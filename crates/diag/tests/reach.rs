@@ -75,3 +75,45 @@ async fn speed_moves_bytes_in_both_directions() {
         serving.abort();
     }
 }
+
+#[tokio::test]
+async fn time_bounded_speed_respects_the_duration_not_a_byte_count() {
+    // The riskiest path: a time bound must end the run on the wall clock, never a fixed byte budget.
+    // Over mem (far faster than any assumed rate) a short window still moves millions of bytes, which a
+    // stale byte-budget heuristic would have truncated well before the deadline.
+    let requested = Duration::from_millis(250);
+    for direction in [Direction::Up, Direction::Down] {
+        let (serving, session) = paired().await.expect("client should reach the responder");
+
+        let report = Speedtest {
+            direction,
+            limit: Limit::ByTime(requested),
+        }
+        .run(&session)
+        .await
+        .expect("time-bounded speed run should succeed over the mem transport");
+
+        assert_eq!(report.direction(), direction);
+        assert!(
+            report.bytes() > 0 && report.mib_per_sec() > 0.0,
+            "throughput should be non-zero, got {} bytes at {} MiB/s",
+            report.bytes(),
+            report.mib_per_sec()
+        );
+        // The run honors the requested duration: it does not stop early on a byte count, and overshoot
+        // is bounded to one 64 KiB chunk plus scheduling, so the window brackets the request.
+        assert!(
+            report.elapsed() >= requested,
+            "a time bound must run for at least the requested {requested:?}, ran {:?}",
+            report.elapsed()
+        );
+        assert!(
+            report.elapsed() < requested * 4,
+            "the run should end near the deadline, not stream on, took {:?}",
+            report.elapsed()
+        );
+
+        drop(session);
+        serving.abort();
+    }
+}

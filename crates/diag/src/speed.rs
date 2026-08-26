@@ -6,7 +6,7 @@ use core::time::Duration;
 use std::time::Instant;
 
 use bifrost::Session;
-use tokio::io::{self, AsyncWriteExt as _};
+use tokio::io::AsyncWriteExt as _;
 
 use crate::payload::Payload;
 use crate::protocol::{ProtocolError, Request, Response};
@@ -29,14 +29,9 @@ pub enum Limit {
     ByBytes(u64),
 }
 
-/// One transfer chunk, and the assumed rate used to size a time-bounded run's byte budget. Chunk size
-/// matches the payload's; the rate estimate only caps how large the responder-sourced stream can grow,
-/// the wall clock is what actually ends the run.
-const CHUNK: u64 = 64 * 1024;
-const ASSUMED_BYTES_PER_SEC: u64 = 1024 * 1024 * 1024;
-
 /// A speed test against one peer: which direction, bounded by time or bytes.
 #[derive(Debug, Clone, Copy)]
+#[must_use = "a Speedtest does nothing until run"]
 pub struct Speedtest {
     /// The direction to measure.
     pub direction: Direction,
@@ -49,32 +44,51 @@ impl Speedtest {
     /// `self` and drives the whole transfer on a single stream.
     pub async fn run<S: Session>(self, session: &S) -> Result<SpeedReport, ProtocolError> {
         let Self { direction, limit } = self;
-        let (mut writer, mut reader) = session.open_bi().await.map_err(io_from_session)?;
+        let (mut writer, mut reader) = session.open_bi().await?;
 
-        let budget = limit.byte_budget();
+        // One window: bytes moved and time elapsed are both measured over this exact span.
         let started = Instant::now();
         let bytes = match direction {
             Direction::Up => {
                 Request::SpeedSink {
-                    limit_bytes: budget,
+                    // The sink cap is only a ceiling; a time-bounded upload stops at the deadline well
+                    // under it, and the responder drains to the client's EOF regardless.
+                    limit_bytes: limit.byte_ceiling(),
                 }
                 .write(&mut writer)
                 .await?;
-                let sent = send_bounded(&mut writer, limit, started).await?;
+                let sent = limit.payload(started).send(&mut writer).await?;
                 // Signal end-of-payload so the responder stops draining and replies with its count.
                 writer.shutdown().await?;
                 let Response::Received { bytes } = Response::read(&mut reader).await? else {
                     return Err(ProtocolError::Mismatched);
                 };
+                // Report only bytes the peer confirmed receiving. Over a reliable stream the two counts
+                // match; a shortfall means loss or truncation, a real signal worth surfacing, not
+                // laundering silently into a smaller (but plausible) throughput number.
+                if bytes < sent {
+                    tracing::warn!(
+                        sent,
+                        received = bytes,
+                        "peer received fewer bytes than sent"
+                    );
+                }
                 bytes.min(sent)
             }
             Direction::Down => {
                 Request::SpeedSource {
-                    limit_bytes: budget,
+                    limit_bytes: limit.source_request(),
                 }
                 .write(&mut writer)
                 .await?;
-                drain_bounded(&mut reader, limit, started).await?
+                let received = limit.payload(started).drain(&mut reader).await?;
+                // A time-bounded download sources unbounded, so the client's deadline (which just fired
+                // to end the drain) is the sole terminator. Dropping the read half closes it, so the
+                // responder's next flood write hits a broken pipe and it stops; shutting the write half
+                // sends a clean FIN too. A byte-bounded download already ended on the exact count.
+                drop(reader);
+                writer.shutdown().await?;
+                received
             }
         };
         let elapsed = started.elapsed();
@@ -87,64 +101,37 @@ impl Speedtest {
 }
 
 impl Limit {
-    /// The number of bytes to request from the responder. A byte bound is exact; a time bound requests
-    /// a generous budget (the wall clock ends the run first) so the responder never runs short.
-    fn byte_budget(self) -> u64 {
+    /// The payload transfer this limit drives from `started`: a byte bound moves an exact count, a time
+    /// bound moves chunks until its deadline.
+    fn payload(self, started: Instant) -> Payload {
+        match self {
+            Limit::ByBytes(bytes) => Payload::of(bytes),
+            Limit::ByTime(duration) => Payload::until(started + duration),
+        }
+    }
+
+    /// What a `--down` client asks the responder to source: `Some(n)` for an exact byte count, `None`
+    /// (unbounded) for a time bound, where the client's deadline, not a byte count, ends the run.
+    fn source_request(self) -> Option<u64> {
+        match self {
+            Limit::ByBytes(bytes) => Some(bytes),
+            Limit::ByTime(_) => None,
+        }
+    }
+
+    /// The largest number of bytes a `--up` run could send, an upper bound for the sink's ceiling. A
+    /// time bound has no exact count, so it uses [`u64::MAX`]; the client's EOF ends the drain first.
+    fn byte_ceiling(self) -> u64 {
         match self {
             Limit::ByBytes(bytes) => bytes,
-            Limit::ByTime(duration) => {
-                let secs = duration.as_secs_f64();
-                (secs * ASSUMED_BYTES_PER_SEC as f64) as u64
-            }
+            Limit::ByTime(_) => u64::MAX,
         }
     }
-
-    /// Whether the run should stop, given how much has moved and how long it has been running.
-    fn reached(self, moved: u64, elapsed: Duration) -> bool {
-        match self {
-            Limit::ByBytes(bytes) => moved >= bytes,
-            Limit::ByTime(duration) => elapsed >= duration,
-        }
-    }
-}
-
-/// Send zero payload one chunk at a time until the limit, returning the bytes written.
-async fn send_bounded<W: io::AsyncWrite + Unpin>(
-    writer: &mut W,
-    limit: Limit,
-    started: Instant,
-) -> io::Result<u64> {
-    let mut sent = 0u64;
-    while !limit.reached(sent, started.elapsed()) {
-        sent += Payload::of(CHUNK).send(writer).await?;
-    }
-    Ok(sent)
-}
-
-/// Drain payload one chunk at a time until the limit or EOF, returning the bytes read.
-async fn drain_bounded<R: io::AsyncRead + Unpin>(
-    reader: &mut R,
-    limit: Limit,
-    started: Instant,
-) -> io::Result<u64> {
-    let mut received = 0u64;
-    while !limit.reached(received, started.elapsed()) {
-        let n = Payload::of(CHUNK).drain(reader).await?;
-        if n == 0 {
-            break;
-        }
-        received += n;
-    }
-    Ok(received)
-}
-
-/// A session-level failure surfaced as an i/o error so it flows through [`ProtocolError::Io`].
-fn io_from_session(error: bifrost::Error) -> ProtocolError {
-    ProtocolError::Io(io::Error::other(error))
 }
 
 /// The measured result of a speed test.
 #[derive(Debug, Clone, Copy)]
+#[must_use = "a SpeedReport is the result of the run and should be reported"]
 pub struct SpeedReport {
     direction: Direction,
     bytes: u64,

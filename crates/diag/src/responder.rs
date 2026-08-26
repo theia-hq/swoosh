@@ -59,7 +59,13 @@ where
                 .map_err(ProtocolError::from)
         }
         Request::SpeedSource { limit_bytes } => {
-            Payload::of(limit_bytes).send(&mut writer).await?;
+            // A byte-bounded download sources an exact count; a time-bounded one sources until the
+            // client stops reading at its deadline, so the client's wall clock is the sole terminator.
+            let payload = match limit_bytes {
+                Some(bytes) => Payload::of(bytes),
+                None => Payload::until_peer_stops(),
+            };
+            payload.send(&mut writer).await?;
             Ok(())
         }
     }

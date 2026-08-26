@@ -10,7 +10,11 @@ async fn request_variants_roundtrip() {
         Request::SpeedSink {
             limit_bytes: 8 * 1024 * 1024,
         },
-        Request::SpeedSource { limit_bytes: 0 },
+        Request::SpeedSource {
+            limit_bytes: Some(4 * 1024 * 1024),
+        },
+        // The unbounded (time-bounded download) source, encoded via the sentinel.
+        Request::SpeedSource { limit_bytes: None },
     ];
     for request in requests {
         let mut buf = Vec::new();

@@ -28,18 +28,32 @@ pub enum Request {
         /// How many payload bytes the client will send after this frame.
         limit_bytes: u64,
     },
-    /// The responder should stream `limit_bytes` of counted payload for the client to drain (download).
+    /// The responder should stream counted payload for the client to drain (download). `limit_bytes`
+    /// is `Some(n)` for a byte-bounded run (send exactly `n`) or `None` for a time-bounded run, where
+    /// the responder streams until the client stops reading and its wall-clock deadline is the sole
+    /// terminator. Encoded with a [`UNBOUNDED`] sentinel so the wire stays a fixed-width `u64`.
     SpeedSource {
-        /// How many payload bytes the responder should send after acknowledging.
-        limit_bytes: u64,
+        /// How many payload bytes to send, or `None` to stream until the client closes the stream.
+        limit_bytes: Option<u64>,
     },
 }
+
+/// The wire value of an unbounded [`Request::SpeedSource`]. `u64::MAX` bytes is unreachable in any real
+/// transfer, so it reads unambiguously as "stream until the client stops" rather than a byte count.
+const UNBOUNDED: u64 = u64::MAX;
 
 /// Wire tags for the [`Request`] variants, kept next to the frame they select.
 mod tag {
     pub const PING: u8 = 0;
     pub const SPEED_SINK: u8 = 1;
     pub const SPEED_SOURCE: u8 = 2;
+}
+
+/// Wire tags for the [`Response`] variants. A response has its own tag namespace, independent of
+/// [`tag`], so a new reply variant never has to dodge a request tag to stay legible.
+mod resp_tag {
+    pub const PONG: u8 = 0;
+    pub const RECEIVED: u8 = 1;
 }
 
 impl Request {
@@ -61,7 +75,9 @@ impl Request {
             }
             Request::SpeedSource { limit_bytes } => {
                 writer.write_all(&[tag::SPEED_SOURCE]).await?;
-                writer.write_all(&limit_bytes.to_be_bytes()).await
+                writer
+                    .write_all(&limit_bytes.unwrap_or(UNBOUNDED).to_be_bytes())
+                    .await
             }
         }
     }
@@ -83,9 +99,12 @@ impl Request {
             tag::SPEED_SINK => Ok(Request::SpeedSink {
                 limit_bytes: read_u64(reader).await?,
             }),
-            tag::SPEED_SOURCE => Ok(Request::SpeedSource {
-                limit_bytes: read_u64(reader).await?,
-            }),
+            tag::SPEED_SOURCE => {
+                let limit_bytes = read_u64(reader).await?;
+                Ok(Request::SpeedSource {
+                    limit_bytes: (limit_bytes != UNBOUNDED).then_some(limit_bytes),
+                })
+            }
             other => Err(ProtocolError::UnknownRequest(other)),
         }
     }
@@ -116,12 +135,12 @@ impl Response {
                 seq,
                 sent_unix_nanos,
             } => {
-                writer.write_all(&[tag::PING]).await?;
+                writer.write_all(&[resp_tag::PONG]).await?;
                 writer.write_all(&seq.to_be_bytes()).await?;
                 writer.write_all(&sent_unix_nanos.to_be_bytes()).await
             }
             Response::Received { bytes } => {
-                writer.write_all(&[tag::SPEED_SINK]).await?;
+                writer.write_all(&[resp_tag::RECEIVED]).await?;
                 writer.write_all(&bytes.to_be_bytes()).await
             }
         }
@@ -132,11 +151,11 @@ impl Response {
         let mut tag = [0u8; 1];
         reader.read_exact(&mut tag).await?;
         match tag[0] {
-            tag::PING => Ok(Response::Pong {
+            resp_tag::PONG => Ok(Response::Pong {
                 seq: read_u32(reader).await?,
                 sent_unix_nanos: read_u64(reader).await?,
             }),
-            tag::SPEED_SINK => Ok(Response::Received {
+            resp_tag::RECEIVED => Ok(Response::Received {
                 bytes: read_u64(reader).await?,
             }),
             other => Err(ProtocolError::UnknownResponse(other)),
@@ -174,6 +193,14 @@ pub enum ProtocolError {
     /// The underlying stream failed while reading a frame.
     #[error("read frame")]
     Io(#[from] io::Error),
+}
+
+/// A session-level failure (opening a stream, connecting) surfaces as an i/o error so it flows through
+/// [`ProtocolError::Io`] alongside the stream-read failures, one error type for the whole engine.
+impl From<bifrost::Error> for ProtocolError {
+    fn from(error: bifrost::Error) -> Self {
+        ProtocolError::Io(io::Error::other(error))
+    }
 }
 
 #[cfg(test)]

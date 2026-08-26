@@ -17,6 +17,7 @@ use crate::protocol::{ProtocolError, Request, Response};
 
 /// A ping run against one peer: how many probes, how far apart.
 #[derive(Debug, Clone, Copy)]
+#[must_use = "a Ping does nothing until run"]
 pub struct Ping {
     /// How many probes to send.
     pub count: u32,
@@ -29,7 +30,7 @@ impl Ping {
     /// `self`, opens a single stream, and drives every probe on it in sequence.
     pub async fn run<S: Session>(self, session: &S) -> Result<PingReport, ProtocolError> {
         let Self { count, interval } = self;
-        let (mut writer, mut reader) = session.open_bi().await.map_err(io_from_session)?;
+        let (mut writer, mut reader) = session.open_bi().await?;
 
         let mut rtts = Vec::with_capacity(count as usize);
         for seq in 0..count {
@@ -80,13 +81,9 @@ fn unix_nanos() -> u64 {
         .unwrap_or(0)
 }
 
-/// A session-level failure surfaced as an i/o error so it flows through [`ProtocolError::Io`].
-fn io_from_session(error: bifrost::Error) -> ProtocolError {
-    ProtocolError::Io(tokio::io::Error::other(error))
-}
-
 /// The gathered result of a ping run: the samples plus how many probes were sent.
 #[derive(Debug, Clone)]
+#[must_use = "a PingReport is the result of the run and should be reported"]
 pub struct PingReport {
     sent: u32,
     rtts: Vec<Duration>,
