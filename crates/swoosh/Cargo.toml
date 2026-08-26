@@ -1,0 +1,26 @@
+[package]
+name = "swoosh"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "swoosh"
+path = "src/main.rs"
+
+[dependencies]
+diag.workspace = true
+
+bifrost.workspace = true
+bifrost-iroh.workspace = true
+clap.workspace = true
+eyre.workspace = true
+futures.workspace = true
+rand.workspace = true
+tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
