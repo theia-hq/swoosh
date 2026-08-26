@@ -88,7 +88,7 @@ _How this codebase is built. It is the contract: reviewers (human or machine) sh
 ## Tests
 - **Test-first for the domain layer** (it's pure, so tests are fast and DB-free).
 - **Unit tests in a separate `<module>_tests.rs` file**, not inline in the module. Integration tests (real transport + database + external mocks via testcontainers) in `tests/`.
-- **Cover zero / one / many / error** per behavior. **`assert_matches!`** for enum/error assertions.
+- **Cover zero / one / many / error** per behavior. Prefer **`assert_matches!`** for enum/error assertions; it is nightly-unstable, so on stable use `assert!(matches!(...))`.
 - **Assert on invariants**, including **compile-time assertions** for constant relationships.
 - **Concurrency is tested with a barrier** (N tasks released together) asserting the invariant holds, not hoped at.
 - **Names read like documentation:** `checkout_decline_leaves_order_open_and_inventory_untouched`. DRY setup via shared builders.
