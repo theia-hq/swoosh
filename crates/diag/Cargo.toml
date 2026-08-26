@@ -1,0 +1,20 @@
+[package]
+name = "diag"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bifrost.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+bifrost-mem.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true
