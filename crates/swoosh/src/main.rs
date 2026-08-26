@@ -46,7 +46,7 @@ async fn main() -> eyre::Result<()> {
     // persisted and shared across every verb, so this node keeps one address across runs and commands.
     let secret = identity::load_or_create().await?;
     let node = Node::new(
-        bifrost_iroh::Endpoint::bind_with_secret(secret).await?,
+        bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?,
         NoDiscovery,
     );
 
