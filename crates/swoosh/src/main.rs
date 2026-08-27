@@ -11,7 +11,7 @@
 
 use std::path::PathBuf;
 
-use bifrost::{Discovery, NoDiscovery, Node, Transport};
+use bifrost::{Discovery, Node, Transport};
 use clap::{Parser, Subcommand};
 
 mod commands;
@@ -33,14 +33,15 @@ use transport::Peer;
 #[derive(Debug, Parser)]
 #[command(name = "swoosh", version, about)]
 struct Cli {
-    /// Which transport to bind under the identity. iroh self-discovers; quirk is direct-only and pairs
-    /// with `--peer` hints. The NodeId is identical whichever is chosen. Global, so it may sit before or
-    /// after the verb.
+    /// Which transport to bind under the identity. iroh self-discovers across the internet; quirk is
+    /// direct-only. Both find peers on the same LAN over mDNS and honor `--peer` hints. The NodeId is
+    /// identical whichever is chosen. Global, so it may sit before or after the verb.
     #[arg(long, value_enum, default_value_t, global = true)]
     transport: transport::Transport,
-    /// A direct address hint for quirk, `<key>=<socketaddr>`, repeatable. Ignored by iroh, which
-    /// self-discovers. Feed back what a peer's `swoosh serve` prints. Global, so it may sit after the
-    /// verb next to the peer key it hints.
+    /// A direct address hint for a peer, `<key>=<socketaddr>`, repeatable. Honored by both transports.
+    /// Rarely needed on a LAN, where peers find each other automatically over mDNS; feed back what a
+    /// peer's `swoosh serve` prints to reach it across networks. Global, so it may sit after the verb
+    /// next to the peer key it hints.
     #[arg(long, global = true)]
     peer: Vec<Peer>,
     /// Pin this run to a persisted identity at the given file, creating it if absent. Without it,
@@ -179,23 +180,22 @@ async fn run() -> eyre::Result<()> {
     // transport swap a swap and not a new node.
     let transport = cli.transport;
     match transport {
-        // iroh self-discovers (n0 pkarr/DNS + relays), so it composes with NoDiscovery and ignores
-        // `--peer`. Unchanged from the iroh-only skeleton.
+        // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
+        // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
+        // addresses, so a same-network dial goes straight there instead of relaying. With nothing
+        // known locally the resolve is empty and iroh self-discovers exactly as before.
         transport::Transport::Iroh => {
-            let node = Node::new(
-                bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?,
-                NoDiscovery,
-            );
+            let endpoint = bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?;
+            let discovery = Peer::discovery(&endpoint, cli.peer);
+            let node = Node::new(endpoint, discovery);
             reach.run(&node, &contacts, transport).await
         }
-        // quirk is direct-only with no internal discovery, so it composes with a StaticDiscovery
-        // seeded from the `--peer` hints. A client dials a peer by feeding back the `<key>=<addr>`
-        // that peer's `serve` prints.
+        // quirk is direct-only with no internal discovery, so the composed discovery is its only way
+        // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
         transport::Transport::Quirk => {
-            let node = Node::new(
-                bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?,
-                Peer::discovery(cli.peer),
-            );
+            let endpoint = bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?;
+            let discovery = Peer::discovery(&endpoint, cli.peer);
+            let node = Node::new(endpoint, discovery);
             reach.run(&node, &contacts, transport).await
         }
     }

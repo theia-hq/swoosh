@@ -2,16 +2,18 @@
 //!
 //! swoosh is transport-blind everywhere above this module; every verb is generic over `Node<T, D>`.
 //! Here, at the composition root, a `--transport` choice binds one concrete backend under the shared
-//! persisted identity and pairs it with the discovery that backend needs. iroh self-discovers, so it
-//! composes with [`NoDiscovery`]; quirk has no internal discovery, so it composes with a
-//! [`StaticDiscovery`] seeded from `--peer` hints. Because both backends derive the [`NodeId`] from the
-//! same ed25519 secret, the node keeps ONE address whichever transport is bound: swap the transport,
-//! keep the key, reach the same peer. That is the whole point of the seam.
+//! persisted identity and pairs it with a single composed discovery, the same for either backend:
+//! the explicit `--peer` hints layered over LAN mDNS. So a peer is reached whether it was named on the
+//! command line or simply heard on the network, and iroh honors an explicit hint just as quirk does.
+//! Because both backends derive the [`NodeId`] from the same ed25519 secret, the node keeps ONE
+//! address whichever transport is bound: swap the transport, keep the key, reach the same peer. That
+//! is the whole point of the seam.
 
 use core::net::SocketAddr;
 use core::str::FromStr;
 
-use bifrost::{NodeId, StaticDiscovery};
+use bifrost::{Layered, NodeId, StaticDiscovery};
+use bifrost_mdns::MdnsDiscovery;
 use clap::ValueEnum;
 use eyre::WrapErr as _;
 
@@ -19,11 +21,12 @@ use eyre::WrapErr as _;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Transport {
     /// iroh: QUIC with NAT traversal and relay fallback, reachable across the internet. Self-
-    /// discovering, so it needs no `--peer` hints.
+    /// discovering, and it also honors LAN mDNS and `--peer` hints, so a same-network peer is reached
+    /// directly instead of via a relay.
     #[default]
     Iroh,
-    /// quirk: our own from-scratch QUIC over UDP. Direct-only (no NAT traversal yet), so a client
-    /// reaches a peer by feeding back the `--peer <key>=<addr>` the peer's `serve` prints.
+    /// quirk: our own from-scratch QUIC over UDP. Direct-only (no NAT traversal yet), so it reaches a
+    /// peer through discovery alone: a LAN peer found over mDNS, or one named with `--peer <key>=<addr>`.
     Quirk,
 }
 
@@ -41,22 +44,44 @@ impl Transport {
 
 /// A direct address hint for one peer: its [`NodeId`] mapped to a reachable [`SocketAddr`]. Parsed at
 /// the clap boundary from `<key>=<socketaddr>`, so a handler receives already-valid domain values and
-/// never re-parses a string. Feeds quirk's [`StaticDiscovery`], since quirk cannot discover a peer's
-/// address on its own.
+/// never re-parses a string. Layered under LAN mDNS to form the discovery both transports use.
 #[derive(Debug, Clone, Copy)]
 pub struct Peer {
     node: NodeId,
     addr: SocketAddr,
 }
 
+/// The discovery both transports compose: explicit `--peer` hints layered over LAN mDNS.
+///
+/// The static hints lead (a hand-fed address wins over a heard one for the same peer), and mDNS fills
+/// in every peer no hint named. An empty resolve from both means "no hints, let the transport try",
+/// which is how iroh keeps self-discovering when nothing is known locally.
+pub type Discovery = Layered<StaticDiscovery, MdnsDiscovery>;
+
 impl Peer {
-    /// Build a [`StaticDiscovery`] table from a set of peer hints, one direct address per identity.
-    pub fn discovery(peers: impl IntoIterator<Item = Self>) -> StaticDiscovery {
-        let mut discovery = StaticDiscovery::new();
+    /// Compose the discovery for a freshly bound `transport`: the `--peer` hints layered over an mDNS
+    /// resolver that advertises this node at its bound local addresses and browses the LAN for peers.
+    ///
+    /// Called once per run, at the seam, after the transport binds (so its local address is known).
+    /// If mDNS cannot start (multicast blocked, no addresses), discovery degrades to the static hints
+    /// alone rather than failing the whole command, since a hinted or self-discovering dial still works.
+    pub fn discovery<T: bifrost::Transport>(
+        transport: &T,
+        peers: impl IntoIterator<Item = Self>,
+    ) -> Discovery {
+        let mut hints = StaticDiscovery::new();
         for Self { node, addr } in peers {
-            discovery.insert(node, vec![addr]);
+            hints.insert(node, vec![addr]);
         }
-        discovery
+        let local = transport.local_addr();
+        let mdns = match MdnsDiscovery::advertise(local.node, local.hints) {
+            Ok(mdns) => mdns,
+            Err(err) => {
+                tracing::warn!(error = %err, "mDNS discovery unavailable; using --peer hints only");
+                MdnsDiscovery::disabled()
+            }
+        };
+        Layered::new(hints, mdns)
     }
 }
 

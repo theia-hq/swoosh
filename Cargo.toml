@@ -12,6 +12,7 @@ diag = { path = "crates/diag" }
 
 bifrost = { path = "../bifrost/crates/bifrost" }
 bifrost-iroh = { path = "../bifrost/crates/transports/bifrost-iroh" }
+bifrost-mdns = { path = "../bifrost/crates/bifrost-mdns" }
 bifrost-mem = { path = "../bifrost/crates/transports/bifrost-mem" }
 bifrost-quirk = { path = "../bifrost/crates/transports/bifrost-quirk" }
 clap = { version = "4", features = ["derive", "env"] }
