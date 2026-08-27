@@ -1,16 +1,23 @@
-//! swoosh: reach a machine by its public key and measure the connection.
+//! swoosh: work with a machine addressed by its public key, not its address.
 //!
 //! You give swoosh a peer's public key and it dials that peer directly, wherever the peer is on the
-//! internet, across NATs, without you knowing the peer's address. `swoosh serve` prints this machine's
-//! key and stays reachable; `swoosh ping <peer>` measures the round-trip time to a key; `swoosh speed
-//! <peer>` measures throughput; `swoosh status <peer>` reports whether the link is direct or relayed.
-//! A peer is a raw key or a saved petname (`swoosh contact add alice <key>`, then `swoosh ping alice`).
+//! internet, across NATs, without you knowing the peer's address: no lookup, no server in the middle.
+//! From that one connection swoosh does whatever you ask of the machine: today it stays reachable and
+//! measures the link; as it grows, the same primitive carries files, tunnels, shared access, and
+//! fetches. Under the hood every job is one cap-gated byte-stream to a key, behind a thin front door
+//! per job, so the surface is broad while the core stays one thing.
+//!
+//! Today's verbs: `swoosh serve` prints this machine's key and stays reachable; `swoosh ping <peer>`
+//! measures the round-trip time to a key; `swoosh speed <peer>` measures throughput; `swoosh status
+//! <peer>` reports whether the link is direct or relayed; `swoosh contact add alice <key>` saves a
+//! petname so `swoosh ping alice` works; `swoosh tree` prints the command tree. A peer is a raw key or
+//! a saved petname, interchangeably.
 //!
 //! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
 //! key and keeps a stable address across runs (and across transports: `--transport iroh|quirk` swaps the
 //! backend without changing the key). The outward verbs only dial out, so they mint a throwaway key each
-//! run unless you pin one with `--key`/`SWOOSH_KEY`. Planned verbs (`send`/`recv`/`tunnel`) are tracked
-//! in the README.
+//! run unless you pin one with `--key`/`SWOOSH_KEY`. The full verb arc (send/beam, tunnel, share, fetch,
+//! run, cluster, MagicDNS names) is tracked in the README's Roadmap; it ticks as it ships.
 
 use std::path::PathBuf;
 
@@ -37,7 +44,7 @@ use transport::Peer;
 #[command(
     name = "swoosh",
     version,
-    about = "Reach a machine by its public key and measure the connection.",
+    about = "Work with a machine addressed by its public key: reach it, measure it, and more.",
     // A bare `swoosh` is a mistake, not a default action: print the full help and exit non-zero. This
     // must hold even with `SWOOSH_KEY` set, but an env-backed global `--key` counts as an arg to clap,
     // so `arg_required_else_help` would fall to a terse "subcommand required" line there instead of the
