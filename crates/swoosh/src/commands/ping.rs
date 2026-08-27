@@ -2,15 +2,18 @@
 
 use core::time::Duration;
 
-use bifrost::{Discovery, Node, NodeId, Transport};
+use bifrost::{Discovery, Node, Transport};
 use clap::Args;
 use diag::{Ping, PingReport};
 
-/// Measure the round-trip time to a peer, addressed by their public key.
+use crate::contacts::{Contacts, Target};
+use crate::reach::{self, Reached};
+
+/// Measure the round-trip time to a peer, addressed by a petname or their public key.
 #[derive(Debug, Args)]
 pub struct PingCmd {
-    /// The peer to reach, as a bifrost node id.
-    pub key: NodeId,
+    /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
+    pub target: Target,
     /// How many probes to send.
     #[arg(short = 'c', long, default_value_t = 4)]
     pub count: u32,
@@ -20,10 +23,14 @@ pub struct PingCmd {
 }
 
 impl PingCmd {
-    /// Dial the peer, run the probes, and print the summary.
-    pub async fn run<T: Transport, D: Discovery>(self, node: &Node<T, D>) -> eyre::Result<()> {
-        let session = node.connect(self.key).await?;
-        println!("pinging {} ({} probes)", self.key.short(), self.count);
+    /// Resolve the target, dial the peer, run the probes, and print the summary.
+    pub async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        contacts: &Contacts,
+    ) -> eyre::Result<()> {
+        let Reached { session, peer } = reach::dial(node, contacts, &self.target).await?;
+        println!("pinging {} ({} probes)", peer.short(), self.count);
 
         let report = Ping {
             count: self.count,

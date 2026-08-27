@@ -4,17 +4,20 @@
 
 use core::time::Duration;
 
-use bifrost::{Discovery, Node, NodeId, Transport};
+use bifrost::{Discovery, Node, Transport};
 use clap::{ArgGroup, Args};
 use diag::{Limit, Mode, SpeedReport, Speedtest, Throughput};
+
+use crate::contacts::{Contacts, Target};
+use crate::reach::{self, Reached};
 
 /// Measure throughput to a peer: iperf, but over the overlay.
 #[derive(Debug, Args)]
 #[command(group = ArgGroup::new("way").args(["up", "down", "bidir"]))]
 #[command(group = ArgGroup::new("bound").args(["secs", "bytes"]))]
 pub struct SpeedCmd {
-    /// The peer to reach, as a bifrost node id.
-    pub key: NodeId,
+    /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
+    pub target: Target,
     /// Measure the upload direction (this node sends).
     #[arg(long)]
     pub up: bool,
@@ -33,12 +36,16 @@ pub struct SpeedCmd {
 }
 
 impl SpeedCmd {
-    /// Dial the peer, run the transfer, and print the throughput.
-    pub async fn run<T: Transport, D: Discovery>(self, node: &Node<T, D>) -> eyre::Result<()> {
+    /// Resolve the target, dial the peer, run the transfer, and print the throughput.
+    pub async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        contacts: &Contacts,
+    ) -> eyre::Result<()> {
         let mode = self.mode();
         let limit = self.limit();
-        let session = node.connect(self.key).await?;
-        println!("speed test to {} ({})", self.key.short(), mode.label());
+        let Reached { session, peer } = reach::dial(node, contacts, &self.target).await?;
+        println!("speed test to {} ({})", peer.short(), mode.label());
 
         let report = Speedtest { mode, limit }.run(&session).await?;
 

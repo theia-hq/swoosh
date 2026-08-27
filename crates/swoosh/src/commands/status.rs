@@ -18,23 +18,26 @@ use bifrost::{ConnInfo, Discovery, Node, NodeId, Path, Session, Transport};
 use clap::Args;
 use diag::Ping;
 
+use crate::contacts::{Contacts, Target};
+use crate::reach::{self, Reached};
 use crate::transport;
 
 /// Report the connection path to a peer: transport, direct vs relayed, remote address, and live RTT.
 #[derive(Debug, Args)]
 pub struct StatusCmd {
-    /// The peer to reach, as a bifrost node id.
-    pub key: NodeId,
+    /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
+    pub target: Target,
 }
 
 impl StatusCmd {
-    /// Dial the peer, probe the path and a single RTT, and print the status line.
+    /// Resolve the target, dial the peer, probe the path and a single RTT, and print the status line.
     pub async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
+        contacts: &Contacts,
         transport: transport::Transport,
     ) -> eyre::Result<()> {
-        let session = node.connect(self.key).await?;
+        let Reached { session, peer } = reach::dial(node, contacts, &self.target).await?;
 
         // A single diag ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
         // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.
@@ -52,7 +55,7 @@ impl StatusCmd {
         let rtt = probed.avg().or(info.rtt);
 
         node.close().await;
-        println!("{}", Line::new(self.key, transport.name(), info, rtt));
+        println!("{}", Line::new(peer, transport.name(), info, rtt));
         Ok(())
     }
 }
