@@ -1,5 +1,5 @@
-# DRAFT — builds a checksummed linux binary and attaches it to a GitHub Release on a `v*` tag.
-# The swoosh-action install step downloads these assets. Needs a tag push to validate.
+# DRAFT — builds checksummed linux + macOS binaries and attaches them to a GitHub Release on a `v*` tag.
+# The swoosh-action install step downloads the asset matching the runner's OS/arch. Needs a tag push to validate.
 name: release
 on:
   push:
@@ -9,20 +9,36 @@ permissions:
   contents: write
 
 jobs:
-  linux-x86_64:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: swoosh-x86_64-linux
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: swoosh-aarch64-linux
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            asset: swoosh-x86_64-macos
+          - runner: macos-14
+            target: aarch64-apple-darwin
+            asset: swoosh-aarch64-macos
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
       - name: build
-        run: cargo build --release -p swoosh
+        run: cargo build --release -p swoosh --target ${{ matrix.target }}
       - name: package + checksum
         run: |
-          out=swoosh-x86_64-linux
-          cp target/release/swoosh "$out"
-          sha256sum "$out" | awk '{print $1}' > "$out.sha256"
+          cp "target/${{ matrix.target }}/release/swoosh" "${{ matrix.asset }}"
+          shasum -a 256 "${{ matrix.asset }}" | awk '{print $1}' > "${{ matrix.asset }}.sha256"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            swoosh-x86_64-linux
-            swoosh-x86_64-linux.sha256
+            ${{ matrix.asset }}
+            ${{ matrix.asset }}.sha256
