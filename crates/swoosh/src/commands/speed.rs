@@ -38,7 +38,7 @@ impl SpeedCmd {
         let mode = self.mode();
         let limit = self.limit();
         let session = node.connect(self.key).await?;
-        println!("speed test to {} ({})", self.key.short(), label(mode));
+        println!("speed test to {} ({})", self.key.short(), mode.label());
 
         let report = Speedtest { mode, limit }.run(&session).await?;
 
@@ -88,15 +88,6 @@ fn print_leg(direction: &str, leg: Throughput, elapsed: f64) {
         mib(leg.bytes()),
         leg.mib_per_sec(),
     );
-}
-
-/// A human label for a mode.
-fn label(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Up => "up",
-        Mode::Down => "down",
-        Mode::Bidir => "bidir",
-    }
 }
 
 /// A byte count rendered as mebibytes.

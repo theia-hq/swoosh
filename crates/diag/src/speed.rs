@@ -27,6 +27,18 @@ pub enum Mode {
     Bidir,
 }
 
+impl Mode {
+    /// The short human label for this mode, for a report header. The domain names its own modes, so a
+    /// reporter (the CLI) never maps variants to strings itself.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Up => "up",
+            Self::Down => "down",
+            Self::Bidir => "bidir",
+        }
+    }
+}
+
 /// How much to transfer before stopping.
 #[derive(Debug, Clone, Copy)]
 pub enum Limit {
