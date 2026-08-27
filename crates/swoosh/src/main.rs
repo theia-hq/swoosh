@@ -132,7 +132,23 @@ impl Reach {
 }
 
 #[tokio::main]
-async fn main() -> eyre::Result<()> {
+async fn main() -> std::process::ExitCode {
+    // Print the error's message chain, not eyre's `Debug` form: returning `eyre::Result` from `main`
+    // trails a source `Location:` (and a spantrace) that is noise to a user and reads as "go read our
+    // source". `{:#}` renders the full `cause: cause` chain with no location; the backtrace stays behind
+    // `RUST_BACKTRACE` for anyone debugging. See STYLE.md, Error handling.
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(report) => {
+            eprintln!("Error: {report:#}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+/// The real entry point, split from `main` so a failure prints its clean message chain rather than
+/// eyre's `Debug` form (see the note in `main`).
+async fn run() -> eyre::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
