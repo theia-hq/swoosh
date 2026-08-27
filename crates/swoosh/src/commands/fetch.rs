@@ -23,7 +23,8 @@ use crate::transport::{self, ReachArgs};
 /// Mint a local URL that fetches an origin through a node you name (your own janus, over the overlay).
 #[derive(Debug, Args)]
 pub struct FetchCmd {
-    /// The origin URL to fetch. Its host is fixed; the local URL's path and query resolve against it.
+    /// The origin URL to fetch (path and query on the local URL resolve against it).
+    #[arg(value_name = "url")]
     pub url: String,
     /// The node to fetch through: a saved petname (`usa`, `alice/box`) or a raw key.
     #[arg(long, value_name = "peer")]
@@ -31,7 +32,7 @@ pub struct FetchCmd {
     /// Present a `sheer:` capability link to a cap-gated node.
     #[arg(long, value_name = "link")]
     pub present: Option<String>,
-    /// Pin the local listener port. Omit for an OS-assigned free port.
+    /// Pin the local listener port (default: an OS-assigned free port).
     #[arg(long, value_name = "port")]
     pub port: Option<u16>,
     #[command(flatten)]
