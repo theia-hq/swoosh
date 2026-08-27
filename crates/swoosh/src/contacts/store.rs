@@ -6,18 +6,13 @@
 //! the strictly-typed [`Contacts`]. Neither the domain types nor [`NodeId`] carry serde derives, so the
 //! wire representation lives here and only here, converted at load and save.
 
-use core::str::FromStr;
 use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
-use bifrost::NodeId;
+use bifrost::{NodeId, NodeIdParseError};
 
 use super::{Contacts, DeviceLabel, DeviceLabelParseError, Petname, PetnameParseError};
-
-/// The node-id parse error, named through its `FromStr` impl so swoosh keeps a typed source in the
-/// error chain without depending on a bifrost sub-crate for the error type directly.
-type NodeIdParseError = <NodeId as FromStr>::Err;
 
 /// A contacts file at a known path, loaded into a mutable [`Contacts`] and saved back atomically.
 ///
@@ -88,7 +83,7 @@ fn decode(text: &str) -> Result<Contacts, StoreError> {
         let petname: Petname = petname.parse()?;
         for (device, key) in group {
             let device: DeviceLabel = device.parse()?;
-            let node: NodeId = key.parse().map_err(StoreError::NodeId)?;
+            let node: NodeId = key.parse()?;
             contacts.add(petname.clone(), Some(device), node);
         }
     }
@@ -136,9 +131,9 @@ pub enum StoreError {
     /// A stored device label was not valid.
     #[error("the contacts file holds an invalid device label")]
     Device(#[from] DeviceLabelParseError),
-    /// A stored identity string was not a valid node id. Held as a `#[source]` rather than `#[from]`:
-    /// the error type is named through `NodeId`'s `FromStr` impl (swoosh depends on the bifrost umbrella,
-    /// which does not re-export the concrete error type), and a projection is not a `#[from]` target.
+    /// A stored identity string was not a valid node id. A plain `#[from]`: the bifrost umbrella
+    /// re-exports the concrete [`NodeIdParseError`], so the source chain is preserved with no projection
+    /// or manual `map_err`.
     #[error("the contacts file holds an invalid node id")]
-    NodeId(#[source] NodeIdParseError),
+    NodeId(#[from] NodeIdParseError),
 }
