@@ -11,6 +11,7 @@
 
 use core::net::SocketAddr;
 use core::str::FromStr;
+use std::net::ToSocketAddrs;
 
 use bifrost::{Layered, NodeId, StaticDiscovery};
 use bifrost_mdns::MdnsDiscovery;
@@ -54,13 +55,14 @@ impl Transport {
     }
 }
 
-/// A direct address hint for one peer: its [`NodeId`] mapped to a reachable [`SocketAddr`]. Parsed at
-/// the clap boundary from `<key>=<socketaddr>`, so a handler receives already-valid domain values and
-/// never re-parses a string. Layered under LAN mDNS to form the discovery both transports use.
-#[derive(Debug, Clone, Copy)]
+/// A direct hint for one peer: its [`NodeId`] mapped to reachable addresses. Parsed at the clap boundary
+/// from `<key>=<host:port>`, where the host may be an IP OR a DNS name (a Docker service, a LAN host): it
+/// resolves via the system resolver, so a readable `nodea:9000` reaches a peer by name. Layered under LAN
+/// mDNS to form the discovery both transports use.
+#[derive(Debug, Clone)]
 pub struct Peer {
     node: NodeId,
-    addr: SocketAddr,
+    addrs: Vec<SocketAddr>,
 }
 
 /// The discovery both transports compose: explicit `--peer` hints layered over LAN mDNS.
@@ -82,8 +84,8 @@ impl Peer {
         peers: impl IntoIterator<Item = Self>,
     ) -> Discovery {
         let mut hints = StaticDiscovery::new();
-        for Self { node, addr } in peers {
-            hints.insert(node, vec![addr]);
+        for Self { node, addrs } in peers {
+            hints.insert(node, addrs);
         }
         let local = transport.local_addr();
         let mdns = match MdnsDiscovery::advertise(local.node, local.hints) {
@@ -103,11 +105,18 @@ impl FromStr for Peer {
     type Err = eyre::Report;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let (key, addr) = text
+        let (key, host) = text
             .split_once('=')
-            .ok_or_else(|| eyre::eyre!("expected <key>=<socketaddr>"))?;
+            .ok_or_else(|| eyre::eyre!("expected <key>=<host:port>"))?;
         let node = key.parse().wrap_err("invalid peer key")?;
-        let addr = addr.parse().wrap_err("invalid peer address")?;
-        Ok(Self { node, addr })
+        // An IP passes through; a DNS name (Docker service, LAN host) resolves via the system resolver.
+        let addrs: Vec<SocketAddr> = host
+            .to_socket_addrs()
+            .wrap_err_with(|| format!("could not resolve peer address {host:?}"))?
+            .collect();
+        if addrs.is_empty() {
+            eyre::bail!("peer address {host:?} resolved to no addresses");
+        }
+        Ok(Self { node, addrs })
     }
 }
