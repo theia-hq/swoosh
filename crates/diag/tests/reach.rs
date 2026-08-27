@@ -6,7 +6,7 @@ use core::time::Duration;
 
 use bifrost::{Error, NoDiscovery, Node};
 use bifrost_mem::MemTransport;
-use diag::{Direction, Limit, Ping, Responder, Speedtest};
+use diag::{Limit, Mode, Ping, Responder, Speedtest};
 
 /// A responder node serving in the background, and a live client session to it, over one mem process.
 type Paired = (tokio::task::JoinHandle<()>, bifrost_mem::MemSession);
@@ -50,25 +50,32 @@ async fn ping_measures_round_trips_with_no_loss() {
 }
 
 #[tokio::test]
-async fn speed_moves_bytes_in_both_directions() {
-    for direction in [Direction::Up, Direction::Down] {
+async fn speed_moves_bytes_in_each_direction() {
+    for mode in [Mode::Up, Mode::Down] {
         let (serving, session) = paired().await.expect("client should reach the responder");
         let limit_bytes = 4 * 1024 * 1024;
 
         let report = Speedtest {
-            direction,
+            mode,
             limit: Limit::ByBytes(limit_bytes),
         }
         .run(&session)
         .await
         .expect("speed run should succeed over the mem transport");
 
-        assert_eq!(report.direction(), direction);
-        assert_eq!(report.bytes(), limit_bytes, "the whole payload should move");
+        // A one-way run fills exactly the measured leg and leaves the other empty.
+        let (measured, empty) = match mode {
+            Mode::Up => (report.up(), report.down()),
+            Mode::Down => (report.down(), report.up()),
+            Mode::Bidir => unreachable!("only one-way modes in this case"),
+        };
+        assert!(empty.is_none(), "a one-way run measures a single direction");
+        let leg = measured.expect("the measured direction has a throughput");
+        assert_eq!(leg.bytes(), limit_bytes, "the whole payload should move");
         assert!(
-            report.mib_per_sec() > 0.0,
+            leg.mib_per_sec() > 0.0,
             "throughput should be non-zero, got {}",
-            report.mib_per_sec()
+            leg.mib_per_sec()
         );
 
         drop(session);
@@ -77,29 +84,66 @@ async fn speed_moves_bytes_in_both_directions() {
 }
 
 #[tokio::test]
+async fn bidir_moves_bytes_in_both_directions_at_once() {
+    // Full-duplex on the one stream: both legs move counted bytes over the same window. This is the
+    // path that must also work over a single-stream transport (quirk); mem proves the mechanism.
+    let (serving, session) = paired().await.expect("client should reach the responder");
+    let limit_bytes = 4 * 1024 * 1024;
+
+    let report = Speedtest {
+        mode: Mode::Bidir,
+        limit: Limit::ByBytes(limit_bytes),
+    }
+    .run(&session)
+    .await
+    .expect("bidir speed run should succeed over the mem transport");
+
+    let up = report.up().expect("bidir measures the upload leg");
+    let down = report.down().expect("bidir measures the download leg");
+    assert_eq!(up.bytes(), limit_bytes, "the whole upload should move");
+    assert_eq!(down.bytes(), limit_bytes, "the whole download should move");
+    assert!(
+        up.mib_per_sec() > 0.0 && down.mib_per_sec() > 0.0,
+        "both directions should have non-zero throughput, got up {} down {}",
+        up.mib_per_sec(),
+        down.mib_per_sec()
+    );
+
+    drop(session);
+    serving.abort();
+}
+
+#[tokio::test]
 async fn time_bounded_speed_respects_the_duration_not_a_byte_count() {
     // The riskiest path: a time bound must end the run on the wall clock, never a fixed byte budget.
     // Over mem (far faster than any assumed rate) a short window still moves millions of bytes, which a
     // stale byte-budget heuristic would have truncated well before the deadline.
     let requested = Duration::from_millis(250);
-    for direction in [Direction::Up, Direction::Down] {
+    for mode in [Mode::Up, Mode::Down, Mode::Bidir] {
         let (serving, session) = paired().await.expect("client should reach the responder");
 
         let report = Speedtest {
-            direction,
+            mode,
             limit: Limit::ByTime(requested),
         }
         .run(&session)
         .await
         .expect("time-bounded speed run should succeed over the mem transport");
 
-        assert_eq!(report.direction(), direction);
-        assert!(
-            report.bytes() > 0 && report.mib_per_sec() > 0.0,
-            "throughput should be non-zero, got {} bytes at {} MiB/s",
-            report.bytes(),
-            report.mib_per_sec()
-        );
+        // Every measured leg moved bytes at a non-zero rate; bidir measures two, one-way measures one.
+        let legs = [report.up(), report.down()].into_iter().flatten();
+        let mut measured = 0u32;
+        for leg in legs {
+            measured += 1;
+            assert!(
+                leg.bytes() > 0 && leg.mib_per_sec() > 0.0,
+                "throughput should be non-zero, got {} bytes at {} MiB/s",
+                leg.bytes(),
+                leg.mib_per_sec()
+            );
+        }
+        let expected_legs = if mode == Mode::Bidir { 2 } else { 1 };
+        assert_eq!(measured, expected_legs, "leg count matches the mode");
         // The run honors the requested duration: it does not stop early on a byte count, and overshoot
         // is bounded to one 64 KiB chunk plus scheduling, so the window brackets the request.
         assert!(

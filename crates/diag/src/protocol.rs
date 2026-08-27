@@ -36,6 +36,16 @@ pub enum Request {
         /// How many payload bytes to send, or `None` to stream until the client closes the stream.
         limit_bytes: Option<u64>,
     },
+    /// Full-duplex speed: both ends send and drain counted payload at once on this one stream, so it
+    /// measures upload and download simultaneously and works over a single-stream transport (quirk).
+    /// The responder mirrors the client: it drains the client's upload to EOF while sourcing its own
+    /// download, `Some(n)` bytes for a byte bound or unbounded for a time bound, where the client's
+    /// close of its read half ends the responder's source. Encoded with the [`UNBOUNDED`] sentinel like
+    /// [`SpeedSource`](Self::SpeedSource), so the wire stays a fixed-width `u64`.
+    SpeedBidir {
+        /// How many payload bytes to move each direction, or `None` to run until the client stops.
+        limit_bytes: Option<u64>,
+    },
 }
 
 /// The wire value of an unbounded [`Request::SpeedSource`]. `u64::MAX` bytes is unreachable in any real
@@ -47,6 +57,7 @@ mod tag {
     pub const PING: u8 = 0;
     pub const SPEED_SINK: u8 = 1;
     pub const SPEED_SOURCE: u8 = 2;
+    pub const SPEED_BIDIR: u8 = 3;
 }
 
 /// Wire tags for the [`Response`] variants. A response has its own tag namespace, independent of
@@ -79,6 +90,12 @@ impl Request {
                     .write_all(&limit_bytes.unwrap_or(UNBOUNDED).to_be_bytes())
                     .await
             }
+            Request::SpeedBidir { limit_bytes } => {
+                writer.write_all(&[tag::SPEED_BIDIR]).await?;
+                writer
+                    .write_all(&limit_bytes.unwrap_or(UNBOUNDED).to_be_bytes())
+                    .await
+            }
         }
     }
 
@@ -102,6 +119,12 @@ impl Request {
             tag::SPEED_SOURCE => {
                 let limit_bytes = read_u64(reader).await?;
                 Ok(Request::SpeedSource {
+                    limit_bytes: (limit_bytes != UNBOUNDED).then_some(limit_bytes),
+                })
+            }
+            tag::SPEED_BIDIR => {
+                let limit_bytes = read_u64(reader).await?;
+                Ok(Request::SpeedBidir {
                     limit_bytes: (limit_bytes != UNBOUNDED).then_some(limit_bytes),
                 })
             }

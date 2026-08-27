@@ -61,14 +61,38 @@ where
         Request::SpeedSource { limit_bytes } => {
             // A byte-bounded download sources an exact count; a time-bounded one sources until the
             // client stops reading at its deadline, so the client's wall clock is the sole terminator.
-            let payload = match limit_bytes {
-                Some(bytes) => Payload::of(bytes),
-                None => Payload::until_peer_stops(),
-            };
-            payload.send(&mut writer).await?;
+            source(&mut writer, limit_bytes).await?;
+            Ok(())
+        }
+        Request::SpeedBidir { limit_bytes } => {
+            // Full-duplex: drain the client's upload to EOF while sourcing our download at once, so both
+            // halves of the one stream carry counted payload simultaneously. The responder holds no
+            // bound of its own; it mirrors the client. A byte bound sources an exact count and the
+            // client's FIN ends the drain; a time bound sources until the client closes its read half at
+            // its deadline (a broken pipe) and FINs its write half (an EOF here). Run both to completion.
+            let (sourced, drained) = tokio::join!(
+                source(&mut writer, limit_bytes),
+                Payload::of_or_until_peer(limit_bytes).drain(&mut reader),
+            );
+            sourced?;
+            drained?;
             Ok(())
         }
     }
+}
+
+/// Source counted download payload: an exact `Some(n)` bytes for a byte bound, or unbounded until the
+/// client stops reading for a time bound (its deadline, not a byte count, is the terminator).
+async fn source<W: io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    limit_bytes: Option<u64>,
+) -> io::Result<()> {
+    let payload = match limit_bytes {
+        Some(bytes) => Payload::of(bytes),
+        None => Payload::until_peer_stops(),
+    };
+    payload.send(writer).await?;
+    Ok(())
 }
 
 /// Echo the opening ping, then every subsequent ping on the same stream until the client closes it.

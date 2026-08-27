@@ -51,6 +51,16 @@ impl Payload {
         Self { bound: Bound::Peer }
     }
 
+    /// A transfer of `Some(n)` exact bytes, or one that runs until the peer stops (EOF when draining, a
+    /// broken pipe when sending) for `None`. The bidir responder's mirror of the client's bound: an
+    /// exact count for a byte-bounded run, unbounded for a time-bounded one the client's deadline ends.
+    pub fn of_or_until_peer(limit: Option<u64>) -> Self {
+        match limit {
+            Some(bytes) => Self::of(bytes),
+            None => Self::until_peer_stops(),
+        }
+    }
+
     /// Write zero payload until the bound, returning how many bytes were written. A [`Bound::Peer`]
     /// transfer ends when the peer closes its read half (a broken-pipe write error), which is the
     /// success path for an unbounded source, so it is not surfaced as an error.

@@ -1,6 +1,8 @@
 //! The speed client: measure throughput to a peer over an established session, iperf-shaped but over
-//! any bifrost transport. It opens one stream, asks the responder to sink (upload) or source
-//! (download) a payload, moves counted bytes until a byte or time bound, and reports MiB/s.
+//! any bifrost transport. It opens one stream and, depending on [`Mode`], asks the responder to sink
+//! (upload), source (download), or mirror (bidir) a payload, moves counted bytes until a byte or time
+//! bound, and reports MiB/s. Bidir moves both directions at once on the one stream, so it measures
+//! upload and download simultaneously and works over a single-stream transport (quirk).
 
 use core::time::Duration;
 use std::time::Instant;
@@ -11,13 +13,18 @@ use tokio::io::AsyncWriteExt as _;
 use crate::payload::Payload;
 use crate::protocol::{ProtocolError, Request, Response};
 
-/// Which way the payload flows in a speed test.
+/// What a speed test measures: one direction, or both at once.
+///
+/// An enum, not two bools: the CLI's mutually-exclusive `--up`/`--down`/`--bidir` group maps onto
+/// exactly these three states, so an impossible "both up and down but not bidir" is unrepresentable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    /// The client sends and the peer sinks: an upload measurement.
+pub enum Mode {
+    /// Measure upload only (this node sends, the peer sinks).
     Up,
-    /// The peer sources and the client sinks: a download measurement.
+    /// Measure download only (the peer sources, this node sinks).
     Down,
+    /// Measure upload and download at once, full-duplex on the one stream.
+    Bidir,
 }
 
 /// How much to transfer before stopping.
@@ -29,12 +36,12 @@ pub enum Limit {
     ByBytes(u64),
 }
 
-/// A speed test against one peer: which direction, bounded by time or bytes.
+/// A speed test against one peer: which mode, bounded by time or bytes.
 #[derive(Debug, Clone, Copy)]
 #[must_use = "a Speedtest does nothing until run"]
 pub struct Speedtest {
-    /// The direction to measure.
-    pub direction: Direction,
+    /// What to measure: up, down, or both at once.
+    pub mode: Mode,
     /// When to stop.
     pub limit: Limit,
 }
@@ -43,61 +50,118 @@ impl Speedtest {
     /// Run the test over an established session and return the measured throughput. One-shot: consumes
     /// `self` and drives the whole transfer on a single stream.
     pub async fn run<S: Session>(self, session: &S) -> Result<SpeedReport, ProtocolError> {
-        let Self { direction, limit } = self;
+        let Self { mode, limit } = self;
         let (mut writer, mut reader) = session.open_bi().await?;
 
         // One window: bytes moved and time elapsed are both measured over this exact span.
         let started = Instant::now();
-        let bytes = match direction {
-            Direction::Up => {
-                Request::SpeedSink {
-                    // The sink cap is only a ceiling; a time-bounded upload stops at the deadline well
-                    // under it, and the responder drains to the client's EOF regardless.
-                    limit_bytes: limit.byte_ceiling(),
-                }
-                .write(&mut writer)
-                .await?;
-                let sent = limit.payload(started).send(&mut writer).await?;
-                // Signal end-of-payload so the responder stops draining and replies with its count.
-                writer.shutdown().await?;
-                let Response::Received { bytes } = Response::read(&mut reader).await? else {
-                    return Err(ProtocolError::Mismatched);
-                };
-                // Report only bytes the peer confirmed receiving. Over a reliable stream the two counts
-                // match; a shortfall means loss or truncation, a real signal worth surfacing, not
-                // laundering silently into a smaller (but plausible) throughput number.
-                if bytes < sent {
-                    tracing::warn!(
-                        sent,
-                        received = bytes,
-                        "peer received fewer bytes than sent"
-                    );
-                }
-                bytes.min(sent)
-            }
-            Direction::Down => {
-                Request::SpeedSource {
-                    limit_bytes: limit.source_request(),
-                }
-                .write(&mut writer)
-                .await?;
-                let received = limit.payload(started).drain(&mut reader).await?;
-                // A time-bounded download sources unbounded, so the client's deadline (which just fired
-                // to end the drain) is the sole terminator. Dropping the read half closes it, so the
-                // responder's next flood write hits a broken pipe and it stops; shutting the write half
-                // sends a clean FIN too. A byte-bounded download already ended on the exact count.
-                drop(reader);
-                writer.shutdown().await?;
-                received
-            }
+        let legs = match mode {
+            Mode::Up => Legs::up(upload(&mut writer, &mut reader, limit, started).await?),
+            Mode::Down => Legs::down(download(&mut writer, &mut reader, limit, started).await?),
+            Mode::Bidir => bidir(&mut writer, &mut reader, limit, started).await?,
         };
         let elapsed = started.elapsed();
-        Ok(SpeedReport {
-            direction,
-            bytes,
-            elapsed,
-        })
+        Ok(SpeedReport { legs, elapsed })
     }
+}
+
+/// Drive the upload leg: ask the responder to sink, stream counted bytes until the bound, then read the
+/// count it confirmed receiving. Reports only confirmed bytes, so a shortfall (loss or truncation)
+/// surfaces rather than laundering into a plausible-but-smaller throughput.
+async fn upload<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    limit: Limit,
+    started: Instant,
+) -> Result<u64, ProtocolError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
+    Request::SpeedSink {
+        // The sink cap is only a ceiling; a time-bounded upload stops at the deadline well under it,
+        // and the responder drains to the client's EOF regardless.
+        limit_bytes: limit.byte_ceiling(),
+    }
+    .write(writer)
+    .await?;
+    let sent = limit.payload(started).send(writer).await?;
+    // Signal end-of-payload so the responder stops draining and replies with its count.
+    writer.shutdown().await?;
+    let Response::Received { bytes } = Response::read(reader).await? else {
+        return Err(ProtocolError::Mismatched);
+    };
+    if bytes < sent {
+        tracing::warn!(
+            sent,
+            received = bytes,
+            "peer received fewer bytes than sent"
+        );
+    }
+    Ok(bytes.min(sent))
+}
+
+/// Drive a download leg that owns the whole stream: ask the responder to source, then drain the count.
+async fn download<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    limit: Limit,
+    started: Instant,
+) -> Result<u64, ProtocolError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
+    Request::SpeedSource {
+        limit_bytes: limit.source_request(),
+    }
+    .write(writer)
+    .await?;
+    let received = limit.payload(started).drain(reader).await?;
+    // A time-bounded download sources unbounded, so the client's deadline (which just fired to end the
+    // drain) is the sole terminator. Shutting the write half sends a clean FIN so the responder's next
+    // flood write hits a broken pipe and it stops. A byte-bounded download already ended on the count.
+    writer.shutdown().await?;
+    Ok(received)
+}
+
+/// Drive a full-duplex bidir run over the one stream: after the single `SpeedBidir` request, send
+/// counted payload while draining counted payload at once, so both directions are measured over the
+/// same window. The one request opens the exchange (the responder reads exactly one), so there is no
+/// per-leg framing to interleave on the shared write half, and no trailing reply to corrupt the drain.
+/// Upload here is client-sent bytes (there is no `Received` confirmation frame in this mode, since a
+/// reply frame appended to the source payload would corrupt the download count); a reliable stream
+/// delivers what was sent, so sent bytes are the honest upload figure. Works over quirk: a single
+/// bidirectional stream carries both halves.
+async fn bidir<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    limit: Limit,
+    started: Instant,
+) -> Result<Legs, ProtocolError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncRead + Unpin,
+{
+    Request::SpeedBidir {
+        limit_bytes: limit.source_request(),
+    }
+    .write(writer)
+    .await?;
+
+    let send = async {
+        let sent = limit.payload(started).send(writer).await?;
+        // FIN the write half so the responder's drain sees EOF and stops mirroring.
+        writer.shutdown().await?;
+        Ok::<u64, ProtocolError>(sent)
+    };
+    let drain = async { Ok::<u64, ProtocolError>(limit.payload(started).drain(reader).await?) };
+
+    let (up, down) = tokio::join!(send, drain);
+    Ok(Legs {
+        up: Some(up?),
+        down: Some(down?),
+    })
 }
 
 impl Limit {
@@ -129,29 +193,75 @@ impl Limit {
     }
 }
 
-/// The measured result of a speed test.
+/// The measured bytes of a run, one leg per direction exercised. A one-way run fills exactly one leg; a
+/// bidir run fills both, measured over the same window.
+#[derive(Debug, Clone, Copy)]
+struct Legs {
+    up: Option<u64>,
+    down: Option<u64>,
+}
+
+impl Legs {
+    /// A run that measured only the upload direction.
+    fn up(bytes: u64) -> Self {
+        Self {
+            up: Some(bytes),
+            down: None,
+        }
+    }
+
+    /// A run that measured only the download direction.
+    fn down(bytes: u64) -> Self {
+        Self {
+            up: None,
+            down: Some(bytes),
+        }
+    }
+}
+
+/// The measured result of a speed test: throughput per direction over a shared window.
 #[derive(Debug, Clone, Copy)]
 #[must_use = "a SpeedReport is the result of the run and should be reported"]
 pub struct SpeedReport {
-    direction: Direction,
-    bytes: u64,
+    legs: Legs,
     elapsed: Duration,
 }
 
 impl SpeedReport {
-    /// The direction measured.
-    pub fn direction(&self) -> Direction {
-        self.direction
+    /// The upload leg, if this run measured it: bytes moved and the throughput over the window.
+    pub fn up(&self) -> Option<Throughput> {
+        self.legs.up.map(|bytes| self.throughput(bytes))
     }
 
-    /// How many payload bytes moved.
-    pub fn bytes(&self) -> u64 {
-        self.bytes
+    /// The download leg, if this run measured it: bytes moved and the throughput over the window.
+    pub fn down(&self) -> Option<Throughput> {
+        self.legs.down.map(|bytes| self.throughput(bytes))
     }
 
-    /// How long the transfer took.
+    /// How long the transfer took, the window both legs are measured over.
     pub fn elapsed(&self) -> Duration {
         self.elapsed
+    }
+
+    fn throughput(&self, bytes: u64) -> Throughput {
+        Throughput {
+            bytes,
+            elapsed: self.elapsed,
+        }
+    }
+}
+
+/// One direction's measured throughput: bytes moved over the run's window.
+#[derive(Debug, Clone, Copy)]
+pub struct Throughput {
+    bytes: u64,
+    elapsed: Duration,
+}
+
+impl Throughput {
+    /// How many payload bytes moved in this direction.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
     }
 
     /// Throughput in mebibytes per second. Zero if no time elapsed.

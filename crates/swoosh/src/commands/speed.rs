@@ -1,15 +1,16 @@
 //! `swoosh speed <key>`: measure throughput to a peer over the overlay, iperf-shaped. One direction at
-//! a time (`--up` or `--down`, default down), bounded by time (`-t`) or bytes (`-n`, default `-t 5`).
+//! a time (`--up` or `--down`, default down) or both at once (`--bidir`), bounded by time (`-t`) or
+//! bytes (`-n`, default `-t 5`).
 
 use core::time::Duration;
 
 use bifrost::{Discovery, Node, NodeId, Transport};
 use clap::{ArgGroup, Args};
-use diag::{Direction, Limit, SpeedReport, Speedtest};
+use diag::{Limit, Mode, SpeedReport, Speedtest, Throughput};
 
 /// Measure throughput to a peer: iperf, but over the overlay.
 #[derive(Debug, Args)]
-#[command(group = ArgGroup::new("way").args(["up", "down"]))]
+#[command(group = ArgGroup::new("way").args(["up", "down", "bidir"]))]
 #[command(group = ArgGroup::new("bound").args(["secs", "bytes"]))]
 pub struct SpeedCmd {
     /// The peer to reach, as a bifrost node id.
@@ -20,6 +21,9 @@ pub struct SpeedCmd {
     /// Measure the download direction (this node receives). The default.
     #[arg(long)]
     pub down: bool,
+    /// Measure upload and download at once, full-duplex on one stream. Works over quirk too.
+    #[arg(long)]
+    pub bidir: bool,
     /// Run for this many seconds. Defaults to 5 when no bound is given.
     #[arg(short = 't', long)]
     pub secs: Option<f64>,
@@ -31,12 +35,12 @@ pub struct SpeedCmd {
 impl SpeedCmd {
     /// Dial the peer, run the transfer, and print the throughput.
     pub async fn run<T: Transport, D: Discovery>(self, node: &Node<T, D>) -> eyre::Result<()> {
-        let direction = self.direction();
+        let mode = self.mode();
         let limit = self.limit();
         let session = node.connect(self.key).await?;
-        println!("speed test to {} ({})", self.key.short(), label(direction));
+        println!("speed test to {} ({})", self.key.short(), label(mode));
 
-        let report = Speedtest { direction, limit }.run(&session).await?;
+        let report = Speedtest { mode, limit }.run(&session).await?;
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;
@@ -44,12 +48,14 @@ impl SpeedCmd {
         Ok(())
     }
 
-    /// The direction to measure: `--up` if asked, otherwise download (the group makes both impossible).
-    fn direction(&self) -> Direction {
+    /// What to measure: `--up`, `--bidir`, or download (the group makes more than one impossible).
+    fn mode(&self) -> Mode {
         if self.up {
-            Direction::Up
+            Mode::Up
+        } else if self.bidir {
+            Mode::Bidir
         } else {
-            Direction::Down
+            Mode::Down
         }
     }
 
@@ -63,22 +69,33 @@ impl SpeedCmd {
     }
 }
 
-/// Print the throughput summary for a finished transfer.
+/// Print the throughput summary: one line per direction the run measured.
 fn print_report(report: &SpeedReport) {
+    let elapsed = report.elapsed().as_secs_f64();
+    if let Some(up) = report.up() {
+        print_leg("up", up, elapsed);
+    }
+    if let Some(down) = report.down() {
+        print_leg("down", down, elapsed);
+    }
+}
+
+/// Print one direction's throughput line.
+fn print_leg(direction: &str, leg: Throughput, elapsed: f64) {
     println!(
-        "{} in {:.2}s = {:.2} MiB/s ({})",
-        mib(report.bytes()),
-        report.elapsed().as_secs_f64(),
-        report.mib_per_sec(),
-        label(report.direction()),
+        "{} {} in {elapsed:.2}s = {:.2} MiB/s",
+        direction,
+        mib(leg.bytes()),
+        leg.mib_per_sec(),
     );
 }
 
-/// A human label for a direction.
-fn label(direction: Direction) -> &'static str {
-    match direction {
-        Direction::Up => "up",
-        Direction::Down => "down",
+/// A human label for a mode.
+fn label(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Up => "up",
+        Mode::Down => "down",
+        Mode::Bidir => "bidir",
     }
 }
 

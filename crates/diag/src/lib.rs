@@ -18,4 +18,4 @@ mod payload;
 
 pub use ping::{Ping, PingReport};
 pub use responder::Responder;
-pub use speed::{Direction, Limit, SpeedReport, Speedtest};
+pub use speed::{Limit, Mode, SpeedReport, Speedtest, Throughput};

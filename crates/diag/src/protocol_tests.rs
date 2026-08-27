@@ -15,6 +15,11 @@ async fn request_variants_roundtrip() {
         },
         // The unbounded (time-bounded download) source, encoded via the sentinel.
         Request::SpeedSource { limit_bytes: None },
+        Request::SpeedBidir {
+            limit_bytes: Some(2 * 1024 * 1024),
+        },
+        // The unbounded (time-bounded) bidir, encoded via the same sentinel.
+        Request::SpeedBidir { limit_bytes: None },
     ];
     for request in requests {
         let mut buf = Vec::new();
