@@ -1,13 +1,16 @@
-//! swoosh: one command, one identity, every p2p operation as a verb.
+//! swoosh: reach a machine by its public key and measure the connection.
 //!
-//! `swoosh serve` makes this node answer reach diagnostics; `swoosh ping <key>` measures the round trip
-//! to a peer by their public key; `swoosh speed <key>` measures throughput to them; `swoosh status
-//! <key>` shows the connection path (direct vs relayed) to a peer. Identity is chosen by intent: `serve`
-//! must be reachable, so it binds a persisted key and keeps one stable address across runs (and across
-//! transports: `--transport iroh|quirk` swaps the backend underneath without changing that address). The
-//! reach-outward verbs need no lasting identity, so they mint a fresh ephemeral key each run unless you
-//! pin one with `--key`/`SWOOSH_KEY`. iris and tightbeam verbs (`send`/`recv`/`tunnel`) land next; see
-//! the README.
+//! You give swoosh a peer's public key and it dials that peer directly, wherever the peer is on the
+//! internet, across NATs, without you knowing the peer's address. `swoosh serve` prints this machine's
+//! key and stays reachable; `swoosh ping <peer>` measures the round-trip time to a key; `swoosh speed
+//! <peer>` measures throughput; `swoosh status <peer>` reports whether the link is direct or relayed.
+//! A peer is a raw key or a saved petname (`swoosh contact add alice <key>`, then `swoosh ping alice`).
+//!
+//! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
+//! key and keeps a stable address across runs (and across transports: `--transport iroh|quirk` swaps the
+//! backend without changing the key). The outward verbs only dial out, so they mint a throwaway key each
+//! run unless you pin one with `--key`/`SWOOSH_KEY`. Planned verbs (`send`/`recv`/`tunnel`) are tracked
+//! in the README.
 
 use std::path::PathBuf;
 
@@ -29,9 +32,12 @@ use contacts::{Contacts, ContactsStore};
 use identity::Identity;
 use transport::Peer;
 
-/// The unified front door to the theia overlay: reach, name, and run code at a public key.
 #[derive(Debug, Parser)]
-#[command(name = "swoosh", version, about)]
+#[command(
+    name = "swoosh",
+    version,
+    about = "Reach a machine by its public key and measure the connection."
+)]
 struct Cli {
     /// Which transport to bind under the identity. iroh self-discovers across the internet; quirk is
     /// direct-only. Both find peers on the same LAN over mDNS and honor `--peer` hints. The NodeId is
