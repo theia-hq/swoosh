@@ -1,11 +1,12 @@
 //! `swoosh status <key>`: dial a peer and report the connection path, Tailscale `status` shaped.
 //!
 //! The single most reassuring thing a p2p tool tells you: am I actually peer to peer, or bouncing off a
-//! relay? This dials the peer, reads the session's best-effort [`conn_info`](bifrost::Session::conn_info)
-//! for the path (direct vs relayed) and remote address, and runs a single diag ping for a live RTT,
-//! then prints one line. Over quirk it says direct; over iroh it reports the current path, which can
-//! start relayed and upgrade to direct as hole-punching completes. Honest when the transport cannot
-//! tell.
+//! relay? This dials the peer, runs a single diag ping for a live RTT, then reads the session's
+//! best-effort [`conn_info`](bifrost::Session::conn_info) for the path (direct vs relayed) and remote
+//! address, and prints one line. The path is read AFTER the probe so iroh's hole-punch has the round
+//! trip to land: a session that connects relayed and upgrades reports the upgraded path, not the
+//! instant-of-connect one. Over quirk it says direct; over iroh it reports the current path, which can
+//! still be relayed if the upgrade has not completed by then. Honest when the transport cannot tell.
 //!
 //! One-shot: swoosh has no daemon, so this reports the one peer you dial. Listing the whole tailnet of
 //! active sessions (Tailscale's full `status`) needs a long-lived node holding those sessions; that is
@@ -34,7 +35,6 @@ impl StatusCmd {
         transport: transport::Transport,
     ) -> eyre::Result<()> {
         let session = node.connect(self.key).await?;
-        let info = session.conn_info();
 
         // A single diag ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
         // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.
@@ -44,6 +44,11 @@ impl StatusCmd {
         }
         .run(&session)
         .await?;
+
+        // Read the path AFTER the probe, not before: the round trip gives iroh's hole-punch a moment to
+        // land, so a session that starts relayed and upgrades reports "direct" here instead of always
+        // showing the pre-upgrade "relayed" it had the instant it connected.
+        let info = session.conn_info();
         let rtt = probed.avg().or(info.rtt);
 
         node.close().await;
