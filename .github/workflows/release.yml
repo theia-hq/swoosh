@@ -43,6 +43,10 @@ jobs:
         with:
           repository: theia-hq/nauthy
           path: nauthy
+      - uses: actions/checkout@v4
+        with:
+          repository: theia-hq/quirk
+          path: quirk
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
