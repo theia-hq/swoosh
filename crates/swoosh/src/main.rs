@@ -15,7 +15,7 @@
 use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Transport};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 mod commands;
 mod contacts;
@@ -36,14 +36,20 @@ use transport::Peer;
 #[command(
     name = "swoosh",
     version,
-    about = "Reach a machine by its public key and measure the connection."
+    about = "Reach a machine by its public key and measure the connection.",
+    // A bare `swoosh` is a mistake, not a default action: print the full help and exit non-zero. This
+    // must hold even with `SWOOSH_KEY` set, but an env-backed global `--key` counts as an arg to clap,
+    // so `arg_required_else_help` would fall to a terse "subcommand required" line there instead of the
+    // help. So the subcommand is `Option` and the no-verb case is handled in `run`, one behavior whether
+    // or not the env var is set.
+    arg_required_else_help = true
 )]
 struct Cli {
     /// Pin a persisted identity dir [env: SWOOSH_KEY]
     #[arg(long = "key", id = "identity-key", env = "SWOOSH_KEY", global = true)]
     key: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -161,6 +167,15 @@ async fn run() -> eyre::Result<()> {
 
     let cli = Cli::parse();
 
+    // No verb given (a bare `swoosh`, even with `SWOOSH_KEY` set): print the full help and exit non-zero,
+    // the same way clap's own `arg_required_else_help` does (full help, non-zero exit, no `Error:` line).
+    // See the note on `Cli` for why this is handled here rather than by that attribute alone.
+    let Some(command) = cli.command else {
+        let mut help = Cli::command();
+        help.print_help()?;
+        std::process::exit(2);
+    };
+
     // The address book lives beside the identity, honoring `--key`'s dir when it points elsewhere, else
     // the default config dir. Open it once, up front: the `contact` group edits it, the reach verbs read
     // it to resolve a petname.
@@ -168,7 +183,7 @@ async fn run() -> eyre::Result<()> {
 
     // A `contact` verb is purely local: it edits the address book and dials nobody, so it runs here
     // before any transport is composed. Everything else reaches a peer, so it falls through to bind one.
-    let reach = match cli.command.split() {
+    let reach = match command.split() {
         Verb::Contact(cmd) => return cmd.run(store).await,
         Verb::Reach(reach) => reach,
     };
