@@ -10,7 +10,7 @@ use diag::{Limit, Mode, SpeedReport, Speedtest, Throughput};
 
 use crate::contacts::{Contacts, Target};
 use crate::reach::{self, Reached};
-use crate::transport;
+use crate::transport::{self, ReachArgs};
 
 /// Measure throughput to a peer: iperf, but over the overlay.
 #[derive(Debug, Args)]
@@ -18,11 +18,12 @@ use crate::transport;
 #[command(group = ArgGroup::new("bound").args(["secs", "bytes"]))]
 pub struct SpeedCmd {
     /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
+    #[arg(value_name = "peer")]
     pub target: Target,
     /// Measure the upload direction (this node sends).
     #[arg(long)]
     pub up: bool,
-    /// Measure the download direction (this node receives). The default.
+    /// Measure the download direction (this node receives).
     #[arg(long)]
     pub down: bool,
     /// Measure upload and download at once, full-duplex on one stream. Works over quirk too.
@@ -34,6 +35,8 @@ pub struct SpeedCmd {
     /// Transfer this many bytes instead of running for a fixed time.
     #[arg(short = 'n', long)]
     pub bytes: Option<u64>,
+    #[command(flatten)]
+    pub reach: ReachArgs,
 }
 
 impl SpeedCmd {

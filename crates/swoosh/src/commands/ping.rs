@@ -8,12 +8,13 @@ use diag::{Ping, PingReport};
 
 use crate::contacts::{Contacts, Target};
 use crate::reach::{self, Reached};
-use crate::transport;
+use crate::transport::{self, ReachArgs};
 
 /// Measure the round-trip time to a peer, addressed by a petname or their public key.
 #[derive(Debug, Args)]
 pub struct PingCmd {
     /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
+    #[arg(value_name = "peer")]
     pub target: Target,
     /// How many probes to send.
     #[arg(short = 'c', long, default_value_t = 4)]
@@ -21,6 +22,8 @@ pub struct PingCmd {
     /// Seconds between probes.
     #[arg(short = 'i', long, default_value_t = 1.0)]
     pub interval: f64,
+    #[command(flatten)]
+    pub reach: ReachArgs,
 }
 
 impl PingCmd {
@@ -53,7 +56,7 @@ impl PingCmd {
 fn print_report(report: &PingReport) {
     let loss_pct = report.loss() * 100.0;
     println!(
-        "{} probes sent, {} replies, {loss_pct:.0}% loss",
+        "{} sent, {} received, {loss_pct:.0}% loss",
         report.sent(),
         report.received()
     );

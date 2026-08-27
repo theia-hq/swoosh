@@ -315,7 +315,9 @@ pub enum ResolveError {
     #[error("unknown contact '{0}'; add it with `swoosh contact add {0} <key>`")]
     UnknownPetname(Petname),
     /// The petname exists but has no device by that label.
-    #[error("contact '{petname}' has no device '{device}'")]
+    #[error(
+        "contact '{petname}' has no device '{device}'; see its devices with `swoosh contact ls {petname}`"
+    )]
     UnknownDevice {
         /// The known petname.
         petname: Petname,

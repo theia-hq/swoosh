@@ -14,19 +14,31 @@ use core::str::FromStr;
 
 use bifrost::{Layered, NodeId, StaticDiscovery};
 use bifrost_mdns::MdnsDiscovery;
-use clap::ValueEnum;
+use clap::{Args, ValueEnum};
 use eyre::WrapErr as _;
+
+/// The flags every reaching verb shares and no local verb has: which backend to bind and any direct
+/// address hints. Flattened into each reach command (`serve`/`ping`/`speed`/`status`) rather than made
+/// a root global, so `contact add/ls/rm` (which bind no transport and dial nobody) are never offered a
+/// `--transport` or `--peer` that would do nothing there. `--key` stays a root global, since it names
+/// the identity dir the address book AND the bound key both live in, meaningful to both families.
+#[derive(Debug, Args)]
+pub struct ReachArgs {
+    /// Backend to bind under this identity
+    #[arg(long, value_enum, default_value_t, value_name = "iroh|quirk")]
+    pub transport: Transport,
+    /// Direct address hint for a peer, `<key>=<addr>` (repeatable)
+    #[arg(long, value_name = "key=addr")]
+    pub peer: Vec<Peer>,
+}
 
 /// Which concrete transport to bind under the shared identity. Default [`iroh`](Self::Iroh).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Transport {
-    /// iroh: QUIC with NAT traversal and relay fallback, reachable across the internet. Self-
-    /// discovering, and it also honors LAN mDNS and `--peer` hints, so a same-network peer is reached
-    /// directly instead of via a relay.
+    /// across the internet, NAT-traversing
     #[default]
     Iroh,
-    /// quirk: our own from-scratch QUIC over UDP. Direct-only (no NAT traversal yet), so it reaches a
-    /// peer through discovery alone: a LAN peer found over mDNS, or one named with `--peer <key>=<addr>`.
+    /// our own QUIC; LAN / direct-only
     Quirk,
 }
 

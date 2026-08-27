@@ -8,9 +8,14 @@ use diag::Responder;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 
+use crate::transport::ReachArgs;
+
 /// Answer reach diagnostics from peers until interrupted.
 #[derive(Debug, Args)]
-pub struct ServeCmd {}
+pub struct ServeCmd {
+    #[command(flatten)]
+    pub reach: ReachArgs,
+}
 
 impl ServeCmd {
     /// Accept sessions and serve each concurrently; a Ctrl-C ends the loop gracefully.

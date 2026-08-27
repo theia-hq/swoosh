@@ -39,21 +39,7 @@ use transport::Peer;
     about = "Reach a machine by its public key and measure the connection."
 )]
 struct Cli {
-    /// Which transport to bind under the identity. iroh self-discovers across the internet; quirk is
-    /// direct-only. Both find peers on the same LAN over mDNS and honor `--peer` hints. The NodeId is
-    /// identical whichever is chosen. Global, so it may sit before or after the verb.
-    #[arg(long, value_enum, default_value_t, global = true)]
-    transport: transport::Transport,
-    /// A direct address hint for a peer, `<key>=<socketaddr>`, repeatable. Honored by both transports.
-    /// Rarely needed on a LAN, where peers find each other automatically over mDNS; feed back what a
-    /// peer's `swoosh serve` prints to reach it across networks. Global, so it may sit after the verb
-    /// next to the peer key it hints.
-    #[arg(long, global = true)]
-    peer: Vec<Peer>,
-    /// Pin this run to a persisted identity at the given file, creating it if absent. Without it,
-    /// `serve` uses the default key file and the reach-outward verbs mint a fresh ephemeral key. Global,
-    /// so it may sit before or after the verb. The id is distinct from a verb's positional `key` (a peer
-    /// `NodeId`); the two never collide.
+    /// Pin a persisted identity dir [env: SWOOSH_KEY]
     #[arg(long = "key", id = "identity-key", env = "SWOOSH_KEY", global = true)]
     key: Option<PathBuf>,
     #[command(subcommand)]
@@ -62,7 +48,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Answer reach diagnostics from peers. Prints this node's address, then stays online.
+    /// Be online: answer reach diagnostics; prints this node's address.
     Serve(ServeCmd),
     /// Measure the round-trip time to a peer, addressed by a petname or their public key.
     Ping(PingCmd),
@@ -115,6 +101,18 @@ impl Reach {
         match self {
             Self::Serve(_) => Identity::Persisted,
             Self::Ping(_) | Self::Speed(_) | Self::Status(_) => Identity::Ephemeral,
+        }
+    }
+
+    /// The reach-family flags this verb carries (`--transport`, `--peer`). Shared by every reaching verb
+    /// and no local one, so they are flattened into each reach command rather than made a root global;
+    /// the composition root reads them here to pick the backend and seed discovery.
+    fn args(&self) -> &transport::ReachArgs {
+        match self {
+            Self::Serve(cmd) => &cmd.reach,
+            Self::Ping(cmd) => &cmd.reach,
+            Self::Speed(cmd) => &cmd.reach,
+            Self::Status(cmd) => &cmd.reach,
         }
     }
 
@@ -183,8 +181,10 @@ async fn run() -> eyre::Result<()> {
 
     // The one and only place a concrete transport is named. Everything downstream speaks `bifrost`. The
     // same secret yields the same NodeId whether bound under iroh or quirk, which is what makes the
-    // transport swap a swap and not a new node.
-    let transport = cli.transport;
+    // transport swap a swap and not a new node. The reach-family flags travel on the verb itself now, so
+    // the backend and the dial hints are read off the chosen reaching verb, not a root global.
+    let transport = reach.args().transport;
+    let peers = reach.args().peer.clone();
     match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
         // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
@@ -192,7 +192,7 @@ async fn run() -> eyre::Result<()> {
         // known locally the resolve is empty and iroh self-discovers exactly as before.
         transport::Transport::Iroh => {
             let endpoint = bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?;
-            let discovery = Peer::discovery(&endpoint, cli.peer);
+            let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
             reach.run(&node, &contacts, transport).await
         }
@@ -200,7 +200,7 @@ async fn run() -> eyre::Result<()> {
         // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
         transport::Transport::Quirk => {
             let endpoint = bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?;
-            let discovery = Peer::discovery(&endpoint, cli.peer);
+            let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
             reach.run(&node, &contacts, transport).await
         }

@@ -20,13 +20,16 @@ use diag::Ping;
 
 use crate::contacts::{Contacts, Target};
 use crate::reach::{self, Reached};
-use crate::transport;
+use crate::transport::{self, ReachArgs};
 
 /// Report the connection path to a peer: transport, direct vs relayed, remote address, and live RTT.
 #[derive(Debug, Args)]
 pub struct StatusCmd {
     /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
+    #[arg(value_name = "peer")]
     pub target: Target,
+    #[command(flatten)]
+    pub reach: ReachArgs,
 }
 
 impl StatusCmd {
