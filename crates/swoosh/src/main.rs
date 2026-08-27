@@ -34,6 +34,7 @@ use commands::contact::ContactCmd;
 use commands::ping::PingCmd;
 use commands::serve::ServeCmd;
 use commands::speed::SpeedCmd;
+use commands::ssh::SshCmd;
 use commands::status::StatusCmd;
 use commands::tree::TreeCmd;
 use contacts::{Contacts, ContactsStore};
@@ -73,6 +74,8 @@ enum Command {
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
     Contact(ContactCmd),
+    /// Reach a peer's sshd over the overlay; runs the system ssh.
+    Ssh(SshCmd),
     /// Print this command tree (spec vs binary).
     Tree(TreeCmd),
 }
@@ -93,6 +96,7 @@ impl Command {
     fn split(self) -> Verb {
         match self {
             Self::Contact(cmd) => Verb::Contact(cmd),
+            Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
@@ -102,10 +106,14 @@ impl Command {
     }
 }
 
-/// The two kinds of verb, once split: purely local, or reaching outward over a transport.
+/// The three kinds of verb, once split: purely local, a launcher, or reaching outward over a transport.
 enum Verb {
     /// Edits the address book; needs no transport.
     Contact(ContactCmd),
+    /// Reads the address book to resolve a peer, then execs the system `ssh` over the overlay. A launcher:
+    /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
+    /// so it dispatches beside the local verbs, off the store, before any transport is composed.
+    Ssh(SshCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(TreeCmd),
     /// Reaches a peer; binds a transport.
@@ -197,6 +205,13 @@ async fn run() -> eyre::Result<()> {
         Verb::Contact(cmd) => {
             let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
             return cmd.run(store).await;
+        }
+        // A launcher: read the store to resolve the peer, then hand off to the system `ssh` (which runs
+        // tightbeam as its `ProxyCommand`). swoosh binds no transport here; on unix `run` execs and does
+        // not return on success.
+        Verb::Ssh(cmd) => {
+            let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
+            return cmd.run(store.contacts());
         }
         Verb::Reach(reach) => reach,
     };
