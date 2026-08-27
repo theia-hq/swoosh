@@ -84,6 +84,15 @@ as usual: `swoosh ssh alice/desk -- ls`, or `swoosh ssh alice/desk -p 2222`. Aut
 The peer exposes its sshd once with [tightbeam](https://github.com/theia-hq/tightbeam)
 (`tightbeam expose ssh=127.0.0.1:22`), which also carries the tunnel.
 
+### `swoosh fetch <url>`
+
+Fetch a URL through a node you name, handed out as a plain local URL. `swoosh fetch
+https://example.com/big.iso --via usa` prints `http://127.0.0.1:PORT/`; whatever pulls from that (curl,
+xget) is served by `usa`'s machine fetching the origin and streaming it back, `Range` intact so a
+resumable download resumes. The exit is a node *you* run (your own overlay HTTP proxy, no vendor): expose
+it there with `tightbeam expose fetch=fetch: --gate cap` and hand out a `sheer:` cap to `--via`. Scoped to
+the one origin you name, not an open proxy.
+
 ### `swoosh contact`: name your peers
 
 Keys are unwieldy to type. Save a peer's key under a short name once, then use the name anywhere a
@@ -155,7 +164,7 @@ lands as it is built.
   server) over a tunnel, a file, or a directory
 - [ ] `attenuate` — narrow a capability link offline and print a tighter one
 - [ ] `cluster` + `share cluster` — name a local set of machines; share the whole group as one capability
-- [ ] `fetch` — mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
+- [x] `fetch` — mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
 - [ ] `run` — run code at a peer addressed by its key (the north star)
 - [ ] MagicDNS `.theia` names — type `ssh desk.alice` or `http://blog.alice.theia` into any app
 
