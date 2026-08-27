@@ -2,6 +2,7 @@
 //! an `async fn run(self, ...)` that consumes it.
 
 pub mod contact;
+pub mod fetch;
 pub mod identity;
 pub mod ping;
 pub mod serve;

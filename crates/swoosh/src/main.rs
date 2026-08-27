@@ -31,6 +31,7 @@ mod reach;
 mod transport;
 
 use commands::contact::ContactCmd;
+use commands::fetch::FetchCmd;
 use commands::identity::IdentityCmd;
 use commands::ping::PingCmd;
 use commands::serve::ServeCmd;
@@ -72,6 +73,8 @@ enum Command {
     Speed(SpeedCmd),
     /// Show the connection path to a peer: direct vs relayed, remote, and live RTT.
     Status(StatusCmd),
+    /// Mint a local URL that fetches an origin through a node you name.
+    Fetch(FetchCmd),
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
     Contact(ContactCmd),
@@ -90,6 +93,7 @@ enum Reach {
     Ping(PingCmd),
     Speed(SpeedCmd),
     Status(StatusCmd),
+    Fetch(FetchCmd),
 }
 
 impl Command {
@@ -106,6 +110,7 @@ impl Command {
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
             Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
             Self::Status(cmd) => Verb::Reach(Reach::Status(cmd)),
+            Self::Fetch(cmd) => Verb::Reach(Reach::Fetch(cmd)),
         }
     }
 }
@@ -133,7 +138,9 @@ impl Reach {
     fn identity(&self) -> Identity {
         match self {
             Self::Serve(_) => Identity::Persisted,
-            Self::Ping(_) | Self::Speed(_) | Self::Status(_) => Identity::Ephemeral,
+            Self::Ping(_) | Self::Speed(_) | Self::Status(_) | Self::Fetch(_) => {
+                Identity::Ephemeral
+            }
         }
     }
 
@@ -146,6 +153,7 @@ impl Reach {
             Self::Ping(cmd) => &cmd.reach,
             Self::Speed(cmd) => &cmd.reach,
             Self::Status(cmd) => &cmd.reach,
+            Self::Fetch(cmd) => &cmd.reach,
         }
     }
 
@@ -166,6 +174,7 @@ impl Reach {
             Self::Ping(cmd) => cmd.run(node, contacts, transport).await,
             Self::Speed(cmd) => cmd.run(node, contacts, transport).await,
             Self::Status(cmd) => cmd.run(node, contacts, transport).await,
+            Self::Fetch(cmd) => cmd.run(node, contacts, transport).await,
         }
     }
 }
