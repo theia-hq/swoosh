@@ -16,6 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
+use bifrost::NodeId;
 use eyre::eyre;
 use zeroize::{Zeroize as _, ZeroizeOnDrop};
 
@@ -38,6 +39,12 @@ impl Secret {
         // Wipe our copy; the returned array is the caller's to own (and, ideally, zeroize) from here.
         self.0.zeroize();
         bytes
+    }
+
+    /// The node id this secret binds under: the identity a peer reaches when it dials this key. Derived
+    /// offline (no transport stood up), so `swoosh identity` can print it without serving.
+    pub fn node_id(&self) -> NodeId {
+        NodeId::from_ed25519_secret(&self.0)
     }
 }
 
@@ -89,7 +96,7 @@ async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
 }
 
 /// The default persisted key location, `~/.config/swoosh/identity.key`.
-fn default_path() -> eyre::Result<PathBuf> {
+pub(crate) fn default_path() -> eyre::Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| eyre!("HOME is not set; pass --key"))?;
     Ok(PathBuf::from(home)
         .join(".config")

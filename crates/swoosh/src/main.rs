@@ -31,6 +31,7 @@ mod reach;
 mod transport;
 
 use commands::contact::ContactCmd;
+use commands::identity::IdentityCmd;
 use commands::ping::PingCmd;
 use commands::serve::ServeCmd;
 use commands::speed::SpeedCmd;
@@ -74,6 +75,8 @@ enum Command {
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
     Contact(ContactCmd),
+    /// Print this node's identity (its NodeId), minting a key if there is none.
+    Identity(IdentityCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(SshCmd),
     /// Print this command tree (spec vs binary).
@@ -96,6 +99,7 @@ impl Command {
     fn split(self) -> Verb {
         match self {
             Self::Contact(cmd) => Verb::Contact(cmd),
+            Self::Identity(cmd) => Verb::Identity(cmd),
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
@@ -110,6 +114,8 @@ impl Command {
 enum Verb {
     /// Edits the address book; needs no transport.
     Contact(ContactCmd),
+    /// Prints this node's identity; needs no transport and no store, only the key path.
+    Identity(IdentityCmd),
     /// Reads the address book to resolve a peer, then execs the system `ssh` over the overlay. A launcher:
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
@@ -206,6 +212,9 @@ async fn run() -> eyre::Result<()> {
             let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
             return cmd.run(store).await;
         }
+        // Prints this node's NodeId (minting a key if absent). Needs only the key path, not the store or
+        // a transport, so it dispatches here beside the other local verbs.
+        Verb::Identity(cmd) => return cmd.run(cli.key.as_deref()).await,
         // A launcher: read the store to resolve the peer, then hand off to the system `ssh` (which runs
         // tightbeam as its `ProxyCommand`). swoosh binds no transport here; on unix `run` execs and does
         // not return on success.
