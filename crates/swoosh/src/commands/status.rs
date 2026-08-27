@@ -37,7 +37,8 @@ impl StatusCmd {
         contacts: &Contacts,
         transport: transport::Transport,
     ) -> eyre::Result<()> {
-        let Reached { session, peer } = reach::dial(node, contacts, &self.target).await?;
+        let Reached { session, peer } =
+            reach::dial(node, contacts, &self.target, transport).await?;
 
         // A single diag ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
         // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.

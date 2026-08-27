@@ -10,6 +10,7 @@ use diag::{Limit, Mode, SpeedReport, Speedtest, Throughput};
 
 use crate::contacts::{Contacts, Target};
 use crate::reach::{self, Reached};
+use crate::transport;
 
 /// Measure throughput to a peer: iperf, but over the overlay.
 #[derive(Debug, Args)]
@@ -41,10 +42,12 @@ impl SpeedCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
+        transport: transport::Transport,
     ) -> eyre::Result<()> {
         let mode = self.mode();
         let limit = self.limit();
-        let Reached { session, peer } = reach::dial(node, contacts, &self.target).await?;
+        let Reached { session, peer } =
+            reach::dial(node, contacts, &self.target, transport).await?;
         println!("speed test to {} ({})", peer.short(), mode.label());
 
         let report = Speedtest { mode, limit }.run(&session).await?;

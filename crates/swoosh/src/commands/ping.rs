@@ -8,6 +8,7 @@ use diag::{Ping, PingReport};
 
 use crate::contacts::{Contacts, Target};
 use crate::reach::{self, Reached};
+use crate::transport;
 
 /// Measure the round-trip time to a peer, addressed by a petname or their public key.
 #[derive(Debug, Args)]
@@ -28,8 +29,10 @@ impl PingCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
+        transport: transport::Transport,
     ) -> eyre::Result<()> {
-        let Reached { session, peer } = reach::dial(node, contacts, &self.target).await?;
+        let Reached { session, peer } =
+            reach::dial(node, contacts, &self.target, transport).await?;
         println!("pinging {} ({} probes)", peer.short(), self.count);
 
         let report = Ping {

@@ -114,8 +114,9 @@ impl Reach {
     /// Run the selected verb against the composed node. Every verb is generic over `Node<T, D>`, so
     /// this dispatch is transport-blind: the concrete transport was chosen once, at the seam below. The
     /// reach-outward verbs take `contacts` to resolve a petname in their peer slot; the `transport`
-    /// label is passed as a plain value for the one verb that reports which backend carried the session
-    /// (`status`), so no verb has to name a concrete backend.
+    /// label is passed as a plain value so a verb can report which backend carried the session
+    /// (`status`) and so a failed dial can name the fix that backend needs, without any verb naming a
+    /// concrete backend.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -124,8 +125,8 @@ impl Reach {
     ) -> eyre::Result<()> {
         match self {
             Self::Serve(cmd) => cmd.run(node).await,
-            Self::Ping(cmd) => cmd.run(node, contacts).await,
-            Self::Speed(cmd) => cmd.run(node, contacts).await,
+            Self::Ping(cmd) => cmd.run(node, contacts, transport).await,
+            Self::Speed(cmd) => cmd.run(node, contacts, transport).await,
             Self::Status(cmd) => cmd.run(node, contacts, transport).await,
         }
     }
