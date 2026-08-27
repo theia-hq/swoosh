@@ -79,6 +79,10 @@ speed test to bf01rwbkys5qovt4 (up)
 Real RTTs at 0% loss and real bytes moved in both directions, over a QUIC we wrote ourselves. The
 ~16 MiB/s is the honest phase-0 stop-and-wait ceiling, not a speed claim.
 
+Tired of pasting the key? Name it once and reach it by name (`swoosh contact add alice $KEY`, then
+`swoosh ping alice`). The name is local and self-sovereign, your address book, not a registry. See the
+README's Contacts section.
+
 ## Part 2: swap the transport, keep the identity
 
 Now stop the quirk node and start `serve` again from the **same key file**, over iroh. Nothing else

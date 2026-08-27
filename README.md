@@ -31,10 +31,11 @@ swoosh serve
 #     bf01hy...            <- share this key
 ```
 
-### `swoosh ping <key>`
+### `swoosh ping <key-or-name>`
 
 Reach a peer by their public key and measure the round-trip time, `ping(8)` shaped. The most legible
-possible proof of reach: an RTT to a person by their key, no IP, no port, no account.
+possible proof of reach: an RTT to a person by their key, no IP, no port, no account. The peer can be a
+raw key or a saved petname (see [Contacts](#swoosh-contact-name-a-peer)), so `swoosh ping alice` works.
 
 ```sh
 swoosh ping bf01hy... -c 8 -i 0.5
@@ -44,11 +45,11 @@ swoosh ping bf01hy... -c 8 -i 0.5
 - `-c, --count <N>` how many probes to send (default 4)
 - `-i, --interval <SECS>` seconds between probes (default 1.0)
 
-### `swoosh speed <key>`
+### `swoosh speed <key-or-name>`
 
 Measure throughput to a peer: iperf, but over the overlay. Because it rides the transport interface,
 it benchmarks the _transport itself_, so the identical test over iroh vs our own QUIC is a head-to-head
-transport dyno.
+transport dyno. Like `ping`, the peer can be a raw key or a saved petname.
 
 ```sh
 swoosh speed bf01hy... --down -t 5
@@ -59,6 +60,33 @@ swoosh speed bf01hy... --down -t 5
 - `-t, --secs <SECS>` run for a fixed time (default 5)
 - `-n, --bytes <N>` transfer a fixed number of bytes instead
 
+### `swoosh contact`: name a peer
+
+Reaching a key means naming it. A public key is something you can reach, **name**, and run code at, so
+`swoosh` keeps a local address book: save a petname for a peer once, then reach them by name instead of
+pasting base32 every time.
+
+```sh
+swoosh contact add alice bf01hy...   # save alice -> that key
+swoosh contact ls                    # alice (1 device)
+swoosh ping alice                    # reach her by name
+swoosh contact rm alice              # forget her
+```
+
+- `contact add <name> <key>` save (or re-point) a petname. Re-adding the same name replaces the key.
+- `contact ls [name]` (alias `list`) list every contact, or the devices under one name.
+- `contact rm <name>` (alias `remove`) forget a contact or one of its devices.
+
+The names are **local and self-sovereign**: your address book, stored in plain TOML at
+`~/.config/swoosh/contacts.toml`, no registry, no consensus, no one else's permission. `alice` means
+whoever _you_ pointed it at.
+
+A contact is a **person** with one or more **devices**. `contact add alice <key>` files that key under
+`alice`'s `default` device; add more with a `name/device` slash, e.g. `contact add alice/laptop <key>`,
+and `contact ls alice` lists them. Reaching a bare `alice` when she has several devices tries each in
+turn and takes the first that answers (first-reachable-wins); reach a specific one with
+`swoosh ping alice/laptop`.
+
 ## Try it locally
 
 In one terminal, be online and copy the printed key:
@@ -67,11 +95,14 @@ In one terminal, be online and copy the printed key:
 swoosh serve
 ```
 
-In another, reach that key:
+In another, reach that key, or save it a name first and reach it by name:
 
 ```sh
 swoosh ping <key>
 swoosh speed <key> --down
+
+swoosh contact add alice <key>   # name it once
+swoosh ping alice                # then reach it by name
 ```
 
 ## Layout
