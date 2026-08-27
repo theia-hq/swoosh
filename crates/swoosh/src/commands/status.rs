@@ -1,25 +1,26 @@
-//! `swoosh status <key>`: dial a peer and report the connection path, Tailscale `status` shaped.
+//! `swoosh status <peer>`: dial a peer and report the connection path, Tailscale `status` shaped.
 //!
 //! The single most reassuring thing a p2p tool tells you: am I actually peer to peer, or bouncing off a
-//! relay? This dials the peer, runs a single diag ping for a live RTT, then reads the session's
-//! best-effort [`conn_info`](bifrost::Session::conn_info) for the path (direct vs relayed) and remote
-//! address, and prints one line. The path is read AFTER the probe so iroh's hole-punch has the round
-//! trip to land: a session that connects relayed and upgrades reports the upgraded path, not the
-//! instant-of-connect one. Over quirk it says direct; over iroh it reports the current path, which can
-//! still be relayed if the upgrade has not completed by then. Honest when the transport cannot tell.
+//! relay? For each device the peer resolves to, this dials it, runs a single diag ping for a live RTT,
+//! then reads the session's best-effort [`conn_info`](bifrost::Session::conn_info) for the path (direct
+//! vs relayed) and remote address, and prints one line. The path is read AFTER the probe so iroh's
+//! hole-punch has the round trip to land: a session that connects relayed and upgrades reports the
+//! upgraded path, not the instant-of-connect one. Over quirk it says direct; over iroh it reports the
+//! current path, which can still be relayed if the upgrade has not completed by then.
 //!
-//! One-shot: swoosh has no daemon, so this reports the one peer you dial. Listing the whole tailnet of
-//! active sessions (Tailscale's full `status`) needs a long-lived node holding those sessions; that is
-//! future work, sequenced behind a swoosh daemon.
+//! A person (`alice`) fans out to ALL her devices, one status line each, since "how do I reach alice,
+//! across her devices" is exactly the diagnostic; `alice/macbook` reports the one. One-shot: swoosh has
+//! no daemon, so this reports the devices you name. Listing the whole tailnet of active sessions
+//! (Tailscale's full `status`) needs a long-lived node holding those sessions; that is future work.
 
 use core::time::Duration;
 
-use bifrost::{ConnInfo, Discovery, Node, NodeId, Path, Session, Transport};
+use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
 use clap::Args;
 use diag::Ping;
 
 use crate::contacts::{Contacts, Target};
-use crate::reach::{self, Reached};
+use crate::reach;
 use crate::transport::{self, ReachArgs};
 
 /// Report the connection path to a peer: transport, direct vs relayed, remote address, and live RTT.
@@ -33,90 +34,116 @@ pub struct StatusCmd {
 }
 
 impl StatusCmd {
-    /// Resolve the target, dial the peer, probe the path and a single RTT, and print the status line.
+    /// Resolve the target to its devices, and for each dial, probe the path and a single RTT, and print a
+    /// status line. Reports every device (a person fans out); an unreachable one prints an honest line
+    /// rather than aborting the rest.
     pub async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
     ) -> eyre::Result<()> {
-        let Reached { session, peer } =
-            reach::dial(node, contacts, &self.target, transport).await?;
+        let candidates = reach::candidates(&self.target, contacts)?;
 
-        // A single diag ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
-        // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.
-        let probed = Ping {
-            count: 1,
-            interval: Duration::ZERO,
+        // Report each device; track whether any was reachable, so an all-unreachable fan-out ends non-
+        // zero with the transport's fix hint, not a bare list of failures.
+        let mut any_reached = false;
+        for candidate in &candidates {
+            let line = match reach::connect(node, candidate).await {
+                Ok(session) => {
+                    any_reached = true;
+                    probe(&session, &candidate.label, transport).await
+                }
+                Err(_error) => Line::unreachable(&candidate.label, transport.name()),
+            };
+            println!("{line}");
         }
-        .run(&session)
-        .await?;
-
-        // Read the path AFTER the probe, not before: the round trip gives iroh's hole-punch a moment to
-        // land, so a session that starts relayed and upgrades reports "direct" here instead of always
-        // showing the pre-upgrade "relayed" it had the instant it connected.
-        let info = session.conn_info();
-        let rtt = probed.avg().or(info.rtt);
 
         node.close().await;
-        println!("{}", Line::new(peer, transport.name(), info, rtt));
-        Ok(())
+        if any_reached {
+            Ok(())
+        } else {
+            Err(reach::hint(
+                eyre::eyre!("could not reach {}", self.target),
+                transport,
+            ))
+        }
     }
 }
 
-/// A rendered status line: the peer, the transport, the path, remote, and RTT.
+/// Probe one reached session for a live RTT and its path, and render its status line under `label` (the
+/// device as the user named it, so a fan-out reads by device, matching `ping`).
+async fn probe<S: Session>(session: &S, label: &str, transport: transport::Transport) -> Line {
+    // A single diag ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
+    // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.
+    let probed = Ping {
+        count: 1,
+        interval: Duration::ZERO,
+    }
+    .run(session)
+    .await;
+
+    // Read the path AFTER the probe, not before: the round trip gives iroh's hole-punch a moment to
+    // land, so a session that starts relayed and upgrades reports "direct" here instead of always
+    // showing the pre-upgrade "relayed" it had the instant it connected.
+    let info = session.conn_info();
+    let rtt = probed.ok().and_then(|report| report.avg()).or(info.rtt);
+    Line::reached(label.to_owned(), transport.name(), info, rtt)
+}
+
+/// A rendered status line for one device: reachable (path + RTT) or not.
 struct Line {
-    peer: NodeId,
+    /// The device as the user named it, or the reached key's short form.
+    label: String,
     transport: &'static str,
+    /// The path and RTT, or `None` when the device was unreachable.
+    reached: Option<Reached>,
+}
+
+/// The reachable half of a [`Line`]: the probed path and round-trip time.
+struct Reached {
     info: ConnInfo,
     rtt: Option<Duration>,
 }
 
 impl Line {
-    fn new(peer: NodeId, transport: &'static str, info: ConnInfo, rtt: Option<Duration>) -> Self {
+    fn reached(
+        label: String,
+        transport: &'static str,
+        info: ConnInfo,
+        rtt: Option<Duration>,
+    ) -> Self {
         Self {
-            peer,
+            label,
             transport,
-            info,
-            rtt,
+            reached: Some(Reached { info, rtt }),
+        }
+    }
+
+    fn unreachable(label: &str, transport: &'static str) -> Self {
+        Self {
+            label: label.to_owned(),
+            transport,
+            reached: None,
         }
     }
 }
 
 impl core::fmt::Display for Line {
-    /// `<peer> via <transport>: <path>[, <rtt>]`, Tailscale-status shaped. The path phrase names the
-    /// remote when a direct address is known and notes that a relayed iroh path may still upgrade.
+    /// `<peer> via <transport>: <path>[, rtt <n>]`, Tailscale-status shaped, or `<peer> via <transport>:
+    /// unreachable` for a device that did not answer. The path phrase (shared with `ping`/`speed`) names
+    /// the remote when a direct address is known and notes that a relayed iroh path may still upgrade.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "{} via {}: {}",
-            self.peer.short(),
-            self.transport,
-            path(&self.info)
-        )?;
-        if let Some(rtt) = self.rtt {
-            write!(f, ", rtt {:.3} ms", rtt.as_secs_f64() * 1000.0)?;
+        write!(f, "{} via {}: ", self.label, self.transport)?;
+        match &self.reached {
+            None => f.write_str("unreachable"),
+            Some(Reached { info, rtt }) => {
+                write!(f, "{}", reach::conn_path(info))?;
+                if let Some(rtt) = rtt {
+                    write!(f, ", rtt {:.3} ms", rtt.as_secs_f64() * 1000.0)?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
-    }
-}
-
-/// The path phrase for a status line, from the best-effort [`ConnInfo`].
-fn path(info: &ConnInfo) -> String {
-    match info.path {
-        Path::Direct => match info.remote {
-            Some(remote) => format!("direct to {remote}"),
-            None => "direct".to_owned(),
-        },
-        // A relayed iroh path is honest about being able to upgrade: hole-punching may still complete
-        // and move this to direct, so a re-run can report a different path.
-        Path::Relayed => "relayed (may upgrade to direct)".to_owned(),
-        Path::Mixed => match info.remote {
-            Some(remote) => format!("mixed (direct to {remote} and relayed)"),
-            None => "mixed (direct and relayed)".to_owned(),
-        },
-        // The transport does not expose its path (in-process, or not yet instrumented). Say so rather
-        // than fabricating a reassuring answer.
-        Path::Unknown => "path unknown".to_owned(),
     }
 }

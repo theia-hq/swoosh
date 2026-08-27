@@ -55,13 +55,10 @@ async fn speed_moves_bytes_in_each_direction() {
         let (serving, session) = paired().await.expect("client should reach the responder");
         let limit_bytes = 4 * 1024 * 1024;
 
-        let report = Speedtest {
-            mode,
-            limit: Limit::ByBytes(limit_bytes),
-        }
-        .run(&session)
-        .await
-        .expect("speed run should succeed over the mem transport");
+        let report = Speedtest::new(mode, Limit::ByBytes(limit_bytes))
+            .run(&session)
+            .await
+            .expect("speed run should succeed over the mem transport");
 
         // A one-way run fills exactly the measured leg and leaves the other empty.
         let (measured, empty) = match mode {
@@ -90,13 +87,10 @@ async fn bidir_moves_bytes_in_both_directions_at_once() {
     let (serving, session) = paired().await.expect("client should reach the responder");
     let limit_bytes = 4 * 1024 * 1024;
 
-    let report = Speedtest {
-        mode: Mode::Bidir,
-        limit: Limit::ByBytes(limit_bytes),
-    }
-    .run(&session)
-    .await
-    .expect("bidir speed run should succeed over the mem transport");
+    let report = Speedtest::new(Mode::Bidir, Limit::ByBytes(limit_bytes))
+        .run(&session)
+        .await
+        .expect("bidir speed run should succeed over the mem transport");
 
     let up = report.up().expect("bidir measures the upload leg");
     let down = report.down().expect("bidir measures the download leg");
@@ -122,13 +116,10 @@ async fn time_bounded_speed_respects_the_duration_not_a_byte_count() {
     for mode in [Mode::Up, Mode::Down, Mode::Bidir] {
         let (serving, session) = paired().await.expect("client should reach the responder");
 
-        let report = Speedtest {
-            mode,
-            limit: Limit::ByTime(requested),
-        }
-        .run(&session)
-        .await
-        .expect("time-bounded speed run should succeed over the mem transport");
+        let report = Speedtest::new(mode, Limit::ByTime(requested))
+            .run(&session)
+            .await
+            .expect("time-bounded speed run should succeed over the mem transport");
 
         // Every measured leg moved bytes at a non-zero rate; bidir measures two, one-way measures one.
         let legs = [report.up(), report.down()].into_iter().flatten();

@@ -11,6 +11,7 @@ use bifrost::Session;
 use tokio::io::AsyncWriteExt as _;
 
 use crate::payload::Payload;
+pub use crate::payload::Progress;
 use crate::protocol::{ProtocolError, Request, Response};
 
 /// What a speed test measures: one direction, or both at once.
@@ -49,28 +50,52 @@ pub enum Limit {
 }
 
 /// A speed test against one peer: which mode, bounded by time or bytes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[must_use = "a Speedtest does nothing until run"]
 pub struct Speedtest {
     /// What to measure: up, down, or both at once.
     pub mode: Mode,
     /// When to stop.
     pub limit: Limit,
+    /// A live byte counter for throughput-over-time reporting, or `None` for the final number only.
+    pub progress: Option<Progress>,
 }
 
 impl Speedtest {
+    /// A test with no live reporting: run it and read the final throughput.
+    pub fn new(mode: Mode, limit: Limit) -> Self {
+        Self {
+            mode,
+            limit,
+            progress: None,
+        }
+    }
+
+    /// Report cumulative bytes into `progress` as the run proceeds, so a caller can print the rate on a
+    /// timer (iperf-style periodic lines) while the final [`SpeedReport`] still carries the totals.
+    pub fn tracking(mut self, progress: Progress) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
     /// Run the test over an established session and return the measured throughput. One-shot: consumes
     /// `self` and drives the whole transfer on a single stream.
     pub async fn run<S: Session>(self, session: &S) -> Result<SpeedReport, ProtocolError> {
-        let Self { mode, limit } = self;
+        let Self {
+            mode,
+            limit,
+            progress,
+        } = self;
         let (mut writer, mut reader) = session.open_bi().await?;
 
         // One window: bytes moved and time elapsed are both measured over this exact span.
         let started = Instant::now();
         let legs = match mode {
-            Mode::Up => Legs::up(upload(&mut writer, &mut reader, limit, started).await?),
-            Mode::Down => Legs::down(download(&mut writer, &mut reader, limit, started).await?),
-            Mode::Bidir => bidir(&mut writer, &mut reader, limit, started).await?,
+            Mode::Up => Legs::up(upload(&mut writer, &mut reader, limit, started, progress).await?),
+            Mode::Down => {
+                Legs::down(download(&mut writer, &mut reader, limit, started, progress).await?)
+            }
+            Mode::Bidir => bidir(&mut writer, &mut reader, limit, started, progress).await?,
         };
         let elapsed = started.elapsed();
         Ok(SpeedReport { legs, elapsed })
@@ -85,6 +110,7 @@ async fn upload<W, R>(
     reader: &mut R,
     limit: Limit,
     started: Instant,
+    progress: Option<Progress>,
 ) -> Result<u64, ProtocolError>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -97,7 +123,7 @@ where
     }
     .write(writer)
     .await?;
-    let sent = limit.payload(started).send(writer).await?;
+    let sent = limit.payload(started, progress).send(writer).await?;
     // Signal end-of-payload so the responder stops draining and replies with its count.
     writer.shutdown().await?;
     let Response::Received { bytes } = Response::read(reader).await? else {
@@ -119,6 +145,7 @@ async fn download<W, R>(
     reader: &mut R,
     limit: Limit,
     started: Instant,
+    progress: Option<Progress>,
 ) -> Result<u64, ProtocolError>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -129,7 +156,7 @@ where
     }
     .write(writer)
     .await?;
-    let received = limit.payload(started).drain(reader).await?;
+    let received = limit.payload(started, progress).drain(reader).await?;
     // A time-bounded download sources unbounded, so the client's deadline (which just fired to end the
     // drain) is the sole terminator. Shutting the write half sends a clean FIN so the responder's next
     // flood write hits a broken pipe and it stops. A byte-bounded download already ended on the count.
@@ -150,6 +177,7 @@ async fn bidir<W, R>(
     reader: &mut R,
     limit: Limit,
     started: Instant,
+    progress: Option<Progress>,
 ) -> Result<Legs, ProtocolError>
 where
     W: tokio::io::AsyncWrite + Unpin,
@@ -161,13 +189,18 @@ where
     .write(writer)
     .await?;
 
+    // Both legs feed the one counter, so a bidir progress line reports the aggregate the session moved;
+    // the final per-leg totals still come from the returned counts.
+    let (up_progress, down_progress) = (progress.clone(), progress);
     let send = async {
-        let sent = limit.payload(started).send(writer).await?;
+        let sent = limit.payload(started, up_progress).send(writer).await?;
         // FIN the write half so the responder's drain sees EOF and stops mirroring.
         writer.shutdown().await?;
         Ok::<u64, ProtocolError>(sent)
     };
-    let drain = async { Ok::<u64, ProtocolError>(limit.payload(started).drain(reader).await?) };
+    let drain = async {
+        Ok::<u64, ProtocolError>(limit.payload(started, down_progress).drain(reader).await?)
+    };
 
     let (up, down) = tokio::join!(send, drain);
     Ok(Legs {
@@ -178,11 +211,16 @@ where
 
 impl Limit {
     /// The payload transfer this limit drives from `started`: a byte bound moves an exact count, a time
-    /// bound moves chunks until its deadline.
-    fn payload(self, started: Instant) -> Payload {
-        match self {
+    /// bound moves chunks until its deadline. Attaches `progress` when given, so the client-side leg of a
+    /// tracked run bumps the shared counter each chunk.
+    fn payload(self, started: Instant, progress: Option<Progress>) -> Payload {
+        let payload = match self {
             Limit::ByBytes(bytes) => Payload::of(bytes),
             Limit::ByTime(duration) => Payload::until(started + duration),
+        };
+        match progress {
+            Some(progress) => payload.tracking(progress),
+            None => payload,
         }
     }
 

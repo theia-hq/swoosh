@@ -226,23 +226,32 @@ impl Contacts {
         self.people.get(petname).map(|group| group.iter())
     }
 
-    /// Resolve an address to the ordered identities a reach verb should try.
+    /// Resolve an address to its ordered [`Candidate`]s, each carrying the `<petname>/<device>` label it
+    /// resolved from.
     ///
     /// A specific device (`alice/macbook`) resolves to exactly that one key. A bare person (`alice`)
-    /// resolves to ALL their devices in label order, so the verb can dial each until one connects
-    /// (v1 first-reachable-wins). An unknown name or device yields the error, never an empty success,
-    /// so a reach verb never silently dials nothing.
-    pub fn resolve(&self, target: &ContactRef) -> Result<Vec<NodeId>, ResolveError> {
+    /// resolves to ALL their devices in label order, so a verb can dial each until one connects (v1
+    /// first-reachable-wins) or fan out over all of them. An unknown name or device yields the error,
+    /// never an empty success, so a reach verb never silently dials nothing. The labels let a fan-out
+    /// verb (`ping`, `status`) report per device by name, not by an opaque key.
+    pub fn resolve_candidates(&self, target: &ContactRef) -> Result<Vec<Candidate>, ResolveError> {
         let group = self
             .people
             .get(&target.petname)
             .ok_or_else(|| ResolveError::UnknownPetname(target.petname.clone()))?;
+        let candidate = |device: &DeviceLabel, node: NodeId| Candidate {
+            label: format!("{}/{device}", target.petname),
+            node,
+        };
         match &target.device {
-            None => Ok(group.values().copied().collect()),
+            None => Ok(group
+                .iter()
+                .map(|(device, node)| candidate(device, *node))
+                .collect()),
             Some(device) => group
                 .get(device)
                 .copied()
-                .map(|node| vec![node])
+                .map(|node| vec![candidate(device, node)])
                 .ok_or_else(|| ResolveError::UnknownDevice {
                     petname: target.petname.clone(),
                     device: device.clone(),
@@ -342,17 +351,32 @@ pub enum Target {
 }
 
 impl Target {
-    /// The identities to try dialing, in order, resolving a petname against `contacts`.
-    ///
-    /// A [`Raw`](Self::Raw) target is a single literal key. A [`Named`](Self::Named) target resolves to
-    /// one device (exact) or the ordered set of a person's devices (first-reachable-wins). An unknown
-    /// name is a clean [`ResolveError`], never a silent empty dial.
-    pub fn resolve(&self, contacts: &Contacts) -> Result<Vec<NodeId>, ResolveError> {
+    /// The ordered [`Candidate`]s this target names, each labeled as the user would recognize it. A raw
+    /// key is one candidate labeled by its short form; a petname resolves to one device or the person's
+    /// whole ordered set (see [`Contacts::resolve_candidates`]). An unknown name is a clean
+    /// [`ResolveError`], never a silent empty dial. The labels are what a fan-out verb prints per device.
+    pub fn candidates(&self, contacts: &Contacts) -> Result<Vec<Candidate>, ResolveError> {
         match self {
-            Self::Raw(node) => Ok(vec![*node]),
-            Self::Named(reference) => contacts.resolve(reference),
+            Self::Raw(node) => Ok(vec![Candidate {
+                label: node.short(),
+                node: *node,
+            }]),
+            Self::Named(reference) => contacts.resolve_candidates(reference),
         }
     }
+}
+
+/// One resolved peer to try: the identity to dial and the label to print for it.
+///
+/// A reach verb dials the [`node`](Self::node) and reports the [`label`](Self::label) (`alice/macbook`,
+/// or a raw key's short form), so a fan-out over a person's devices names each device rather than a bare
+/// key. Carried through resolution because the label is lost once a `ContactRef` becomes a `NodeId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// The peer's identity, dialed verbatim.
+    pub node: NodeId,
+    /// How to name this candidate in output: `alice/macbook`, or a raw key's short form.
+    pub label: String,
 }
 
 impl core::fmt::Display for Target {

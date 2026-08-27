@@ -1,13 +1,19 @@
-//! `swoosh ping <key>`: reach a peer by their public key and report round-trip time, `ping(8)` shaped.
+//! `swoosh ping <peer>`: reach a peer by petname or public key and report round-trip time, `ping(8)`
+//! shaped.
+//!
+//! ping is a diagnostic, so a person (`alice`) fans out to ALL her devices and reports each: how do I
+//! reach alice, across every device she has? `alice/macbook` pings the one. Each device's block leads
+//! with the connection path (direct vs relayed, the same source `status` reads) so a slow RTT reads as
+//! "it relayed", not a mystery, then the `ping(8)` counts/loss and RTT distribution.
 
 use core::time::Duration;
 
-use bifrost::{Discovery, Node, Transport};
+use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use diag::{Ping, PingReport};
 
 use crate::contacts::{Contacts, Target};
-use crate::reach::{self, Reached};
+use crate::reach;
 use crate::transport::{self, ReachArgs};
 
 /// Measure the round-trip time to a peer, addressed by a petname or their public key.
@@ -27,36 +33,56 @@ pub struct PingCmd {
 }
 
 impl PingCmd {
-    /// Resolve the target, dial the peer, run the probes, and print the summary.
+    /// Resolve the target to its devices, and for each dial, probe, and print its path and RTT summary.
+    /// Reports every device (a person fans out); an unreachable one prints an honest line and the run
+    /// continues, ending non-zero only if no device answered at all.
     pub async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
     ) -> eyre::Result<()> {
-        let Reached { session, peer } =
-            reach::dial(node, contacts, &self.target, transport).await?;
-        println!("pinging {} ({} probes)", peer.short(), self.count);
-
-        let report = Ping {
+        let candidates = reach::candidates(&self.target, contacts)?;
+        let plan = Ping {
             count: self.count,
             interval: Duration::from_secs_f64(self.interval),
+        };
+
+        let mut any_reached = false;
+        for candidate in &candidates {
+            match reach::connect(node, candidate).await {
+                Ok(session) => {
+                    any_reached = true;
+                    let report = plan.run(&session).await?;
+                    let path = reach::conn_path(&session.conn_info());
+                    print_device(&candidate.label, transport.name(), &path, &report);
+                }
+                Err(_error) => {
+                    println!("{} via {}: unreachable", candidate.label, transport.name());
+                }
+            }
         }
-        .run(&session)
-        .await?;
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;
-        print_report(&report);
-        Ok(())
+        if any_reached {
+            Ok(())
+        } else {
+            Err(reach::hint(
+                eyre::eyre!("could not reach {}", self.target),
+                transport,
+            ))
+        }
     }
 }
 
-/// Print the `ping(8)`-style summary: counts, loss, and the RTT distribution.
-fn print_report(report: &PingReport) {
+/// Print one device's block: the path line (status-shaped), then the `ping(8)` counts and RTT
+/// distribution indented beneath it.
+fn print_device(label: &str, transport: &str, path: &str, report: &PingReport) {
+    println!("{label} via {transport}: {path}");
     let loss_pct = report.loss() * 100.0;
     println!(
-        "{} sent, {} received, {loss_pct:.0}% loss",
+        "  {} sent, {} received, {loss_pct:.0}% loss",
         report.sent(),
         report.received()
     );
@@ -64,7 +90,7 @@ fn print_report(report: &PingReport) {
         (report.min(), report.avg(), report.max(), report.mdev())
     {
         println!(
-            "rtt min/avg/max/mdev = {:.3}/{:.3}/{:.3}/{:.3} ms",
+            "  rtt min/avg/max/mdev = {:.3}/{:.3}/{:.3}/{:.3} ms",
             millis(min),
             millis(avg),
             millis(max),

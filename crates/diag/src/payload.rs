@@ -3,9 +3,38 @@
 //! per byte. Sending and draining are the two halves of every speed test, so they live together here as
 //! [`Payload`], which owns the one chunk loop and the one reusable buffer the whole engine shares.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
+
+/// A live count of bytes a [`Payload`] has moved so far, shared with an observer for throughput-over-
+/// time reporting.
+///
+/// The transfer loop bumps this each chunk; a reporter reads it on a timer to print periodic lines (the
+/// iperf model: rate over each interval, not just the final average). Relaxed ordering is enough: this
+/// is a monotonic progress gauge, never a synchronization point, and a reader that sees a slightly stale
+/// count just reports a hair conservatively.
+#[derive(Debug, Clone, Default)]
+pub struct Progress(Arc<AtomicU64>);
+
+impl Progress {
+    /// A fresh counter at zero.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bytes moved so far.
+    pub fn bytes(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// Add `n` bytes to the running count.
+    fn add(&self, n: u64) {
+        self.0.fetch_add(n, Ordering::Relaxed);
+    }
+}
 
 /// The transfer chunk. 64 KiB matches bifrost-mem's stream buffer and the wire's streaming chunk, so a
 /// chunk crosses an in-memory stream without a partial second copy. The single source of truth for the
@@ -25,30 +54,30 @@ pub enum Bound {
 }
 
 /// A counted transfer in one direction, stopping at its [`Bound`]. One chunk loop, one reused buffer.
-#[derive(Debug, Clone, Copy)]
+///
+/// Optionally carries a [`Progress`] the loop bumps each chunk, so an observer can report throughput
+/// over time; without one the transfer is unobserved (the responder side never reports progress).
+#[derive(Debug, Clone)]
 #[must_use = "a Payload does nothing until sent or drained"]
 pub struct Payload {
     bound: Bound,
+    progress: Option<Progress>,
 }
 
 impl Payload {
     /// A transfer of exactly `limit` bytes.
     pub fn of(limit: u64) -> Self {
-        Self {
-            bound: Bound::Bytes(limit),
-        }
+        Self::from(Bound::Bytes(limit))
     }
 
     /// A transfer bounded by wall clock, moving chunks until `deadline`.
     pub fn until(deadline: Instant) -> Self {
-        Self {
-            bound: Bound::Until(deadline),
-        }
+        Self::from(Bound::Until(deadline))
     }
 
     /// A transfer that streams until the peer stops reading (the responder's unbounded source).
     pub fn until_peer_stops() -> Self {
-        Self { bound: Bound::Peer }
+        Self::from(Bound::Peer)
     }
 
     /// A transfer of `Some(n)` exact bytes, or one that runs until the peer stops (EOF when draining, a
@@ -61,11 +90,17 @@ impl Payload {
         }
     }
 
+    /// Track this transfer's cumulative bytes in `progress`, so a reporter can read the rate on a timer.
+    pub fn tracking(mut self, progress: Progress) -> Self {
+        self.progress = Some(progress);
+        self
+    }
+
     /// Write zero payload until the bound, returning how many bytes were written. A [`Bound::Peer`]
     /// transfer ends when the peer closes its read half (a broken-pipe write error), which is the
     /// success path for an unbounded source, so it is not surfaced as an error.
     pub async fn send<W: io::AsyncWrite + Unpin>(self, writer: &mut W) -> io::Result<u64> {
-        let Self { bound } = self;
+        let Self { bound, progress } = self;
         let zeros = [0u8; CHUNK as usize];
         let mut sent = 0u64;
         while let Some(want) = bound.remaining(sent) {
@@ -77,6 +112,7 @@ impl Payload {
                 };
             }
             sent += n as u64;
+            report(&progress, n as u64);
         }
         writer.flush().await?;
         Ok(sent)
@@ -85,7 +121,7 @@ impl Payload {
     /// Drain payload until the bound or EOF, returning how many bytes arrived. A truncated transfer
     /// (EOF before the bound) is counted honestly rather than hanging.
     pub async fn drain<R: io::AsyncRead + Unpin>(self, reader: &mut R) -> io::Result<u64> {
-        let Self { bound } = self;
+        let Self { bound, progress } = self;
         let mut sink = [0u8; CHUNK as usize];
         let mut received = 0u64;
         while let Some(want) = bound.remaining(received) {
@@ -94,8 +130,25 @@ impl Payload {
                 break;
             }
             received += n as u64;
+            report(&progress, n as u64);
         }
         Ok(received)
+    }
+}
+
+impl From<Bound> for Payload {
+    fn from(bound: Bound) -> Self {
+        Self {
+            bound,
+            progress: None,
+        }
+    }
+}
+
+/// Bump a progress counter by `n` bytes, if the transfer is being observed.
+fn report(progress: &Option<Progress>, n: u64) {
+    if let Some(progress) = progress {
+        progress.add(n);
     }
 }
 

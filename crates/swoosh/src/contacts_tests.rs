@@ -26,6 +26,14 @@ fn device(label: &str) -> DeviceLabel {
     label.parse().expect("valid device label in test")
 }
 
+/// Resolve a contact address to just its node ids, in order, for assertions that care about which
+/// identities (and in what order) a reference resolves to, not the display labels.
+fn resolve(contacts: &Contacts, target: &ContactRef) -> Result<Vec<NodeId>, ResolveError> {
+    contacts
+        .resolve_candidates(target)
+        .map(|candidates| candidates.into_iter().map(|c| c.node).collect())
+}
+
 #[test]
 fn petname_rejects_slash_whitespace_and_empty() {
     assert_eq!("".parse::<Petname>(), Err(PetnameParseError::Empty));
@@ -75,11 +83,11 @@ fn resolve_maps_name_to_node_and_passes_through_device() {
 
     // The person resolves to every device, in label order (iphone before macbook).
     let person: ContactRef = "alice".parse().expect("person");
-    assert_eq!(contacts.resolve(&person), Ok(vec![node(2), node(1)]));
+    assert_eq!(resolve(&contacts, &person), Ok(vec![node(2), node(1)]));
 
     // A specific device resolves to exactly that key.
     let one: ContactRef = "alice/macbook".parse().expect("device");
-    assert_eq!(contacts.resolve(&one), Ok(vec![node(1)]));
+    assert_eq!(resolve(&contacts, &one), Ok(vec![node(1)]));
 }
 
 #[test]
@@ -87,7 +95,7 @@ fn resolve_unknown_name_is_a_clean_error_not_an_empty_dial() {
     let contacts = Contacts::default();
     let target: ContactRef = "ghost".parse().expect("name");
     assert_eq!(
-        contacts.resolve(&target),
+        resolve(&contacts, &target),
         Err(ResolveError::UnknownPetname(petname("ghost")))
     );
 
@@ -95,7 +103,7 @@ fn resolve_unknown_name_is_a_clean_error_not_an_empty_dial() {
     contacts.add(petname("alice"), Some(device("macbook")), node(1));
     let missing: ContactRef = "alice/desktop".parse().expect("device");
     assert_eq!(
-        contacts.resolve(&missing),
+        resolve(&contacts, &missing),
         Err(ResolveError::UnknownDevice {
             petname: petname("alice"),
             device: device("desktop"),
@@ -122,7 +130,13 @@ fn target_parses_raw_node_id_and_falls_back_to_petname() {
 fn target_resolve_passes_a_raw_key_through_without_the_store() {
     let contacts = Contacts::default();
     let target = Target::Raw(node(3));
-    assert_eq!(target.resolve(&contacts), Ok(vec![node(3)]));
+    let candidates = target.candidates(&contacts).expect("raw key resolves");
+    assert_eq!(
+        candidates.iter().map(|c| c.node).collect::<Vec<_>>(),
+        vec![node(3)]
+    );
+    // A raw key labels itself by its short form, since there is no petname to name it.
+    assert_eq!(candidates[0].label, node(3).short());
 }
 
 #[test]
@@ -136,7 +150,7 @@ fn remove_drops_a_device_then_the_now_empty_person() {
         Removed::Removed
     );
     assert_eq!(
-        contacts.resolve(&"alice".parse().expect("person")),
+        resolve(&contacts, &"alice".parse().expect("person")),
         Ok(vec![node(1)])
     );
 
@@ -172,11 +186,11 @@ async fn store_roundtrips_across_reload() {
     let reloaded = ContactsStore::open(path.clone()).await.expect("reopen");
     let contacts = reloaded.contacts();
     assert_eq!(
-        contacts.resolve(&"alice".parse().expect("person")),
+        resolve(contacts, &"alice".parse().expect("person")),
         Ok(vec![node(2), node(1)])
     );
     assert_eq!(
-        contacts.resolve(&"bob".parse().expect("person")),
+        resolve(contacts, &"bob".parse().expect("person")),
         Ok(vec![node(3)])
     );
 
