@@ -1,41 +1,43 @@
 # swoosh
 
-One command, every p2p operation as a verb.
+`swoosh` connects to another machine by its public key instead of its IP address, and measures the
+connection. You give it a peer's key (a short base32 string), and it dials that peer directly, wherever
+the peer is on the internet, across home routers and NATs, without you knowing or caring about their
+address. Then it tells you useful things about that connection: the round-trip time, the throughput,
+and whether the link is direct or bouncing through a relay.
 
-A public key is something you can reach, name, and run code at, over any transport and across any NAT.
-`swoosh` is the unified front door to that overlay: you address _who_, not _where_.
+```sh
+swoosh serve                 # on one machine: print this machine's key, stay reachable
+swoosh ping bf01hy...        # on another: reach that key, measure the round trip
+swoosh speed bf01hy...       # measure throughput to it
+swoosh status bf01hy...      # is the link direct, or relayed?
+```
 
 > Experimental. The CLI, wire protocol, and identity format will change; not ready for production use.
 
-## What it is
+## Why a key instead of an address
 
-`swoosh` is a multitool (git / cargo / kubectl shaped): one binary, one `cargo install`, one `--help`.
-Under the hood it rides `bifrost`, the pubkey-addressed overlay, and is transport-blind: the same
-operation runs over iroh today and over our own QUIC next, unchanged.
+A machine's IP address changes: it moves networks, sits behind a router, gets a new lease. Its public
+key does not. Addressing a peer by key means you reach the same peer every time, and the connection is
+authenticated end to end by that key, so you know you reached the machine you meant and no one is in the
+middle. `swoosh serve` prints a key; anyone with that key can reach the machine, from anywhere.
 
-Identity is chosen by intent. `swoosh serve` must be reachable at one address, so it binds a persisted
-ed25519 identity at `~/.config/swoosh/identity.key`: restart the node, keep the address. The reach-
-outward verbs (`ping`, `speed`, `status`) address a peer and are never dialed back, so they mint a fresh
-random ephemeral key each run, no key file to provision and nothing left on disk. Pin any run to a
-persisted identity with `--key <path>` (or `SWOOSH_KEY`) when you do want a stable address.
-
-## The verbs
+## Commands
 
 ### `swoosh serve`
 
-Be online. Prints this node's address, then answers reach diagnostics for any peer that dials it.
+Stay online and reachable. Prints this machine's key, then answers `ping`, `speed`, and `status` from
+any peer that dials it. The key is stable across restarts, so peers can save it once.
 
 ```sh
 swoosh serve
-# swoosh ready. peers can reach this node at:
-#     bf01hy...            <- share this key
+# swoosh ready, reachable at:
+#     bf01hy...            (share this key)
 ```
 
-### `swoosh ping <key-or-name>`
+### `swoosh ping <peer>`
 
-Reach a peer by their public key and measure the round-trip time, `ping(8)` shaped. The most legible
-possible proof of reach: an RTT to a person by their key, no IP, no port, no account. The peer can be a
-raw key or a saved petname (see [Contacts](#swoosh-contact-name-a-peer)), so `swoosh ping alice` works.
+Dial a peer and measure the round-trip time, like `ping(8)` but addressed by key.
 
 ```sh
 swoosh ping bf01hy... -c 8 -i 0.5
@@ -45,11 +47,9 @@ swoosh ping bf01hy... -c 8 -i 0.5
 - `-c, --count <N>` how many probes to send (default 4)
 - `-i, --interval <SECS>` seconds between probes (default 1.0)
 
-### `swoosh speed <key-or-name>`
+### `swoosh speed <peer>`
 
-Measure throughput to a peer: iperf, but over the overlay. Because it rides the transport interface,
-it benchmarks the _transport itself_, so the identical test over iroh vs our own QUIC is a head-to-head
-transport dyno. Like `ping`, the peer can be a raw key or a saved petname.
+Measure throughput to a peer, like `iperf` but addressed by key.
 
 ```sh
 swoosh speed bf01hy... --down -t 5
@@ -60,65 +60,82 @@ swoosh speed bf01hy... --down -t 5
 - `-t, --secs <SECS>` run for a fixed time (default 5)
 - `-n, --bytes <N>` transfer a fixed number of bytes instead
 
-### `swoosh contact`: name a peer
+### `swoosh status <peer>`
 
-Reaching a key means naming it. A public key is something you can reach, **name**, and run code at, so
-`swoosh` keeps a local address book: save a petname for a peer once, then reach them by name instead of
-pasting base32 every time.
+Dial a peer and report the connection path: direct or relayed, the remote address, and a live RTT.
+Answers the one question a p2p connection always raises: am I actually talking to the peer directly, or
+bouncing through a relay?
+
+```sh
+swoosh status bf01hy...
+# alice via iroh: direct to 203.0.113.7:41641, rtt 24.8 ms
+```
+
+### `swoosh contact`: name your peers
+
+Keys are unwieldy to type. Save a peer's key under a short name once, then use the name anywhere a
+command wants a peer: `swoosh ping alice` instead of pasting base32. Names are yours alone, stored in
+plain TOML at `~/.config/swoosh/contacts.toml`. `alice` means whoever you pointed it at, no registry
+and no one else's permission.
 
 ```sh
 swoosh contact add alice bf01hy...   # save alice -> that key
-swoosh contact ls                    # alice (1 device)
+swoosh contact ls                    # list your contacts
 swoosh ping alice                    # reach her by name
 swoosh contact rm alice              # forget her
 ```
 
-- `contact add <name> <key>` save (or re-point) a petname. Re-adding the same name replaces the key.
-- `contact ls [name]` (alias `list`) list every contact, or the devices under one name.
-- `contact rm <name>` (alias `remove`) forget a contact or one of its devices.
+- `contact add <name> <key>` save (or re-point) a name. Re-adding the same name replaces the key.
+- `contact ls [name]` list every contact, or the devices saved under one name.
+- `contact rm <name>` forget a contact or one of its devices.
 
-The names are **local and self-sovereign**: your address book, stored in plain TOML at
-`~/.config/swoosh/contacts.toml`, no registry, no consensus, no one else's permission. `alice` means
-whoever _you_ pointed it at.
+One person can have several machines. `contact add alice/laptop <key>` files a key under `alice`'s
+`laptop`; `swoosh ping alice` then tries each of alice's machines and takes the first that answers, or
+reach a specific one with `swoosh ping alice/laptop`.
 
-A contact is a **person** with one or more **devices**. `contact add alice <key>` files that key under
-`alice`'s `default` device; add more with a `name/device` slash, e.g. `contact add alice/laptop <key>`,
-and `contact ls alice` lists them. Reaching a bare `alice` when she has several devices tries each in
-turn and takes the first that answers (first-reachable-wins); reach a specific one with
-`swoosh ping alice/laptop`.
+## Identity
+
+Every `swoosh` command runs under a key of its own. `serve` needs to be reachable at one stable address,
+so it saves its key at `~/.config/swoosh/identity.key` and reuses it across runs. The outward commands
+(`ping`, `speed`, `status`) only dial out and are never dialed back, so they generate a throwaway key
+each run, nothing to set up and nothing left on disk. Pass `--key <path>` (or set `SWOOSH_KEY`) to pin
+any command to a saved key when you want a stable address.
+
+## Transports
+
+`swoosh` can carry a connection two ways, chosen with `--transport`:
+
+- `iroh` (default) finds and reaches peers across the internet, punching through NATs.
+- `quirk` is a from-scratch QUIC implementation, direct or same-LAN only.
+
+The key is the same either way, so switching transports reaches the same peer. On a shared LAN, peers
+find each other automatically. Across networks, feed a peer the address its `swoosh serve` printed with
+`--peer <key>=<addr>`.
 
 ## Try it locally
 
-In one terminal, be online and copy the printed key:
+In one terminal, be reachable and copy the printed key:
 
 ```sh
 swoosh serve
 ```
 
-In another, reach that key, or save it a name first and reach it by name:
+In another, reach that key:
 
 ```sh
 swoosh ping <key>
 swoosh speed <key> --down
+swoosh status <key>
 
-swoosh contact add alice <key>   # name it once
+swoosh contact add alice <key>   # or name it once
 swoosh ping alice                # then reach it by name
 ```
 
 ## Layout
 
-- `crates/diag` the reach-diagnostics engine (ping + speed): a tiny versioned protocol on bifrost
-  streams, a responder, and the two clients. Transport-blind (generic over `bifrost::Session`), so it
-  runs over iroh, the in-process mem transport, and any future transport unchanged.
-- `crates/swoosh` the CLI: the composition root binds one bifrost node with the shared identity, then
-  dispatches to a verb.
-
-## Future work
-
-This is the flagship skeleton plus its first two diagnostic verbs. Coming next, behind the same
-identity and front door: `send` / `recv` (verified file transfer, powered by iris), `tunnel`
-(private p2p tunnels, powered by tightbeam), and `status` (connection-path visibility, direct vs
-relayed). The built-in responder will become always-on and nauthy-gated once nauthy is extracted.
+- `crates/diag` the measurement engine (ping, speed): a small versioned protocol, a responder, and the
+  two clients.
+- `crates/swoosh` the CLI: binds one node under the chosen key and transport, then runs a command.
 
 ## License
 
