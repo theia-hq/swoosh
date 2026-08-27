@@ -53,8 +53,11 @@ impl PingCmd {
             match reach::connect(node, candidate).await {
                 Ok(session) => {
                     any_reached = true;
+                    // Path at connect, so the phrase below can report a relayed-to-direct upgrade that
+                    // the probe's round trips gave iroh's hole-punch time to land.
+                    let initial = session.conn_info().path;
                     let report = plan.run(&session).await?;
-                    let path = reach::conn_path(&session.conn_info());
+                    let path = reach::conn_path(initial, &session.conn_info());
                     print_device(&candidate.label, transport.name(), &path, &report);
                 }
                 Err(_error) => {

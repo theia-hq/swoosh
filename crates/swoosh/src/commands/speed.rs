@@ -4,10 +4,11 @@
 //!
 //! One target, unlike `ping`/`status`: a speed test saturates a link, so fanning out over a person's
 //! devices would just contend for the one uplink and have no single number to report. A bare person
-//! (`alice`) dials her first reachable device; `alice/macbook` picks the one. The header names the
-//! connection path (direct vs relayed, the same source `status` reads) so a slow number reads as "it
-//! relayed", not a mystery, and throughput prints OVER TIME: a line per interval as it runs, then the
-//! per-direction totals.
+//! (`alice`) dials her first reachable device; `alice/macbook` picks the one. Throughput prints OVER
+//! TIME: a line per interval as it runs, then the per-direction totals. The connection path (direct vs
+//! relayed, the same source `status` reads) is reported after the transfer, since the run is the window
+//! in which a relayed iroh link may hole-punch up to direct: a slow number then reads as "it relayed",
+//! not a mystery.
 
 use core::time::Duration;
 use std::time::Instant;
@@ -52,8 +53,8 @@ pub struct SpeedCmd {
 }
 
 impl SpeedCmd {
-    /// Dial the first reachable device, print the path header, then run the transfer while a ticker
-    /// prints the rate each interval, and finish with the per-direction totals.
+    /// Dial the first reachable device, run the transfer while a ticker prints the rate each interval,
+    /// then report the settled connection path and the per-direction totals.
     pub async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -64,9 +65,11 @@ impl SpeedCmd {
         let limit = self.limit();
         let Reached { session, label } =
             reach::dial(node, contacts, &self.target, transport).await?;
-        let path = reach::conn_path(&session.conn_info());
+        // Path at connect. The transfer below is the window where iroh's hole-punch lands, so the
+        // settled path (and any relayed-to-direct upgrade) is read and reported after it, not here.
+        let initial = session.conn_info().path;
         println!(
-            "speed test to {label} via {}: {path} ({})",
+            "speed test to {label} via {} ({})",
             transport.name(),
             mode.label()
         );
@@ -87,8 +90,13 @@ impl SpeedCmd {
             }
         };
 
+        // Read the settled path now: the transfer gave hole-punching time to land, and we must read
+        // before the transport closes.
+        let path = reach::conn_path(initial, &session.conn_info());
+
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;
+        println!("path: {path}");
         print_totals(&report);
         Ok(())
     }

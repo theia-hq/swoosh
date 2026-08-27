@@ -15,7 +15,7 @@
 
 use core::time::Duration;
 
-use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
+use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
 use clap::Args;
 use diag::Ping;
 
@@ -74,6 +74,10 @@ impl StatusCmd {
 /// Probe one reached session for a live RTT and its path, and render its status line under `label` (the
 /// device as the user named it, so a fan-out reads by device, matching `ping`).
 async fn probe<S: Session>(session: &S, label: &str, transport: transport::Transport) -> Line {
+    // Sample the path at connect, before the probe, so we can tell whether iroh's hole-punch upgraded a
+    // relayed path to direct during the round trip below.
+    let initial = session.conn_info().path;
+
     // A single diag ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
     // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.
     let probed = Ping {
@@ -88,7 +92,7 @@ async fn probe<S: Session>(session: &S, label: &str, transport: transport::Trans
     // showing the pre-upgrade "relayed" it had the instant it connected.
     let info = session.conn_info();
     let rtt = probed.ok().and_then(|report| report.avg()).or(info.rtt);
-    Line::reached(label.to_owned(), transport.name(), info, rtt)
+    Line::reached(label.to_owned(), transport.name(), initial, info, rtt)
 }
 
 /// A rendered status line for one device: reachable (path + RTT) or not.
@@ -100,8 +104,10 @@ struct Line {
     reached: Option<Reached>,
 }
 
-/// The reachable half of a [`Line`]: the probed path and round-trip time.
+/// The reachable half of a [`Line`]: the path at connect, the path after the probe, and the round-trip
+/// time. `initial` lets the rendered phrase report a relayed-to-direct upgrade that landed during probing.
 struct Reached {
+    initial: Path,
     info: ConnInfo,
     rtt: Option<Duration>,
 }
@@ -110,13 +116,14 @@ impl Line {
     fn reached(
         label: String,
         transport: &'static str,
+        initial: Path,
         info: ConnInfo,
         rtt: Option<Duration>,
     ) -> Self {
         Self {
             label,
             transport,
-            reached: Some(Reached { info, rtt }),
+            reached: Some(Reached { initial, info, rtt }),
         }
     }
 
@@ -132,13 +139,13 @@ impl Line {
 impl core::fmt::Display for Line {
     /// `<peer> via <transport>: <path>[, rtt <n>]`, Tailscale-status shaped, or `<peer> via <transport>:
     /// unreachable` for a device that did not answer. The path phrase (shared with `ping`/`speed`) names
-    /// the remote when a direct address is known and notes that a relayed iroh path may still upgrade.
+    /// the remote when a direct address is known, and reports a relayed-to-direct upgrade when one landed.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{} via {}: ", self.label, self.transport)?;
         match &self.reached {
             None => f.write_str("unreachable"),
-            Some(Reached { info, rtt }) => {
-                write!(f, "{}", reach::conn_path(info))?;
+            Some(Reached { initial, info, rtt }) => {
+                write!(f, "{}", reach::conn_path(*initial, info))?;
                 if let Some(rtt) = rtt {
                     write!(f, ", rtt {:.3} ms", rtt.as_secs_f64() * 1000.0)?;
                 }

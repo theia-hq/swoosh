@@ -120,19 +120,31 @@ pub fn hint(error: eyre::Report, transport: transport::Transport) -> eyre::Repor
     }
 }
 
-/// The path phrase for a session's [`ConnInfo`]: `direct to <addr>` / `relayed (may upgrade to direct)`
-/// / `mixed (...)` / `path unknown`. Honest when the transport cannot tell rather than fabricating a
-/// reassuring answer. Shared by `status` (its whole output) and `ping`/`speed` (which print it inline so
-/// a slow number reads as "it relayed", not a mystery), so all three name a path the same way.
-pub fn conn_path(info: &ConnInfo) -> String {
+/// The path phrase for a session's [`ConnInfo`], comparing the path at connect (`initial`) to the path
+/// now: `direct to <addr>` / `direct to <addr> (upgraded from relayed)` / `relayed` / `mixed (...)` /
+/// `path unknown`. Reports the current state plainly rather than hedging: iroh often connects relayed
+/// then hole-punches to direct, so callers sample `initial` at connect and read this after a probe; if
+/// the upgrade landed in that window we say so, otherwise we name what it is now. Shared by `status`
+/// (its whole output) and `ping`/`speed` (which print it inline so a slow number reads as "it relayed",
+/// not a mystery), so all three name a path the same way.
+pub fn conn_path(initial: Path, info: &ConnInfo) -> String {
     match info.path {
-        Path::Direct => match info.remote {
-            Some(remote) => format!("direct to {remote}"),
-            None => "direct".to_owned(),
-        },
-        // A relayed iroh path is honest about being able to upgrade: hole-punching may still complete
-        // and move this to direct, so a re-run can report a different path.
-        Path::Relayed => "relayed (may upgrade to direct)".to_owned(),
+        Path::Direct => {
+            let direct = match info.remote {
+                Some(remote) => format!("direct to {remote}"),
+                None => "direct".to_owned(),
+            };
+            // It connected relayed (or mixed) and hole-punching landed a direct path during the probe:
+            // report the upgrade, which is the reassuring thing to know actually happened.
+            if matches!(initial, Path::Relayed | Path::Mixed) {
+                format!("{direct} (upgraded from relayed)")
+            } else {
+                direct
+            }
+        }
+        // Still relayed after the probe window. Report the current state plainly; a later re-run may
+        // show direct if hole-punching completes after this point.
+        Path::Relayed => "relayed".to_owned(),
         Path::Mixed => match info.remote {
             Some(remote) => format!("mixed (direct to {remote} and relayed)"),
             None => "mixed (direct and relayed)".to_owned(),
