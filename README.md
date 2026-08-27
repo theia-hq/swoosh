@@ -76,6 +76,14 @@ Dial a peer and report the connection path: direct or relayed, the remote addres
 Answers the one question a p2p connection always raises: am I actually talking to the peer directly, or
 bouncing through a relay?
 
+### `swoosh ssh <peer>`
+
+Open an ssh session to a peer over the overlay, by name or key: `swoosh ssh alice/desk`. It resolves the
+peer and points the system `ssh` at it through a private tunnel, then hands off, so anything after works
+as usual: `swoosh ssh alice/desk -- ls`, or `swoosh ssh alice/desk -p 2222`. Auth is your normal ssh keys.
+The peer exposes its sshd once with [tightbeam](https://github.com/theia-hq/tightbeam)
+(`tightbeam expose ssh=127.0.0.1:22`), which also carries the tunnel.
+
 ### `swoosh contact`: name your peers
 
 Keys are unwieldy to type. Save a peer's key under a short name once, then use the name anywhere a
@@ -136,19 +144,20 @@ lands as it is built.
 - [x] `contact` — a local, self-sovereign address book (`add` / `ls` / `rm`), petname resolution in every
   reach verb, several devices under one name
 - [x] `tree` — print the command tree, read from the parser
+- [x] `ssh` — open an ssh session to a peer over the overlay (`swoosh ssh alice/desk`)
 - [ ] `send` / `recv` — push a file or directory to a peer, verified end to end
 - [ ] `beam` — one verb for "get this over there": a file, piped stdin, the clipboard, or a fetched URL's
   result, delivered to a key
 - [ ] `tunnel expose` / `tunnel connect` — expose a local service under a name; reach a peer's service on
   a local port (with `--stdio` for `ssh` `ProxyCommand`)
-- [ ] `ssh-config` — emit `ssh` `Host` aliases from your contacts, so `ssh alice-desk` just works
+- [ ] `ssh config` — emit `ssh` `Host` aliases for devices that advertise ssh (waits on advertised services)
 - [ ] `share` — mint a `sheer:` capability link (a signed, expiring, attenuable, delegable grant with no
   server) over a tunnel, a file, or a directory
 - [ ] `attenuate` — narrow a capability link offline and print a tighter one
 - [ ] `cluster` + `share cluster` — name a local set of machines; share the whole group as one capability
 - [ ] `fetch` — mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
 - [ ] `run` — run code at a peer addressed by its key (the north star)
-- [ ] MagicDNS `.theia` names — type `ssh mine.desktop` or `http://alice.blog.theia` into any app
+- [ ] MagicDNS `.theia` names — type `ssh desk.alice` or `http://blog.alice.theia` into any app
 
 ## Layout
 
