@@ -13,6 +13,9 @@ swoosh speed alice           # measure throughput to it
 swoosh status alice          # is the link direct, or relayed?
 ```
 
+Powered by [bifrost](https://github.com/theia-hq/bifrost) for the keyed connection and
+[tightbeam](https://github.com/theia-hq/tightbeam) for the tunnels behind `ssh` and `fetch`.
+
 > Experimental. The CLI, wire protocol, and identity format will change; not ready for production use.
 
 ## Why a key instead of an address
@@ -93,6 +96,14 @@ resumable download resumes. The exit is a node *you* run (your own overlay HTTP 
 it there with `tightbeam expose fetch=fetch: --gate cap` and hand out a `sheer:` cap to `--via`. Scoped to
 the one origin you name, not an open proxy.
 
+### `swoosh identity`
+
+Print this machine's key (its NodeId), minting one if there is none. A local command: it stands up no
+transport, it just resolves the key `--key`/`SWOOSH_KEY` points at (or the default) and prints the key a
+node bound under it will present. Use it to provision an identity ahead of time: mint a key here, save
+its NodeId as a contact, then hand the key file to the machine that will adopt it (a CI runner, say) so
+you can reach it by a name you already know.
+
 ### `swoosh contact`: name your peers
 
 Keys are unwieldy to type. Save a peer's key under a short name once, then use the name anywhere a
@@ -153,6 +164,7 @@ lands as it is built.
 - [x] `contact` — a local, self-sovereign address book (`add` / `ls` / `rm`), petname resolution in every
   reach verb, several devices under one name
 - [x] `tree` — print the command tree, read from the parser
+- [x] `identity` — print this machine's key, minting one if absent, to provision a node ahead of time
 - [x] `ssh` — open an ssh session to a peer over the overlay (`swoosh ssh alice/desk`)
 - [ ] `send` / `recv` — push a file or directory to a peer, verified end to end
 - [ ] `beam` — one verb for "get this over there": a file, piped stdin, the clipboard, or a fetched URL's
