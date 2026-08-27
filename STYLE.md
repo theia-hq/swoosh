@@ -38,6 +38,7 @@ _How this codebase is built. It is the contract: reviewers (human or machine) sh
 ## Error handling
 - **Libraries: `thiserror`.** Typed, enumerated, matchable error kinds, errors are part of the API.
 - **Binaries: `eyre::Result`** (thiserror loses backtrace information, so it stays out of bins). Use it **path-qualified** (`eyre::Result<T>`); never `use eyre::Result`, keep it visibly distinct from `core::result::Result`.
+- **User-facing CLI errors show the message chain, never a `file:line` / backtrace / spantrace.** A handled error a user hits is a report about their input or environment, not a crash: print the eyre chain with `Display` alternate (`eprintln!("Error: {report:#}")` or an eyre hook that suppresses the location), never the `Debug` (`{:?}`) form that trails a source `Location:` and spantrace. A source path is noise to a user and reads as "go read our source". Keep the location/backtrace for `RUST_BACKTRACE`/debug diagnostics, out of the default user path. (`main` returning `eyre::Result` prints `Debug` by default, so install a minimal hook or print-and-exit rather than leaning on the `?`-from-`main` default.)
 - **The underlying error kind is contained and returned by reference** via the source chain (`std::error::Error::source`), `ParseIntError` inside your variant is the textbook shape. Don't stringify away the cause.
 - **Error messages are lowercase and carry no trailing punctuation**, they *will* compose into larger chains, so `invalid quantity` not `Invalid quantity.`
 - **No `.unwrap()` / `.expect()` in non-test code** (clippy-denied). Panic only on a genuinely unreachable invariant, with a message saying why it's unreachable.
@@ -84,7 +85,7 @@ _How this codebase is built. It is the contract: reviewers (human or machine) sh
 - **Qualify one level** where it reads better than pulling the leaf in: `use std::io;` → `io::Error`; `use tokio::sync::{mpsc, oneshot};` → `mpsc::channel`; `use tokio::time;` → `time::Duration`, `time::sleep`.
 - **Path-qualify derive macros from crates:** `#[derive(thiserror::Error, Debug)]`, not a bare `Error` brought in by `use`.
 - **Never wildcard-import** (`use foo::*`); bring every name in explicitly so a reader always knows where a symbol comes from. Enforced by `clippy::wildcard_imports = deny`.
-- **`cargo sort`** keeps `Cargo.toml` dependencies ordered.
+- **`cargo sort --grouped`** keeps `Cargo.toml` dependencies ordered. Local (in-tree/path) dependencies are grouped first, blank-line-separated from the externals, in both `[dependencies]` and `[workspace.dependencies]`; each group is then sorted alphabetically within itself (the `--grouped` flag honors the blank-line groups and sorts inside them). This mirrors the `use`-statement local/external split: a reader scanning a manifest sees at a glance which deps are in-tree and will move with a refactor. Sort within the group alphabetically, not by dependency layer.
 
 ## Tests
 - **Test-first for the domain layer** (it's pure, so tests are fast and DB-free).
@@ -105,7 +106,7 @@ _How this codebase is built. It is the contract: reviewers (human or machine) sh
 - **`zeroize` sensitive data** so secrets don't linger in freed memory.
 
 ## Tooling & dependencies
-- **`cargo fmt`, `cargo clippy -D warnings`, `cargo sort`** all clean before every commit, part of the definition of done.
+- **`cargo fmt`, `cargo clippy -D warnings`, `cargo sort --grouped`** all clean before every commit, part of the definition of done. `--grouped` is the house form so the local-above-external manifest grouping (see Code layout) survives the sort.
 - **Prefer `core::` over `std::`** wherever the item exists in `core`. Do not prefer `alloc::` over `std::`: if an item lives only in `alloc` (not `core`), just use `std::`. Enforced by `clippy::std_instead_of_core` (restriction lint, `warn`).
 - **Explicitly-sized integer types over arch-specific** (`u64`/`u32`, not `usize`) wherever the width is semantic rather than a container index.
 - **Macros defined sparingly.** Great power, great responsibility: only with irrefutable rationale.
