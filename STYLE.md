@@ -69,6 +69,17 @@ _How this codebase is built. It is the contract: reviewers (human or machine) sh
 - **`///` on every public item and every enforced invariant.** Document *why* the invariant exists at the point it's enforced.
 - **No em dashes** anywhere in prose (comments, docs, README, commit messages, PR text).
 
+## Documentation
+_The doc voice, proven across every repo. A README, crate description, or `--help` line follows these._
+- **Say what it IS, not how it came to be.** Lead with what the thing does for the reader. No lineage as the opener ("built on X", "part of the Y suite"); name a building block only where it genuinely helps the reader understand or use the thing.
+- **A stranger gets it from the first paragraph** with zero knowledge of any other project or its history.
+- **No jargon, no phrases that sound like something but mean nothing.** If a phrase needs decoding, cut it or replace it with the plain thing.
+- **Do not sell.** No superlatives, no "unified", no "reduces the need to manage N tools". Describe; let the reader judge.
+- **Concrete over abstract.** Show a real command and its real output, or a real code snippet. The reader learns by seeing it work.
+- **Describe what ships, not what is planned.** Planned work goes in a clearly-marked section ("Not yet", "Planned"), never mixed into the description of what the thing does today.
+- **Terse. KISS.** Every sentence earns its place. Long enough to be clear, not one word longer.
+- **The one-line help / crate `about` states the action in the reader's terms,** no metaphor that needs decoding. Rich rationale lives in the `//!` module note or the README, never in the `about` line.
+
 ## Code layout & readability
 - **Top-down story.** Lay items out so meaning is discovered reading downward: a high-level item on line 1 references helpers defined below it, so a reader chasing a detail reads *on* until satisfied, then exits, never scrolls up to assemble context first.
 - **No `mod.rs`.** Use `<module>.rs` with submodules in a sibling `<module>/` directory.
