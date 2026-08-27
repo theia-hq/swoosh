@@ -14,7 +14,7 @@ bifrost = { path = "../bifrost/crates/bifrost" }
 bifrost-iroh = { path = "../bifrost/crates/transports/bifrost-iroh" }
 bifrost-mem = { path = "../bifrost/crates/transports/bifrost-mem" }
 bifrost-quirk = { path = "../bifrost/crates/transports/bifrost-quirk" }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 eyre = "0.6"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 rand = "0.8"

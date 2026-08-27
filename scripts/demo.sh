@@ -30,8 +30,9 @@ fi
 WORK="$(mktemp -d)"
 trap 'kill "${SERVE_PID:-}" 2>/dev/null || true; rm -rf "$WORK"' EXIT
 
+# Only the server needs a persisted key: it must stay reachable at one address. The client reaches
+# outward, so each verb mints a fresh ephemeral identity with no key file.
 SERVER_KEY="$WORK/server.key"
-CLIENT_KEY="$WORK/client.key"
 
 banner() { printf '\n=== %s ===\n' "$1"; }
 
@@ -52,13 +53,13 @@ KEY="$(grep -m1 -oE 'bf01[a-z0-9]+' "$WORK/quirk-serve.out" | head -1)"
 ADDR="$(grep -m1 -oE '127\.0\.0\.1:[0-9]+' "$WORK/quirk-serve.out" | head -1)"
 
 banner "quirk ping (same command, our transport)"
-SWOOSH_KEY="$CLIENT_KEY" "$BIN" --transport quirk ping "$KEY" --peer "$KEY=$ADDR" -c 5 -i 0.2
+"$BIN" --transport quirk ping "$KEY" --peer "$KEY=$ADDR" -c 5 -i 0.2
 
 banner "quirk speed --down"
-SWOOSH_KEY="$CLIENT_KEY" "$BIN" --transport quirk speed "$KEY" --peer "$KEY=$ADDR" --down -t 3
+"$BIN" --transport quirk speed "$KEY" --peer "$KEY=$ADDR" --down -t 3
 
 banner "quirk speed --up"
-SWOOSH_KEY="$CLIENT_KEY" "$BIN" --transport quirk speed "$KEY" --peer "$KEY=$ADDR" --up -t 3
+"$BIN" --transport quirk speed "$KEY" --peer "$KEY=$ADDR" --up -t 3
 
 kill "$SERVE_PID" 2>/dev/null || true
 wait "$SERVE_PID" 2>/dev/null || true
@@ -88,10 +89,10 @@ else
 fi
 
 banner "iroh ping (identical command, no --peer: iroh self-discovers)"
-SWOOSH_KEY="$CLIENT_KEY" "$BIN" --transport iroh ping "$KEY" -c 5 -i 0.2
+"$BIN" --transport iroh ping "$KEY" -c 5 -i 0.2
 
 banner "iroh speed --down"
-SWOOSH_KEY="$CLIENT_KEY" "$BIN" --transport iroh speed "$KEY" --down -t 3
+"$BIN" --transport iroh speed "$KEY" --down -t 3
 
 kill "$SERVE_PID" 2>/dev/null || true
 wait "$SERVE_PID" 2>/dev/null || true

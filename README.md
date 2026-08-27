@@ -1,20 +1,23 @@
 # swoosh
 
-One command, one identity, every p2p operation as a verb.
+One command, every p2p operation as a verb.
 
 A public key is something you can reach, name, and run code at, over any transport and across any NAT.
-`swoosh` is the unified front door to that overlay: you address _who_, not _where_, and every verb
-speaks from the same persisted identity, so this machine has one address for everything it does.
+`swoosh` is the unified front door to that overlay: you address _who_, not _where_.
 
 > Experimental. The CLI, wire protocol, and identity format will change; not ready for production use.
 
 ## What it is
 
-`swoosh` is a multitool (git / cargo / kubectl shaped): one binary, one `cargo install`, one `--help`,
-one config dir. The verbs share a single ed25519 identity at `~/.config/swoosh/identity.key`
-(override with `SWOOSH_KEY`), so "what is my address?" has one answer no matter which verb you run.
+`swoosh` is a multitool (git / cargo / kubectl shaped): one binary, one `cargo install`, one `--help`.
 Under the hood it rides `bifrost`, the pubkey-addressed overlay, and is transport-blind: the same
 operation runs over iroh today and over our own QUIC next, unchanged.
+
+Identity is chosen by intent. `swoosh serve` must be reachable at one address, so it binds a persisted
+ed25519 identity at `~/.config/swoosh/identity.key`: restart the node, keep the address. The reach-
+outward verbs (`ping`, `speed`, `status`) address a peer and are never dialed back, so they mint a fresh
+random ephemeral key each run, no key file to provision and nothing left on disk. Pin any run to a
+persisted identity with `--key <path>` (or `SWOOSH_KEY`) when you do want a stable address.
 
 ## The verbs
 

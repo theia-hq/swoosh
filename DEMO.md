@@ -24,12 +24,13 @@ same NodeId, different transport. That is the whole show.
 
 ## The setup
 
-Two processes, two distinct persisted key files, host-local. Each `SWOOSH_KEY` file is one ed25519
-secret; the server's yields one NodeId that we will see printed identically over both transports.
+Two processes, host-local. Only the server needs a persisted key: it must be reachable at one address,
+so we pin it. The client reaches outward and needs no lasting identity, so it mints a fresh ephemeral
+key each run (nothing to provision). The server's `SWOOSH_KEY` file is one ed25519 secret, yielding one
+NodeId we will see printed identically over both transports.
 
 ```sh
-export SERVER_KEY=/tmp/swoosh-demo/server.key   # the peer we reach
-export CLIENT_KEY=/tmp/swoosh-demo/client.key   # the one reaching
+export SERVER_KEY=/tmp/swoosh-demo/server.key   # the peer we reach (persisted, so it stays reachable)
 ```
 
 ## Part 1: reach over quirk (our own QUIC)
@@ -53,11 +54,12 @@ answering ping and speed. press ctrl-c to stop.
 ```
 
 ```sh
-# terminal 2, feed back the printed key and hint
+# terminal 2, feed back the printed key and hint. No client key: these verbs reach outward, so each
+# mints a fresh ephemeral identity.
 KEY=bf01rwbkys5qovt4kartnbxawkezyom2ngl64tzkrla44e53jb5xg3ma
-SWOOSH_KEY=$CLIENT_KEY swoosh --transport quirk ping  $KEY --peer $KEY=127.0.0.1:53487 -c 5 -i 0.2
-SWOOSH_KEY=$CLIENT_KEY swoosh --transport quirk speed $KEY --peer $KEY=127.0.0.1:53487 --down -t 3
-SWOOSH_KEY=$CLIENT_KEY swoosh --transport quirk speed $KEY --peer $KEY=127.0.0.1:53487 --up   -t 3
+swoosh --transport quirk ping  $KEY --peer $KEY=127.0.0.1:53487 -c 5 -i 0.2
+swoosh --transport quirk speed $KEY --peer $KEY=127.0.0.1:53487 --down -t 3
+swoosh --transport quirk speed $KEY --peer $KEY=127.0.0.1:53487 --up   -t 3
 ```
 
 Real captured output:
@@ -116,8 +118,8 @@ The identical client commands, now over iroh (no `--peer`, iroh finds the peer i
 ```sh
 # terminal 2
 KEY=bf01rwbkys5qovt4kartnbxawkezyom2ngl64tzkrla44e53jb5xg3ma
-SWOOSH_KEY=$CLIENT_KEY swoosh --transport iroh ping  $KEY -c 5 -i 0.2
-SWOOSH_KEY=$CLIENT_KEY swoosh --transport iroh speed $KEY --down -t 3
+swoosh --transport iroh ping  $KEY -c 5 -i 0.2
+swoosh --transport iroh speed $KEY --down -t 3
 ```
 
 Real captured output:
