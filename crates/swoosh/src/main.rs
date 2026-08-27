@@ -28,6 +28,7 @@ use commands::ping::PingCmd;
 use commands::serve::ServeCmd;
 use commands::speed::SpeedCmd;
 use commands::status::StatusCmd;
+use commands::tree::TreeCmd;
 use contacts::{Contacts, ContactsStore};
 use identity::Identity;
 use transport::Peer;
@@ -65,6 +66,8 @@ enum Command {
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
     Contact(ContactCmd),
+    /// Print this command tree (spec vs binary).
+    Tree(TreeCmd),
 }
 
 /// A verb that reaches a peer: it binds a transport and dials. Split from the local `contact` group,
@@ -83,6 +86,7 @@ impl Command {
     fn split(self) -> Verb {
         match self {
             Self::Contact(cmd) => Verb::Contact(cmd),
+            Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
             Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
@@ -95,6 +99,8 @@ impl Command {
 enum Verb {
     /// Edits the address book; needs no transport.
     Contact(ContactCmd),
+    /// Prints the command tree; needs no transport and no store.
+    Tree(TreeCmd),
     /// Reaches a peer; binds a transport.
     Reach(Reach),
 }
@@ -176,17 +182,21 @@ async fn run() -> eyre::Result<()> {
         std::process::exit(2);
     };
 
-    // The address book lives beside the identity, honoring `--key`'s dir when it points elsewhere, else
-    // the default config dir. Open it once, up front: the `contact` group edits it, the reach verbs read
-    // it to resolve a petname.
-    let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
-
-    // A `contact` verb is purely local: it edits the address book and dials nobody, so it runs here
-    // before any transport is composed. Everything else reaches a peer, so it falls through to bind one.
+    // Local verbs run here, before any transport is composed and (for `tree`) before the store is even
+    // opened: `tree` is pure introspection over clap's own model, and `contact` only edits the address
+    // book. A reaching verb falls through to bind a transport below.
     let reach = match command.split() {
-        Verb::Contact(cmd) => return cmd.run(store).await,
+        Verb::Tree(cmd) => return cmd.run(&Cli::command()),
+        Verb::Contact(cmd) => {
+            let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
+            return cmd.run(store).await;
+        }
         Verb::Reach(reach) => reach,
     };
+
+    // The address book lives beside the identity, honoring `--key`'s dir when it points elsewhere, else
+    // the default config dir. A reach verb reads it to resolve a petname in its peer slot.
+    let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
 
     // The verb decides its identity: `serve` persists so it is reachable at one address, the reach-
     // outward verbs mint a fresh ephemeral key, and an explicit `--key` pins either. Resolve it before

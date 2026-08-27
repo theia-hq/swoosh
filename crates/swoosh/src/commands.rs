@@ -6,3 +6,4 @@ pub mod ping;
 pub mod serve;
 pub mod speed;
 pub mod status;
+pub mod tree;
