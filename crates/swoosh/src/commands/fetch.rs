@@ -9,6 +9,8 @@ use core::net::Ipv4Addr;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
+use futures::StreamExt as _;
+use futures::stream::FuturesUnordered;
 use tightbeam::http::{FetchRequest, FetchResponse};
 use tightbeam::protocol::{Request, Response};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -55,19 +57,55 @@ impl FetchCmd {
             self.url
         );
 
+        // Each request rides its own bifrost stream, served concurrently, so a downloader's parallel
+        // ranged GETs do not stall behind one slow transfer. A transient local accept error is logged
+        // and the listener keeps running (matching the tunnel siblings), never tearing down in-flight
+        // downloads.
+        let mut pipes = FuturesUnordered::new();
         loop {
-            let (tcp, _) = listener.accept().await?;
-            // One request, one stream. A failed request serves a 502 and the listener keeps going, so a
-            // single bad fetch never tears the local endpoint down mid-download.
-            if let Err(error) = self.serve(tcp, &session).await {
-                eprintln!("fetch: {error:#}");
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (tcp, _) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            tracing::warn!(%error, "local accept failed; still listening");
+                            continue;
+                        }
+                    };
+                    pipes.push(self.serve(tcp, &session));
+                }
+                Some(result) = pipes.next(), if !pipes.is_empty() => {
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "fetch request ended");
+                    }
+                }
             }
         }
     }
 
-    /// Serve one inbound HTTP request: relay it to the `fetch:` service and stream the response back.
+    /// Serve one inbound HTTP request. A failure BEFORE any response bytes are written serves a `502` so
+    /// a downloader sees a real HTTP error, not a bare connection reset; a failure once the response has
+    /// begun just closes the socket (a second HTTP response into the body would corrupt it).
     async fn serve<S: Session>(&self, mut tcp: TcpStream, session: &S) -> eyre::Result<()> {
-        let head = read_head(&mut tcp).await?;
+        let mut responded = false;
+        if let Err(error) = self.relay(&mut tcp, session, &mut responded).await {
+            if !responded {
+                let _ = respond_error(&mut tcp, &format!("fetch failed: {error:#}")).await;
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Relay one request to the `fetch:` service and stream the response back, setting `responded` the
+    /// moment any HTTP response has begun (so the caller knows a `502` is no longer safe to send).
+    async fn relay<S: Session>(
+        &self,
+        tcp: &mut TcpStream,
+        session: &S,
+        responded: &mut bool,
+    ) -> eyre::Result<()> {
+        let head = read_head(tcp).await?;
         let Parsed {
             method,
             target,
@@ -83,7 +121,8 @@ impl FetchCmd {
         .write(&mut writer)
         .await?;
         if let Response::Error(message) = Response::read(&mut reader).await? {
-            return respond_error(&mut tcp, &format!("fetch service refused: {message}")).await;
+            *responded = true;
+            return respond_error(tcp, &format!("fetch service refused: {message}")).await;
         }
 
         FetchRequest {
@@ -95,13 +134,15 @@ impl FetchCmd {
         .await?;
         match FetchResponse::read(&mut reader).await? {
             FetchResponse::Ok { status, headers } => {
-                write_response_head(&mut tcp, status, &headers).await?;
+                *responded = true;
+                write_response_head(tcp, status, &headers).await?;
                 // The body follows on the same stream; stream it to the client until the node closes.
-                tokio::io::copy(&mut reader, &mut tcp).await?;
+                tokio::io::copy(&mut reader, tcp).await?;
                 tcp.shutdown().await?;
             }
             FetchResponse::Error(message) => {
-                respond_error(&mut tcp, &format!("origin error: {message}")).await?;
+                *responded = true;
+                respond_error(tcp, &format!("origin error: {message}")).await?;
             }
         }
         Ok(())
@@ -149,7 +190,9 @@ struct Parsed {
 fn parse_request(head: &[u8]) -> eyre::Result<Parsed> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut request = httparse::Request::new(&mut headers);
-    request.parse(head)?;
+    if request.parse(head)?.is_partial() {
+        eyre::bail!("incomplete request head");
+    }
     let method = request
         .method
         .ok_or_else(|| eyre::eyre!("no method in request"))?
