@@ -1,7 +1,8 @@
 //! swoosh: one command, one identity, every p2p operation as a verb.
 //!
 //! `swoosh serve` makes this node answer reach diagnostics; `swoosh ping <key>` measures the round trip
-//! to a peer by their public key; `swoosh speed <key>` measures throughput to them. Every verb speaks
+//! to a peer by their public key; `swoosh speed <key>` measures throughput to them; `swoosh status
+//! <key>` shows the connection path (direct vs relayed) to a peer. Every verb speaks
 //! from the same persisted identity, so this node has one address across all of them, AND across
 //! transports: `--transport iroh|quirk` swaps the backend underneath without changing the address. iris
 //! and tightbeam verbs (`send`/`recv`/`tunnel`) land next; see the README.
@@ -16,6 +17,7 @@ mod transport;
 use commands::ping::PingCmd;
 use commands::serve::ServeCmd;
 use commands::speed::SpeedCmd;
+use commands::status::StatusCmd;
 use transport::Peer;
 
 /// The unified front door to the theia overlay: reach, name, and run code at a public key.
@@ -44,16 +46,25 @@ enum Command {
     Ping(PingCmd),
     /// Measure throughput to a peer: iperf, but over the overlay.
     Speed(SpeedCmd),
+    /// Show the connection path to a peer: direct vs relayed, remote, and live RTT.
+    Status(StatusCmd),
 }
 
 impl Command {
     /// Run the selected verb against the composed node. Every verb is generic over `Node<T, D>`, so
-    /// this dispatch is transport-blind: the concrete transport was chosen once, at the seam below.
-    async fn run<T: Transport, D: Discovery>(self, node: &Node<T, D>) -> eyre::Result<()> {
+    /// this dispatch is transport-blind: the concrete transport was chosen once, at the seam below. The
+    /// `transport` label is passed as a plain value for the one verb that reports which backend carried
+    /// the session (`status`), so no verb has to name a concrete backend.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        transport: transport::Transport,
+    ) -> eyre::Result<()> {
         match self {
             Self::Serve(cmd) => cmd.run(node).await,
             Self::Ping(cmd) => cmd.run(node).await,
             Self::Speed(cmd) => cmd.run(node).await,
+            Self::Status(cmd) => cmd.run(node, transport).await,
         }
     }
 }
@@ -71,7 +82,10 @@ async fn main() -> eyre::Result<()> {
     // one address across runs, commands, and backends: the same key yields the same NodeId whether it
     // is bound under iroh or quirk, which is what makes the transport swap a swap and not a new node.
     let secret = identity::load_or_create().await?;
-    match cli.transport {
+    // `Copy`, so it feeds both the composition-root match and the one verb that reports which backend
+    // carried the session (`status`), without moving out of `cli` before the match reads it.
+    let transport = cli.transport;
+    match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays), so it composes with NoDiscovery and ignores
         // `--peer`. Unchanged from the iroh-only skeleton.
         transport::Transport::Iroh => {
@@ -79,7 +93,7 @@ async fn main() -> eyre::Result<()> {
                 bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?,
                 NoDiscovery,
             );
-            cli.command.run(&node).await
+            cli.command.run(&node, transport).await
         }
         // quirk is direct-only with no internal discovery, so it composes with a StaticDiscovery
         // seeded from the `--peer` hints. A client dials a peer by feeding back the `<key>=<addr>`
@@ -89,7 +103,7 @@ async fn main() -> eyre::Result<()> {
                 bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?,
                 Peer::discovery(cli.peer),
             );
-            cli.command.run(&node).await
+            cli.command.run(&node, transport).await
         }
     }
 }

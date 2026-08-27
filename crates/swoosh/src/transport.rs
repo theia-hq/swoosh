@@ -27,6 +27,18 @@ pub enum Transport {
     Quirk,
 }
 
+impl Transport {
+    /// The short name of the bound backend, for diagnostics like `swoosh status` that report which
+    /// transport carried the session. The label of the concrete backend chosen at the seam, passed as a
+    /// plain value so the verb stays transport-blind and never names the backend itself.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Iroh => "iroh",
+            Self::Quirk => "quirk",
+        }
+    }
+}
+
 /// A direct address hint for one peer: its [`NodeId`] mapped to a reachable [`SocketAddr`]. Parsed at
 /// the clap boundary from `<key>=<socketaddr>`, so a handler receives already-valid domain values and
 /// never re-parses a string. Feeds quirk's [`StaticDiscovery`], since quirk cannot discover a peer's
