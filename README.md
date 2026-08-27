@@ -1,16 +1,16 @@
 # swoosh
 
-`swoosh` connects to another machine by its public key instead of its IP address, and measures the
-connection. You give it a peer's key (a short base32 string), and it dials that peer directly, wherever
-the peer is on the internet, across home routers and NATs, without you knowing or caring about their
-address. Then it tells you useful things about that connection: the round-trip time, the throughput,
-and whether the link is direct or bouncing through a relay.
+`swoosh` works with another machine addressed by its public key instead of its IP: reach it, measure
+the link, and (as the tool grows) send files, open tunnels, share access, and fetch through it. You give
+it a peer's key (a short base32 string) and it dials that peer directly, wherever the peer is on the
+internet, across home routers and NATs, without you knowing or caring about the peer's address. No
+address to look up, no server in the middle.
 
 ```sh
 swoosh serve                 # on one machine: print this machine's key, stay reachable
-swoosh ping bf01hy...        # on another: reach that key, measure the round trip
-swoosh speed bf01hy...       # measure throughput to it
-swoosh status bf01hy...      # is the link direct, or relayed?
+swoosh ping alice            # on another: reach that key, measure the round trip
+swoosh speed alice           # measure throughput to it
+swoosh status alice          # is the link direct, or relayed?
 ```
 
 > Experimental. The CLI, wire protocol, and identity format will change; not ready for production use.
@@ -22,6 +22,32 @@ key does not. Addressing a peer by key means you reach the same peer every time,
 authenticated end to end by that key, so you know you reached the machine you meant and no one is in the
 middle. `swoosh serve` prints a key; anyone with that key can reach the machine, from anywhere.
 
+## A real run
+
+On one machine, be reachable and copy the printed key:
+
+```sh
+$ swoosh serve
+swoosh ready — reachable at:
+
+    bf01hy…                     (share this key)
+
+answering ping + speed. ctrl-c to stop.
+```
+
+On another, save the key under a name once, then reach it by name:
+
+```sh
+$ swoosh contact add alice bf01hy…
+$ swoosh ping alice -c 4
+pinging alice (4 probes)
+4 sent, 4 received, 0% loss
+rtt min/avg/max/mdev = 21.4/24.8/33.1/3.2 ms
+
+$ swoosh status alice
+alice via iroh: direct to 203.0.113.7:41641, rtt 24.8 ms
+```
+
 ## Commands
 
 ### `swoosh serve`
@@ -29,20 +55,9 @@ middle. `swoosh serve` prints a key; anyone with that key can reach the machine,
 Stay online and reachable. Prints this machine's key, then answers `ping`, `speed`, and `status` from
 any peer that dials it. The key is stable across restarts, so peers can save it once.
 
-```sh
-swoosh serve
-# swoosh ready, reachable at:
-#     bf01hy...            (share this key)
-```
-
 ### `swoosh ping <peer>`
 
 Dial a peer and measure the round-trip time, like `ping(8)` but addressed by key.
-
-```sh
-swoosh ping bf01hy... -c 8 -i 0.5
-# rtt min/avg/max/mdev = 21.4/24.8/33.1/3.2 ms
-```
 
 - `-c, --count <N>` how many probes to send (default 4)
 - `-i, --interval <SECS>` seconds between probes (default 1.0)
@@ -50,11 +65,6 @@ swoosh ping bf01hy... -c 8 -i 0.5
 ### `swoosh speed <peer>`
 
 Measure throughput to a peer, like `iperf` but addressed by key.
-
-```sh
-swoosh speed bf01hy... --down -t 5
-# 612.00 MiB in 5.00s = 122.40 MiB/s (down)
-```
 
 - `--up` / `--down` which direction to measure (default down)
 - `-t, --secs <SECS>` run for a fixed time (default 5)
@@ -66,11 +76,6 @@ Dial a peer and report the connection path: direct or relayed, the remote addres
 Answers the one question a p2p connection always raises: am I actually talking to the peer directly, or
 bouncing through a relay?
 
-```sh
-swoosh status bf01hy...
-# alice via iroh: direct to 203.0.113.7:41641, rtt 24.8 ms
-```
-
 ### `swoosh contact`: name your peers
 
 Keys are unwieldy to type. Save a peer's key under a short name once, then use the name anywhere a
@@ -79,10 +84,9 @@ plain TOML at `~/.config/swoosh/contacts.toml`. `alice` means whoever you pointe
 and no one else's permission.
 
 ```sh
-swoosh contact add alice bf01hy...   # save alice -> that key
-swoosh contact ls                    # list your contacts
-swoosh ping alice                    # reach her by name
-swoosh contact rm alice              # forget her
+swoosh contact add alice bf01hy…   # save alice -> that key
+swoosh contact ls                  # list your contacts
+swoosh contact rm alice            # forget her
 ```
 
 - `contact add <name> <key>` save (or re-point) a name. Re-adding the same name replaces the key.
@@ -92,6 +96,11 @@ swoosh contact rm alice              # forget her
 One person can have several machines. `contact add alice/laptop <key>` files a key under `alice`'s
 `laptop`; `swoosh ping alice` then tries each of alice's machines and takes the first that answers, or
 reach a specific one with `swoosh ping alice/laptop`.
+
+### `swoosh tree`
+
+Print the command tree with each verb's one-line summary, read straight from the parser, so it can never
+drift from `--help`.
 
 ## Identity
 
@@ -106,30 +115,40 @@ any command to a saved key when you want a stable address.
 `swoosh` can carry a connection two ways, chosen with `--transport`:
 
 - `iroh` (default) finds and reaches peers across the internet, punching through NATs.
-- `quirk` is a from-scratch QUIC implementation, direct or same-LAN only.
+- [`quirk`](https://github.com/theia-hq/quirk) is a from-scratch QUIC implementation, direct or same-LAN
+  only.
 
 The key is the same either way, so switching transports reaches the same peer. On a shared LAN, peers
 find each other automatically. Across networks, feed a peer the address its `swoosh serve` printed with
 `--peer <key>=<addr>`.
 
-## Try it locally
+## Roadmap
 
-In one terminal, be reachable and copy the printed key:
+`swoosh` is one umbrella for doing things with a machine addressed by its key. Every planned verb is the
+same primitive underneath — a cap-gated byte-stream to a key — with a thin front door per job, so the
+surface stays broad while the core stays one thing. Shipped today is ticked; the rest is planned and
+lands as it is built.
 
-```sh
-swoosh serve
-```
-
-In another, reach that key:
-
-```sh
-swoosh ping <key>
-swoosh speed <key> --down
-swoosh status <key>
-
-swoosh contact add alice <key>   # or name it once
-swoosh ping alice                # then reach it by name
-```
+- [x] `serve` — be online, answer reach diagnostics under a persisted key
+- [x] `ping` — round-trip time to a peer, `ping(8)`-shaped
+- [x] `speed` — throughput to a peer, `iperf`-shaped
+- [x] `status` — connection path to a peer: direct vs relayed
+- [x] `contact` — a local, self-sovereign address book (`add` / `ls` / `rm`), petname resolution in every
+  reach verb, several devices under one name
+- [x] `tree` — print the command tree, read from the parser
+- [ ] `send` / `recv` — push a file or directory to a peer, verified end to end
+- [ ] `beam` — one verb for "get this over there": a file, piped stdin, the clipboard, or a fetched URL's
+  result, delivered to a key
+- [ ] `tunnel expose` / `tunnel connect` — expose a local service under a name; reach a peer's service on
+  a local port (with `--stdio` for `ssh` `ProxyCommand`)
+- [ ] `ssh-config` — emit `ssh` `Host` aliases from your contacts, so `ssh alice-desk` just works
+- [ ] `share` — mint a `sheer:` capability link (a signed, expiring, attenuable, delegable grant with no
+  server) over a tunnel, a file, or a directory
+- [ ] `attenuate` — narrow a capability link offline and print a tighter one
+- [ ] `cluster` + `share cluster` — name a local set of machines; share the whole group as one capability
+- [ ] `fetch` — mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
+- [ ] `run` — run code at a peer addressed by its key (the north star)
+- [ ] MagicDNS `.theia` names — type `ssh mine.desktop` or `http://alice.blog.theia` into any app
 
 ## Layout
 
