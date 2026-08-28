@@ -24,15 +24,18 @@ use std::path::PathBuf;
 use bifrost::{Discovery, Node, Transport};
 use clap::{CommandFactory, Parser, Subcommand};
 
+mod authkey;
 mod commands;
 mod contacts;
 mod identity;
 mod reach;
 mod transport;
 
+use commands::adopt::AdoptCmd;
 use commands::contact::ContactCmd;
 use commands::fetch::FetchCmd;
 use commands::identity::IdentityCmd;
+use commands::mint::MintCmd;
 use commands::ping::PingCmd;
 use commands::serve::ServeCmd;
 use commands::speed::SpeedCmd;
@@ -80,6 +83,10 @@ enum Command {
     Contact(ContactCmd),
     /// Print this node's identity (its NodeId), minting a key if there is none.
     Identity(IdentityCmd),
+    /// Derive a device identity from your signet and emit an authkey for a machine to adopt.
+    Mint(MintCmd),
+    /// Adopt a minted authkey: become that device identity and trust the signet that minted it.
+    Adopt(AdoptCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(SshCmd),
     /// Print this command tree (spec vs binary).
@@ -104,6 +111,8 @@ impl Command {
         match self {
             Self::Contact(cmd) => Verb::Contact(cmd),
             Self::Identity(cmd) => Verb::Identity(cmd),
+            Self::Mint(cmd) => Verb::Mint(cmd),
+            Self::Adopt(cmd) => Verb::Adopt(cmd),
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
@@ -121,6 +130,12 @@ enum Verb {
     Contact(ContactCmd),
     /// Prints this node's identity; needs no transport and no store, only the key path.
     Identity(IdentityCmd),
+    /// Derives a device identity and records `me/<label>`; needs the key (the signet) and the store, no
+    /// transport.
+    Mint(MintCmd),
+    /// Adopts an authkey: writes the device identity + signet anchor; needs the key path, no store or
+    /// transport.
+    Adopt(AdoptCmd),
     /// Reads the address book to resolve a peer, then execs the system `ssh` over the overlay. A launcher:
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
@@ -224,6 +239,15 @@ async fn run() -> eyre::Result<()> {
         // Prints this node's NodeId (minting a key if absent). Needs only the key path, not the store or
         // a transport, so it dispatches here beside the other local verbs.
         Verb::Identity(cmd) => return cmd.run(cli.key.as_deref()).await,
+        // Derives a device identity from the signet and records `me/<label>`. Needs the key (to derive)
+        // and the store (to record the contact); binds no transport.
+        Verb::Mint(cmd) => {
+            let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
+            return cmd.run(store, cli.key.as_deref()).await;
+        }
+        // Provisions this machine from an authkey (writes the tightbeam identity + anchor). Needs only the
+        // key path; binds no transport and touches no address book.
+        Verb::Adopt(cmd) => return cmd.run(cli.key.as_deref()).await,
         // A launcher: read the store to resolve the peer, then hand off to the system `ssh` (which runs
         // tightbeam as its `ProxyCommand`). swoosh binds no transport here; on unix `run` execs and does
         // not return on success.

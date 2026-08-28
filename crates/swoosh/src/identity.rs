@@ -46,6 +46,15 @@ impl Secret {
     pub fn node_id(&self) -> NodeId {
         NodeId::from_ed25519_secret(&self.0)
     }
+
+    /// The seed for a device identity derived from this key (the signet) under `label`: the secret a
+    /// machine ADOPTS to become that device, and the payload of a `mint`ed authkey. Borrows, so this root
+    /// stays owned here and zeroizes on drop; the raw root never leaves the wrapper, only the derived
+    /// child does. Hardened (only the holder of this root can compute a child), so a leaked device seed
+    /// cannot recover the root or a sibling.
+    pub fn derive_child_seed(&self, label: &str) -> [u8; 32] {
+        bifrost_core::derive_ed25519_child_secret(&self.0, label)
+    }
 }
 
 /// How a verb wants its identity: pinned to a stable address, or freshly minted for one run.

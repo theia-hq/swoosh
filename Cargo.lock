@@ -245,6 +245,7 @@ dependencies = [
 name = "bifrost-core"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "data-encoding",
  "ed25519-dalek 2.2.0",
  "thiserror 2.0.20",
@@ -3779,10 +3780,12 @@ name = "swoosh"
 version = "0.0.0"
 dependencies = [
  "bifrost",
+ "bifrost-core",
  "bifrost-iroh",
  "bifrost-mdns",
  "bifrost-quirk",
  "clap",
+ "data-encoding",
  "diag",
  "eyre",
  "futures",
@@ -3932,6 +3935,8 @@ version = "0.0.0"
 dependencies = [
  "bifrost",
  "bifrost-iroh",
+ "bifrost-mdns",
+ "blake3",
  "clap",
  "eyre",
  "futures",

@@ -8,14 +8,17 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-diag = { path = "crates/diag" }
-
+# theia
 bifrost = { path = "../bifrost/crates/bifrost" }
+bifrost-core = { path = "../bifrost/crates/bifrost-core" }
 bifrost-iroh = { path = "../bifrost/crates/transports/bifrost-iroh" }
 bifrost-mdns = { path = "../bifrost/crates/bifrost-mdns" }
 bifrost-mem = { path = "../bifrost/crates/transports/bifrost-mem" }
 bifrost-quirk = { path = "../bifrost/crates/transports/bifrost-quirk" }
+diag = { path = "crates/diag" }
+
 clap = { version = "4", features = ["derive", "env"] }
+data-encoding = "2"
 eyre = "0.6"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 rand = "0.8"

@@ -10,19 +10,22 @@ name = "swoosh"
 path = "src/main.rs"
 
 [dependencies]
-diag.workspace = true
-
+# theia
 bifrost.workspace = true
+bifrost-core.workspace = true
 bifrost-iroh.workspace = true
 bifrost-mdns.workspace = true
 bifrost-quirk.workspace = true
+diag.workspace = true
+tightbeam = { path = "../../../tightbeam" }
+
 clap.workspace = true
+data-encoding.workspace = true
 eyre.workspace = true
 futures.workspace = true
 httparse = "1"
 rand.workspace = true
 thiserror.workspace = true
-tightbeam = { path = "../../../tightbeam" }
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "signal"] }
 toml.workspace = true
 tracing.workspace = true
