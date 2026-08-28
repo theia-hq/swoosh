@@ -42,6 +42,7 @@ use commands::speed::SpeedCmd;
 use commands::ssh::SshCmd;
 use commands::status::StatusCmd;
 use commands::tree::TreeCmd;
+use commands::tunnel_connect::TunnelConnectCmd;
 use contacts::{Contacts, ContactsStore};
 use identity::Identity;
 use transport::Peer;
@@ -91,6 +92,10 @@ enum Command {
     Ssh(SshCmd),
     /// Print this command tree (spec vs binary).
     Tree(TreeCmd),
+    /// The in-process ProxyCommand behind `swoosh ssh`: self-invoked via `current_exe()`, never typed.
+    /// Hidden from help and `tree` — it is plumbing, not a user verb (see `commands::tunnel_connect`).
+    #[command(hide = true)]
+    TunnelConnect(TunnelConnectCmd),
 }
 
 /// A verb that reaches a peer: it binds a transport and dials. Split from the local `contact` group,
@@ -101,6 +106,7 @@ enum Reach {
     Speed(SpeedCmd),
     Status(StatusCmd),
     Fetch(FetchCmd),
+    TunnelConnect(TunnelConnectCmd),
 }
 
 impl Command {
@@ -115,6 +121,7 @@ impl Command {
             Self::Adopt(cmd) => Verb::Adopt(cmd),
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
+            Self::TunnelConnect(cmd) => Verb::Reach(Reach::TunnelConnect(cmd)),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
             Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
@@ -152,7 +159,9 @@ impl Reach {
     /// ephemeral by default. An explicit `--key` overrides either (see [`identity::resolve`]).
     fn identity(&self) -> Identity {
         match self {
-            Self::Serve(_) => Identity::Persisted,
+            // `serve` must be reachable at a stable address; `tunnel-connect` must dial under swoosh's OWN
+            // key so the family gate proves the identity the membership badge was minted for. Both persist.
+            Self::Serve(_) | Self::TunnelConnect(_) => Identity::Persisted,
             Self::Ping(_) | Self::Speed(_) | Self::Status(_) | Self::Fetch(_) => {
                 Identity::Ephemeral
             }
@@ -169,6 +178,7 @@ impl Reach {
             Self::Speed(cmd) => &cmd.reach,
             Self::Status(cmd) => &cmd.reach,
             Self::Fetch(cmd) => &cmd.reach,
+            Self::TunnelConnect(cmd) => &cmd.reach,
         }
     }
 
@@ -190,6 +200,9 @@ impl Reach {
             Self::Speed(cmd) => cmd.run(node, contacts, transport).await,
             Self::Status(cmd) => cmd.run(node, contacts, transport).await,
             Self::Fetch(cmd) => cmd.run(node, contacts, transport).await,
+            // The peer is already a resolved raw key and the badge travels on the command, so it needs
+            // neither the address book nor the transport label.
+            Self::TunnelConnect(cmd) => cmd.run(node).await,
         }
     }
 }

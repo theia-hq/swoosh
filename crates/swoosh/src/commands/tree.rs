@@ -24,6 +24,11 @@ impl TreeCmd {
 /// Recurse the subcommands of `cmd`, printing each name and its trimmed `about` at two-space depth.
 fn walk(cmd: &Command, depth: usize) {
     for sub in cmd.get_subcommands() {
+        // Hidden subcommands (the ssh ProxyCommand `tunnel-connect`) are plumbing, not user verbs: keep
+        // them out of the tree exactly as `--help` does, so the printed surface matches CLI-DESIGN.
+        if sub.is_hide_set() {
+            continue;
+        }
         let about = sub
             .get_about()
             .map(|about| about.to_string())

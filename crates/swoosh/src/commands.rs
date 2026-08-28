@@ -12,3 +12,4 @@ pub mod speed;
 pub mod ssh;
 pub mod status;
 pub mod tree;
+pub mod tunnel_connect;
