@@ -9,12 +9,13 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # theia
-bifrost = { path = "../bifrost/crates/bifrost" }
-bifrost-core = { path = "../bifrost/crates/bifrost-core" }
-bifrost-iroh = { path = "../bifrost/crates/transports/bifrost-iroh" }
-bifrost-mdns = { path = "../bifrost/crates/bifrost-mdns" }
-bifrost-mem = { path = "../bifrost/crates/transports/bifrost-mem" }
-bifrost-quirk = { path = "../bifrost/crates/transports/bifrost-quirk" }
+bifrost = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-core = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-quirk = { git = "https://github.com/theia-hq/bifrost" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam" }
 diag = { path = "crates/diag" }
 
 clap = { version = "4", features = ["derive", "env"] }

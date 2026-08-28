@@ -17,7 +17,7 @@ bifrost-iroh.workspace = true
 bifrost-mdns.workspace = true
 bifrost-quirk.workspace = true
 diag.workspace = true
-tightbeam = { path = "../../../tightbeam" }
+tightbeam.workspace = true
 
 clap.workspace = true
 data-encoding.workspace = true
