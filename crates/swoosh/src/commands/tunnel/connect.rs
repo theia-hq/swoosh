@@ -16,8 +16,10 @@ use crate::transport::ReachArgs;
 #[derive(Debug, Args)]
 pub struct TunnelConnectCmd {
     /// who to reach: a raw node id, or a `sheer:` capability link
+    // Field is `node`, not `peer`: the clap arg id derives from the field name, so a `peer` field would
+    // collide with the `--peer` dial hint in the flattened `ReachArgs`. `value_name` keeps usage as `<peer>`.
     #[arg(value_name = "peer")]
-    pub peer: Target,
+    pub node: Target,
     /// local port to forward to the peer
     #[arg(long, value_name = "port")]
     pub to: u16,
@@ -35,7 +37,7 @@ impl TunnelConnectCmd {
     /// Bind the local port and forward each connection to the peer's service over the overlay.
     pub async fn run<T: Transport, D: Discovery>(self, node: &Node<T, D>) -> eyre::Result<()> {
         ConnectCmd {
-            target: self.peer,
+            target: self.node,
             to: Some(self.to),
             stdio: false,
             service: self.service,
