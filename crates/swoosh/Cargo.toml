@@ -17,6 +17,7 @@ bifrost-iroh.workspace = true
 bifrost-mdns.workspace = true
 bifrost-quirk.workspace = true
 diag.workspace = true
+nauthy.workspace = true
 tightbeam.workspace = true
 
 clap.workspace = true

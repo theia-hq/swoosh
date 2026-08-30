@@ -26,7 +26,7 @@ pub struct AdoptCmd {
 impl AdoptCmd {
     /// Parse the authkey, write the child seed as this node's identity, and record the signet anchor.
     pub async fn run(self, key: Option<&Path>) -> eyre::Result<()> {
-        let (mut seed, signet) = authkey::parse(&self.authkey)?;
+        let (mut seed, signet, badge) = authkey::parse(&self.authkey)?;
         // Compute the adopted node id before wiping the seed, for the confirmation line.
         let node = NodeId::from_ed25519_secret(&seed);
         // Become the derived device: write the child seed as the tightbeam identity this machine exposes
@@ -35,12 +35,24 @@ impl AdoptCmd {
         seed.zeroize();
         // Trust the signet: `expose`'s default gate admits its devices (badges) and delegates (slips).
         tightbeam::config::write_anchor(signet).await?;
+        // Store the membership badge the signet signed for this device, so when this machine DIALS a
+        // family-gated node it presents its own proof of membership. A two-field authkey (no badge) leaves
+        // this unset; such a device can still expose and be reached, it just cannot prove membership when
+        // dialing out.
+        if let Some(badge) = &badge {
+            tightbeam::config::write_badge(badge).await?;
+        }
 
         println!("adopted this machine as {}  [mine]", node.short());
         println!(
             "trusting signet {} \u{2014} `tightbeam expose` now admits its devices and delegates.",
             signet.short()
         );
+        if badge.is_some() {
+            println!(
+                "carrying a membership badge \u{2014} this machine can prove it is yours when it dials out."
+            );
+        }
         Ok(())
     }
 }

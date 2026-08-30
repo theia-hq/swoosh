@@ -47,6 +47,35 @@ impl Secret {
         NodeId::from_ed25519_secret(&self.0)
     }
 
+    /// The cap-signing identity rooted at this secret: the same key, read as a nauthy [`Identity`] that
+    /// can mint and verify capabilities. Borrows, so the secret stays owned here and zeroizes on drop.
+    ///
+    /// This is what lets the signet holder SELF-SIGN a membership badge when it dials a family-gated node
+    /// (`mint` signs a device's badge; `swoosh ssh` self-signs its own): the badge roots at this key, the
+    /// same key the dial binds under, so the gate's device-binding matches. Mirrors tightbeam's
+    /// `Secret::cap_identity`, the exposer side of the same seam.
+    pub fn cap_identity(&self) -> eyre::Result<nauthy::Identity> {
+        Ok(nauthy::Identity::from_secret(&self.0)?)
+    }
+
+    /// Self-sign a membership badge for THIS identity: a short-lived `theia:member` cap rooted at this key
+    /// and bound to this key's own node id. The signet holder is the one party always entitled to a badge
+    /// (it holds the root), so when it dials a family-gated node it mints one in-process rather than
+    /// carrying a stored one. Short-lived because it is re-minted per dial; the binding makes it useless if
+    /// intercepted off another key. Returns the `sheer:` link to present.
+    pub fn member_badge(&self) -> eyre::Result<String> {
+        use core::time::Duration;
+
+        // Minted fresh each dial, so a few minutes is ample and bounds a leaked in-flight badge.
+        let ttl = Duration::from_secs(5 * 60);
+        let badge = self
+            .cap_identity()?
+            .mint_member(self.node_id(), nauthy::expires_in(ttl))?
+            .seal()?
+            .link()?;
+        Ok(badge)
+    }
+
     /// The seed for a device identity derived from this key (the signet) under `label`: the secret a
     /// machine ADOPTS to become that device, and the payload of a `mint`ed authkey. Borrows, so this root
     /// stays owned here and zeroizes on drop; the raw root never leaves the wrapper, only the derived

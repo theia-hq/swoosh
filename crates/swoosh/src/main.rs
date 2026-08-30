@@ -193,6 +193,7 @@ impl Reach {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
+        self_badge: Option<String>,
     ) -> eyre::Result<()> {
         match self {
             Self::Serve(cmd) => cmd.run(node).await,
@@ -200,9 +201,22 @@ impl Reach {
             Self::Speed(cmd) => cmd.run(node, contacts, transport).await,
             Self::Status(cmd) => cmd.run(node, contacts, transport).await,
             Self::Fetch(cmd) => cmd.run(node, contacts, transport).await,
-            // The peer is already a resolved raw key and the badge travels on the command, so it needs
-            // neither the address book nor the transport label.
-            Self::TunnelConnect(cmd) => cmd.run(node).await,
+            // The peer is already a resolved raw key, so no address book or transport label is needed; the
+            // `self_badge` (this identity's self-signed membership badge) is the signet-holder's proof to
+            // present, resolved against any stored badge inside the command.
+            Self::TunnelConnect(cmd) => cmd.run(node, self_badge).await,
+        }
+    }
+
+    /// The self-signed membership badge to present when dialing, if this verb dials a family-gated node.
+    /// Only `tunnel-connect` (the `swoosh ssh` bridge) presents one: the signet holder self-signs a badge
+    /// bound to its own key so it proves membership without carrying a stored one. Computed here, in the
+    /// composition root, because it needs the resolved secret before the transport consumes it. Every other
+    /// reach verb presents nothing, so returns `None`.
+    fn self_badge(&self, secret: &identity::Secret) -> eyre::Result<Option<String>> {
+        match self {
+            Self::TunnelConnect(_) => Ok(Some(secret.member_badge()?)),
+            _ => Ok(None),
         }
     }
 }
@@ -287,6 +301,10 @@ async fn run() -> eyre::Result<()> {
     // the backend and the dial hints are read off the chosen reaching verb, not a root global.
     let transport = reach.args().transport;
     let peers = reach.args().peer.clone();
+    // Sign the membership badge (only `tunnel-connect` produces one) BEFORE the secret is consumed by the
+    // transport bind: it self-signs against the same key the dial then binds under, so the badge's device
+    // binding matches the identity the far gate proves.
+    let self_badge = reach.self_badge(&secret)?;
     match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
         // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
@@ -296,7 +314,7 @@ async fn run() -> eyre::Result<()> {
             let endpoint = bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?;
             let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
-            reach.run(&node, &contacts, transport).await
+            reach.run(&node, &contacts, transport, self_badge).await
         }
         // quirk is direct-only with no internal discovery, so the composed discovery is its only way
         // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
@@ -304,7 +322,7 @@ async fn run() -> eyre::Result<()> {
             let endpoint = bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?;
             let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
-            reach.run(&node, &contacts, transport).await
+            reach.run(&node, &contacts, transport, self_badge).await
         }
     }
 }
