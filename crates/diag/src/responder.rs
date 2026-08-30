@@ -41,7 +41,7 @@ impl Responder {
 /// Answer one inbound diagnostic stream by dispatching on its opening request. Ping keeps the stream
 /// open and echoes every probe on it (the client sends its whole run over one stream); a speed request
 /// is one transfer per stream.
-async fn answer<W, R>(mut writer: W, mut reader: R) -> Result<(), ProtocolError>
+pub async fn answer<W, R>(mut writer: W, mut reader: R) -> Result<(), ProtocolError>
 where
     W: io::AsyncWrite + Unpin,
     R: io::AsyncRead + Unpin,

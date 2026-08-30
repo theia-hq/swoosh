@@ -135,6 +135,11 @@ impl SshCmd {
 /// occurrence of an option, so swoosh's intent wins over a user's trailing `-o`. `HostKeyAlias` keys the
 /// pin on the node id, not the mutable placeholder host; the `UserKnownHostsFile` path is double-quoted so
 /// an install dir with a space stays one filename to ssh.
+// ssh's argv has this many genuinely distinct, independent inputs (the proxy bridge, the resolved identity,
+// the service, an optional cap link, the host placeholder, the known_hosts path, and the passthrough args);
+// bundling them into a struct would only rename the same fields without making any illegal state
+// unrepresentable, so keep the flat signature of a pure argv-assembler.
+#[allow(clippy::too_many_arguments)]
 fn ssh_argv(
     proxy: &str,
     key: &str,

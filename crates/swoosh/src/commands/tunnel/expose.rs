@@ -8,8 +8,12 @@
 //! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb: no tightbeam
 //! `--offline`/`--bind-addr` here, so the surface stays swoosh's.
 
+use std::sync::Arc;
+
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
+use futures::FutureExt as _;
+use tightbeam::tunnel::{Handler, Registry, ServeFn};
 use tightbeam::{Brand, ExposeCmd};
 
 use crate::transport::ReachArgs;
@@ -58,7 +62,27 @@ impl TunnelExposeCmd {
             public: self.public,
             quiet: self.quiet,
         }
-        .run(node, host_seed, signet, BRAND)
+        .run(
+            node,
+            host_seed,
+            signet,
+            BRAND,
+            Registry::new().with("diag", diag_handler()),
+        )
         .await
     }
+}
+
+/// The `diag:` handler swoosh injects into the exposer: reach diagnostics (ping/speed) behind the node's
+/// gate. It answers one diagnostic request over the admitted stream; it holds no auth of its own to protect
+/// (unlike a keyless shell), so it needs no gate beyond the one the tunnel already applied.
+fn diag_handler() -> Handler {
+    let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
+        async move {
+            diag::answer(&mut writer, &mut reader).await?;
+            Ok(())
+        }
+        .boxed()
+    });
+    Handler::open(serve)
 }

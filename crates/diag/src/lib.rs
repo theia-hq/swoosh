@@ -17,5 +17,5 @@ pub mod speed;
 mod payload;
 
 pub use ping::{Ping, PingReport};
-pub use responder::Responder;
+pub use responder::{Responder, answer};
 pub use speed::{Limit, Mode, Progress, SpeedReport, Speedtest, Throughput};
