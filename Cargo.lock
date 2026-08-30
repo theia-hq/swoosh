@@ -2703,7 +2703,6 @@ dependencies = [
 name = "nauthy"
 version = "0.0.0"
 dependencies = [
- "bifrost-core",
  "biscuit-auth",
  "data-encoding",
  "thiserror 2.0.20",

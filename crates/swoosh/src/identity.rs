@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
 use eyre::eyre;
+use tightbeam::identity::AsVerifyKey as _;
 use zeroize::{Zeroize as _, ZeroizeOnDrop};
 
 /// The ed25519 secret key a verb binds under. Wraps the raw bytes so they zeroize on drop and never
@@ -72,7 +73,7 @@ impl Secret {
         let ttl = Duration::from_secs(5 * 60);
         let badge = self
             .cap_identity()?
-            .mint_member(self.node_id(), nauthy::expires_in(ttl))?
+            .mint_member(self.node_id().verify_key(), nauthy::expires_in(ttl))?
             .seal()?
             .link()?;
         Ok(badge)
