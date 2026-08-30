@@ -360,7 +360,7 @@ async fn run() -> eyre::Result<()> {
         // not return on success.
         Verb::Ssh(cmd) => {
             let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
-            return cmd.run(store.contacts());
+            return cmd.run(store.contacts(), cli.key.as_deref());
         }
         Verb::Reach(reach) => reach,
     };
