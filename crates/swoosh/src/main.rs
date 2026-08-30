@@ -32,15 +32,13 @@ mod reach;
 mod transport;
 
 use commands::adopt::AdoptCmd;
-use commands::attenuate::AttenuateCmd;
 use commands::contact::ContactCmd;
 use commands::fetch::FetchCmd;
+use commands::grant::GrantCmd;
 use commands::identity::IdentityCmd;
 use commands::mint::MintCmd;
 use commands::ping::PingCmd;
-use commands::revoke::RevokeCmd;
 use commands::serve::ServeCmd;
-use commands::share::ShareCmd;
 use commands::speed::SpeedCmd;
 use commands::ssh::SshCmd;
 use commands::status::StatusCmd;
@@ -86,12 +84,6 @@ enum Command {
     /// Expose a local service to peers, or bind a peer's exposed service to a local port.
     #[command(subcommand)]
     Tunnel(TunnelCmd),
-    /// Mint a `sheer:` capability link granting one service, expiring, attenuable, delegable.
-    Share(ShareCmd),
-    /// Narrow an existing `sheer:` link offline before handing it on.
-    Attenuate(AttenuateCmd),
-    /// Revoke a `sheer:` link so this node refuses it at once, without waiting for expiry.
-    Revoke(RevokeCmd),
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
     Contact(ContactCmd),
@@ -103,6 +95,9 @@ enum Command {
     Adopt(AdoptCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(SshCmd),
+    /// Mint, narrow, or revoke a `sheer:` capability link.
+    #[command(subcommand)]
+    Grant(GrantCmd),
     /// Print this command tree (spec vs binary).
     Tree(TreeCmd),
     /// The in-process ProxyCommand behind `swoosh ssh`: self-invoked via `current_exe()`, never typed.
@@ -138,9 +133,7 @@ impl Command {
             Self::Adopt(cmd) => Verb::Adopt(cmd),
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
-            Self::Share(cmd) => Verb::Share(cmd),
-            Self::Attenuate(cmd) => Verb::Attenuate(cmd),
-            Self::Revoke(cmd) => Verb::Revoke(cmd),
+            Self::Grant(cmd) => Verb::Grant(cmd),
             Self::TunnelConnect(cmd) => Verb::Reach(Reach::TunnelConnect(cmd)),
             Self::Tunnel(cmd) => Verb::Reach(Reach::Tunnel(cmd)),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
@@ -170,12 +163,9 @@ enum Verb {
     Ssh(SshCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(TreeCmd),
-    /// Mints a `sheer:` capability link; signs with the persisted key, binds no transport and no store.
-    Share(ShareCmd),
-    /// Narrows a `sheer:` link offline; needs no identity, transport, or store.
-    Attenuate(AttenuateCmd),
-    /// Revokes a `sheer:` link into the local denylist; needs no identity, transport, or store.
-    Revoke(RevokeCmd),
+    /// Mints, narrows, or revokes a `sheer:` capability link. `share` signs with the persisted key;
+    /// `attenuate` and `revoke` are wholly offline. No leaf binds a transport or reads the address book.
+    Grant(GrantCmd),
     /// Reaches a peer; binds a transport.
     Reach(Reach),
 }
@@ -355,11 +345,16 @@ async fn run() -> eyre::Result<()> {
         // Provisions this machine from an authkey (writes the tightbeam identity + signet). Needs only the
         // key path; binds no transport and touches no address book.
         Verb::Adopt(cmd) => return cmd.run(cli.key.as_deref()).await,
-        // Cap verbs: `share` signs a link with the persisted key; `attenuate`/`revoke` are wholly offline.
-        // None binds a transport or reads the address book, so they dispatch here beside the local verbs.
-        Verb::Share(cmd) => return cmd.run(cli.key.as_deref()).await,
-        Verb::Attenuate(cmd) => return cmd.run(),
-        Verb::Revoke(cmd) => return cmd.run().await,
+        // The `grant` group: `share` signs a link with the persisted key; `attenuate`/`revoke` are wholly
+        // offline. No leaf binds a transport or reads the address book, so the group dispatches here beside
+        // the local verbs rather than falling through to the reach path.
+        Verb::Grant(cmd) => {
+            return match cmd {
+                GrantCmd::Share(cmd) => cmd.run(cli.key.as_deref()).await,
+                GrantCmd::Attenuate(cmd) => cmd.run(),
+                GrantCmd::Revoke(cmd) => cmd.run().await,
+            };
+        }
         // A launcher: read the store to resolve the peer, then hand off to the system `ssh` (which runs
         // tightbeam as its `ProxyCommand`). swoosh binds no transport here; on unix `run` execs and does
         // not return on success.
@@ -426,5 +421,29 @@ fn contacts_path(key: Option<&std::path::Path>) -> eyre::Result<PathBuf> {
     match key.and_then(std::path::Path::parent) {
         Some(dir) => Ok(dir.join("contacts.toml")),
         None => Ok(contacts::default_path()?),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    /// The cap verbs live ONLY under `grant`, never as flat top-level commands: `swoosh grant share`
+    /// resolves, and a bare `swoosh share` is an unknown command, not a leaf.
+    #[test]
+    fn cap_verbs_resolve_under_grant_not_the_top_level() {
+        let cli =
+            Cli::try_parse_from(["swoosh", "grant", "share", "ssh"]).expect("grant share parses");
+        assert!(matches!(
+            cli.command,
+            Some(Command::Grant(GrantCmd::Share(_)))
+        ));
+
+        // The bare verbs are gone from the top level; clap rejects them as unknown subcommands.
+        assert!(Cli::try_parse_from(["swoosh", "share", "ssh"]).is_err());
+        assert!(Cli::try_parse_from(["swoosh", "attenuate", "sheer:x"]).is_err());
+        assert!(Cli::try_parse_from(["swoosh", "revoke", "sheer:x"]).is_err());
     }
 }

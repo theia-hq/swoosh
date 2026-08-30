@@ -1,4 +1,4 @@
-//! `swoosh attenuate <link>`: narrow an existing `sheer:` link, offline, before handing it on.
+//! `swoosh grant attenuate <link>`: narrow an existing `sheer:` link, offline, before handing it on.
 //!
 //! A local verb: no identity, no transport, no network. Wraps tightbeam's [`AttenuateCmd`] in-process; it
 //! only ever adds constraints, so the result is never broader than the input. A holder uses it to hand a
@@ -8,7 +8,10 @@ use clap::Args;
 use tightbeam::AttenuateCmd as Inner;
 
 /// Narrow an existing `sheer:` link offline before handing it on.
+// `group(skip)`: a pass-through wrapper over tightbeam's identically-named `AttenuateCmd`, so its implicit
+// arg group would collide with the inner's. It groups nothing, so skipping clears the collision cleanly.
 #[derive(Debug, Args)]
+#[group(skip)]
 pub struct AttenuateCmd {
     #[command(flatten)]
     inner: Inner,

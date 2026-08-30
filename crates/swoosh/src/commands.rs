@@ -5,6 +5,7 @@ pub mod adopt;
 pub mod attenuate;
 pub mod contact;
 pub mod fetch;
+pub mod grant;
 pub mod identity;
 pub mod mint;
 pub mod ping;

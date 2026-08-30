@@ -16,6 +16,10 @@ swoosh status alice          # is the link direct, or relayed?
 Powered by [bifrost](https://github.com/theia-hq/bifrost) for the keyed connection and
 [tightbeam](https://github.com/theia-hq/tightbeam) for the tunnels behind `ssh` and `fetch`.
 
+**The name.** *swoosh* is the sound of something sent across: this is the one command you type to
+reach a machine by its key and do things with it, from measuring the link to opening a shell to
+sending a file.
+
 > Experimental. The CLI, wire protocol, and identity format will change; not ready for production use.
 
 ## Why a key instead of an address
@@ -31,7 +35,7 @@ On one machine, be reachable and copy the printed key:
 
 ```sh
 $ swoosh serve
-swoosh ready — reachable at:
+swoosh ready. Reachable at:
 
     bf01hy…                     (share this key)
 
@@ -93,8 +97,26 @@ Fetch a URL through a node you name, handed out as a plain local URL. `swoosh fe
 https://example.com/big.iso --via usa` prints `http://127.0.0.1:PORT/`; whatever pulls from that (curl,
 xget) is served by `usa`'s machine fetching the origin and streaming it back, `Range` intact so a
 resumable download resumes. The exit is a node *you* run (your own overlay HTTP proxy, no vendor): expose
-it there with `tightbeam expose fetch=fetch: --gate cap` and hand out a `sheer:` cap to `--via`. Scoped to
+it there with `tightbeam expose fetch=fetch:` (gated to your signet) and hand out a `sheer:` cap to `--via`. Scoped to
 the one origin you name, not an open proxy.
+
+### `swoosh tunnel`
+
+Expose a local service to peers, or bind a peer's exposed service to a local port (the `ssh -L` shape,
+but pubkey-addressed and p2p).
+
+- `tunnel expose <name=addr>...` publish local services under this node's key, gated by your signet.
+- `tunnel connect <peer> --to <port>` reach a peer's exposed service and bind it to a local port.
+
+### `swoosh grant`
+
+Mint, narrow, or revoke a `sheer:` capability link: a signed, expiring grant to one exposed service,
+rooted at this node's key. It carries its own authority, so a holder connects with no allowlist to keep in
+sync, and it is minted, narrowed, and revoked entirely offline.
+
+- `grant share <service>` mint a link granting one service, expiring, attenuable, delegable.
+- `grant attenuate <link>` narrow an existing link (only ever adds constraints), before handing it on.
+- `grant revoke <link>` refuse a link at this node at once, without waiting for its expiry.
 
 ### `swoosh identity`
 
@@ -103,6 +125,13 @@ transport, it just resolves the key `--key`/`SWOOSH_KEY` points at (or the defau
 node bound under it will present. Use it to provision an identity ahead of time: mint a key here, save
 its NodeId as a contact, then hand the key file to the machine that will adopt it (a CI runner, say) so
 you can reach it by a name you already know.
+
+### `swoosh mint` and `swoosh adopt`
+
+Provision a second machine under an identity you control, without copying a key by hand. On the machine
+that holds your signet, `swoosh mint <label>` derives a device identity and emits a one-time authkey; on
+the new machine, `swoosh adopt <authkey>` becomes that device identity and trusts the signet that minted
+it. The two ends of one handshake: use them to bring a laptop or a CI runner onto your overlay.
 
 ### `swoosh contact`: name your peers
 
@@ -153,32 +182,34 @@ find each other automatically. Across networks, feed a peer the address its `swo
 ## Roadmap
 
 `swoosh` is one umbrella for doing things with a machine addressed by its key. Every planned verb is the
-same primitive underneath — a cap-gated byte-stream to a key — with a thin front door per job, so the
+same primitive underneath (a cap-gated byte-stream to a key) with a thin front door per job, so the
 surface stays broad while the core stays one thing. Shipped today is ticked; the rest is planned and
 lands as it is built.
 
-- [x] `serve` — be online, answer reach diagnostics under a persisted key
-- [x] `ping` — round-trip time to a peer, `ping(8)`-shaped
-- [x] `speed` — throughput to a peer, `iperf`-shaped
-- [x] `status` — connection path to a peer: direct vs relayed
-- [x] `contact` — a local, self-sovereign address book (`add` / `ls` / `rm`), petname resolution in every
+- [x] `serve`: be online, answer reach diagnostics under a persisted key
+- [x] `ping`: round-trip time to a peer, `ping(8)`-shaped
+- [x] `speed`: throughput to a peer, `iperf`-shaped
+- [x] `status`: connection path to a peer: direct vs relayed
+- [x] `contact`: a local, self-sovereign address book (`add` / `ls` / `rm`), petname resolution in every
   reach verb, several devices under one name
-- [x] `tree` — print the command tree, read from the parser
-- [x] `identity` — print this machine's key, minting one if absent, to provision a node ahead of time
-- [x] `ssh` — open an ssh session to a peer over the overlay (`swoosh ssh alice/desk`)
-- [ ] `send` / `recv` — push a file or directory to a peer, verified end to end
-- [ ] `beam` — one verb for "get this over there": a file, piped stdin, the clipboard, or a fetched URL's
-  result, delivered to a key
-- [ ] `tunnel expose` / `tunnel connect` — expose a local service under a name; reach a peer's service on
+- [x] `tree`: print the command tree, read from the parser
+- [x] `identity`: print this machine's key, minting one if absent, to provision a node ahead of time
+- [x] `mint` / `adopt`: provision a second machine under an identity you control, via a one-time authkey
+- [x] `ssh`: open an ssh session to a peer over the overlay (`swoosh ssh alice/desk`)
+- [x] `tunnel expose` / `tunnel connect`: expose a local service under a name; reach a peer's service on
   a local port (with `--stdio` for `ssh` `ProxyCommand`)
-- [ ] `ssh config` — emit `ssh` `Host` aliases for devices that advertise ssh (waits on advertised services)
-- [ ] `share` — mint a `sheer:` capability link (a signed, expiring, attenuable, delegable grant with no
-  server) over a tunnel, a file, or a directory
-- [ ] `attenuate` — narrow a capability link offline and print a tighter one
-- [ ] `cluster` + `share cluster` — name a local set of machines; share the whole group as one capability
-- [x] `fetch` — mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
-- [ ] `run` — run code at a peer addressed by its key (the north star)
-- [ ] MagicDNS `.theia` names — type `ssh desk.alice` or `http://blog.alice.theia` into any app
+- [x] `grant share`: mint a `sheer:` capability link (a signed, expiring, attenuable, delegable grant with
+  no server) to an exposed service
+- [x] `grant attenuate`: narrow a capability link offline and print a tighter one
+- [x] `grant revoke`: refuse a capability link at this node at once, without waiting for its expiry
+- [x] `fetch`: mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
+- [ ] `send` / `recv`: push a file or directory to a peer, verified end to end
+- [ ] `beam`: one verb for "get this over there": a file, piped stdin, the clipboard, or a fetched URL's
+  result, delivered to a key
+- [ ] `ssh config`: emit `ssh` `Host` aliases for devices that advertise ssh (waits on advertised services)
+- [ ] `cluster` + `grant share cluster`: name a local set of machines; share the whole group as one capability
+- [ ] `run`: run code at a peer addressed by its key (the north star)
+- [ ] MagicDNS `.theia` names: type `ssh desk.alice` or `http://blog.alice.theia` into any app
 
 ## Layout
 

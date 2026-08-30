@@ -1,4 +1,4 @@
-//! `swoosh share <service>`: mint a `sheer:` capability link for one of this node's services.
+//! `swoosh grant share <service>`: mint a `sheer:` capability link for one of this node's services.
 //!
 //! A local verb: it signs with this node's persisted identity (the key an exposed service roots at) but
 //! binds no transport and reaches nobody. Wraps tightbeam's [`ShareCmd`] in-process, so the link a peer
@@ -13,7 +13,11 @@ use tightbeam::ShareCmd as Inner;
 use crate::identity::{self, Identity};
 
 /// Mint a `sheer:` capability link granting one service, expiring, attenuable, delegable.
+// `group(skip)`: this wrapper only re-parents tightbeam's identically-named `ShareCmd`, so its implicit
+// clap arg group would collide with the inner's (both default to the ident `ShareCmd`). It groups nothing
+// of its own, so skipping its group is both correct and what clears the collision.
 #[derive(Debug, Args)]
+#[group(skip)]
 pub struct ShareCmd {
     #[command(flatten)]
     inner: Inner,
