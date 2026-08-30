@@ -38,7 +38,7 @@ impl AdoptCmd {
 
         println!("adopted this machine as {}  [mine]", node.short());
         println!(
-            "trusting signet {} \u{2014} `tightbeam expose` now admits its members and delegates.",
+            "trusting signet {}: `tightbeam expose` now admits its members and delegates.",
             signet.short()
         );
         Ok(())
