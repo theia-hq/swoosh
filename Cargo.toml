@@ -9,16 +9,14 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 # theia
-# Pinned to a rev for reproducible releases (see tightbeam/Cargo.toml). Root .cargo/config.toml [patch]
-# overrides these with local paths for dev; bump on release with `cargo update -p <crate>`.
-bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "ba4fa897c80eae95ebdf874940dca2aac47100d7" }
-bifrost-core = { git = "https://github.com/theia-hq/bifrost", rev = "ba4fa897c80eae95ebdf874940dca2aac47100d7" }
-bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "ba4fa897c80eae95ebdf874940dca2aac47100d7" }
-bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "ba4fa897c80eae95ebdf874940dca2aac47100d7" }
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "ba4fa897c80eae95ebdf874940dca2aac47100d7" }
-bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "ba4fa897c80eae95ebdf874940dca2aac47100d7" }
-nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "1c1a15b43789a50925d06361d7a8a4cc856abedd" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "64129c25279597212a1f1ac008b8680d9e72c7f2" }
+bifrost = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-core = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost" }
+bifrost-quirk = { git = "https://github.com/theia-hq/bifrost" }
+nauthy = { git = "https://github.com/theia-hq/nauthy" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam" }
 diag = { path = "crates/diag" }
 
 clap = { version = "4", features = ["derive", "env"] }
