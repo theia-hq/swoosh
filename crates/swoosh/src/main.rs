@@ -140,7 +140,7 @@ enum Verb {
     /// Derives a device identity and records `me/<label>`; needs the key (the signet) and the store, no
     /// transport.
     Mint(MintCmd),
-    /// Adopts an authkey: writes the device identity + signet anchor; needs the key path, no store or
+    /// Adopts an authkey: writes the device identity + trusted signet; needs the key path, no store or
     /// transport.
     Adopt(AdoptCmd),
     /// Reads the address book to resolve a peer, then execs the system `ssh` over the overlay. A launcher:
@@ -272,7 +272,7 @@ async fn run() -> eyre::Result<()> {
             let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
             return cmd.run(store, cli.key.as_deref()).await;
         }
-        // Provisions this machine from an authkey (writes the tightbeam identity + anchor). Needs only the
+        // Provisions this machine from an authkey (writes the tightbeam identity + signet). Needs only the
         // key path; binds no transport and touches no address book.
         Verb::Adopt(cmd) => return cmd.run(cli.key.as_deref()).await,
         // A launcher: read the store to resolve the peer, then hand off to the system `ssh` (which runs

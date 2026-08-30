@@ -1,11 +1,11 @@
 //! `swoosh adopt <authkey>`: become the derived identity and trust the signet that minted it.
 //!
 //! The other half of `mint`: on the MACHINE (a CI runner, a new laptop), `adopt` writes the authkey's
-//! child seed as this node's identity, so it comes up AS the derived device, and records the signet as
-//! the anchor its gate trusts, so `tightbeam expose` admits the owner's own devices and anyone they
-//! delegate to. A local verb: no transport, no reach. It provisions the tightbeam node this machine
-//! exposes under (honoring `TIGHTBEAM_KEY` / `TIGHTBEAM_ANCHOR`, or the default with `--key`), which is
-//! the identity `expose` binds and the anchor `expose` reads.
+//! child seed as this node's identity, so it comes up AS the derived device, and records the signet its
+//! gate trusts, so `tightbeam expose` admits the owner's own devices and anyone they delegate to. A local
+//! verb: no transport, no reach. It provisions the tightbeam node this machine exposes under (honoring
+//! `TIGHTBEAM_KEY` / `TIGHTBEAM_SIGNET`, or the default with `--key`), which is the identity `expose` binds
+//! and the signet `expose` reads.
 
 use std::path::Path;
 
@@ -24,7 +24,7 @@ pub struct AdoptCmd {
 }
 
 impl AdoptCmd {
-    /// Parse the authkey, write the child seed as this node's identity, and record the signet anchor.
+    /// Parse the authkey, write the child seed as this node's identity, and record the trusted signet.
     pub async fn run(self, key: Option<&Path>) -> eyre::Result<()> {
         let (mut seed, signet) = authkey::parse(&self.authkey)?;
         // Compute the adopted node id before wiping the seed, for the confirmation line.
@@ -34,7 +34,7 @@ impl AdoptCmd {
         tightbeam::identity::write(&seed, key).await?;
         seed.zeroize();
         // Trust the signet: `expose`'s default gate admits its devices (members) and delegates (slips).
-        tightbeam::config::write_anchor(signet).await?;
+        tightbeam::config::write_signet(signet).await?;
 
         println!("adopted this machine as {}  [mine]", node.short());
         println!(
