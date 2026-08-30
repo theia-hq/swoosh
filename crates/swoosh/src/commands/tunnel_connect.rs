@@ -29,6 +29,10 @@ pub struct TunnelConnectCmd {
     /// present a membership badge or capability link to a family/cap-gated host
     #[arg(long, value_name = "link")]
     pub present: Option<String>,
+    /// pipe the service over stdin/stdout — the only mode this leaf runs. Accepted (and required by the
+    /// `swoosh ssh` ProxyCommand ABI) but always true; hidden, since a user never types it.
+    #[arg(long, hide = true)]
+    pub stdio: bool,
     #[command(flatten)]
     pub reach: transport::ReachArgs,
 }
