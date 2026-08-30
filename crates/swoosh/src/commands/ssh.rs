@@ -18,6 +18,26 @@
 //! `ssh` is spec'd as a group that will also own `ssh config` (emit `~/.ssh/config` blocks) once contacts
 //! carry advertised-service metadata; that leaf is HELD and deliberately not built. This one shipping op
 //! takes the peer positionally, the shape CLI-DESIGN reserves for it.
+//!
+//! ## Host-key pinning
+//!
+//! The far sshd derives its host key from its node secret (a KDF distinct from the node key, so no
+//! cross-protocol reuse), so a client holding only the peer's public node id CANNOT compute that host key
+//! in advance — there is nothing to pre-seed. The host-key check here is therefore not the primary auth:
+//! the OVERLAY already authenticated the peer end to end (raw-public-key TLS to the exact node id, an
+//! in-process pipe with no seam a MITM could enter), so ssh's own check is self-consistency bookkeeping
+//! on top of that. This launcher binds only the authenticated default transport (it exposes no
+//! `--transport`), so "first use" always rides the authenticated tunnel.
+//!
+//! So rather than pollute the user's global `~/.ssh/known_hosts` and prompt an interactive TOFU keyed on a
+//! mutable petname, `swoosh ssh` keeps its OWN known_hosts (`~/.config/swoosh/known_hosts`), keyed on the
+//! immutable node id via `HostKeyAlias`, with `StrictHostKeyChecking=accept-new`: pin on first sight (safe,
+//! because first sight is over the authenticated overlay), reject a later key change. `accept-new` not
+//! `yes`, precisely because the derived key is not client-computable; node id not petname, so a rename
+//! never orphans a pin. The private file is `0600` in a `0700` dir, and a loose one is refused rather than
+//! trusted.
+
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 
@@ -64,37 +84,120 @@ impl SshCmd {
             eyre::bail!("could not resolve {}: no known device", self.peer);
         };
         let host = self.peer.to_string();
+        let key = first.node.to_string();
+
+        // swoosh keeps its own host-key book (see module docs): prepare the private file, and on the first
+        // sight of this node id print the id being pinned, so a human can eyeball it against an out-of-band
+        // value. First sight is over the already-authenticated overlay, so this is a record, not blind TOFU.
+        let known_hosts = known_hosts_path()?;
+        prepare_known_hosts(&known_hosts)?;
+        if !already_pinned(&known_hosts, &key) {
+            eprintln!("swoosh: pinning {key} on first connection (over the authenticated overlay)");
+        }
+
         let proxy = self_invocation()?;
-        let argv = ssh_argv(
-            &proxy,
-            &first.node.to_string(),
-            &self.service,
-            &host,
-            &self.args,
-        );
+        let argv = ssh_argv(&proxy, &key, &self.service, &host, &known_hosts, &self.args);
         exec_ssh(argv)
     }
 }
 
-/// The `ssh` argv for a resolved peer: `-o ProxyCommand=<recipe>`, a stable placeholder `host`, then the
-/// passthrough `args` verbatim.
+/// The `ssh` argv for a resolved peer: the `ProxyCommand` bridge, the private host-key pinning options, a
+/// stable placeholder `host`, then the passthrough `args` verbatim.
 ///
 /// Pure so it is unit-testable (the `exec` itself is not): given the shell-quoted `proxy` (this binary's
-/// own path, see [`self_invocation`]), the resolved `key`, the `service`, the placeholder `host`, and the
-/// user's trailing ssh `args`, it assembles the exact argv [`exec_ssh`] hands to `ssh`. The `ProxyCommand`
-/// value is `<self> tunnel-connect <key> --service <name> --stdio`: ssh runs it to bridge the overlay
-/// stream in-process, under swoosh's own identity, with no `tightbeam` binary and no `$PATH` lookup. ssh
-/// splits `ProxyCommand` on whitespace, so `proxy` is pre-quoted and the other tokens are whitespace-free
-/// (a `NodeId` is base32, the service is a single name). The passthrough args land after the host.
-fn ssh_argv(proxy: &str, key: &str, service: &str, host: &str, args: &[String]) -> Vec<String> {
+/// own path, see [`self_invocation`]), the resolved `key`, the `service`, the placeholder `host`, the
+/// private `known_hosts` path, and the user's trailing ssh `args`, it assembles the exact argv
+/// [`exec_ssh`] hands to `ssh`. The `ProxyCommand` value is `<self> tunnel-connect <key> --service <name>
+/// --stdio`: ssh runs it to bridge the overlay stream in-process, under swoosh's own identity, with no
+/// `tightbeam` binary and no `$PATH` lookup. ssh splits `ProxyCommand` on whitespace, so `proxy` is
+/// pre-quoted and the other tokens are whitespace-free (a `NodeId` is base32, the service is a single
+/// name).
+///
+/// The four host-key options (see the module docs) come BEFORE the passthrough args: ssh honors the first
+/// occurrence of an option, so swoosh's intent wins over a user's trailing `-o`. `HostKeyAlias` keys the
+/// pin on the node id, not the mutable placeholder host; the `UserKnownHostsFile` path is double-quoted so
+/// an install dir with a space stays one filename to ssh.
+fn ssh_argv(
+    proxy: &str,
+    key: &str,
+    service: &str,
+    host: &str,
+    known_hosts: &Path,
+    args: &[String],
+) -> Vec<String> {
     let proxy_command = format!("{proxy} tunnel-connect {key} --service {service} --stdio");
     let mut argv = vec![
         "-o".to_owned(),
         format!("ProxyCommand={proxy_command}"),
+        "-o".to_owned(),
+        format!("UserKnownHostsFile=\"{}\"", known_hosts.display()),
+        "-o".to_owned(),
+        "GlobalKnownHostsFile=/dev/null".to_owned(),
+        "-o".to_owned(),
+        "StrictHostKeyChecking=accept-new".to_owned(),
+        "-o".to_owned(),
+        format!("HostKeyAlias={key}"),
         host.to_owned(),
     ];
     argv.extend(args.iter().cloned());
     argv
+}
+
+/// swoosh's private known_hosts, `~/.config/swoosh/known_hosts`, beside the identity and address book.
+/// Isolated from the user's global `~/.ssh/known_hosts` so pins never pollute or collide with it.
+fn known_hosts_path() -> eyre::Result<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| eyre::eyre!("HOME is not set"))?;
+    Ok(Path::new(&home)
+        .join(".config")
+        .join("swoosh")
+        .join("known_hosts"))
+}
+
+/// Ensure the private known_hosts directory exists (`0700`) and refuse a file writable by group or other.
+///
+/// The file is a trust root: anyone who can write it can pre-seed a host-key pin (a silent MITM) or wedge a
+/// peer with a bogus "host key changed". So a loose file fails closed rather than being trusted. ssh itself
+/// creates the file `0600` on the first `accept-new` write; swoosh only guarantees the directory and vets
+/// an existing file.
+#[cfg(unix)]
+fn prepare_known_hosts(path: &Path) -> eyre::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.permissions().mode() & 0o022 != 0 {
+            eyre::bail!(
+                "{} is writable by group or other; refusing to trust it (chmod 600 it)",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn prepare_known_hosts(path: &Path) -> eyre::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    Ok(())
+}
+
+/// Whether `node_id` is already pinned in the private known_hosts (a line whose host field is the alias).
+/// Best-effort and only drives the one-time first-pin notice: an unreadable or absent file reads as "not
+/// pinned", so the notice prints once on the first successful connection.
+fn already_pinned(path: &Path, node_id: &str) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    text.lines().any(|line| {
+        line.split_whitespace()
+            .next()
+            .is_some_and(|field| field.split(',').any(|host| host == node_id))
+    })
 }
 
 /// This binary's own path, shell-quoted for use as the ssh `ProxyCommand` executable.
@@ -163,39 +266,56 @@ mod tests {
     /// deterministic in tests (the real path is `current_exe()` at runtime).
     const PROXY: &str = "'/opt/bin/swoosh'";
 
+    /// A fixed private known_hosts path, so the assembled argv is deterministic in tests.
+    fn known_hosts() -> PathBuf {
+        PathBuf::from("/home/me/.config/swoosh/known_hosts")
+    }
+
     #[test]
-    fn argv_wires_the_self_invoked_proxy_command_then_host() {
-        let argv = ssh_argv(PROXY, KEY, "ssh", "alice/desk", &[]);
+    fn argv_wires_the_proxy_then_pinning_options_then_host() {
+        let argv = ssh_argv(PROXY, KEY, "ssh", "alice/desk", &known_hosts(), &[]);
         assert_eq!(
             argv,
             vec![
                 "-o".to_owned(),
                 format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --stdio"),
+                "-o".to_owned(),
+                "UserKnownHostsFile=\"/home/me/.config/swoosh/known_hosts\"".to_owned(),
+                "-o".to_owned(),
+                "GlobalKnownHostsFile=/dev/null".to_owned(),
+                "-o".to_owned(),
+                "StrictHostKeyChecking=accept-new".to_owned(),
+                "-o".to_owned(),
+                format!("HostKeyAlias={KEY}"),
                 "alice/desk".to_owned(),
             ]
         );
     }
 
     #[test]
+    fn argv_pins_on_the_node_id_not_the_placeholder_host() {
+        // The known_hosts pin is keyed on the node id via HostKeyAlias, so a petname rename never orphans
+        // it. The placeholder host is the mutable petname; the alias is the immutable key.
+        let argv = ssh_argv(PROXY, KEY, "ssh", "alice/desk", &known_hosts(), &[]);
+        assert!(argv.contains(&format!("HostKeyAlias={KEY}")));
+        assert!(argv.contains(&"StrictHostKeyChecking=accept-new".to_owned()));
+        assert!(argv.contains(&"GlobalKnownHostsFile=/dev/null".to_owned()));
+    }
+
+    #[test]
     fn argv_forwards_passthrough_args_after_the_host() {
         let args = vec!["-p".to_owned(), "2222".to_owned(), "ls".to_owned()];
-        let argv = ssh_argv(PROXY, KEY, "ssh", "bob", &args);
-        assert_eq!(
-            argv,
-            vec![
-                "-o".to_owned(),
-                format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --stdio"),
-                "bob".to_owned(),
-                "-p".to_owned(),
-                "2222".to_owned(),
-                "ls".to_owned(),
-            ]
-        );
+        let argv = ssh_argv(PROXY, KEY, "ssh", "bob", &known_hosts(), &args);
+        // The passthrough args land last, after the host and after swoosh's own options — so swoosh's
+        // host-key options (ssh honors the first occurrence) win over any the user trails.
+        let host_at = argv.iter().position(|a| a == "bob").expect("host present");
+        assert_eq!(&argv[host_at + 1..], &["-p", "2222", "ls"]);
+        assert!(argv[..host_at].contains(&"StrictHostKeyChecking=accept-new".to_owned()));
     }
 
     #[test]
     fn argv_honors_a_non_default_service() {
-        let argv = ssh_argv(PROXY, KEY, "admin-ssh", "alice", &[]);
+        let argv = ssh_argv(PROXY, KEY, "admin-ssh", "alice", &known_hosts(), &[]);
         assert_eq!(
             argv[1],
             format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service admin-ssh --stdio")
