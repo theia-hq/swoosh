@@ -32,16 +32,20 @@ mod reach;
 mod transport;
 
 use commands::adopt::AdoptCmd;
+use commands::attenuate::AttenuateCmd;
 use commands::contact::ContactCmd;
 use commands::fetch::FetchCmd;
 use commands::identity::IdentityCmd;
 use commands::mint::MintCmd;
 use commands::ping::PingCmd;
+use commands::revoke::RevokeCmd;
 use commands::serve::ServeCmd;
+use commands::share::ShareCmd;
 use commands::speed::SpeedCmd;
 use commands::ssh::SshCmd;
 use commands::status::StatusCmd;
 use commands::tree::TreeCmd;
+use commands::tunnel::TunnelCmd;
 use commands::tunnel_connect::TunnelConnectCmd;
 use contacts::{Contacts, ContactsStore};
 use identity::Identity;
@@ -79,6 +83,15 @@ enum Command {
     Status(StatusCmd),
     /// Mint a local URL that fetches an origin through a node you name.
     Fetch(FetchCmd),
+    /// Expose a local service to peers, or bind a peer's exposed service to a local port.
+    #[command(subcommand)]
+    Tunnel(TunnelCmd),
+    /// Mint a `sheer:` capability link granting one service, expiring, attenuable, delegable.
+    Share(ShareCmd),
+    /// Narrow an existing `sheer:` link offline before handing it on.
+    Attenuate(AttenuateCmd),
+    /// Revoke a `sheer:` link so this node refuses it at once, without waiting for expiry.
+    Revoke(RevokeCmd),
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
     Contact(ContactCmd),
@@ -106,6 +119,10 @@ enum Reach {
     Speed(SpeedCmd),
     Status(StatusCmd),
     Fetch(FetchCmd),
+    /// The public `swoosh tunnel` group: `expose` (serve a local service) or `connect` (bind a remote
+    /// service to a local port). Both bind a transport, so the group rides the reach path; the `expose`
+    /// arm additionally reads the signet and swoosh's ssh host seed, resolved in the root like `self_badge`.
+    Tunnel(TunnelCmd),
     TunnelConnect(TunnelConnectCmd),
 }
 
@@ -121,7 +138,11 @@ impl Command {
             Self::Adopt(cmd) => Verb::Adopt(cmd),
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
+            Self::Share(cmd) => Verb::Share(cmd),
+            Self::Attenuate(cmd) => Verb::Attenuate(cmd),
+            Self::Revoke(cmd) => Verb::Revoke(cmd),
             Self::TunnelConnect(cmd) => Verb::Reach(Reach::TunnelConnect(cmd)),
+            Self::Tunnel(cmd) => Verb::Reach(Reach::Tunnel(cmd)),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
             Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
@@ -149,6 +170,12 @@ enum Verb {
     Ssh(SshCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(TreeCmd),
+    /// Mints a `sheer:` capability link; signs with the persisted key, binds no transport and no store.
+    Share(ShareCmd),
+    /// Narrows a `sheer:` link offline; needs no identity, transport, or store.
+    Attenuate(AttenuateCmd),
+    /// Revokes a `sheer:` link into the local denylist; needs no identity, transport, or store.
+    Revoke(RevokeCmd),
     /// Reaches a peer; binds a transport.
     Reach(Reach),
 }
@@ -162,6 +189,13 @@ impl Reach {
             // `serve` must be reachable at a stable address; `tunnel-connect` must dial under swoosh's OWN
             // key so the family gate proves the identity the membership badge was minted for. Both persist.
             Self::Serve(_) | Self::TunnelConnect(_) => Identity::Persisted,
+            // `tunnel expose` roots its services and any share-link at a stable key, so it persists;
+            // `tunnel connect` is a dial-only client (it presents a link, not swoosh's identity), so it is
+            // ephemeral like the other reach-outward verbs.
+            Self::Tunnel(cmd) => match cmd {
+                TunnelCmd::Expose(_) => Identity::Persisted,
+                TunnelCmd::Connect(_) => Identity::Ephemeral,
+            },
             Self::Ping(_) | Self::Speed(_) | Self::Status(_) | Self::Fetch(_) => {
                 Identity::Ephemeral
             }
@@ -178,6 +212,10 @@ impl Reach {
             Self::Speed(cmd) => &cmd.reach,
             Self::Status(cmd) => &cmd.reach,
             Self::Fetch(cmd) => &cmd.reach,
+            Self::Tunnel(cmd) => match cmd {
+                TunnelCmd::Expose(cmd) => &cmd.reach,
+                TunnelCmd::Connect(cmd) => &cmd.reach,
+            },
             Self::TunnelConnect(cmd) => &cmd.reach,
         }
     }
@@ -194,13 +232,30 @@ impl Reach {
         contacts: &Contacts,
         transport: transport::Transport,
         self_badge: Option<String>,
-    ) -> eyre::Result<()> {
+        expose: Option<ExposeContext>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as bifrost::Session>::Write: Send + 'static,
+        <T::Session as bifrost::Session>::Read: Send + 'static,
+    {
         match self {
             Self::Serve(cmd) => cmd.run(node).await,
             Self::Ping(cmd) => cmd.run(node, contacts, transport).await,
             Self::Speed(cmd) => cmd.run(node, contacts, transport).await,
             Self::Status(cmd) => cmd.run(node, contacts, transport).await,
             Self::Fetch(cmd) => cmd.run(node, contacts, transport).await,
+            Self::Tunnel(cmd) => match cmd {
+                // `expose` reads the signet its default gate trusts and swoosh's own ssh host seed, both
+                // resolved in the root before the secret was consumed by the transport bind (see
+                // `ExposeContext`). It is only ever `Some` on this arm.
+                TunnelCmd::Expose(cmd) => {
+                    let ExposeContext { host_seed, signet } = expose.ok_or_else(|| {
+                        eyre::eyre!("internal: tunnel expose reached without its context")
+                    })?;
+                    cmd.run(node, host_seed, signet).await
+                }
+                TunnelCmd::Connect(cmd) => cmd.run(node).await,
+            },
             // The peer is already a resolved raw key, so no address book or transport label is needed; the
             // `self_badge` (this identity's self-signed membership badge) is the signet-holder's proof to
             // present, resolved against any stored badge inside the command.
@@ -219,6 +274,31 @@ impl Reach {
             _ => Ok(None),
         }
     }
+
+    /// The exposer context `tunnel expose` needs, resolved before the secret is consumed by the transport
+    /// bind: swoosh's ssh host seed (derived from the secret) and the signet its default gate trusts (read
+    /// from tightbeam's config, so a swoosh node gates on the same signet `swoosh adopt` set). Every other
+    /// verb returns `None`. Async because the signet is read from disk.
+    async fn expose_context(
+        &self,
+        secret: &identity::Secret,
+    ) -> eyre::Result<Option<ExposeContext>> {
+        match self {
+            Self::Tunnel(TunnelCmd::Expose(_)) => Ok(Some(ExposeContext {
+                host_seed: secret.ssh_host_seed(),
+                signet: tightbeam::config::load_signet().await?,
+            })),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// What `tunnel expose` needs beyond the bound node: swoosh's ssh host seed and the trusted signet. Both
+/// are resolved in the composition root (the host seed needs the secret before the transport consumes it),
+/// then handed to the exposer arm.
+struct ExposeContext {
+    host_seed: [u8; 32],
+    signet: Option<bifrost::NodeId>,
 }
 
 #[tokio::main]
@@ -275,6 +355,11 @@ async fn run() -> eyre::Result<()> {
         // Provisions this machine from an authkey (writes the tightbeam identity + signet). Needs only the
         // key path; binds no transport and touches no address book.
         Verb::Adopt(cmd) => return cmd.run(cli.key.as_deref()).await,
+        // Cap verbs: `share` signs a link with the persisted key; `attenuate`/`revoke` are wholly offline.
+        // None binds a transport or reads the address book, so they dispatch here beside the local verbs.
+        Verb::Share(cmd) => return cmd.run(cli.key.as_deref()).await,
+        Verb::Attenuate(cmd) => return cmd.run(),
+        Verb::Revoke(cmd) => return cmd.run().await,
         // A launcher: read the store to resolve the peer, then hand off to the system `ssh` (which runs
         // tightbeam as its `ProxyCommand`). swoosh binds no transport here; on unix `run` execs and does
         // not return on success.
@@ -303,8 +388,10 @@ async fn run() -> eyre::Result<()> {
     let peers = reach.args().peer.clone();
     // Sign the membership badge (only `tunnel-connect` produces one) BEFORE the secret is consumed by the
     // transport bind: it self-signs against the same key the dial then binds under, so the badge's device
-    // binding matches the identity the far gate proves.
+    // binding matches the identity the far gate proves. The exposer context (`tunnel expose`) is resolved
+    // for the same reason: its ssh host seed derives from the secret before the bind consumes it.
     let self_badge = reach.self_badge(&secret)?;
+    let expose = reach.expose_context(&secret).await?;
     match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
         // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
@@ -314,7 +401,9 @@ async fn run() -> eyre::Result<()> {
             let endpoint = bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?;
             let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
-            reach.run(&node, &contacts, transport, self_badge).await
+            reach
+                .run(&node, &contacts, transport, self_badge, expose)
+                .await
         }
         // quirk is direct-only with no internal discovery, so the composed discovery is its only way
         // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
@@ -322,7 +411,9 @@ async fn run() -> eyre::Result<()> {
             let endpoint = bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?;
             let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
-            reach.run(&node, &contacts, transport, self_badge).await
+            reach
+                .run(&node, &contacts, transport, self_badge, expose)
+                .await
         }
     }
 }

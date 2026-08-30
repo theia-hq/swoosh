@@ -78,6 +78,14 @@ impl Secret {
         Ok(badge)
     }
 
+    /// A stable seed for this node's ssh host key, derived from this secret by the same domain-separated
+    /// KDF tightbeam uses, so a swoosh node exposing `ssh=sshd:` under its persisted key presents the SAME
+    /// host key a client pins. Delegates to tightbeam's [`ssh_host_seed`](tightbeam::identity::ssh_host_seed)
+    /// so the derivation lives in exactly one place; the raw secret never leaves the wrapper, only the seed.
+    pub fn ssh_host_seed(&self) -> [u8; 32] {
+        tightbeam::identity::ssh_host_seed(&self.0)
+    }
+
     /// The seed for a device identity derived from this key (the signet) under `label`: the secret a
     /// machine ADOPTS to become that device, and the payload of a `mint`ed authkey. Borrows, so this root
     /// stays owned here and zeroizes on drop; the raw root never leaves the wrapper, only the derived

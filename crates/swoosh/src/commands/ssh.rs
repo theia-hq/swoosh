@@ -60,6 +60,10 @@ pub struct SshCmd {
     /// The exposed service name to reach on the host.
     #[arg(long, value_name = "name", default_value = DEFAULT_SERVICE)]
     pub service: String,
+    /// Present a `sheer:` capability link to a cap-gated host (e.g. an ssh slip minted with `swoosh
+    /// share`). Without it, the tunnel-connect bridge self-signs a membership badge from swoosh's key.
+    #[arg(long, value_name = "link")]
+    pub present: Option<String>,
     /// Args forwarded verbatim to the system ssh, after `--`.
     #[arg(
         trailing_var_arg = true,
@@ -96,7 +100,15 @@ impl SshCmd {
         }
 
         let proxy = self_invocation()?;
-        let argv = ssh_argv(&proxy, &key, &self.service, &host, &known_hosts, &self.args);
+        let argv = ssh_argv(
+            &proxy,
+            &key,
+            &self.service,
+            self.present.as_deref(),
+            &host,
+            &known_hosts,
+            &self.args,
+        );
         exec_ssh(argv)
     }
 }
@@ -105,13 +117,13 @@ impl SshCmd {
 /// stable placeholder `host`, then the passthrough `args` verbatim.
 ///
 /// Pure so it is unit-testable (the `exec` itself is not): given the shell-quoted `proxy` (this binary's
-/// own path, see [`self_invocation`]), the resolved `key`, the `service`, the placeholder `host`, the
-/// private `known_hosts` path, and the user's trailing ssh `args`, it assembles the exact argv
-/// [`exec_ssh`] hands to `ssh`. The `ProxyCommand` value is `<self> tunnel-connect <key> --service <name>
-/// --stdio`: ssh runs it to bridge the overlay stream in-process, under swoosh's own identity, with no
-/// `tightbeam` binary and no `$PATH` lookup. ssh splits `ProxyCommand` on whitespace, so `proxy` is
-/// pre-quoted and the other tokens are whitespace-free (a `NodeId` is base32, the service is a single
-/// name).
+/// own path, see [`self_invocation`]), the resolved `key`, the `service`, an optional `present` capability
+/// link, the placeholder `host`, the private `known_hosts` path, and the user's trailing ssh `args`, it
+/// assembles the exact argv [`exec_ssh`] hands to `ssh`. The `ProxyCommand` value is `<self>
+/// tunnel-connect <key> --service <name> --stdio [--present <link>]`: ssh runs it to bridge the overlay
+/// stream in-process, under swoosh's own identity, with no `tightbeam` binary and no `$PATH` lookup. ssh
+/// splits `ProxyCommand` on whitespace, so `proxy` is pre-quoted and the other tokens are whitespace-free
+/// (a `NodeId` is base32, the service is a single name, a `sheer:` link is one token like a key).
 ///
 /// The four host-key options (see the module docs) come BEFORE the passthrough args: ssh honors the first
 /// occurrence of an option, so swoosh's intent wins over a user's trailing `-o`. `HostKeyAlias` keys the
@@ -121,11 +133,17 @@ fn ssh_argv(
     proxy: &str,
     key: &str,
     service: &str,
+    present: Option<&str>,
     host: &str,
     known_hosts: &Path,
     args: &[String],
 ) -> Vec<String> {
-    let proxy_command = format!("{proxy} tunnel-connect {key} --service {service} --stdio");
+    let mut proxy_command = format!("{proxy} tunnel-connect {key} --service {service} --stdio");
+    // A `sheer:` link is whitespace-free (a single token, like the key), so it is safe unquoted in the
+    // whitespace-split ProxyCommand. Appended only when present; without it the bridge self-signs a badge.
+    if let Some(link) = present {
+        proxy_command.push_str(&format!(" --present {link}"));
+    }
     let mut argv = vec![
         "-o".to_owned(),
         format!("ProxyCommand={proxy_command}"),
@@ -273,7 +291,7 @@ mod tests {
 
     #[test]
     fn argv_wires_the_proxy_then_pinning_options_then_host() {
-        let argv = ssh_argv(PROXY, KEY, "ssh", "alice/desk", &known_hosts(), &[]);
+        let argv = ssh_argv(PROXY, KEY, "ssh", None, "alice/desk", &known_hosts(), &[]);
         assert_eq!(
             argv,
             vec![
@@ -296,7 +314,7 @@ mod tests {
     fn argv_pins_on_the_node_id_not_the_placeholder_host() {
         // The known_hosts pin is keyed on the node id via HostKeyAlias, so a petname rename never orphans
         // it. The placeholder host is the mutable petname; the alias is the immutable key.
-        let argv = ssh_argv(PROXY, KEY, "ssh", "alice/desk", &known_hosts(), &[]);
+        let argv = ssh_argv(PROXY, KEY, "ssh", None, "alice/desk", &known_hosts(), &[]);
         assert!(argv.contains(&format!("HostKeyAlias={KEY}")));
         assert!(argv.contains(&"StrictHostKeyChecking=accept-new".to_owned()));
         assert!(argv.contains(&"GlobalKnownHostsFile=/dev/null".to_owned()));
@@ -305,7 +323,7 @@ mod tests {
     #[test]
     fn argv_forwards_passthrough_args_after_the_host() {
         let args = vec!["-p".to_owned(), "2222".to_owned(), "ls".to_owned()];
-        let argv = ssh_argv(PROXY, KEY, "ssh", "bob", &known_hosts(), &args);
+        let argv = ssh_argv(PROXY, KEY, "ssh", None, "bob", &known_hosts(), &args);
         // The passthrough args land last, after the host and after swoosh's own options — so swoosh's
         // host-key options (ssh honors the first occurrence) win over any the user trails.
         let host_at = argv.iter().position(|a| a == "bob").expect("host present");
@@ -315,10 +333,24 @@ mod tests {
 
     #[test]
     fn argv_honors_a_non_default_service() {
-        let argv = ssh_argv(PROXY, KEY, "admin-ssh", "alice", &known_hosts(), &[]);
+        let argv = ssh_argv(PROXY, KEY, "admin-ssh", None, "alice", &known_hosts(), &[]);
         assert_eq!(
             argv[1],
             format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service admin-ssh --stdio")
+        );
+    }
+
+    #[test]
+    fn argv_appends_a_present_link_to_the_proxy_command() {
+        // A `sheer:` link (whitespace-free, like the key) rides unquoted in the whitespace-split
+        // ProxyCommand, after `--stdio`, so the bridge presents the given slip instead of self-signing.
+        let link = "sheer:abcdef0123456789";
+        let argv = ssh_argv(PROXY, KEY, "ssh", Some(link), "alice", &known_hosts(), &[]);
+        assert_eq!(
+            argv[1],
+            format!(
+                "ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --stdio --present {link}"
+            )
         );
     }
 
