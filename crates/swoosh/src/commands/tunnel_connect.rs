@@ -24,7 +24,7 @@ pub struct TunnelConnectCmd {
     #[arg(value_name = "peer")]
     pub node: NodeId,
     /// the exposed service name to reach on the host
-    #[arg(long, default_value = "default")]
+    #[arg(long, value_name = "service", default_value = "default")]
     pub service: String,
     /// present a membership badge or capability link to a family/cap-gated host
     #[arg(long, value_name = "link")]

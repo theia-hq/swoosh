@@ -23,10 +23,10 @@ pub struct PingCmd {
     #[arg(value_name = "peer")]
     pub target: Target,
     /// How many probes to send.
-    #[arg(short = 'c', long, default_value_t = 4)]
+    #[arg(short = 'c', long, value_name = "count", default_value_t = 4)]
     pub count: u32,
     /// Seconds between probes.
-    #[arg(short = 'i', long, default_value_t = 1.0)]
+    #[arg(short = 'i', long, value_name = "seconds", default_value_t = 1.0)]
     pub interval: f64,
     #[command(flatten)]
     pub reach: ReachArgs,

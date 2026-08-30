@@ -8,6 +8,7 @@ use crate::contacts::{ContactRef, ContactsStore, Removed};
 #[derive(Debug, Args)]
 pub struct RmCmd {
     /// The contact to remove, `alice` for the whole person or `alice/macbook` for one device.
+    #[arg(value_name = "name")]
     pub name: ContactRef,
 }
 

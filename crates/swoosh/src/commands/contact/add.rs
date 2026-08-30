@@ -9,8 +9,10 @@ use crate::contacts::{Added, ContactRef, ContactsStore};
 #[derive(Debug, Args)]
 pub struct AddCmd {
     /// The name to save, `alice` for a person or `alice/macbook` to group a device under one.
+    #[arg(value_name = "name")]
     pub name: ContactRef,
     /// The peer's identity, as a bifrost node id.
+    #[arg(value_name = "key")]
     pub key: NodeId,
 }
 

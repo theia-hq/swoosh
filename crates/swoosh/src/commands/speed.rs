@@ -43,10 +43,10 @@ pub struct SpeedCmd {
     #[arg(long)]
     pub bidir: bool,
     /// Run for this many seconds. Defaults to 5 when no bound is given.
-    #[arg(short = 't', long)]
+    #[arg(short = 't', long, value_name = "seconds")]
     pub secs: Option<f64>,
     /// Transfer this many bytes instead of running for a fixed time.
-    #[arg(short = 'n', long)]
+    #[arg(short = 'n', long, value_name = "bytes")]
     pub bytes: Option<u64>,
     #[command(flatten)]
     pub reach: ReachArgs,

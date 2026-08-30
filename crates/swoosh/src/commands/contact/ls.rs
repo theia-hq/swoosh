@@ -9,6 +9,7 @@ use crate::contacts::{Contacts, ContactsStore, DeviceLabel, Petname};
 #[derive(Debug, Args)]
 pub struct LsCmd {
     /// A contact to expand into its devices. Omit to list every contact.
+    #[arg(value_name = "petname")]
     pub petname: Option<Petname>,
     /// Print only the contact names, one per line.
     #[arg(short = 'q', long = "names-only")]
