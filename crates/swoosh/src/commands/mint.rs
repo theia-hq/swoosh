@@ -8,11 +8,8 @@
 
 use std::path::Path;
 
-use core::time::Duration;
-
 use bifrost::NodeId;
 use clap::Args;
-use nauthy::expires_in;
 use zeroize::Zeroize as _;
 
 use crate::authkey;
@@ -22,11 +19,6 @@ use crate::identity::{self, Identity};
 /// The reserved petname for your own devices: your signet is person-zero, and each device it derives
 /// lives under `me/<label>`, addressed exactly like a saved contact (`swoosh ssh me/ci-runner`).
 const ME: &str = "me";
-
-/// How long a minted device badge is valid. A provisioned device (a CI runner, a second laptop) is a
-/// standing member, so the badge is effectively non-expiring; `expires_in` saturates a century out. A
-/// shorter, rotatable TTL is a fast-follow, not v1 (the seed the badge rides with is the real secret).
-const BADGE_TTL: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
 
 /// Derive a device identity under your signet and print an authkey for the machine to adopt.
 #[derive(Debug, Args)]
@@ -47,16 +39,7 @@ impl MintCmd {
 
         let mut seed = signet.derive_child_seed(device.as_str());
         let node = NodeId::from_ed25519_secret(&seed);
-        // Sign the device's membership badge: a `theia:member` cap rooted at the signet, BOUND to this
-        // child's node id so it grants only when the proven dialer IS this device (a leaked badge is
-        // useless without the matching seed). Sealed so the device cannot attenuate it into a slip and
-        // hand it on. This is the "A vouches B once" step: thereafter the device carries its own proof.
-        let badge = signet
-            .cap_identity()?
-            .mint_member(node, expires_in(BADGE_TTL))?
-            .seal()?
-            .link()?;
-        let token = authkey::encode(&seed, signet.node_id(), Some(&badge));
+        let token = authkey::encode(&seed, signet.node_id());
         seed.zeroize();
 
         // Record `me/<label> -> node` so the machine is addressable by name once it adopts the seed. The

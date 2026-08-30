@@ -41,22 +41,15 @@ impl TunnelConnectCmd {
     /// Pipe the peer's service against this process's stdin/stdout, dialing under swoosh's own identity.
     /// Always `--stdio`: this leaf exists only as the ssh `ProxyCommand` bridge.
     ///
-    /// The badge presented to a family-gated host is resolved in priority order: an explicit `--present`
-    /// link, else a STORED badge (an adopted device carries the one its signet signed), else the
+    /// The badge presented to a family-gated host is an explicit `--present` link if given, else the
     /// `self_signed` badge the caller minted from this identity (the signet holder is entitled to sign its
-    /// own). A node gated Open/Strict ignores whatever is presented, so presenting a badge is always safe.
+    /// own, fresh per dial). A node gated Open ignores whatever is presented, so presenting is always safe.
     pub async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         self_signed: Option<String>,
     ) -> eyre::Result<()> {
-        let present = match self.present {
-            Some(link) => Some(link),
-            None => match tightbeam::config::load_badge().await? {
-                Some(stored) => Some(stored),
-                None => self_signed,
-            },
-        };
+        let present = self.present.or(self_signed);
         ConnectCmd {
             target: Target::Node(self.node),
             to: None,
