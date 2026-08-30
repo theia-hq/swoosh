@@ -3,11 +3,11 @@
 //! A LAUNCHER, a third verb category beside the local and reach families. Like a local verb it reads the
 //! contact store (to resolve the peer to a raw key) and binds no bifrost `Node` in this process; unlike a
 //! local verb it ends up reaching a peer. It does so by `exec`ing the system `ssh` with a `ProxyCommand`
-//! that re-invokes THIS binary — `<self> tunnel-connect <key> --service <name> --stdio`, via
-//! `current_exe()` (see [`self_invocation`]) — and that hidden re-invocation binds the `Node` under
+//! that re-invokes THIS binary (`<self> tunnel-connect <key> --service <name> --stdio`, via
+//! `current_exe()`, see [`self_invocation`]) and that hidden re-invocation binds the `Node` under
 //! swoosh's OWN identity and pipes the overlay stream over ssh's stdin/stdout, so ssh talks to the far
 //! sshd as if it were local. One binary, no `tightbeam` on PATH and no `$PATH` lookup at all, and the dial
-//! carries swoosh's key — so a membership badge presented there binds to the identity the family gate
+//! carries swoosh's key, so a membership badge presented there binds to the identity the family gate
 //! proves. `swoosh ssh alice` is a drop-in for `ssh <host>`.
 //!
 //! The peer resolves in-process, BEFORE ssh runs, through the same `Target`/contact-store lookup
@@ -23,7 +23,7 @@
 //!
 //! The far sshd derives its host key from its node secret (a KDF distinct from the node key, so no
 //! cross-protocol reuse), so a client holding only the peer's public node id CANNOT compute that host key
-//! in advance — there is nothing to pre-seed. The host-key check here is therefore not the primary auth:
+//! in advance: there is nothing to pre-seed. The host-key check here is therefore not the primary auth:
 //! the OVERLAY already authenticated the peer end to end (raw-public-key TLS to the exact node id, an
 //! in-process pipe with no seam a MITM could enter), so ssh's own check is self-consistency bookkeeping
 //! on top of that. This launcher binds only the authenticated default transport (it exposes no
@@ -47,7 +47,7 @@ use crate::contacts::{Contacts, Target};
 const DEFAULT_SERVICE: &str = "ssh";
 
 /// The system binary a launch shells out to: the far sshd is reached by the system `SSH`, whose overlay
-/// transport is THIS binary re-invoked as its `ProxyCommand` (see [`self_invocation`]) — no separate
+/// transport is THIS binary re-invoked as its `ProxyCommand` (see [`self_invocation`]): no separate
 /// `tightbeam` binary. Named as a constant so a "not found on PATH" error can point at the exact binary.
 const SSH: &str = "ssh";
 
@@ -220,7 +220,7 @@ fn already_pinned(path: &Path, node_id: &str) -> bool {
 
 /// This binary's own path, shell-quoted for use as the ssh `ProxyCommand` executable.
 ///
-/// Using `current_exe()` — not the bare name `swoosh`, and not a separate `tightbeam` — means ssh spawns
+/// Using `current_exe()` (not the bare name `swoosh`, and not a separate `tightbeam`) means ssh spawns
 /// exactly THIS binary by absolute path (no `$PATH` entry needed) and the overlay bridge runs in-process
 /// under swoosh's own identity. ssh runs a `ProxyCommand` through `/bin/sh -c` and splits it on
 /// whitespace, so the path is shell-quoted to survive an install directory with a space.
@@ -324,7 +324,7 @@ mod tests {
     fn argv_forwards_passthrough_args_after_the_host() {
         let args = vec!["-p".to_owned(), "2222".to_owned(), "ls".to_owned()];
         let argv = ssh_argv(PROXY, KEY, "ssh", None, "bob", &known_hosts(), &args);
-        // The passthrough args land last, after the host and after swoosh's own options — so swoosh's
+        // The passthrough args land last, after the host and after swoosh's own options, so swoosh's
         // host-key options (ssh honors the first occurrence) win over any the user trails.
         let host_at = argv.iter().position(|a| a == "bob").expect("host present");
         assert_eq!(&argv[host_at + 1..], &["-p", "2222", "ls"]);

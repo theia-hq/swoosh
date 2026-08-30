@@ -4,7 +4,7 @@
 //! binary via `current_exe()` (not a separate `tightbeam` binary on PATH). It binds a node under swoosh's
 //! OWN identity and pipes a peer's exposed service over stdin/stdout, so ssh speaks its protocol to a far
 //! sshd across the overlay. Wrapping tightbeam's [`ConnectCmd`] as a library keeps one identity throughout
-//! and drops the PATH/binary dependency, and — because the dial carries swoosh's key — a membership badge
+//! and drops the PATH/binary dependency, and (because the dial carries swoosh's key) a membership badge
 //! presented here (step 6) binds to the identity the family gate will actually prove.
 //!
 //! The public port-forward form (`tunnel connect --to <port>`) is a separate, later surface; this leaf
@@ -29,7 +29,7 @@ pub struct TunnelConnectCmd {
     /// present a membership badge or capability link to a family/cap-gated host
     #[arg(long, value_name = "link")]
     pub present: Option<String>,
-    /// pipe the service over stdin/stdout — the only mode this leaf runs. Accepted (and required by the
+    /// pipe the service over stdin/stdout: the only mode this leaf runs. Accepted (and required by the
     /// `swoosh ssh` ProxyCommand ABI) but always true; hidden, since a user never types it.
     #[arg(long, hide = true)]
     pub stdio: bool,

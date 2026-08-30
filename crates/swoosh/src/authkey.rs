@@ -9,7 +9,7 @@
 //! The authkey carries no membership badge. A device is admitted by presenting a badge when it DIALS,
 //! and the only party that can sign a signet-rooted badge is the signet holder itself (which self-signs
 //! per dial). A provisioned device that needs to reach a service dials with a delegated slip, not a
-//! stored whole-node badge — so nothing standing lives on the device's disk, and there is no long-lived
+//! stored whole-node badge, so nothing standing lives on the device's disk, and there is no long-lived
 //! bearer credential to leak.
 
 use bifrost::{NodeId, NodeIdParseError};

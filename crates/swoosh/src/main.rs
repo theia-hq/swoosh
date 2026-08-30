@@ -101,7 +101,7 @@ enum Command {
     /// Print this command tree (spec vs binary).
     Tree(TreeCmd),
     /// The in-process ProxyCommand behind `swoosh ssh`: self-invoked via `current_exe()`, never typed.
-    /// Hidden from help and `tree` — it is plumbing, not a user verb (see `commands::tunnel_connect`).
+    /// Hidden from help and `tree`: it is plumbing, not a user verb (see `commands::tunnel_connect`).
     #[command(hide = true)]
     TunnelConnect(TunnelConnectCmd),
 }
