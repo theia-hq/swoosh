@@ -58,8 +58,10 @@ impl Secret {
         Ok(nauthy::Identity::from_secret(&self.0)?)
     }
 
-    /// Self-sign a membership badge for THIS identity: a short-lived `theia:member` cap rooted at this key
-    /// and bound to this key's own node id. The signet holder is the one party always entitled to a badge
+    /// Self-sign a membership badge for THIS identity: a short-lived cap carrying a `member(true)` fact in
+    /// its authority block, rooted at this key and bound to this key's own node id. The `member(true)` fact
+    /// is what a family gate reads as membership; because biscuit trusts only authority-block facts, it
+    /// cannot be forged by attenuation. The signet holder is the one party always entitled to a badge
     /// (it holds the root), so when it dials a family-gated node it mints one in-process rather than
     /// carrying a stored one. Short-lived because it is re-minted per dial; the binding makes it useless if
     /// intercepted off another key. Returns the `sheer:` link to present.
