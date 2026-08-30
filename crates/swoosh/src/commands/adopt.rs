@@ -1,11 +1,12 @@
 //! `swoosh adopt <authkey>`: become the derived identity and trust the signet that minted it.
 //!
 //! The other half of `mint`: on the MACHINE (a CI runner, a new laptop), `adopt` writes the authkey's
-//! child seed as this node's identity, so it comes up AS the derived device, and records the signet its
-//! gate trusts, so `tightbeam expose` admits the owner's own devices and anyone they delegate to. A local
-//! verb: no transport, no reach. It provisions the tightbeam node this machine exposes under (honoring
-//! `TIGHTBEAM_KEY` / `TIGHTBEAM_SIGNET`, or the default with `--key`), which is the identity `expose` binds
-//! and the signet `expose` reads.
+//! child seed as SWOOSH's persisted identity, so it comes up AS the derived device, and records the signet
+//! its gate trusts, so `swoosh tunnel expose` admits the owner's own devices and anyone they delegate to. A
+//! local verb: no transport, no reach. The identity lands in swoosh's own store (`~/.config/swoosh/`, or
+//! `--key`/`SWOOSH_KEY`) -- the SAME store `swoosh tunnel expose`/`serve` bind under -- so the exposed node
+//! id matches the contact `mint` recorded. The signet lands in tightbeam's config, where the expose gate
+//! reads it.
 
 use std::path::Path;
 
@@ -29,16 +30,20 @@ impl AdoptCmd {
         let (mut seed, signet) = authkey::parse(&self.authkey)?;
         // Compute the adopted node id before wiping the seed, for the confirmation line.
         let node = NodeId::from_ed25519_secret(&seed);
-        // Become the derived device: write the child seed as the tightbeam identity this machine exposes
-        // under, then wipe our copy.
-        tightbeam::identity::write(&seed, key).await?;
+        // Become the derived device: write the child seed as SWOOSH's persisted identity -- the SAME store
+        // `swoosh tunnel expose`/`serve` bind under (crate::identity::resolve), so this node comes up AS the
+        // adopted device. Writing tightbeam's separate store was the bug: `swoosh tunnel expose` binds
+        // swoosh's key, so the exposed node had a different id than the contact pointed at, and was never
+        // reachable. Then wipe our copy.
+        crate::identity::write(&seed, key).await?;
         seed.zeroize();
-        // Trust the signet: `expose`'s default gate admits its devices (members) and delegates (slips).
+        // Trust the signet: the default gate admits its devices (members) and delegates (slips). The signet
+        // lives in tightbeam's config, which `swoosh tunnel expose` reads via `tightbeam::config::load_signet`.
         tightbeam::config::write_signet(signet).await?;
 
         println!("adopted this machine as {}  [mine]", node.short());
         println!(
-            "trusting signet {}: `tightbeam expose` now admits its members and delegates.",
+            "trusting signet {}: `swoosh tunnel expose` now admits its members and delegates.",
             signet.short()
         );
         Ok(())
