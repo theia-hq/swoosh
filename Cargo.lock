@@ -3786,7 +3786,7 @@ dependencies = [
 
 [[package]]
 name = "swoosh"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "bifrost",
  "bifrost-core",
@@ -3941,7 +3941,7 @@ dependencies = [
 
 [[package]]
 name = "tightbeam"
-version = "0.0.0"
+version = "0.2.0"
 dependencies = [
  "bifrost",
  "bifrost-iroh",
