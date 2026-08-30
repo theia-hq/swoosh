@@ -114,8 +114,8 @@ Mint, narrow, or revoke a `sheer:` capability link: a signed, expiring grant to 
 rooted at this node's key. It carries its own authority, so a holder connects with no allowlist to keep in
 sync, and it is minted, narrowed, and revoked entirely offline.
 
-- `grant share <service>` mint a link granting one service, expiring, attenuable, delegable.
-- `grant attenuate <link>` narrow an existing link (only ever adds constraints), before handing it on.
+- `grant issue <service>` mint a link granting one service, expiring, attenuable, delegable.
+- `grant narrow <link>` narrow an existing link (only ever adds constraints), before handing it on.
 - `grant revoke <link>` refuse a link at this node at once, without waiting for its expiry.
 
 ### `swoosh identity`
@@ -198,16 +198,16 @@ lands as it is built.
 - [x] `ssh`: open an ssh session to a peer over the overlay (`swoosh ssh alice/desk`)
 - [x] `tunnel expose` / `tunnel connect`: expose a local service under a name; reach a peer's service on
   a local port (with `--stdio` for `ssh` `ProxyCommand`)
-- [x] `grant share`: mint a `sheer:` capability link (a signed, expiring, attenuable, delegable grant with
+- [x] `grant issue`: mint a `sheer:` capability link (a signed, expiring, attenuable, delegable grant with
   no server) to an exposed service
-- [x] `grant attenuate`: narrow a capability link offline and print a tighter one
+- [x] `grant narrow`: narrow a capability link offline and print a tighter one
 - [x] `grant revoke`: refuse a capability link at this node at once, without waiting for its expiry
 - [x] `fetch`: mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
 - [ ] `send` / `recv`: push a file or directory to a peer, verified end to end
 - [ ] `beam`: one verb for "get this over there": a file, piped stdin, the clipboard, or a fetched URL's
   result, delivered to a key
 - [ ] `ssh config`: emit `ssh` `Host` aliases for devices that advertise ssh (waits on advertised services)
-- [ ] `cluster` + `grant share cluster`: name a local set of machines; share the whole group as one capability
+- [ ] `cluster` + `grant issue cluster`: name a local set of machines; share the whole group as one capability
 - [ ] `run`: run code at a peer addressed by its key (the north star)
 - [ ] MagicDNS `.theia` names: type `ssh desk.alice` or `http://blog.alice.theia` into any app
 

@@ -3,7 +3,7 @@
 //! Wraps tightbeam's [`ExposeCmd`] in-process under swoosh's OWN persisted identity: the node binds the
 //! same key `serve` and `swoosh ssh` bind, reads the trusted signet with
 //! [`load_signet`](tightbeam::config::load_signet), and derives the ssh host seed from swoosh's secret,
-//! so an `ssh=sshd:` service presents the host key a client pins and a `swoosh grant share` link roots at the
+//! so an `ssh=sshd:` service presents the host key a client pins and a `swoosh grant issue` link roots at the
 //! key peers dial. `--public` and `--quiet` live on THIS verb (not root), and reach comes via the shared
 //! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb: no tightbeam
 //! `--offline`/`--bind-addr` here, so the surface stays swoosh's.
@@ -15,10 +15,10 @@ use tightbeam::{Brand, ExposeCmd};
 use crate::transport::ReachArgs;
 
 /// How the readiness banner names this tool, so `swoosh tunnel expose` says "swoosh tunnel ready" and
-/// points at `swoosh grant share` for minting a link, never at `tightbeam`.
+/// points at `swoosh grant issue` for minting a link, never at `tightbeam`.
 const BRAND: Brand = Brand {
     ready: "swoosh tunnel",
-    share: "swoosh grant share",
+    share: "swoosh grant issue",
 };
 
 /// Expose a local service to peers who hold this node's key, gated by your signet.

@@ -350,8 +350,8 @@ async fn run() -> eyre::Result<()> {
         // the local verbs rather than falling through to the reach path.
         Verb::Grant(cmd) => {
             return match cmd {
-                GrantCmd::Share(cmd) => cmd.run(cli.key.as_deref()).await,
-                GrantCmd::Attenuate(cmd) => cmd.run(),
+                GrantCmd::Issue(cmd) => cmd.run(cli.key.as_deref()).await,
+                GrantCmd::Narrow(cmd) => cmd.run(),
                 GrantCmd::Revoke(cmd) => cmd.run().await,
             };
         }
@@ -430,20 +430,20 @@ mod tests {
 
     use super::*;
 
-    /// The cap verbs live ONLY under `grant`, never as flat top-level commands: `swoosh grant share`
-    /// resolves, and a bare `swoosh share` is an unknown command, not a leaf.
+    /// The cap verbs live ONLY under `grant`, never as flat top-level commands: `swoosh grant issue`
+    /// resolves, and a bare `swoosh issue` is an unknown command, not a leaf.
     #[test]
     fn cap_verbs_resolve_under_grant_not_the_top_level() {
         let cli =
-            Cli::try_parse_from(["swoosh", "grant", "share", "ssh"]).expect("grant share parses");
+            Cli::try_parse_from(["swoosh", "grant", "issue", "ssh"]).expect("grant issue parses");
         assert!(matches!(
             cli.command,
-            Some(Command::Grant(GrantCmd::Share(_)))
+            Some(Command::Grant(GrantCmd::Issue(_)))
         ));
 
         // The bare verbs are gone from the top level; clap rejects them as unknown subcommands.
-        assert!(Cli::try_parse_from(["swoosh", "share", "ssh"]).is_err());
-        assert!(Cli::try_parse_from(["swoosh", "attenuate", "sheer:x"]).is_err());
+        assert!(Cli::try_parse_from(["swoosh", "issue", "ssh"]).is_err());
+        assert!(Cli::try_parse_from(["swoosh", "narrow", "sheer:x"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "revoke", "sheer:x"]).is_err());
     }
 }
