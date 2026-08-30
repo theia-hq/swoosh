@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write      # mint the OIDC token the attestation is signed with (keyless, no key to manage)
+  attestations: write  # record the signed build-provenance attestation for each binary
 
 jobs:
   build:
@@ -54,6 +56,12 @@ jobs:
         run: |
           cp "swoosh/target/${{ matrix.target }}/release/swoosh" "${{ matrix.asset }}"
           shasum -a 256 "${{ matrix.asset }}" | awk '{print $1}' > "${{ matrix.asset }}.sha256"
+      - name: attest build provenance
+        # Keyless (sigstore/OIDC, no key to manage): records a signed provenance attestation binding this
+        # binary to the workflow that built it. Verify with `gh attestation verify <bin> --repo theia-hq/swoosh`.
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ matrix.asset }}
       - uses: softprops/action-gh-release@v2
         with:
           files: |
