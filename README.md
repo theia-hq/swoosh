@@ -13,6 +13,18 @@ swoosh speed alice           # measure throughput to it
 swoosh status alice          # is the link direct, or relayed?
 ```
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/install.sh | sh
+```
+
+Downloads the right binary for your platform from the [latest release](https://github.com/theia-hq/swoosh/releases),
+verifies its SHA-256 checksum (and, if you have the GitHub CLI, its build-provenance attestation), and
+installs it to `~/.local/bin`. Set `INSTALL_DIR` to change where it lands. Prefer to do it yourself? Grab a
+binary from the releases page; each carries a checksum and a keyless signature you can verify with
+`gh attestation verify <binary> --repo theia-hq/swoosh`.
+
 Powered by [bifrost](https://github.com/theia-hq/bifrost) for the keyed connection and
 [tightbeam](https://github.com/theia-hq/tightbeam) for the tunnels behind `ssh` and `fetch`.
 
