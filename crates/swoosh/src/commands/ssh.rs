@@ -60,8 +60,8 @@ pub struct SshCmd {
     /// The exposed service name to reach on the host.
     #[arg(long, value_name = "name", default_value = DEFAULT_SERVICE)]
     pub service: String,
-    /// Present a `sheer:` capability link to a cap-gated host (e.g. an ssh slip minted with `swoosh
-    /// share`). Without it, the tunnel-connect bridge self-signs a membership badge from swoosh's key.
+    /// Present a `sheer:` capability link to a cap-gated host (e.g. an ssh slip minted with `swoosh grant
+    /// issue`). Without it, the tunnel-connect bridge self-signs a membership badge from swoosh's key.
     #[arg(long, value_name = "link")]
     pub present: Option<String>,
     /// Args forwarded verbatim to the system ssh, after `--`.
