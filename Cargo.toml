@@ -39,3 +39,10 @@ std_instead_of_core = "warn"
 
 [workspace.lints.rust]
 unused_must_use = "deny"
+
+# Ship a lean release binary: strip symbols, whole-program LTO, single codegen unit. Roughly halves the
+# artifact at no runtime cost — only a longer release link, a CI concern rather than a user's.
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
