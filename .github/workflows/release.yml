@@ -1,6 +1,7 @@
 # Builds checksummed linux + macOS binaries and attaches them to a GitHub Release on a `v*` tag.
-# swoosh path-deps tightbeam -> bifrost + nauthy, so the release build checks out the sibling repos as
-# siblings under the workspace (matching the local layout) before building.
+# swoosh declares its theia crates as git deps, so cargo fetches them from GitHub at build time; no sibling
+# checkout is needed. NOTE: those git deps are unpinned (default-branch HEAD), so a tag is not yet fully
+# reproducible; pin a rev per release to fix (see the release-reproducibility entry in notes/02-DECISIONS.md).
 name: release
 on:
   push:
@@ -30,22 +31,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: swoosh
-      - uses: actions/checkout@v4
-        with:
-          repository: theia-hq/tightbeam
-          path: tightbeam
-      - uses: actions/checkout@v4
-        with:
-          repository: theia-hq/bifrost
-          path: bifrost
-      - uses: actions/checkout@v4
-        with:
-          repository: theia-hq/nauthy
-          path: nauthy
-      - uses: actions/checkout@v4
-        with:
-          repository: theia-hq/quirk
-          path: quirk
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
