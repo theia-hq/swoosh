@@ -49,7 +49,7 @@ impl PingCmd {
     ) -> eyre::Result<()> {
         let candidates = reach::candidates(&self.target, contacts)?;
         // Present an explicit `--present` link if given, else the self-signed badge minted from this
-        // identity: the peer's `diag:` service is gated, so each probe must prove membership to run.
+        // identity: the peer's `diag.ping` service is gated, so each probe must prove membership to run.
         let present = self.present.or(self_badge);
         let plan = Ping {
             count: self.count,
@@ -58,7 +58,9 @@ impl PingCmd {
 
         let mut any_reached = false;
         for candidate in &candidates {
-            match reach::connect_service(node, candidate, present.clone()).await {
+            match reach::connect_service(node, candidate, reach::PING_SERVICE, present.clone())
+                .await
+            {
                 Ok(session) => {
                     any_reached = true;
                     // Path at connect, so the phrase below can report a relayed-to-direct upgrade that

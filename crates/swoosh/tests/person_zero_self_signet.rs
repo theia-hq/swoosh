@@ -6,7 +6,8 @@
 //! its OWN key but NO provisioned signet gates on ITSELF. A plain `swoosh serve` (no `adopt`, no `--public`)
 //! self-trusts: it admits its own self-signed member badge (rooted at this node's key) and refuses a
 //! STRANGER (a badge rooted at any other key). This is what lets a plain node answer its own gated `diag:`
-//! without opening to the world.
+//! without opening to the world. diag is TWO services here (`diag.ping` and `diag.speed`), so the proof
+//! runs ping over `diag.ping` and speed over `diag.speed`; self-gating walls each independently.
 //!
 //! The composition root supplies the gate root: when `config::load_signet` finds no `signet` file, `serve`
 //! passes the node's OWN id to `resolve_gate` (proved at the seam by
@@ -73,7 +74,11 @@ async fn proof() {
         let host_id = host.node_id();
         let self_signet = NodeId::from_ed25519_secret(&SELF_SECRET);
         tokio::task::spawn_local(async move {
-            let services = Services::parse(&["diag=diag:".to_owned()]).unwrap();
+            let services = Services::parse(&[
+                "diag.ping=diag.ping:".to_owned(),
+                "diag.speed=diag.speed:".to_owned(),
+            ])
+            .unwrap();
             // Person-zero self-signet: the gate roots at the node's OWN key, exactly as
             // `resolve_gate(false, Some(secret.node_id()), ...)` builds it when nothing was adopted.
             let gate = tunnel::resolve_gate(false, Some(self_signet), empty_denylist("self").await)
@@ -93,18 +98,18 @@ async fn proof() {
         let member = Node::new(MemTransport::bind(), NoDiscovery);
         let member_badge = self_badge(&SELF_SECRET, member.node_id());
 
-        // Ping over the gated `diag:` service: the round trip proves the self-gate admits a member.
-        let diag = Connector::to_node(host_id, "diag".to_owned(), Some(member_badge.clone()))
+        // Ping over the gated `diag.ping` service: the round trip proves the self-gate admits a member.
+        let diag = Connector::to_node(host_id, "diag.ping".to_owned(), Some(member_badge.clone()))
             .open_service(&member)
             .await
-            .expect("a member reaches the person-zero node's gated diag");
+            .expect("a member reaches the person-zero node's gated diag.ping");
         let report = Ping {
             count: 3,
             interval: Duration::ZERO,
         }
         .run(&diag)
         .await
-        .expect("member ping runs over the self-gated diag service");
+        .expect("member ping runs over the self-gated diag.ping service");
         assert_eq!(report.received(), 3, "a member's every probe is answered");
         assert_eq!(
             report.loss(),
@@ -112,12 +117,12 @@ async fn proof() {
             "a member's self-gated ping loses nothing"
         );
 
-        // Speedtest over the same gated service: bytes move both ways, so the self-gate admits the transfer
-        // stream too, not just a ping.
-        let diag = Connector::to_node(host_id, "diag".to_owned(), Some(member_badge))
+        // Speedtest over the gated `diag.speed` service: bytes move both ways, so the self-gate admits the
+        // transfer stream too, not just a ping.
+        let diag = Connector::to_node(host_id, "diag.speed".to_owned(), Some(member_badge))
             .open_service(&member)
             .await
-            .expect("a member reaches diag for speed");
+            .expect("a member reaches diag.speed for speed");
         let speed = Speedtest::new(Mode::Bidir, Limit::ByBytes(1 << 16))
             .run(&diag)
             .await
@@ -138,11 +143,15 @@ async fn proof() {
         let stranger = Node::new(MemTransport::bind(), NoDiscovery);
         let stranger_badge = self_badge(&[3u8; 32], stranger.node_id());
 
-        // Refused at diag: the ping ERRORS (the gate refuses the stream), it does not hang or succeed.
-        let diag = Connector::to_node(host_id, "diag".to_owned(), Some(stranger_badge.clone()))
-            .open_service(&stranger)
-            .await
-            .expect("the base connect lands; the gate refuses per-stream");
+        // Refused at diag.ping: the ping ERRORS (the gate refuses the stream), it does not hang or succeed.
+        let diag = Connector::to_node(
+            host_id,
+            "diag.ping".to_owned(),
+            Some(stranger_badge.clone()),
+        )
+        .open_service(&stranger)
+        .await
+        .expect("the base connect lands; the gate refuses per-stream");
         let refused = Ping {
             count: 1,
             interval: Duration::ZERO,
@@ -151,11 +160,11 @@ async fn proof() {
         .await;
         assert!(
             refused.is_err(),
-            "a stranger's ping must be refused at a person-zero node's gated diag, not answered"
+            "a stranger's ping must be refused at a person-zero node's gated diag.ping, not answered"
         );
 
-        // Refused at speed too: a stranger cannot speedtest a self-gating node.
-        let diag = Connector::to_node(host_id, "diag".to_owned(), Some(stranger_badge))
+        // Refused at diag.speed too: a stranger cannot speedtest a self-gating node.
+        let diag = Connector::to_node(host_id, "diag.speed".to_owned(), Some(stranger_badge))
             .open_service(&stranger)
             .await
             .expect("the base connect lands; the gate refuses per-stream");
@@ -164,7 +173,7 @@ async fn proof() {
             .await;
         assert!(
             refused.is_err(),
-            "a stranger's speedtest must be refused at a person-zero node's gated diag"
+            "a stranger's speedtest must be refused at a person-zero node's gated diag.speed"
         );
     }
 }

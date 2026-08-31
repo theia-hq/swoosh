@@ -490,7 +490,8 @@ mod tests {
         assert!(Cli::try_parse_from(["swoosh", "tunnel", "expose", "diag=diag:"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "tunnel", "connect", &peer, "--to", "22"]).is_err());
 
-        // `serve` is the primary publish verb: bare (default `diag`) and with an explicit service set.
+        // `serve` is the primary publish verb: bare (default `diag.ping` + `diag.speed`) and with an
+        // explicit service set.
         assert!(matches!(
             Cli::try_parse_from(["swoosh", "serve"])
                 .expect("bare serve parses")
@@ -498,7 +499,7 @@ mod tests {
             Some(Command::Serve(_))
         ));
         assert!(matches!(
-            Cli::try_parse_from(["swoosh", "serve", "ssh=sshd:", "diag=diag:"])
+            Cli::try_parse_from(["swoosh", "serve", "ssh=sshd:", "diag.ping=diag.ping:"])
                 .expect("serve with services parses")
                 .command,
             Some(Command::Serve(_))

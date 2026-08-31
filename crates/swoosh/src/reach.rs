@@ -15,9 +15,13 @@ use tightbeam::tunnel::{Connector, ServiceSession};
 use crate::contacts::{Candidate, Contacts, Target};
 use crate::transport;
 
-/// The service name the diagnostic verbs reach: the peer's GATED `diag:` handler. A constant so
-/// `ping`/`speed`/`status` all request the same scheme swoosh serves at `serve diag=diag:`.
-const DIAG_SERVICE: &str = "diag";
+/// The two diagnostic services a peer serves, split so a node may offer one without the other: `diag.ping`
+/// (cheap RTT) and `diag.speed` (bandwidth-eating throughput). `ping`/`status` reach [`PING_SERVICE`];
+/// `speed` reaches [`SPEED_SERVICE`]. Each verb dials only the half it needs, so a peer that serves only
+/// one answers that verb and refuses the other. These are the names `swoosh serve` publishes by default.
+pub const PING_SERVICE: &str = "diag.ping";
+/// The speed half of diag; see [`PING_SERVICE`].
+pub const SPEED_SERVICE: &str = "diag.speed";
 
 /// How long to wait for one candidate device to connect before moving on to the next.
 ///
@@ -109,26 +113,28 @@ pub fn candidates(target: &Target, contacts: &Contacts) -> eyre::Result<Vec<Cand
     Ok(target.candidates(contacts)?)
 }
 
-/// A reached peer's GATED `diag:` service: the [`ServiceSession`] to run diag over, plus the label of the
-/// device that answered. The session gates every stream it opens through the `diag:` request, so diag's
+/// A reached peer's GATED diag service: the [`ServiceSession`] to run diag over, plus the label of the
+/// device that answered. The session gates every stream it opens through the service request, so diag's
 /// `Ping`/`Speedtest` run over it unchanged while each stream is admitted by the peer's family gate.
 pub struct Resolved<S> {
-    /// The service-scoped session; every `open_bi` speaks the `diag:` handshake presenting the badge.
+    /// The service-scoped session; every `open_bi` speaks the diag service handshake presenting the badge.
     pub session: ServiceSession<S>,
     /// The label the reached device resolved from (`alice/macbook`, or a raw key's short form).
     pub label: String,
 }
 
-/// Resolve `target` and open the FIRST reachable device's gated `diag:` service, presenting `present`
-/// (the caller's membership badge or an explicit link). What `speed` wants: one target, one session.
+/// Resolve `target` and open the FIRST reachable device's gated `service` (one of [`PING_SERVICE`] /
+/// [`SPEED_SERVICE`]), presenting `present` (the caller's membership badge or an explicit link). What
+/// `speed` wants: one target, one session.
 ///
 /// Candidates are tried in resolution order under the per-candidate [`DIAL_TIMEOUT`]; the first whose
-/// base session connects wins. The `diag:` handshake itself rides each `open_bi` later (the gate is
+/// base session connects wins. The service handshake itself rides each `open_bi` later (the gate is
 /// per-stream), so "reachable" here is the underlying connect landing, exactly as the raw [`dial`] meant.
 pub async fn dial_service<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     contacts: &Contacts,
     target: &Target,
+    service: &str,
     present: Option<String>,
     transport: transport::Transport,
 ) -> eyre::Result<Resolved<T::Session>> {
@@ -136,7 +142,7 @@ pub async fn dial_service<T: Transport, D: Discovery>(
 
     let mut last_error = None;
     for candidate in candidates {
-        match connect_service(node, &candidate, present.clone()).await {
+        match connect_service(node, &candidate, service, present.clone()).await {
             Ok(session) => {
                 return Ok(Resolved {
                     session,
@@ -154,15 +160,17 @@ pub async fn dial_service<T: Transport, D: Discovery>(
     Err(hint(reached, transport))
 }
 
-/// Open one named candidate's gated `diag:` service under the [`DIAL_TIMEOUT`], presenting `present`. The
-/// service-scoped session `ping` and `status` loop over to fan out across a person's devices. A timeout
-/// maps to a plain unreachable error so a caller loops on to the next device.
+/// Open one named candidate's gated `service` (one of [`PING_SERVICE`] / [`SPEED_SERVICE`]) under the
+/// [`DIAL_TIMEOUT`], presenting `present`. The service-scoped session `ping` and `status` loop over to fan
+/// out across a person's devices. A timeout maps to a plain unreachable error so a caller loops on to the
+/// next device.
 pub async fn connect_service<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     candidate: &Candidate,
+    service: &str,
     present: Option<String>,
 ) -> eyre::Result<ServiceSession<T::Session>> {
-    let connector = Connector::to_node(candidate.node, DIAG_SERVICE.to_owned(), present);
+    let connector = Connector::to_node(candidate.node, service.to_owned(), present);
     // Bound the base connect the same way [`connect`] does, so a wedged device does not strand the
     // reachable ones. The `diag:` handshake rides each stream later, so this bounds only reaching the peer.
     match tokio::time::timeout(DIAL_TIMEOUT, connector.open_service(node)).await {
