@@ -1,7 +1,7 @@
 # swoosh
 
 `swoosh` works with another machine addressed by its public key instead of its IP: reach it, measure
-the link, and (as the tool grows) send files, open tunnels, share access, and fetch through it. You give
+the link, and (as the tool grows) send files, forward ports, share access, and fetch through it. You give
 it a peer's key (a short base32 string) and it dials that peer directly, wherever the peer is on the
 internet, across home routers and NATs, without you knowing or caring about the peer's address. No
 address to look up, no server in the middle.
@@ -26,7 +26,7 @@ binary from the releases page; each carries a checksum and a keyless signature y
 `gh attestation verify <binary> --repo theia-hq/swoosh`.
 
 Powered by [bifrost](https://github.com/theia-hq/bifrost) for the keyed connection and
-[tightbeam](https://github.com/theia-hq/tightbeam) for the keyed tunnels.
+[tightbeam](https://github.com/theia-hq/tightbeam) for the keyed byte-streams that carry a forwarded port.
 
 **The name.** *swoosh* is the sound of something sent across: this is the one command you type to
 reach a machine by its key and do things with it, from measuring the link to opening a shell to
@@ -99,31 +99,33 @@ bouncing through a relay?
 ### `swoosh ssh <peer>`
 
 Open an ssh session to a peer over the overlay, by name or key: `swoosh ssh alice/desk`. It resolves the
-peer and points the system `ssh` at it through a private tunnel, then hands off, so anything after works
+peer and points the system `ssh` at it through a private forward, then hands off, so anything after works
 as usual: `swoosh ssh alice/desk -- ls`, or `swoosh ssh alice/desk -p 2222`. Auth is your normal ssh keys.
-The peer exposes its sshd once with `swoosh tunnel expose ssh=sshd:` (a keyless shell, gated to your
-signet), or points at an existing sshd with `swoosh tunnel expose ssh=127.0.0.1:22`.
+The peer serves its sshd once with `swoosh serve ssh=sshd:` (a keyless shell, gated to your
+signet), or points at an existing sshd with `swoosh serve ssh=127.0.0.1:22`.
 
 ### `swoosh fetch <url>`
 
 Fetch a URL through a node you name, handed out as a plain local URL. `swoosh fetch
 https://example.com/big.iso --via usa` prints `http://127.0.0.1:PORT/`; whatever pulls from that (curl,
 xget) is served by `usa`'s machine fetching the origin and streaming it back, `Range` intact so a
-resumable download resumes. The exit is a node *you* run (your own overlay HTTP proxy, no vendor): expose
-it there with `swoosh tunnel expose fetch=fetch:` (gated to your signet) and hand out a `sheer:` cap to `--via`. Scoped to
+resumable download resumes. The exit is a node *you* run (your own overlay HTTP proxy, no vendor): serve
+it there with `swoosh serve fetch=fetch:` (gated to your signet) and hand out a `sheer:` cap to `--via`. Scoped to
 the one origin you name, not an open proxy.
 
-### `swoosh tunnel`
+### `swoosh serve <name>=<svc>` and `swoosh forward <peer>`
 
-Expose a local service to peers, or bind a peer's exposed service to a local port (the `ssh -L` shape,
-but pubkey-addressed and p2p).
+Publish local services under this node's key, and reach a peer's service on a local port (the `ssh -L`
+shape, but pubkey-addressed and p2p).
 
-- `tunnel expose <name=addr>...` publish local services under this node's key, gated by your signet.
-- `tunnel connect <peer> --to <port>` reach a peer's exposed service and bind it to a local port.
+- `serve <name=svc>...` publish local services under this node's key, gated by your signet. A bare
+  `swoosh serve` publishes `diag=diag:` (reach diagnostics); name more to publish more.
+- `forward <peer> --to <port>` reach a peer's published service and bind it to a local port, so a plain
+  local client talks to it as if it were on `127.0.0.1`.
 
 ### `swoosh grant`
 
-Mint, narrow, or revoke a `sheer:` capability link: a signed, expiring grant to one exposed service,
+Mint, narrow, or revoke a `sheer:` capability link: a signed, expiring grant to one published service,
 rooted at this node's key. It carries its own authority, so a holder connects with no allowlist to keep in
 sync, and it is minted, narrowed, and revoked entirely offline.
 
@@ -209,10 +211,10 @@ lands as it is built.
 - [x] `identity`: print this machine's key, minting one if absent, to provision a node ahead of time
 - [x] `mint` / `adopt`: provision a second machine under an identity you control, via a one-time authkey
 - [x] `ssh`: open an ssh session to a peer over the overlay (`swoosh ssh alice/desk`)
-- [x] `tunnel expose` / `tunnel connect`: expose a local service under a name; reach a peer's service on
-  a local port (with `--stdio` for `ssh` `ProxyCommand`)
+- [x] `serve <name=svc>` / `forward`: publish local services under this node's key; reach a peer's service
+  on a local port (with `--stdio` for `ssh` `ProxyCommand`)
 - [x] `grant issue`: mint a `sheer:` capability link (a signed, expiring, attenuable, delegable grant with
-  no server) to an exposed service
+  no server) to a published service
 - [x] `grant narrow`: narrow a capability link offline and print a tighter one
 - [x] `grant revoke`: refuse a capability link at this node at once, without waiting for its expiry
 - [x] `fetch`: mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)

@@ -33,7 +33,8 @@ pub struct ServeCmd {
     #[arg(value_name = "name=svc")]
     pub services: Vec<String>,
     /// Serve to ANYONE, unauthenticated: the one deliberate opt-out from the signet gate. Refused for a
-    /// keyless shell (`sshd:`) or an unbounded drain (`diag:`), which have no auth of their own.
+    /// keyless shell (`sshd:`, remote code execution) or a raw diagnostics drain (`diag:`, no
+    /// responder-side bound yet), neither of which has a legitimate public use.
     #[arg(long)]
     pub public: bool,
     /// Suppress the readiness banner (the node id, services, and gate), for unattended/CI use.
@@ -158,9 +159,10 @@ fn fetch_handler() -> Handler {
 }
 
 /// The `diag:` handler swoosh injects into the exposer: reach diagnostics (ping/speed) behind the node's
-/// gate. It answers one diagnostic request over the admitted stream. GATED: `SpeedSource{None}` is an
-/// unbounded anonymous egress drain, so an open gate over it (`--public diag:`) is refused at
-/// [`Exposer::new`]; the family gate is the terminator until the responder-side bound lands.
+/// gate. It answers one diagnostic request over the admitted stream. GATED: `SpeedSource{None}` is a raw
+/// diagnostics drain with no responder-side bound yet, so it has no legitimate public use; an open gate
+/// over it (`--public diag:`) is refused at [`Exposer::new`]. The family gate is the terminator until the
+/// responder-side bound lands.
 fn diag_handler() -> Handler {
     let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
         async move {
@@ -172,9 +174,10 @@ fn diag_handler() -> Handler {
     Handler::gated(serve)
 }
 
-/// The `sshd:` handler swoosh injects under the `ssh` feature: a keyless shell. GATED, because a shell has
-/// no auth of its own so the gate IS its authentication; an open gate over it is refused at
-/// [`Exposer::new`]. Captures the ssh host-key seed the caller derived from swoosh's identity.
+/// The `sshd:` handler swoosh injects under the `ssh` feature: a keyless shell. GATED, because a keyless
+/// shell is remote code execution with no legitimate public use, so the gate IS its authentication; an open
+/// gate over it is refused at [`Exposer::new`]. Captures the ssh host-key seed the caller derived from
+/// swoosh's identity.
 #[cfg(feature = "ssh")]
 fn sshd_handler(host_seed: [u8; 32]) -> Handler {
     let serve: ServeFn = Arc::new(move |admitted, writer, reader| {
