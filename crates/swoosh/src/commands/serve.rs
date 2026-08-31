@@ -2,14 +2,14 @@
 //! then stay reachable so peers who hold this node's key can reach them.
 //!
 //! This IS the node. `swoosh serve` with no services answers reach diagnostics (`ping`/`speed`) from
-//! peers your signet admits: `diag.ping` (RTT) and `diag.speed` (throughput) are the default services, two
-//! so a node may offer one without the other. `swoosh serve ssh=sshd: diag.ping=diag.ping:` publishes a
+//! peers your signet admits: `ping` (RTT) and `speed` (throughput) are the default services, two
+//! so a node may offer one without the other. `swoosh serve ssh=sshd: ping=ping:` publishes a
 //! shell and a public-able ping responder without exposing speed. It drives tightbeam's tunnel LIBRARY
 //! (`Exposer`) directly under swoosh's OWN persisted identity:
 //! the node binds the same key `swoosh ssh` and a minted `swoosh grant issue` link root at, gates on the
 //! signet read from swoosh's own store, and derives the ssh host seed from swoosh's secret, so an
 //! `ssh=sshd:` service presents the host key a client pins. swoosh assembles the whole handler registry
-//! itself (`fetch:`, `diag.ping:`/`diag.speed:`, and `sshd:` under the `ssh` feature), builds the gate through the shared
+//! itself (`fetch:`, `ping:`/`speed:`, and `sshd:` under the `ssh` feature), builds the gate through the shared
 //! [`resolve_gate`](tightbeam::tunnel::resolve_gate) policy, and prints its OWN readiness banner. `--public`
 //! and `--quiet` live on THIS verb (not root), and reach comes via the shared
 //! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb.
@@ -24,22 +24,22 @@ use tightbeam::tunnel::{self, Exposer, Handler, Registry, ServeFn, Services};
 
 use crate::transport::ReachArgs;
 
-/// The default services `serve` publishes when none is named: swoosh's own gated `diag.ping` and
-/// `diag.speed` handlers, under the names a client requests. diag is TWO services (cheap RTT vs
-/// bandwidth-eating throughput), so a bare `swoosh serve` answers BOTH behind the signet gate, and a node
-/// that wants to offer only one names just that one (`swoosh serve diag.ping=diag.ping:`). Each may be
+/// The default services `serve` publishes when none is named: swoosh's own gated `ping` and
+/// `speed` handlers, under the names a client requests. ping and speed are TWO independent services (cheap
+/// RTT vs bandwidth-eating throughput), so a bare `swoosh serve` answers BOTH behind the signet gate, and a
+/// node that wants to offer only one names just that one (`swoosh serve ping=ping:`). Each may be
 /// made `--public` independently.
-const DEFAULT_SERVICES: [&str; 2] = ["diag.ping=diag.ping:", "diag.speed=diag.speed:"];
+const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 
 /// Be a node: publish these services behind your signet gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// publish local services as `name=svc` (bare `swoosh serve` = `diag.ping` + `diag.speed`, reach diagnostics)
+    /// publish local services as `name=svc` (bare = `ping=ping: speed=speed:`, reach diagnostics)
     #[arg(value_name = "name=svc")]
     pub services: Vec<String>,
     /// Serve to ANYONE, unauthenticated: the one deliberate opt-out from the signet gate. Refused for a
-    /// keyless shell (`sshd:`, remote code execution) or a raw diagnostics service (`diag.ping:`/
-    /// `diag.speed:`, no responder-side bound yet), which have no safe public form until that bound lands.
+    /// keyless shell (`sshd:`, remote code execution) or a raw diagnostics service (`ping:`/
+    /// `speed:`, no responder-side bound yet), which have no safe public form until that bound lands.
     #[arg(long)]
     pub public: bool,
     /// Suppress the readiness banner (the node id, services, and gate), for unattended/CI use.
@@ -50,11 +50,11 @@ pub struct ServeCmd {
 }
 
 impl ServeCmd {
-    /// Serve the named services (default `diag.ping:` + `diag.speed:`) under swoosh's identity by driving the
+    /// Serve the named services (default `ping:` + `speed:`) under swoosh's identity by driving the
     /// tunnel core directly: parse the services, resolve the gate from swoosh's own signet + denylist (through
     /// the shared `resolve_gate` policy, so `--public` opens, else a family gate on the signet), assemble the
-    /// handler registry (`fetch:`, `diag.ping:`/`diag.speed:`, and `sshd:` under the `ssh` feature), print
-    /// swoosh's banner, and run the exposer. A `sshd:`/`diag.*:` service stays gated regardless. The `signet` here is already
+    /// handler registry (`fetch:`, `ping:`/`speed:`, and `sshd:` under the `ssh` feature), print
+    /// swoosh's banner, and run the exposer. A `sshd:`/`ping:`/`speed:` service stays gated regardless. The `signet` here is already
     /// resolved by the composition root: a provisioned signet if one was adopted, else this node's OWN key
     /// (person-zero self-trusts), so a plain node gates on itself rather than failing "no signet".
     pub async fn run<T: Transport, D: Discovery>(
@@ -77,7 +77,7 @@ impl ServeCmd {
         // Resolve the gate before announcing readiness: an unprovisioned node with no `--public` fails
         // HERE, through the ONE shared policy point, rather than ever serving on a permissive default.
         let gate = tunnel::resolve_gate(self.public, signet, denylist)?;
-        // The core assembles the exposer, enforcing the sshd-cannot-be-public (and diag-cannot-be-public)
+        // The core assembles the exposer, enforcing the sshd-cannot-be-public (and ping/speed-cannot-be-public)
         // invariant before any banner is printed, so a refused pairing never advertises a service it will
         // not serve.
         let exposer = Exposer::new(services.clone(), registry(host_seed)?, gate)?;
@@ -131,22 +131,22 @@ impl ServeCmd {
 }
 
 /// Assemble the whole handler registry swoosh serves: the HTTP egress `fetch:`, the two gated diagnostic
-/// services `diag.ping:` and `diag.speed:`, and (under the `ssh` feature) the keyless shell `sshd:`. swoosh
+/// services `ping:` and `speed:`, and (under the `ssh` feature) the keyless shell `sshd:`. swoosh
 /// is the one crate that depends on every service crate, so it is the one place these are wired: tightbeam
 /// names no service crate and ships no built-in, and this function injects them all with `.with(...)`.
 /// `extend` stays available for add-only merges, but swoosh builds one registry directly here.
 ///
-/// diag is TWO services so a node may offer ping without speed (or the reverse), and each carries its own
-/// gate: `diag.ping` answers only ping frames, `diag.speed` only speed frames, refusing the other method at
-/// the wire (`ProtocolError::WrongService`), so a grant narrowed to one half can never open the other.
+/// ping and speed are TWO independent services so a node may offer ping without speed (or the reverse),
+/// and each carries its own gate: `ping` answers only ping frames, `speed` only speed frames, refusing the
+/// other method at the wire (`ProtocolError::WrongService`), so a grant for one can never open the other.
 ///
 /// The ONE assembly the product verb and the `gated_diag` proof test both build, so the test exercises the
 /// identical registry swoosh serves rather than a hand-rolled near-copy.
 pub fn registry(host_seed: [u8; 32]) -> eyre::Result<Registry> {
     let registry = Registry::new()
         .with("fetch", fetch_handler())
-        .with("diag.ping", diag_ping_handler())
-        .with("diag.speed", diag_speed_handler());
+        .with("ping", ping_handler())
+        .with("speed", speed_handler());
     #[cfg(feature = "ssh")]
     let registry = registry.with("sshd", sshd_handler(host_seed));
     #[cfg(not(feature = "ssh"))]
@@ -168,12 +168,12 @@ fn fetch_handler() -> Handler {
     Handler::open(serve)
 }
 
-/// The `diag.ping:` handler swoosh injects: the cheap RTT half of reach diagnostics, behind the node's
+/// The `ping:` handler swoosh injects: the cheap RTT half of reach diagnostics, behind the node's
 /// gate. It answers one ping run over the admitted stream and REFUSES a speed frame at the wire, so a grant
-/// narrowed to `diag.ping` can never open the speed drain. GATED for now (an open gate over it, `--public
-/// diag.ping:`, is a deliberate opt-out a node makes to advertise as a public ping responder); a member is
+/// for `ping` can never open the speed drain. GATED for now (an open gate over it, `--public
+/// ping:`, is a deliberate opt-out a node makes to advertise as a public ping responder); a member is
 /// admitted whole-node.
-fn diag_ping_handler() -> Handler {
+fn ping_handler() -> Handler {
     let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
         async move {
             diag::answer_ping(&mut writer, &mut reader).await?;
@@ -184,13 +184,13 @@ fn diag_ping_handler() -> Handler {
     Handler::gated(serve)
 }
 
-/// The `diag.speed:` handler swoosh injects: the bandwidth-eating throughput half of reach diagnostics,
+/// The `speed:` handler swoosh injects: the bandwidth-eating throughput half of reach diagnostics,
 /// behind the node's gate. It answers one speed transfer over the admitted stream and REFUSES a ping frame
 /// at the wire. GATED: `SpeedSource{None}` is a raw diagnostics drain with no responder-side bound yet, so
 /// an open gate over it is a saturable uplink handed to anyone; a node that DELIBERATELY wants to advertise
-/// as a public speedtest server opts in with `--public diag.speed:`. The family gate is the terminator
+/// as a public speedtest server opts in with `--public speed:`. The family gate is the terminator
 /// until the responder-side bound lands.
-fn diag_speed_handler() -> Handler {
+fn speed_handler() -> Handler {
     let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
         async move {
             diag::answer_speed(&mut writer, &mut reader).await?;

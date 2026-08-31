@@ -213,10 +213,10 @@ pub enum ProtocolError {
     /// A well-formed reply did not match the request it answered (wrong sequence or nonce).
     #[error("reply did not match the probe")]
     Mismatched,
-    /// This service does not serve the requested method: a ping frame arrived on the `diag.speed`
-    /// service (or a speed frame on `diag.ping`). The two halves are distinct services with distinct
+    /// This service does not serve the requested method: a ping frame arrived on the `speed`
+    /// service (or a speed frame on `ping`). These are two independent services with distinct
     /// gates, so the served method must match the service the gate admitted, at the wire, not just at
-    /// the gate. Refusing here is what makes a `diag.ping`-only grant unable to open a speed drain.
+    /// the gate. Refusing here is what makes a `ping` grant unable to open a speed drain.
     #[error("this service does not serve that method")]
     WrongService,
     /// The underlying stream failed while reading a frame.

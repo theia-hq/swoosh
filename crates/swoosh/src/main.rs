@@ -176,7 +176,7 @@ impl Reach {
             // `forward` is a dial-only client (it presents a link, not swoosh's identity), so it is
             // ephemeral like the other reach-outward verbs.
             Self::Forward(_) => Identity::Ephemeral,
-            // The diagnostic verbs reach a peer's GATED `diag:` service presenting a self-signed badge, so
+            // The diagnostic verbs reach a peer's GATED `ping`/`speed` service presenting a self-signed badge, so
             // they must dial under the persisted identity WHEN one exists (the badge roots at the dialing
             // key, so an ephemeral key's self-badge would be refused by the peer's family gate). A fresh
             // install with no persisted key still dials out ephemerally. `--present` carries a link for a
@@ -232,7 +232,7 @@ impl Reach {
                 })?;
                 cmd.run(node, host_seed, signet, denylist).await
             }
-            // The diagnostic verbs reach the peer's GATED `diag:` service, so they present the self-signed
+            // The diagnostic verbs reach the peer's GATED `ping`/`speed` service, so they present the self-signed
             // membership badge (minted below in `self_badge`) the same way `tunnel-connect` does.
             Self::Ping(cmd) => cmd.run(node, contacts, transport, self_badge).await,
             Self::Speed(cmd) => cmd.run(node, contacts, transport, self_badge).await,
@@ -248,7 +248,7 @@ impl Reach {
 
     /// The membership badge to present when dialing, if this verb dials a family-gated node.
     /// `tunnel-connect` (the `swoosh ssh` bridge) and the diagnostic verbs (`ping`/`speed`/`status`, which
-    /// reach the peer's gated `diag:` service) present one. Computed here, in the composition root, because
+    /// reach the peer's gated `ping`/`speed` service) present one. Computed here, in the composition root, because
     /// it needs the resolved secret before the transport consumes it. Every other reach verb presents
     /// nothing, so returns `None`.
     ///
@@ -286,7 +286,7 @@ impl Reach {
     /// OWN identity key as the signet root, rather than failing "no signet to gate on". A node self-trusts:
     /// it admits its own self-signed member badge (rooted at this key) and any device/delegate it later
     /// signs from this root, and refuses a stranger (whose badge roots at some other key the gate never
-    /// trusts). This is what lets a plain node answer its own gated `diag:` without `--public`. The
+    /// trusts). This is what lets a plain node answer its own gated `ping`/`speed` without `--public`. The
     /// EXPLICIT-signet path (an adopted device carrying a provisioned signet) is untouched: `load_signet`
     /// wins whenever a signet file exists, and only its ABSENCE falls back to self.
     async fn expose_context(
@@ -487,10 +487,10 @@ mod tests {
 
         // The retired noun and both old paths are unknown commands now.
         assert!(Cli::try_parse_from(["swoosh", "tunnel"]).is_err());
-        assert!(Cli::try_parse_from(["swoosh", "tunnel", "expose", "diag=diag:"]).is_err());
+        assert!(Cli::try_parse_from(["swoosh", "tunnel", "expose", "ping=ping:"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "tunnel", "connect", &peer, "--to", "22"]).is_err());
 
-        // `serve` is the primary publish verb: bare (default `diag.ping` + `diag.speed`) and with an
+        // `serve` is the primary publish verb: bare (default `ping` + `speed`) and with an
         // explicit service set.
         assert!(matches!(
             Cli::try_parse_from(["swoosh", "serve"])
@@ -499,7 +499,7 @@ mod tests {
             Some(Command::Serve(_))
         ));
         assert!(matches!(
-            Cli::try_parse_from(["swoosh", "serve", "ssh=sshd:", "diag.ping=diag.ping:"])
+            Cli::try_parse_from(["swoosh", "serve", "ssh=sshd:", "ping=ping:"])
                 .expect("serve with services parses")
                 .command,
             Some(Command::Serve(_))

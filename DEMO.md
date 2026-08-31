@@ -105,7 +105,7 @@ swoosh ready. peers can reach this node at:
 
     --peer bf01dqd6hpuofhyhfxccpluqrkttqw4zmfx5oi3gcqfm7nlh5nswntgq=127.0.0.1:61110
 
-serving diag (gate: self (person-zero: this node and its devices)). ctrl-c to stop.
+serving ping, speed (gate: self (person-zero: this node and its devices)). ctrl-c to stop.
 ```
 
 The member dials, feeding back the printed key and hint. It presents the badge the server's signet minted

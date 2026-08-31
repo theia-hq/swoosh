@@ -5,21 +5,21 @@
 //! The gated diag client, end to end over the in-process transport: the security proof that a diagnostic
 //! (`ping`/`speed`) rides the family gate, so a MEMBER can measure a gated node but a STRANGER cannot.
 //!
-//! diag is TWO services, `diag.ping` (cheap RTT) and `diag.speed` (throughput), so a node may offer one
-//! without the other. One node here exposes `ssh`/`fetch`/`diag.ping`/`diag.speed` under a family gate
+//! `ping` and `speed` are TWO independent services (cheap RTT vs throughput), so a node may offer one
+//! without the other. One node here exposes `ssh`/`fetch`/`ping`/`speed` under a family gate
 //! rooted at a signet, assembled through the SAME `registry()` the `swoosh serve` product path builds, so
 //! this test exercises the identical registry swoosh serves rather than a hand-rolled near-copy. A client
 //! that dials under the signet's own key self-signs a membership badge the gate admits: it pings the node
-//! (a round trip) at `diag.ping`, speed-tests it (bytes move both ways) at `diag.speed`, and is admitted at
+//! (a round trip) at `ping`, speed-tests it (bytes move both ways) at `speed`, and is admitted at
 //! `fetch`. A client under a RANDOM key self-signs a badge that roots at that stranger key, which the gate
-//! has never seen, so it is REFUSED at both diag services (its ping/speed error, not hang, not succeed) and
+//! has never seen, so it is REFUSED at both services (its ping/speed error, not hang, not succeed) and
 //! equally at `fetch`. The stranger-refused case is the load-bearing proof: a stranger cannot ping,
 //! speedtest, or fetch a gated node.
 //!
-//! The split adds a wire-level invariant proven here too: a member admitted at `diag.ping` who sends a
-//! SPEED frame is refused at the wire (and a `diag.speed` member who sends a PING frame), so the served
-//! method matches the service the gate admitted. That is what makes a `diag.ping`-only grant unable to open
-//! the speed drain even though both halves speak the same frame.
+//! The two-service split adds a wire-level invariant proven here too: a member admitted at `ping` who
+//! sends a SPEED frame is refused at the wire (and a `speed` member who sends a PING frame), so the served
+//! method matches the service the gate admitted. That is what makes a `ping` grant unable to open
+//! the speed drain even though both services speak the same frame.
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a badge must bind to whatever id the
 //! mem transport proves for the dialer -- NOT to a device's derived ed25519 key. That is why this test
@@ -75,7 +75,7 @@ fn a_member_pings_speeds_and_fetches_a_gated_node_a_stranger_is_refused() {
 /// The proof body: expose a gated node, admit a member (ping + speed + fetch), refuse a stranger.
 async fn proof() {
     {
-        // The exposer node, serving ssh/fetch/diag behind a family gate rooted at the signet, through
+        // The exposer node, serving ssh/fetch/ping/speed behind a family gate rooted at the signet, through
         // the SAME registry the product `serve` path assembles.
         let host = Node::new(MemTransport::bind(), NoDiscovery);
         let host_id = host.node_id();
@@ -83,14 +83,14 @@ async fn proof() {
         tokio::task::spawn_local(async move {
             // `sshd:` is only in the registry under the `ssh` feature, so declare it only when that
             // feature builds it; without it, `Exposer::new` would refuse an unregistered handler. The
-            // proof exercises the two diag services + `fetch`, so gating this keeps it green WITH and
+            // proof exercises the ping + speed services + `fetch`, so gating this keeps it green WITH and
             // WITHOUT the feature.
             // `mut` is only exercised under the `ssh` feature (the push below); without it the vec is final.
             #[cfg_attr(not(feature = "ssh"), allow(unused_mut))]
             let mut requested = vec![
                 "fetch=fetch:".to_owned(),
-                "diag.ping=diag.ping:".to_owned(),
-                "diag.speed=diag.speed:".to_owned(),
+                "ping=ping:".to_owned(),
+                "speed=speed:".to_owned(),
             ];
             #[cfg(feature = "ssh")]
             requested.push("ssh=sshd:".to_owned());
@@ -115,32 +115,32 @@ async fn proof() {
         let member = Node::new(MemTransport::bind(), NoDiscovery);
         let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
 
-        // Ping over the gated `diag.ping` service: the round trip proves the whole diagnostic rides the gate
+        // Ping over the gated `ping` service: the round trip proves the whole diagnostic rides the gate
         // unchanged, one admitted stream at a time.
-        let diag = Connector::to_node(host_id, "diag.ping".to_owned(), Some(member_badge.clone()))
+        let diag = Connector::to_node(host_id, "ping".to_owned(), Some(member_badge.clone()))
             .open_service(&member)
             .await
-            .expect("member reaches diag.ping");
+            .expect("member reaches ping");
         let report = Ping {
             count: 3,
             interval: Duration::ZERO,
         }
         .run(&diag)
         .await
-        .expect("member ping runs over the gated diag.ping service");
+        .expect("member ping runs over the gated ping service");
         assert_eq!(report.received(), 3, "a member's every probe is answered");
         assert_eq!(report.loss(), 0.0, "a member's gated ping loses nothing");
 
-        // Speedtest over the gated `diag.speed` service: bytes move both ways, so the gate admits the
+        // Speedtest over the gated `speed` service: bytes move both ways, so the gate admits the
         // transfer stream too, not just a ping.
-        let diag = Connector::to_node(host_id, "diag.speed".to_owned(), Some(member_badge.clone()))
+        let diag = Connector::to_node(host_id, "speed".to_owned(), Some(member_badge.clone()))
             .open_service(&member)
             .await
-            .expect("member reaches diag.speed");
+            .expect("member reaches speed");
         let speed = Speedtest::new(Mode::Bidir, Limit::ByBytes(1 << 16))
             .run(&diag)
             .await
-            .expect("member speedtest runs over the gated diag.speed service");
+            .expect("member speedtest runs over the gated speed service");
         assert!(
             speed.up().is_some_and(|leg| leg.bytes() > 0),
             "a member's gated speedtest moves upload bytes"
@@ -150,16 +150,15 @@ async fn proof() {
             "a member's gated speedtest moves download bytes"
         );
 
-        // The split's wire wall: a MEMBER admitted at `diag.ping` who sends a SPEED frame gets NO drain.
+        // The split's wire wall: a MEMBER admitted at `ping` who sends a SPEED frame gets NO drain.
         // The gate admitted the stream (the member is whole-node), so this proves the containment is the
         // served-method check, not the gate: `answer_ping` refuses the speed frame at the wire before
-        // sourcing a single byte, so a `diag.ping`-only grant cannot open the unbounded egress drain. The
+        // sourcing a single byte, so a `ping`-only grant cannot open the unbounded egress drain. The
         // download reads a clean stream close, so its counted total is ZERO: no bytes flowed.
-        let ping_only =
-            Connector::to_node(host_id, "diag.ping".to_owned(), Some(member_badge.clone()))
-                .open_service(&member)
-                .await
-                .expect("member reaches diag.ping");
+        let ping_only = Connector::to_node(host_id, "ping".to_owned(), Some(member_badge.clone()))
+            .open_service(&member)
+            .await
+            .expect("member reaches ping");
         let drained = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
             .run(&ping_only)
             .await
@@ -167,17 +166,17 @@ async fn proof() {
         assert_eq!(
             drained.down().map(|leg| leg.bytes()),
             Some(0),
-            "a speed frame on diag.ping must source ZERO bytes: the drain is contained at the wire"
+            "a speed frame on ping must source ZERO bytes: the drain is contained at the wire"
         );
 
-        // And symmetrically: a member admitted at `diag.speed` who sends a PING frame is refused at the
+        // And symmetrically: a member admitted at `speed` who sends a PING frame is refused at the
         // wire. `answer_speed` refuses the ping frame before echoing, so the probe goes unanswered: the
         // run reports 100% loss, no pong. The speed service serves only throughput.
         let speed_only =
-            Connector::to_node(host_id, "diag.speed".to_owned(), Some(member_badge.clone()))
+            Connector::to_node(host_id, "speed".to_owned(), Some(member_badge.clone()))
                 .open_service(&member)
                 .await
-                .expect("member reaches diag.speed");
+                .expect("member reaches speed");
         let unanswered = Ping {
             count: 3,
             interval: Duration::ZERO,
@@ -188,7 +187,7 @@ async fn proof() {
         assert_eq!(
             unanswered.received(),
             0,
-            "a ping frame on diag.speed must go unanswered: the speed service serves no ping"
+            "a ping frame on speed must go unanswered: the speed service serves no ping"
         );
 
         // Fetch is a raw handler, so admission (not the HTTP egress) is what the gate rules on: a member
@@ -208,16 +207,12 @@ async fn proof() {
         let stranger = Node::new(MemTransport::bind(), NoDiscovery);
         let stranger_badge = signet_badge(&[3u8; 32], stranger.node_id());
 
-        // Refused at diag.ping: the ping ERRORS (the gate refuses the stream), it does not hang or succeed.
+        // Refused at ping: the ping ERRORS (the gate refuses the stream), it does not hang or succeed.
         // This is the security proof: a stranger cannot ping a gated node.
-        let diag = Connector::to_node(
-            host_id,
-            "diag.ping".to_owned(),
-            Some(stranger_badge.clone()),
-        )
-        .open_service(&stranger)
-        .await
-        .expect("the base connect lands; the gate refuses per-stream");
+        let diag = Connector::to_node(host_id, "ping".to_owned(), Some(stranger_badge.clone()))
+            .open_service(&stranger)
+            .await
+            .expect("the base connect lands; the gate refuses per-stream");
         let refused = Ping {
             count: 1,
             interval: Duration::ZERO,
@@ -226,25 +221,21 @@ async fn proof() {
         .await;
         assert!(
             refused.is_err(),
-            "a stranger's ping must be refused at the gated diag.ping service, not answered"
+            "a stranger's ping must be refused at the gated ping service, not answered"
         );
 
-        // Refused at diag.speed too: a stranger cannot speedtest a gated node. The gate walls each service
+        // Refused at speed too: a stranger cannot speedtest a gated node. The gate walls each service
         // independently, so refusing one does not imply the other.
-        let diag = Connector::to_node(
-            host_id,
-            "diag.speed".to_owned(),
-            Some(stranger_badge.clone()),
-        )
-        .open_service(&stranger)
-        .await
-        .expect("the base connect lands; the gate refuses per-stream");
+        let diag = Connector::to_node(host_id, "speed".to_owned(), Some(stranger_badge.clone()))
+            .open_service(&stranger)
+            .await
+            .expect("the base connect lands; the gate refuses per-stream");
         let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
             .run(&diag)
             .await;
         assert!(
             refused.is_err(),
-            "a stranger's speedtest must be refused at the gated diag.speed service"
+            "a stranger's speedtest must be refused at the gated speed service"
         );
 
         // Refused at fetch too: a stranger cannot fetch through a gated node. Opening the gated stream

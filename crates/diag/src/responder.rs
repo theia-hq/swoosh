@@ -3,12 +3,12 @@
 //! sink, source a stream. Generic over `Session`, so the same responder answers over iroh (in
 //! `swoosh serve`) and over mem (in tests).
 //!
-//! diag is TWO services, not one: `diag.ping` (cheap RTT) and `diag.speed` (bandwidth-eating
+//! ping and speed are TWO independent services, not one: `ping` (cheap RTT) and `speed` (bandwidth-eating
 //! throughput). A node may offer one without the other, and each carries its own gate, so the served
 //! method MUST match the service that admitted the stream. [`answer_ping`] and [`answer_speed`] are the
 //! two narrow entry points swoosh wires into the registry: each refuses the other's method at the wire
-//! ([`ProtocolError::WrongService`]), so a `diag.ping`-only grant can never open a speed drain even
-//! though both speak the same frame. [`answer`] is the whole-diag union, for a responder that serves
+//! ([`ProtocolError::WrongService`]), so a `ping` grant can never open a speed drain even
+//! though both speak the same frame. [`answer`] is the union of both, for a responder that serves
 //! both over one session.
 
 use bifrost::Session;
@@ -46,9 +46,9 @@ impl Responder {
     }
 }
 
-/// Answer one inbound stream on the `diag.ping` service: echo the opening ping and every probe on it
+/// Answer one inbound stream on the `ping` service: echo the opening ping and every probe on it
 /// (the client sends its whole run over one stream). A non-ping frame is a wire-level violation, not a
-/// silent widening: the outer `diag.ping` gate admitted this stream for liveness only, so a speed frame
+/// silent widening: the outer `ping` gate admitted this stream for liveness only, so a speed frame
 /// here is refused with [`ProtocolError::WrongService`].
 pub async fn answer_ping<W, R>(mut writer: W, mut reader: R) -> Result<(), ProtocolError>
 where
@@ -64,9 +64,9 @@ where
     }
 }
 
-/// Answer one inbound stream on the `diag.speed` service: run the requested transfer (sink / source /
+/// Answer one inbound stream on the `speed` service: run the requested transfer (sink / source /
 /// bidir), one per stream. A ping frame is refused with [`ProtocolError::WrongService`] for symmetry, so
-/// a `diag.speed` grant serves only throughput, never a liveness probe on the wrong wall.
+/// a `speed` grant serves only throughput, never a liveness probe on the wrong wall.
 pub async fn answer_speed<W, R>(mut writer: W, mut reader: R) -> Result<(), ProtocolError>
 where
     W: io::AsyncWrite + Unpin,
@@ -78,7 +78,7 @@ where
     }
 }
 
-/// Answer one inbound stream on the whole-diag service (both methods), dispatching on its opening
+/// Answer one inbound stream on the union of both methods, dispatching on its opening
 /// request. Used by [`Responder`], which serves ping and speed over one session; the split
 /// [`answer_ping`]/[`answer_speed`] are what the gated registry wires when the two are distinct services.
 pub async fn answer<W, R>(mut writer: W, mut reader: R) -> Result<(), ProtocolError>
@@ -96,7 +96,7 @@ where
 }
 
 /// Run one speed transfer for an already-read speed request: drain a sink, source a download, or mirror a
-/// full-duplex run. Shared by [`answer_speed`] and the whole-diag [`answer`], so the transfer engine has
+/// full-duplex run. Shared by [`answer_speed`] and the union [`answer`], so the transfer engine has
 /// one home. A [`Request::Ping`] is unreachable here (both callers peel it off first) and refused for
 /// completeness.
 async fn serve_speed<W, R>(

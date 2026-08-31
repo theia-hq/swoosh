@@ -69,7 +69,7 @@ impl SpeedCmd {
         let mode = self.mode();
         let limit = self.limit();
         // Present an explicit `--present` link if given, else the self-signed badge minted from this
-        // identity: the peer's `diag.speed` service is gated, so a diagnostic must prove membership to run.
+        // identity: the peer's `speed` service is gated, so a diagnostic must prove membership to run.
         let present = self.present.or(self_badge);
         let Resolved { session, label } = reach::dial_service(
             node,

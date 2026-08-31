@@ -6,8 +6,8 @@
 //! `bifrost::Session`), so the identical test runs over iroh, mem, and any future transport. That is
 //! the payoff: speed is iperf, but over any transport, a built-in transport dyno.
 //!
-//! diag is TWO services, so a node may advertise one without the other: `diag.ping` (cheap RTT) and
-//! `diag.speed` (bandwidth-eating throughput). A node answers them with [`answer_ping`]/[`answer_speed`]
+//! ping and speed are TWO independent services, so a node may advertise one without the other: `ping`
+//! (cheap RTT) and `speed` (bandwidth-eating throughput). A node answers them with [`answer_ping`]/[`answer_speed`]
 //! (each refuses the other's method at the wire), or serves both over one session with a [`Responder`].
 //! A client constructs a [`Ping`] or [`Speedtest`], runs it against a session, and reads back a report.
 

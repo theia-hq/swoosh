@@ -15,13 +15,13 @@ use tightbeam::tunnel::{Connector, ServiceSession};
 use crate::contacts::{Candidate, Contacts, Target};
 use crate::transport;
 
-/// The two diagnostic services a peer serves, split so a node may offer one without the other: `diag.ping`
-/// (cheap RTT) and `diag.speed` (bandwidth-eating throughput). `ping`/`status` reach [`PING_SERVICE`];
-/// `speed` reaches [`SPEED_SERVICE`]. Each verb dials only the half it needs, so a peer that serves only
+/// The two diagnostic services a peer serves, independent so a node may offer one without the other: `ping`
+/// (cheap RTT) and `speed` (bandwidth-eating throughput). `ping`/`status` reach [`PING_SERVICE`];
+/// `speed` reaches [`SPEED_SERVICE`]. Each verb dials only the service it needs, so a peer that serves only
 /// one answers that verb and refuses the other. These are the names `swoosh serve` publishes by default.
-pub const PING_SERVICE: &str = "diag.ping";
-/// The speed half of diag; see [`PING_SERVICE`].
-pub const SPEED_SERVICE: &str = "diag.speed";
+pub const PING_SERVICE: &str = "ping";
+/// The speed service; see [`PING_SERVICE`].
+pub const SPEED_SERVICE: &str = "speed";
 
 /// How long to wait for one candidate device to connect before moving on to the next.
 ///
@@ -172,7 +172,7 @@ pub async fn connect_service<T: Transport, D: Discovery>(
 ) -> eyre::Result<ServiceSession<T::Session>> {
     let connector = Connector::to_node(candidate.node, service.to_owned(), present);
     // Bound the base connect the same way [`connect`] does, so a wedged device does not strand the
-    // reachable ones. The `diag:` handshake rides each stream later, so this bounds only reaching the peer.
+    // reachable ones. The ping/speed handshake rides each stream later, so this bounds only reaching the peer.
     match tokio::time::timeout(DIAL_TIMEOUT, connector.open_service(node)).await {
         Ok(Ok(session)) => Ok(session),
         Ok(Err(error)) => {

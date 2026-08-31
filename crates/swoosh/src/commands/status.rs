@@ -50,7 +50,7 @@ impl StatusCmd {
     ) -> eyre::Result<()> {
         let candidates = reach::candidates(&self.target, contacts)?;
         // Present an explicit `--present` link if given, else the self-signed badge minted from this
-        // identity: the peer's `diag.ping` service is gated, so the RTT probe must prove membership to run.
+        // identity: the peer's `ping` service is gated, so the RTT probe must prove membership to run.
         let present = self.present.or(self_badge);
 
         // Report each device; track whether any was reachable, so an all-unreachable fan-out ends non-

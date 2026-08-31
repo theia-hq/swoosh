@@ -52,7 +52,7 @@ swoosh ready. peers can reach this node at:
 
     bf01hy…
 
-serving diag.ping, diag.speed (gate: signet bf04mn…). ctrl-c to stop.
+serving ping, speed (gate: signet bf04mn…). ctrl-c to stop.
 ```
 
 On another, save the key under a name once, then reach it by name:
@@ -75,9 +75,9 @@ alice via iroh: direct to 203.0.113.7:41641, rtt 24.8 ms
 Stay online and reachable. Prints this machine's key, then answers `ping`, `speed`, and `status` from
 any peer that dials it. The key is stable across restarts, so peers can save it once.
 
-Diagnostics are two services, `diag.ping` (cheap RTT) and `diag.speed` (bandwidth-eating throughput),
+Diagnostics are two services, `ping` (cheap RTT) and `speed` (bandwidth-eating throughput),
 so a node MAY offer one without the other. Bare `swoosh serve` publishes both; `swoosh serve
-diag.ping=diag.ping:` answers ping but not speed (and `diag.speed=diag.speed:` the reverse). Each is
+ping=ping:` answers ping but not speed (and `speed=speed:` the reverse). Each is
 gated by default, so members reach both; a per-service grant can hand out ping-only.
 
 ### `swoosh ping <peer>`
@@ -141,7 +141,7 @@ Publish local services under this node's key, and reach a peer's service on a lo
 shape, but pubkey-addressed and p2p).
 
 - `serve <name=svc>...` publish local services under this node's key, gated by your signet. A bare
-  `swoosh serve` publishes `diag.ping=diag.ping:` and `diag.speed=diag.speed:` (reach diagnostics, two
+  `swoosh serve` publishes `ping=ping:` and `speed=speed:` (reach diagnostics, two
   services so a node may offer one without the other); name more to publish more.
 - `forward <peer> --to <port | - | unix:PATH>` reach a peer's published service and put it on a local
   port (a plain local client talks to it as if it were on `127.0.0.1`) or stream it to stdout with `--to -`

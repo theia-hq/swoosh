@@ -7,7 +7,7 @@
 # Three identities, each in its own key dir, so this is a real membership story:
 #   - the SERVER runs the node and gates diagnostics behind its signet.
 #   - the MEMBER is minted + adopted, so the server's signet trusts it; it
-#     reaches the server's gated diag service over quirk AND over iroh.
+#     reaches the server's gated ping/speed service over quirk AND over iroh.
 #   - the STRANGER is never adopted, so the gate refuses it.
 #
 # Because the member is a DISTINCT identity (its own key, its own NodeId), the
