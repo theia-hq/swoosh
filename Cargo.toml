@@ -16,6 +16,7 @@ bifrost-mdns = { git = "https://github.com/theia-hq/bifrost" }
 bifrost-mem = { git = "https://github.com/theia-hq/bifrost" }
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost" }
 nauthy = { git = "https://github.com/theia-hq/nauthy" }
+sshh = { git = "https://github.com/theia-hq/sshh" }
 tightbeam = { git = "https://github.com/theia-hq/tightbeam" }
 diag = { path = "crates/diag" }
 fetch = { path = "crates/fetch" }

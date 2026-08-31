@@ -10,12 +10,12 @@ name = "swoosh"
 path = "src/main.rs"
 
 [features]
-# `ssh` toggles tightbeam's keyless-ssh service through, so a default swoosh serves `tunnel expose
-# ssh=sshd:` and `swoosh ssh` reaches it. DEFAULT-ON: the keyless shell is a headline capability, not an
-# opt-in. A lean client that only reaches out (`ping`/`speed`/`fetch`) can drop the russh/pty tree with
-# `--no-default-features`, keeping swoosh the one binary either way.
+# `ssh` pulls in swoosh's own `sshh` dependency and injects the `sshd:` handler, so a default swoosh serves
+# `tunnel expose ssh=sshd:` and `swoosh ssh` reaches it. DEFAULT-ON: the keyless shell is a headline
+# capability, not an opt-in. A lean client that only reaches out (`ping`/`speed`/`fetch`) can drop the
+# russh/pty tree with `--no-default-features`, keeping swoosh the one binary either way.
 default = ["ssh"]
-ssh = ["tightbeam/ssh"]
+ssh = ["dep:sshh"]
 
 [dependencies]
 # theia
@@ -25,7 +25,9 @@ bifrost-iroh.workspace = true
 bifrost-mdns.workspace = true
 bifrost-quirk.workspace = true
 diag.workspace = true
+fetch.workspace = true
 nauthy.workspace = true
+sshh = { workspace = true, optional = true }
 tightbeam.workspace = true
 
 clap.workspace = true
