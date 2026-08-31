@@ -39,7 +39,14 @@ impl MintCmd {
 
         let mut seed = signet.derive_child_seed(device.as_str());
         let node = NodeId::from_ed25519_secret(&seed);
-        let token = authkey::encode(&seed, signet.node_id());
+        // The signet signs a membership badge FOR this device: rooted at the signet (so the family gate,
+        // which trusts the signet, admits it) and bound to the device's own node id (so an intercepted
+        // badge cannot be replayed from another key). The device could never mint this itself -- its own
+        // self-sign roots at its child key and is refused -- which is exactly why the signet mints it here,
+        // once, and the device carries it. The signet SECRET stays in `signet`; only the signed PUBLIC
+        // badge (a `sheer:` link) leaves, alongside the child seed and the signet's public node id.
+        let badge = signet.sign_device_badge(node)?;
+        let token = authkey::encode(&seed, signet.node_id(), &badge);
         seed.zeroize();
 
         // Record `me/<label> -> node` so the machine is addressable by name once it adopts the seed. The

@@ -27,7 +27,11 @@ pub struct AdoptCmd {
 impl AdoptCmd {
     /// Parse the authkey, write the child seed as this node's identity, and record the trusted signet.
     pub async fn run(self, key: Option<&Path>) -> eyre::Result<()> {
-        let (mut seed, signet) = authkey::parse(&self.authkey)?;
+        let authkey::Authkey {
+            mut seed,
+            signet,
+            badge,
+        } = authkey::parse(&self.authkey)?;
         // Compute the adopted node id before wiping the seed, for the confirmation line.
         let node = NodeId::from_ed25519_secret(&seed);
         // Become the derived device: write the child seed as SWOOSH's persisted identity -- the SAME store
@@ -41,12 +45,22 @@ impl AdoptCmd {
         // lands beside the identity just written, under the SAME `--key` dir, in swoosh's own config, which
         // `swoosh tunnel expose` reads via `crate::config::load_signet`. One command, one dir.
         crate::config::write_signet(key, signet).await?;
+        // Store the signet-signed membership badge beside the seed, so this device PRESENTS the badge the
+        // signet minted for it (rooted at the signet, bound to this key) when it dials a family-gated node,
+        // rather than self-signing (which roots at this child key and is refused). Absent for a legacy
+        // two-field authkey; then the device falls back to self-signing (only useful for the signet holder).
+        if let Some(badge) = &badge {
+            crate::config::write_badge(key, badge).await?;
+        }
 
         println!("adopted this machine as {}  [mine]", node.short());
         println!(
             "trusting signet {}: `swoosh tunnel expose` now admits its members and delegates.",
             signet.short()
         );
+        if badge.is_some() {
+            println!("stored your membership badge: this device now reaches your gated services.");
+        }
         Ok(())
     }
 }
