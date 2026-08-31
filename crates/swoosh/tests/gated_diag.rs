@@ -73,7 +73,8 @@ async fn proof() {
                 "diag=diag:".to_owned(),
             ])
             .unwrap();
-            let gate = tunnel::family_gate(signet, empty_denylist("host").await);
+            let gate =
+                tunnel::resolve_gate(false, Some(signet), empty_denylist("host").await).unwrap();
             let registry = swoosh::commands::tunnel::expose::registry(HOST_SEED).unwrap();
             Exposer::new(services, registry, gate)
                 .unwrap()
