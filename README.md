@@ -86,6 +86,23 @@ Dial a peer and measure the round-trip time, like `ping(8)` but addressed by key
 
 - `-c, --count <N>` how many probes to send (default 4)
 - `-i, --interval <SECS>` seconds between probes (default 1.0)
+- `-v, --verbose` print a line per probe as it lands (watch iroh punch to direct)
+
+With `-v`, ping prints a line per probe as it arrives, like `tailscale ping`, sampling the path beside
+each pong. Over iroh a session often starts relayed and hole-punches to direct mid-run, so you watch it
+flip live: the exact probe that lands direct reads `(upgraded from relayed)`. The `ping(8)` summary still
+follows.
+
+```sh
+$ swoosh ping alice -v -c 4
+alice/macbook via iroh: relayed, seq 0 rtt 61.200 ms
+alice/macbook via iroh: relayed, seq 1 rtt 58.900 ms
+alice/macbook via iroh: direct to 203.0.113.7:41641 (upgraded from relayed), seq 2 rtt 24.800 ms
+alice/macbook via iroh: direct to 203.0.113.7:41641 (upgraded from relayed), seq 3 rtt 23.100 ms
+alice/macbook via iroh: direct to 203.0.113.7:41641 (upgraded from relayed)
+  4 sent, 4 received, 0% loss
+  rtt min/avg/max/mdev = 23.100/42.000/61.200/18.400 ms
+```
 
 ### `swoosh speed <peer>`
 

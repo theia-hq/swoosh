@@ -193,6 +193,10 @@ path: mixed (direct to 129.222.206.36:57307 and relayed)
 down  0.99 MiB in 3.01s = 0.33 MiB/s
 ```
 
+Add `-v` to `ping` to WATCH that path settle: it prints a line per probe as it lands (like `tailscale
+ping`), sampling the path beside each pong, so the exact probe where a relayed link hole-punches to
+direct reads `(upgraded from relayed)` in real time. The `ping(8)` summary still follows.
+
 Same member, same server key, same verbs, real reach over the internet path. Because the member is a
 distinct identity, there is no self-connect: iroh accepts the dial (the one-key demo could not, iroh
 forbids connecting to your own NodeId). The numbers across quirk and iroh are not comparable and are not

@@ -15,6 +15,17 @@ use tokio::time;
 
 use crate::protocol::{ProtocolError, Request, Response};
 
+/// One probe's outcome, handed to a live observer the instant it completes: the sequence number and its
+/// round-trip time, or `None` for a lost probe. This is what a caller watches to print a line per pong
+/// (like `tailscale ping`), sampling the session's path alongside each one as hole-punching progresses.
+#[derive(Debug, Clone, Copy)]
+pub struct Probe {
+    /// The zero-based probe index, in `0..count`.
+    pub seq: u32,
+    /// The measured round-trip time, or `None` if this probe's reply was lost.
+    pub rtt: Option<Duration>,
+}
+
 /// A ping run against one peer: how many probes, how far apart.
 #[derive(Debug, Clone, Copy)]
 #[must_use = "a Ping does nothing until run"]
@@ -29,6 +40,18 @@ impl Ping {
     /// Run the probes over an established session and return the gathered report. One-shot: consumes
     /// `self`, opens a single stream, and drives every probe on it in sequence.
     pub async fn run<S: Session>(self, session: &S) -> Result<PingReport, ProtocolError> {
+        self.observing(session, |_probe| {}).await
+    }
+
+    /// Run the probes, calling `observe` with each [`Probe`] the instant it completes, then return the
+    /// gathered report. The live counterpart to [`run`](Self::run) (which is this with a no-op observer):
+    /// a caller watches probes land one by one, sampling the session's path beside each, so the exact
+    /// probe where a relayed link hole-punches to direct is visible live. Same report either way.
+    pub async fn observing<S: Session>(
+        self,
+        session: &S,
+        mut observe: impl FnMut(Probe),
+    ) -> Result<PingReport, ProtocolError> {
         let Self { count, interval } = self;
         let (mut writer, mut reader) = session.open_bi().await?;
 
@@ -37,10 +60,17 @@ impl Ping {
             if seq > 0 {
                 time::sleep(interval).await;
             }
-            match probe(&mut writer, &mut reader, seq).await {
-                Ok(rtt) => rtts.push(rtt),
-                Err(error) => tracing::warn!(%error, seq, "ping probe lost"),
-            }
+            let rtt = match probe(&mut writer, &mut reader, seq).await {
+                Ok(rtt) => {
+                    rtts.push(rtt);
+                    Some(rtt)
+                }
+                Err(error) => {
+                    tracing::warn!(%error, seq, "ping probe lost");
+                    None
+                }
+            };
+            observe(Probe { seq, rtt });
         }
         // Close the write half so the responder sees EOF and its stream task can finish cleanly.
         writer.shutdown().await.map_err(ProtocolError::Io)?;

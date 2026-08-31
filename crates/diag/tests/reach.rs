@@ -50,6 +50,35 @@ async fn ping_measures_round_trips_with_no_loss() {
 }
 
 #[tokio::test]
+async fn observing_reports_every_probe_in_order_as_it_lands() {
+    // The live-view path: `observing` must call back once per probe, in sequence order, each carrying a
+    // round-trip time (no loss over mem). This is what the `-v` ping surface watches to print a line per
+    // pong and sample the path beside each.
+    let (serving, session) = paired().await.expect("client should reach the responder");
+
+    let mut seen = Vec::new();
+    let report = Ping {
+        count: 3,
+        interval: Duration::from_millis(1),
+    }
+    .observing(&session, |probe| {
+        seen.push((probe.seq, probe.rtt.is_some()))
+    })
+    .await
+    .expect("observed ping run should succeed over the mem transport");
+
+    assert_eq!(
+        seen,
+        vec![(0, true), (1, true), (2, true)],
+        "every probe is observed once, in order, with a measured rtt"
+    );
+    assert_eq!(report.received(), 3, "the report still gathers every reply");
+
+    drop(session);
+    serving.abort();
+}
+
+#[tokio::test]
 async fn speed_moves_bytes_in_each_direction() {
     for mode in [Mode::Up, Mode::Down] {
         let (serving, session) = paired().await.expect("client should reach the responder");
