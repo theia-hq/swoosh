@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/diag", "crates/swoosh"]
+members = ["crates/diag", "crates/fetch", "crates/swoosh"]
 
 [workspace.package]
 edition = "2024"
@@ -18,6 +18,7 @@ bifrost-quirk = { git = "https://github.com/theia-hq/bifrost" }
 nauthy = { git = "https://github.com/theia-hq/nauthy" }
 tightbeam = { git = "https://github.com/theia-hq/tightbeam" }
 diag = { path = "crates/diag" }
+fetch = { path = "crates/fetch" }
 
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"

@@ -1,0 +1,14 @@
+[package]
+name = "fetch"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+futures.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "time"] }
+
+[lints]
+workspace = true
