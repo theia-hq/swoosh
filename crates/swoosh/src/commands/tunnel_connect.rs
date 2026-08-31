@@ -71,7 +71,8 @@ fn connector(dial: &Dial, service: String, present: Option<String>) -> eyre::Res
 }
 
 /// The ONE connect path both swoosh surfaces drive. Resolve the connector, then either forward a local port
-/// (printing swoosh's own `forwarding …` line) or pipe stdin/stdout (no banner: ssh owns the tty).
+/// (proving admission, then printing swoosh's own `forwarding …` line) or pipe stdin/stdout (no banner: ssh
+/// owns the tty). A refused forward surfaces the host's reason here and exits non-zero, never a fake banner.
 pub async fn connect<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     dial: Dial,
@@ -82,12 +83,14 @@ pub async fn connect<T: Transport, D: Discovery>(
     let connector = connector(&dial, service, present)?;
     match mode {
         Mode::Port(port) => {
-            println!(
-                "forwarding 127.0.0.1:{port} to {} ({})",
-                connector.dial(),
-                connector.service()
-            );
-            connector.forward_port(node, port).await
+            // Prove the gate admits us BEFORE printing "forwarding …": `preflight` reaches, probes
+            // admission on one stream, and binds the port, returning the host's refusal reason on an
+            // Err. So an unauthorized forward fails loudly here (a clear one-line reason, non-zero exit),
+            // never a hopeful banner followed by a silent reset.
+            let (dial, service) = (connector.dial(), connector.service().to_owned());
+            let forward = connector.preflight(node, port).await?;
+            println!("forwarding 127.0.0.1:{port} to {dial} ({service})");
+            forward.run().await
         }
         Mode::Stdio => connector.pipe_stdio(node).await,
     }
