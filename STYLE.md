@@ -117,6 +117,7 @@ _The doc voice, proven across every repo. A README, crate description, or `--hel
 
 ## Security
 - **`zeroize` sensitive data** so secrets don't linger in freed memory.
+- **A trust default degrades to SELF, never to open and never to a dead end.** When a gate needs a trust root and none is provisioned, root it at the node's OWN identity key (self-trust: admit yourself and whom you delegate, refuse strangers) rather than forcing the operator to either open the gate to everyone or hit a "nothing to gate on" error. A node is its own root of trust by default. The permissive opt-out (`--public`) stays an explicit, named choice; absence of provisioning is not a reason to fall open, and self-trust keeps a plain node useful without weakening the stranger-refused guarantee (person-zero self-signet, swoosh `serve`).
 
 ## Tooling & dependencies
 - **`cargo fmt`, `cargo clippy -D warnings`, `cargo sort --grouped`** all clean before every commit, part of the definition of done. `--grouped` is the house form so the local-above-external manifest grouping (see Code layout) survives the sort.

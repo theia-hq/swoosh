@@ -46,9 +46,11 @@ pub struct ServeCmd {
 impl ServeCmd {
     /// Serve the named services (default `diag=diag:`) under swoosh's identity by driving the tunnel core
     /// directly: parse the services, resolve the gate from swoosh's own signet + denylist (through the
-    /// shared `resolve_gate` policy, so `--public` opens, else a family gate on the signet, else a loud
-    /// error), assemble the handler registry (`fetch:`, `diag:`, and `sshd:` under the `ssh` feature),
-    /// print swoosh's banner, and run the exposer. A `sshd:`/`diag:` service stays gated regardless.
+    /// shared `resolve_gate` policy, so `--public` opens, else a family gate on the signet), assemble the
+    /// handler registry (`fetch:`, `diag:`, and `sshd:` under the `ssh` feature), print swoosh's banner, and
+    /// run the exposer. A `sshd:`/`diag:` service stays gated regardless. The `signet` here is already
+    /// resolved by the composition root: a provisioned signet if one was adopted, else this node's OWN key
+    /// (person-zero self-trusts), so a plain node gates on itself rather than failing "no signet".
     pub async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -88,7 +90,7 @@ impl ServeCmd {
             println!(
                 "serving {} (gate: {}). ctrl-c to stop.",
                 names.join(", "),
-                self.gate_description(signet)
+                self.gate_description(signet, addr.node)
             );
         }
 
@@ -104,12 +106,17 @@ impl ServeCmd {
         }
     }
 
-    /// A one-line description of the effective gate, for the readiness banner: trust made visible.
-    fn gate_description(&self, signet: Option<NodeId>) -> String {
+    /// A one-line description of the effective gate, for the readiness banner: trust made visible. `self_id`
+    /// is this node's own id, so the banner can say "self" when the gate roots at the node's OWN key (a
+    /// person-zero node with no provisioned signet self-trusts) rather than naming its own id as a "signet".
+    fn gate_description(&self, signet: Option<NodeId>, self_id: NodeId) -> String {
         if self.public {
             "public (anyone, unauthenticated)".to_owned()
         } else {
             match signet {
+                Some(root) if root == self_id => {
+                    "self (person-zero: this node and its devices)".to_owned()
+                }
                 Some(root) => format!("signet {}", root.short()),
                 None => "unprovisioned".to_owned(),
             }

@@ -281,6 +281,14 @@ impl Reach {
     /// and the revocation denylist the gate honors. All read from swoosh's OWN store, dir-derived from
     /// `--key` like the contacts file, so a swoosh node gates on the signet `swoosh adopt` set under the same
     /// `--key`. Every other verb returns `None`. Async because the signet and denylist are read from disk.
+    ///
+    /// Person-zero self-signet: a node with its OWN key but no PROVISIONED signet (no `adopt`) gates on its
+    /// OWN identity key as the signet root, rather than failing "no signet to gate on". A node self-trusts:
+    /// it admits its own self-signed member badge (rooted at this key) and any device/delegate it later
+    /// signs from this root, and refuses a stranger (whose badge roots at some other key the gate never
+    /// trusts). This is what lets a plain node answer its own gated `diag:` without `--public`. The
+    /// EXPLICIT-signet path (an adopted device carrying a provisioned signet) is untouched: `load_signet`
+    /// wins whenever a signet file exists, and only its ABSENCE falls back to self.
     async fn expose_context(
         &self,
         secret: &identity::Secret,
@@ -291,7 +299,11 @@ impl Reach {
             // returns `None`.
             Self::Serve(_) => Ok(Some(ExposeContext {
                 host_seed: secret.ssh_host_seed(),
-                signet: config::load_signet(key).await?,
+                signet: Some(
+                    config::load_signet(key)
+                        .await?
+                        .unwrap_or_else(|| secret.node_id()),
+                ),
                 denylist: nauthy::Denylist::load(config::revoked_path(key)?).await?,
             })),
             _ => Ok(None),
@@ -516,5 +528,42 @@ mod tests {
         ])
         .expect("the hidden tunnel-connect ABI still resolves");
         assert!(matches!(cli.command, Some(Command::TunnelConnect(_))));
+    }
+
+    /// Person-zero self-signet: `serve` on a node with its OWN key but NO provisioned signet (an empty
+    /// config dir, no `signet` file) resolves its gate root to the node's OWN id, not `None`. This is the
+    /// seam that lets a plain node gate on itself rather than fail "no signet to gate on"; the security
+    /// consequence (admit self, refuse a stranger) is proved end to end in `person_zero_self_signet.rs`.
+    #[tokio::test]
+    async fn serve_with_no_signet_gates_on_the_nodes_own_key() {
+        let dir = std::env::temp_dir().join(format!("swoosh-person-zero-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create an empty config dir");
+        let key = dir.join("identity.key");
+
+        // An in-memory secret standing in for the persisted identity; the dir it points at has no signet.
+        let secret = identity::Secret::ephemeral();
+        let reach = match Cli::try_parse_from(["swoosh", "serve"])
+            .expect("bare serve parses")
+            .command
+            .expect("serve is a command")
+            .split()
+        {
+            Verb::Reach(reach) => reach,
+            _ => panic!("serve splits to a reaching verb"),
+        };
+
+        let expose = reach
+            .expose_context(&secret, Some(&key))
+            .await
+            .expect("expose context resolves")
+            .expect("serve carries an expose context");
+        assert_eq!(
+            expose.signet,
+            Some(secret.node_id()),
+            "an unprovisioned node gates on its OWN key (person-zero self-signet), not None"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

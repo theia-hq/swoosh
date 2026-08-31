@@ -48,8 +48,9 @@ pub fn badge_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
 }
 
 /// Load this node's signet: the [`NodeId`] it was provisioned to trust, or `None` if it was never
-/// provisioned. The file is a single public node id; an absent file means unprovisioned, which `expose`
-/// treats as "no default gate" (a loud error), never a silent open.
+/// provisioned. The file is a single public node id; an absent file means unprovisioned, which `serve`
+/// treats as "gate on this node's OWN key" (person-zero self-trusts: it admits itself and its devices,
+/// refuses strangers), never a silent open.
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 pub async fn load_signet(key: Option<&Path>) -> eyre::Result<Option<NodeId>> {
