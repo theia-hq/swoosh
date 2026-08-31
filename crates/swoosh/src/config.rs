@@ -19,7 +19,8 @@ fn config_dir(key: Option<&Path>) -> eyre::Result<PathBuf> {
     match key.and_then(Path::parent) {
         Some(dir) => Ok(dir.to_path_buf()),
         None => {
-            let home = std::env::var_os("HOME").ok_or_else(|| eyre!("HOME is not set; pass --key"))?;
+            let home =
+                std::env::var_os("HOME").ok_or_else(|| eyre!("HOME is not set; pass --key"))?;
             Ok(PathBuf::from(home).join(".config").join("swoosh"))
         }
     }

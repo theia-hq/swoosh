@@ -309,7 +309,16 @@ mod tests {
 
     #[test]
     fn argv_wires_the_proxy_then_pinning_options_then_host() {
-        let argv = ssh_argv(PROXY, KEY, "ssh", None, "alice/desk", &known_hosts(), None, &[]);
+        let argv = ssh_argv(
+            PROXY,
+            KEY,
+            "ssh",
+            None,
+            "alice/desk",
+            &known_hosts(),
+            None,
+            &[],
+        );
         assert_eq!(
             argv,
             vec![
@@ -333,8 +342,16 @@ mod tests {
         // `swoosh ssh --key <dir>` must DIAL under that identity: the re-invoked tunnel-connect gets the
         // same --key, so its membership badge roots at that key. Without this, --key was silently dropped
         // and the dial used swoosh's default identity -- the bug that faked an auth bypass.
-        let with_key =
-            ssh_argv(PROXY, KEY, "ssh", None, "alice", &known_hosts(), Some(Path::new("/tmp/yah")), &[]);
+        let with_key = ssh_argv(
+            PROXY,
+            KEY,
+            "ssh",
+            None,
+            "alice",
+            &known_hosts(),
+            Some(Path::new("/tmp/yah")),
+            &[],
+        );
         assert!(
             with_key.iter().any(|a| a
                 == &format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --stdio --key \"/tmp/yah\"")),
@@ -349,7 +366,16 @@ mod tests {
     fn argv_pins_on_the_node_id_not_the_placeholder_host() {
         // The known_hosts pin is keyed on the node id via HostKeyAlias, so a petname rename never orphans
         // it. The placeholder host is the mutable petname; the alias is the immutable key.
-        let argv = ssh_argv(PROXY, KEY, "ssh", None, "alice/desk", &known_hosts(), None, &[]);
+        let argv = ssh_argv(
+            PROXY,
+            KEY,
+            "ssh",
+            None,
+            "alice/desk",
+            &known_hosts(),
+            None,
+            &[],
+        );
         assert!(argv.contains(&format!("HostKeyAlias={KEY}")));
         assert!(argv.contains(&"StrictHostKeyChecking=accept-new".to_owned()));
         assert!(argv.contains(&"GlobalKnownHostsFile=/dev/null".to_owned()));
@@ -368,7 +394,16 @@ mod tests {
 
     #[test]
     fn argv_honors_a_non_default_service() {
-        let argv = ssh_argv(PROXY, KEY, "admin-ssh", None, "alice", &known_hosts(), None, &[]);
+        let argv = ssh_argv(
+            PROXY,
+            KEY,
+            "admin-ssh",
+            None,
+            "alice",
+            &known_hosts(),
+            None,
+            &[],
+        );
         assert_eq!(
             argv[1],
             format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service admin-ssh --stdio")
@@ -380,7 +415,16 @@ mod tests {
         // A `sheer:` link (whitespace-free, like the key) rides unquoted in the whitespace-split
         // ProxyCommand, after `--stdio`, so the bridge presents the given slip instead of self-signing.
         let link = "sheer:abcdef0123456789";
-        let argv = ssh_argv(PROXY, KEY, "ssh", Some(link), "alice", &known_hosts(), None, &[]);
+        let argv = ssh_argv(
+            PROXY,
+            KEY,
+            "ssh",
+            Some(link),
+            "alice",
+            &known_hosts(),
+            None,
+            &[],
+        );
         assert_eq!(
             argv[1],
             format!(

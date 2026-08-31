@@ -23,7 +23,6 @@ use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Transport};
 use clap::{CommandFactory, Parser, Subcommand};
-
 // The verb modules live in the swoosh LIBRARY (`lib.rs`), so an integration test can drive the same pieces
 // this binary composes. The binary owns only the CLI surface below (the clap tree and composition root).
 use swoosh::commands::adopt::AdoptCmd;
