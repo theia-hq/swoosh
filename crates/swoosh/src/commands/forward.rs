@@ -1,7 +1,7 @@
-//! `swoosh tunnel connect <peer> --to <port>`: bind a peer's exposed service to a local port.
+//! `swoosh forward <peer> --to <port>`: bind a peer's served service to a local port.
 //!
 //! Drives tightbeam's tunnel [`Connector`] directly under swoosh's OWN identity: the public port-forward
-//! form (`ssh -L` shaped), where a local TCP port carries each connection to the peer's exposed service
+//! form (`ssh -L` shaped), where a local TCP port carries each connection to the peer's served service
 //! over the overlay. Distinct from the hidden `tunnel-connect` leaf (the `swoosh ssh` ProxyCommand ABI,
 //! which is `--stdio`-only and never typed): this is the port-bound form a user reaches directly. Both
 //! surfaces share the one [`connect`](crate::commands::tunnel_connect::connect) runner, selected here by
@@ -13,9 +13,9 @@ use clap::Args;
 use crate::commands::tunnel_connect::{self, Dial, Mode};
 use crate::transport::ReachArgs;
 
-/// Reach a peer's exposed service and bind it to a local port.
+/// Bind a peer's served service to a local port.
 #[derive(Debug, Args)]
-pub struct TunnelConnectCmd {
+pub struct ForwardCmd {
     /// who to reach: a raw node id, or a `sheer:` capability link
     // Field is `node`, not `peer`: the clap arg id derives from the field name, so a `peer` field would
     // collide with the `--peer` dial hint in the flattened `ReachArgs`. `value_name` keeps usage as `<peer>`.
@@ -24,7 +24,7 @@ pub struct TunnelConnectCmd {
     /// local port to forward to the peer
     #[arg(long, value_name = "port")]
     pub to: u16,
-    /// which exposed service to reach
+    /// which served service to reach
     #[arg(long, value_name = "service", default_value = "default")]
     pub service: String,
     /// present a `sheer:` capability link alongside a raw node id
@@ -34,7 +34,7 @@ pub struct TunnelConnectCmd {
     pub reach: ReachArgs,
 }
 
-impl TunnelConnectCmd {
+impl ForwardCmd {
     /// Bind the local port and forward each connection to the peer's service over the overlay.
     pub async fn run<T: Transport, D: Discovery>(self, node: &Node<T, D>) -> eyre::Result<()> {
         tunnel_connect::connect(

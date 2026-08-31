@@ -2,7 +2,7 @@
 //!
 //! A local verb: no identity, no transport. It opens swoosh's OWN revocation denylist (dir-derived from
 //! `--key` like the rest of swoosh's store) and hands it to the tunnel core's [`revoke_into`], which adds
-//! the cap's id by value and never reaches a config path. The next `swoosh tunnel expose` reads the same
+//! the cap's id by value and never reaches a config path. The next `swoosh serve` reads the same
 //! denylist, so a revoked link is refused at once rather than waiting for its expiry.
 
 use std::path::Path;

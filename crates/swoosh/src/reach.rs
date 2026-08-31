@@ -16,7 +16,7 @@ use crate::contacts::{Candidate, Contacts, Target};
 use crate::transport;
 
 /// The service name the diagnostic verbs reach: the peer's GATED `diag:` handler. A constant so
-/// `ping`/`speed`/`status` all request the same scheme swoosh exposes at `tunnel expose diag=diag:`.
+/// `ping`/`speed`/`status` all request the same scheme swoosh serves at `serve diag=diag:`.
 const DIAG_SERVICE: &str = "diag";
 
 /// How long to wait for one candidate device to connect before moving on to the next.

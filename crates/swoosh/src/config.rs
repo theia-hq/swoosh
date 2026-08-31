@@ -2,7 +2,7 @@
 //!
 //! These live beside swoosh's identity, dir-derived from `--key` exactly as [`contacts`](crate::contacts)
 //! is: a pinned `--key` moves the whole identity+trust unit (identity.key + contacts.toml + signet +
-//! revoked) as one, so `swoosh adopt --key /custom` and `swoosh tunnel expose --key /custom` read and write
+//! revoked) as one, so `swoosh adopt --key /custom` and `swoosh serve --key /custom` read and write
 //! the SAME dir. Without `--key` the default `~/.config/swoosh/` applies. swoosh owns these outright: it
 //! never reaches into tightbeam's config, so the store dir is a function of swoosh's own `--key`.
 
@@ -34,7 +34,7 @@ pub fn signet_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
 }
 
 /// The persisted revocation-denylist location, `<config-dir>/revoked`. Records the biscuit revocation ids
-/// of caps this node has revoked, which the next `swoosh tunnel expose` reads.
+/// of caps this node has revoked, which the next `swoosh serve` reads.
 pub fn revoked_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
     Ok(config_dir(key)?.join("revoked"))
 }

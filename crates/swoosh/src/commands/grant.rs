@@ -1,10 +1,9 @@
 //! `swoosh grant`: mint, narrow, or revoke a `sheer:` capability link for one of this node's services.
 //!
-//! A local group: unlike the `tunnel` group, no leaf binds a transport or dials. `issue` signs with this
-//! node's persisted identity (the key an exposed service roots at); `narrow` and `revoke` are wholly
+//! A local group: unlike the reaching verbs, no leaf binds a transport or dials. `issue` signs with this
+//! node's persisted identity (the key a served service roots at); `narrow` and `revoke` are wholly
 //! offline. They wrap tightbeam's cap leaves in-process, so a link minted here roots at the same key
-//! `swoosh serve` and `swoosh tunnel expose` run under. One binary: no `tightbeam` on PATH, one identity
-//! throughout.
+//! `swoosh serve` runs under. One binary: no `tightbeam` on PATH, one identity throughout.
 
 use clap::Subcommand;
 

@@ -1,9 +1,9 @@
 //! The one swoosh connect runner over tightbeam's tunnel [`Connector`], plus the hidden `tunnel-connect`
 //! leaf behind `swoosh ssh`.
 //!
-//! Both of swoosh's connect surfaces -- the public `tunnel connect --to <port>` (port-forward) and this
+//! Both of swoosh's connect surfaces -- the public `forward <peer> --to <port>` (port-forward) and this
 //! hidden `tunnel-connect --stdio` (the `swoosh ssh` ProxyCommand bridge) -- are the SAME concept: dial a
-//! peer's exposed service, optionally presenting a cap, then drive it. They differ only in surface (a user
+//! peer's served service, optionally presenting a cap, then drive it. They differ only in surface (a user
 //! verb with `--to` vs an ABI ssh re-invokes) and in how the mode is chosen. So they share ONE [`connect`]
 //! runner over the library `Connector`, parameterized by [`Mode`]: `Port` binds a local port and forwards
 //! each connection, `Stdio` pipes the single stream over this process's stdin/stdout. The present/
@@ -35,7 +35,7 @@ pub enum Mode {
 }
 
 /// What swoosh's connect was pointed at: a bare node id, or a `sheer:` capability link. swoosh's OWN target
-/// type, so its `tunnel*` modules never name tightbeam's CLI-layer parse type. A link supersedes the
+/// type, so its `forward`/ssh-bridge modules never name tightbeam's CLI-layer parse type. A link supersedes the
 /// identity path: it names the node to dial (the cap's root) and presents the token; a bare node id is the
 /// pre-capability path, gated on the proven identity alone.
 #[derive(Debug, Clone)]

@@ -28,6 +28,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use swoosh::commands::adopt::AdoptCmd;
 use swoosh::commands::contact::ContactCmd;
 use swoosh::commands::fetch::FetchCmd;
+use swoosh::commands::forward::ForwardCmd;
 use swoosh::commands::grant::GrantCmd;
 use swoosh::commands::identity::IdentityCmd;
 use swoosh::commands::mint::MintCmd;
@@ -37,7 +38,6 @@ use swoosh::commands::speed::SpeedCmd;
 use swoosh::commands::ssh::SshCmd;
 use swoosh::commands::status::StatusCmd;
 use swoosh::commands::tree::TreeCmd;
-use swoosh::commands::tunnel::TunnelCmd;
 use swoosh::commands::tunnel_connect::TunnelConnectCmd;
 use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::identity::Identity;
@@ -66,7 +66,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Be online: answer reach diagnostics; prints this node's address.
+    /// Be a node: publish named services behind your signet gate (bare = answer reach diagnostics).
     Serve(ServeCmd),
     /// Measure the round-trip time to a peer, addressed by a petname or their public key.
     Ping(PingCmd),
@@ -76,9 +76,8 @@ enum Command {
     Status(StatusCmd),
     /// Mint a local URL that fetches an origin through a node you name.
     Fetch(FetchCmd),
-    /// Expose a local service to peers, or bind a peer's exposed service to a local port.
-    #[command(subcommand)]
-    Tunnel(TunnelCmd),
+    /// Bind a peer's served service to a local port (ssh's `-L`, but the far side is a public key).
+    Forward(ForwardCmd),
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
     Contact(ContactCmd),
@@ -109,10 +108,9 @@ enum Reach {
     Speed(SpeedCmd),
     Status(StatusCmd),
     Fetch(FetchCmd),
-    /// The public `swoosh tunnel` group: `expose` (serve a local service) or `connect` (bind a remote
-    /// service to a local port). Both bind a transport, so the group rides the reach path; the `expose`
-    /// arm additionally reads the signet and swoosh's ssh host seed, resolved in the root like `self_badge`.
-    Tunnel(TunnelCmd),
+    /// `swoosh forward`: bind a peer's served service to a local port. A dial-only client (it presents a
+    /// link, not swoosh's identity), so it rides the reach path like the other reach-outward verbs.
+    Forward(ForwardCmd),
     TunnelConnect(TunnelConnectCmd),
 }
 
@@ -130,7 +128,7 @@ impl Command {
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Grant(cmd) => Verb::Grant(cmd),
             Self::TunnelConnect(cmd) => Verb::Reach(Reach::TunnelConnect(cmd)),
-            Self::Tunnel(cmd) => Verb::Reach(Reach::Tunnel(cmd)),
+            Self::Forward(cmd) => Verb::Reach(Reach::Forward(cmd)),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
             Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
@@ -171,16 +169,13 @@ impl Reach {
     /// ephemeral by default. An explicit `--key` overrides either (see [`identity::resolve`]).
     fn identity(&self) -> Identity {
         match self {
-            // `serve` must be reachable at a stable address; `tunnel-connect` must dial under swoosh's OWN
-            // key so the family gate proves the identity the membership badge was minted for. Both persist.
+            // `serve` roots its services and any share-link at a stable key AND must be reachable at one
+            // address, so it persists; `tunnel-connect` must dial under swoosh's OWN key so the family gate
+            // proves the identity the membership badge was minted for. Both persist.
             Self::Serve(_) | Self::TunnelConnect(_) => Identity::Persisted,
-            // `tunnel expose` roots its services and any share-link at a stable key, so it persists;
-            // `tunnel connect` is a dial-only client (it presents a link, not swoosh's identity), so it is
+            // `forward` is a dial-only client (it presents a link, not swoosh's identity), so it is
             // ephemeral like the other reach-outward verbs.
-            Self::Tunnel(cmd) => match cmd {
-                TunnelCmd::Expose(_) => Identity::Persisted,
-                TunnelCmd::Connect(_) => Identity::Ephemeral,
-            },
+            Self::Forward(_) => Identity::Ephemeral,
             // The diagnostic verbs reach a peer's GATED `diag:` service presenting a self-signed badge, so
             // they must dial under the persisted identity WHEN one exists (the badge roots at the dialing
             // key, so an ephemeral key's self-badge would be refused by the peer's family gate). A fresh
@@ -201,10 +196,7 @@ impl Reach {
             Self::Speed(cmd) => &cmd.reach,
             Self::Status(cmd) => &cmd.reach,
             Self::Fetch(cmd) => &cmd.reach,
-            Self::Tunnel(cmd) => match cmd {
-                TunnelCmd::Expose(cmd) => &cmd.reach,
-                TunnelCmd::Connect(cmd) => &cmd.reach,
-            },
+            Self::Forward(cmd) => &cmd.reach,
             Self::TunnelConnect(cmd) => &cmd.reach,
         }
     }
@@ -228,8 +220,8 @@ impl Reach {
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
         match self {
-            // `serve` is sugar for `tunnel expose diag=diag:`: it drives the gated exposer, so it needs
-            // the same `ExposeContext` (host seed, signet, denylist) the expose arm resolves.
+            // `serve` drives the gated exposer, so it needs the `ExposeContext` (host seed, signet,
+            // denylist) resolved in the root before the transport consumed the secret.
             Self::Serve(cmd) => {
                 let ExposeContext {
                     host_seed,
@@ -246,22 +238,7 @@ impl Reach {
             Self::Speed(cmd) => cmd.run(node, contacts, transport, self_badge).await,
             Self::Status(cmd) => cmd.run(node, contacts, transport, self_badge).await,
             Self::Fetch(cmd) => cmd.run(node, contacts, transport).await,
-            Self::Tunnel(cmd) => match cmd {
-                // `expose` reads the signet its default gate trusts and swoosh's own ssh host seed, both
-                // resolved in the root before the secret was consumed by the transport bind (see
-                // `ExposeContext`). It is only ever `Some` on this arm.
-                TunnelCmd::Expose(cmd) => {
-                    let ExposeContext {
-                        host_seed,
-                        signet,
-                        denylist,
-                    } = expose.ok_or_else(|| {
-                        eyre::eyre!("internal: tunnel expose reached without its context")
-                    })?;
-                    cmd.run(node, host_seed, signet, denylist).await
-                }
-                TunnelCmd::Connect(cmd) => cmd.run(node).await,
-            },
+            Self::Forward(cmd) => cmd.run(node).await,
             // The peer is already a resolved raw key, so no address book or transport label is needed; the
             // `self_badge` (this identity's self-signed membership badge) is the signet-holder's proof to
             // present, resolved against any stored badge inside the command.
@@ -299,8 +276,8 @@ impl Reach {
         }
     }
 
-    /// The exposer context `serve` and `tunnel expose` need, resolved before the secret is consumed by the
-    /// transport bind: swoosh's ssh host seed (derived from the secret), the signet its default gate trusts,
+    /// The exposer context `serve` needs, resolved before the secret is consumed by the transport bind:
+    /// swoosh's ssh host seed (derived from the secret), the signet its default gate trusts,
     /// and the revocation denylist the gate honors. All read from swoosh's OWN store, dir-derived from
     /// `--key` like the contacts file, so a swoosh node gates on the signet `swoosh adopt` set under the same
     /// `--key`. Every other verb returns `None`. Async because the signet and denylist are read from disk.
@@ -310,9 +287,9 @@ impl Reach {
         key: Option<&std::path::Path>,
     ) -> eyre::Result<Option<ExposeContext>> {
         match self {
-            // `serve` and `tunnel expose` both drive the gated exposer, so both resolve the exposer
-            // context; every other verb returns `None`.
-            Self::Serve(_) | Self::Tunnel(TunnelCmd::Expose(_)) => Ok(Some(ExposeContext {
+            // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
+            // returns `None`.
+            Self::Serve(_) => Ok(Some(ExposeContext {
                 host_seed: secret.ssh_host_seed(),
                 signet: config::load_signet(key).await?,
                 denylist: nauthy::Denylist::load(config::revoked_path(key)?).await?,
@@ -322,9 +299,9 @@ impl Reach {
     }
 }
 
-/// What `tunnel expose` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, and the
+/// What `serve` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, and the
 /// revocation denylist the gate honors. All are resolved in the composition root (the host seed needs the
-/// secret before the transport consumes it), then handed to the exposer arm.
+/// secret before the transport consumes it), then handed to the serve arm.
 struct ExposeContext {
     host_seed: [u8; 32],
     signet: Option<bifrost::NodeId>,
@@ -424,8 +401,8 @@ async fn run() -> eyre::Result<()> {
     // Resolve the membership badge to present BEFORE the secret is consumed by the transport bind: an
     // adopted device presents its STORED signet-signed badge (bound to this key, which the dial then binds
     // under, so the far gate's device-binding matches); the signet holder self-signs one against the same
-    // key for the same reason. The exposer context (`tunnel expose`) is resolved before the bind too: its
-    // ssh host seed derives from the secret before the bind consumes it.
+    // key for the same reason. The exposer context (`serve`) is resolved before the bind too: its ssh
+    // host seed derives from the secret before the bind consumes it.
     let self_badge = reach.self_badge(&secret, cli.key.as_deref()).await?;
     let expose = reach.expose_context(&secret, cli.key.as_deref()).await?;
     match transport {
@@ -467,6 +444,7 @@ fn contacts_path(key: Option<&std::path::Path>) -> eyre::Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use bifrost::NodeId;
     use clap::Parser;
 
     use super::*;
@@ -486,5 +464,57 @@ mod tests {
         assert!(Cli::try_parse_from(["swoosh", "issue", "ssh"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "narrow", "sheer:x"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "revoke", "sheer:x"]).is_err());
+    }
+
+    /// The `tunnel` noun is retired: its two leaves are now the flat top-level verbs `serve` (publish
+    /// services) and `forward` (bind a peer's service to a local port). `swoosh tunnel ...` no longer
+    /// resolves; `serve` and `forward` do.
+    #[test]
+    fn tunnel_is_gone_and_serve_and_forward_are_flat() {
+        let peer = NodeId::from_ed25519_secret(&[2u8; 32]).to_string();
+
+        // The retired noun and both old paths are unknown commands now.
+        assert!(Cli::try_parse_from(["swoosh", "tunnel"]).is_err());
+        assert!(Cli::try_parse_from(["swoosh", "tunnel", "expose", "diag=diag:"]).is_err());
+        assert!(Cli::try_parse_from(["swoosh", "tunnel", "connect", &peer, "--to", "22"]).is_err());
+
+        // `serve` is the primary publish verb: bare (default `diag`) and with an explicit service set.
+        assert!(matches!(
+            Cli::try_parse_from(["swoosh", "serve"])
+                .expect("bare serve parses")
+                .command,
+            Some(Command::Serve(_))
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["swoosh", "serve", "ssh=sshd:", "diag=diag:"])
+                .expect("serve with services parses")
+                .command,
+            Some(Command::Serve(_))
+        ));
+
+        // `forward` is the flat port-forward verb.
+        assert!(matches!(
+            Cli::try_parse_from(["swoosh", "forward", &peer, "--to", "5432"])
+                .expect("forward parses")
+                .command,
+            Some(Command::Forward(_))
+        ));
+    }
+
+    /// The hidden `tunnel-connect` ABI (the `swoosh ssh` ProxyCommand bridge) is internal plumbing, not a
+    /// user verb: its subcommand name is unchanged, so the ssh re-invocation `<self> tunnel-connect <peer>
+    /// --stdio` keeps resolving even though the user-facing `tunnel` noun is gone.
+    #[test]
+    fn the_hidden_tunnel_connect_abi_is_intact() {
+        let cli = Cli::try_parse_from([
+            "swoosh",
+            "tunnel-connect",
+            &NodeId::from_ed25519_secret(&[1u8; 32]).to_string(),
+            "--service",
+            "ssh",
+            "--stdio",
+        ])
+        .expect("the hidden tunnel-connect ABI still resolves");
+        assert!(matches!(cli.command, Some(Command::TunnelConnect(_))));
     }
 }

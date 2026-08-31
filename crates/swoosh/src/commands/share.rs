@@ -2,7 +2,7 @@
 //!
 //! A local verb: it signs with this node's persisted identity (the key an exposed service roots at) but
 //! binds no transport and reaches nobody. Wraps tightbeam's [`ShareCmd`] in-process, so the link a peer
-//! presents to `swoosh tunnel expose` roots at the same key swoosh serves under. Minting is offline: hand
+//! presents to `swoosh serve` roots at the same key swoosh serves under. Minting is offline: hand
 //! the link to a peer and they connect directly, no allowlist to keep in sync.
 
 use std::path::Path;

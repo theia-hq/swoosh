@@ -210,10 +210,10 @@ async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
 
 /// Write `seed` as the persisted identity at `explicit` (or the default path), mode 0600, creating the
 /// directory. This is how [`adopt`](crate::commands::adopt) provisions the device identity a later
-/// `serve`/`tunnel expose` binds: it MUST land in the same store [`resolve`] reads, so the node comes up
-/// AS the adopted device. (Writing tightbeam's separate store instead was the qat identity-mismatch bug:
-/// `expose` bound swoosh's own key, never the adopted one, so the exposed node had a different id than the
-/// contact pointed at.)
+/// `serve` binds: it MUST land in the same store [`resolve`] reads, so the node comes up AS the adopted
+/// device. (Writing tightbeam's separate store instead was the qat identity-mismatch bug: `serve` bound
+/// swoosh's own key, never the adopted one, so the exposed node had a different id than the contact
+/// pointed at.)
 pub async fn write(seed: &[u8; 32], explicit: Option<&Path>) -> eyre::Result<()> {
     let path = match explicit {
         Some(p) => p.to_path_buf(),

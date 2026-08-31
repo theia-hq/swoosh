@@ -1,39 +1,54 @@
-//! `swoosh serve`: be online. Print this node's address, then answer reach diagnostics (`ping`/`speed`)
-//! from peers your signet admits. This is the peer a `swoosh ping` / `swoosh speed` client dials.
+//! `swoosh serve [<name>=<svc>...]`: be a node. Publish named services behind this node's signet gate,
+//! then stay reachable so peers who hold this node's key can reach them.
 //!
-//! Sugar for `swoosh tunnel expose diag=diag:`: it drives the SAME gated exposer, so `serve` answers
-//! diagnostics behind the family gate by default rather than to anyone. `--public` is the one deliberate
-//! opt-out to the old "anyone can ping me" behaviour. There is no bespoke accept loop: a diagnostic
-//! client reaches `diag:` only through the tunnel's `Request{service}` handshake, and the gate is not
-//! optional, so `serve` cannot answer an ungated peer.
+//! This IS the node. `swoosh serve` with no services answers reach diagnostics (`ping`/`speed`) from
+//! peers your signet admits: `diag` is the default service. `swoosh serve ssh=sshd: diag=diag:` publishes
+//! more. It drives tightbeam's tunnel LIBRARY (`Exposer`) directly under swoosh's OWN persisted identity:
+//! the node binds the same key `swoosh ssh` and a minted `swoosh grant issue` link root at, gates on the
+//! signet read from swoosh's own store, and derives the ssh host seed from swoosh's secret, so an
+//! `ssh=sshd:` service presents the host key a client pins. swoosh assembles the whole handler registry
+//! itself (`fetch:`, `diag:`, and `sshd:` under the `ssh` feature), builds the gate through the shared
+//! [`resolve_gate`](tightbeam::tunnel::resolve_gate) policy, and prints its OWN readiness banner. `--public`
+//! and `--quiet` live on THIS verb (not root), and reach comes via the shared
+//! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb.
+
+use std::sync::Arc;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
+use futures::FutureExt as _;
 use nauthy::Denylist;
-use tightbeam::tunnel::{self, Exposer, Services};
+use tightbeam::tunnel::{self, Exposer, Handler, Registry, ServeFn, Services};
 
-use crate::commands::tunnel::expose::registry;
 use crate::transport::ReachArgs;
 
-/// The service `serve` exposes: swoosh's own gated `diag:` handler, under the `diag` name a client
-/// requests. Sugar for the `diag=diag:` entry a user would otherwise type into `tunnel expose`.
-const DIAG_SERVICE: &str = "diag=diag:";
+/// The default service `serve` publishes when none is named: swoosh's own gated `diag:` handler, under the
+/// `diag` name a client requests. A bare `swoosh serve` answers reach diagnostics behind the signet gate.
+const DEFAULT_SERVICE: &str = "diag=diag:";
 
-/// Answer reach diagnostics from peers your signet admits, until interrupted.
+/// Be a node: publish these services behind your signet gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// Answer ANYONE, unauthenticated: the one deliberate opt-out from the signet gate. `diag:` carries
-    /// no auth of its own, so this is the old "anyone can ping me" behaviour, made explicit.
+    /// publish local services as `name=svc` (bare `swoosh serve` = `diag=diag:`, reach diagnostics)
+    #[arg(value_name = "name=svc")]
+    pub services: Vec<String>,
+    /// Serve to ANYONE, unauthenticated: the one deliberate opt-out from the signet gate. Refused for a
+    /// keyless shell (`sshd:`) or an unbounded drain (`diag:`), which have no auth of their own.
     #[arg(long)]
     pub public: bool,
+    /// Suppress the readiness banner (the node id, services, and gate), for unattended/CI use.
+    #[arg(long)]
+    pub quiet: bool,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
 
 impl ServeCmd {
-    /// Announce this node's address, then run the gated `diag:` exposer until Ctrl-C. Builds the SAME
-    /// registry and gate `tunnel expose` does (through the shared `registry`/`resolve_gate` seams), so
-    /// `serve` is exactly `tunnel expose diag=diag:` with a friendlier banner; `--public` opens the gate.
+    /// Serve the named services (default `diag=diag:`) under swoosh's identity by driving the tunnel core
+    /// directly: parse the services, resolve the gate from swoosh's own signet + denylist (through the
+    /// shared `resolve_gate` policy, so `--public` opens, else a family gate on the signet, else a loud
+    /// error), assemble the handler registry (`fetch:`, `diag:`, and `sshd:` under the `ssh` feature),
+    /// print swoosh's banner, and run the exposer. A `sshd:`/`diag:` service stays gated regardless.
     pub async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -45,25 +60,37 @@ impl ServeCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        let services = Services::parse(&[DIAG_SERVICE.to_owned()])?;
+        let requested = if self.services.is_empty() {
+            vec![DEFAULT_SERVICE.to_owned()]
+        } else {
+            self.services.clone()
+        };
+        let services = Services::parse(&requested)?;
         // Resolve the gate before announcing readiness: an unprovisioned node with no `--public` fails
         // HERE, through the ONE shared policy point, rather than ever serving on a permissive default.
         let gate = tunnel::resolve_gate(self.public, signet, denylist)?;
-        let exposer = Exposer::new(services, registry(host_seed)?, gate)?;
+        // The core assembles the exposer, enforcing the sshd-cannot-be-public (and diag-cannot-be-public)
+        // invariant before any banner is printed, so a refused pairing never advertises a service it will
+        // not serve.
+        let exposer = Exposer::new(services.clone(), registry(host_seed)?, gate)?;
 
-        let addr = node.local_addr();
-        println!("swoosh ready. peers can reach this node at:\n");
-        println!("    {}\n", addr.node);
-        // Direct-only transports (quirk) cannot discover this address, so print the dialable hint a
-        // client feeds back via `--peer`. Self-discovering transports (iroh) carry no local hints here,
-        // so this loop prints nothing for them.
-        for hint in &addr.hints {
-            println!("    --peer {}={hint}\n", addr.node);
+        if !self.quiet {
+            let addr = node.local_addr();
+            println!("swoosh ready. peers can reach this node at:\n");
+            println!("    {}\n", addr.node);
+            // Direct-only transports (quirk) cannot discover this address, so print the dialable hint a
+            // client feeds back via `--peer`. Self-discovering transports (iroh) carry no local hints here,
+            // so this loop prints nothing for them.
+            for hint in &addr.hints {
+                println!("    --peer {}={hint}\n", addr.node);
+            }
+            let names: Vec<&str> = services.names().collect();
+            println!(
+                "serving {} (gate: {}). ctrl-c to stop.",
+                names.join(", "),
+                self.gate_description(signet)
+            );
         }
-        println!(
-            "answering ping and speed (gate: {}). press ctrl-c to stop.",
-            self.gate_description(signet)
-        );
 
         // The exposer runs until cancelled; a Ctrl-C ends it gracefully by cancelling the run.
         tokio::select! {
@@ -77,8 +104,7 @@ impl ServeCmd {
         }
     }
 
-    /// A one-line description of the effective gate, for the readiness banner: trust made visible, matching
-    /// what `tunnel expose` prints.
+    /// A one-line description of the effective gate, for the readiness banner: trust made visible.
     fn gate_description(&self, signet: Option<NodeId>) -> String {
         if self.public {
             "public (anyone, unauthenticated)".to_owned()
@@ -89,4 +115,67 @@ impl ServeCmd {
             }
         }
     }
+}
+
+/// Assemble the whole handler registry swoosh serves: the HTTP egress `fetch:`, the gated diagnostic
+/// `diag:`, and (under the `ssh` feature) the keyless shell `sshd:`. swoosh is the one crate that depends on
+/// every service crate, so it is the one place these are wired: tightbeam names no service crate and ships
+/// no built-in, and this function injects them all with `.with(...)`. `extend` stays available for add-only
+/// merges, but swoosh builds one registry directly here.
+///
+/// The ONE assembly the product verb and the `gated_diag` proof test both build, so the test exercises the
+/// identical registry swoosh serves rather than a hand-rolled near-copy.
+pub fn registry(host_seed: [u8; 32]) -> eyre::Result<Registry> {
+    let registry = Registry::new()
+        .with("fetch", fetch_handler())
+        .with("diag", diag_handler());
+    #[cfg(feature = "ssh")]
+    let registry = registry.with("sshd", sshd_handler(host_seed));
+    #[cfg(not(feature = "ssh"))]
+    let _ = host_seed;
+    Ok(registry)
+}
+
+/// The `fetch:` handler swoosh injects: the node acts as an HTTP client and streams an origin response back
+/// over the admitted stream. It carries its own SSRF guard, so it does not require the gate (a `--public
+/// fetch:` is a deliberate choice, not an accidental keyless shell).
+fn fetch_handler() -> Handler {
+    let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
+        async move {
+            fetch::serve_fetch(&mut writer, &mut reader).await?;
+            Ok(())
+        }
+        .boxed()
+    });
+    Handler::open(serve)
+}
+
+/// The `diag:` handler swoosh injects into the exposer: reach diagnostics (ping/speed) behind the node's
+/// gate. It answers one diagnostic request over the admitted stream. GATED: `SpeedSource{None}` is an
+/// unbounded anonymous egress drain, so an open gate over it (`--public diag:`) is refused at
+/// [`Exposer::new`]; the family gate is the terminator until the responder-side bound lands.
+fn diag_handler() -> Handler {
+    let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
+        async move {
+            diag::answer(&mut writer, &mut reader).await?;
+            Ok(())
+        }
+        .boxed()
+    });
+    Handler::gated(serve)
+}
+
+/// The `sshd:` handler swoosh injects under the `ssh` feature: a keyless shell. GATED, because a shell has
+/// no auth of its own so the gate IS its authentication; an open gate over it is refused at
+/// [`Exposer::new`]. Captures the ssh host-key seed the caller derived from swoosh's identity.
+#[cfg(feature = "ssh")]
+fn sshd_handler(host_seed: [u8; 32]) -> Handler {
+    let serve: ServeFn = Arc::new(move |admitted, writer, reader| {
+        async move {
+            sshh::serve(admitted, host_seed, writer, reader).await?;
+            Ok(())
+        }
+        .boxed()
+    });
+    Handler::gated(serve)
 }

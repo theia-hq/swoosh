@@ -6,7 +6,7 @@
 //! (`ping`/`speed`) rides the family gate, so a MEMBER can measure a gated node but a STRANGER cannot.
 //!
 //! One node exposes `ssh`/`fetch`/`diag` under a family gate rooted at a signet, assembled through the SAME
-//! `registry()` the `swoosh serve` / `swoosh tunnel expose` product path builds, so this test exercises the
+//! `registry()` the `swoosh serve` product path builds, so this test exercises the
 //! identical registry swoosh serves rather than a hand-rolled near-copy. A client that dials under the
 //! signet's own key self-signs a membership badge the gate admits: it pings the node (a round trip), speed-
 //! tests it (bytes move both ways), and is admitted at `fetch`. A client under a RANDOM key self-signs a
@@ -69,7 +69,7 @@ fn a_member_pings_speeds_and_fetches_a_gated_node_a_stranger_is_refused() {
 async fn proof() {
     {
         // The exposer node, serving ssh/fetch/diag behind a family gate rooted at the signet, through
-        // the SAME registry the product `serve`/`tunnel expose` path assembles.
+        // the SAME registry the product `serve` path assembles.
         let host = Node::new(MemTransport::bind(), NoDiscovery);
         let host_id = host.node_id();
         let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
@@ -82,7 +82,7 @@ async fn proof() {
             .unwrap();
             let gate =
                 tunnel::resolve_gate(false, Some(signet), empty_denylist("host").await).unwrap();
-            let registry = swoosh::commands::tunnel::expose::registry(HOST_SEED).unwrap();
+            let registry = swoosh::commands::serve::registry(HOST_SEED).unwrap();
             Exposer::new(services, registry, gate)
                 .unwrap()
                 .run(&host)
