@@ -61,11 +61,9 @@ impl TunnelExposeCmd {
         // Assemble the registry swoosh runs: tightbeam's shipped raw-forward handlers, plus swoosh's own
         // `diag:` (reach diagnostics behind the gate). `extend` is add-only, so `diag:` (a new scheme) is
         // accepted while a reserved built-in (`fetch`/`sshd`) could never be shadowed.
-        let mut registry = Registry::new().with("fetch", tightbeam::handlers::fetch());
+        let registry = Registry::new().with("fetch", tightbeam::handlers::fetch());
         #[cfg(feature = "ssh")]
-        {
-            registry = registry.with("sshd", tightbeam::handlers::sshd(host_seed));
-        }
+        let registry = registry.with("sshd", tightbeam::handlers::sshd(host_seed));
         #[cfg(not(feature = "ssh"))]
         let _ = host_seed;
         let registry = registry.extend(Registry::new().with("diag", diag_handler()))?;
