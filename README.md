@@ -26,7 +26,7 @@ binary from the releases page; each carries a checksum and a keyless signature y
 `gh attestation verify <binary> --repo theia-hq/swoosh`.
 
 Powered by [bifrost](https://github.com/theia-hq/bifrost) for the keyed connection and
-[tightbeam](https://github.com/theia-hq/tightbeam) for the tunnels behind `ssh` and `fetch`.
+[tightbeam](https://github.com/theia-hq/tightbeam) for the keyed tunnels.
 
 **The name.** *swoosh* is the sound of something sent across: this is the one command you type to
 reach a machine by its key and do things with it, from measuring the link to opening a shell to
@@ -39,7 +39,8 @@ sending a file.
 A machine's IP address changes: it moves networks, sits behind a router, gets a new lease. Its public
 key does not. Addressing a peer by key means you reach the same peer every time, and the connection is
 authenticated end to end by that key, so you know you reached the machine you meant and no one is in the
-middle. `swoosh serve` prints a key; anyone with that key can reach the machine, from anywhere.
+middle. `swoosh serve` prints a key; by default only your own devices and peers you have granted a
+capability can reach it (it is gated to your signet), and `--public` is the deliberate opt-out to anyone.
 
 ## A real run
 
@@ -47,11 +48,11 @@ On one machine, be reachable and copy the printed key:
 
 ```sh
 $ swoosh serve
-swoosh ready. Reachable at:
+swoosh ready. peers can reach this node at:
 
-    bf01hy…                     (share this key)
+    bf01hy…
 
-answering ping + speed. ctrl-c to stop.
+answering ping and speed (gate: signet bf04mn…). press ctrl-c to stop.
 ```
 
 On another, save the key under a name once, then reach it by name:
@@ -100,8 +101,8 @@ bouncing through a relay?
 Open an ssh session to a peer over the overlay, by name or key: `swoosh ssh alice/desk`. It resolves the
 peer and points the system `ssh` at it through a private tunnel, then hands off, so anything after works
 as usual: `swoosh ssh alice/desk -- ls`, or `swoosh ssh alice/desk -p 2222`. Auth is your normal ssh keys.
-The peer exposes its sshd once with [tightbeam](https://github.com/theia-hq/tightbeam)
-(`tightbeam expose ssh=127.0.0.1:22`), which also carries the tunnel.
+The peer exposes its sshd once with `swoosh tunnel expose ssh=sshd:` (a keyless shell, gated to your
+signet), or points at an existing sshd with `swoosh tunnel expose ssh=127.0.0.1:22`.
 
 ### `swoosh fetch <url>`
 
@@ -109,7 +110,7 @@ Fetch a URL through a node you name, handed out as a plain local URL. `swoosh fe
 https://example.com/big.iso --via usa` prints `http://127.0.0.1:PORT/`; whatever pulls from that (curl,
 xget) is served by `usa`'s machine fetching the origin and streaming it back, `Range` intact so a
 resumable download resumes. The exit is a node *you* run (your own overlay HTTP proxy, no vendor): expose
-it there with `tightbeam expose fetch=fetch:` (gated to your signet) and hand out a `sheer:` cap to `--via`. Scoped to
+it there with `swoosh tunnel expose fetch=fetch:` (gated to your signet) and hand out a `sheer:` cap to `--via`. Scoped to
 the one origin you name, not an open proxy.
 
 ### `swoosh tunnel`
@@ -227,6 +228,8 @@ lands as it is built.
 
 - `crates/diag` the measurement engine (ping, speed): a small versioned protocol, a responder, and the
   two clients.
+- `crates/fetch` the `fetch:` service: fetch an origin URL on the requester's behalf and stream the
+  response back, scoped to one origin.
 - `crates/swoosh` the CLI: binds one node under the chosen key and transport, then runs a command.
 
 ## License
