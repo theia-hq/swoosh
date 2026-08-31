@@ -74,12 +74,13 @@ async fn proof() {
         let host_id = host.node_id();
         let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
         tokio::task::spawn_local(async move {
-            let services = Services::parse(&[
-                "ssh=sshd:".to_owned(),
-                "fetch=fetch:".to_owned(),
-                "diag=diag:".to_owned(),
-            ])
-            .unwrap();
+            // `sshd:` is only in the registry under the `ssh` feature, so declare it only when that
+            // feature builds it; without it, `Exposer::new` would refuse an unregistered handler. The
+            // proof exercises `diag`/`fetch`, so gating this keeps it green WITH and WITHOUT the feature.
+            let mut requested = vec!["fetch=fetch:".to_owned(), "diag=diag:".to_owned()];
+            #[cfg(feature = "ssh")]
+            requested.push("ssh=sshd:".to_owned());
+            let services = Services::parse(&requested).unwrap();
             let gate =
                 tunnel::resolve_gate(false, Some(signet), empty_denylist("host").await).unwrap();
             let registry = swoosh::commands::serve::registry(HOST_SEED).unwrap();
