@@ -4778,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "swoosh"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "bifrost",
  "bifrost-core",
@@ -4945,6 +4945,7 @@ dependencies = [
  "clap",
  "eyre",
  "futures",
+ "libc",
  "nauthy",
  "rand 0.8.8",
  "thiserror 2.0.20",

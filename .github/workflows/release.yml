@@ -36,7 +36,7 @@ jobs:
           targets: ${{ matrix.target }}
       - name: build
         working-directory: swoosh
-        run: cargo build --release -p swoosh --target ${{ matrix.target }}
+        run: cargo build --release --locked -p swoosh --target ${{ matrix.target }}
       - name: package + checksum
         run: |
           cp "swoosh/target/${{ matrix.target }}/release/swoosh" "${{ matrix.asset }}"
