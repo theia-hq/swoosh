@@ -39,8 +39,11 @@ banner() { printf '\n=== %s ===\n' "$1"; }
 # ---------------------------------------------------------------------------
 # Part 1: quirk. Our own from-scratch QUIC, direct-only over loopback.
 # ---------------------------------------------------------------------------
+# `serve` gates diagnostics to the node's own signet by default, and this demo's server key is
+# unprovisioned (person-zero, no signet), so it answers ANYONE with `--public`: the deliberate opt-out
+# that makes "anyone can ping me" explicit. The clients here are ephemeral, so a gate would refuse them.
 banner "quirk serve (our own QUIC)"
-SWOOSH_KEY="$SERVER_KEY" "$BIN" --transport quirk serve >"$WORK/quirk-serve.out" 2>&1 &
+SWOOSH_KEY="$SERVER_KEY" "$BIN" serve --public --transport quirk >"$WORK/quirk-serve.out" 2>&1 &
 SERVE_PID=$!
 
 for _ in $(seq 1 40); do
@@ -53,13 +56,13 @@ KEY="$(grep -m1 -oE 'bf01[a-z0-9]+' "$WORK/quirk-serve.out" | head -1)"
 ADDR="$(grep -m1 -oE '127\.0\.0\.1:[0-9]+' "$WORK/quirk-serve.out" | head -1)"
 
 banner "quirk ping (same command, our transport)"
-"$BIN" --transport quirk ping "$KEY" --peer "$KEY=$ADDR" -c 5 -i 0.2
+"$BIN" ping "$KEY" --transport quirk --peer "$KEY=$ADDR" -c 5 -i 0.2
 
 banner "quirk speed --down"
-"$BIN" --transport quirk speed "$KEY" --peer "$KEY=$ADDR" --down -t 3
+"$BIN" speed "$KEY" --transport quirk --peer "$KEY=$ADDR" --down -t 3
 
 banner "quirk speed --up"
-"$BIN" --transport quirk speed "$KEY" --peer "$KEY=$ADDR" --up -t 3
+"$BIN" speed "$KEY" --transport quirk --peer "$KEY=$ADDR" --up -t 3
 
 kill "$SERVE_PID" 2>/dev/null || true
 wait "$SERVE_PID" 2>/dev/null || true
@@ -70,7 +73,7 @@ wait "$SERVE_PID" 2>/dev/null || true
 # same key, same address, different transport.
 # ---------------------------------------------------------------------------
 banner "iroh serve (SAME key file, self-discovering)"
-SWOOSH_KEY="$SERVER_KEY" "$BIN" --transport iroh serve >"$WORK/iroh-serve.out" 2>&1 &
+SWOOSH_KEY="$SERVER_KEY" "$BIN" serve --public --transport iroh >"$WORK/iroh-serve.out" 2>&1 &
 SERVE_PID=$!
 
 for _ in $(seq 1 60); do
@@ -89,10 +92,10 @@ else
 fi
 
 banner "iroh ping (identical command, no --peer: iroh self-discovers)"
-"$BIN" --transport iroh ping "$KEY" -c 5 -i 0.2
+"$BIN" ping "$KEY" --transport iroh -c 5 -i 0.2
 
 banner "iroh speed --down"
-"$BIN" --transport iroh speed "$KEY" --down -t 3
+"$BIN" speed "$KEY" --transport iroh --down -t 3
 
 kill "$SERVE_PID" 2>/dev/null || true
 wait "$SERVE_PID" 2>/dev/null || true
