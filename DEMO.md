@@ -24,13 +24,14 @@ same NodeId, different transport. That is the whole show.
 
 ## The setup
 
-Two processes, host-local. Only the server needs a persisted key: it must be reachable at one address,
-so we pin it. The client reaches outward and needs no lasting identity, so it mints a fresh ephemeral
-key each run (nothing to provision). The server's `SWOOSH_KEY` file is one ed25519 secret, yielding one
-NodeId we will see printed identically over both transports.
+Two processes, host-local, ONE key file used by both. `serve` gates diagnostics behind the node's signet
+by default; a plain node with no provisioned signet is its OWN signet root (person-zero self-trusts). So
+the node admits itself: the client dials under the SAME key, self-signs a member badge rooted at that key,
+and the self-gate admits it. No `--public`, no stranger let in. Using one key for both ends also gives us
+one NodeId, printed identically over both transports, which is the swap we are here to show.
 
 ```sh
-export SERVER_KEY=/tmp/swoosh-demo/server.key   # the peer we reach (persisted, so it stays reachable)
+export DEMO_KEY=/tmp/swoosh-demo/node.key   # one persisted key: the node serves under it, and reaches itself under it
 ```
 
 ## Part 1: reach over quirk (our own QUIC)
@@ -40,7 +41,7 @@ hint that the client feeds back. That hint is quirk's discovery.
 
 ```sh
 # terminal 1
-SWOOSH_KEY=$SERVER_KEY swoosh --transport quirk serve
+SWOOSH_KEY=$DEMO_KEY swoosh serve --transport quirk
 ```
 
 ```
@@ -50,16 +51,16 @@ swoosh ready. peers can reach this node at:
 
     --peer bf01rwbkys5qovt4kartnbxawkezyom2ngl64tzkrla44e53jb5xg3ma=127.0.0.1:53487
 
-answering ping and speed. press ctrl-c to stop.
+serving diag (gate: self (person-zero: this node and its devices)). ctrl-c to stop.
 ```
 
 ```sh
-# terminal 2, feed back the printed key and hint. No client key: these verbs reach outward, so each
-# mints a fresh ephemeral identity.
+# terminal 2, feed back the printed key and hint. Dial under the SAME key: the client self-signs a member
+# badge rooted at the node's signet root, so the self-gate admits it (the node reaching itself).
 KEY=bf01rwbkys5qovt4kartnbxawkezyom2ngl64tzkrla44e53jb5xg3ma
-swoosh --transport quirk ping  $KEY --peer $KEY=127.0.0.1:53487 -c 5 -i 0.2
-swoosh --transport quirk speed $KEY --peer $KEY=127.0.0.1:53487 --down -t 3
-swoosh --transport quirk speed $KEY --peer $KEY=127.0.0.1:53487 --up   -t 3
+SWOOSH_KEY=$DEMO_KEY swoosh ping  $KEY --transport quirk --peer $KEY=127.0.0.1:53487 -c 5 -i 0.2
+SWOOSH_KEY=$DEMO_KEY swoosh speed $KEY --transport quirk --peer $KEY=127.0.0.1:53487 --down -t 3
+SWOOSH_KEY=$DEMO_KEY swoosh speed $KEY --transport quirk --peer $KEY=127.0.0.1:53487 --up   -t 3
 ```
 
 Real captured output:
@@ -89,8 +90,8 @@ Now stop the quirk node and start `serve` again from the **same key file**, over
 changes. iroh self-discovers over the internet (n0 pkarr/DNS plus relays), so no `--peer` is needed.
 
 ```sh
-# terminal 1, SAME SERVER_KEY, different transport
-SWOOSH_KEY=$SERVER_KEY swoosh --transport iroh serve
+# terminal 1, SAME DEMO_KEY, different transport
+SWOOSH_KEY=$DEMO_KEY swoosh serve --transport iroh
 ```
 
 ```
@@ -102,7 +103,7 @@ swoosh ready. peers can reach this node at:
 
     --peer bf01rwbkys5qovt4kartnbxawkezyom2ngl64tzkrla44e53jb5xg3ma=[::]:60061
 
-answering ping and speed. press ctrl-c to stop.
+serving diag (gate: self (person-zero: this node and its devices)). ctrl-c to stop.
 ```
 
 Look at the NodeId:
@@ -120,10 +121,10 @@ the address. That is what makes this a swap and not a new node.
 The identical client commands, now over iroh (no `--peer`, iroh finds the peer itself):
 
 ```sh
-# terminal 2
+# terminal 2, SAME key again (so the self-gate admits), no --peer: iroh self-discovers.
 KEY=bf01rwbkys5qovt4kartnbxawkezyom2ngl64tzkrla44e53jb5xg3ma
-swoosh --transport iroh ping  $KEY -c 5 -i 0.2
-swoosh --transport iroh speed $KEY --down -t 3
+SWOOSH_KEY=$DEMO_KEY swoosh ping  $KEY --transport iroh -c 5 -i 0.2
+SWOOSH_KEY=$DEMO_KEY swoosh speed $KEY --transport iroh --down -t 3
 ```
 
 Real captured output:
@@ -169,4 +170,5 @@ transport) still stands on its own.
 - quirk phase 0 is stop-and-wait (~16 MiB/s ceiling); multi-stream and a congestion window come later.
 - quirk is direct-only (no NAT traversal), which is exactly enough for this host-to-host demo and nothing
   more; NAT traversal is future work (maggie/derpie).
-- The built-in responder answers any peer (no nauthy gating yet).
+- `serve` gates diagnostics behind the node's signet; here the node self-gates (person-zero) and reaches
+  itself. Admitting a SEPARATE device is the `mint`/`adopt` provisioning flow, out of scope for this demo.
