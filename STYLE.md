@@ -80,6 +80,7 @@ _The doc voice, proven across every repo. A README, crate description, or `--hel
 - **Describe what ships, not what is planned.** Planned work goes in a clearly-marked section ("Not yet", "Planned"), never mixed into the description of what the thing does today.
 - **Terse. KISS.** Every sentence earns its place. Long enough to be clear, not one word longer.
 - **The one-line help / crate `about` states the action in the reader's terms,** no metaphor that needs decoding. Rich rationale lives in the `//!` module note or the README, never in the `about` line.
+- **If the name is a metaphor, a "The name." note earns it** after the reader already knows what the thing does. State the what plainly first; then, in one to three sentences, say why it carries that name. The payoff comes after the what, never as the lead.
 
 ## Code layout & readability
 - **Top-down story.** Lay items out so meaning is discovered reading downward: a high-level item on line 1 references helpers defined below it, so a reader chasing a detail reads *on* until satisfied, then exits, never scrolls up to assemble context first.
@@ -139,6 +140,7 @@ to flag the same smell twice._
   by value. Reserve bare
   free functions for genuinely standalone pure helpers, and even then prefer a local trait for a
   cohesive family of conversions (see the wire/domain/storage section).
+- **The discriminator for a free function is who owns the type the behaviour binds, and which direction a method would force the code to move.** A free function is a smell, and the fix is a method, when it (a) constructs one of this crate's types, especially a boxed enum variant, or (b) threads the state of a type this crate owns. It is legitimate in exactly three cases: (1) a pure helper over no receiver you own; (2) a policy resolver at the correct layer, over foreign inputs, yielding a value that belongs to a lower crate (e.g. `resolve_gate`); (3) a serialization or edge adapter that marshals a wire form into a lower-crate type and then delegates to one method that already exists there (e.g. `mint_link`). The test is not pure-versus-impure: it is ownership and direction. Making a legitimate free function into a method would invert the dependency, forcing code to move the wrong way; making a smelly one into a method moves the behaviour home to the type that owns it. Builders are earned only by staged optional assembly with a build-time invariant, never by wrapping a fixed-arity one-shot.
 - **Wrap a foreign stack once, at the composition root; everything downstream speaks your own vocabulary.**
   An app names a concrete external implementation (a specific transport, driver, or backend) exactly once,
   where it builds its root object. Every subsequent operation is generic over your own traits. If a file
