@@ -4778,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "swoosh"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "bifrost",
  "bifrost-core",
