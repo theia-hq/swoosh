@@ -187,9 +187,13 @@ impl Reach {
                 TunnelCmd::Expose(_) => Identity::Persisted,
                 TunnelCmd::Connect(_) => Identity::Ephemeral,
             },
-            Self::Ping(_) | Self::Speed(_) | Self::Status(_) | Self::Fetch(_) => {
-                Identity::Ephemeral
-            }
+            // The diagnostic verbs reach a peer's GATED `diag:` service presenting a self-signed badge, so
+            // they must dial under the persisted identity WHEN one exists (the badge roots at the dialing
+            // key, so an ephemeral key's self-badge would be refused by the peer's family gate). A fresh
+            // install with no persisted key still dials out ephemerally. `--present` carries a link for a
+            // non-signet member either way.
+            Self::Ping(_) | Self::Speed(_) | Self::Status(_) => Identity::PersistedIfPresent,
+            Self::Fetch(_) => Identity::Ephemeral,
         }
     }
 

@@ -109,6 +109,13 @@ pub enum Identity {
     Persisted,
     /// Mint a fresh random secret in memory for this run only; nothing is written or read.
     Ephemeral,
+    /// Dial under the persisted identity WHEN one already exists, else mint a fresh ephemeral key. The
+    /// diagnostic verbs (`ping`/`speed`/`status`) want this: a self-signed membership badge only admits at
+    /// a family-gated node when it roots at the SAME key the dial binds under, so a provisioned operator
+    /// reaches their own gated node by loading the persisted identity, while a fresh install still dials
+    /// out ephemerally with nothing on disk. Never CREATES the persisted file (unlike `Persisted`): an
+    /// outward dial must not silently mint a lasting identity where one was not asked for.
+    PersistedIfPresent,
 }
 
 /// Resolve the secret a verb binds under, honoring an explicit override before the verb's [`Identity`].
@@ -122,6 +129,29 @@ pub async fn resolve(intent: Identity, explicit: Option<&Path>) -> eyre::Result<
         (Some(path), _) => load_or_create(path).await,
         (None, Identity::Persisted) => load_or_create(&default_path()?).await,
         (None, Identity::Ephemeral) => Ok(Secret::ephemeral()),
+        // Load the persisted key only if it already exists; never create it. So a provisioned operator's
+        // outward dial roots at their own key (their self-badge admits at their gated node) while a fresh
+        // install dials out ephemerally, with nothing written to disk.
+        (None, Identity::PersistedIfPresent) => match load_existing(&default_path()?).await? {
+            Some(secret) => Ok(secret),
+            None => Ok(Secret::ephemeral()),
+        },
+    }
+}
+
+/// Load the secret at `path` if the file exists and holds a 32-byte key, else `None`. Unlike
+/// [`load_or_create`], never writes: an outward dial reads a provisioned identity but does not mint one.
+// `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+async fn load_existing(path: &Path) -> eyre::Result<Option<Secret>> {
+    match tokio::fs::read(path).await {
+        Ok(mut bytes) => {
+            let secret = <[u8; 32]>::try_from(bytes.as_slice()).ok().map(Secret);
+            bytes.zeroize();
+            Ok(secret)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
     }
 }
 
