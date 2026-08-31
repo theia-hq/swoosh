@@ -13,6 +13,7 @@ use std::sync::Arc;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use futures::FutureExt as _;
+use nauthy::Denylist;
 use tightbeam::tunnel::{Handler, Registry, ServeFn};
 use tightbeam::{Brand, ExposeCmd};
 
@@ -52,11 +53,16 @@ impl TunnelExposeCmd {
         node: &Node<T, D>,
         host_seed: [u8; 32],
         signet: Option<NodeId>,
+        denylist: Denylist,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
+        // The denylist is loaded in the composition root from swoosh's own store and threaded here as a
+        // value; step 2 drives the tunnel core with it directly (via `resolve_gate`). Until then the inner
+        // `ExposeCmd` still opens tightbeam's own, so swoosh's is not yet consumed.
+        let _ = denylist;
         ExposeCmd {
             services: self.services,
             public: self.public,

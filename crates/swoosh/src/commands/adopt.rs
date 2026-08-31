@@ -5,8 +5,8 @@
 //! its gate trusts, so `swoosh tunnel expose` admits the owner's own devices and anyone they delegate to. A
 //! local verb: no transport, no reach. The identity lands in swoosh's own store (`~/.config/swoosh/`, or
 //! `--key`/`SWOOSH_KEY`) -- the SAME store `swoosh tunnel expose`/`serve` bind under -- so the exposed node
-//! id matches the contact `mint` recorded. The signet lands in tightbeam's config, where the expose gate
-//! reads it.
+//! id matches the contact `mint` recorded. The signet lands beside it in swoosh's own config, under the
+//! same `--key` dir, where the expose gate reads it.
 
 use std::path::Path;
 
@@ -38,8 +38,9 @@ impl AdoptCmd {
         crate::identity::write(&seed, key).await?;
         seed.zeroize();
         // Trust the signet: the default gate admits its devices (members) and delegates (slips). The signet
-        // lives in tightbeam's config, which `swoosh tunnel expose` reads via `tightbeam::config::load_signet`.
-        tightbeam::config::write_signet(signet).await?;
+        // lands beside the identity just written, under the SAME `--key` dir, in swoosh's own config, which
+        // `swoosh tunnel expose` reads via `crate::config::load_signet`. One command, one dir.
+        crate::config::write_signet(key, signet).await?;
 
         println!("adopted this machine as {}  [mine]", node.short());
         println!(

@@ -26,6 +26,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 mod authkey;
 mod commands;
+mod config;
 mod contacts;
 mod identity;
 mod reach;
@@ -239,10 +240,14 @@ impl Reach {
                 // resolved in the root before the secret was consumed by the transport bind (see
                 // `ExposeContext`). It is only ever `Some` on this arm.
                 TunnelCmd::Expose(cmd) => {
-                    let ExposeContext { host_seed, signet } = expose.ok_or_else(|| {
+                    let ExposeContext {
+                        host_seed,
+                        signet,
+                        denylist,
+                    } = expose.ok_or_else(|| {
                         eyre::eyre!("internal: tunnel expose reached without its context")
                     })?;
-                    cmd.run(node, host_seed, signet).await
+                    cmd.run(node, host_seed, signet, denylist).await
                 }
                 TunnelCmd::Connect(cmd) => cmd.run(node).await,
             },
@@ -266,29 +271,33 @@ impl Reach {
     }
 
     /// The exposer context `tunnel expose` needs, resolved before the secret is consumed by the transport
-    /// bind: swoosh's ssh host seed (derived from the secret) and the signet its default gate trusts (read
-    /// from tightbeam's config, so a swoosh node gates on the same signet `swoosh adopt` set). Every other
-    /// verb returns `None`. Async because the signet is read from disk.
+    /// bind: swoosh's ssh host seed (derived from the secret), the signet its default gate trusts, and the
+    /// revocation denylist the gate honors. All read from swoosh's OWN store, dir-derived from `--key` like
+    /// the contacts file, so a swoosh node gates on the signet `swoosh adopt` set under the same `--key`.
+    /// Every other verb returns `None`. Async because the signet and denylist are read from disk.
     async fn expose_context(
         &self,
         secret: &identity::Secret,
+        key: Option<&std::path::Path>,
     ) -> eyre::Result<Option<ExposeContext>> {
         match self {
             Self::Tunnel(TunnelCmd::Expose(_)) => Ok(Some(ExposeContext {
                 host_seed: secret.ssh_host_seed(),
-                signet: tightbeam::config::load_signet().await?,
+                signet: config::load_signet(key).await?,
+                denylist: nauthy::Denylist::load(config::revoked_path(key)?).await?,
             })),
             _ => Ok(None),
         }
     }
 }
 
-/// What `tunnel expose` needs beyond the bound node: swoosh's ssh host seed and the trusted signet. Both
-/// are resolved in the composition root (the host seed needs the secret before the transport consumes it),
-/// then handed to the exposer arm.
+/// What `tunnel expose` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, and the
+/// revocation denylist the gate honors. All are resolved in the composition root (the host seed needs the
+/// secret before the transport consumes it), then handed to the exposer arm.
 struct ExposeContext {
     host_seed: [u8; 32],
     signet: Option<bifrost::NodeId>,
+    denylist: nauthy::Denylist,
 }
 
 #[tokio::main]
@@ -352,7 +361,7 @@ async fn run() -> eyre::Result<()> {
             return match cmd {
                 GrantCmd::Issue(cmd) => cmd.run(cli.key.as_deref()).await,
                 GrantCmd::Narrow(cmd) => cmd.run(),
-                GrantCmd::Revoke(cmd) => cmd.run().await,
+                GrantCmd::Revoke(cmd) => cmd.run(cli.key.as_deref()).await,
             };
         }
         // A launcher: read the store to resolve the peer, then hand off to the system `ssh` (which runs
@@ -386,7 +395,7 @@ async fn run() -> eyre::Result<()> {
     // binding matches the identity the far gate proves. The exposer context (`tunnel expose`) is resolved
     // for the same reason: its ssh host seed derives from the secret before the bind consumes it.
     let self_badge = reach.self_badge(&secret)?;
-    let expose = reach.expose_context(&secret).await?;
+    let expose = reach.expose_context(&secret, cli.key.as_deref()).await?;
     match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
         // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
