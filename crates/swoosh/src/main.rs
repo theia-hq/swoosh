@@ -269,20 +269,31 @@ impl Reach {
         }
     }
 
-    /// The self-signed membership badge to present when dialing, if this verb dials a family-gated node.
+    /// The membership badge to present when dialing, if this verb dials a family-gated node.
     /// `tunnel-connect` (the `swoosh ssh` bridge) and the diagnostic verbs (`ping`/`speed`/`status`, which
-    /// reach the peer's gated `diag:` service) present one: the signet holder self-signs a badge bound to
-    /// its own key so it proves membership without carrying a stored one. Computed here, in the composition
-    /// root, because it needs the resolved secret before the transport consumes it. Every other reach verb
-    /// presents nothing, so returns `None`.
-    fn self_badge(&self, secret: &identity::Secret) -> eyre::Result<Option<String>> {
+    /// reach the peer's gated `diag:` service) present one. Computed here, in the composition root, because
+    /// it needs the resolved secret before the transport consumes it. Every other reach verb presents
+    /// nothing, so returns `None`.
+    ///
+    /// Present the STORED signet-signed badge if one exists (an adopted device carries the badge the signet
+    /// minted FOR it: rooted at the signet, bound to this device -- the only credential a signet-rooted gate
+    /// admits). Else self-sign (`member_badge`): the fallback for the signet holder itself (person-zero has
+    /// no stored badge -- it IS the root -- and its self-sign roots at the signet, so it admits). A fresh
+    /// install with neither badge nor signet key self-signs an ephemeral badge that is correctly refused.
+    async fn self_badge(
+        &self,
+        secret: &identity::Secret,
+        key: Option<&std::path::Path>,
+    ) -> eyre::Result<Option<String>> {
         match self {
             // `tunnel-connect` (the `swoosh ssh` bridge) and the diagnostic verbs all reach a family-gated
-            // service, so each self-signs a badge bound to its own dialing key. The diagnostic verbs dial
-            // under the persisted identity when present, so a provisioned operator's badge roots at the key
-            // their own gated node trusts; a fresh install's ephemeral badge is correctly refused.
+            // service. An adopted DEVICE presents its stored signet-signed badge; the signet holder (no
+            // stored badge) self-signs, which roots at the signet and admits.
             Self::TunnelConnect(_) | Self::Ping(_) | Self::Speed(_) | Self::Status(_) => {
-                Ok(Some(secret.member_badge()?))
+                match config::load_badge(key).await? {
+                    Some(badge) => Ok(Some(badge)),
+                    None => Ok(Some(secret.member_badge()?)),
+                }
             }
             _ => Ok(None),
         }
@@ -410,11 +421,12 @@ async fn run() -> eyre::Result<()> {
     // the backend and the dial hints are read off the chosen reaching verb, not a root global.
     let transport = reach.args().transport;
     let peers = reach.args().peer.clone();
-    // Sign the membership badge (only `tunnel-connect` produces one) BEFORE the secret is consumed by the
-    // transport bind: it self-signs against the same key the dial then binds under, so the badge's device
-    // binding matches the identity the far gate proves. The exposer context (`tunnel expose`) is resolved
-    // for the same reason: its ssh host seed derives from the secret before the bind consumes it.
-    let self_badge = reach.self_badge(&secret)?;
+    // Resolve the membership badge to present BEFORE the secret is consumed by the transport bind: an
+    // adopted device presents its STORED signet-signed badge (bound to this key, which the dial then binds
+    // under, so the far gate's device-binding matches); the signet holder self-signs one against the same
+    // key for the same reason. The exposer context (`tunnel expose`) is resolved before the bind too: its
+    // ssh host seed derives from the secret before the bind consumes it.
+    let self_badge = reach.self_badge(&secret, cli.key.as_deref()).await?;
     let expose = reach.expose_context(&secret, cli.key.as_deref()).await?;
     match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed

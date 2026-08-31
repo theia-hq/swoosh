@@ -14,10 +14,17 @@
 //! ping errors, not hangs, not succeeds) and equally at `fetch`. The stranger-refused case is the load-
 //! bearing proof: a stranger cannot ping, speedtest, or fetch a gated node.
 //!
-//! Over `mem` the proven peer is the transport's synthetic node id, so a client's self-signed badge binds
-//! to the id the mem transport proves for it; the exposer's family gate is rooted at the signet's cap key,
-//! independent of the mem id, exactly as the tightbeam membership test relies on. That lets the badge's
-//! device-binding be exercised without an ed25519-keyed mem transport.
+//! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a badge must bind to whatever id the
+//! mem transport proves for the dialer -- NOT to a device's derived ed25519 key. That is why this test
+//! signs the member's badge here, bound to the member's mem node id: the real `mint`/`adopt` path binds a
+//! badge to the DEVICE's derived key, which cannot equal the mem transport's synthetic proven id, so an
+//! honest device-adopt-then-DIAL run is not expressible over `mem`. This is a deliberate, documented
+//! accommodation, not a paper-over: what this test proves is that the family GATE admits a signet-rooted,
+//! bound badge for the proven dialer and REFUSES a non-signet-rooted one (the load-bearing stranger case).
+//! What it does NOT prove is that `mint`/`adopt` produce and store that badge for a device -- that is the
+//! job of `device_badge_wiring.rs` (the real mint -> adopt -> stored-badge -> verify-at-signet-root proof),
+//! and the true second-device-reaches-a-gated-service demo is the Operator's live quirk run (bifrost-quirk
+//! carries real ed25519 ids, so the device's derived key IS its proven id there).
 
 use core::time::Duration;
 
@@ -83,11 +90,13 @@ async fn proof() {
                 .unwrap();
         });
 
-        // A MEMBER: a client whose badge roots at the signet (the key the gate trusts) and is bound to
-        // the member's OWN proven node id, so the family gate's `bound_device` check matches. Over the
-        // real transports the dialer binds under the signet secret, so its proven id and the signet's
-        // cap-key id coincide and `swoosh`'s in-process `member_badge()` binds to the same id; over mem
-        // the proven id is synthetic, so the test binds explicitly (the membership test's rationale).
+        // A MEMBER: a client presenting a badge the SIGNET signed, rooted at the signet (the key the gate
+        // trusts) and bound to the member's proven mem node id, so the gate's `bound_device` check matches.
+        // This is the SHAPE `mint` mints for a device -- signet root, member(true), device-bound -- signed
+        // here rather than run through `mint`/`adopt` because the badge must bind to the mem transport's
+        // SYNTHETIC proven id (a real device badge binds to the device's derived ed25519 key, which cannot
+        // equal a mem proven id; see the module note). `device_badge_wiring.rs` proves `mint`/`adopt`
+        // actually produce and store this credential; here we prove the GATE admits it.
         let member = Node::new(MemTransport::bind(), NoDiscovery);
         let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
 
@@ -187,9 +196,12 @@ async fn proof() {
 }
 
 /// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven node id). This is the
-/// shape `swoosh`'s `member_badge()` mints: a `member(true)` badge rooted at the signing key and bound to
-/// the dialer. A badge rooted at the signet admits (the gate trusts that key AND its binding matches the
-/// proven dialer); one rooted at a stranger key is refused, because the gate trusts only the signet's key.
+/// shape the signet mints for a device (`identity::Secret::sign_device_badge`, delivered by `mint` and
+/// stored by `adopt`) and the shape a signet holder self-signs (`member_badge`): a `member(true)` badge
+/// rooted at the signing key and bound to the dialer. A badge rooted at the signet admits (the gate trusts
+/// that key AND its binding matches the proven dialer); one rooted at a stranger key is refused, because
+/// the gate trusts only the signet's key. Signed here (not via `mint`/`adopt`) so it binds to the mem
+/// transport's synthetic proven id; `device_badge_wiring.rs` covers the real mint/adopt production.
 fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
     Identity::from_secret(secret)
         .unwrap()
