@@ -1,9 +1,9 @@
 //! `swoosh tunnel`: expose a local service to peers, or bind a peer's exposed service to a local port.
 //!
-//! A reach group: unlike the local `contact` group, both leaves bind a transport and dial. They wrap
-//! tightbeam's `expose`/`connect` in-process under swoosh's OWN persisted identity, the same one
-//! `swoosh ssh` and `serve` bind, so a service exposed here roots at the key peers already dial and a
-//! minted share-link verifies against it. One binary: no `tightbeam` on PATH, one identity throughout.
+//! A reach group: unlike the local `contact` group, both leaves bind a transport and dial. They drive
+//! tightbeam's tunnel LIBRARY (`Exposer`/`Connector`) directly under swoosh's OWN persisted identity, the
+//! same one `swoosh ssh` and `serve` bind, so a service exposed here roots at the key peers already dial
+//! and a minted share-link verifies against it. One binary: no `tightbeam` on PATH, one identity throughout.
 //!
 //! Distinct from the hidden `tunnel-connect` leaf (the `swoosh ssh` ProxyCommand ABI, `--stdio` only):
 //! that is plumbing for ssh; this is the public port-forward a user types. Each leaf owns its
