@@ -1,19 +1,20 @@
-//! `swoosh forward <peer> --to <port>`: bind a peer's served service to a local port.
+//! `swoosh forward <peer> --to <port | - | unix:PATH>`: bind a peer's served service to a local port,
+//! stream it to stdout, or (reserved) a local unix listener.
 //!
-//! Drives tightbeam's tunnel [`Connector`] directly under swoosh's OWN identity: the public port-forward
-//! form (`ssh -L` shaped), where a local TCP port carries each connection to the peer's served service
-//! over the overlay. Distinct from the hidden `tunnel-connect` leaf (the `swoosh ssh` ProxyCommand ABI,
-//! which is `--stdio`-only and never typed): this is the port-bound form a user reaches directly. Both
-//! surfaces share the one [`connect`](crate::commands::tunnel_connect::connect) runner, selected here by
-//! [`Mode::Port`].
+//! Drives tightbeam's tunnel [`Connector`] directly under swoosh's OWN identity: the public forward form
+//! (`ssh -L` shaped), where a local port carries each connection to the peer's served service over the
+//! overlay, or `--to -` streams the single service to stdout (compose with the shell). Distinct from the
+//! hidden `tunnel-connect` leaf (the `swoosh ssh` ProxyCommand ABI, which is `--to -`-only and never
+//! typed): this is the form a user reaches directly. Both surfaces share the one
+//! [`connect`](crate::commands::tunnel_connect::connect) runner, selected here by the single [`To`].
 
 use bifrost::{Discovery, Node, Transport};
 use clap::Args;
 
-use crate::commands::tunnel_connect::{self, Dial, Mode};
+use crate::commands::tunnel_connect::{self, Dial, To};
 use crate::transport::ReachArgs;
 
-/// Bind a peer's served service to a local port.
+/// Bind a peer's served service to a local port, stream it to stdout, or a reserved unix listener.
 #[derive(Debug, Args)]
 pub struct ForwardCmd {
     /// who to reach: a raw node id, or a `sheer:` capability link
@@ -21,9 +22,9 @@ pub struct ForwardCmd {
     // collide with the `--peer` dial hint in the flattened `ReachArgs`. `value_name` keeps usage as `<peer>`.
     #[arg(value_name = "peer")]
     pub node: Dial,
-    /// local port to forward to the peer
-    #[arg(long, value_name = "port")]
-    pub to: u16,
+    /// where to put the stream: a local port, `-` for stdout, or `unix:<path>`
+    #[arg(long, value_name = "port | - | unix:PATH")]
+    pub to: To,
     /// which served service to reach
     #[arg(long, value_name = "service", default_value = "default")]
     pub service: String,
@@ -35,15 +36,9 @@ pub struct ForwardCmd {
 }
 
 impl ForwardCmd {
-    /// Bind the local port and forward each connection to the peer's service over the overlay.
+    /// Drive the sink `--to` names: bind a local port and forward each connection, stream to stdout, or the
+    /// reserved unix listener, all over the overlay under swoosh's identity.
     pub async fn run<T: Transport, D: Discovery>(self, node: &Node<T, D>) -> eyre::Result<()> {
-        tunnel_connect::connect(
-            node,
-            self.node,
-            self.service,
-            self.present,
-            Mode::Port(self.to),
-        )
-        .await
+        tunnel_connect::connect(node, self.node, self.service, self.present, self.to).await
     }
 }

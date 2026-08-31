@@ -3,7 +3,7 @@
 //! A LAUNCHER, a third verb category beside the local and reach families. Like a local verb it reads the
 //! contact store (to resolve the peer to a raw key) and binds no bifrost `Node` in this process; unlike a
 //! local verb it ends up reaching a peer. It does so by `exec`ing the system `ssh` with a `ProxyCommand`
-//! that re-invokes THIS binary (`<self> tunnel-connect <key> --service <name> --stdio`, via
+//! that re-invokes THIS binary (`<self> tunnel-connect <key> --service <name> --to -`, via
 //! `current_exe()`, see [`self_invocation`]) and that hidden re-invocation binds the `Node` under
 //! swoosh's OWN identity and pipes the overlay stream over ssh's stdin/stdout, so ssh talks to the far
 //! sshd as if it were local. One binary, no `tightbeam` on PATH and no `$PATH` lookup at all, and the dial
@@ -126,7 +126,7 @@ impl SshCmd {
 /// own path, see [`self_invocation`]), the resolved `key`, the `service`, an optional `present` capability
 /// link, the placeholder `host`, the private `known_hosts` path, and the user's trailing ssh `args`, it
 /// assembles the exact argv [`exec_ssh`] hands to `ssh`. The `ProxyCommand` value is `<self>
-/// tunnel-connect <key> --service <name> --stdio [--present <link>]`: ssh runs it to bridge the overlay
+/// tunnel-connect <key> --service <name> --to - [--present <link>]`: ssh runs it to bridge the overlay
 /// stream in-process, under swoosh's own identity, with no `tightbeam` binary and no `$PATH` lookup. ssh
 /// splits `ProxyCommand` on whitespace, so `proxy` is pre-quoted and the other tokens are whitespace-free
 /// (a `NodeId` is base32, the service is a single name, a `sheer:` link is one token like a key).
@@ -150,7 +150,9 @@ fn ssh_argv(
     identity_key: Option<&Path>,
     args: &[String],
 ) -> Vec<String> {
-    let mut proxy_command = format!("{proxy} tunnel-connect {key} --service {service} --stdio");
+    // `--to -` streams the overlay service over stdin/stdout (the ProxyCommand shape). `-` is one
+    // whitespace-free token, safe in ssh's whitespace-split ProxyCommand, like the key and the service.
+    let mut proxy_command = format!("{proxy} tunnel-connect {key} --service {service} --to -");
     // Carry the caller's identity dir into the re-invocation, so `swoosh ssh --key X` dials as X (its
     // membership badge roots at X). `--key` is a global, valid after the subcommand; double-quoted so a
     // dir with a space stays one token. Absent, the bridge uses swoosh's default identity, as before.
@@ -323,7 +325,7 @@ mod tests {
             argv,
             vec![
                 "-o".to_owned(),
-                format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --stdio"),
+                format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to -"),
                 "-o".to_owned(),
                 "UserKnownHostsFile=\"/home/me/.config/swoosh/known_hosts\"".to_owned(),
                 "-o".to_owned(),
@@ -354,7 +356,7 @@ mod tests {
         );
         assert!(
             with_key.iter().any(|a| a
-                == &format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --stdio --key \"/tmp/yah\"")),
+                == &format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to - --key \"/tmp/yah\"")),
             "the ProxyCommand must carry --key so the dial uses the given identity: {with_key:?}"
         );
         // Absent, no --key rides the ProxyCommand: the bridge uses swoosh's default identity, as before.
@@ -406,14 +408,14 @@ mod tests {
         );
         assert_eq!(
             argv[1],
-            format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service admin-ssh --stdio")
+            format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service admin-ssh --to -")
         );
     }
 
     #[test]
     fn argv_appends_a_present_link_to_the_proxy_command() {
         // A `sheer:` link (whitespace-free, like the key) rides unquoted in the whitespace-split
-        // ProxyCommand, after `--stdio`, so the bridge presents the given slip instead of self-signing.
+        // ProxyCommand, after `--to -`, so the bridge presents the given slip instead of self-signing.
         let link = "sheer:abcdef0123456789";
         let argv = ssh_argv(
             PROXY,
@@ -428,7 +430,7 @@ mod tests {
         assert_eq!(
             argv[1],
             format!(
-                "ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --stdio --present {link}"
+                "ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to - --present {link}"
             )
         );
     }

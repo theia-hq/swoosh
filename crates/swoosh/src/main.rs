@@ -76,7 +76,7 @@ enum Command {
     Status(StatusCmd),
     /// Mint a local URL that fetches an origin through a node you name.
     Fetch(FetchCmd),
-    /// Bind a peer's served service to a local port (ssh's `-L`, but the far side is a public key).
+    /// Put a peer's served service on a local port, stdout (`-`), or a unix socket (ssh's `-L`, keyed).
     Forward(ForwardCmd),
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
@@ -504,18 +504,35 @@ mod tests {
             Some(Command::Serve(_))
         ));
 
-        // `forward` is the flat port-forward verb.
-        assert!(matches!(
-            Cli::try_parse_from(["swoosh", "forward", &peer, "--to", "5432"])
-                .expect("forward parses")
-                .command,
-            Some(Command::Forward(_))
-        ));
+        // `forward` is the flat forward verb; `--to` takes a port, `-` (stdout), or `unix:<path>`.
+        for to in ["5432", "-", "unix:/run/x.sock"] {
+            assert!(
+                matches!(
+                    Cli::try_parse_from(["swoosh", "forward", &peer, "--to", to])
+                        .expect("forward parses each --to form")
+                        .command,
+                    Some(Command::Forward(_))
+                ),
+                "forward --to {to} should parse"
+            );
+        }
+        // A bare path or a source-only scheme is a hard parse error, never a silent misparse.
+        for bad in ["/tmp/out", "fifo:/tmp/x", "0"] {
+            assert!(
+                Cli::try_parse_from(["swoosh", "forward", &peer, "--to", bad]).is_err(),
+                "forward --to {bad} must be rejected"
+            );
+        }
+        // `--stdio` is gone: the old boolean no longer parses.
+        assert!(
+            Cli::try_parse_from(["swoosh", "forward", &peer, "--stdio"]).is_err(),
+            "the retired --stdio boolean must not resolve"
+        );
     }
 
     /// The hidden `tunnel-connect` ABI (the `swoosh ssh` ProxyCommand bridge) is internal plumbing, not a
     /// user verb: its subcommand name is unchanged, so the ssh re-invocation `<self> tunnel-connect <peer>
-    /// --stdio` keeps resolving even though the user-facing `tunnel` noun is gone.
+    /// --to -` keeps resolving even though the user-facing `tunnel` noun is gone.
     #[test]
     fn the_hidden_tunnel_connect_abi_is_intact() {
         let cli = Cli::try_parse_from([
@@ -524,7 +541,8 @@ mod tests {
             &NodeId::from_ed25519_secret(&[1u8; 32]).to_string(),
             "--service",
             "ssh",
-            "--stdio",
+            "--to",
+            "-",
         ])
         .expect("the hidden tunnel-connect ABI still resolves");
         assert!(matches!(cli.command, Some(Command::TunnelConnect(_))));

@@ -1,13 +1,14 @@
 //! The one swoosh connect runner over tightbeam's tunnel [`Connector`], plus the hidden `tunnel-connect`
 //! leaf behind `swoosh ssh`.
 //!
-//! Both of swoosh's connect surfaces -- the public `forward <peer> --to <port>` (port-forward) and this
-//! hidden `tunnel-connect --stdio` (the `swoosh ssh` ProxyCommand bridge) -- are the SAME concept: dial a
-//! peer's served service, optionally presenting a cap, then drive it. They differ only in surface (a user
-//! verb with `--to` vs an ABI ssh re-invokes) and in how the mode is chosen. So they share ONE [`connect`]
-//! runner over the library `Connector`, parameterized by [`Mode`]: `Port` binds a local port and forwards
-//! each connection, `Stdio` pipes the single stream over this process's stdin/stdout. The present/
-//! self-signed-badge choice lives in exactly one place (the caller picks `present` before handing off).
+//! Both of swoosh's connect surfaces -- the public `forward <peer> --to <port | - | unix:PATH>`
+//! (port-forward or stdout) and this hidden `tunnel-connect --to -` (the `swoosh ssh` ProxyCommand bridge)
+//! -- are the SAME concept: dial a peer's served service, optionally presenting a cap, then drive it. They
+//! differ only in surface (a user verb vs an ABI ssh re-invokes) and in how the sink is chosen. So they
+//! share ONE [`connect`] runner over the library `Connector`, parameterized by the single [`To`] selector:
+//! `Port` binds a local port and forwards each connection, `Stdout` streams the single stream over this
+//! process's stdin/stdout, `UnixListener` is reserved. The present/self-signed-badge choice lives in
+//! exactly one place (the caller picks `present` before handing off).
 //!
 //! The hidden leaf is not a user verb: it is the executable `swoosh ssh` names in ssh's `ProxyCommand`,
 //! invoked on THIS binary via `current_exe()` (not a separate `tightbeam` binary on PATH). It binds a node
@@ -19,20 +20,10 @@ use core::str::FromStr;
 use bifrost::{Discovery, Node, NodeId, Transport};
 use clap::Args;
 use nauthy::{Cap, SCHEME};
+pub use tightbeam::To;
 use tightbeam::tunnel::Connector;
 
 use crate::transport;
-
-/// How a resolved [`Connector`] is driven once dialed: bind a local port and forward each connection, or
-/// pipe the single service stream over this process's stdin/stdout. Making the two mutually exclusive an
-/// enum (not two bools) makes "both `--to` and `--stdio`" unrepresentable: each surface hands the runner
-/// exactly one mode.
-pub enum Mode {
-    /// Bind `127.0.0.1:<port>` and forward each accepted connection to the peer's service (`ssh -L` shaped).
-    Port(u16),
-    /// Pipe the single service stream over stdin/stdout (the `swoosh ssh` ProxyCommand bridge).
-    Stdio,
-}
 
 /// What swoosh's connect was pointed at: a bare node id, or a `sheer:` capability link. swoosh's OWN target
 /// type, so its `forward`/ssh-bridge modules never name tightbeam's CLI-layer parse type. A link supersedes the
@@ -70,19 +61,20 @@ fn connector(dial: &Dial, service: String, present: Option<String>) -> eyre::Res
     }
 }
 
-/// The ONE connect path both swoosh surfaces drive. Resolve the connector, then either forward a local port
-/// (proving admission, then printing swoosh's own `forwarding …` line) or pipe stdin/stdout (no banner: ssh
-/// owns the tty). A refused forward surfaces the host's reason here and exits non-zero, never a fake banner.
+/// The ONE connect path both swoosh surfaces drive. Resolve the connector, then drive the sink [`To`] names:
+/// forward a local port (proving admission, then printing swoosh's own `forwarding …` line), stream
+/// stdin/stdout (no banner: ssh owns the tty), or the reserved unix listener. A refused forward surfaces the
+/// host's reason here and exits non-zero, never a fake banner.
 pub async fn connect<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     dial: Dial,
     service: String,
     present: Option<String>,
-    mode: Mode,
+    to: To,
 ) -> eyre::Result<()> {
     let connector = connector(&dial, service, present)?;
-    match mode {
-        Mode::Port(port) => {
+    match to {
+        To::Port(port) => {
             // Prove the gate admits us BEFORE printing "forwarding …": `preflight` reaches, probes
             // admission on one stream, and binds the port, returning the host's refusal reason on an
             // Err. So an unauthorized forward fails loudly here (a clear one-line reason, non-zero exit),
@@ -92,11 +84,15 @@ pub async fn connect<T: Transport, D: Discovery>(
             println!("forwarding 127.0.0.1:{port} to {dial} ({service})");
             forward.run().await
         }
-        Mode::Stdio => connector.pipe_stdio(node).await,
+        To::Stdout => connector.pipe_stdio(node).await,
+        To::UnixListener(path) => eyre::bail!(
+            "--to unix:{} is reserved, not yet built (bind a port and connect to it, or use `--to -`)",
+            path.display()
+        ),
     }
 }
 
-/// Pipe a peer's exposed service over stdin/stdout (the ssh `ProxyCommand` bridge). Hidden: reached only
+/// Stream a peer's exposed service over stdin/stdout (the ssh `ProxyCommand` bridge). Hidden: reached only
 /// through `swoosh ssh`, never typed by a user.
 #[derive(Debug, Args)]
 pub struct TunnelConnectCmd {
@@ -109,17 +105,17 @@ pub struct TunnelConnectCmd {
     /// present a membership badge or capability link to a family/cap-gated host
     #[arg(long, value_name = "link")]
     pub present: Option<String>,
-    /// pipe the service over stdin/stdout: the only mode this leaf runs. Accepted (and required by the
-    /// `swoosh ssh` ProxyCommand ABI) but always true; hidden, since a user never types it.
-    #[arg(long, hide = true)]
-    pub stdio: bool,
+    /// where to put the stream: the `swoosh ssh` ProxyCommand ABI always passes `-` (stdout). Accepted as
+    /// the shared `--to` selector so the bridge speaks the same flag as `forward`; hidden, never typed.
+    #[arg(long, value_name = "port | - | unix:PATH", hide = true)]
+    pub to: To,
     #[command(flatten)]
     pub reach: transport::ReachArgs,
 }
 
 impl TunnelConnectCmd {
-    /// Pipe the peer's service against this process's stdin/stdout, dialing under swoosh's own identity.
-    /// Always `Mode::Stdio`: this leaf exists only as the ssh `ProxyCommand` bridge.
+    /// Stream the peer's service against this process's stdin/stdout, dialing under swoosh's own identity.
+    /// Always `--to -` in practice: this leaf exists only as the ssh `ProxyCommand` bridge.
     ///
     /// The badge presented to a family-gated host is an explicit `--present` link if given, else the
     /// `self_signed` badge the caller minted from this identity (the signet holder is entitled to sign its
@@ -131,13 +127,6 @@ impl TunnelConnectCmd {
         self_signed: Option<String>,
     ) -> eyre::Result<()> {
         let present = self.present.or(self_signed);
-        connect(
-            node,
-            Dial::Node(self.node),
-            self.service,
-            present,
-            Mode::Stdio,
-        )
-        .await
+        connect(node, Dial::Node(self.node), self.service, present, self.to).await
     }
 }

@@ -120,8 +120,9 @@ shape, but pubkey-addressed and p2p).
 
 - `serve <name=svc>...` publish local services under this node's key, gated by your signet. A bare
   `swoosh serve` publishes `diag=diag:` (reach diagnostics); name more to publish more.
-- `forward <peer> --to <port>` reach a peer's published service and bind it to a local port, so a plain
-  local client talks to it as if it were on `127.0.0.1`.
+- `forward <peer> --to <port | - | unix:PATH>` reach a peer's published service and put it on a local
+  port (a plain local client talks to it as if it were on `127.0.0.1`) or stream it to stdout with `--to -`
+  (compose with the shell, e.g. `--to - | mpv -`). `unix:<path>` (a local socket listener) is reserved.
 
 ### `swoosh grant`
 
@@ -212,7 +213,7 @@ lands as it is built.
 - [x] `mint` / `adopt`: provision a second machine under an identity you control, via a one-time authkey
 - [x] `ssh`: open an ssh session to a peer over the overlay (`swoosh ssh alice/desk`)
 - [x] `serve <name=svc>` / `forward`: publish local services under this node's key; reach a peer's service
-  on a local port (with `--stdio` for `ssh` `ProxyCommand`)
+  on a local port or stream it to stdout (`--to -`, the shape `ssh` `ProxyCommand` uses)
 - [x] `grant issue`: mint a `sheer:` capability link (a signed, expiring, attenuable, delegable grant with
   no server) to a published service
 - [x] `grant narrow`: narrow a capability link offline and print a tighter one
