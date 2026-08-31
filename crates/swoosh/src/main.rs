@@ -24,31 +24,26 @@ use std::path::PathBuf;
 use bifrost::{Discovery, Node, Transport};
 use clap::{CommandFactory, Parser, Subcommand};
 
-mod authkey;
-mod commands;
-mod config;
-mod contacts;
-mod identity;
-mod reach;
-mod transport;
-
-use commands::adopt::AdoptCmd;
-use commands::contact::ContactCmd;
-use commands::fetch::FetchCmd;
-use commands::grant::GrantCmd;
-use commands::identity::IdentityCmd;
-use commands::mint::MintCmd;
-use commands::ping::PingCmd;
-use commands::serve::ServeCmd;
-use commands::speed::SpeedCmd;
-use commands::ssh::SshCmd;
-use commands::status::StatusCmd;
-use commands::tree::TreeCmd;
-use commands::tunnel::TunnelCmd;
-use commands::tunnel_connect::TunnelConnectCmd;
-use contacts::{Contacts, ContactsStore};
-use identity::Identity;
-use transport::Peer;
+// The verb modules live in the swoosh LIBRARY (`lib.rs`), so an integration test can drive the same pieces
+// this binary composes. The binary owns only the CLI surface below (the clap tree and composition root).
+use swoosh::commands::adopt::AdoptCmd;
+use swoosh::commands::contact::ContactCmd;
+use swoosh::commands::fetch::FetchCmd;
+use swoosh::commands::grant::GrantCmd;
+use swoosh::commands::identity::IdentityCmd;
+use swoosh::commands::mint::MintCmd;
+use swoosh::commands::ping::PingCmd;
+use swoosh::commands::serve::ServeCmd;
+use swoosh::commands::speed::SpeedCmd;
+use swoosh::commands::ssh::SshCmd;
+use swoosh::commands::status::StatusCmd;
+use swoosh::commands::tree::TreeCmd;
+use swoosh::commands::tunnel::TunnelCmd;
+use swoosh::commands::tunnel_connect::TunnelConnectCmd;
+use swoosh::contacts::{Contacts, ContactsStore};
+use swoosh::identity::Identity;
+use swoosh::transport::Peer;
+use swoosh::{config, contacts, identity, transport};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -234,10 +229,23 @@ impl Reach {
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
         match self {
-            Self::Serve(cmd) => cmd.run(node).await,
-            Self::Ping(cmd) => cmd.run(node, contacts, transport).await,
-            Self::Speed(cmd) => cmd.run(node, contacts, transport).await,
-            Self::Status(cmd) => cmd.run(node, contacts, transport).await,
+            // `serve` is sugar for `tunnel expose diag=diag:`: it drives the gated exposer, so it needs
+            // the same `ExposeContext` (host seed, signet, denylist) the expose arm resolves.
+            Self::Serve(cmd) => {
+                let ExposeContext {
+                    host_seed,
+                    signet,
+                    denylist,
+                } = expose.ok_or_else(|| {
+                    eyre::eyre!("internal: serve reached without its expose context")
+                })?;
+                cmd.run(node, host_seed, signet, denylist).await
+            }
+            // The diagnostic verbs reach the peer's GATED `diag:` service, so they present the self-signed
+            // membership badge (minted below in `self_badge`) the same way `tunnel-connect` does.
+            Self::Ping(cmd) => cmd.run(node, contacts, transport, self_badge).await,
+            Self::Speed(cmd) => cmd.run(node, contacts, transport, self_badge).await,
+            Self::Status(cmd) => cmd.run(node, contacts, transport, self_badge).await,
             Self::Fetch(cmd) => cmd.run(node, contacts, transport).await,
             Self::Tunnel(cmd) => match cmd {
                 // `expose` reads the signet its default gate trusts and swoosh's own ssh host seed, both
@@ -263,29 +271,38 @@ impl Reach {
     }
 
     /// The self-signed membership badge to present when dialing, if this verb dials a family-gated node.
-    /// Only `tunnel-connect` (the `swoosh ssh` bridge) presents one: the signet holder self-signs a badge
-    /// bound to its own key so it proves membership without carrying a stored one. Computed here, in the
-    /// composition root, because it needs the resolved secret before the transport consumes it. Every other
-    /// reach verb presents nothing, so returns `None`.
+    /// `tunnel-connect` (the `swoosh ssh` bridge) and the diagnostic verbs (`ping`/`speed`/`status`, which
+    /// reach the peer's gated `diag:` service) present one: the signet holder self-signs a badge bound to
+    /// its own key so it proves membership without carrying a stored one. Computed here, in the composition
+    /// root, because it needs the resolved secret before the transport consumes it. Every other reach verb
+    /// presents nothing, so returns `None`.
     fn self_badge(&self, secret: &identity::Secret) -> eyre::Result<Option<String>> {
         match self {
-            Self::TunnelConnect(_) => Ok(Some(secret.member_badge()?)),
+            // `tunnel-connect` (the `swoosh ssh` bridge) and the diagnostic verbs all reach a family-gated
+            // service, so each self-signs a badge bound to its own dialing key. The diagnostic verbs dial
+            // under the persisted identity when present, so a provisioned operator's badge roots at the key
+            // their own gated node trusts; a fresh install's ephemeral badge is correctly refused.
+            Self::TunnelConnect(_) | Self::Ping(_) | Self::Speed(_) | Self::Status(_) => {
+                Ok(Some(secret.member_badge()?))
+            }
             _ => Ok(None),
         }
     }
 
-    /// The exposer context `tunnel expose` needs, resolved before the secret is consumed by the transport
-    /// bind: swoosh's ssh host seed (derived from the secret), the signet its default gate trusts, and the
-    /// revocation denylist the gate honors. All read from swoosh's OWN store, dir-derived from `--key` like
-    /// the contacts file, so a swoosh node gates on the signet `swoosh adopt` set under the same `--key`.
-    /// Every other verb returns `None`. Async because the signet and denylist are read from disk.
+    /// The exposer context `serve` and `tunnel expose` need, resolved before the secret is consumed by the
+    /// transport bind: swoosh's ssh host seed (derived from the secret), the signet its default gate trusts,
+    /// and the revocation denylist the gate honors. All read from swoosh's OWN store, dir-derived from
+    /// `--key` like the contacts file, so a swoosh node gates on the signet `swoosh adopt` set under the same
+    /// `--key`. Every other verb returns `None`. Async because the signet and denylist are read from disk.
     async fn expose_context(
         &self,
         secret: &identity::Secret,
         key: Option<&std::path::Path>,
     ) -> eyre::Result<Option<ExposeContext>> {
         match self {
-            Self::Tunnel(TunnelCmd::Expose(_)) => Ok(Some(ExposeContext {
+            // `serve` and `tunnel expose` both drive the gated exposer, so both resolve the exposer
+            // context; every other verb returns `None`.
+            Self::Serve(_) | Self::Tunnel(TunnelCmd::Expose(_)) => Ok(Some(ExposeContext {
                 host_seed: secret.ssh_host_seed(),
                 signet: config::load_signet(key).await?,
                 denylist: nauthy::Denylist::load(config::revoked_path(key)?).await?,

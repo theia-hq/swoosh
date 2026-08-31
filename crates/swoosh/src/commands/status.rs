@@ -29,6 +29,10 @@ pub struct StatusCmd {
     /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
     #[arg(value_name = "peer")]
     pub target: Target,
+    /// Present a membership badge or capability link to a family/cap-gated peer. Defaults to the
+    /// self-signed badge minted from this identity when it dials under a persisted key.
+    #[arg(long, value_name = "link")]
+    pub present: Option<String>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -42,14 +46,18 @@ impl StatusCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
+        self_badge: Option<String>,
     ) -> eyre::Result<()> {
         let candidates = reach::candidates(&self.target, contacts)?;
+        // Present an explicit `--present` link if given, else the self-signed badge minted from this
+        // identity: the peer's `diag:` service is gated, so the RTT probe must prove membership to run.
+        let present = self.present.or(self_badge);
 
         // Report each device; track whether any was reachable, so an all-unreachable fan-out ends non-
         // zero with the transport's fix hint, not a bare list of failures.
         let mut any_reached = false;
         for candidate in &candidates {
-            let line = match reach::connect(node, candidate).await {
+            let line = match reach::connect_service(node, candidate, present.clone()).await {
                 Ok(session) => {
                     any_reached = true;
                     probe(&session, &candidate.label, transport).await

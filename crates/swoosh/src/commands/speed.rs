@@ -18,7 +18,7 @@ use clap::{ArgGroup, Args};
 use diag::{Limit, Mode, Progress, SpeedReport, Speedtest, Throughput};
 
 use crate::contacts::{Contacts, Target};
-use crate::reach::{self, Reached};
+use crate::reach::{self, Resolved};
 use crate::transport::{self, ReachArgs};
 
 /// How often a running speed test prints its current rate. One second matches iperf's default report
@@ -33,6 +33,10 @@ pub struct SpeedCmd {
     /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
     #[arg(value_name = "peer")]
     pub target: Target,
+    /// Present a membership badge or capability link to a family/cap-gated peer. Defaults to the
+    /// self-signed badge minted from this identity when it dials under a persisted key.
+    #[arg(long, value_name = "link")]
+    pub present: Option<String>,
     /// Measure the upload direction (this node sends).
     #[arg(long)]
     pub up: bool,
@@ -60,11 +64,15 @@ impl SpeedCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
+        self_badge: Option<String>,
     ) -> eyre::Result<()> {
         let mode = self.mode();
         let limit = self.limit();
-        let Reached { session, label } =
-            reach::dial(node, contacts, &self.target, transport).await?;
+        // Present an explicit `--present` link if given, else the self-signed badge minted from this
+        // identity: the peer's `diag:` service is gated, so a diagnostic must prove membership to run.
+        let present = self.present.or(self_badge);
+        let Resolved { session, label } =
+            reach::dial_service(node, contacts, &self.target, present, transport).await?;
         // Path at connect. The transfer below is the window where iroh's hole-punch lands, so the
         // settled path (and any relayed-to-direct upgrade) is read and reported after it, not here.
         let initial = session.conn_info().path;

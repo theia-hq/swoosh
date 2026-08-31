@@ -63,7 +63,11 @@ impl TunnelExposeCmd {
         // it will not serve.
         let exposer = Exposer::new(services.clone(), registry(host_seed)?, gate)?;
         if !self.quiet {
-            expose_banner(node.node_id(), services.names(), &self.gate_description(signet));
+            expose_banner(
+                node.node_id(),
+                services.names(),
+                &self.gate_description(signet),
+            );
         }
         exposer.run(node).await
     }
@@ -87,9 +91,15 @@ impl TunnelExposeCmd {
 /// (the node id); the host seed and the signet secret never appear. Withheld under `--quiet`.
 fn expose_banner<'a>(node_id: NodeId, names: impl Iterator<Item = &'a str>, gate: &str) {
     println!("swoosh tunnel ready. peers can reach these services at:\n");
-    println!("    {node_id}                     (share this key, or mint a link with `swoosh grant issue`)\n");
+    println!(
+        "    {node_id}                     (share this key, or mint a link with `swoosh grant issue`)\n"
+    );
     let names: Vec<&str> = names.collect();
-    println!("exposing {}. gate: {}. ctrl-c to stop.", names.join(", "), gate);
+    println!(
+        "exposing {}. gate: {}. ctrl-c to stop.",
+        names.join(", "),
+        gate
+    );
 }
 
 /// Assemble the handler registry swoosh serves: tightbeam's shipped raw-forward handlers (`fetch`, and

@@ -10,9 +10,14 @@
 use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, Path, Transport};
+use tightbeam::tunnel::{Connector, ServiceSession};
 
 use crate::contacts::{Candidate, Contacts, Target};
 use crate::transport;
+
+/// The service name the diagnostic verbs reach: the peer's GATED `diag:` handler. A constant so
+/// `ping`/`speed`/`status` all request the same scheme swoosh exposes at `tunnel expose diag=diag:`.
+const DIAG_SERVICE: &str = "diag";
 
 /// How long to wait for one candidate device to connect before moving on to the next.
 ///
@@ -102,6 +107,77 @@ pub async fn connect<T: Transport, D: Discovery>(
 /// [`Target::candidates`] so a verb resolves without reaching into the contacts module directly.
 pub fn candidates(target: &Target, contacts: &Contacts) -> eyre::Result<Vec<Candidate>> {
     Ok(target.candidates(contacts)?)
+}
+
+/// A reached peer's GATED `diag:` service: the [`ServiceSession`] to run diag over, plus the label of the
+/// device that answered. The session gates every stream it opens through the `diag:` request, so diag's
+/// `Ping`/`Speedtest` run over it unchanged while each stream is admitted by the peer's family gate.
+pub struct Resolved<S> {
+    /// The service-scoped session; every `open_bi` speaks the `diag:` handshake presenting the badge.
+    pub session: ServiceSession<S>,
+    /// The label the reached device resolved from (`alice/macbook`, or a raw key's short form).
+    pub label: String,
+}
+
+/// Resolve `target` and open the FIRST reachable device's gated `diag:` service, presenting `present`
+/// (the caller's membership badge or an explicit link). What `speed` wants: one target, one session.
+///
+/// Candidates are tried in resolution order under the per-candidate [`DIAL_TIMEOUT`]; the first whose
+/// base session connects wins. The `diag:` handshake itself rides each `open_bi` later (the gate is
+/// per-stream), so "reachable" here is the underlying connect landing, exactly as the raw [`dial`] meant.
+pub async fn dial_service<T: Transport, D: Discovery>(
+    node: &Node<T, D>,
+    contacts: &Contacts,
+    target: &Target,
+    present: Option<String>,
+    transport: transport::Transport,
+) -> eyre::Result<Resolved<T::Session>> {
+    let candidates = target.candidates(contacts)?;
+
+    let mut last_error = None;
+    for candidate in candidates {
+        match connect_service(node, &candidate, present.clone()).await {
+            Ok(session) => {
+                return Ok(Resolved {
+                    session,
+                    label: candidate.label,
+                });
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    let reached = match last_error {
+        Some(error) => error.wrap_err(format!("could not reach {target}")),
+        None => eyre::eyre!("could not reach {target}: no known device"),
+    };
+    Err(hint(reached, transport))
+}
+
+/// Open one named candidate's gated `diag:` service under the [`DIAL_TIMEOUT`], presenting `present`. The
+/// service-scoped session `ping` and `status` loop over to fan out across a person's devices. A timeout
+/// maps to a plain unreachable error so a caller loops on to the next device.
+pub async fn connect_service<T: Transport, D: Discovery>(
+    node: &Node<T, D>,
+    candidate: &Candidate,
+    present: Option<String>,
+) -> eyre::Result<ServiceSession<T::Session>> {
+    let connector = Connector::to_node(candidate.node, DIAG_SERVICE.to_owned(), present);
+    // Bound the base connect the same way [`connect`] does, so a wedged device does not strand the
+    // reachable ones. The `diag:` handshake rides each stream later, so this bounds only reaching the peer.
+    match tokio::time::timeout(DIAL_TIMEOUT, connector.open_service(node)).await {
+        Ok(Ok(session)) => Ok(session),
+        Ok(Err(error)) => {
+            tracing::debug!(peer = %candidate.node, %error, "device unreachable");
+            Err(error)
+        }
+        Err(_elapsed) => {
+            tracing::debug!(peer = %candidate.node, timeout = ?DIAL_TIMEOUT, "device did not answer in time");
+            Err(eyre::eyre!(
+                "timed out after {DIAL_TIMEOUT:?} with no response"
+            ))
+        }
+    }
 }
 
 /// Append the fix the bound transport needs to a reach failure, so the error names what to do next.

@@ -28,6 +28,10 @@ pub struct PingCmd {
     /// Seconds between probes.
     #[arg(short = 'i', long, value_name = "seconds", default_value_t = 1.0)]
     pub interval: f64,
+    /// Present a membership badge or capability link to a family/cap-gated peer. Defaults to the
+    /// self-signed badge minted from this identity when it dials under a persisted key.
+    #[arg(long, value_name = "link")]
+    pub present: Option<String>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -41,8 +45,12 @@ impl PingCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
+        self_badge: Option<String>,
     ) -> eyre::Result<()> {
         let candidates = reach::candidates(&self.target, contacts)?;
+        // Present an explicit `--present` link if given, else the self-signed badge minted from this
+        // identity: the peer's `diag:` service is gated, so each probe must prove membership to run.
+        let present = self.present.or(self_badge);
         let plan = Ping {
             count: self.count,
             interval: Duration::from_secs_f64(self.interval),
@@ -50,7 +58,7 @@ impl PingCmd {
 
         let mut any_reached = false;
         for candidate in &candidates {
-            match reach::connect(node, candidate).await {
+            match reach::connect_service(node, candidate, present.clone()).await {
                 Ok(session) => {
                     any_reached = true;
                     // Path at connect, so the phrase below can report a relayed-to-direct upgrade that

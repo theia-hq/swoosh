@@ -41,5 +41,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+# The in-process transport the `gated_diag` proof drives: two mem nodes share a global registry, so a
+# client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
+bifrost-mem.workspace = true
+
 [lints]
 workspace = true
