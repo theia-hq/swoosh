@@ -7,11 +7,11 @@
 
 use core::net::Ipv4Addr;
 
+use ::fetch::http::{FetchRequest, FetchResponse};
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
-use ::fetch::http::{FetchRequest, FetchResponse};
 use tightbeam::protocol::{Request, Response};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
