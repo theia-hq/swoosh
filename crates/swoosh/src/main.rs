@@ -38,6 +38,7 @@ use swoosh::commands::serve::ServeCmd;
 use swoosh::commands::speed::SpeedCmd;
 use swoosh::commands::ssh::SshCmd;
 use swoosh::commands::status::StatusCmd;
+use swoosh::commands::stop::StopCmd;
 use swoosh::commands::tree::TreeCmd;
 use swoosh::commands::tunnel_connect::TunnelConnectCmd;
 use swoosh::contacts::{Contacts, ContactsStore};
@@ -69,6 +70,8 @@ struct Cli {
 enum Command {
     /// Be a node: publish named services behind your signet gate (bare = answer reach diagnostics).
     Serve(ServeCmd),
+    /// Stop a peer's node (stop it serving), addressed by its public key or a `sheer:` link.
+    Stop(StopCmd),
     /// Measure the round-trip time to a peer, addressed by a petname or their public key.
     Ping(PingCmd),
     /// Measure throughput to a peer: iperf, but over the overlay.
@@ -117,6 +120,10 @@ enum Reach {
     /// `swoosh beam`: push files to a peer's gated `beam:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
     Beam(BeamCmd),
+    /// `swoosh stop`: reach a peer's gated `control.stop` service and trigger a graceful stop. Presents a
+    /// membership badge (like `ping`/`speed`/`beam`), so it rides the reach path under the persisted
+    /// identity when one exists.
+    Stop(StopCmd),
     TunnelConnect(TunnelConnectCmd),
 }
 
@@ -136,6 +143,7 @@ impl Command {
             Self::TunnelConnect(cmd) => Verb::Reach(Reach::TunnelConnect(cmd)),
             Self::Forward(cmd) => Verb::Reach(Reach::Forward(cmd)),
             Self::Beam(cmd) => Verb::Reach(Reach::Beam(cmd)),
+            Self::Stop(cmd) => Verb::Reach(Reach::Stop(cmd)),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
             Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
@@ -193,6 +201,11 @@ impl Reach {
             // diagnostic verbs it dials under the persisted identity when one exists (the badge roots at
             // the dialing key), and mints an ephemeral key on a fresh install.
             Self::Beam(_) => Identity::PersistedIfPresent,
+            // `stop` reaches a GATED `control.stop` service presenting a self-signed badge, so like the
+            // diagnostic verbs and `beam` it dials under the persisted identity when one exists (the badge
+            // roots at the dialing key: only a member of the node's family may stop it), ephemeral on a
+            // fresh install (whose self-badge is then correctly refused).
+            Self::Stop(_) => Identity::PersistedIfPresent,
             Self::Fetch(_) => Identity::Ephemeral,
         }
     }
@@ -209,6 +222,7 @@ impl Reach {
             Self::Fetch(cmd) => &cmd.reach,
             Self::Forward(cmd) => &cmd.reach,
             Self::Beam(cmd) => &cmd.reach,
+            Self::Stop(cmd) => &cmd.reach,
             Self::TunnelConnect(cmd) => &cmd.reach,
         }
     }
@@ -254,6 +268,9 @@ impl Reach {
             // `beam` presents the self-signed membership badge (minted below) to the peer's gated `beam:`
             // service, the same way the diagnostic verbs and `tunnel-connect` do.
             Self::Beam(cmd) => cmd.run(node, self_badge).await,
+            // `stop` presents the self-signed membership badge to the peer's gated `control.stop` service,
+            // the same way `beam` and the diagnostic verbs do.
+            Self::Stop(cmd) => cmd.run(node, self_badge).await,
             // The peer is already a resolved raw key, so no address book or transport label is needed; the
             // `self_badge` (this identity's self-signed membership badge) is the signet-holder's proof to
             // present, resolved against any stored badge inside the command.
@@ -285,7 +302,8 @@ impl Reach {
             | Self::Ping(_)
             | Self::Speed(_)
             | Self::Status(_)
-            | Self::Beam(_) => match config::load_badge(key).await? {
+            | Self::Beam(_)
+            | Self::Stop(_) => match config::load_badge(key).await? {
                 Some(badge) => Ok(Some(badge)),
                 None => Ok(Some(secret.member_badge()?)),
             },

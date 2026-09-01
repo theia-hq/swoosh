@@ -25,7 +25,7 @@ use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, ProtocolError, Speedtest};
 use nauthy::{Denylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{self, Connector, Exposer, Services};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Services};
 
 /// The node's OWN secret: its ed25519 public half is both its identity key and the self-signet its gate
 /// roots at (a person-zero node is its own signet root), so a member badge rooted here is admitted.
@@ -173,7 +173,7 @@ async fn expose(services: &[String]) -> NodeId {
         let registry = swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir()).unwrap();
         Exposer::new(services, registry, gate)
             .unwrap()
-            .run(&host)
+            .run(&host, CancellationToken::new())
             .await
             .unwrap();
     });

@@ -40,7 +40,7 @@ use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, ProtocolError, Speedtest};
 use nauthy::{Denylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{self, Connector, Exposer, Services};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Services};
 
 /// The signet's fixed secret. Its ed25519 public half is the signet the family gate trusts, and it roots
 /// every membership badge minted here.
@@ -101,7 +101,7 @@ async fn proof() {
                 swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir()).unwrap();
             Exposer::new(services, registry, gate)
                 .unwrap()
-                .run(&host)
+                .run(&host, CancellationToken::new())
                 .await
                 .unwrap();
         });

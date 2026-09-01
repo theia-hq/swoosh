@@ -17,5 +17,6 @@ pub mod share;
 pub mod speed;
 pub mod ssh;
 pub mod status;
+pub mod stop;
 pub mod tree;
 pub mod tunnel_connect;
