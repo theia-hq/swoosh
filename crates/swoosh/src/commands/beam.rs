@@ -39,8 +39,11 @@ pub struct BeamCmd {
     #[arg(required = true, value_name = "path")]
     pub paths: Vec<PathBuf>,
     /// who to reach: a raw node id, or a `sheer:` capability link
+    // Named `target`, not `peer`: the flattened `ReachArgs` already owns a `--peer` arg (its clap id is
+    // `peer`), so a positional field named `peer` collides two args under one clap id (a panic at --help).
+    // The help still reads `<peer>` via `value_name`.
     #[arg(value_name = "peer")]
-    pub peer: Dial,
+    pub target: Dial,
     /// present a `sheer:` capability link alongside a raw node id
     #[arg(long, value_name = "link")]
     pub present: Option<String>,
@@ -61,7 +64,7 @@ impl BeamCmd {
         // Present an explicit `--present` link if given, else the self-signed badge minted from this
         // identity: the peer's `beam` service is gated, so each stream must prove membership to be admitted.
         let present = self.present.or(self_badge);
-        let connector = match &self.peer {
+        let connector = match &self.target {
             Dial::Node(id) => Connector::to_node(*id, BEAM_SERVICE.to_owned(), present),
             Dial::Capability(link) => Connector::from_link(link, BEAM_SERVICE.to_owned())?,
         };
