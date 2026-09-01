@@ -503,6 +503,15 @@ pub fn default_path() -> Result<PathBuf, StoreError> {
         .join("contacts.toml"))
 }
 
+/// The contacts file for a given `--key`: beside the key's dir when one is set (so one `--key` moves the
+/// whole config), else [`default_path`]. Lets a command open its own store from the key alone.
+pub fn path(key: Option<&Path>) -> Result<PathBuf, StoreError> {
+    match key.and_then(Path::parent) {
+        Some(dir) => Ok(dir.join("contacts.toml")),
+        None => default_path(),
+    }
+}
+
 #[cfg(test)]
 #[path = "contacts_tests.rs"]
 mod contacts_tests;

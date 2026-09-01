@@ -6,6 +6,7 @@ pub mod attenuate;
 pub mod beam;
 pub mod contact;
 pub mod fetch;
+pub mod fleet;
 pub mod forward;
 pub mod grant;
 pub mod identity;

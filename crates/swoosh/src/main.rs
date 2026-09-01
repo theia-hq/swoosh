@@ -29,6 +29,7 @@ use swoosh::commands::adopt::AdoptCmd;
 use swoosh::commands::beam::BeamCmd;
 use swoosh::commands::contact::ContactCmd;
 use swoosh::commands::fetch::FetchCmd;
+use swoosh::commands::fleet::FleetCmd;
 use swoosh::commands::forward::ForwardCmd;
 use swoosh::commands::grant::GrantCmd;
 use swoosh::commands::identity::IdentityCmd;
@@ -84,6 +85,8 @@ enum Command {
     Forward(ForwardCmd),
     /// Push a file or directory to a peer, verified end to end.
     Beam(BeamCmd),
+    /// Learn your fleet: pull the signed roster from a coordination node and fold it into your contacts.
+    Fleet(FleetCmd),
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
     Contact(ContactCmd),
@@ -124,6 +127,9 @@ enum Reach {
     /// membership badge (like `ping`/`speed`/`beam`), so it rides the reach path under the persisted
     /// identity when one exists.
     Stop(StopCmd),
+    /// `swoosh fleet --pull`: pull the signed fleet roster from a coordination node and hydrate contacts.
+    /// Presents a membership badge (like `ping`/`beam`) and needs the persisted identity (adopt first).
+    Fleet(FleetCmd),
     TunnelConnect(TunnelConnectCmd),
 }
 
@@ -143,6 +149,7 @@ impl Command {
             Self::TunnelConnect(cmd) => Verb::Reach(Reach::TunnelConnect(cmd)),
             Self::Forward(cmd) => Verb::Reach(Reach::Forward(cmd)),
             Self::Beam(cmd) => Verb::Reach(Reach::Beam(cmd)),
+            Self::Fleet(cmd) => Verb::Reach(Reach::Fleet(cmd)),
             Self::Stop(cmd) => Verb::Reach(Reach::Stop(cmd)),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
@@ -206,6 +213,10 @@ impl Reach {
             // roots at the dialing key: only a member of the node's family may stop it), ephemeral on a
             // fresh install (whose self-badge is then correctly refused).
             Self::Stop(_) => Identity::PersistedIfPresent,
+            // `fleet --pull` reaches a GATED `roster:` service presenting a member badge, like `beam`/`stop`,
+            // so it dials under the persisted identity when one exists; a node with no signet errors clearly
+            // ("adopt first") rather than dialing as a stranger.
+            Self::Fleet(_) => Identity::PersistedIfPresent,
             Self::Fetch(_) => Identity::Ephemeral,
         }
     }
@@ -223,6 +234,7 @@ impl Reach {
             Self::Forward(cmd) => &cmd.reach,
             Self::Beam(cmd) => &cmd.reach,
             Self::Stop(cmd) => &cmd.reach,
+            Self::Fleet(cmd) => &cmd.reach,
             Self::TunnelConnect(cmd) => &cmd.reach,
         }
     }
@@ -240,6 +252,7 @@ impl Reach {
         transport: transport::Transport,
         self_badge: Option<String>,
         expose: Option<ExposeContext>,
+        key: Option<&std::path::Path>,
     ) -> eyre::Result<()>
     where
         <T::Session as bifrost::Session>::Write: Send + 'static,
@@ -269,6 +282,10 @@ impl Reach {
             // `beam` presents the self-signed membership badge (minted below) to the peer's gated `beam:`
             // service, the same way the diagnostic verbs and `tunnel-connect` do.
             Self::Beam(cmd) => cmd.run(node, self_badge).await,
+            // `fleet --pull` presents the membership badge to the coordination node's gated `roster:`
+            // service, verifies the signed roster against our signet, and hydrates contacts; it opens its
+            // OWN store from `key` (a write, unlike the read-only `contacts` the reach verbs share).
+            Self::Fleet(cmd) => cmd.run(node, self_badge, key).await,
             // `stop` presents the self-signed membership badge to the peer's gated `control.stop` service,
             // the same way `beam` and the diagnostic verbs do.
             Self::Stop(cmd) => cmd.run(node, self_badge).await,
@@ -473,7 +490,7 @@ async fn run() -> eyre::Result<()> {
             let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
             reach
-                .run(&node, &contacts, transport, self_badge, expose)
+                .run(&node, &contacts, transport, self_badge, expose, cli.key.as_deref())
                 .await
         }
         // quirk is direct-only with no internal discovery, so the composed discovery is its only way
@@ -483,7 +500,7 @@ async fn run() -> eyre::Result<()> {
             let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
             reach
-                .run(&node, &contacts, transport, self_badge, expose)
+                .run(&node, &contacts, transport, self_badge, expose, cli.key.as_deref())
                 .await
         }
     }
