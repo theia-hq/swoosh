@@ -22,7 +22,12 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::path::{Path, PathBuf};
 
-use bifrost::NodeId;
+use bifrost::{CryptoKind, NodeId};
+use nauthy::RosterDoc;
+
+/// The reserved petname for the operator's own devices: the signet is person-zero, each device it derives
+/// lives under `me/<label>`. A signet-verified roster hydrates into exactly this partition.
+const ME: &str = "me";
 
 mod store;
 
@@ -188,13 +193,36 @@ pub enum ContactRefParseError {
     Device(#[from] DeviceLabelParseError),
 }
 
-/// The in-memory address book: every petname mapped to its ordered group of device identities.
+/// Where a contact binding came from: a name YOU typed, or a member the signet vouched for in a signed
+/// roster. This distinction is the moat: a roster-hydrated member stays distinguishable from a hand-typed
+/// peer at read time, so flattening the two can never silently launder a stranger into a signed member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// A binding the operator added by hand (`contact add`, `mint`), or loaded from the legacy bare-string
+    /// wire form. It carries no signature; it is trust the operator asserted locally.
+    HandTyped,
+    /// A binding hydrated from a signet-signed roster at the given epoch. Only [`Contacts::hydrate`] writes
+    /// this, and only from an already-verified [`RosterDoc`], so the signet-only membership fence is a
+    /// type-path property: no hand-typed op can forge a `Roster` provenance.
+    Roster { epoch: u64 },
+}
+
+/// One device binding: its node identity and where that binding came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Binding {
+    /// The device's node identity.
+    pub node: NodeId,
+    /// Whether the operator typed this binding or the signet vouched for it in a roster.
+    pub source: Source,
+}
+
+/// The in-memory address book: every petname mapped to its ordered group of device bindings.
 ///
 /// This is the pure domain view the store loads into and saves back from. It owns the add / list /
-/// remove / resolve behaviour; persistence is the [`ContactsStore`]'s job, layered around it.
+/// remove / resolve / hydrate behaviour; persistence is the [`ContactsStore`]'s job, layered around it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Contacts {
-    people: BTreeMap<Petname, BTreeMap<DeviceLabel, NodeId>>,
+    people: BTreeMap<Petname, BTreeMap<DeviceLabel, Binding>>,
 }
 
 impl Contacts {
@@ -205,9 +233,13 @@ impl Contacts {
     pub fn add(&mut self, petname: Petname, device: Option<DeviceLabel>, node: NodeId) -> Added {
         let device = device.unwrap_or(DeviceLabel(DeviceLabel::DEFAULT.to_owned()));
         let group = self.people.entry(petname).or_default();
-        match group.insert(device, node) {
-            Some(previous) if previous == node => Added::Unchanged,
-            Some(previous) => Added::Replaced(previous),
+        let binding = Binding {
+            node,
+            source: Source::HandTyped,
+        };
+        match group.insert(device, binding) {
+            Some(previous) if previous.node == node => Added::Unchanged,
+            Some(previous) => Added::Replaced(previous.node),
             None => Added::Created,
         }
     }
@@ -223,6 +255,19 @@ impl Contacts {
         &self,
         petname: &Petname,
     ) -> Option<impl Iterator<Item = (&DeviceLabel, &NodeId)>> {
+        self.people
+            .get(petname)
+            .map(|group| group.iter().map(|(label, binding)| (label, &binding.node)))
+    }
+
+    /// Every device binding under a petname WITH its provenance, in label order, for the store's codec and
+    /// for a `contact ls` that wants to show which entries the signet vouched for. `None` for an unknown
+    /// petname. Unlike [`devices`](Self::devices) (which projects to the node for reach), this carries the
+    /// [`Source`] so a roster-hydrated member round-trips through persistence.
+    pub fn bindings(
+        &self,
+        petname: &Petname,
+    ) -> Option<impl Iterator<Item = (&DeviceLabel, &Binding)>> {
         self.people.get(petname).map(|group| group.iter())
     }
 
@@ -246,17 +291,60 @@ impl Contacts {
         match &target.device {
             None => Ok(group
                 .iter()
-                .map(|(device, node)| candidate(device, *node))
+                .map(|(device, binding)| candidate(device, binding.node))
                 .collect()),
             Some(device) => group
                 .get(device)
-                .copied()
+                .map(|binding| binding.node)
                 .map(|node| vec![candidate(device, node)])
                 .ok_or_else(|| ResolveError::UnknownDevice {
                     petname: target.petname.clone(),
                     device: device.clone(),
                 }),
         }
+    }
+
+    /// Fold a signet-verified roster into the `me` partition (the operator's own fleet), tagging each member
+    /// [`Source::Roster`]. THIS is the moat's write path, and it is safe by construction: the only way to
+    /// obtain a [`RosterDoc`] to pass here is [`nauthy::SignedRoster::verify`], so a `Roster` provenance can
+    /// only ever come from the signet, never from a hand-typed op. Merge rule, per device under `me`:
+    ///
+    /// - a VACANT slot is added;
+    /// - a HAND-TYPED binding is NEVER clobbered (the operator's local choice wins; the member is a
+    ///   suggestion, so a roster can never silently overwrite a name you set);
+    /// - a prior ROSTER binding is refreshed only when the new epoch is at least the old one (a stale
+    ///   re-pull from a lagging courier cannot roll the fleet back).
+    ///
+    /// Only the `me` partition is touched: other petnames (people you know) are never rewritten by your own
+    /// fleet roster. A member whose label is somehow not a valid device label is skipped rather than trusted.
+    pub fn hydrate(&mut self, roster: &RosterDoc) {
+        let epoch = roster.epoch().0;
+        let group = self.people.entry(Petname(ME.to_owned())).or_default();
+        for member in roster.members() {
+            let Ok(device) = member.label.as_str().parse::<DeviceLabel>() else {
+                continue;
+            };
+            match group.get(&device).map(|binding| binding.source) {
+                Some(Source::HandTyped) => {}
+                Some(Source::Roster { epoch: prior }) if epoch < prior => {}
+                _ => {
+                    group.insert(
+                        device,
+                        Binding {
+                            node: NodeId::new(CryptoKind::Ed25519, *member.node.bytes()),
+                            source: Source::Roster { epoch },
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// Insert a fully-formed binding (node + provenance) under a petname's device. For the store's codec,
+    /// which reconstructs persisted state INCLUDING a `Roster` provenance; the trust for that provenance was
+    /// established when it was first hydrated from a verified roster, and persistence just round-trips it.
+    pub(crate) fn insert_binding(&mut self, petname: Petname, device: DeviceLabel, binding: Binding) {
+        self.people.entry(petname).or_default().insert(device, binding);
     }
 
     /// Remove a whole petname (all its devices) or, with a device, just that one device. Returns whether

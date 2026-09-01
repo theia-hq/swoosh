@@ -10,9 +10,11 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 
-use bifrost::{NodeId, NodeIdParseError};
+use bifrost::NodeIdParseError;
 
-use super::{Contacts, DeviceLabel, DeviceLabelParseError, Petname, PetnameParseError};
+use super::{
+    Binding, Contacts, DeviceLabel, DeviceLabelParseError, Petname, PetnameParseError, Source,
+};
 
 /// A contacts file at a known path, loaded into a mutable [`Contacts`] and saved back atomically.
 ///
@@ -73,38 +75,87 @@ impl ContactsStore {
 
 /// The on-disk shape: petname to device-label to base32 identity string. A separate wire type so no
 /// serde derive touches the domain, and the string keys/values are exactly what a human reads and edits.
-type Wire = BTreeMap<String, BTreeMap<String, String>>;
+/// The wire value for one device: either the legacy bare key string (a hand-typed binding) or an inline
+/// table `{ key = "...", roster = <epoch> }` for a member the signet vouched for. Modeled as a generic
+/// [`toml::Value`] so both shapes round-trip through one document and files written before provenance
+/// existed still load.
+type Wire = BTreeMap<String, BTreeMap<String, toml::Value>>;
 
-/// Parse a contacts TOML document into the strictly-typed domain, validating every name and key.
+/// Parse a contacts TOML document into the strictly-typed domain, validating every name, key, and entry.
 fn decode(text: &str) -> Result<Contacts, StoreError> {
     let wire: Wire = toml::from_str(text).map_err(StoreError::Parse)?;
     let mut contacts = Contacts::default();
     for (petname, group) in wire {
         let petname: Petname = petname.parse()?;
-        for (device, key) in group {
+        for (device, value) in group {
             let device: DeviceLabel = device.parse()?;
-            let node: NodeId = key.parse()?;
-            contacts.add(petname.clone(), Some(device), node);
+            contacts.insert_binding(petname.clone(), device, decode_binding(&value)?);
         }
     }
     Ok(contacts)
+}
+
+/// Parse one device's wire value into a [`Binding`]: a bare string is a hand-typed key, an inline table is
+/// a roster-hydrated member.
+fn decode_binding(value: &toml::Value) -> Result<Binding, StoreError> {
+    match value {
+        toml::Value::String(key) => Ok(Binding {
+            node: key.parse()?,
+            source: Source::HandTyped,
+        }),
+        toml::Value::Table(table) => {
+            let key = table
+                .get("key")
+                .and_then(toml::Value::as_str)
+                .ok_or(StoreError::BadEntry)?;
+            let epoch = table
+                .get("roster")
+                .and_then(toml::Value::as_integer)
+                .ok_or(StoreError::BadEntry)?;
+            Ok(Binding {
+                node: key.parse()?,
+                source: Source::Roster {
+                    epoch: u64::try_from(epoch).map_err(|_| StoreError::BadEntry)?,
+                },
+            })
+        }
+        _ => Err(StoreError::BadEntry),
+    }
 }
 
 /// Render the domain address book as a contacts TOML document.
 fn encode(contacts: &Contacts) -> Result<String, StoreError> {
     let mut wire = Wire::new();
     for petname in contacts.petnames() {
-        // `petnames` yields only present names, so `devices` is always `Some` here; skip defensively
+        // `petnames` yields only present names, so `bindings` is always `Some` here; skip defensively
         // rather than unwrap, since a future change to either method must not turn into a panic.
-        let Some(devices) = contacts.devices(petname) else {
+        let Some(bindings) = contacts.bindings(petname) else {
             continue;
         };
-        let group = devices
-            .map(|(label, node)| (label.as_str().to_owned(), node.to_string()))
+        let group = bindings
+            .map(|(label, binding)| (label.as_str().to_owned(), encode_binding(binding)))
             .collect();
         wire.insert(petname.as_str().to_owned(), group);
     }
     toml::to_string_pretty(&wire).map_err(StoreError::Encode)
+}
+
+/// Render one binding to its wire value. A hand-typed binding stays a BARE key string (the legacy form, so
+/// a file untouched by roster-sync reads and writes byte-for-byte as before); a roster-hydrated member
+/// becomes `{ key = "...", roster = <epoch> }`, carrying the provenance the moat depends on.
+fn encode_binding(binding: &Binding) -> toml::Value {
+    match binding.source {
+        Source::HandTyped => toml::Value::String(binding.node.to_string()),
+        Source::Roster { epoch } => {
+            let mut table = toml::value::Table::new();
+            table.insert("key".to_owned(), toml::Value::String(binding.node.to_string()));
+            table.insert(
+                "roster".to_owned(),
+                toml::Value::Integer(i64::try_from(epoch).unwrap_or(i64::MAX)),
+            );
+            toml::Value::Table(table)
+        }
+    }
 }
 
 /// Why the contacts store could not be loaded or saved.
@@ -136,4 +187,7 @@ pub enum StoreError {
     /// or manual `map_err`.
     #[error("the contacts file holds an invalid node id")]
     NodeId(#[from] NodeIdParseError),
+    /// A device entry was neither a bare key string nor a well-formed `{ key, roster }` table.
+    #[error("the contacts file holds a malformed contact entry")]
+    BadEntry,
 }

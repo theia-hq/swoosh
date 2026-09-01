@@ -196,3 +196,117 @@ async fn store_roundtrips_across_reload() {
 
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
+
+use nauthy::{Epoch, Member, RosterDoc, RosterLabel, VerifyKey};
+
+/// A roster member whose node id is the all-`seed`-byte key, so it hydrates to the same [`node`] fixture,
+/// which doubles as a check that the `VerifyKey -> NodeId` conversion preserves the bytes.
+fn roster_member(seed: u8, label: &str) -> Member {
+    Member {
+        node: VerifyKey::new([seed; 32]),
+        label: label.parse::<RosterLabel>().expect("valid roster label"),
+    }
+}
+
+fn roster(epoch: u64, members: Vec<Member>) -> RosterDoc {
+    RosterDoc::new(Epoch(epoch), members).expect("valid roster")
+}
+
+/// The provenance of every device under `me`, in label order.
+fn me_sources(contacts: &Contacts) -> Vec<Source> {
+    contacts
+        .bindings(&petname("me"))
+        .expect("me present")
+        .map(|(_, binding)| binding.source)
+        .collect()
+}
+
+#[test]
+fn hydrate_adds_members_under_me_tagged_roster() {
+    let mut contacts = Contacts::default();
+    contacts.hydrate(&roster(
+        3,
+        vec![roster_member(1, "desk"), roster_member(2, "phone")],
+    ));
+    assert_eq!(
+        resolve(&contacts, &"me/desk".parse().expect("addr")),
+        Ok(vec![node(1)])
+    );
+    assert_eq!(
+        resolve(&contacts, &"me/phone".parse().expect("addr")),
+        Ok(vec![node(2)])
+    );
+    assert!(
+        me_sources(&contacts)
+            .iter()
+            .all(|s| *s == Source::Roster { epoch: 3 })
+    );
+}
+
+#[test]
+fn hydrate_never_clobbers_a_hand_typed_binding() {
+    // The operator hand-typed me/desk; a roster that claims something else must NOT overwrite the local
+    // choice, and the entry stays HandTyped. This is the moat: a member never launders itself over a name
+    // you set.
+    let mut contacts = Contacts::default();
+    contacts.add(petname("me"), Some(device("desk")), node(7));
+    contacts.hydrate(&roster(9, vec![roster_member(1, "desk")]));
+    assert_eq!(
+        resolve(&contacts, &"me/desk".parse().expect("addr")),
+        Ok(vec![node(7)])
+    );
+    assert_eq!(me_sources(&contacts), vec![Source::HandTyped]);
+}
+
+#[test]
+fn hydrate_refreshes_on_a_newer_epoch_and_ignores_a_stale_one() {
+    let mut contacts = Contacts::default();
+    contacts.hydrate(&roster(5, vec![roster_member(1, "desk")]));
+    contacts.hydrate(&roster(6, vec![roster_member(2, "desk")])); // newer epoch refreshes
+    assert_eq!(
+        resolve(&contacts, &"me/desk".parse().expect("addr")),
+        Ok(vec![node(2)])
+    );
+    contacts.hydrate(&roster(4, vec![roster_member(3, "desk")])); // stale epoch is ignored
+    assert_eq!(
+        resolve(&contacts, &"me/desk".parse().expect("addr")),
+        Ok(vec![node(2)])
+    );
+    assert_eq!(me_sources(&contacts), vec![Source::Roster { epoch: 6 }]);
+}
+
+#[tokio::test]
+async fn store_round_trips_roster_provenance() {
+    let dir = std::env::temp_dir().join(format!("swoosh-contacts-prov-{}", std::process::id()));
+    let path = dir.join("contacts.toml");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+
+    let mut store = ContactsStore::open(path.clone()).await.expect("open");
+    store
+        .contacts_mut()
+        .add(petname("alice"), Some(device("macbook")), node(1)); // hand-typed peer
+    store
+        .contacts_mut()
+        .hydrate(&roster(4, vec![roster_member(2, "desk")])); // roster member
+    store.save().await.expect("save");
+
+    // Reload: the hand-typed peer stays HandTyped, the fleet member stays Roster with its epoch. Provenance
+    // survives persistence, so the moat is not a purely in-memory property.
+    let reloaded = ContactsStore::open(path.clone()).await.expect("reopen");
+    let contacts = reloaded.contacts();
+    assert_eq!(
+        resolve(contacts, &"me/desk".parse().expect("addr")),
+        Ok(vec![node(2)])
+    );
+    assert_eq!(me_sources(contacts), vec![Source::Roster { epoch: 4 }]);
+    let alice = contacts
+        .bindings(&petname("alice"))
+        .expect("alice present")
+        .next()
+        .expect("one device")
+        .1
+        .source;
+    assert_eq!(alice, Source::HandTyped);
+
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+}
