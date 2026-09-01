@@ -21,11 +21,13 @@ use std::sync::Arc;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use futures::FutureExt as _;
-use nauthy::Denylist;
+use nauthy::{Denylist, Epoch, Member, RosterDoc, RosterLabel, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{self, CancellationToken, Exposer, Handler, Registry, ServeFn, Services};
 use tokio::io::AsyncWriteExt as _;
 
+use crate::contacts::{Contacts, Petname};
+use crate::identity::Secret;
 use crate::transport::ReachArgs;
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
@@ -83,6 +85,7 @@ impl ServeCmd {
         host_seed: [u8; 32],
         signet: Option<NodeId>,
         denylist: Denylist,
+        roster_blob: Arc<Vec<u8>>,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
@@ -113,6 +116,7 @@ impl ServeCmd {
         // not serve. The `control.stop` handler is added over the shared base registry with a CLONE of the
         // cancel token, so an admitted caller that reaches it requests the same graceful teardown.
         let registry = registry(host_seed, self.out.clone())?
+            .with("roster", roster_handler(roster_blob))
             .with(CONTROL_STOP_SERVICE, stop_handler(cancel.clone()));
         let exposer = Exposer::new(services.clone(), registry, gate)?;
 
@@ -236,6 +240,50 @@ pub fn registry(host_seed: [u8; 32], beam_out: PathBuf) -> eyre::Result<Registry
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
     Ok(registry)
+}
+
+/// Cut the current roster from the operator's own contacts (the `me/<label>` partition, where `mint`
+/// records each member) and sign it with the signet, returning the encoded blob the `roster:` handler
+/// serves. The SIGNET signs it (via [`Secret::cap_identity`]), so any member node can serve it and none can
+/// forge it. Cut ONCE at serve start (a snapshot); a member added later is picked up on the next `serve`.
+///
+/// B1 ships epoch 0: a single hand-repointed coordination node needs no ordering yet, and the epoch counter
+/// rides B2's `fleet` re-cut. A `me` device whose label is not a valid roster label is skipped rather than
+/// aborting the whole roster.
+pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>> {
+    let me: Petname = "me".parse()?;
+    let members: Vec<Member> = contacts
+        .devices(&me)
+        .into_iter()
+        .flatten()
+        .filter_map(|(label, node)| {
+            let label = label.as_str().parse::<RosterLabel>().ok()?;
+            Some(Member {
+                node: VerifyKey::new(*node.key()),
+                label,
+            })
+        })
+        .collect();
+    let doc = RosterDoc::new(Epoch(0), members)?;
+    Ok(secret.cap_identity()?.sign_roster(&doc).encode())
+}
+
+/// The `roster:` handler: serve the signet-signed membership snapshot to an admitted member, then close.
+/// GATED (a stranger must never read the member set: delib-28 containment). Only the signet SIGNED the blob;
+/// this node merely serves a pre-cut snapshot, so a popped courier leaks a read of a member-known set, never
+/// authority (the signing secret is not needed to serve, only to have signed). The blob is self-delimiting
+/// and signature-validated by the puller, so the handler just writes it and closes the write half.
+fn roster_handler(blob: Arc<Vec<u8>>) -> Handler {
+    let serve: ServeFn = Arc::new(move |_admitted, mut writer, _reader| {
+        let blob = Arc::clone(&blob);
+        async move {
+            writer.write_all(&blob).await?;
+            writer.shutdown().await?;
+            Ok(())
+        }
+        .boxed()
+    });
+    Handler::gated(serve)
 }
 
 /// The `control.stop` handler swoosh injects: the remote node-lifecycle stop. It holds a CLONE of the

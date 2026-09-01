@@ -253,10 +253,11 @@ impl Reach {
                     host_seed,
                     signet,
                     denylist,
+                    roster_blob,
                 } = expose.ok_or_else(|| {
                     eyre::eyre!("internal: serve reached without its expose context")
                 })?;
-                cmd.run(node, host_seed, signet, denylist).await
+                cmd.run(node, host_seed, signet, denylist, roster_blob).await
             }
             // The diagnostic verbs reach the peer's GATED `ping`/`speed` service, so they present the self-signed
             // membership badge (minted below in `self_badge`) the same way `tunnel-connect` does.
@@ -327,11 +328,13 @@ impl Reach {
     async fn expose_context(
         &self,
         secret: &identity::Secret,
+        contacts: &Contacts,
         key: Option<&std::path::Path>,
     ) -> eyre::Result<Option<ExposeContext>> {
         match self {
             // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
-            // returns `None`.
+            // returns `None`. The roster is cut and signed HERE, where the secret is still live and the
+            // contacts store is loaded, then handed to the serve arm as a pre-cut blob.
             Self::Serve(_) => Ok(Some(ExposeContext {
                 host_seed: secret.ssh_host_seed(),
                 signet: Some(
@@ -340,6 +343,9 @@ impl Reach {
                         .unwrap_or_else(|| secret.node_id()),
                 ),
                 denylist: nauthy::Denylist::load(config::revoked_path(key)?).await?,
+                roster_blob: std::sync::Arc::new(
+                    swoosh::commands::serve::cut_roster(contacts, secret)?,
+                ),
             })),
             _ => Ok(None),
         }
@@ -353,6 +359,9 @@ struct ExposeContext {
     host_seed: [u8; 32],
     signet: Option<bifrost::NodeId>,
     denylist: nauthy::Denylist,
+    /// The signet-signed roster blob the `roster:` handler serves, cut here from the operator's contacts
+    /// while the secret is still live (the transport consumes it below). A snapshot, cut once per `serve`.
+    roster_blob: std::sync::Arc<Vec<u8>>,
 }
 
 #[tokio::main]
@@ -451,7 +460,9 @@ async fn run() -> eyre::Result<()> {
     // key for the same reason. The exposer context (`serve`) is resolved before the bind too: its ssh
     // host seed derives from the secret before the bind consumes it.
     let self_badge = reach.self_badge(&secret, cli.key.as_deref()).await?;
-    let expose = reach.expose_context(&secret, cli.key.as_deref()).await?;
+    let expose = reach
+        .expose_context(&secret, store.contacts(), cli.key.as_deref())
+        .await?;
     match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
         // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
@@ -608,7 +619,7 @@ mod tests {
         };
 
         let expose = reach
-            .expose_context(&secret, Some(&key))
+            .expose_context(&secret, &Contacts::default(), Some(&key))
             .await
             .expect("expose context resolves")
             .expect("serve carries an expose context");
