@@ -1,0 +1,22 @@
+[package]
+name = "sshh"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# A keyless SSH server over an already-authenticated byte stream. Its own crate so its heavy,
+# security-sensitive dependency tree (russh, ssh-key, pty-process) is behind swoosh's `ssh` feature and
+# never lands in a lean client that only reaches out.
+[dependencies]
+nauthy.workspace = true
+russh.workspace = true
+ssh-key.workspace = true
+pty-process.workspace = true
+tokio = { workspace = true, features = ["process"] }
+thiserror.workspace = true
+tracing.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true

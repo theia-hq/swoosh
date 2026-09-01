@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/beam", "crates/fetch", "crates/measure", "crates/swoosh"]
+members = ["crates/beam", "crates/fetch", "crates/measure", "crates/sshh", "crates/swoosh"]
 
 [workspace.package]
 edition = "2024"
@@ -16,17 +16,21 @@ bifrost-mdns = { git = "https://github.com/theia-hq/bifrost" }
 bifrost-mem = { git = "https://github.com/theia-hq/bifrost" }
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost" }
 nauthy = { git = "https://github.com/theia-hq/nauthy" }
-sshh = { git = "https://github.com/theia-hq/sshh" }
 tightbeam = { git = "https://github.com/theia-hq/tightbeam" }
 beam = { path = "crates/beam" }
 fetch = { path = "crates/fetch" }
 measure = { path = "crates/measure" }
+sshh = { path = "crates/sshh" }
 
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
 eyre = "0.6"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+libc = "0.2"
+pty-process = { version = "0.5.3", features = ["async", "tokio"] }
 rand = "0.8"
+russh = "0.63"
+ssh-key = { version = "=0.7.0-rc.11", features = ["ed25519"] }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
 toml = "0.8"
