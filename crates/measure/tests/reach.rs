@@ -4,9 +4,9 @@
 
 use core::time::Duration;
 
-use bifrost::{Error, NoDiscovery, Node};
+use bifrost::{Error, NoDiscovery, Node, Session as _};
 use bifrost_mem::MemTransport;
-use measure::{Limit, Mode, Ping, Responder, Speedtest};
+use measure::{Limit, Mode, Ping, ProtocolError, Responder, Speedtest, answer_ping, answer_speed};
 
 /// A responder node serving in the background, and a live client session to it, over one mem process.
 type Paired = (tokio::task::JoinHandle<()>, bifrost_mem::MemSession);
@@ -20,6 +20,42 @@ async fn paired() -> Result<Paired, Error> {
     let serving = tokio::spawn(async move {
         if let Ok(session) = responder.accept().await {
             Responder::serve(session).await;
+        }
+    });
+
+    let session = client.connect(responder_id).await?;
+    Ok((serving, session))
+}
+
+/// Which single method a node serves: this is the Layer-2 fixture, a node that serves exactly one of the
+/// two methods so the OTHER is refused at the wire by [`answer_ping`] / [`answer_speed`].
+#[derive(Clone, Copy)]
+enum Serves {
+    /// Serve only ping ([`answer_ping`]): a speed frame is refused.
+    Ping,
+    /// Serve only speed ([`answer_speed`]): a ping frame is refused.
+    Speed,
+}
+
+/// Bring up a responder that serves exactly ONE method (via [`answer_ping`] / [`answer_speed`], the split
+/// handlers the gated registry wires), and a client session to it. The wrong method is then refused at the
+/// wire with a `Response::Unsupported` frame, exactly as a node offering only that one service would.
+async fn serving_one(serves: Serves) -> Result<Paired, Error> {
+    let responder = Node::new(MemTransport::bind(), NoDiscovery);
+    let responder_id = responder.node_id();
+    let client = Node::new(MemTransport::bind(), NoDiscovery);
+
+    let serving = tokio::spawn(async move {
+        let Ok(session) = responder.accept().await else {
+            return;
+        };
+        // Answer each inbound stream with the single served method's handler, so a wrong-method frame is
+        // refused at the wire. One at a time is enough for these fixtures (one dial per test).
+        while let Ok((writer, reader)) = session.accept_bi().await {
+            let _ = match serves {
+                Serves::Ping => answer_ping(writer, reader).await,
+                Serves::Speed => answer_speed(writer, reader).await,
+            };
         }
     });
 
@@ -180,4 +216,50 @@ async fn time_bounded_speed_respects_the_duration_not_a_byte_count() {
         drop(session);
         serving.abort();
     }
+}
+
+#[tokio::test]
+async fn a_speed_frame_on_a_ping_only_node_carries_the_unsupported_refusal() {
+    // The Layer-2 proof: a responder wired `answer_ping` that receives a speed frame WRITES the typed
+    // `Response::Unsupported` refusal on the wire, and the client decodes it to `ProtocolError::Refused`.
+    // This proves the wire carries the distinction, not that the client merely happens to error: a
+    // wrong-method dial can never degrade to a silent close read as `0.00 MiB/s`.
+    let (serving, session) = serving_one(Serves::Ping)
+        .await
+        .expect("client should reach the ping-only responder");
+
+    let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
+        .run(&session)
+        .await;
+    assert!(
+        matches!(refused, Err(ProtocolError::Refused(_))),
+        "a speed frame on a ping-only node must decode a typed refusal, not source zero bytes: {refused:?}"
+    );
+
+    drop(session);
+    serving.abort();
+}
+
+#[tokio::test]
+async fn a_ping_frame_on_a_speed_only_node_carries_the_unsupported_refusal() {
+    // The symmetric Layer-2 proof: a responder wired `answer_speed` that receives a ping frame WRITES
+    // `Response::Unsupported`, and the client decodes `ProtocolError::Refused` rather than reading the
+    // dropped stream as `100% loss`.
+    let (serving, session) = serving_one(Serves::Speed)
+        .await
+        .expect("client should reach the speed-only responder");
+
+    let refused = Ping {
+        count: 3,
+        interval: Duration::from_millis(1),
+    }
+    .run(&session)
+    .await;
+    assert!(
+        matches!(refused, Err(ProtocolError::Refused(_))),
+        "a ping frame on a speed-only node must decode a typed refusal, not report 100% loss: {refused:?}"
+    );
+
+    drop(session);
+    serving.abort();
 }

@@ -22,7 +22,7 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_mem::MemTransport;
-use measure::{Limit, Mode, Ping, Speedtest};
+use measure::{Limit, Mode, Ping, ProtocolError, Speedtest};
 use nauthy::{Denylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, Connector, Exposer, Services};
@@ -94,21 +94,20 @@ async fn proof_ping_only() {
     );
 
     // The member's SPEED does not flow against a ping-only node. A node offering exactly one service
-    // resolves any request to it, so `speed` resolves to the sole `ping`, whose handler refuses
-    // the speed frame at the wire BEFORE sourcing a byte. So the download reads a clean close and its
-    // counted total is ZERO: the node offers ping, not speed, and no drain flows.
+    // resolves any request to it, so `speed` resolves to the sole `ping`, whose handler refuses the speed
+    // frame at the wire with a typed `Response::Unsupported` BEFORE sourcing a byte. The client decodes
+    // that to `ProtocolError::Refused` and short-circuits: a refusal is a LOUD error, NEVER a `0.00 MiB/s`
+    // report over the elapsed window. (This test used to enshrine the bug by asserting `Some(0)` bytes.)
     let speed = Connector::to_node(host, "speed".to_owned(), Some(member_badge))
         .open_service(&member)
         .await
         .expect("the base connect lands; the offered service is resolved per-stream");
-    let drained = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
+    let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
         .run(&speed)
-        .await
-        .expect("the download stream closes cleanly on the wire refusal");
-    assert_eq!(
-        drained.down().map(|leg| leg.bytes()),
-        Some(0),
-        "a node offering only ping must source ZERO speed bytes"
+        .await;
+    assert!(
+        matches!(refused, Err(ProtocolError::Refused(_))),
+        "a node offering only ping must REFUSE speed loudly, not source zero bytes: {refused:?}"
     );
 
     // The stranger reaches neither: a badge rooted at a key the self-gate never trusted is refused.
@@ -137,23 +136,23 @@ async fn proof_speed_only() {
     );
 
     // The member's PING does not succeed against a speed-only node: `ping` resolves to the sole offered
-    // `speed`, whose handler refuses the ping frame at the wire before echoing. So every probe goes
-    // unanswered and the run reports 100% loss: the node offers speed, not ping.
+    // `speed`, whose handler refuses the ping frame at the wire with a typed `Response::Unsupported`
+    // before echoing. The client decodes that to `ProtocolError::Refused` and short-circuits: a refusal
+    // is a LOUD error, NEVER a `100% loss` report. (This test used to enshrine the bug by asserting
+    // `received() == 0`.)
     let ping = Connector::to_node(host, "ping".to_owned(), Some(member_badge))
         .open_service(&member)
         .await
         .expect("the base connect lands; the offered service is resolved per-stream");
-    let unanswered = Ping {
+    let refused = Ping {
         count: 3,
         interval: Duration::ZERO,
     }
     .run(&ping)
-    .await
-    .expect("the ping run completes; every probe is unanswered on the wire refusal");
-    assert_eq!(
-        unanswered.received(),
-        0,
-        "a node offering only speed must answer no ping probe"
+    .await;
+    assert!(
+        matches!(refused, Err(ProtocolError::Refused(_))),
+        "a node offering only speed must REFUSE ping loudly, not report 100% loss: {refused:?}"
     );
 
     // The stranger reaches neither.

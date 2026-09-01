@@ -14,7 +14,7 @@ use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
 use clap::Args;
-use measure::{Ping, PingReport, Probe};
+use measure::{Ping, PingReport, Probe, ProtocolError};
 
 use crate::contacts::{Contacts, Target};
 use crate::reach;
@@ -63,13 +63,16 @@ impl PingCmd {
             interval: Duration::from_secs_f64(self.interval),
         };
 
-        let mut any_reached = false;
+        // Track whether any device was HEALTHY (answered the probe), so a fan-out where every device was
+        // unreachable OR refused ends non-zero. A refused device answered the dial but does not serve
+        // ping, so it prints a distinct line and does not hold the exit code green: a refusal is never
+        // rendered as `100% loss`.
+        let mut any_healthy = false;
         for candidate in &candidates {
             match reach::connect_service(node, candidate, reach::PING_SERVICE, present.clone())
                 .await
             {
                 Ok(session) => {
-                    any_reached = true;
                     // Path at connect, so the phrases below can report a relayed-to-direct upgrade that
                     // the probe's round trips gave iroh's hole-punch time to land.
                     let initial = session.conn_info().path;
@@ -85,12 +88,27 @@ impl PingCmd {
                                 probe_line(label, name, initial, &session.conn_info(), probe)
                             );
                         })
-                        .await?
+                        .await
                     } else {
-                        plan.run(&session).await?
+                        plan.run(&session).await
                     };
-                    let path = reach::conn_path(initial, &session.conn_info());
-                    print_device(&candidate.label, transport.name(), &path, &report);
+                    match report {
+                        Ok(report) => {
+                            any_healthy = true;
+                            let path = reach::conn_path(initial, &session.conn_info());
+                            print_device(&candidate.label, transport.name(), &path, &report);
+                        }
+                        // The node reached us but does not serve ping: a distinct refusal line, never a
+                        // healthy device line with 100% loss. The run continues to the next device.
+                        Err(ProtocolError::Refused(reason)) => {
+                            println!(
+                                "{} via {}: refused ({reason})",
+                                candidate.label,
+                                transport.name()
+                            );
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
                 Err(_error) => {
                     println!("{} via {}: unreachable", candidate.label, transport.name());
@@ -100,7 +118,7 @@ impl PingCmd {
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;
-        if any_reached {
+        if any_healthy {
             Ok(())
         } else {
             Err(reach::hint(

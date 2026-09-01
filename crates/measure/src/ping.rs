@@ -65,6 +65,9 @@ impl Ping {
                     rtts.push(rtt);
                     Some(rtt)
                 }
+                // A refusal is NOT a lost probe: the node does not serve ping, so short-circuit the whole
+                // run with the typed error rather than reading it as loss. No report is built from it.
+                Err(error @ ProtocolError::Refused(_)) => return Err(error),
                 Err(error) => {
                     tracing::warn!(%error, seq, "ping probe lost");
                     None
@@ -99,6 +102,9 @@ where
             seq: echoed_seq,
             sent_unix_nanos: echoed_nonce,
         } if echoed_seq == seq && echoed_nonce == sent_unix_nanos => Ok(started.elapsed()),
+        // The node admitted the stream but does not serve ping (a speed-only node): a REFUSAL, not a
+        // lost probe. It must short-circuit the whole run, never fold into loss.
+        Response::Unsupported { reason } => Err(ProtocolError::Refused(reason)),
         _ => Err(ProtocolError::Mismatched),
     }
 }

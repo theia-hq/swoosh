@@ -37,12 +37,18 @@ async fn response_variants_roundtrip() {
             sent_unix_nanos: 42,
         },
         Response::Received { bytes: 1024 },
+        // The download go-ahead and the typed refusal frame: both must survive the wire so a client can
+        // tell "here comes the payload" and "this method is refused" from each other and from a raw read.
+        Response::Sourcing,
+        Response::Unsupported {
+            reason: "this node serves ping, not speed".to_owned(),
+        },
     ];
-    for response in responses {
+    for response in &responses {
         let mut buf = Vec::new();
         response.write(&mut buf).await.unwrap();
         let decoded = Response::read(&mut buf.as_slice()).await.unwrap();
-        assert_eq!(decoded, response);
+        assert_eq!(&decoded, response);
     }
 }
 

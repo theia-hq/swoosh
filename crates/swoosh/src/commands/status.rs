@@ -17,7 +17,7 @@ use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
 use clap::Args;
-use measure::Ping;
+use measure::{Ping, ProtocolError};
 
 use crate::contacts::{Contacts, Target};
 use crate::reach;
@@ -53,25 +53,25 @@ impl StatusCmd {
         // identity: the peer's `ping` service is gated, so the RTT probe must prove membership to run.
         let present = self.present.or(self_badge);
 
-        // Report each device; track whether any was reachable, so an all-unreachable fan-out ends non-
-        // zero with the transport's fix hint, not a bare list of failures.
-        let mut any_reached = false;
+        // Report each device; track whether any device was HEALTHY (reached and served the probe), so a
+        // fan-out where every device was unreachable OR refused ends non-zero rather than exiting clean
+        // on a screen full of failures. A refused device answered the dial but does not serve ping, so it
+        // is not healthy: it must not hold the exit code green the way a real status line does.
+        let mut any_healthy = false;
         for candidate in &candidates {
             let line =
                 match reach::connect_service(node, candidate, reach::PING_SERVICE, present.clone())
                     .await
                 {
-                    Ok(session) => {
-                        any_reached = true;
-                        probe(&session, &candidate.label, transport).await
-                    }
+                    Ok(session) => probe(&session, &candidate.label, transport).await,
                     Err(_error) => Line::unreachable(&candidate.label, transport.name()),
                 };
+            any_healthy |= line.is_healthy();
             println!("{line}");
         }
 
         node.close().await;
-        if any_reached {
+        if any_healthy {
             Ok(())
         } else {
             Err(reach::hint(
@@ -98,6 +98,14 @@ async fn probe<S: Session>(session: &S, label: &str, transport: transport::Trans
     .run(session)
     .await;
 
+    // A refusal is NOT a healthy line with a borrowed transport RTT. The node reached us but does not
+    // serve ping, so render a distinct `refused` line rather than `.ok()`-swallowing the error and
+    // reporting the transport's own path RTT as if the probe had succeeded. That swallow is exactly what
+    // made a refusing node look fully healthy; a typed `Refused` is a first-class outcome here.
+    if let Err(ProtocolError::Refused(reason)) = &probed {
+        return Line::refused(label.to_owned(), transport.name(), reason.clone());
+    }
+
     // Read the path AFTER the probe, not before: the round trip gives iroh's hole-punch a moment to
     // land, so a session that starts relayed and upgrades reports "direct" here instead of always
     // showing the pre-upgrade "relayed" it had the instant it connected.
@@ -106,21 +114,30 @@ async fn probe<S: Session>(session: &S, label: &str, transport: transport::Trans
     Line::reached(label.to_owned(), transport.name(), initial, info, rtt)
 }
 
-/// A rendered status line for one device: reachable (path + RTT) or not.
+/// A rendered status line for one device: reachable (path + RTT), unreachable, or reached-but-refused.
 struct Line {
     /// The device as the user named it, or the reached key's short form.
     label: String,
     transport: &'static str,
-    /// The path and RTT, or `None` when the device was unreachable.
-    reached: Option<Reached>,
+    state: State,
 }
 
-/// The reachable half of a [`Line`]: the path at connect, the path after the probe, and the round-trip
-/// time. `initial` lets the rendered phrase report a relayed-to-direct upgrade that landed during probing.
-struct Reached {
-    initial: Path,
-    info: ConnInfo,
-    rtt: Option<Duration>,
+/// The outcome for one device. A refusal is a first-class state, distinct from both reachable and
+/// unreachable: the node answered the dial but does not serve ping, so it is neither a healthy path line
+/// nor an "unreachable". Making it its own variant is what stops a refusal from rendering as a healthy
+/// line with a borrowed transport RTT.
+enum State {
+    /// The device answered the probe: the path at connect, the path after the probe, and the RTT.
+    /// `initial` lets the phrase report a relayed-to-direct upgrade that landed during probing.
+    Reached {
+        initial: Path,
+        info: ConnInfo,
+        rtt: Option<Duration>,
+    },
+    /// The device did not answer the dial at all.
+    Unreachable,
+    /// The device answered but refused the ping probe (it does not serve ping), carrying the host's reason.
+    Refused { reason: String },
 }
 
 impl Line {
@@ -134,7 +151,7 @@ impl Line {
         Self {
             label,
             transport,
-            reached: Some(Reached { initial, info, rtt }),
+            state: State::Reached { initial, info, rtt },
         }
     }
 
@@ -142,20 +159,36 @@ impl Line {
         Self {
             label: label.to_owned(),
             transport,
-            reached: None,
+            state: State::Unreachable,
         }
+    }
+
+    fn refused(label: String, transport: &'static str, reason: String) -> Self {
+        Self {
+            label,
+            transport,
+            state: State::Refused { reason },
+        }
+    }
+
+    /// Whether this device answered the probe (a real status line), as opposed to being unreachable or
+    /// having refused. Only a healthy device keeps the fan-out's exit code green.
+    fn is_healthy(&self) -> bool {
+        matches!(self.state, State::Reached { .. })
     }
 }
 
 impl core::fmt::Display for Line {
     /// `<peer> via <transport>: <path>[, rtt <n>]`, Tailscale-status shaped, or `<peer> via <transport>:
-    /// unreachable` for a device that did not answer. The path phrase (shared with `ping`/`speed`) names
+    /// unreachable` for a device that did not answer, or `<peer> via <transport>: refused (<reason>)` for
+    /// a node that answered but does not serve ping. The path phrase (shared with `ping`/`speed`) names
     /// the remote when a direct address is known, and reports a relayed-to-direct upgrade when one landed.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{} via {}: ", self.label, self.transport)?;
-        match &self.reached {
-            None => f.write_str("unreachable"),
-            Some(Reached { initial, info, rtt }) => {
+        match &self.state {
+            State::Unreachable => f.write_str("unreachable"),
+            State::Refused { reason } => write!(f, "refused ({reason})"),
+            State::Reached { initial, info, rtt } => {
                 write!(f, "{}", reach::conn_path(*initial, info))?;
                 if let Some(rtt) = rtt {
                     write!(f, ", rtt {:.3} ms", rtt.as_secs_f64() * 1000.0)?;

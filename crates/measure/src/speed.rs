@@ -126,8 +126,12 @@ where
     let sent = limit.payload(started, progress).send(writer).await?;
     // Signal end-of-payload so the responder stops draining and replies with its count.
     writer.shutdown().await?;
-    let Response::Received { bytes } = Response::read(reader).await? else {
-        return Err(ProtocolError::Mismatched);
+    let bytes = match Response::read(reader).await? {
+        Response::Received { bytes } => bytes,
+        // A node that does not serve speed refuses the sink frame with `Unsupported` before draining a
+        // byte: a typed `Refused`, never a plausible-but-smaller throughput.
+        Response::Unsupported { reason } => return Err(ProtocolError::Refused(reason)),
+        _ => return Err(ProtocolError::Mismatched),
     };
     if bytes < sent {
         tracing::warn!(
@@ -156,6 +160,9 @@ where
     }
     .write(writer)
     .await?;
+    // Read the leading go-ahead frame before draining: a node that does not serve speed refuses here
+    // with `Unsupported`, which must short-circuit as a typed `Refused`, never drain as zero bytes.
+    expect_sourcing(reader).await?;
     let received = limit.payload(started, progress).drain(reader).await?;
     // A time-bounded download sources unbounded, so the client's deadline (which just fired to end the
     // drain) is the sole terminator. Shutting the write half sends a clean FIN so the responder's next
@@ -188,6 +195,9 @@ where
     }
     .write(writer)
     .await?;
+    // Read the leading go-ahead frame before either leg flows: a node that does not serve speed refuses
+    // here with `Unsupported`, short-circuiting as a typed `Refused` rather than a zero-byte bidir run.
+    expect_sourcing(reader).await?;
 
     // Both legs feed the one counter, so a bidir progress line reports the aggregate the session moved;
     // the final per-leg totals still come from the returned counts.
@@ -207,6 +217,21 @@ where
         up: Some(up?),
         down: Some(down?),
     })
+}
+
+/// Read the leading response a download expects before the payload flows: [`Response::Sourcing`] is the
+/// go-ahead, [`Response::Unsupported`] is a wrong-method refusal (a node that serves ping, not speed),
+/// mapped to a typed [`ProtocolError::Refused`] so it short-circuits the run rather than draining as
+/// zero bytes. Any other frame is a protocol violation.
+async fn expect_sourcing<R>(reader: &mut R) -> Result<(), ProtocolError>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    match Response::read(reader).await? {
+        Response::Sourcing => Ok(()),
+        Response::Unsupported { reason } => Err(ProtocolError::Refused(reason)),
+        _ => Err(ProtocolError::Mismatched),
+    }
 }
 
 impl Limit {

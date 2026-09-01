@@ -60,7 +60,7 @@ where
             seq,
             sent_unix_nanos,
         } => echo_pings(&mut writer, &mut reader, seq, sent_unix_nanos).await,
-        _ => Err(ProtocolError::WrongService),
+        _ => refuse(&mut writer, "this node serves ping, not speed").await,
     }
 }
 
@@ -73,7 +73,7 @@ where
     R: io::AsyncRead + Unpin,
 {
     match Request::read(&mut reader).await? {
-        Request::Ping { .. } => Err(ProtocolError::WrongService),
+        Request::Ping { .. } => refuse(&mut writer, "this node serves speed, not ping").await,
         speed => serve_speed(&mut writer, &mut reader, speed).await,
     }
 }
@@ -109,7 +109,7 @@ where
     R: io::AsyncRead + Unpin,
 {
     match request {
-        Request::Ping { .. } => Err(ProtocolError::WrongService),
+        Request::Ping { .. } => refuse(writer, "this node serves speed, not ping").await,
         Request::SpeedSink { limit_bytes } => {
             let bytes = Payload::of(limit_bytes).drain(reader).await?;
             Response::Received { bytes }
@@ -118,12 +118,19 @@ where
                 .map_err(ProtocolError::from)
         }
         Request::SpeedSource { limit_bytes } => {
+            // A leading go-ahead frame precedes the payload so the client can tell "here comes the
+            // download" from a refusal on its first read; a wrong-method node writes `Unsupported`
+            // instead (in `answer_ping`), so the download can never drain a refusal as zero bytes.
+            Response::Sourcing.write(writer).await?;
             // A byte-bounded download sources an exact count; a time-bounded one sources until the
             // client stops reading at its deadline, so the client's wall clock is the sole terminator.
             source(writer, limit_bytes).await?;
             Ok(())
         }
         Request::SpeedBidir { limit_bytes } => {
+            // Lead with the go-ahead frame (as the source path does) so the client's download half reads
+            // "sourcing" or a refusal deterministically before any payload, then run both halves.
+            Response::Sourcing.write(writer).await?;
             // Full-duplex: drain the client's upload to EOF while sourcing our download at once, so both
             // halves of the one stream carry counted payload simultaneously. The responder holds no
             // bound of its own; it mirrors the client. A byte bound sources an exact count and the
@@ -138,6 +145,22 @@ where
             Ok(())
         }
     }
+}
+
+/// Refuse a wrong-method frame LOUDLY: write a typed [`Response::Unsupported`] frame carrying `reason`
+/// so the client decodes a refusal (not a silently dropped stream it would read as loss or zero bytes),
+/// then return [`ProtocolError::WrongService`] so the stream task logs why it refused. This is the fix for
+/// the false-success class: a wrong method is a frame on the wire, never a silent close.
+async fn refuse<W: io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    reason: &str,
+) -> Result<(), ProtocolError> {
+    Response::Unsupported {
+        reason: reason.to_owned(),
+    }
+    .write(writer)
+    .await?;
+    Err(ProtocolError::WrongService)
 }
 
 /// Source counted download payload: an exact `Some(n)` bytes for a byte bound, or unbounded until the

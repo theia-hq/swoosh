@@ -37,7 +37,7 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use measure::{Limit, Mode, Ping, Speedtest};
+use measure::{Limit, Mode, Ping, ProtocolError, Speedtest};
 use nauthy::{Denylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, Connector, Exposer, Services};
@@ -150,44 +150,42 @@ async fn proof() {
             "a member's gated speedtest moves download bytes"
         );
 
-        // The split's wire wall: a MEMBER admitted at `ping` who sends a SPEED frame gets NO drain.
+        // The split's wire wall: a MEMBER admitted at `ping` who sends a SPEED frame gets a LOUD refusal.
         // The gate admitted the stream (the member is whole-node), so this proves the containment is the
-        // served-method check, not the gate: `answer_ping` refuses the speed frame at the wire before
-        // sourcing a single byte, so a `ping`-only grant cannot open the unbounded egress drain. The
-        // download reads a clean stream close, so its counted total is ZERO: no bytes flowed.
+        // served-method check, not the gate: `answer_ping` refuses the speed frame at the wire with a
+        // typed `Response::Unsupported` before sourcing a single byte, so a `ping`-only grant cannot open
+        // the unbounded egress drain. The client decodes the refusal to `ProtocolError::Refused` and
+        // short-circuits: it is a distinct error, NEVER a `0.00 MiB/s` report. (This test used to enshrine
+        // the false-success by asserting `Some(0)` bytes.)
         let ping_only = Connector::to_node(host_id, "ping".to_owned(), Some(member_badge.clone()))
             .open_service(&member)
             .await
             .expect("member reaches ping");
-        let drained = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
+        let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
             .run(&ping_only)
-            .await
-            .expect("the download stream closes cleanly on the wire refusal");
-        assert_eq!(
-            drained.down().map(|leg| leg.bytes()),
-            Some(0),
-            "a speed frame on ping must source ZERO bytes: the drain is contained at the wire"
+            .await;
+        assert!(
+            matches!(refused, Err(ProtocolError::Refused(_))),
+            "a speed frame on ping must REFUSE loudly, not source zero bytes: {refused:?}"
         );
 
-        // And symmetrically: a member admitted at `speed` who sends a PING frame is refused at the
-        // wire. `answer_speed` refuses the ping frame before echoing, so the probe goes unanswered: the
-        // run reports 100% loss, no pong. The speed service serves only throughput.
+        // And symmetrically: a member admitted at `speed` who sends a PING frame is refused at the wire.
+        // `answer_speed` refuses the ping frame with `Response::Unsupported` before echoing, so the client
+        // sees a typed `Refused`, NEVER a `100% loss` report. The speed service serves only throughput.
         let speed_only =
             Connector::to_node(host_id, "speed".to_owned(), Some(member_badge.clone()))
                 .open_service(&member)
                 .await
                 .expect("member reaches speed");
-        let unanswered = Ping {
+        let refused = Ping {
             count: 3,
             interval: Duration::ZERO,
         }
         .run(&speed_only)
-        .await
-        .expect("the ping run completes; every probe is unanswered on the wire refusal");
-        assert_eq!(
-            unanswered.received(),
-            0,
-            "a ping frame on speed must go unanswered: the speed service serves no ping"
+        .await;
+        assert!(
+            matches!(refused, Err(ProtocolError::Refused(_))),
+            "a ping frame on speed must REFUSE loudly, not report 100% loss: {refused:?}"
         );
 
         // Fetch is a raw handler, so admission (not the HTTP egress) is what the gate rules on: a member

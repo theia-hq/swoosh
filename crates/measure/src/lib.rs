@@ -19,5 +19,6 @@ pub mod speed;
 mod payload;
 
 pub use ping::{Ping, PingReport, Probe};
+pub use protocol::ProtocolError;
 pub use responder::{Responder, answer, answer_ping, answer_speed};
 pub use speed::{Limit, Mode, Progress, SpeedReport, Speedtest, Throughput};

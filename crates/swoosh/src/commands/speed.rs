@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::{ArgGroup, Args};
-use measure::{Limit, Mode, Progress, SpeedReport, Speedtest, Throughput};
+use measure::{Limit, Mode, Progress, ProtocolError, SpeedReport, Speedtest, Throughput};
 
 use crate::contacts::{Contacts, Target};
 use crate::reach::{self, Resolved};
@@ -92,7 +92,7 @@ impl SpeedCmd {
         // A shared counter the transfer bumps and the ticker reads, so the rate prints live rather than
         // only at the end. The ticker runs until the transfer finishes and drops its end of the channel.
         let progress = Progress::new();
-        let report = {
+        let outcome = {
             let ticker = report_over_time(progress.clone());
             let test = Speedtest::new(mode, limit)
                 .tracking(progress.clone())
@@ -100,8 +100,21 @@ impl SpeedCmd {
             // Race the transfer against the ticker: the transfer completes, the ticker loops forever, so
             // select ends the ticker the moment the run returns.
             tokio::select! {
-                report = test => report?,
+                report = test => report,
                 never = ticker => match never {},
+            }
+        };
+        // A refusal is a LOUD, distinct error, never `0.00 MiB/s`: the node reached us but does not serve
+        // speed, so name that plainly rather than reporting a zero-byte transfer over the elapsed window.
+        let report = match outcome {
+            Ok(report) => report,
+            Err(ProtocolError::Refused(reason)) => {
+                node.close().await;
+                eyre::bail!("{label} does not serve `speed`: {reason}");
+            }
+            Err(error) => {
+                node.close().await;
+                return Err(error.into());
             }
         };
 
