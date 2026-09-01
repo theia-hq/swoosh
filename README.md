@@ -252,10 +252,10 @@ lands as it is built.
 
 ## Layout
 
-- `crates/diag` the measurement engine (ping, speed): a small versioned protocol, a responder, and the
-  two clients.
 - `crates/fetch` the `fetch:` service: fetch an origin URL on the requester's behalf and stream the
   response back, scoped to one origin.
+- `crates/measure` the measurement engine (ping, speed): a small versioned protocol, a responder, and the
+  two clients.
 - `crates/swoosh` the CLI: binds one node under the chosen key and transport, then runs a command.
 
 ## License

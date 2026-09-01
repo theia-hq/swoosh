@@ -1,4 +1,4 @@
-//! The diag stream protocol: a small, versioned frame that opens each diagnostic stream and selects
+//! The measure stream protocol: a small, versioned frame that opens each diagnostic stream and selects
 //! what the responder should do, before the measured bytes flow. Same shape as tightbeam's
 //! `protocol.rs`: a 4-byte magic guards every stream, then a typed [`Request`], then a typed reply.
 //!
@@ -201,8 +201,8 @@ async fn read_u64<R: io::AsyncRead + Unpin>(reader: &mut R) -> io::Result<u64> {
 /// Why a diagnostic frame could not be decoded.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
-    /// The stream did not open with the diag magic (foreign or wrong-version stream).
-    #[error("not a diag stream")]
+    /// The stream did not open with the measure magic (foreign or wrong-version stream).
+    #[error("not a measure stream")]
     BadMagic,
     /// The request tag was not recognized.
     #[error("unknown request tag {0:#04x}")]

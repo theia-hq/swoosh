@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::{ArgGroup, Args};
-use diag::{Limit, Mode, Progress, SpeedReport, Speedtest, Throughput};
+use measure::{Limit, Mode, Progress, SpeedReport, Speedtest, Throughput};
 
 use crate::contacts::{Contacts, Target};
 use crate::reach::{self, Resolved};

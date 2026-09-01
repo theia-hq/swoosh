@@ -23,7 +23,7 @@
 //!
 //! The device-adopt-then-DIAL end-to-end reach (a second device actually reaching a gated service over a
 //! live transport) stays the Operator's quirk-run gate, because the badge binds to the device's PROVEN
-//! transport id, which over `mem` is synthetic (see `gated_diag.rs`). This wiring test is the real,
+//! transport id, which over `mem` is synthetic (see `gated_measure.rs`). This wiring test is the real,
 //! in-tree coverage that the mint/adopt/present path produces and stores the correct credential.
 
 use std::path::Path;

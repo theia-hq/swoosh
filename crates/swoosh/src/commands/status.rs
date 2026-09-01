@@ -1,7 +1,7 @@
 //! `swoosh status <peer>`: dial a peer and report the connection path, Tailscale `status` shaped.
 //!
 //! The single most reassuring thing a p2p tool tells you: am I actually peer to peer, or bouncing off a
-//! relay? For each device the peer resolves to, this dials it, runs a single diag ping for a live RTT,
+//! relay? For each device the peer resolves to, this dials it, runs a single measure ping for a live RTT,
 //! then reads the session's best-effort [`conn_info`](bifrost::Session::conn_info) for the path (direct
 //! vs relayed) and remote address, and prints one line. The path is read AFTER the probe so iroh's
 //! hole-punch has the round trip to land: a session that connects relayed and upgrades reports the
@@ -17,7 +17,7 @@ use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
 use clap::Args;
-use diag::Ping;
+use measure::Ping;
 
 use crate::contacts::{Contacts, Target};
 use crate::reach;
@@ -89,7 +89,7 @@ async fn probe<S: Session>(session: &S, label: &str, transport: transport::Trans
     // relayed path to direct during the round trip below.
     let initial = session.conn_info().path;
 
-    // A single diag ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
+    // A single measure ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
     // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.
     let probed = Ping {
         count: 1,

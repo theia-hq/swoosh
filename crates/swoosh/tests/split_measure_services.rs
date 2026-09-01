@@ -14,7 +14,7 @@
 //! stranger-refused invariant still holds per service: a stranger reaches neither.
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a badge binds to that id rather than
-//! a device's derived ed25519 key, exactly as `gated_diag.rs` documents; what this proves is that the gate
+//! a device's derived ed25519 key, exactly as `gated_measure.rs` documents; what this proves is that the gate
 //! admits a signet-rooted bound badge and that the OFFERED-service boundary is real, not that mint/adopt
 //! store the badge (that is `device_badge_wiring.rs`).
 
@@ -22,7 +22,7 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_mem::MemTransport;
-use diag::{Limit, Mode, Ping, Speedtest};
+use measure::{Limit, Mode, Ping, Speedtest};
 use nauthy::{Denylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, Connector, Exposer, Services};
@@ -31,7 +31,7 @@ use tightbeam::tunnel::{self, Connector, Exposer, Services};
 /// roots at (a person-zero node is its own signet root), so a member badge rooted here is admitted.
 const SELF_SECRET: [u8; 32] = [21u8; 32];
 
-/// The ssh host-key seed the shared `registry()` carries. Unused here (this exercises the diag halves), but
+/// The ssh host-key seed the shared `registry()` carries. Unused here (this exercises the measure halves), but
 /// a fixed value keeps the build stable with and without the `ssh` feature.
 const HOST_SEED: [u8; 32] = [9u8; 32];
 
@@ -45,7 +45,7 @@ fn a_node_offering_only_speed_answers_speed_and_not_ping() {
     run(proof_speed_only);
 }
 
-/// Run one proof on a worker thread with a generous stack, for the same reason as `gated_diag.rs`: diag's
+/// Run one proof on a worker thread with a generous stack, for the same reason as `gated_measure.rs`: measure's
 /// transfer engine holds a 64 KiB chunk buffer per direction on the stack, and over mem both sides run on
 /// one LocalSet thread, so a bidir speedtest nests several at once. An 8 MiB thread keeps that safe.
 fn run<F, Fut>(proof: F)
@@ -212,7 +212,7 @@ async fn assert_stranger_refused(host: NodeId) {
 /// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven mem node id): a
 /// `member(true)` badge rooted at the signing key. A badge rooted at the node's OWN key admits at its
 /// self-gate; one rooted at a stranger key is refused. Signed here (not via mint/adopt) so it binds to the
-/// mem transport's synthetic proven id; see the module note and `gated_diag.rs`.
+/// mem transport's synthetic proven id; see the module note and `gated_measure.rs`.
 fn self_badge(secret: &[u8; 32], bound: NodeId) -> String {
     Identity::from_secret(secret)
         .unwrap()
@@ -230,7 +230,8 @@ fn self_badge(secret: &[u8; 32], bound: NodeId) -> String {
 /// An empty revocation denylist: these tests exercise membership admission, not revocation, so the gate
 /// loads from a path that does not exist (an absent file is an empty set). `tag` keeps parallel paths apart.
 async fn empty_denylist(tag: &str) -> Denylist {
-    let path = std::env::temp_dir().join(format!("swoosh-split-diag-{tag}-{}", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("swoosh-split-measure-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
     Denylist::load(path).await.unwrap()
 }

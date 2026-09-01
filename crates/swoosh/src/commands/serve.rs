@@ -140,7 +140,7 @@ impl ServeCmd {
 /// and each carries its own gate: `ping` answers only ping frames, `speed` only speed frames, refusing the
 /// other method at the wire (`ProtocolError::WrongService`), so a grant for one can never open the other.
 ///
-/// The ONE assembly the product verb and the `gated_diag` proof test both build, so the test exercises the
+/// The ONE assembly the product verb and the `gated_measure` proof test both build, so the test exercises the
 /// identical registry swoosh serves rather than a hand-rolled near-copy.
 pub fn registry(host_seed: [u8; 32]) -> eyre::Result<Registry> {
     let registry = Registry::new()
@@ -176,7 +176,7 @@ fn fetch_handler() -> Handler {
 fn ping_handler() -> Handler {
     let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
         async move {
-            diag::answer_ping(&mut writer, &mut reader).await?;
+            measure::answer_ping(&mut writer, &mut reader).await?;
             Ok(())
         }
         .boxed()
@@ -193,7 +193,7 @@ fn ping_handler() -> Handler {
 fn speed_handler() -> Handler {
     let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
         async move {
-            diag::answer_speed(&mut writer, &mut reader).await?;
+            measure::answer_speed(&mut writer, &mut reader).await?;
             Ok(())
         }
         .boxed()

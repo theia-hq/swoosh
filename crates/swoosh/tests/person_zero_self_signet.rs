@@ -21,14 +21,14 @@
 //! transport proves for the dialer -- NOT to a device's derived ed25519 key. That is why the member badge is
 //! signed here, bound to the member's mem node id, rather than run through the real self-sign path (which
 //! binds to swoosh's ed25519 id, unequal to a mem proven id). This mirrors the accommodation documented in
-//! `gated_diag.rs`; what it proves is that a self-rooted gate admits a badge rooted at K and refuses one that
+//! `gated_measure.rs`; what it proves is that a self-rooted gate admits a badge rooted at K and refuses one that
 //! is not. `device_badge_wiring.rs` proves `mint`/`adopt` actually produce and store the device credential.
 
 use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_mem::MemTransport;
-use diag::{Limit, Mode, Ping, Speedtest};
+use measure::{Limit, Mode, Ping, Speedtest};
 use nauthy::{Denylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, Connector, Exposer, Services};
@@ -38,11 +38,11 @@ use tightbeam::tunnel::{self, Connector, Exposer, Services};
 /// composition root derives from `secret.node_id()` when no signet file was ever written.
 const SELF_SECRET: [u8; 32] = [11u8; 32];
 
-/// The ssh host-key seed the exposer's registry carries. Unused by this test (it exercises `diag`, not
+/// The ssh host-key seed the exposer's registry carries. Unused by this test (it exercises `measure`, not
 /// `sshd`), but the shared `registry()` derives `sshd` from it, so a fixed value keeps the build stable.
 const HOST_SEED: [u8; 32] = [9u8; 32];
 
-/// Run the proof on a worker thread with a generous stack, for the same reason as `gated_diag.rs`: diag's
+/// Run the proof on a worker thread with a generous stack, for the same reason as `gated_measure.rs`: measure's
 /// transfer engine holds a 64 KiB chunk buffer per direction on the stack, and over mem both sides run on
 /// one LocalSet thread, so a bidir speedtest nests several at once. An 8 MiB thread keeps that safe.
 #[test]
@@ -96,7 +96,7 @@ async fn proof() {
         let member_badge = self_badge(&SELF_SECRET, member.node_id());
 
         // Ping over the gated `ping` service: the round trip proves the self-gate admits a member.
-        let diag = Connector::to_node(host_id, "ping".to_owned(), Some(member_badge.clone()))
+        let measure = Connector::to_node(host_id, "ping".to_owned(), Some(member_badge.clone()))
             .open_service(&member)
             .await
             .expect("a member reaches the person-zero node's gated ping");
@@ -104,7 +104,7 @@ async fn proof() {
             count: 3,
             interval: Duration::ZERO,
         }
-        .run(&diag)
+        .run(&measure)
         .await
         .expect("member ping runs over the self-gated ping service");
         assert_eq!(report.received(), 3, "a member's every probe is answered");
@@ -116,12 +116,12 @@ async fn proof() {
 
         // Speedtest over the gated `speed` service: bytes move both ways, so the self-gate admits the
         // transfer stream too, not just a ping.
-        let diag = Connector::to_node(host_id, "speed".to_owned(), Some(member_badge))
+        let measure = Connector::to_node(host_id, "speed".to_owned(), Some(member_badge))
             .open_service(&member)
             .await
             .expect("a member reaches the self-gated speed service");
         let speed = Speedtest::new(Mode::Bidir, Limit::ByBytes(1 << 16))
-            .run(&diag)
+            .run(&measure)
             .await
             .expect("member speedtest runs over the self-gated speed service");
         assert!(
@@ -141,7 +141,7 @@ async fn proof() {
         let stranger_badge = self_badge(&[3u8; 32], stranger.node_id());
 
         // Refused at ping: the ping ERRORS (the gate refuses the stream), it does not hang or succeed.
-        let diag = Connector::to_node(host_id, "ping".to_owned(), Some(stranger_badge.clone()))
+        let measure = Connector::to_node(host_id, "ping".to_owned(), Some(stranger_badge.clone()))
             .open_service(&stranger)
             .await
             .expect("the base connect lands; the gate refuses per-stream");
@@ -149,7 +149,7 @@ async fn proof() {
             count: 1,
             interval: Duration::ZERO,
         }
-        .run(&diag)
+        .run(&measure)
         .await;
         assert!(
             refused.is_err(),
@@ -157,12 +157,12 @@ async fn proof() {
         );
 
         // Refused at speed too: a stranger cannot speedtest a self-gating node.
-        let diag = Connector::to_node(host_id, "speed".to_owned(), Some(stranger_badge))
+        let measure = Connector::to_node(host_id, "speed".to_owned(), Some(stranger_badge))
             .open_service(&stranger)
             .await
             .expect("the base connect lands; the gate refuses per-stream");
         let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
-            .run(&diag)
+            .run(&measure)
             .await;
         assert!(
             refused.is_err(),

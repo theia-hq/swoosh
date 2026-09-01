@@ -1,4 +1,4 @@
-//! diag: reach diagnostics over the bifrost overlay.
+//! measure: reach diagnostics over the bifrost overlay.
 //!
 //! Ping and speed are diagnostics on reach itself, the cheapest high-signal proofs of the thesis: an
 //! RTT to a peer addressed by their public key, and throughput over the session that reaches them.

@@ -6,7 +6,7 @@ use core::time::Duration;
 
 use bifrost::{Error, NoDiscovery, Node};
 use bifrost_mem::MemTransport;
-use diag::{Limit, Mode, Ping, Responder, Speedtest};
+use measure::{Limit, Mode, Ping, Responder, Speedtest};
 
 /// A responder node serving in the background, and a live client session to it, over one mem process.
 type Paired = (tokio::task::JoinHandle<()>, bifrost_mem::MemSession);

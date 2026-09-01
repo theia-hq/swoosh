@@ -24,8 +24,8 @@ bifrost-core.workspace = true
 bifrost-iroh.workspace = true
 bifrost-mdns.workspace = true
 bifrost-quirk.workspace = true
-diag.workspace = true
 fetch.workspace = true
+measure.workspace = true
 nauthy.workspace = true
 sshh = { workspace = true, optional = true }
 tightbeam.workspace = true
@@ -44,7 +44,7 @@ tracing-subscriber.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-# The in-process transport the `gated_diag` proof drives: two mem nodes share a global registry, so a
+# The in-process transport the `gated_measure` proof drives: two mem nodes share a global registry, so a
 # client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
 bifrost-mem.workspace = true
 

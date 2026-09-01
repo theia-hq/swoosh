@@ -14,7 +14,7 @@ use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
 use clap::Args;
-use diag::{Ping, PingReport, Probe};
+use measure::{Ping, PingReport, Probe};
 
 use crate::contacts::{Contacts, Target};
 use crate::reach;

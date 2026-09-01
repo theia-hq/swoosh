@@ -113,11 +113,11 @@ pub fn candidates(target: &Target, contacts: &Contacts) -> eyre::Result<Vec<Cand
     Ok(target.candidates(contacts)?)
 }
 
-/// A reached peer's GATED diag service: the [`ServiceSession`] to run diag over, plus the label of the
-/// device that answered. The session gates every stream it opens through the service request, so diag's
+/// A reached peer's GATED measure service: the [`ServiceSession`] to run measure over, plus the label of the
+/// device that answered. The session gates every stream it opens through the service request, so measure's
 /// `Ping`/`Speedtest` run over it unchanged while each stream is admitted by the peer's family gate.
 pub struct Resolved<S> {
-    /// The service-scoped session; every `open_bi` speaks the diag service handshake presenting the badge.
+    /// The service-scoped session; every `open_bi` speaks the measure service handshake presenting the badge.
     pub session: ServiceSession<S>,
     /// The label the reached device resolved from (`alice/macbook`, or a raw key's short form).
     pub label: String,
