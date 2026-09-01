@@ -223,6 +223,19 @@ Error: read frame: stream: service refused: capability does not grant this servi
 Exit status 1. The member is in; the stranger is out. That refusal is the demo's most important line: the
 gate is real, not decorative, and it holds no matter which transport carried the dial.
 
+## Tear it down from the member
+
+The member stops the server it was admitted to, no shell on the box. `stop` dials the server's gated
+`control.stop` service, the member's badge admits it, and the node stops serving.
+
+```sh
+# on the member
+SWOOSH_KEY=$MEMBER swoosh stop $SERVER_KEY
+```
+
+The stranger cannot: the same gate that refused its ping refuses its stop. Membership gates the whole
+node, teardown included.
+
 ## Why this matters
 
 Reach is a seam, and membership is real. Because you address a public key and the verbs are generic over

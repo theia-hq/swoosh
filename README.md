@@ -1,7 +1,7 @@
 # swoosh
 
 `swoosh` works with another machine addressed by its public key instead of its IP: reach it, measure
-the link, and (as the tool grows) send files, forward ports, share access, and fetch through it. You give
+the link, send files, forward ports, share access, and fetch through it. You give
 it a peer's key (a short base32 string) and it dials that peer directly, wherever the peer is on the
 internet, across home routers and NATs, without you knowing or caring about the peer's address. No
 address to look up, no server in the middle.
@@ -11,6 +11,8 @@ swoosh serve                 # on one machine: print this machine's key, stay re
 swoosh ping alice            # on another: reach that key, measure the round trip
 swoosh speed alice           # measure throughput to it
 swoosh status alice          # is the link direct, or relayed?
+swoosh beam report.pdf alice # push a file to it, verified end to end
+swoosh stop alice            # tell it to stop serving
 ```
 
 ## Install
@@ -80,6 +82,18 @@ so a node MAY offer one without the other. Bare `swoosh serve` publishes both; `
 ping=ping:` answers ping but not speed (and `speed=speed:` the reverse). Each is
 gated by default, so members reach both; a per-service grant can hand out ping-only.
 
+- `--for <duration>` serve for a bounded time, then stop by itself (`30m`, `2h`, `1d`). A local timer:
+  when the deadline passes the node stops gracefully, the same teardown a Ctrl-C gives. The banner reads
+  `stops in 30m, or ctrl-c`.
+- `--out <dir>` where a `beam:` service saves pushed files (default: the current directory).
+- `--public` serve to anyone, unauthenticated: the deliberate opt-out from the signet gate. Refused for a
+  keyless shell or a raw diagnostics service, which have no safe public form yet.
+- `--quiet` suppress the readiness banner, for unattended/CI use.
+
+Every node also answers `control.stop`, always: an admitted peer reaching it triggers a graceful stop
+(this is what `swoosh stop` dials). It is gated like the diagnostics, so for a single-owner node only
+your own devices can stop it.
+
 ### `swoosh ping <peer>`
 
 Dial a peer and measure the round-trip time, like `ping(8)` but addressed by key.
@@ -103,6 +117,10 @@ alice/macbook via iroh: direct to 203.0.113.7:41641 (upgraded from relayed)
   4 sent, 4 received, 0% loss
   rtt min/avg/max/mdev = 23.100/42.000/61.200/18.400 ms
 ```
+
+If the peer refuses the service (a node serving `ping` but not `speed`, or one that never admitted you),
+`ping`, `speed`, `status`, and `fetch` say so plainly and exit non-zero, rather than reporting a healthy
+line, 100% loss, or 0.00 MiB/s.
 
 ### `swoosh speed <peer>`
 
@@ -155,6 +173,15 @@ to it: `swoosh beam report.pdf photos/ alice`. A directory expands to every file
 over concurrent streams, and each is hashed with BLAKE3 and re-checked on arrival, so a truncated or
 tampered transfer is rejected, never written. The `beam:` service is gated by your signet like `ssh` and
 the diagnostics, so only members (or a `sheer:` cap you hand out with `--present`) can push to your node.
+
+### `swoosh stop <peer>`
+
+Tell a peer's node to stop serving, addressed by its key or a `sheer:` link: `swoosh stop alice`. It dials
+the node's gated `control.stop` service and, once admitted, triggers the same graceful stop a Ctrl-C or a
+`serve --for` deadline gives. This stops the node (it stops serving); it does NOT power off the machine.
+Because `control.stop` is gated like the diagnostics, for a single-owner node only your own devices can
+stop it, and a node that refuses you says so and exits non-zero. A natural end to a bounded session:
+`swoosh serve --for 30m` on one side, `swoosh stop me/<node>` to tear it down early from another.
 
 ### `swoosh grant`
 
@@ -234,7 +261,7 @@ same primitive underneath (a cap-gated byte-stream to a key) with a thin front d
 surface stays broad while the core stays one thing. Shipped today is ticked; the rest is planned and
 lands as it is built.
 
-- [x] `serve`: be online, answer reach diagnostics under a persisted key
+- [x] `serve`: be online, answer reach diagnostics under a persisted key; `--for` bounds its own life
 - [x] `ping`: round-trip time to a peer, `ping(8)`-shaped
 - [x] `speed`: throughput to a peer, `iperf`-shaped
 - [x] `status`: connection path to a peer: direct vs relayed
@@ -252,6 +279,7 @@ lands as it is built.
 - [x] `grant revoke`: refuse a capability link at this node at once, without waiting for its expiry
 - [x] `fetch`: mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
 - [x] `beam`: push a file or directory to a peer, verified end to end (the receiver serves `beam=beam:`)
+- [x] `stop`: tell a peer's node to stop serving, over the gated `control.stop` service
 - [ ] `beam` (more sources): the same verb for piped stdin, the clipboard, or a fetched URL's result,
   delivered to a key
 - [ ] `ssh config`: emit `ssh` `Host` aliases for devices that advertise ssh (waits on advertised services)
