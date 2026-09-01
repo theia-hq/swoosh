@@ -14,13 +14,13 @@
 //! gate already admitted (never a raw socket, never an `open` gate). As a second line of defence, [`serve`]
 //! refuses to run as root, since a cap-holder would otherwise get a root shell.
 //!
-//! NOT YET (tracked follow-ups from the Tailscale-parity study): dynamic window-resize propagation
-//! (`window_change_request` needs a resize handle the current splice consumes), SFTP/scp, and per-user
-//! mapping (today the shell runs as this process's uid).
+//! NOT YET (tracked follow-ups from the Tailscale-parity study): SFTP/scp, and per-user mapping (today
+//! the shell runs as this process's uid).
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::io::{self, AsyncRead, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{self, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::sync::watch;
 
 use pty_process::{Command, Size};
 use russh::server::{Handler, Msg, Session};
@@ -134,6 +134,11 @@ struct Shell {
     term: String,
     cols: u16,
     rows: u16,
+    /// Live resize handle into the running splice task, `Some` only after [`Shell::spawn`]. A
+    /// `window_change_request` pushes the new [`Size`] through this so the task (sole owner of the pty)
+    /// applies it; the pty is never shared. `None` before the shell spawns, so a window-change that
+    /// arrives first is captured into `cols`/`rows` and used as the initial size instead.
+    resize: Option<watch::Sender<Size>>,
 }
 
 impl Shell {
@@ -163,13 +168,17 @@ impl Shell {
                 return Ok(());
             }
         };
-        if pty
-            .resize(Size::new(self.rows.max(1), self.cols.max(1)))
-            .is_err()
-        {
+        // The latest geometry the client asked for, from `pty_request` and any `window_change_request`
+        // that landed before the shell spawned. Seed the pty and the resize channel with it.
+        let size = win_size(self.cols, self.rows);
+        if pty.resize(size).is_err() {
             let _ = session.channel_failure(id);
             return Ok(());
         }
+        // The splice task owns the pty; a later `window_change_request` pushes a new size through this
+        // sender and the task applies it. Keep the sender on `self` so the `&mut self` handler can send.
+        let (resize_tx, resize_rx) = watch::channel(size);
+        self.resize = Some(resize_tx);
         let term = if self.term.is_empty() {
             "xterm-256color"
         } else {
@@ -196,7 +205,7 @@ impl Shell {
             // `'static` writer before the borrowing reader.
             let writer = channel.make_writer();
             let reader = channel.make_reader();
-            let _ = splice(pty, writer, reader).await;
+            let _ = splice(pty, writer, reader, resize_rx).await;
             // Report the shell's exit and close the channel so the client's `ssh` exits cleanly.
             let code = wait_code(child).await;
             let _ = handle.exit_status_request(id, code).await;
@@ -246,6 +255,32 @@ impl Handler for Shell {
         Ok(())
     }
 
+    /// Propagate a live terminal resize to the running pty, so full-screen apps (vim, htop, less) reflow
+    /// instead of rendering at the old geometry. OpenSSH sends this on the client's SIGWINCH.
+    ///
+    /// Two orderings, both handled: AFTER the shell spawned, push the new size to the splice task (sole
+    /// owner of the pty) via the resize channel; a send error means the shell already exited, so drop it.
+    /// BEFORE the shell spawned (no task yet), record the geometry so [`Shell::spawn`] opens the pty at
+    /// the up-to-date size instead of a stale one.
+    #[allow(clippy::too_many_arguments)]
+    async fn window_change_request(
+        &mut self,
+        id: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.cols = col_width as u16;
+        self.rows = row_height as u16;
+        if let Some(resize) = &self.resize {
+            let _ = resize.send(win_size(self.cols, self.rows));
+        }
+        session.channel_success(id)?;
+        Ok(())
+    }
+
     async fn shell_request(
         &mut self,
         id: ChannelId,
@@ -265,24 +300,77 @@ impl Handler for Shell {
     }
 }
 
-/// Copy bytes both ways between the pty and the ssh channel until both sides close.
-async fn splice<S, W, R>(local: S, mut writer: W, mut reader: R) -> io::Result<()>
+/// Copy bytes both ways between the pty and the ssh channel until both sides close, applying any
+/// terminal resize that arrives on `resize` to the pty along the way.
+///
+/// Owns the pty by value and splits it into the two directions with `into_split`, so the pty stays
+/// single-owned by this task: resizes come in over the channel and are applied on the write half's own
+/// `resize`, sidestepping any shared `Pty` handle. The write direction is a manual select loop (not a
+/// plain `io::copy`) precisely so it can also poll the resize receiver; each arm is a whole await with no
+/// half-read held across it, so cancelling one to run the other loses no bytes.
+async fn splice<W, R>(
+    local: pty_process::Pty,
+    mut writer: W,
+    mut reader: R,
+    mut resize: watch::Receiver<Size>,
+) -> io::Result<()>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
     W: AsyncWrite + Unpin,
     R: AsyncRead + Unpin,
 {
-    let (mut local_reader, mut local_writer) = io::split(local);
+    let (mut local_reader, mut local_writer) = local.into_split();
     let upstream = async {
         io::copy(&mut local_reader, &mut writer).await?;
         writer.shutdown().await
     };
     let downstream = async {
-        io::copy(&mut reader, &mut local_writer).await?;
+        let mut buf = [0u8; 8 * 1024];
+        loop {
+            tokio::select! {
+                // `biased` so a pending resize is applied before more input bytes are pumped, keeping the
+                // pty geometry current for the data that follows.
+                biased;
+                // A new terminal size: apply it to the pty. A resize failing is non-fatal (the pty may be
+                // tearing down), so log nothing and keep splicing.
+                changed = resize.changed() => match changed {
+                    // `borrow_and_update` marks the value seen, so the next `changed()` waits for the next
+                    // send rather than re-firing on this one.
+                    Ok(()) => {
+                        let _ = local_writer.resize(*resize.borrow_and_update());
+                    }
+                    // The sender dropped (the handler is gone), so no more resizes will ever come. A closed
+                    // watch resolves `changed()` immediately, which would busy-spin this arm, so copy the
+                    // rest of the input with a plain `io::copy` and finish.
+                    Err(_) => {
+                        io::copy(&mut reader, &mut local_writer).await?;
+                        break;
+                    }
+                },
+                read = reader.read(&mut buf) => match read? {
+                    // Channel EOF: the client closed its input, so half-close the pty and finish.
+                    0 => break,
+                    n => local_writer.write_all(&buf[..n]).await?,
+                },
+            }
+        }
         local_writer.shutdown().await
     };
     tokio::try_join!(upstream, downstream)?;
     Ok(())
+}
+
+/// Map an SSH window geometry (columns, rows) to a pty [`Size`], clamped to at least 1x1. A client can
+/// send a zero dimension (or none at all, defaulting the fields to 0); a 0-row/0-col pty is degenerate and
+/// makes full-screen apps misrender, so floor each at 1, mirroring the initial-size clamp.
+fn win_size(cols: u16, rows: u16) -> Size {
+    let (rows, cols) = clamp_geometry(cols, rows);
+    Size::new(rows, cols)
+}
+
+/// Floor a client (cols, rows) geometry at 1x1 and return it as (rows, cols), the order [`Size::new`]
+/// takes. Split out from [`win_size`] as the testable seam, since [`Size`] exposes no field accessors.
+fn clamp_geometry(cols: u16, rows: u16) -> (u16, u16) {
+    (rows.max(1), cols.max(1))
 }
 
 /// This user's login shell for a bare `shell` request: `$SHELL` if set, else a sane default.
