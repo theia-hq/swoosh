@@ -14,6 +14,7 @@ use std::path::Path;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
+use eyre::WrapErr as _;
 use nauthy::SignedRoster;
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::Connector;
@@ -65,7 +66,7 @@ impl FleetCmd {
         let (send, recv) = session
             .open_bi()
             .await
-            .map_err(|e| eyre::eyre!("the coordination node refused the roster read: {e}"))?;
+            .wrap_err("the coordination node refused the roster read")?;
         drop(send); // a roster is a read; we send nothing, so the handler's write half completes
         let mut bytes = Vec::new();
         recv.take(MAX_ROSTER_BLOB).read_to_end(&mut bytes).await?;
