@@ -331,7 +331,6 @@ dependencies = [
  "bifrost",
  "eyre",
  "tokio",
- "tracing",
 ]
 
 [[package]]
