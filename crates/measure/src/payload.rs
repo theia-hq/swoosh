@@ -113,10 +113,12 @@ impl Payload {
             // torn final chunk on a stream that is about to be shut down costs nothing.
             let write = writer.write_all(&zeros[..n]);
             let outcome = match bound {
-                Bound::Until(deadline) => match tokio::time::timeout_at(deadline.into(), write).await {
-                    Ok(result) => result,
-                    Err(_past_deadline) => break,
-                },
+                Bound::Until(deadline) => {
+                    match tokio::time::timeout_at(deadline.into(), write).await {
+                        Ok(result) => result,
+                        Err(_past_deadline) => break,
+                    }
+                }
                 _ => write.await,
             };
             if let Err(error) = outcome {
