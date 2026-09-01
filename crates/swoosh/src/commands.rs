@@ -3,6 +3,7 @@
 
 pub mod adopt;
 pub mod attenuate;
+pub mod beam;
 pub mod contact;
 pub mod fetch;
 pub mod forward;

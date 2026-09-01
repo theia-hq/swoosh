@@ -19,6 +19,7 @@ ssh = ["dep:sshh"]
 
 [dependencies]
 # theia
+beam.workspace = true
 bifrost.workspace = true
 bifrost-core.workspace = true
 bifrost-iroh.workspace = true
