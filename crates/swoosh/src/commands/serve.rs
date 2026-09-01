@@ -273,7 +273,7 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
 /// this node merely serves a pre-cut snapshot, so a popped courier leaks a read of a member-known set, never
 /// authority (the signing secret is not needed to serve, only to have signed). The blob is self-delimiting
 /// and signature-validated by the puller, so the handler just writes it and closes the write half.
-fn roster_handler(blob: Arc<Vec<u8>>) -> Handler {
+pub fn roster_handler(blob: Arc<Vec<u8>>) -> Handler {
     let serve: ServeFn = Arc::new(move |_admitted, mut writer, _reader| {
         let blob = Arc::clone(&blob);
         async move {
