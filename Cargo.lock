@@ -325,6 +325,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "beam"
+version = "0.0.0"
+dependencies = [
+ "bifrost",
+ "eyre",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "bifrost"
 version = "0.0.0"
 dependencies = [
@@ -4780,6 +4790,7 @@ dependencies = [
 name = "swoosh"
 version = "0.5.0"
 dependencies = [
+ "beam",
  "bifrost",
  "bifrost-core",
  "bifrost-iroh",

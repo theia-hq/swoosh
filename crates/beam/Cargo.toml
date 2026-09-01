@@ -1,0 +1,20 @@
+[package]
+name = "beam"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# theia
+bifrost.workspace = true
+
+eyre.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

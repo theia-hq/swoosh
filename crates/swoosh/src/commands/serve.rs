@@ -14,6 +14,8 @@
 //! and `--quiet` live on THIS verb (not root), and reach comes via the shared
 //! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
@@ -45,6 +47,9 @@ pub struct ServeCmd {
     /// Suppress the readiness banner (the node id, services, and gate), for unattended/CI use.
     #[arg(long)]
     pub quiet: bool,
+    /// Directory a `beam:` service saves pushed files into (received files land here).
+    #[arg(long, value_name = "dir", default_value = ".")]
+    pub out: PathBuf,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -80,7 +85,11 @@ impl ServeCmd {
         // The core assembles the exposer, enforcing the sshd-cannot-be-public (and ping/speed-cannot-be-public)
         // invariant before any banner is printed, so a refused pairing never advertises a service it will
         // not serve.
-        let exposer = Exposer::new(services.clone(), registry(host_seed)?, gate)?;
+        let exposer = Exposer::new(
+            services.clone(),
+            registry(host_seed, self.out.clone())?,
+            gate,
+        )?;
 
         if !self.quiet {
             let addr = node.local_addr();
@@ -131,27 +140,59 @@ impl ServeCmd {
 }
 
 /// Assemble the whole handler registry swoosh serves: the HTTP egress `fetch:`, the two gated diagnostic
-/// services `ping:` and `speed:`, and (under the `ssh` feature) the keyless shell `sshd:`. swoosh
-/// is the one crate that depends on every service crate, so it is the one place these are wired: tightbeam
-/// names no service crate and ships no built-in, and this function injects them all with `.with(...)`.
-/// `extend` stays available for add-only merges, but swoosh builds one registry directly here.
+/// services `ping:` and `speed:`, the gated file-receive `beam:`, and (under the `ssh` feature) the keyless
+/// shell `sshd:`. swoosh is the one crate that depends on every service crate, so it is the one place these
+/// are wired: tightbeam names no service crate and ships no built-in, and this function injects them all
+/// with `.with(...)`. `extend` stays available for add-only merges, but swoosh builds one registry directly
+/// here.
 ///
 /// ping and speed are TWO independent services so a node may offer ping without speed (or the reverse),
 /// and each carries its own gate: `ping` answers only ping frames, `speed` only speed frames, refusing the
 /// other method at the wire (`ProtocolError::WrongService`), so a grant for one can never open the other.
 ///
+/// `beam_out` is the directory a `beam:` service saves pushed files into; the handler reduces each
+/// sender-supplied name to a safe relative path under it (`beam::safe_relative_path`), so a peer can never
+/// write outside the directory.
+///
 /// The ONE assembly the product verb and the `gated_measure` proof test both build, so the test exercises the
 /// identical registry swoosh serves rather than a hand-rolled near-copy.
-pub fn registry(host_seed: [u8; 32]) -> eyre::Result<Registry> {
+pub fn registry(host_seed: [u8; 32], beam_out: PathBuf) -> eyre::Result<Registry> {
     let registry = Registry::new()
         .with("fetch", fetch_handler())
         .with("ping", ping_handler())
-        .with("speed", speed_handler());
+        .with("speed", speed_handler())
+        .with("beam", beam_handler(beam_out));
     #[cfg(feature = "ssh")]
     let registry = registry.with("sshd", sshd_handler(host_seed));
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
     Ok(registry)
+}
+
+/// The `beam:` handler swoosh injects: the receive half of PUSH file transfer. It takes one admitted stream
+/// carrying one pushed file, drives `bifrost-wire`'s verified receive into a temp file under `beam_out`, and
+/// moves it into place at the safe relative path the sender named. GATED, because a receive service with no
+/// auth of its own would let anyone write files into the node's output directory; the gate IS its
+/// authentication. Each stream gets a unique tag from a shared counter, so concurrent pushes never contend
+/// for the same temp file.
+fn beam_handler(out: PathBuf) -> Handler {
+    let out = Arc::new(out);
+    let next_tag = Arc::new(AtomicU64::new(0));
+    let serve: ServeFn = Arc::new(move |_admitted, writer, reader| {
+        let out = Arc::clone(&out);
+        let tag = next_tag.fetch_add(1, Ordering::Relaxed);
+        async move {
+            let received = beam::receive_file(writer, reader, &out, tag).await?;
+            println!(
+                "received {} ({} bytes)",
+                received.path.display(),
+                received.bytes
+            );
+            Ok(())
+        }
+        .boxed()
+    });
+    Handler::gated(serve)
 }
 
 /// The `fetch:` handler swoosh injects: the node acts as an HTTP client and streams an origin response back

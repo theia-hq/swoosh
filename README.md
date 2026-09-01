@@ -147,6 +147,15 @@ shape, but pubkey-addressed and p2p).
   port (a plain local client talks to it as if it were on `127.0.0.1`) or stream it to stdout with `--to -`
   (compose with the shell, e.g. `--to - | mpv -`). `unix:<path>` (a local socket listener) is reserved.
 
+### `swoosh beam <path>... <peer>`
+
+Push a file or directory to a peer, verified end to end. You send; the peer receives. The receiver stays
+online with `swoosh serve beam=beam:` (saving into the current directory, or `--out <dir>`), and you push
+to it: `swoosh beam report.pdf photos/ alice`. A directory expands to every file under it, files stream
+over concurrent streams, and each is hashed with BLAKE3 and re-checked on arrival, so a truncated or
+tampered transfer is rejected, never written. The `beam:` service is gated by your signet like `ssh` and
+the diagnostics, so only members (or a `sheer:` cap you hand out with `--present`) can push to your node.
+
 ### `swoosh grant`
 
 Mint, narrow, or revoke a `sheer:` capability link: a signed, expiring grant to one published service,
@@ -242,9 +251,9 @@ lands as it is built.
 - [x] `grant narrow`: narrow a capability link offline and print a tighter one
 - [x] `grant revoke`: refuse a capability link at this node at once, without waiting for its expiry
 - [x] `fetch`: mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
-- [ ] `send` / `recv`: push a file or directory to a peer, verified end to end
-- [ ] `beam`: one verb for "get this over there": a file, piped stdin, the clipboard, or a fetched URL's
-  result, delivered to a key
+- [x] `beam`: push a file or directory to a peer, verified end to end (the receiver serves `beam=beam:`)
+- [ ] `beam` (more sources): the same verb for piped stdin, the clipboard, or a fetched URL's result,
+  delivered to a key
 - [ ] `ssh config`: emit `ssh` `Host` aliases for devices that advertise ssh (waits on advertised services)
 - [ ] `cluster` + `grant issue cluster`: name a local set of machines; share the whole group as one capability
 - [ ] `run`: run code at a peer addressed by its key (the north star)
@@ -252,6 +261,8 @@ lands as it is built.
 
 ## Layout
 
+- `crates/beam` the `beam:` service: receive a pushed file over one admitted stream, verified end to end,
+  saved under a safe relative path.
 - `crates/fetch` the `fetch:` service: fetch an origin URL on the requester's behalf and stream the
   response back, scoped to one origin.
 - `crates/measure` the measurement engine (ping, speed): a small versioned protocol, a responder, and the

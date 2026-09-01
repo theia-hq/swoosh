@@ -97,7 +97,8 @@ async fn proof() {
             let services = Services::parse(&requested).unwrap();
             let gate =
                 tunnel::resolve_gate(false, Some(signet), empty_denylist("host").await).unwrap();
-            let registry = swoosh::commands::serve::registry(HOST_SEED).unwrap();
+            let registry =
+                swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir()).unwrap();
             Exposer::new(services, registry, gate)
                 .unwrap()
                 .run(&host)

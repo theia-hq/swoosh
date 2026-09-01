@@ -26,6 +26,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 // The verb modules live in the swoosh LIBRARY (`lib.rs`), so an integration test can drive the same pieces
 // this binary composes. The binary owns only the CLI surface below (the clap tree and composition root).
 use swoosh::commands::adopt::AdoptCmd;
+use swoosh::commands::beam::BeamCmd;
 use swoosh::commands::contact::ContactCmd;
 use swoosh::commands::fetch::FetchCmd;
 use swoosh::commands::forward::ForwardCmd;
@@ -78,6 +79,8 @@ enum Command {
     Fetch(FetchCmd),
     /// Put a peer's served service on a local port, stdout (`-`), or a unix socket (ssh's `-L`, keyed).
     Forward(ForwardCmd),
+    /// Push a file or directory to a peer, verified end to end.
+    Beam(BeamCmd),
     /// Manage local petnames: save, list, and remove peer aliases.
     #[command(subcommand)]
     Contact(ContactCmd),
@@ -111,6 +114,9 @@ enum Reach {
     /// `swoosh forward`: bind a peer's served service to a local port. A dial-only client (it presents a
     /// link, not swoosh's identity), so it rides the reach path like the other reach-outward verbs.
     Forward(ForwardCmd),
+    /// `swoosh beam`: push files to a peer's gated `beam:` service. Presents a membership badge (like
+    /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
+    Beam(BeamCmd),
     TunnelConnect(TunnelConnectCmd),
 }
 
@@ -129,6 +135,7 @@ impl Command {
             Self::Grant(cmd) => Verb::Grant(cmd),
             Self::TunnelConnect(cmd) => Verb::Reach(Reach::TunnelConnect(cmd)),
             Self::Forward(cmd) => Verb::Reach(Reach::Forward(cmd)),
+            Self::Beam(cmd) => Verb::Reach(Reach::Beam(cmd)),
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
             Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
@@ -182,6 +189,10 @@ impl Reach {
             // install with no persisted key still dials out ephemerally. `--present` carries a link for a
             // non-signet member either way.
             Self::Ping(_) | Self::Speed(_) | Self::Status(_) => Identity::PersistedIfPresent,
+            // `beam` pushes to a GATED `beam:` service presenting a self-signed badge, so like the
+            // diagnostic verbs it dials under the persisted identity when one exists (the badge roots at
+            // the dialing key), and mints an ephemeral key on a fresh install.
+            Self::Beam(_) => Identity::PersistedIfPresent,
             Self::Fetch(_) => Identity::Ephemeral,
         }
     }
@@ -197,6 +208,7 @@ impl Reach {
             Self::Status(cmd) => &cmd.reach,
             Self::Fetch(cmd) => &cmd.reach,
             Self::Forward(cmd) => &cmd.reach,
+            Self::Beam(cmd) => &cmd.reach,
             Self::TunnelConnect(cmd) => &cmd.reach,
         }
     }
@@ -239,6 +251,9 @@ impl Reach {
             Self::Status(cmd) => cmd.run(node, contacts, transport, self_badge).await,
             Self::Fetch(cmd) => cmd.run(node, contacts, transport).await,
             Self::Forward(cmd) => cmd.run(node).await,
+            // `beam` presents the self-signed membership badge (minted below) to the peer's gated `beam:`
+            // service, the same way the diagnostic verbs and `tunnel-connect` do.
+            Self::Beam(cmd) => cmd.run(node, self_badge).await,
             // The peer is already a resolved raw key, so no address book or transport label is needed; the
             // `self_badge` (this identity's self-signed membership badge) is the signet-holder's proof to
             // present, resolved against any stored badge inside the command.
@@ -266,12 +281,14 @@ impl Reach {
             // `tunnel-connect` (the `swoosh ssh` bridge) and the diagnostic verbs all reach a family-gated
             // service. An adopted DEVICE presents its stored signet-signed badge; the signet holder (no
             // stored badge) self-signs, which roots at the signet and admits.
-            Self::TunnelConnect(_) | Self::Ping(_) | Self::Speed(_) | Self::Status(_) => {
-                match config::load_badge(key).await? {
-                    Some(badge) => Ok(Some(badge)),
-                    None => Ok(Some(secret.member_badge()?)),
-                }
-            }
+            Self::TunnelConnect(_)
+            | Self::Ping(_)
+            | Self::Speed(_)
+            | Self::Status(_)
+            | Self::Beam(_) => match config::load_badge(key).await? {
+                Some(badge) => Ok(Some(badge)),
+                None => Ok(Some(secret.member_badge()?)),
+            },
             _ => Ok(None),
         }
     }
