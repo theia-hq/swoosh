@@ -105,7 +105,21 @@ impl Payload {
         let mut sent = 0u64;
         while let Some(want) = bound.remaining(sent) {
             let n = want.min(CHUNK) as usize;
-            if let Err(error) = writer.write_all(&zeros[..n]).await {
+            // A time-bounded send must not block PAST its deadline. When the peer reads slowly (or not at
+            // all), the send window fills and `write_all` parks on backpressure; the between-chunk deadline
+            // check in `remaining` never runs, so the run overshoots its `-t` window arbitrarily and the
+            // reported rate collapses toward zero (the observed `--up`/`--bidir` hang). Race each write
+            // against the deadline and stop the instant it fires: the payload is meaningless zeros, so a
+            // torn final chunk on a stream that is about to be shut down costs nothing.
+            let write = writer.write_all(&zeros[..n]);
+            let outcome = match bound {
+                Bound::Until(deadline) => match tokio::time::timeout_at(deadline.into(), write).await {
+                    Ok(result) => result,
+                    Err(_past_deadline) => break,
+                },
+                _ => write.await,
+            };
+            if let Err(error) = outcome {
                 return match bound {
                     Bound::Peer if is_disconnect(&error) => Ok(sent),
                     _ => Err(error),
