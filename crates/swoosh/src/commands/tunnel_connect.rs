@@ -16,14 +16,60 @@
 //! gate will actually prove, and the whole flow stays one binary, one identity, no `$PATH` lookup.
 
 use core::str::FromStr;
+use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, NodeId, Transport};
 use clap::Args;
 use nauthy::{Cap, SCHEME};
-pub use tightbeam::To;
 use tightbeam::tunnel::Connector;
 
 use crate::transport;
+
+/// Where a reached service's bytes go locally: the one `--to` selector, parsed to a closed enum so the
+/// three sinks are disjoint and "two sinks at once" is unrepresentable (no `ArgGroup`, no two-bool trap).
+///
+/// swoosh's OWN selector, so its connect surfaces never name tightbeam's CLI-layer arg type. The arms are
+/// distinguished by a prefix test BEFORE any numeric parse, so `unix:` can never collide with a port, `-`
+/// can never collide with a path, and a bare path can never masquerade as either:
+///
+/// - `unix:<path>` -> [`To::UnixListener`] (everything after the prefix is the path, verbatim); reserved.
+/// - `-` -> [`To::Stdout`] (the universal Unix idiom: stream the single service to this process's stdout).
+/// - a `u16` in `1..=65535` -> [`To::Port`] (bind `127.0.0.1:<port>`, a local TCP listener).
+///
+/// Anything else (a bare path, `fifo:`, `file:`, `0`, `70000`) is a hard parse error naming the three
+/// legal forms, so a bare path is never a silent anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum To {
+    /// Bind `127.0.0.1:<port>` and forward each accepted connection to the peer's service (`ssh -L` shaped).
+    Port(u16),
+    /// Stream the single service to this process's stdout (composes with the shell: `> file`, `| mpv -`).
+    Stdout,
+    /// Bind a local `AF_UNIX` listener at `<path>` (the unix-domain analog of a port). RESERVED: parsing
+    /// recognizes it so a `unix:` target is never a silent misparse, but the listener is not yet built.
+    UnixListener(PathBuf),
+}
+
+impl FromStr for To {
+    type Err = eyre::Error;
+
+    fn from_str(text: &str) -> eyre::Result<Self> {
+        // Prefix-test `unix:` first, then `-`, then a port: the arms are disjoint by their first token, so
+        // there is never a "which did you mean" case (see the type docs).
+        if let Some(path) = text.strip_prefix("unix:") {
+            return Ok(To::UnixListener(PathBuf::from(path)));
+        }
+        if text == "-" {
+            return Ok(To::Stdout);
+        }
+        match text.parse::<u16>() {
+            Ok(port) if port != 0 => Ok(To::Port(port)),
+            _ => eyre::bail!(
+                "`{text}` is not a valid --to target. Use a port (1..=65535), `-` for stdout (compose \
+                 with the shell, e.g. `--to - > out`), or `unix:<path>` for a local socket listener"
+            ),
+        }
+    }
+}
 
 /// What swoosh's connect was pointed at: a bare node id, or a `sheer:` capability link. swoosh's OWN target
 /// type, so its `forward`/ssh-bridge modules never name tightbeam's CLI-layer parse type. A link supersedes the
@@ -128,5 +174,33 @@ impl TunnelConnectCmd {
     ) -> eyre::Result<()> {
         let present = self.present.or(self_signed);
         connect(node, Dial::Node(self.node), self.service, present, self.to).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::To;
+
+    #[test]
+    fn to_parses_each_of_the_three_forms_and_rejects_the_rest() {
+        assert_eq!("5432".parse::<To>().expect("a port parses"), To::Port(5432));
+        assert_eq!("-".parse::<To>().expect("stdout parses"), To::Stdout);
+        assert_eq!(
+            "unix:/run/x.sock".parse::<To>().expect("unix parses"),
+            To::UnixListener("/run/x.sock".into())
+        );
+        // A bare path, a source-only scheme, and out-of-range ports are hard errors, never a silent
+        // misparse (a bare path must never look like a port, `fifo:`/`file:` are the shell's job).
+        for bad in [
+            "/tmp/out",
+            "fifo:/tmp/x",
+            "file:out",
+            "0",
+            "70000",
+            "web",
+            "",
+        ] {
+            assert!(bad.parse::<To>().is_err(), "`{bad}` must be rejected");
+        }
     }
 }
