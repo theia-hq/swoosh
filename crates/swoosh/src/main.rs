@@ -321,6 +321,7 @@ impl Reach {
             | Self::Speed(_)
             | Self::Status(_)
             | Self::Beam(_)
+            | Self::Fleet(_)
             | Self::Stop(_) => match config::load_badge(key).await? {
                 Some(badge) => Ok(Some(badge)),
                 None => Ok(Some(secret.member_badge()?)),
