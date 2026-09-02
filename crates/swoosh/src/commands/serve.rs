@@ -85,6 +85,14 @@ impl crate::reaching::Reaching for ServeCmd {
     fn credential(&self) -> crate::credential::Credential {
         crate::credential::Credential::Anonymous
     }
+
+    /// `serve` MUST be reachable at one stable address across runs, so it declares `Persisted` EXPLICITLY
+    /// rather than inheriting the credential's derived `Ephemeral` (which would give a new address every
+    /// run: a broken node). This is a written declaration the compiler requires, not a forgettable
+    /// override, so a serve verb cannot silently come up ephemeral.
+    fn identity(&self) -> crate::identity::Identity {
+        crate::identity::Identity::Persisted
+    }
 }
 
 impl ServeCmd {

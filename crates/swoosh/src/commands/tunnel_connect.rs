@@ -171,6 +171,13 @@ impl crate::reaching::Reaching for TunnelConnectCmd {
     fn credential(&self) -> crate::credential::Credential {
         crate::credential::Credential::Family { present: None }
     }
+
+    /// `tunnel-connect` MUST dial under swoosh's OWN persisted key so the family gate proves the identity
+    /// the membership badge was minted for, so it declares `Persisted` EXPLICITLY rather than inheriting
+    /// the credential's derived `PersistedIfPresent`. A written declaration the compiler requires.
+    fn identity(&self) -> crate::identity::Identity {
+        crate::identity::Identity::Persisted
+    }
 }
 
 impl TunnelConnectCmd {

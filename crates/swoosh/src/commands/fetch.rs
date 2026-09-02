@@ -56,6 +56,10 @@ impl crate::reaching::Reaching for FetchCmd {
             present: self.present.clone(),
         }
     }
+
+    fn identity(&self) -> crate::identity::Identity {
+        self.credential().identity()
+    }
 }
 
 impl FetchCmd {

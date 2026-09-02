@@ -187,43 +187,23 @@ enum Verb {
 }
 
 impl Reach {
-    /// The identity this verb binds under. `serve` must be reachable at a stable address, so it
-    /// persists; the reach-outward verbs address a peer and are never dialed back, so they are
-    /// ephemeral by default. An explicit `--key` overrides either (see [`identity::resolve`]).
+    /// The identity this verb binds under, forwarded to each verb's [`Reaching::identity`] (the ONE place
+    /// a verb states it). A thin dispatch like [`credential`](Self::credential): for the reach-outward
+    /// verbs `identity()` derives from the credential (`Family -> PersistedIfPresent`,
+    /// `Anonymous -> Ephemeral`), so identity and badge cannot disagree; `serve`/`tunnel-connect` declare
+    /// `Persisted` explicitly there. An explicit `--key` still overrides either (see [`identity::resolve`]).
     fn identity(&self) -> Identity {
         match self {
-            // `serve` roots its services and any share-link at a stable key AND must be reachable at one
-            // address, so it persists; `tunnel-connect` must dial under swoosh's OWN key so the family gate
-            // proves the identity the membership badge was minted for. Both persist.
-            Self::Serve(_) | Self::TunnelConnect(_) => Identity::Persisted,
-            // `forward` is a dial-only client (it presents a link, not swoosh's identity), so it is
-            // ephemeral like the other reach-outward verbs.
-            Self::Forward(_) => Identity::Ephemeral,
-            // The diagnostic verbs reach a peer's GATED `ping`/`speed` service presenting a self-signed badge, so
-            // they must dial under the persisted identity WHEN one exists (the badge roots at the dialing
-            // key, so an ephemeral key's self-badge would be refused by the peer's family gate). A fresh
-            // install with no persisted key still dials out ephemerally. `--present` carries a link for a
-            // non-signet member either way.
-            Self::Ping(_) | Self::Speed(_) | Self::Status(_) => Identity::PersistedIfPresent,
-            // `beam` pushes to a GATED `beam:` service presenting a self-signed badge, so like the
-            // diagnostic verbs it dials under the persisted identity when one exists (the badge roots at
-            // the dialing key), and mints an ephemeral key on a fresh install.
-            Self::Beam(_) => Identity::PersistedIfPresent,
-            // `stop` reaches a GATED `control.stop` service presenting a self-signed badge, so like the
-            // diagnostic verbs and `beam` it dials under the persisted identity when one exists (the badge
-            // roots at the dialing key: only a member of the node's family may stop it), ephemeral on a
-            // fresh install (whose self-badge is then correctly refused).
-            Self::Stop(_) => Identity::PersistedIfPresent,
-            // `fleet --pull` reaches a GATED `roster:` service presenting a member badge, like `beam`/`stop`,
-            // so it dials under the persisted identity when one exists; a node with no signet errors clearly
-            // ("adopt first") rather than dialing as a stranger.
-            Self::Fleet(_) => Identity::PersistedIfPresent,
-            // `fetch --via` reaches a GATED `fetch:` service presenting a member badge (like the diagnostic
-            // verbs and `beam`/`stop`/`fleet`), so it dials under the persisted identity when one exists
-            // (the badge roots at the dialing key: the owner reaching their OWN exit node admits), ephemeral
-            // on a fresh install. This is the identity half of the owner-reaching-own-node 403 fix; step 4
-            // collapses this whole match into `credential().identity()`.
-            Self::Fetch(_) => Identity::PersistedIfPresent,
+            Self::Serve(cmd) => cmd.identity(),
+            Self::Ping(cmd) => cmd.identity(),
+            Self::Speed(cmd) => cmd.identity(),
+            Self::Status(cmd) => cmd.identity(),
+            Self::Fetch(cmd) => cmd.identity(),
+            Self::Forward(cmd) => cmd.identity(),
+            Self::Beam(cmd) => cmd.identity(),
+            Self::Stop(cmd) => cmd.identity(),
+            Self::Fleet(cmd) => cmd.identity(),
+            Self::TunnelConnect(cmd) => cmd.identity(),
         }
     }
 

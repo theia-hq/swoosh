@@ -14,7 +14,7 @@
 use std::path::Path;
 
 use crate::credential::{Credential, MemberBadge};
-use crate::identity::Secret;
+use crate::identity::{Identity, Secret};
 use crate::{config, transport};
 
 /// A verb that reaches a peer over a transport, stating how it authenticates.
@@ -31,6 +31,16 @@ pub trait Reaching {
     /// cannot compile without returning a [`Credential`], and there is no `None`/default to fall through
     /// to, so a verb that reaches a family-gated service without a badge is unrepresentable.
     fn credential(&self) -> Credential;
+
+    /// The identity this verb binds under. REQUIRED with NO default body: a verb must state it, so a
+    /// verb that needs a stable address (`serve`, `tunnel-connect`) cannot SILENTLY inherit
+    /// [`Ephemeral`](Identity::Ephemeral) and come up as a broken node (a new address every run). The
+    /// common reaching verbs write the one-liner `self.credential().identity()` (the derivation, so
+    /// identity and badge cannot disagree); the two that need `Persisted` for a reason OTHER than
+    /// family-rooting (a stable address / dialing under swoosh's own key) declare it EXPLICITLY here.
+    /// This is the Adversary's non-forgettable override: `Persisted` is a written declaration, never a
+    /// silent default.
+    fn identity(&self) -> Identity;
 }
 
 /// The concrete badge a resolved [`Credential`] presents on the wire: a member badge, or nothing.

@@ -54,6 +54,10 @@ impl crate::reaching::Reaching for PingCmd {
     fn credential(&self) -> crate::credential::Credential {
         crate::credential::Credential::Family { present: None }
     }
+
+    fn identity(&self) -> crate::identity::Identity {
+        self.credential().identity()
+    }
 }
 
 impl PingCmd {

@@ -46,6 +46,10 @@ impl crate::reaching::Reaching for ForwardCmd {
     fn credential(&self) -> crate::credential::Credential {
         crate::credential::Credential::Anonymous
     }
+
+    fn identity(&self) -> crate::identity::Identity {
+        self.credential().identity()
+    }
 }
 
 impl ForwardCmd {
