@@ -3,7 +3,7 @@
 //! matcher gates the normalized (scheme, host, port) triple, never a suffix, and is not fooled by userinfo,
 //! case, a trailing dot, or a scheme/port mismatch. An empty allowlist stays unconstrained (back-compat).
 
-use crate::origin::{OriginAllowlist, compose_url};
+use crate::origin::{Origin, OriginAllowlist, compose_url};
 
 /// Parse a request URL through the SAME `reqwest::Url` parse the SSRF guard and the matcher both use, so the
 /// test asks the matcher exactly what the handler asks it.
@@ -32,6 +32,21 @@ fn userinfo_masquerading_as_the_host_is_refused() {
     // The real host is `evil.example` (the part after the `@`); the userinfo `api.github.com` must not fool
     // the allowlist while the connection lands on `evil.example`.
     assert!(!admits(&github(), "https://api.github.com@evil.example/"));
+}
+
+#[test]
+fn userinfo_is_refused_even_when_the_real_host_is_the_allowed_one() {
+    // The reverse of the masquerade: the userinfo is junk and the real host IS the allowed origin
+    // (`https://evil.example@api.github.com/`). Parsing AROUND the userinfo would ADMIT this; rejecting a
+    // URL that carries userinfo at all (the spec's reading) refuses it, failing closed.
+    assert!(!admits(&github(), "https://evil.example@api.github.com/"));
+}
+
+#[test]
+fn an_origin_with_userinfo_fails_to_parse() {
+    // An operator's declared origin must not carry userinfo either: it fails at parse, at expose time, not
+    // silently at dial time.
+    assert!(Origin::parse("https://user:pass@api.github.com").is_err());
 }
 
 #[test]

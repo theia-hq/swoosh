@@ -20,8 +20,10 @@
 /// - **scheme:** exact, so an allow of `https://x` does not admit `http://x`.
 /// - **port:** the URL's `port_or_known_default`, so `https://x` and `https://x:443` are one origin.
 ///
-/// A URL with userinfo (`https://api.github.com@evil.example/`) yields the host `evil.example` here (the
-/// part after the `@`), so the userinfo cannot fool the allowlist into matching the text before it.
+/// A URL with userinfo (`https://api.github.com@evil.example/`) is REJECTED here, never parsed to its host:
+/// so neither the userinfo dressed as the allowed host nor the reverse (`https://evil.example@api.github.com/`)
+/// can reach the matcher. This fails CLOSED and keeps the code and the delib-13 BUILD-SPEC ("reject userinfo
+/// entirely") in agreement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin {
     scheme: String,
@@ -43,6 +45,16 @@ impl Origin {
     /// The origin of an already-parsed URL: the same source the SSRF `resolve_public` reads its host from,
     /// so the allowlist check and the connection cannot see different hosts (no parse-differential).
     pub fn of(url: &reqwest::Url) -> Result<Self, String> {
+        // Reject userinfo (`user:pass@host`) outright rather than parsing around it: a fetch origin/request
+        // URL must carry none (delib-13 BUILD-SPEC), and refusing here fails CLOSED, so a request URL whose
+        // userinfo is dressed to look like an allowed host (`https://allowed@evil/`) AND the reverse
+        // (`https://evil@allowed/`, which parsing around would admit) never reach the matcher at all.
+        // `username()` is "" and `password()` is None when absent, so this fires only on a real `@`-authority.
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(
+                "url carries userinfo (user:pass@), which a fetch origin must not".to_owned(),
+            );
+        }
         let host = url.host_str().ok_or_else(|| "url has no host".to_owned())?;
         // Lowercase, then strip a SINGLE trailing dot so the rooted-FQDN form `host.` equals `host`; do not
         // strip more than one (`host..` is not `host`).
