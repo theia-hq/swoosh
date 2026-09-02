@@ -20,9 +20,9 @@ use std::sync::Arc;
 use ::fetch::OriginAllowlist;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
-use nauthy::{Denylist, Gate, VerifyKey};
+use nauthy::{Denylist, VerifyKey};
 use tightbeam::duration::Lifetime;
-use tightbeam::tunnel::{self, CancellationToken, Exposer, Registry, Services};
+use tightbeam::tunnel::{self, CancellationToken, Exposer, PublicRequest, Registry, Services};
 
 use crate::contacts::{Contacts, Petname};
 use crate::identity::Secret;
@@ -87,11 +87,14 @@ pub struct ServeCmd {
     /// publish local services as `name=svc` (bare = `ping=ping: speed=speed:`, reach diagnostics)
     #[arg(value_name = "name=svc")]
     pub services: Vec<String>,
-    /// Serve to ANYONE, unauthenticated: the one deliberate opt-out from the signet gate. Refused for a
-    /// keyless shell (`sshd:`, remote code execution) or a raw diagnostics service (`ping:`/
-    /// `speed:`, no responder-side bound yet), which have no safe public form until that bound lands.
-    #[arg(long)]
-    pub public: bool,
+    /// Open these NAMED services to anyone, unauthenticated (comma-list, repeatable: `--public speed,fetch`
+    /// or `--public speed --public fetch`): the per-service opt-out from the signet gate. Each name must be a
+    /// service you serve. A keyless shell (`sshd:`, remote code execution) is refused with a teaching error,
+    /// and `control.stop`/`control.services` can never be opened. `ping`/`speed` MAY be opened, but they have
+    /// no responder-side rate limit yet, so an open one lets an anonymous caller drain this node's uplink (an
+    /// amplifier); the readiness banner says so.
+    #[arg(long, value_name = "svc", value_delimiter = ',')]
+    pub public: Vec<String>,
     /// Suppress the readiness banner (the node id, services, and gate), for unattended/CI use.
     #[arg(long)]
     pub quiet: bool,
@@ -246,41 +249,60 @@ impl ServeCmd {
         requested.push(format!(
             "{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"
         ));
-        // Pull the operator's fetch origin scope out of the requested services BEFORE tightbeam parses them.
-        // A `name=fetch:<origin>` entry carries an origin tightbeam's `Target::Handler` (a bare scheme) has
-        // nowhere to hold, so swoosh captures the origins into an allowlist here and rewrites each such entry
-        // to a bare `fetch:` the tunnel core parses as an ordinary handler. A bare `fetch:` (no origin) is
-        // left untouched and contributes nothing, so an unscoped service stays unconstrained.
+        // Pull each fetch service out of the requested set BEFORE tightbeam parses them, and de-merge them:
+        // every `name=fetch:<origin>` becomes its OWN handler instance holding ONLY its own origin scope,
+        // registered under a distinct UNSPELLABLE synthetic scheme (`fetch_0`, `fetch_1`, ...). A public
+        // fetch handler therefore physically holds only its own origins and cannot reach a gated fetch's
+        // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention (delib-39 BLOCKER-3). The
+        // synthetic scheme carries a `_`, which the addr grammar rejects, so no operator entry (`x=fetch_0:`)
+        // can ever resolve onto a synthetic instance.
         let fetch = FetchScope::extract(&mut requested)?;
-        let services = Services::parse(&requested)?;
-        // Resolve the gate before announcing readiness: an unprovisioned node with no `--public` fails
-        // HERE, through the ONE shared policy point, rather than ever serving on a permissive default.
-        let gate = tunnel::resolve_gate(self.public, signet, denylist)?;
-        // MAJOR-1 (delib-13 Adversary): refuse an unconstrained PUBLIC fetch. Both the gate and the fetch
-        // origin scope are in hand HERE, so the one illegal pairing (an open gate over a bare, any-origin
-        // `fetch:`) is refused at build time, before any banner or accepted stream, the same shape the
-        // sshd-cannot-be-public invariant takes at `Exposer::new`. The allowlist is a swoosh/fetch concept,
-        // so this stays swoosh-side rather than leaking into tightbeam's generic `Exposer::new`.
-        fetch.refuse_open_relay(&gate)?;
-        // Snapshot the served catalog (names + effective posture under this gate) ONCE, here, for the
-        // `control.services` read handler to serve. A pure read of the parsed services and the resolved gate,
-        // no mutable state: what this node serves is fixed for the run, so the snapshot is the whole answer.
-        let catalog = services.catalog(&gate);
+        let mut services = Services::parse(&requested)?;
+        for scoped in fetch.services() {
+            // Inserted DIRECTLY (bypassing the addr grammar) so the synthetic `_`-bearing scheme is usable.
+            services = services.with_handler(scoped.name(), scoped.scheme())?;
+        }
+        // The operator's raw `--public` request: the UNPROVEN set of names to open. `Exposer::with_public`
+        // below is the wall that proves each one exposed and open-safe (per-service), turning it into the
+        // gate's proven overlay; a `Never` service or an unknown name bails there.
+        let public = PublicRequest::new(self.public.clone());
+        // Resolve the node BASE gate before announcing readiness: an unprovisioned node fails HERE, through
+        // the ONE shared policy point, rather than ever serving on a permissive default. Opening individual
+        // services is the separate `--public` overlay, never a node-wide value.
+        let gate = tunnel::resolve_gate(signet, denylist)?;
+        // Refuse an unconstrained PUBLIC fetch per-service: for each fetch service NAMED in `--public` whose
+        // allowlist is unconstrained, bail at build time (an open egress relay). With per-service scopes in
+        // hand this reasons about "is THIS public fetch unconstrained", so a second origin-scoped fetch can no
+        // longer mask a bare public one. Stays swoosh-side; tightbeam's `with_public` handles the sshd/raw wall.
+        fetch.refuse_open_relay(&public)?;
+        // Snapshot the served catalog (names + effective PER-SERVICE posture: open iff opened by `--public`,
+        // else gated) ONCE, here, for the `control.services` read handler to serve. Built from the same raw
+        // request `with_public` proves below, so a name reads `open` only when the proof would also pass.
+        let catalog = services.catalog(&gate, &public);
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
         // `--for` timer and the gated `control.stop` handler each hold a CLONE as the node-control
         // capability -- they may REQUEST the stop, never tear the node down themselves. So this one token is
         // the join point for every way the node can stop: a Ctrl-C, a `--for` deadline, or a remote
         // `swoosh stop`.
         let cancel = CancellationToken::new();
-        // The core assembles the exposer, enforcing the sshd-cannot-be-public (and ping/speed-cannot-be-public)
-        // invariant before any banner is printed, so a refused pairing never advertises a service it will
-        // not serve. The `control.stop` handler is added over the shared base registry with a CLONE of the
-        // cancel token, so an admitted caller that reaches it requests the same graceful teardown.
-        let registry = registry(host_seed, self.out.clone(), fetch.allow)?
+        // Assemble the registry: the base handlers, then one `Fetch` instance per fetch service under its own
+        // synthetic scheme, then roster + the two `control.*` handlers. `Exposer::new` enforces every named
+        // handler is registered and guards a node-wide-open base; `with_public` then proves the per-service
+        // overlay (sshd/raw/unknown bail here, before any banner advertises a service it will not serve).
+        let mut registry = registry(host_seed, self.out.clone())?;
+        for scoped in fetch.services() {
+            registry = registry.with(
+                scoped.scheme(),
+                Fetch {
+                    allow: scoped.allow().clone(),
+                },
+            );
+        }
+        let registry = registry
             .with("roster", Roster::new(roster_blob))
             .with(CONTROL_STOP_SERVICE, Stop::new(cancel.clone()))
             .with(CONTROL_SERVICES_SERVICE, ServiceList::new(catalog));
-        let exposer = Exposer::new(services.clone(), registry, gate)?;
+        let exposer = Exposer::new(services.clone(), registry, gate)?.with_public(public)?;
 
         if !self.quiet {
             let addr = node.local_addr();
@@ -302,6 +324,23 @@ impl ServeCmd {
                 names.join(", "),
                 self.gate_description(signet, addr.node),
             );
+            if !self.public.is_empty() {
+                println!(
+                    "open to anyone, unauthenticated: {}.",
+                    self.public.join(", ")
+                );
+            }
+            // Honesty (delib-39 B2/MAJOR-1): a public `ping`/`speed` answers any anonymous caller with no
+            // responder-side rate limit yet, so it lets a stranger drain this node's uplink. State the
+            // amplification plainly so the operator's opt-in is informed.
+            let amplifiers = public_amplifiers(&requested, &self.public);
+            if !amplifiers.is_empty() {
+                println!(
+                    "  note: {} answer anyone with no rate limit yet, so an anonymous caller can drain \
+                     this node's uplink (an amplifier).",
+                    amplifiers.join(", ")
+                );
+            }
         }
 
         // A `--for` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
@@ -364,22 +403,39 @@ impl ServeCmd {
         }
     }
 
-    /// A one-line description of the effective gate, for the readiness banner: trust made visible. `self_id`
+    /// A one-line description of the node's BASE gate, for the readiness banner: trust made visible. `self_id`
     /// is this node's own id, so the banner can say "self" when the gate roots at the node's OWN key (a
     /// person-zero node with no provisioned signet self-trusts) rather than naming its own id as a "signet".
+    /// The base is always the family gate now; services opened with `--public` are reported on their own line,
+    /// not folded into the base description.
     fn gate_description(&self, signet: Option<NodeId>, self_id: NodeId) -> String {
-        if self.public {
-            "public (anyone, unauthenticated)".to_owned()
-        } else {
-            match signet {
-                Some(root) if root == self_id => {
-                    "self (person-zero: this node and its devices)".to_owned()
-                }
-                Some(root) => format!("signet {}", root.short()),
-                None => "unprovisioned".to_owned(),
+        match signet {
+            Some(root) if root == self_id => {
+                "self (person-zero: this node and its devices)".to_owned()
             }
+            Some(root) => format!("signet {}", root.short()),
+            None => "unprovisioned".to_owned(),
         }
     }
+}
+
+/// The public service names that are reach-diagnostic AMPLIFIERS (`ping`/`speed`): a public one answers any
+/// anonymous caller with no responder-side rate limit yet, so the banner names them so the operator's opt-in
+/// is informed (delib-39 B2/MAJOR-1). Reads the resolved request entries (`name=addr`, control.* and defaults
+/// already folded in), so a renamed amplifier (`fast=speed:`) is caught by its `speed:`/`ping:` scheme, not
+/// by a hard-coded name. A bare `ping:`/`speed:` with no name defaults to `default`, matching `Services::parse`.
+fn public_amplifiers(requested: &[String], public: &[String]) -> Vec<String> {
+    requested
+        .iter()
+        .filter_map(|entry| {
+            let (name, addr) = match entry.split_once('=') {
+                Some((name, addr)) => (name, addr),
+                None => ("default", entry.as_str()),
+            };
+            (matches!(addr, "ping:" | "speed:") && public.iter().any(|p| p == name))
+                .then(|| name.to_owned())
+        })
+        .collect()
 }
 
 /// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a
@@ -433,12 +489,16 @@ fn humanize(duration: core::time::Duration) -> String {
     }
 }
 
-/// Assemble the whole handler registry swoosh serves: the HTTP egress `fetch:`, the two gated diagnostic
-/// services `ping:` and `speed:`, the gated file-receive `beam:`, and (under the `ssh` feature) the keyless
-/// shell `sshd:`. swoosh is the one crate that depends on every service crate, so it is the one place these
-/// are wired: tightbeam names no service crate and ships no built-in, and this function injects them all
-/// with `.with(...)`. `extend` stays available for add-only merges, but swoosh builds one registry directly
-/// here.
+/// Assemble the BASE handler registry swoosh serves: the two gated diagnostic services `ping:` and `speed:`,
+/// the gated file-receive `beam:`, and (under the `ssh` feature) the keyless shell `sshd:`. swoosh is the one
+/// crate that depends on every service crate, so it is the one place these are wired: tightbeam names no
+/// service crate and ships no built-in, and this function injects them all with `.with(...)`.
+///
+/// Fetch is NOT here: each fetch service is de-merged into its OWN `Fetch` instance holding only its own
+/// origin scope, registered by `run_serve` under a distinct synthetic scheme (delib-39 BLOCKER-3), so there
+/// is no single shared `fetch:` handler to over-permit. `roster:` and the two `control.*` handlers are
+/// likewise added by `run_serve` (they hold per-run state: the signed roster blob, the teardown token, the
+/// catalog snapshot).
 ///
 /// ping and speed are TWO independent services so a node may offer ping without speed (or the reverse),
 /// and each carries its own gate: `ping` answers only ping frames, `speed` only speed frames, refusing the
@@ -449,18 +509,9 @@ fn humanize(duration: core::time::Duration) -> String {
 /// write outside the directory.
 ///
 /// The ONE assembly the product verb and the `gated_measure` proof test both build, so the test exercises the
-/// identical registry swoosh serves rather than a hand-rolled near-copy.
-///
-/// `fetch_allow` is the operator's origin scope for the `fetch:` handler, extracted from the requested
-/// `name=fetch:<origin>` services. An empty allowlist (a bare `fetch:`, or any node that serves no fetch)
-/// leaves the handler unconstrained, so a caller that does not scope fetch passes `OriginAllowlist::default()`.
-pub fn registry(
-    host_seed: [u8; 32],
-    beam_out: PathBuf,
-    fetch_allow: OriginAllowlist,
-) -> eyre::Result<Registry> {
+/// identical handlers swoosh serves rather than a hand-rolled near-copy.
+pub fn registry(host_seed: [u8; 32], beam_out: PathBuf) -> eyre::Result<Registry> {
     let registry = Registry::new()
-        .with("fetch", Fetch { allow: fetch_allow })
         .with("ping", Ping)
         .with("speed", Speed)
         .with("beam", Beam::new(beam_out));
@@ -499,87 +550,119 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
     Ok(crate::roster::cut(&secret.cap_identity()?, &doc))
 }
 
-/// The scheme a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE literal
-/// swoosh registers the handler under, not a re-typed string that could drift from it.
+/// The scheme prefix a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE
+/// literal, not a re-typed string that could drift from it.
 const FETCH_SCHEME: &str = "fetch";
 
-/// Pulls the operator's fetch origin scope out of the requested service entries: a `name=fetch:<origin>`
-/// entry hands tightbeam an origin its bare-scheme `Target::Handler` cannot hold, so swoosh strips the
-/// origin here (into an [`OriginAllowlist`] baked into the `fetch:` handler) and rewrites the entry to a
-/// bare `fetch:` the tunnel core parses as an ordinary handler.
+/// One de-merged fetch service: its served NAME (the wire name a dialer requests, e.g. `news`), the
+/// UNSPELLABLE synthetic registry scheme its own `Fetch` instance is keyed under (`fetch_0`, `fetch_1`, ...),
+/// and ONLY its own origin scope. Because each fetch service holds its own instance under its own scheme, a
+/// public fetch physically cannot reach a gated fetch's origins: the SSRF pivot is unrepresentable, not
+/// fail-closed-by-convention (delib-39 BLOCKER-3).
+struct FetchService {
+    name: String,
+    scheme: String,
+    allow: OriginAllowlist,
+}
+
+impl FetchService {
+    /// The served name a dialer requests and `--public` names.
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The synthetic, unspellable registry scheme this service's own `Fetch` instance is keyed under.
+    fn scheme(&self) -> &str {
+        &self.scheme
+    }
+
+    /// This service's own origin scope (only its own; never merged with another's).
+    fn allow(&self) -> &OriginAllowlist {
+        &self.allow
+    }
+}
+
+/// De-merges the fetch services out of the requested set: a `name=fetch:<origin>` entry hands tightbeam an
+/// origin its bare-scheme `Target::Handler` cannot hold, so swoosh separates each into its OWN
+/// [`FetchService`] (name + a distinct synthetic scheme + its own origin scope) here, before `Services::parse`.
 ///
-/// This is a pure edge adapter over the raw request strings, run once BEFORE `Services::parse`: it does not
-/// name the fetch service or enforce naming (that is the tunnel grammar's job), it only separates the origin
-/// from the scheme. A bare `fetch:` (no origin suffix) is left untouched and contributes no origin, so an
-/// unscoped service stays unconstrained.
+/// A pure edge adapter over the raw request strings. A bare `fetch:` (no origin) is an unconstrained fetch
+/// under the name `default` (matching `Services::parse`'s bare-entry rule); a `name=fetch:<origin>` is a
+/// named, origin-scoped fetch. A malformed origin fails HERE, at expose time, not at dial time.
 struct FetchScope;
 
 impl FetchScope {
-    /// Rewrite each `fetch:<origin>` entry in `requested` to a bare `fetch:` and return the collected origins
-    /// as an [`OriginAllowlist`], together with whether any fetch service is exposed at all. Entries that are
-    /// not fetch services, and a bare `fetch:` with no origin, pass through unchanged. A malformed origin
-    /// fails HERE, at expose time, with a teaching message, not at dial time as an opaque refusal.
-    fn extract(requested: &mut [String]) -> eyre::Result<FetchExposure> {
-        let mut origins: Vec<String> = Vec::new();
-        let mut exposed = false;
-        for entry in requested.iter_mut() {
-            // Split off the optional `name=` prefix; a bare entry (no `=`) is its own addr. Only the ADDR
-            // side names a scheme, so the origin is read from there, and the name (if any) is preserved.
+    /// Remove every fetch entry from `requested` (leaving the non-fetch services for `Services::parse`) and
+    /// return them as one [`FetchService`] each: its served name, a distinct synthetic `fetch_<i>` scheme, and
+    /// only its own [`OriginAllowlist`]. Non-fetch entries are left in place, in order. A malformed origin
+    /// fails HERE with a teaching message.
+    fn extract(requested: &mut Vec<String>) -> eyre::Result<FetchExposure> {
+        let mut services: Vec<FetchService> = Vec::new();
+        let mut remaining: Vec<String> = Vec::new();
+        for entry in requested.drain(..) {
+            // Split off the optional `name=` prefix; a bare entry (no `=`) is its own addr under the `default`
+            // name. Only the ADDR side names a scheme, so the origin is read from there.
             let (name, addr) = match entry.split_once('=') {
-                Some((name, addr)) => (Some(name), addr),
-                None => (None, entry.as_str()),
+                Some((name, addr)) => (name.to_owned(), addr),
+                None => ("default".to_owned(), entry.as_str()),
             };
-            // A fetch service is `fetch:` optionally followed by an origin. Recognize the SCHEME first (so a
-            // bare `fetch:` counts as exposed), THEN read any origin off the tail.
+            // A fetch service is `fetch:` optionally followed by an origin. A non-fetch entry passes through
+            // unchanged, in order, for `Services::parse`.
             let Some(origin) = addr
                 .strip_prefix(FETCH_SCHEME)
                 .and_then(|rest| rest.strip_prefix(':'))
             else {
+                remaining.push(entry);
                 continue;
             };
-            exposed = true;
-            // A bare `fetch:` (no origin) contributes no origin and needs no rewrite; it stays unconstrained.
-            if origin.is_empty() {
-                continue;
-            }
-            origins.push(origin.to_owned());
-            // Rewrite to a bare `fetch:` the tunnel core parses as an ordinary handler, preserving the name.
-            *entry = match name {
-                Some(name) => format!("{name}={FETCH_SCHEME}:"),
-                None => format!("{FETCH_SCHEME}:"),
+            // Each fetch service gets its OWN allowlist (only its own origin; empty = unconstrained) and its
+            // OWN unspellable synthetic scheme, indexed so two fetch services never collide.
+            let allow = if origin.is_empty() {
+                OriginAllowlist::default()
+            } else {
+                OriginAllowlist::parse([origin]).map_err(|error| eyre::eyre!(error))?
             };
+            let scheme = format!("{FETCH_SCHEME}_{}", services.len());
+            services.push(FetchService {
+                name,
+                scheme,
+                allow,
+            });
         }
-        let allow = OriginAllowlist::parse(&origins).map_err(|error| eyre::eyre!(error))?;
-        Ok(FetchExposure { allow, exposed })
+        *requested = remaining;
+        Ok(FetchExposure { services })
     }
 }
 
-/// The operator's fetch posture pulled from the requested services: the origin allowlist baked into the
-/// `fetch:` handler, AND whether a fetch service is exposed at all. Both facts are read off the raw request
-/// strings in ONE place ([`FetchScope::extract`]), so the refusal of an unconstrained public fetch has a
-/// single source of truth rather than re-deriving "is fetch exposed" at the gate.
+/// The operator's per-service fetch posture pulled from the requested services: one [`FetchService`] per
+/// exposed fetch, each with its own scope. Read off the raw request strings in ONE place
+/// ([`FetchScope::extract`]), so the refusal of an unconstrained public fetch has a single source of truth.
 struct FetchExposure {
-    /// The origins an admitted requester may reach. Empty is unconstrained (a bare `fetch:`), which stays
-    /// legal for a gated fetch and is refused only when paired with an open gate (see [`refuse_open_relay`]).
-    allow: OriginAllowlist,
-    /// Whether any `fetch:` service (bare or origin-scoped) is among the requested services, so a public node
-    /// that serves no fetch is not mistaken for an open relay by its empty allowlist.
-    exposed: bool,
+    services: Vec<FetchService>,
 }
 
 impl FetchExposure {
-    /// Refuse the one illegal fetch shape: a PUBLIC fetch service with no origin scope (an open gate over a
-    /// bare, any-origin `fetch:`), which is an open egress relay (traffic-source laundering, a reflector, a
-    /// free anonymizing hop). The check has the gate AND the fetch scope in hand, so the illegal pairing is
-    /// refused at build time, before any banner or accepted stream, mirroring the sshd-cannot-be-public
-    /// invariant `Exposer::new` draws over `type Public`. An empty allowlist stays legal for a GATED fetch
-    /// (the family gate is the terminator there) and for a node that serves no fetch at all.
-    fn refuse_open_relay(&self, gate: &Gate) -> eyre::Result<()> {
-        if matches!(gate, Gate::Open) && self.exposed && self.allow.is_unconstrained() {
-            eyre::bail!(
-                "a public fetch service must be origin-scoped (`serve api=fetch:https://origin --public`); \
-                 an unconstrained public fetch is an open relay"
-            );
+    /// The de-merged fetch services, each to be registered under its own synthetic scheme.
+    fn services(&self) -> &[FetchService] {
+        &self.services
+    }
+
+    /// Refuse the one illegal fetch shape PER SERVICE: a fetch service NAMED in `--public` whose allowlist is
+    /// unconstrained (any origin), which is an open egress relay (traffic-source laundering, a reflector, a
+    /// free anonymizing hop). Because each fetch service carries its own scope, this reasons about THIS public
+    /// fetch, so a second origin-scoped fetch can no longer mask a bare public one. Refused at build time,
+    /// before any banner or accepted stream, mirroring the sshd-cannot-be-public wall. A GATED fetch (not in
+    /// `--public`) stays legal unconstrained: the family gate is the terminator there.
+    fn refuse_open_relay(&self, public: &PublicRequest) -> eyre::Result<()> {
+        for service in &self.services {
+            if public.contains(&service.name) && service.allow.is_unconstrained() {
+                eyre::bail!(
+                    "a public fetch service must be origin-scoped \
+                     (`serve {name}=fetch:https://origin --public {name}`); an unconstrained public fetch \
+                     is an open relay",
+                    name = service.name
+                );
+            }
         }
         Ok(())
     }

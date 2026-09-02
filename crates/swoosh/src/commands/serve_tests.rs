@@ -3,9 +3,7 @@
 //! process exits non-zero). The end-to-end proof that a member `control.stop` makes the exposer return `Ok`
 //! (which the run turns into [`Stopped::Requested`], exit 0) lives in `tests/gated_stop.rs`.
 
-use std::path::PathBuf;
-
-use nauthy::{Denylist, Gate, VerifyKey};
+use tightbeam::tunnel::{Exposer, PublicRequest, Services};
 
 use super::{FetchScope, Stopped};
 
@@ -46,77 +44,88 @@ fn stopped_has_an_arm_only_for_graceful_reasons() {
     }
 }
 
-/// A `name=fetch:<origin>` service is a NAMED, origin-scoped fetch: `extract` strips the origin into the
-/// allowlist and rewrites the entry to a bare `fetch:` the tunnel core parses as an ordinary handler, so the
-/// name survives and the origin scopes the handler. Two such services yield two named, origin-scoped fetches.
+/// Two `name=fetch:<origin>` services de-merge into TWO separate `FetchService`s, each with its own served
+/// name, its OWN unspellable synthetic scheme, and ONLY its own origin scope. `extract` removes them from the
+/// requested set (leaving the non-fetch entries for `Services::parse`).
 #[test]
-fn named_fetch_origins_are_extracted_and_the_entries_become_bare_fetch() {
+fn named_fetch_origins_de_merge_into_per_service_instances() {
     let mut requested = vec![
         "news=fetch:https://news.example".to_owned(),
         "apple=fetch:https://apple.example".to_owned(),
     ];
     let fetch = FetchScope::extract(&mut requested).expect("origins parse");
 
+    assert!(
+        requested.is_empty(),
+        "fetch entries are removed from the set `Services::parse` then sees"
+    );
+    let services = fetch.services();
     assert_eq!(
-        requested,
-        vec!["news=fetch:".to_owned(), "apple=fetch:".to_owned()],
-        "each origin-scoped entry is rewritten to a bare `fetch:` under its name, so the tunnel core \
-         parses it as an ordinary handler"
+        services.len(),
+        2,
+        "two fetch services de-merge into two instances"
+    );
+    let names: Vec<&str> = services.iter().map(super::FetchService::name).collect();
+    assert!(
+        names.contains(&"news") && names.contains(&"apple"),
+        "each keeps its served name"
+    );
+    assert_ne!(
+        services[0].scheme(),
+        services[1].scheme(),
+        "each fetch service gets its OWN synthetic scheme, never a shared one"
     );
     assert!(
-        !fetch.allow.is_unconstrained(),
-        "two declared origins make a non-empty allowlist"
+        services.iter().all(|s| !s.allow().is_unconstrained()),
+        "each declared its own origin, so each allowlist is scoped"
     );
-    assert!(fetch.exposed, "two fetch services are exposed");
 }
 
-/// A bare `fetch:` is the UNSCOPED singleton: `extract` leaves it untouched and contributes no origin, so
-/// the handler's allowlist stays empty (any public origin). This is the back-compat arm the grammar must
-/// keep: bare `fetch:` self-names and is unconstrained; `name=fetch:<origin>` is a named, scoped multi.
+/// A bare `fetch:` (no origin, no name) is the UNSCOPED singleton under the `default` name: `extract` gives it
+/// its own instance with an empty (unconstrained) allowlist.
 #[test]
-fn bare_fetch_is_left_untouched_and_unconstrained() {
+fn bare_fetch_is_a_default_named_unconstrained_instance() {
     let mut requested = vec!["fetch:".to_owned()];
     let fetch = FetchScope::extract(&mut requested).expect("no origins to parse");
 
+    assert!(requested.is_empty(), "the bare fetch entry is removed");
+    let services = fetch.services();
+    assert_eq!(services.len(), 1);
     assert_eq!(
-        requested,
-        vec!["fetch:".to_owned()],
-        "a bare `fetch:` is not an origin-scoped entry, so it passes through unchanged"
+        services[0].name(),
+        "default",
+        "a bare fetch entry defaults to the `default` name"
     );
     assert!(
-        fetch.allow.is_unconstrained(),
-        "a bare `fetch:` declares no origin, so the allowlist is empty (unconstrained)"
-    );
-    assert!(
-        fetch.exposed,
-        "a bare `fetch:` still exposes a fetch service, even though it declares no origin"
+        services[0].allow().is_unconstrained(),
+        "a bare `fetch:` declares no origin, so its own allowlist is unconstrained"
     );
 }
 
-/// Non-fetch services are untouched, and a `fetch:<origin>` alongside them is the only entry rewritten, so
-/// extraction is scoped to fetch and does not disturb the rest of the requested set.
+/// Non-fetch services pass through in order, and only fetch is de-merged out, so extraction is scoped to fetch
+/// and does not disturb the rest of the requested set.
 #[test]
-fn non_fetch_services_pass_through_and_only_fetch_is_rewritten() {
+fn non_fetch_services_pass_through_and_only_fetch_is_removed() {
     let mut requested = vec![
         "ping:".to_owned(),
         "web=127.0.0.1:8080".to_owned(),
         "gh=fetch:https://api.github.com".to_owned(),
     ];
-    FetchScope::extract(&mut requested).expect("origin parses");
+    let fetch = FetchScope::extract(&mut requested).expect("origin parses");
 
     assert_eq!(
         requested,
-        vec![
-            "ping:".to_owned(),
-            "web=127.0.0.1:8080".to_owned(),
-            "gh=fetch:".to_owned(),
-        ],
-        "only the fetch entry is rewritten; ping and the raw forward are left exactly as given"
+        vec!["ping:".to_owned(), "web=127.0.0.1:8080".to_owned()],
+        "the fetch entry is removed; ping and the raw forward are left exactly as given, in order"
+    );
+    assert_eq!(
+        fetch.services().len(),
+        1,
+        "only the one fetch service is de-merged out"
     );
 }
 
-/// A malformed origin fails at expose time with a teaching error, not at dial time as an opaque refusal, so
-/// the operator learns of the typo when they type it.
+/// A malformed origin fails at expose time with a teaching error, not at dial time as an opaque refusal.
 #[test]
 fn a_malformed_fetch_origin_is_refused_at_expose_time() {
     let mut requested = vec!["bad=fetch:not a url".to_owned()];
@@ -126,21 +135,90 @@ fn a_malformed_fetch_origin_is_refused_at_expose_time() {
     );
 }
 
-/// An empty, non-persisting family gate, so a refusal test can exercise the GATED (non-open) arm without
-/// standing up a signet. The path is never written; `Denylist::empty` needs no file to exist.
-fn gated() -> Gate {
-    Gate::family(VerifyKey::new([1u8; 32]), Denylist::empty(PathBuf::new()))
+/// The synthetic per-service scheme is UNSPELLABLE (delib-39 B1): it carries a `_`, which the tunnel's
+/// handler-scheme grammar rejects, so an operator entry `x=fetch_0:` is a parse error and can never resolve
+/// onto a synthetic fetch instance. The de-merge builds it directly, bypassing that grammar.
+#[test]
+fn the_synthetic_fetch_scheme_is_unspellable_by_an_operator_entry() {
+    let mut requested = vec!["news=fetch:https://news.example".to_owned()];
+    let fetch = FetchScope::extract(&mut requested).expect("parse");
+    let scheme = fetch.services()[0].scheme().to_owned();
+    assert!(
+        scheme.contains('_'),
+        "the synthetic scheme carries the byte the grammar rejects: {scheme}"
+    );
+    // Spelled as an operator service entry, that same scheme is not a handler; it is a parse error.
+    assert!(
+        Services::parse(&[format!("x={scheme}:")]).is_err(),
+        "`x={scheme}:` must be rejected by the handler-scheme grammar (the pivot cannot be spelled)"
+    );
 }
 
-/// MAJOR-1 (delib-13 Adversary): a `serve fetch: --public` (an unconstrained public fetch) is an open egress
-/// relay and is REFUSED at build time with a TEACHING error that names the problem and the fix, mirroring the
-/// sshd-cannot-be-public refusal at `Exposer::new`.
+/// BLOCKER-3: a PUBLIC fetch instance holds ONLY its own origin scope, so it cannot reach a GATED fetch
+/// instance's origins. De-merged, the public `pub` and the gated `internal` are separate instances under
+/// separate schemes, each scoped to its OWN origin; there is no shared allowlist to over-permit.
+#[test]
+fn a_public_fetch_instance_cannot_reach_a_gated_fetch_s_origins() {
+    let mut requested = vec![
+        "pub=fetch:https://public.example".to_owned(),
+        "internal=fetch:http://10.0.0.5".to_owned(),
+    ];
+    let fetch = FetchScope::extract(&mut requested).expect("parse");
+    let public = fetch
+        .services()
+        .iter()
+        .find(|s| s.name() == "pub")
+        .expect("pub");
+    let internal = fetch
+        .services()
+        .iter()
+        .find(|s| s.name() == "internal")
+        .expect("internal");
+
+    assert_ne!(
+        public.scheme(),
+        internal.scheme(),
+        "the public and gated fetches are distinct instances under distinct schemes"
+    );
+    // The public instance is scoped to its OWN origin (not unconstrained), and it is a SEPARATE allowlist
+    // from the gated instance's: there is no shared list holding the internal origin for it to reach. (That
+    // an allowlist admits ONLY its listed origin, exact-match, is proven in `fetch`'s own origin tests.)
+    assert!(
+        !public.allow().is_unconstrained(),
+        "the public fetch is scoped to its own origin only"
+    );
+    assert!(
+        !internal.allow().is_unconstrained(),
+        "the gated fetch holds its own internal origin only"
+    );
+}
+
+/// BLOCKER-3 masking sub-attack: an origin-scoped GATED fetch beside a bare PUBLIC fetch must NOT mask the
+/// open relay. Per-service, `refuse_open_relay` reasons about the PUBLIC fetch's own scope, so a bare public
+/// fetch is refused even when a second, scoped, gated fetch is present.
+#[test]
+fn a_scoped_gated_fetch_does_not_mask_a_bare_public_open_relay() {
+    let mut requested = vec![
+        "internal=fetch:http://10.0.0.5".to_owned(), // scoped, gated
+        "pub=fetch:".to_owned(),                     // bare, public
+    ];
+    let fetch = FetchScope::extract(&mut requested).expect("parse");
+    let public = PublicRequest::new(["pub".to_owned()]);
+    assert!(
+        fetch.refuse_open_relay(&public).is_err(),
+        "a bare public fetch is an open relay even beside a scoped gated fetch (no masking)"
+    );
+}
+
+/// MAJOR-1: a bare, unconstrained fetch NAMED in `--public` is refused at build time with a teaching error
+/// that names the problem and the fix, mirroring the sshd-cannot-be-public refusal.
 #[test]
 fn an_unconstrained_public_fetch_is_refused_as_an_open_relay() {
-    let mut requested = vec!["fetch:".to_owned()];
+    let mut requested = vec!["api=fetch:".to_owned()];
     let fetch = FetchScope::extract(&mut requested).expect("bare fetch parses");
+    let public = PublicRequest::new(["api".to_owned()]);
     let error = fetch
-        .refuse_open_relay(&Gate::Open)
+        .refuse_open_relay(&public)
         .expect_err("a public bare fetch is an open relay and must be refused");
     let message = format!("{error}");
     assert!(
@@ -149,39 +227,131 @@ fn an_unconstrained_public_fetch_is_refused_as_an_open_relay() {
     );
 }
 
-/// A `serve api=fetch:https://origin --public` (a SCOPED public fetch) is exactly the safe, intended shape:
-/// the origin allowlist is armed, so the same open gate is ALLOWED.
+/// A `serve api=fetch:https://origin --public api` (a SCOPED public fetch) is the safe, intended shape: its
+/// own allowlist is armed, so it is allowed.
 #[test]
 fn a_scoped_public_fetch_is_allowed() {
     let mut requested = vec!["api=fetch:https://origin.example".to_owned()];
     let fetch = FetchScope::extract(&mut requested).expect("origin parses");
+    let public = PublicRequest::new(["api".to_owned()]);
     assert!(
-        fetch.refuse_open_relay(&Gate::Open).is_ok(),
+        fetch.refuse_open_relay(&public).is_ok(),
         "a public fetch scoped to an origin is armed, not an open relay"
     );
 }
 
-/// A bare `fetch:` behind the FAMILY gate stays legal: the gate is the terminator, so an empty allowlist is
-/// not an open relay. Only the PUBLIC + empty combination is refused.
+/// A bare `fetch:` that is NOT named in `--public` stays legal: it is gated (the family gate terminates it),
+/// so an unconstrained allowlist is not an open relay. Only a PUBLIC unconstrained fetch is refused.
 #[test]
 fn a_gated_bare_fetch_is_allowed() {
-    let mut requested = vec!["fetch:".to_owned()];
+    let mut requested = vec!["api=fetch:".to_owned()];
     let fetch = FetchScope::extract(&mut requested).expect("bare fetch parses");
+    // `api` is served but NOT public.
     assert!(
-        fetch.refuse_open_relay(&gated()).is_ok(),
+        fetch.refuse_open_relay(&PublicRequest::none()).is_ok(),
         "a gated (member-only) bare fetch is unchanged; the family gate terminates it"
     );
 }
 
-/// A `--public` node that serves NO fetch (its allowlist is empty only because it declared no fetch) is not
-/// an open relay: `exposed` is false, so the refusal does not fire on an unrelated public ping/speed node.
+/// A minimal family gate for a construction test: an empty, non-persisting family gate, so `with_public`'s
+/// per-service proof runs without standing up a signet.
+fn gated() -> nauthy::Gate {
+    nauthy::Gate::family(
+        nauthy::VerifyKey::new([1u8; 32]),
+        nauthy::Denylist::empty(std::path::PathBuf::new()),
+    )
+}
+
+/// `serve speed --public speed` BUILDS (speed is OptIn, openable), and `--public <unknown>` is refused with a
+/// message that names the served set. Proves the CLI's per-service overlay wires onto the real swoosh
+/// handlers through `Exposer::with_public`.
 #[test]
-fn a_public_node_without_fetch_is_not_refused() {
-    let mut requested = vec!["ping:".to_owned(), "speed:".to_owned()];
-    let fetch = FetchScope::extract(&mut requested).expect("no fetch to parse");
-    assert!(!fetch.exposed, "no fetch service is exposed");
+fn public_speed_builds_and_public_unknown_is_refused() {
+    let services = || Services::parse(&["speed=speed:".to_owned()]).unwrap();
+    // `--public speed` builds: `speed` is an OptIn handler, so the overlay proves it open-safe.
+    let built = Exposer::new(
+        services(),
+        super::registry([0u8; 32], std::env::temp_dir()).unwrap(),
+        gated(),
+    )
+    .unwrap()
+    .with_public(PublicRequest::new(["speed".to_owned()]));
     assert!(
-        fetch.refuse_open_relay(&Gate::Open).is_ok(),
-        "an empty allowlist with no fetch service is not an open relay"
+        built.is_ok(),
+        "`--public speed` must build (speed is openable)"
+    );
+
+    // `--public <unknown>` is refused, naming what the node DOES serve.
+    let assembled = Exposer::new(
+        services(),
+        super::registry([0u8; 32], std::env::temp_dir()).unwrap(),
+        gated(),
+    )
+    .unwrap();
+    let Err(error) = assembled.with_public(PublicRequest::new(["nope".to_owned()])) else {
+        panic!("an unknown public name must be refused");
+    };
+    assert!(
+        error.to_string().contains("no service named"),
+        "an unknown public name is refused with the served list: {error}"
+    );
+}
+
+/// `--public sshd` (naming the keyless shell) is refused with a TEACHING error that names the service and the
+/// fix and never leaks the marker names, posture winning over the operator's request.
+#[cfg(feature = "ssh")]
+#[test]
+fn public_sshd_is_refused_with_a_teaching_error() {
+    let services = Services::parse(&["ssh=sshd:".to_owned()]).unwrap();
+    // The `ssh` feature registers the `sshd` handler; without it, `Exposer::new` would refuse it as
+    // unregistered before `with_public` ever runs, which is why this test is feature-gated.
+    let registry = super::registry([0u8; 32], std::env::temp_dir()).unwrap();
+    let assembled = Exposer::new(services, registry, gated()).unwrap();
+    let Err(error) = assembled.with_public(PublicRequest::new(["ssh".to_owned()])) else {
+        panic!("`--public ssh` (a keyless shell) must be refused");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("ssh") && message.contains("gated"),
+        "the teaching error names the service and leads with the fix: {message:?}"
+    );
+    for marker in ["Never", "OptIn"] {
+        assert!(
+            !message.contains(marker),
+            "the refusal must not leak the marker {marker:?}: {message:?}"
+        );
+    }
+}
+
+/// The `--public` CLI surface: bare `--public` (the node-wide open that caused the bug) is an ERROR by
+/// construction, the value is a comma-list, and omitting it opens nothing.
+#[test]
+fn public_flag_requires_a_value_and_splits_on_commas() {
+    use clap::Parser as _;
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        serve: super::ServeCmd,
+    }
+
+    // Bare `--public` (no value) is a parse error: node-wide-open is untypeable.
+    assert!(
+        Wrap::try_parse_from(["x", "--public"]).is_err(),
+        "bare --public must be an error (no whole-node open)"
+    );
+    // The value is a comma-list of service names.
+    let wrap = Wrap::try_parse_from(["x", "speed=speed:", "--public", "speed,fetch"])
+        .expect("a comma-list parses");
+    assert_eq!(
+        wrap.serve.public,
+        vec!["speed".to_owned(), "fetch".to_owned()],
+        "--public splits on commas into the per-service set"
+    );
+    // Omitting `--public` opens nothing.
+    let wrap = Wrap::try_parse_from(["x"]).expect("no --public parses");
+    assert!(
+        wrap.serve.public.is_empty(),
+        "no --public means nothing is opened"
     );
 }

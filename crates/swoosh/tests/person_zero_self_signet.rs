@@ -77,15 +77,11 @@ async fn proof() {
             let services =
                 Services::parse(&["ping=ping:".to_owned(), "speed=speed:".to_owned()]).unwrap();
             // Person-zero self-signet: the gate roots at the node's OWN key, exactly as
-            // `resolve_gate(false, Some(secret.node_id()), ...)` builds it when nothing was adopted.
-            let gate = tunnel::resolve_gate(false, Some(self_signet), empty_denylist("self").await)
-                .unwrap();
-            let registry = swoosh::commands::serve::registry(
-                HOST_SEED,
-                std::env::temp_dir(),
-                fetch::OriginAllowlist::default(),
-            )
-            .unwrap();
+            // `resolve_gate(Some(secret.node_id()), ...)` builds it when nothing was adopted.
+            let gate =
+                tunnel::resolve_gate(Some(self_signet), empty_denylist("self").await).unwrap();
+            let registry =
+                swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir()).unwrap();
             Exposer::new(services, registry, gate)
                 .unwrap()
                 .run(&host, CancellationToken::new())

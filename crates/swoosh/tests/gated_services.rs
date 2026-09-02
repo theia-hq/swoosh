@@ -27,7 +27,8 @@ use nauthy::{Denylist, Identity};
 use swoosh::commands::serve::{CONTROL_SERVICES_SERVICE, ServiceList};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, Posture, Registry, ServiceCatalog, Services,
+    self, CancellationToken, Connector, Exposer, Posture, PublicRequest, Registry, ServiceCatalog,
+    Services,
 };
 use tokio::io::AsyncReadExt as _;
 
@@ -142,8 +143,8 @@ async fn build_exposer() -> Exposer {
         "{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"
     ));
     let services = Services::parse(&requested).unwrap();
-    let gate = tunnel::resolve_gate(false, Some(signet), empty_denylist().await).unwrap();
-    let catalog = services.catalog(&gate);
+    let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
+    let catalog = services.catalog(&gate, &PublicRequest::none());
     // The served menu is raw socket forwards (no injected handler), so the registry holds just the
     // `control.services` read handler over the catalog snapshot. `Exposer::new` only requires a registered
     // handler for HANDLER-scheme services; a forward needs none, and the only stream this proof dials is the

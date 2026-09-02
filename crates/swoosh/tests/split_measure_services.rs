@@ -168,14 +168,8 @@ async fn expose(services: &[String]) -> NodeId {
     let self_signet = NodeId::from_ed25519_secret(&SELF_SECRET);
     let services = Services::parse(services).unwrap();
     tokio::task::spawn_local(async move {
-        let gate =
-            tunnel::resolve_gate(false, Some(self_signet), empty_denylist("offer").await).unwrap();
-        let registry = swoosh::commands::serve::registry(
-            HOST_SEED,
-            std::env::temp_dir(),
-            fetch::OriginAllowlist::default(),
-        )
-        .unwrap();
+        let gate = tunnel::resolve_gate(Some(self_signet), empty_denylist("offer").await).unwrap();
+        let registry = swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir()).unwrap();
         Exposer::new(services, registry, gate)
             .unwrap()
             .run(&host, CancellationToken::new())

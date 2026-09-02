@@ -172,7 +172,7 @@ async fn build_exposer(cancel: CancellationToken) -> Exposer {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
     let services =
         Services::parse(&[format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:")]).unwrap();
-    let gate = tunnel::resolve_gate(false, Some(signet), empty_denylist().await).unwrap();
+    let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
     let registry = Registry::new().with(CONTROL_STOP_SERVICE, Stop::new(cancel));
     Exposer::new(services, registry, gate).unwrap()
 }
