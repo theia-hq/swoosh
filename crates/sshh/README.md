@@ -22,10 +22,9 @@ A shell has no auth of its own, so everything rests on the stream being pre-auth
 
 ## Why its own crate
 
-`sshh` lives apart from the byte-funnel ([tightbeam](https://github.com/theia-hq/tightbeam)) so its heavy,
-security-sensitive dependency tree (`russh`, `ssh-key`, `pty-process`) never weighs down a tunnel binary. A
-caller that owns composition ([swoosh](https://github.com/theia-hq/swoosh)) wraps `serve` in a gated handler
-behind its `ssh` feature.
+`sshh` lives apart from the byte-moving layer so its heavy, security-sensitive dependency tree (`russh`,
+`ssh-key`, `pty-process`) stays out of a lean, reach-only client. The composing consumer wraps `serve` in a
+gated handler behind its `ssh` feature.
 
 ## License
 

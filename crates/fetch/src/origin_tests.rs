@@ -1,4 +1,4 @@
-//! The origin allowlist host matcher: the whole security value of an origin-scoped `fetch:` service. Each
+//! The origin allowlist host matcher: the whole security value of an origin-scoped fetch service. Each
 //! test is an evasion the matcher must refuse, or a legitimate variant it must admit (delib-13 footgun): the
 //! matcher gates the normalized (scheme, host, port) triple, never a suffix, and is not fooled by userinfo,
 //! case, a trailing dot, or a scheme/port mismatch. An empty allowlist stays unconstrained (back-compat).
@@ -91,7 +91,7 @@ fn the_known_default_port_matches_the_implicit_one() {
 
 #[test]
 fn an_empty_allowlist_admits_any_origin() {
-    // A bare `fetch:` (no operator scope) fetches any public origin: today's behavior, unchanged.
+    // An unscoped service (no operator scope) fetches any public origin: today's behavior, unchanged.
     let unconstrained = OriginAllowlist::default();
     assert!(unconstrained.is_unconstrained());
     assert!(admits(&unconstrained, "https://anything.example/"));

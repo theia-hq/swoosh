@@ -7,8 +7,8 @@
 //! capability IS the auth, exactly as Tailscale SSH accepts `none` behind WireGuard. A standard `ssh`/`scp`
 //! client works unchanged, with no ssh keys to manage.
 //!
-//! This lives in its own crate, apart from the byte-funnel (tightbeam), so its heavy, security-sensitive
-//! dependency tree (`russh`, `ssh-key`, `pty-process`) never weighs down a tunnel binary.
+//! This lives in its own crate, apart from the byte-moving layer, so its heavy, security-sensitive
+//! dependency tree (`russh`, `ssh-key`, `pty-process`) stays out of a lean, reach-only client.
 //!
 //! SAFETY: a shell has no auth of its own, so the caller MUST only ever hand [`serve`] a stream that a real
 //! gate already admitted (never a raw socket, never an `open` gate). As a second line of defence, [`serve`]

@@ -1,4 +1,4 @@
-//! fetch: an HTTP origin fetch behind a keyed node's `fetch:` service.
+//! fetch: an HTTP origin fetch a keyed node performs on an admitted requester's behalf.
 //!
 //! The node acts as an HTTP client on the requester's behalf: it reads a [`FetchRequest`] off an admitted
 //! stream, performs the GET/HEAD at the origin (TLS terminated HERE, not at the requester), vets the target
@@ -6,15 +6,15 @@
 //! the smallest honest instance of "run this at a keyed node": a fetch scoped to one origin, not a general
 //! proxy or an open VPN.
 //!
-//! **Origin allowlist.** An operator scopes a `fetch:` service to a fixed set of origins with
-//! `serve news=fetch:https://news.example`, and [`serve_fetch`] refuses any request whose origin is not in
-//! that [`OriginAllowlist`] before it connects. This is the control that makes `--public fetch:` safe and
-//! narrows an admitted delegate's egress. A bare `fetch:` builds an EMPTY allowlist, which is unconstrained:
-//! it fetches any origin that passes the SSRF guard, so an unscoped service is unchanged.
+//! **Origin allowlist.** An operator scopes the service to a fixed set of origins at expose time, and
+//! [`serve_fetch`] refuses any request whose origin is not in
+//! that [`OriginAllowlist`] before it connects. This is the control that makes an OPEN (unauthenticated)
+//! origin-fetch service safe and narrows an admitted delegate's egress. An unscoped service builds an EMPTY
+//! allowlist, which is unconstrained: it fetches any origin that passes the SSRF guard.
 //!
 //! It is a service crate: it knows what to DO with an admitted stream, never how the peer was reached or
-//! gated. A caller that owns composition (swoosh) wraps [`serve_fetch`] in a handler and injects it into
-//! tightbeam's registry; the [`http`] framing is public so the same caller's client side speaks the wire.
+//! gated. The composing consumer wraps [`serve_fetch`] in a handler and injects it into the tunnel's handler
+//! registry; the [`http`] framing is public so the same caller's client side speaks the wire.
 
 pub mod http;
 mod origin;

@@ -1,6 +1,6 @@
 //! The measure stream protocol: a small, versioned frame that opens each diagnostic stream and selects
-//! what the responder should do, before the measured bytes flow. Same shape as tightbeam's
-//! `protocol.rs`: a 4-byte magic guards every stream, then a typed [`Request`], then a typed reply.
+//! what the responder should do, before the measured bytes flow. A 4-byte magic guards every stream, then a
+//! typed [`Request`], then a typed reply.
 //!
 //! Ping round-trips a whole frame (request then echoed reply). Speed sends the framed request, then a
 //! counted byte stream flows in the chosen direction, then a framed reply reports the counted total.
@@ -157,8 +157,8 @@ pub enum Response {
     /// wrong-method [`Unsupported`](Self::Unsupported) can never be drained as if it were zero bytes.
     Sourcing,
     /// The gate admitted this stream, but the handler does not serve the requested method: a ping frame
-    /// arrived on the `speed` service, or a speed frame on `ping`. This is the measure twin of tightbeam's
-    /// `Response::Error`: a TYPED refusal on the wire, so a client can tell "refused" from "measured
+    /// arrived on the `speed` service, or a speed frame on `ping`. This is a TYPED refusal on the wire, so a
+    /// client can tell "refused" from "measured
     /// badly" instead of reading a silently dropped stream as loss or zero bytes. A responder writes it
     /// instead of dropping the stream; a client decodes it to [`ProtocolError::Refused`], which no report
     /// can be constructed from.
@@ -292,14 +292,14 @@ pub enum ProtocolError {
     Io(#[from] io::Error),
 }
 
-/// The exact prefix tightbeam's `ServiceSession` gives a Layer-1 gate refusal when it surfaces the host's
+/// The exact prefix the byte-tunnel layer gives a Layer-1 gate refusal when it surfaces the host's
 /// reason through a `bifrost::Error::Stream`. Matching it here is what keeps a typed gate refusal typed
 /// instead of laundering it into an anonymous [`ProtocolError::Io`]: the render path must be able to tell
 /// "the gate refused you" from "the stream had an i/o error".
 const GATE_REFUSAL_PREFIX: &str = "service refused: ";
 
-/// Map a session-level failure onto a protocol error. A gate refusal (tightbeam's `Response::Error`,
-/// surfaced as a `bifrost::Error::Stream` whose SOURCE reads `"service refused: …"`) is a REFUSAL, not an
+/// Map a session-level failure onto a protocol error. A gate refusal (surfaced by the byte-tunnel layer as
+/// a `bifrost::Error::Stream` whose SOURCE reads `"service refused: …"`) is a REFUSAL, not an
 /// i/o failure, so it maps to [`ProtocolError::Refused`] with the host's reason preserved; every other
 /// session failure is a genuine [`ProtocolError::Io`]. This is the seam that stops a typed refusal from
 /// arriving at the render path indistinguishable from a read error. The reason lives in the boxed source,
@@ -314,7 +314,7 @@ impl From<bifrost::Error> for ProtocolError {
 }
 
 /// The refusal reason if `error` is a gate refusal, else `None`. Walks the source chain because
-/// tightbeam boxes the `"service refused: <reason>"` text as the stream error's source.
+/// the byte-tunnel layer boxes the `"service refused: <reason>"` text as the stream error's source.
 fn gate_refusal_reason(error: &bifrost::Error) -> Option<String> {
     let mut source: Option<&(dyn core::error::Error + 'static)> = Some(error);
     while let Some(cause) = source {

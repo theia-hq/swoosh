@@ -1,4 +1,4 @@
-//! The HTTP preamble (`TBH1`): the request/response framing for the `fetch:` egress service.
+//! The HTTP preamble (`TBH1`): the request/response framing for the origin-fetch egress service.
 //!
 //! It rides INSIDE an admitted stream: after the host admits the requester, the requester writes a
 //! [`FetchRequest`], the host performs the origin request and writes a [`FetchResponse`], then streams the

@@ -18,9 +18,8 @@ method at the wire), or serves both over one session with a `Responder`. A clien
 ## How it composes
 
 `measure` is a service crate: it knows what to DO with an admitted stream, never how the peer was reached or
-gated. A caller that owns composition ([swoosh](https://github.com/theia-hq/swoosh)) injects the answer
-handlers into [tightbeam](https://github.com/theia-hq/tightbeam)'s registry and drives the client side from
-its `ping` / `speed` verbs.
+gated. The composing consumer injects the answer handlers into the tunnel's handler registry and drives the
+client side from its `ping` / `speed` verbs.
 
 ## License
 

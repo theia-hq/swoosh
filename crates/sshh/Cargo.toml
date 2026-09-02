@@ -6,8 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 # A keyless SSH server over an already-authenticated byte stream. Its own crate so its heavy,
-# security-sensitive dependency tree (russh, ssh-key, pty-process) is behind swoosh's `ssh` feature and
-# never lands in a lean client that only reaches out.
+# security-sensitive dependency tree (russh, ssh-key, pty-process) sits behind the composing consumer's
+# `ssh` feature and never lands in a lean client that only reaches out.
 [dependencies]
 blake3 = "1"
 nauthy.workspace = true

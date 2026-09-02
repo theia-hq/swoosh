@@ -1,4 +1,4 @@
-//! The origin-fetch handler behind a `fetch:` service: read a [`FetchRequest`] off the stream, perform
+//! The origin-fetch handler: read a [`FetchRequest`] off the stream, perform
 //! the HTTP GET/HEAD at the origin with a real HTTPS client (TLS terminates HERE, not at the requester),
 //! and stream the response back (status + headers, then the body to stream close). This is the smallest
 //! honest instance of "run this at a keyed node": a fetch, not a general proxy.
@@ -18,13 +18,13 @@ use crate::origin::OriginAllowlist;
 const FETCH_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read one [`FetchRequest`], fetch the origin, write the [`FetchResponse`] + body, then close the write
-/// half so the requester sees the body's end. The `fetch:` handler swoosh injects into tightbeam's registry
-/// calls this with the admitted stream's halves.
+/// half so the requester sees the body's end. The handler the composing consumer injects into the tunnel's
+/// handler registry calls this with the admitted stream's halves.
 ///
-/// `allow` is the operator's origin scope for this service (`serve news=fetch:https://news.example`): if it
+/// `allow` is the operator's origin scope for this service, set at expose time: if it
 /// is non-empty and the request's origin is not in it, the fetch is refused with a typed
 /// [`FetchResponse::Error`] BEFORE any connection, IN FRONT of the SSRF guard, not instead of it. An empty
-/// allowlist is unconstrained (a bare `fetch:`), so today's any-public-origin behavior is unchanged.
+/// allowlist is unconstrained (an unscoped service), so today's any-public-origin behavior is unchanged.
 pub async fn serve_fetch<W, R>(
     writer: &mut W,
     reader: &mut R,
@@ -191,7 +191,7 @@ async fn resolve_public(host: &str, port: u16) -> Result<SocketAddr, String> {
     Ok(first)
 }
 
-/// Whether an IP is a public (globally routable) unicast address: the only kind `fetch:` will reach.
+/// Whether an IP is a public (globally routable) unicast address: the only kind this service will reach.
 /// Conservative: loopback, private, link-local, shared (CGNAT), unspecified, and multicast are all NOT
 /// public. Any IPv6 that EMBEDS an IPv4 address (mapped, NAT64, or the deprecated compatible form) is
 /// unwrapped and judged as IPv4, so `::ffff:169.254.169.254` AND the NAT64 `64:ff9b::169.254.169.254`

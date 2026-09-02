@@ -1,12 +1,12 @@
 //! The diagnostic responder: what every "online" node runs to answer reach diagnostics. It serves an
 //! accepted [`Session`]'s streams, dispatching each on its opening [`Request`]: echo a ping, drain a
-//! sink, source a stream. Generic over `Session`, so the same responder answers over iroh (in
-//! `swoosh serve`) and over mem (in tests).
+//! sink, source a stream. Generic over `Session`, so the same responder answers over iroh (behind a served
+//! node) and over mem (in tests).
 //!
 //! ping and speed are TWO independent services, not one: `ping` (cheap RTT) and `speed` (bandwidth-eating
 //! throughput). A node may offer one without the other, and each carries its own gate, so the served
 //! method MUST match the service that admitted the stream. [`answer_ping`] and [`answer_speed`] are the
-//! two narrow entry points swoosh wires into the registry: each refuses the other's method at the wire
+//! two narrow entry points the composing consumer wires into the handler registry: each refuses the other's method at the wire
 //! ([`ProtocolError::WrongService`]), so a `ping` grant can never open a speed drain even
 //! though both speak the same frame. [`answer`] is the union of both, for a responder that serves
 //! both over one session.

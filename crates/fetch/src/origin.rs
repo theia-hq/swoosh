@@ -1,13 +1,13 @@
-//! The operator-set origin scope for a `fetch:` service: an allowlist of origins an admitted requester
-//! may fetch, and the normalized (scheme, host, port) [`Origin`] the check compares against.
+//! The operator-set origin scope for the origin-fetch service: an allowlist of origins an admitted
+//! requester may fetch, and the normalized (scheme, host, port) [`Origin`] the check compares against.
 //!
-//! The operator bakes this in at expose time (`serve news=fetch:https://news.example`); the handler checks
+//! The operator bakes this in at expose time (naming the origins the service may reach); the handler checks
 //! each request's origin against it BEFORE the fetch (in front of the SSRF guard, not instead of it). An
-//! EMPTY allowlist is unconstrained: a bare `fetch:` fetches any public origin, today's behavior. This is
+//! EMPTY allowlist is unconstrained: an unscoped service fetches any public origin, today's behavior. This is
 //! an origin allowlist, never a URL-rewriting policy engine: it gates the (scheme, host, port) triple and
 //! says nothing about the path or query.
 
-/// The scheme, host, and port a `fetch:` service may reach, normalized so a request origin and an allowed
+/// The scheme, host, and port the origin-fetch service may reach, normalized so a request origin and an allowed
 /// origin compare as the SAME kind of thing regardless of how each was written. Derived from the SAME
 /// `reqwest::Url` parse the SSRF guard uses, so the origin the allowlist checks and the origin the
 /// connection lands on cannot diverge.
@@ -71,8 +71,8 @@ impl Origin {
     }
 }
 
-/// The operator's origin scope for one `fetch:` service: the set of origins an admitted requester may reach.
-/// Empty means unconstrained (a bare `fetch:` fetches any public origin, today's behavior); non-empty means
+/// The operator's origin scope for one origin-fetch service: the set of origins an admitted requester may
+/// reach. Empty means unconstrained (an unscoped service fetches any public origin, today's behavior); non-empty means
 /// a request origin absent from the set is refused BEFORE the fetch.
 #[derive(Debug, Clone, Default)]
 pub struct OriginAllowlist(Vec<Origin>);
@@ -93,7 +93,7 @@ impl OriginAllowlist {
             .map(Self)
     }
 
-    /// Whether this allowlist is unconstrained (empty): a bare `fetch:` with no operator-set scope, which
+    /// Whether this allowlist is unconstrained (empty): an unscoped service with no operator-set scope, which
     /// fetches any public origin. Non-empty scopes every request to the listed origins.
     pub fn is_unconstrained(&self) -> bool {
         let Self(origins) = self;

@@ -1,6 +1,6 @@
 # fetch
 
-An HTTP origin fetch behind a keyed node's `fetch:` service. The node acts as an HTTP client on a
+An HTTP origin fetch a keyed node performs on a requester's behalf. The node acts as an HTTP client on a
 requester's behalf: it reads a request off an already-authorized stream, performs the `GET`/`HEAD` at the
 origin (TLS terminates HERE, at the node, not at the requester), and streams the response back with `Range`
 intact so a resumable download works. It is the smallest honest instance of "run this at a keyed node": a
@@ -18,18 +18,17 @@ followed here, so the client decides.
 ## Origin allowlist (designed, not yet built)
 
 Today the REQUESTER names the URL, and the node fetches any origin that passes the SSRF guard above. An
-OPERATOR-side origin allowlist, `serve fetch=fetch:https://api.github.com`, that constrains a `fetch:`
-handler to a fixed set of origins is designed (theia deliberation 13) and coming: it is the control that
-makes `--public fetch:` safe and narrows an admitted delegate's egress (every fetch leaves from your IP, so
-you may not want to hand a delegate your whole public reach). Until it lands, scope a `fetch:` service by
-handing its capability only to peers you trust to egress from your public IP.
+OPERATOR-side origin allowlist, set at expose time, that constrains the origin-fetch service to a fixed set
+of origins is designed (theia deliberation 13) and coming: it is the control that makes an OPEN
+(unauthenticated) origin-fetch service safe and narrows an admitted delegate's egress (every fetch leaves
+from your IP, so you may not want to hand a delegate your whole public reach). Until it lands, scope the
+service by handing its capability only to peers you trust to egress from your public IP.
 
 ## How it composes
 
 `fetch` is a service crate: it knows what to DO with an admitted stream, never how the peer was reached or
-gated. A caller that owns composition ([swoosh](https://github.com/theia-hq/swoosh)) wraps `serve_fetch` in
-a handler and injects it into [tightbeam](https://github.com/theia-hq/tightbeam)'s registry; the `http`
-framing is public so the same caller's client side speaks the wire.
+gated. The composing consumer wraps `serve_fetch` in a handler and injects it into the tunnel's handler
+registry; the `http` framing is public so the same caller's client side speaks the wire.
 
 ## License
 
