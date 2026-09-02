@@ -90,7 +90,11 @@ async fn fetch_origin(
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         // Pin resolution to the vetted address: reqwest connects here and nowhere else for this host, so a
-        // rebind cannot move the target after the check.
+        // rebind cannot move the target after the check. The pin key is `host_str()`, which for a rooted
+        // FQDN keeps its trailing dot (`api.github.com.`); an observed probe (delib-13 MINOR-2, reqwest
+        // 0.12.28) confirms reqwest keys its resolve override on that SAME dotted host it connects for, so
+        // the pin HOLDS for the trailing-dot form (no desync, no fresh connect-time lookup) and needs no
+        // dot-stripping here.
         .resolve(&host, vetted)
         .build()
         .map_err(|error| format!("http client: {error}"))?;
