@@ -25,7 +25,7 @@ use core::time::Duration;
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::{Denylist, Identity};
-use swoosh::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop};
+use swoosh::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop, Stopped};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Registry, Services};
 use tokio::io::AsyncReadExt as _;
@@ -99,12 +99,22 @@ async fn a_member_stops_a_gated_node_over_control_stop() {
             assert_eq!(ack[0], STOP_ACK, "the node acks with the stop byte");
             drop(writer);
 
-            // The stop cancelled the exposer's token, so its run returns gracefully.
+            // The stop cancelled the exposer's token, so its run returns gracefully. This `Ok` is EXACTLY
+            // what `serve` classifies as a graceful, exit-0 stop: its run maps an exposer `Ok` (the token
+            // fired) to `Stopped::Requested` and exits 0, so a deliberate `swoosh stop` (the qat CI teardown)
+            // reads as SUCCESS, not a crash. An `Err` here would instead propagate and exit non-zero; a
+            // `control.stop` never produces one.
             let ended = tokio::time::timeout(Duration::from_secs(5), run)
                 .await
                 .expect("an admitted control.stop must stop the node, not leave it running")
                 .expect("the run task joins");
-            assert!(ended.is_ok(), "a stopped node returns Ok(()): {ended:?}");
+            ended.expect("a stopped node returns Ok(()), the exit-0 graceful stop");
+            let stopped = Stopped::Requested;
+            assert!(
+                stopped.message().contains("gracefully"),
+                "the graceful-stop line names it a graceful stop: {:?}",
+                stopped.message()
+            );
         })
         .await;
 }

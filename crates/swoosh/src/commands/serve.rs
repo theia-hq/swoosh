@@ -260,19 +260,52 @@ impl ServeCmd {
             });
         }
 
-        // The exposer owns the teardown: it returns when the token fires (a `--for` deadline, or an admitted
-        // `control.stop` caller). A Ctrl-C is the same graceful stop, driven here by cancelling the token so
-        // there is ONE stop path, then letting the run finish. Either way the node is closed after.
-        tokio::select! {
-            result = exposer.run(node, cancel.clone()) => result?,
-            signalled = tokio::signal::ctrl_c() => {
-                signalled?;
-                cancel.cancel();
-            }
-        }
-        println!("\nshutting down.");
+        // Run until a stop, distinguishing a GRACEFUL stop (an owner-requested `control.stop` or a `--for`
+        // deadline, or a Ctrl-C) from an ERRORED teardown. The exposer returns `Ok` when the token fires and
+        // an `Err` only on a real failure, so `run_until_stopped` maps that into a typed [`Stopped`] reason
+        // for a graceful end and propagates the error otherwise. A requested stop is SUCCESS: a deliberate
+        // `swoosh stop` (or a timer, or a Ctrl-C) must exit 0 so the qat CI action reads a clean teardown as
+        // green, not a crash; only a genuine error teardown exits non-zero.
+        let stopped = self.run_until_stopped(exposer, node, cancel).await?;
+        println!("{}", stopped.message());
         node.close().await;
         Ok(())
+    }
+
+    /// Drive the exposer until it stops, returning WHY it stopped for a graceful end or propagating the
+    /// error for a failed teardown. The one seam that classifies a stop: the exposer's `run` returns `Ok`
+    /// the instant the teardown token fires (an owner's `control.stop`, or a `--for` deadline) and an `Err`
+    /// only on a real failure, so an `Ok` return is a [`Stopped::Requested`]; a Ctrl-C is a
+    /// [`Stopped::Interrupted`] (the local operator asking for the same graceful stop). A returned `Err` is
+    /// a genuine teardown failure the caller propagates, so the process exits non-zero ONLY then.
+    async fn run_until_stopped<T: Transport, D: Discovery>(
+        &self,
+        exposer: Exposer,
+        node: &Node<T, D>,
+        cancel: CancellationToken,
+    ) -> eyre::Result<Stopped>
+    where
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static,
+    {
+        // The exposer owns the teardown: it returns when the token fires (a `--for` deadline, or an admitted
+        // `control.stop` caller). A Ctrl-C is the same graceful stop, driven here by cancelling the token so
+        // there is ONE stop path, then letting the run finish.
+        tokio::select! {
+            result = exposer.run(node, cancel.clone()) => {
+                // `Ok` here means the token fired (a requested stop): success. An `Err` is a real teardown
+                // failure, propagated so the process exits non-zero (the one non-zero path).
+                result?;
+                Ok(Stopped::Requested)
+            }
+            signalled = tokio::signal::ctrl_c() => {
+                // A failure INSTALLING the signal handler is a real error (propagate); an actual Ctrl-C is a
+                // graceful interrupt, so cancel the one token and let the run finish, then report it.
+                signalled?;
+                cancel.cancel();
+                Ok(Stopped::Interrupted)
+            }
+        }
     }
 
     /// A one-line description of the effective gate, for the readiness banner: trust made visible. `self_id`
@@ -289,6 +322,32 @@ impl ServeCmd {
                 Some(root) => format!("signet {}", root.short()),
                 None => "unprovisioned".to_owned(),
             }
+        }
+    }
+}
+
+/// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a
+/// decision at every match site (STYLE: prefer enums to bools). Every arm is a SUCCESS: an owner asked the
+/// node to stop and it did, so the process exits 0. A real teardown FAILURE never becomes a `Stopped`, it
+/// stays an `Err` the run propagates, so "graceful" and "errored" cannot be confused: the type only exists
+/// on the success path. This is the distinction the qat CI action reads, a deliberate stop is green.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// An owner requested the stop: an admitted `control.stop` caller, or a `--for` deadline. The exposer's
+    /// `run` returned `Ok` because its teardown token fired, the ordinary end of a node's life.
+    Requested,
+    /// The local operator pressed Ctrl-C: the same graceful stop, driven from the keyboard rather than the
+    /// overlay.
+    Interrupted,
+}
+
+impl Stopped {
+    /// The one clear line printed on a graceful stop, so a CI action log (the qat teardown) reads a
+    /// deliberate stop as a clean end, not a mystery exit. Names the reason plainly.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::Requested => "\nnode stopped gracefully.",
+            Self::Interrupted => "\nnode stopped (interrupted).",
         }
     }
 }
@@ -599,3 +658,7 @@ impl Handler for Sshd {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "serve_tests.rs"]
+mod serve_tests;
