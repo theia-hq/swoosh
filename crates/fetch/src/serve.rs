@@ -10,6 +10,7 @@ use futures::StreamExt as _;
 use tokio::io::{self, AsyncWriteExt as _};
 
 use crate::http::{FetchRequest, FetchResponse, MAX_HEADERS};
+use crate::origin::OriginAllowlist;
 
 /// How long to wait for a connector to send its fetch frame before dropping the stream. The exposer's
 /// pre-gate request timeout does not cover this frame (it is read AFTER admission), so an admitted peer
@@ -19,7 +20,16 @@ const FETCH_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Read one [`FetchRequest`], fetch the origin, write the [`FetchResponse`] + body, then close the write
 /// half so the requester sees the body's end. The `fetch:` handler swoosh injects into tightbeam's registry
 /// calls this with the admitted stream's halves.
-pub async fn serve_fetch<W, R>(writer: &mut W, reader: &mut R) -> io::Result<()>
+///
+/// `allow` is the operator's origin scope for this service (`serve news=fetch:https://news.example`): if it
+/// is non-empty and the request's origin is not in it, the fetch is refused with a typed
+/// [`FetchResponse::Error`] BEFORE any connection, IN FRONT of the SSRF guard, not instead of it. An empty
+/// allowlist is unconstrained (a bare `fetch:`), so today's any-public-origin behavior is unchanged.
+pub async fn serve_fetch<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    allow: &OriginAllowlist,
+) -> io::Result<()>
 where
     W: io::AsyncWrite + Unpin,
     R: io::AsyncRead + Unpin,
@@ -30,7 +40,7 @@ where
         Ok(result) => result?,
         Err(_) => return Err(io::Error::other("fetch request read timed out")),
     };
-    let served = match fetch_origin(&request).await {
+    let served = match fetch_origin(&request, allow).await {
         Ok(response) => stream_response(writer, response).await,
         Err(message) => FetchResponse::Error(message).write(writer).await,
     };
@@ -48,9 +58,21 @@ where
 /// loopback, its LAN (RFC1918), or the cloud metadata endpoint (`169.254.169.254`) to steal instance
 /// credentials. The vetted address is pinned into the client so a DNS rebind between the check and the
 /// connect cannot swap a public answer for a private one.
-async fn fetch_origin(request: &FetchRequest) -> Result<reqwest::Response, String> {
+async fn fetch_origin(
+    request: &FetchRequest,
+    allow: &OriginAllowlist,
+) -> Result<reqwest::Response, String> {
     let method = allowed_method(&request.method)?;
     let url = reqwest::Url::parse(&request.url).map_err(|error| format!("invalid url: {error}"))?;
+    // Enforce the operator's origin scope BEFORE the SSRF guard and any connection: a request outside the
+    // declared origin is refused here, reading its origin from the SAME parse the guard vets below, so the
+    // allowlist and the connection cannot see different hosts. An empty allowlist admits any public origin.
+    if !allow.admits(&url) {
+        return Err(format!(
+            "origin {} not allowed by this fetch service",
+            url.origin().ascii_serialization()
+        ));
+    }
     if !matches!(url.scheme(), "http" | "https") {
         return Err(format!(
             "scheme {} not allowed (http/https only)",

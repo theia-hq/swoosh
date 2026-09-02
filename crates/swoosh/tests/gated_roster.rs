@@ -14,11 +14,11 @@
 //! the mem transport proves for the dialer; see `gated_beam.rs` for the full note.
 
 use core::time::Duration;
+use std::sync::Arc;
 
 use bifrost::{CryptoKind, NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::{Denylist, Identity, VerifyKey};
-use std::sync::Arc;
 use swoosh::contacts::{Contacts, DeviceLabel};
 use swoosh::roster::{self, Epoch, Member, RosterDoc};
 use tightbeam::identity::AsVerifyKey as _;
@@ -77,10 +77,15 @@ async fn proof() {
     let signet_id = NodeId::from_ed25519_secret(&SIGNET_SECRET);
     tokio::task::spawn_local(async move {
         let services = Services::parse(&["roster=roster:".to_owned()]).unwrap();
-        let gate = tunnel::resolve_gate(false, Some(signet_id), empty_denylist("host").await).unwrap();
-        let registry = swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir())
-            .unwrap()
-            .with("roster", swoosh::commands::serve::Roster::new(blob));
+        let gate =
+            tunnel::resolve_gate(false, Some(signet_id), empty_denylist("host").await).unwrap();
+        let registry = swoosh::commands::serve::registry(
+            HOST_SEED,
+            std::env::temp_dir(),
+            fetch::OriginAllowlist::default(),
+        )
+        .unwrap()
+        .with("roster", swoosh::commands::serve::Roster::new(blob));
         Exposer::new(services, registry, gate)
             .unwrap()
             .run(&host, CancellationToken::new())
@@ -96,10 +101,15 @@ async fn proof() {
         .open_service(&member)
         .await
         .expect("member reaches the roster service");
-    let (send, mut recv) = session.open_bi().await.expect("member is admitted at roster");
+    let (send, mut recv) = session
+        .open_bi()
+        .await
+        .expect("member is admitted at roster");
     drop(send); // the roster is a read; signal we send nothing so the handler's write completes
     let mut bytes = Vec::new();
-    recv.read_to_end(&mut bytes).await.expect("read the roster blob");
+    recv.read_to_end(&mut bytes)
+        .await
+        .expect("read the roster blob");
 
     let verified = roster::verify(&bytes, signet.node_id())
         .expect("the roster is signed by the signet we trust");
@@ -155,7 +165,8 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
 }
 
 async fn empty_denylist(tag: &str) -> Denylist {
-    let path = std::env::temp_dir().join(format!("swoosh-gated-roster-{tag}-{}", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("swoosh-gated-roster-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
     Denylist::load(path).await.unwrap()
 }

@@ -3,7 +3,7 @@
 //! process exits non-zero). The end-to-end proof that a member `control.stop` makes the exposer return `Ok`
 //! (which the run turns into [`Stopped::Requested`], exit 0) lives in `tests/gated_stop.rs`.
 
-use super::Stopped;
+use super::{FetchScope, Stopped};
 
 /// Every graceful-stop reason reports a distinct, non-empty line, so a CI action log (the qat teardown)
 /// reads a deliberate stop as a clean end rather than a bare exit. The line names WHY the node stopped.
@@ -40,4 +40,79 @@ fn stopped_has_an_arm_only_for_graceful_reasons() {
         };
         assert!(graceful, "{reason:?} is a graceful, exit-0 stop");
     }
+}
+
+/// A `name=fetch:<origin>` service is a NAMED, origin-scoped fetch: `extract` strips the origin into the
+/// allowlist and rewrites the entry to a bare `fetch:` the tunnel core parses as an ordinary handler, so the
+/// name survives and the origin scopes the handler. Two such services yield two named, origin-scoped fetches.
+#[test]
+fn named_fetch_origins_are_extracted_and_the_entries_become_bare_fetch() {
+    let mut requested = vec![
+        "news=fetch:https://news.example".to_owned(),
+        "apple=fetch:https://apple.example".to_owned(),
+    ];
+    let allow = FetchScope::extract(&mut requested).expect("origins parse");
+
+    assert_eq!(
+        requested,
+        vec!["news=fetch:".to_owned(), "apple=fetch:".to_owned()],
+        "each origin-scoped entry is rewritten to a bare `fetch:` under its name, so the tunnel core \
+         parses it as an ordinary handler"
+    );
+    assert!(
+        !allow.is_unconstrained(),
+        "two declared origins make a non-empty allowlist"
+    );
+}
+
+/// A bare `fetch:` is the UNSCOPED singleton: `extract` leaves it untouched and contributes no origin, so
+/// the handler's allowlist stays empty (any public origin). This is the back-compat arm the grammar must
+/// keep: bare `fetch:` self-names and is unconstrained; `name=fetch:<origin>` is a named, scoped multi.
+#[test]
+fn bare_fetch_is_left_untouched_and_unconstrained() {
+    let mut requested = vec!["fetch:".to_owned()];
+    let allow = FetchScope::extract(&mut requested).expect("no origins to parse");
+
+    assert_eq!(
+        requested,
+        vec!["fetch:".to_owned()],
+        "a bare `fetch:` is not an origin-scoped entry, so it passes through unchanged"
+    );
+    assert!(
+        allow.is_unconstrained(),
+        "a bare `fetch:` declares no origin, so the allowlist is empty (unconstrained)"
+    );
+}
+
+/// Non-fetch services are untouched, and a `fetch:<origin>` alongside them is the only entry rewritten, so
+/// extraction is scoped to fetch and does not disturb the rest of the requested set.
+#[test]
+fn non_fetch_services_pass_through_and_only_fetch_is_rewritten() {
+    let mut requested = vec![
+        "ping:".to_owned(),
+        "web=127.0.0.1:8080".to_owned(),
+        "gh=fetch:https://api.github.com".to_owned(),
+    ];
+    FetchScope::extract(&mut requested).expect("origin parses");
+
+    assert_eq!(
+        requested,
+        vec![
+            "ping:".to_owned(),
+            "web=127.0.0.1:8080".to_owned(),
+            "gh=fetch:".to_owned(),
+        ],
+        "only the fetch entry is rewritten; ping and the raw forward are left exactly as given"
+    );
+}
+
+/// A malformed origin fails at expose time with a teaching error, not at dial time as an opaque refusal, so
+/// the operator learns of the typo when they type it.
+#[test]
+fn a_malformed_fetch_origin_is_refused_at_expose_time() {
+    let mut requested = vec!["bad=fetch:not a url".to_owned()];
+    assert!(
+        FetchScope::extract(&mut requested).is_err(),
+        "an unparseable origin is refused when the service is declared"
+    );
 }

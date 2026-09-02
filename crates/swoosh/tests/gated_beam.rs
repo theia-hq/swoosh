@@ -63,7 +63,12 @@ async fn proof() {
     tokio::task::spawn_local(async move {
         let services = Services::parse(&["beam=beam:".to_owned()]).unwrap();
         let gate = tunnel::resolve_gate(false, Some(signet), empty_denylist("host").await).unwrap();
-        let registry = swoosh::commands::serve::registry(HOST_SEED, out_for_host).unwrap();
+        let registry = swoosh::commands::serve::registry(
+            HOST_SEED,
+            out_for_host,
+            fetch::OriginAllowlist::default(),
+        )
+        .unwrap();
         Exposer::new(services, registry, gate)
             .unwrap()
             .run(&host, CancellationToken::new())

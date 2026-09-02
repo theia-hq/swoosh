@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
+use fetch::OriginAllowlist;
 use nauthy::{Admitted, Denylist, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::open_policy::{Never, OptIn};
@@ -227,6 +228,12 @@ impl ServeCmd {
         requested.push(format!(
             "{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"
         ));
+        // Pull the operator's fetch origin scope out of the requested services BEFORE tightbeam parses them.
+        // A `name=fetch:<origin>` entry carries an origin tightbeam's `Target::Handler` (a bare scheme) has
+        // nowhere to hold, so swoosh captures the origins into an allowlist here and rewrites each such entry
+        // to a bare `fetch:` the tunnel core parses as an ordinary handler. A bare `fetch:` (no origin) is
+        // left untouched and contributes nothing, so an unscoped service stays unconstrained.
+        let fetch_allow = FetchScope::extract(&mut requested)?;
         let services = Services::parse(&requested)?;
         // Resolve the gate before announcing readiness: an unprovisioned node with no `--public` fails
         // HERE, through the ONE shared policy point, rather than ever serving on a permissive default.
@@ -245,7 +252,7 @@ impl ServeCmd {
         // invariant before any banner is printed, so a refused pairing never advertises a service it will
         // not serve. The `control.stop` handler is added over the shared base registry with a CLONE of the
         // cancel token, so an admitted caller that reaches it requests the same graceful teardown.
-        let registry = registry(host_seed, self.out.clone())?
+        let registry = registry(host_seed, self.out.clone(), fetch_allow)?
             .with("roster", Roster::new(roster_blob))
             .with(CONTROL_STOP_SERVICE, Stop::new(cancel.clone()))
             .with(CONTROL_SERVICES_SERVICE, ServiceList::new(catalog));
@@ -419,9 +426,17 @@ fn humanize(duration: core::time::Duration) -> String {
 ///
 /// The ONE assembly the product verb and the `gated_measure` proof test both build, so the test exercises the
 /// identical registry swoosh serves rather than a hand-rolled near-copy.
-pub fn registry(host_seed: [u8; 32], beam_out: PathBuf) -> eyre::Result<Registry> {
+///
+/// `fetch_allow` is the operator's origin scope for the `fetch:` handler, extracted from the requested
+/// `name=fetch:<origin>` services. An empty allowlist (a bare `fetch:`, or any node that serves no fetch)
+/// leaves the handler unconstrained, so a caller that does not scope fetch passes `OriginAllowlist::default()`.
+pub fn registry(
+    host_seed: [u8; 32],
+    beam_out: PathBuf,
+    fetch_allow: OriginAllowlist,
+) -> eyre::Result<Registry> {
     let registry = Registry::new()
-        .with("fetch", Fetch)
+        .with("fetch", Fetch { allow: fetch_allow })
         .with("ping", Ping)
         .with("speed", Speed)
         .with("beam", Beam::new(beam_out));
@@ -634,7 +649,13 @@ impl Handler for Beam {
 /// The `fetch:` handler swoosh injects: the node acts as an HTTP client and streams an origin response back
 /// over the admitted stream. It carries its own SSRF guard, so it does not require the gate (a `--public
 /// fetch:` is a deliberate choice, not an accidental keyless shell).
-struct Fetch;
+///
+/// It holds the operator's [`OriginAllowlist`] baked in at expose time (`serve news=fetch:https://news.example`):
+/// the handler refuses any request whose origin is not in the list before it connects. A bare `fetch:` bakes
+/// an EMPTY allowlist, which is unconstrained (any public origin), so an unscoped service is unchanged.
+struct Fetch {
+    allow: OriginAllowlist,
+}
 
 impl Handler for Fetch {
     // OPT-IN: `fetch:` carries its own SSRF guard, so a `--public fetch:` is a deliberate choice, not an
@@ -647,8 +668,55 @@ impl Handler for Fetch {
         mut writer: BoxWrite,
         mut reader: BoxRead,
     ) -> eyre::Result<()> {
-        fetch::serve_fetch(&mut writer, &mut reader).await?;
+        fetch::serve_fetch(&mut writer, &mut reader, &self.allow).await?;
         Ok(())
+    }
+}
+
+/// The scheme a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE literal
+/// swoosh registers the handler under, not a re-typed string that could drift from it.
+const FETCH_SCHEME: &str = "fetch";
+
+/// Pulls the operator's fetch origin scope out of the requested service entries: a `name=fetch:<origin>`
+/// entry hands tightbeam an origin its bare-scheme `Target::Handler` cannot hold, so swoosh strips the
+/// origin here (into an [`OriginAllowlist`] baked into the `fetch:` handler) and rewrites the entry to a
+/// bare `fetch:` the tunnel core parses as an ordinary handler.
+///
+/// This is a pure edge adapter over the raw request strings, run once BEFORE `Services::parse`: it does not
+/// name the fetch service or enforce naming (that is the tunnel grammar's job), it only separates the origin
+/// from the scheme. A bare `fetch:` (no origin suffix) is left untouched and contributes no origin, so an
+/// unscoped service stays unconstrained.
+struct FetchScope;
+
+impl FetchScope {
+    /// Rewrite each `fetch:<origin>` entry in `requested` to a bare `fetch:` and return the collected origins
+    /// as an [`OriginAllowlist`]. Entries that are not fetch services, and a bare `fetch:` with no origin,
+    /// pass through unchanged. A malformed origin fails HERE, at expose time, with a teaching message, not at
+    /// dial time as an opaque refusal.
+    fn extract(requested: &mut [String]) -> eyre::Result<OriginAllowlist> {
+        let mut origins: Vec<String> = Vec::new();
+        for entry in requested.iter_mut() {
+            // Split off the optional `name=` prefix; a bare entry (no `=`) is its own addr. Only the ADDR
+            // side names a scheme, so the origin is read from there, and the name (if any) is preserved.
+            let (name, addr) = match entry.split_once('=') {
+                Some((name, addr)) => (Some(name), addr),
+                None => (None, entry.as_str()),
+            };
+            let Some(origin) = addr
+                .strip_prefix(FETCH_SCHEME)
+                .and_then(|rest| rest.strip_prefix(':'))
+                .filter(|origin| !origin.is_empty())
+            else {
+                continue;
+            };
+            origins.push(origin.to_owned());
+            // Rewrite to a bare `fetch:` the tunnel core parses as an ordinary handler, preserving the name.
+            *entry = match name {
+                Some(name) => format!("{name}={FETCH_SCHEME}:"),
+                None => format!("{FETCH_SCHEME}:"),
+            };
+        }
+        OriginAllowlist::parse(&origins).map_err(|error| eyre::eyre!(error))
     }
 }
 
