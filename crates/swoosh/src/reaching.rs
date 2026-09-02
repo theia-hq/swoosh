@@ -11,15 +11,42 @@
 //! into six verbs: it turns a declared [`Credential`] into the concrete badge to present, once, in the
 //! composition root.
 
+use core::future::Future;
 use std::path::Path;
 
+use bifrost::{Discovery, Node, Session, Transport};
+
+use crate::contacts::Contacts;
 use crate::credential::{Credential, MemberBadge};
 use crate::identity::{Identity, Secret};
 use crate::{config, transport};
 
-/// A verb that reaches a peer over a transport, stating how it authenticates.
+/// The uniform context every reaching verb runs against, so dispatch is ONE line (`self.run(node, ctx)`)
+/// instead of a per-verb argument-threading match with a different signature per arm.
 ///
-/// The compiler forces both methods on every reaching verb, so adding a verb that forgets its auth need
+/// It carries what a reach-outward verb needs and no more: the [`contacts`](Self::contacts) to resolve a
+/// petname, the bound [`transport`](Self::transport) label a verb reports and a failed dial names, the
+/// ALREADY-RESOLVED [`present`](Self::present) badge (minted once by [`resolve`], so the verb never
+/// re-derives it), and the [`key`](Self::key) path a verb that opens its own store needs. A verb ignores
+/// the fields it does not use. `serve`'s `ExposeContext` is DELIBERATELY not here (Craftsman): it lives on
+/// [`ServeCmd`](crate::commands::serve::ServeCmd), which reads its own, so this context stays uniform.
+pub struct ReachCtx<'a> {
+    /// The address book, to resolve a petname in a verb's peer slot.
+    pub contacts: &'a Contacts,
+    /// The bound transport label: a verb reports which backend carried the session, and a failed dial
+    /// names the fix that backend needs.
+    pub transport: transport::Transport,
+    /// The membership badge to present, resolved ONCE in the composition root via [`resolve`] (a stored
+    /// device badge, a signet-holder self-sign, or a `--present` slip). `None` for an `Anonymous` dial.
+    pub present: Option<String>,
+    /// The key path, for a verb that opens its OWN store (`fleet` writes contacts; a write, unlike the
+    /// read-only `contacts` the reach verbs share).
+    pub key: Option<&'a Path>,
+}
+
+/// A verb that reaches a peer over a transport, stating how it authenticates and how it runs.
+///
+/// The compiler forces every method on every reaching verb, so adding a verb that forgets its auth need
 /// does not compile (the fleet/fetch bug class). [`credential`](Self::credential) is TOTAL: it returns a
 /// [`Credential`], an enum with no "unset" arm, so "forgot to say" is unrepresentable. The identity mode
 /// derives from the credential ([`Credential::identity`]), so identity and badge can never disagree.
@@ -41,6 +68,24 @@ pub trait Reaching {
     /// This is the Adversary's non-forgettable override: `Persisted` is a written declaration, never a
     /// silent default.
     fn identity(&self) -> Identity;
+
+    /// Run this verb against the composed node under the uniform [`ReachCtx`]. Every verb takes the same
+    /// context, so the composition root dispatches with ONE line (`cmd.run(node, ctx)`), not a per-verb
+    /// argument-threading match. A verb reads the ctx fields it needs and ignores the rest. The `Send`
+    /// bounds on the session halves are stated once here (structured concurrency across `.await`s).
+    ///
+    /// Written as a returned `impl Future` (RPITIT), not `async fn`, matching the `Handler` trait: an
+    /// `async fn` in a trait cannot state its auto-trait bounds and draws the `async_fn_in_trait` lint;
+    /// the impls stay plain `async fn`, which coerces to this on the pinned toolchain.
+    fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: ReachCtx<'_>,
+    ) -> impl Future<Output = eyre::Result<()>>
+    where
+        Self: Sized,
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static;
 }
 
 /// The concrete badge a resolved [`Credential`] presents on the wire: a member badge, or nothing.

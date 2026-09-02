@@ -65,6 +65,20 @@ impl crate::reaching::Reaching for BeamCmd {
     fn identity(&self) -> crate::identity::Identity {
         self.credential().identity()
     }
+
+    /// Uniform dispatch: unpack the reach context and run. `beam` reads only the resolved `present` badge
+    /// (it takes a `--target` node id or link directly); it ignores `contacts`, `transport`, and `key`.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static,
+    {
+        self.run_beam(node, ctx.present).await
+    }
 }
 
 impl BeamCmd {
@@ -72,7 +86,7 @@ impl BeamCmd {
     /// directories first. Presents `self_badge` (the self-signed membership badge, or an explicit
     /// `--present` link) so the receiver's family gate admits each stream. A file that cannot be read is
     /// skipped and reported; the run ends non-zero if any item failed.
-    pub async fn run<T: Transport, D: Discovery>(
+    async fn run_beam<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         self_badge: Option<String>,

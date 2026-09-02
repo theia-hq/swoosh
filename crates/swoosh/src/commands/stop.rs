@@ -55,13 +55,27 @@ impl crate::reaching::Reaching for StopCmd {
     fn identity(&self) -> crate::identity::Identity {
         self.credential().identity()
     }
+
+    /// Uniform dispatch: unpack the reach context and run. `stop` reads only the resolved `present`
+    /// badge; it ignores `contacts`, `transport`, and `key`.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as bifrost::Session>::Write: Send + 'static,
+        <T::Session as bifrost::Session>::Read: Send + 'static,
+    {
+        self.run_stop(node, ctx.present).await
+    }
 }
 
 impl StopCmd {
     /// Reach the peer's gated `control.stop` service and trigger a graceful stop. Presents `self_badge` (the
     /// self-signed membership badge, or an explicit `--present` link) so the node's family gate admits the
     /// stream; a node that does not admit this caller refuses LOUDLY here, never a silent no-op.
-    pub async fn run<T: Transport, D: Discovery>(
+    async fn run_stop<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         self_badge: Option<String>,

@@ -58,13 +58,28 @@ impl crate::reaching::Reaching for PingCmd {
     fn identity(&self) -> crate::identity::Identity {
         self.credential().identity()
     }
+
+    /// Uniform dispatch: unpack the reach context and run. `ping` reads `contacts` (fan-out), the
+    /// `transport` label, and the resolved `present` badge; it ignores `key`.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static,
+    {
+        self.run_ping(node, ctx.contacts, ctx.transport, ctx.present)
+            .await
+    }
 }
 
 impl PingCmd {
     /// Resolve the target to its devices, and for each dial, probe, and print its path and RTT summary.
     /// Reports every device (a person fans out); an unreachable one prints an honest line and the run
     /// continues, ending non-zero only if no device answered at all.
-    pub async fn run<T: Transport, D: Discovery>(
+    async fn run_ping<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
@@ -72,8 +87,8 @@ impl PingCmd {
         self_badge: Option<String>,
     ) -> eyre::Result<()> {
         let candidates = reach::candidates(&self.target, contacts)?;
-        // Present an explicit `--present` link if given, else the self-signed badge minted from this
-        // identity: the peer's `ping` service is gated, so each probe must prove membership to run.
+        // Present an explicit `--present` link if given, else the resolved member badge from the root:
+        // the peer's `ping` service is gated, so each probe must prove membership to run.
         let present = self.present.or(self_badge);
         let plan = Ping {
             count: self.count,

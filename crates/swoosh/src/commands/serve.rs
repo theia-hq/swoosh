@@ -71,6 +71,44 @@ pub struct ServeCmd {
     pub r#for: Option<Lifetime>,
     #[command(flatten)]
     pub reach: ReachArgs,
+    /// What `serve` needs beyond the bound node, resolved by the composition root BEFORE the transport
+    /// consumes the secret (the ssh host seed derives from it). Not a flag: clap skips it, and the root
+    /// fills it in via [`with_expose`](Self::with_expose) before dispatch. Lives HERE, on `ServeCmd`, so
+    /// `serve` reads its OWN context (Craftsman): it is deliberately NOT a `ReachCtx` field, so the reach
+    /// context stays uniform, and the old `Option<ExposeContext>` threaded through the generic reach
+    /// dispatch plus its "internal: serve reached without its expose context" runtime guard are gone.
+    #[arg(skip)]
+    pub expose: Option<ExposeContext>,
+}
+
+/// What `serve` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, the revocation
+/// denylist the gate honors, and the pre-cut signed roster blob. All resolved in the composition root (the
+/// host seed needs the secret before the transport consumes it), then attached to [`ServeCmd`] via
+/// [`with_expose`](ServeCmd::with_expose). Moved here from `main.rs` so `serve` reads its own context.
+pub struct ExposeContext {
+    /// swoosh's ssh host key seed, derived from the secret so an `ssh=sshd:` service presents the host
+    /// key a client pins.
+    pub host_seed: [u8; 32],
+    /// The signet the default gate trusts: a provisioned signet if one was adopted, else this node's OWN
+    /// key (person-zero self-trusts).
+    pub signet: Option<NodeId>,
+    /// The revocation denylist the gate honors.
+    pub denylist: Denylist,
+    /// The signet-signed roster blob the `roster:` handler serves, cut once per `serve` from the
+    /// operator's contacts while the secret is still live.
+    pub roster_blob: Arc<Vec<u8>>,
+}
+
+impl core::fmt::Debug for ExposeContext {
+    /// `Denylist` holds a `Mutex` (not `Debug`), so this impl names the fields it can and elides that one,
+    /// which is enough for the derived `Debug` on `ServeCmd`/`Command` to compile.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ExposeContext")
+            .field("host_seed", &self.host_seed)
+            .field("signet", &self.signet)
+            .field("roster_blob_len", &self.roster_blob.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl crate::reaching::Reaching for ServeCmd {
@@ -93,6 +131,49 @@ impl crate::reaching::Reaching for ServeCmd {
     fn identity(&self) -> crate::identity::Identity {
         crate::identity::Identity::Persisted
     }
+
+    /// Uniform dispatch: `serve` reads its OWN [`ExposeContext`] (attached by the root via
+    /// [`with_expose`](Self::with_expose)), so it ignores every `ReachCtx` field. This is where the old
+    /// `Option<ExposeContext>` threaded through the generic reach dispatch, and its
+    /// "internal: serve reached without its expose context" guard in `main.rs`, are gone: the context is
+    /// serve's own, attached before dispatch.
+    async fn run<T: Transport, D: Discovery>(
+        mut self,
+        node: &Node<T, D>,
+        _ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static,
+    {
+        // The root always attaches the expose context to a `serve` verb before dispatch (it is the only
+        // caller, and `with_expose` is the only path to a runnable `ServeCmd`), so a missing one is a
+        // composition-root bug, not a user error. Surface it as an internal error rather than panicking:
+        // unlike the OLD guard, this is not a threaded `Option` a whole family of verbs could trip, it is
+        // serve reading its own field, so the failure is local and one verb wide.
+        let Some(ExposeContext {
+            host_seed,
+            signet,
+            denylist,
+            roster_blob,
+        }) = self.expose.take()
+        else {
+            eyre::bail!("internal: serve reached run without its expose context (composition-root bug)");
+        };
+        self.run_serve(node, host_seed, signet, denylist, roster_blob)
+            .await
+    }
+}
+
+impl ServeCmd {
+    /// Attach the resolved [`ExposeContext`] the composition root cut while the secret was still live, so
+    /// `serve` reads its own context at run time. The ONE path the root uses to make a `ServeCmd`
+    /// runnable, so a `serve` that reached `run` without one is a root bug, not a representable state a
+    /// user hits.
+    pub fn with_expose(mut self, expose: ExposeContext) -> Self {
+        self.expose = Some(expose);
+        self
+    }
 }
 
 impl ServeCmd {
@@ -103,7 +184,7 @@ impl ServeCmd {
     /// swoosh's banner, and run the exposer. A `sshd:`/`ping:`/`speed:` service stays gated regardless. The `signet` here is already
     /// resolved by the composition root: a provisioned signet if one was adopted, else this node's OWN key
     /// (person-zero self-trusts), so a plain node gates on itself rather than failing "no signet".
-    pub async fn run<T: Transport, D: Discovery>(
+    async fn run_serve<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         host_seed: [u8; 32],

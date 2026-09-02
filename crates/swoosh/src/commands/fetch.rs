@@ -60,6 +60,21 @@ impl crate::reaching::Reaching for FetchCmd {
     fn identity(&self) -> crate::identity::Identity {
         self.credential().identity()
     }
+
+    /// Uniform dispatch: unpack the reach context and run. `fetch` reads `contacts` (to resolve `--via`),
+    /// the `transport` label, and the resolved `present` badge; it ignores `key`.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static,
+    {
+        self.run_fetch(node, ctx.contacts, ctx.transport, ctx.present)
+            .await
+    }
 }
 
 impl FetchCmd {
@@ -69,7 +84,7 @@ impl FetchCmd {
     /// `present` is the ALREADY-RESOLVED badge from the composition root: the member badge rooted at the
     /// dialing key by default (so the owner reaching their OWN gated exit node admits), a `--present` slip
     /// if the caller gave one. `fetch:` is family-gated, so every per-request stream presents it.
-    pub async fn run<T: Transport, D: Discovery>(
+    async fn run_fetch<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,

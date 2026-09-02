@@ -225,62 +225,46 @@ impl Reach {
         }
     }
 
-    /// Run the selected verb against the composed node. Every verb is generic over `Node<T, D>`, so
-    /// this dispatch is transport-blind: the concrete transport was chosen once, at the seam below. The
-    /// reach-outward verbs take `contacts` to resolve a petname in their peer slot; the `transport`
-    /// label is passed as a plain value so a verb can report which backend carried the session
-    /// (`status`) and so a failed dial can name the fix that backend needs, without any verb naming a
-    /// concrete backend.
+    /// Attach the resolved [`serve::ExposeContext`] to the `serve` verb (a no-op for every other verb, which
+    /// carries no expose context), so `serve` reads its OWN context at run time. Called once in the root
+    /// after the context is cut (while the secret is still live), before dispatch. This is why the reach
+    /// [`ReachCtx`] stays uniform: the one verb that needs more than the shared context gets it on ITSELF
+    /// here, not as an `Option` field threaded through every verb's dispatch.
+    fn attach_expose(self, expose: Option<swoosh::commands::serve::ExposeContext>) -> Self {
+        match (self, expose) {
+            (Self::Serve(cmd), Some(expose)) => Self::Serve(cmd.with_expose(expose)),
+            // A non-serve verb resolves `expose` to `None` (see `expose_context`), so there is nothing to
+            // attach; a `serve` with no context is a root bug caught at its own `run`, not here.
+            (reach, _) => reach,
+        }
+    }
+
+    /// Run the selected verb against the composed node, dispatching to each verb's [`Reaching::run`] with
+    /// ONE uniform [`ReachCtx`] (`cmd.run(node, ctx)`), not a per-verb argument-threading match. Every verb
+    /// is generic over `Node<T, D>`, so this stays transport-blind: the concrete transport was chosen once,
+    /// at the seam below. A verb reads the ctx fields it needs (`contacts` to resolve a petname, the
+    /// `transport` label to report, the resolved `present` badge, the `key`) and ignores the rest; `serve`
+    /// reads its own attached [`serve::ExposeContext`] instead.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
-        contacts: &Contacts,
-        transport: transport::Transport,
-        self_badge: Option<String>,
-        expose: Option<ExposeContext>,
-        key: Option<&std::path::Path>,
+        ctx: reaching::ReachCtx<'_>,
     ) -> eyre::Result<()>
     where
         <T::Session as bifrost::Session>::Write: Send + 'static,
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
         match self {
-            // `serve` drives the gated exposer, so it needs the `ExposeContext` (host seed, signet,
-            // denylist) resolved in the root before the transport consumed the secret.
-            Self::Serve(cmd) => {
-                let ExposeContext {
-                    host_seed,
-                    signet,
-                    denylist,
-                    roster_blob,
-                } = expose.ok_or_else(|| {
-                    eyre::eyre!("internal: serve reached without its expose context")
-                })?;
-                cmd.run(node, host_seed, signet, denylist, roster_blob).await
-            }
-            // The diagnostic verbs reach the peer's GATED `ping`/`speed` service, so they present the self-signed
-            // membership badge (minted below in `self_badge`) the same way `tunnel-connect` does.
-            Self::Ping(cmd) => cmd.run(node, contacts, transport, self_badge).await,
-            Self::Speed(cmd) => cmd.run(node, contacts, transport, self_badge).await,
-            Self::Status(cmd) => cmd.run(node, contacts, transport, self_badge).await,
-            // `fetch` reaches the peer's GATED `fetch:` service, so it presents the self-signed membership
-            // badge (minted below in `self_badge`) by default, an explicit `--present` slip overriding.
-            Self::Fetch(cmd) => cmd.run(node, contacts, transport, self_badge).await,
-            Self::Forward(cmd) => cmd.run(node).await,
-            // `beam` presents the self-signed membership badge (minted below) to the peer's gated `beam:`
-            // service, the same way the diagnostic verbs and `tunnel-connect` do.
-            Self::Beam(cmd) => cmd.run(node, self_badge).await,
-            // `fleet --pull` presents the membership badge to the coordination node's gated `roster:`
-            // service, verifies the signed roster against our signet, and hydrates contacts; it opens its
-            // OWN store from `key` (a write, unlike the read-only `contacts` the reach verbs share).
-            Self::Fleet(cmd) => cmd.run(node, self_badge, key).await,
-            // `stop` presents the self-signed membership badge to the peer's gated `control.stop` service,
-            // the same way `beam` and the diagnostic verbs do.
-            Self::Stop(cmd) => cmd.run(node, self_badge).await,
-            // The peer is already a resolved raw key, so no address book or transport label is needed; the
-            // `self_badge` (this identity's self-signed membership badge) is the signet-holder's proof to
-            // present, resolved against any stored badge inside the command.
-            Self::TunnelConnect(cmd) => cmd.run(node, self_badge).await,
+            Self::Serve(cmd) => cmd.run(node, ctx).await,
+            Self::Ping(cmd) => cmd.run(node, ctx).await,
+            Self::Speed(cmd) => cmd.run(node, ctx).await,
+            Self::Status(cmd) => cmd.run(node, ctx).await,
+            Self::Fetch(cmd) => cmd.run(node, ctx).await,
+            Self::Forward(cmd) => cmd.run(node, ctx).await,
+            Self::Beam(cmd) => cmd.run(node, ctx).await,
+            Self::Fleet(cmd) => cmd.run(node, ctx).await,
+            Self::Stop(cmd) => cmd.run(node, ctx).await,
+            Self::TunnelConnect(cmd) => cmd.run(node, ctx).await,
         }
     }
 
@@ -339,12 +323,12 @@ impl Reach {
         secret: &identity::Secret,
         contacts: &Contacts,
         key: Option<&std::path::Path>,
-    ) -> eyre::Result<Option<ExposeContext>> {
+    ) -> eyre::Result<Option<swoosh::commands::serve::ExposeContext>> {
         match self {
             // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
             // returns `None`. The roster is cut and signed HERE, where the secret is still live and the
-            // contacts store is loaded, then handed to the serve arm as a pre-cut blob.
-            Self::Serve(_) => Ok(Some(ExposeContext {
+            // contacts store is loaded, then handed to the serve verb (via `attach_expose`) as a pre-cut blob.
+            Self::Serve(_) => Ok(Some(swoosh::commands::serve::ExposeContext {
                 host_seed: secret.ssh_host_seed(),
                 signet: Some(
                     config::load_signet(key)
@@ -361,17 +345,6 @@ impl Reach {
     }
 }
 
-/// What `serve` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, and the
-/// revocation denylist the gate honors. All are resolved in the composition root (the host seed needs the
-/// secret before the transport consumes it), then handed to the serve arm.
-struct ExposeContext {
-    host_seed: [u8; 32],
-    signet: Option<bifrost::NodeId>,
-    denylist: nauthy::Denylist,
-    /// The signet-signed roster blob the `roster:` handler serves, cut here from the operator's contacts
-    /// while the secret is still live (the transport consumes it below). A snapshot, cut once per `serve`.
-    roster_blob: std::sync::Arc<Vec<u8>>,
-}
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -472,6 +445,17 @@ async fn run() -> eyre::Result<()> {
     let expose = reach
         .expose_context(&secret, store.contacts(), cli.key.as_deref())
         .await?;
+    // Attach the resolved exposer context to the `serve` verb (a no-op otherwise), so `serve` reads its OWN
+    // context and every verb dispatches through the uniform `ReachCtx` below.
+    let reach = reach.attach_expose(expose);
+    // The one uniform context every verb runs against: the badge is already resolved, so the dispatch is
+    // `cmd.run(node, ctx)` per verb, not a per-verb argument-threading match.
+    let ctx = reaching::ReachCtx {
+        contacts: &contacts,
+        transport,
+        present: self_badge,
+        key: cli.key.as_deref(),
+    };
     match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
         // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
@@ -481,9 +465,7 @@ async fn run() -> eyre::Result<()> {
             let endpoint = bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?;
             let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
-            reach
-                .run(&node, &contacts, transport, self_badge, expose, cli.key.as_deref())
-                .await
+            reach.run(&node, ctx).await
         }
         // quirk is direct-only with no internal discovery, so the composed discovery is its only way
         // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
@@ -491,9 +473,7 @@ async fn run() -> eyre::Result<()> {
             let endpoint = bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?;
             let discovery = Peer::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
-            reach
-                .run(&node, &contacts, transport, self_badge, expose, cli.key.as_deref())
-                .await
+            reach.run(&node, ctx).await
         }
     }
 }

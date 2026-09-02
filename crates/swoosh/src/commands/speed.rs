@@ -70,12 +70,27 @@ impl crate::reaching::Reaching for SpeedCmd {
     fn identity(&self) -> crate::identity::Identity {
         self.credential().identity()
     }
+
+    /// Uniform dispatch: unpack the reach context and run. `speed` reads `contacts`, the `transport`
+    /// label, and the resolved `present` badge; it ignores `key`.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static,
+    {
+        self.run_speed(node, ctx.contacts, ctx.transport, ctx.present)
+            .await
+    }
 }
 
 impl SpeedCmd {
     /// Dial the first reachable device, run the transfer while a ticker prints the rate each interval,
     /// then report the settled connection path and the per-direction totals.
-    pub async fn run<T: Transport, D: Discovery>(
+    async fn run_speed<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
@@ -84,8 +99,8 @@ impl SpeedCmd {
     ) -> eyre::Result<()> {
         let mode = self.mode();
         let limit = self.limit();
-        // Present an explicit `--present` link if given, else the self-signed badge minted from this
-        // identity: the peer's `speed` service is gated, so a diagnostic must prove membership to run.
+        // Present an explicit `--present` link if given, else the resolved member badge from the root:
+        // the peer's `speed` service is gated, so a diagnostic must prove membership to run.
         let present = self.present.or(self_badge);
         let Resolved { session, label } = reach::dial_service(
             node,
@@ -144,7 +159,9 @@ impl SpeedCmd {
         print_totals(&report);
         Ok(())
     }
+}
 
+impl SpeedCmd {
     /// What to measure: `--up`, `--bidir`, or download (the group makes more than one impossible).
     fn mode(&self) -> Mode {
         if self.up {

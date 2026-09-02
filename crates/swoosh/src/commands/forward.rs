@@ -50,12 +50,19 @@ impl crate::reaching::Reaching for ForwardCmd {
     fn identity(&self) -> crate::identity::Identity {
         self.credential().identity()
     }
-}
 
-impl ForwardCmd {
     /// Drive the sink `--to` names: bind a local port and forward each connection, stream to stdout, or the
-    /// reserved unix listener, all over the overlay under swoosh's identity.
-    pub async fn run<T: Transport, D: Discovery>(self, node: &Node<T, D>) -> eyre::Result<()> {
+    /// reserved unix listener, all over the overlay. A dial-only client presenting its own `--present`
+    /// link, so it reads nothing from `ctx` (it is `Anonymous`).
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        _ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as bifrost::Session>::Write: Send + 'static,
+        <T::Session as bifrost::Session>::Read: Send + 'static,
+    {
         tunnel_connect::connect(node, self.node, self.service, self.present, self.to).await
     }
 }

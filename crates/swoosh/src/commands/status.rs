@@ -51,13 +51,28 @@ impl crate::reaching::Reaching for StatusCmd {
     fn identity(&self) -> crate::identity::Identity {
         self.credential().identity()
     }
+
+    /// Uniform dispatch: unpack the reach context and run. `status` reads `contacts`, the `transport`
+    /// label, and the resolved `present` badge; it ignores `key`.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static,
+    {
+        self.run_status(node, ctx.contacts, ctx.transport, ctx.present)
+            .await
+    }
 }
 
 impl StatusCmd {
     /// Resolve the target to its devices, and for each dial, probe the path and a single RTT, and print a
     /// status line. Reports every device (a person fans out); an unreachable one prints an honest line
     /// rather than aborting the rest.
-    pub async fn run<T: Transport, D: Discovery>(
+    async fn run_status<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,

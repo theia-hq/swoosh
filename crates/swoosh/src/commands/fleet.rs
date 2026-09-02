@@ -53,6 +53,21 @@ impl crate::reaching::Reaching for FleetCmd {
     fn identity(&self) -> crate::identity::Identity {
         self.credential().identity()
     }
+
+    /// Uniform dispatch: unpack the reach context and run. `fleet` reads the resolved `present` badge and
+    /// the `key` (it opens its OWN store to WRITE hydrated contacts, unlike the read-only `contacts`); it
+    /// ignores `contacts` and `transport`.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static,
+    {
+        self.run_fleet(node, ctx.present, ctx.key).await
+    }
 }
 
 impl FleetCmd {
@@ -60,7 +75,7 @@ impl FleetCmd {
     /// the signed blob, verify it against the adopted signet, and hydrate contacts. Refuses loudly if the
     /// node has no signet (adopt first), if the coordination node refuses the read, or if the roster is not
     /// signed by our signet.
-    pub async fn run<T: Transport, D: Discovery>(
+    async fn run_fleet<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         self_badge: Option<String>,

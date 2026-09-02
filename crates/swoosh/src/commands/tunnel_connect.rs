@@ -178,6 +178,20 @@ impl crate::reaching::Reaching for TunnelConnectCmd {
     fn identity(&self) -> crate::identity::Identity {
         crate::identity::Identity::Persisted
     }
+
+    /// Uniform dispatch: unpack the reach context and run. `tunnel-connect` reads only the resolved
+    /// `present` badge; it ignores `contacts` (its peer is a raw key), `transport`, and `key`.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: crate::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as bifrost::Session>::Write: Send + 'static,
+        <T::Session as bifrost::Session>::Read: Send + 'static,
+    {
+        self.run_tunnel_connect(node, ctx.present).await
+    }
 }
 
 impl TunnelConnectCmd {
@@ -188,7 +202,7 @@ impl TunnelConnectCmd {
     /// `self_signed` badge the caller minted from this identity (the signet holder is entitled to sign its
     /// own, fresh per dial). A node gated Open ignores whatever is presented, so presenting is always safe.
     /// This is the one place the two connect surfaces differ in how `present` is chosen.
-    pub async fn run<T: Transport, D: Discovery>(
+    async fn run_tunnel_connect<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         self_signed: Option<String>,
