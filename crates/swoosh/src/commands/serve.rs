@@ -14,7 +14,6 @@
 //! and `--quiet` live on THIS verb (not root), and reach comes via the shared
 //! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb.
 
-use core::sync::atomic::{AtomicU64, Ordering};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,7 +22,7 @@ use clap::Args;
 use fetch::OriginAllowlist;
 use nauthy::{Admitted, Denylist, Gate, VerifyKey};
 use tightbeam::duration::Lifetime;
-use tightbeam::open_policy::{Never, OptIn};
+use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{
     self, BoxRead, BoxWrite, CancellationToken, Exposer, Handler, Registry, ServiceCatalog,
     Services,
@@ -34,6 +33,25 @@ use crate::contacts::{Contacts, Petname};
 use crate::identity::Secret;
 use crate::roster::{self, Epoch, Member, RosterDoc};
 use crate::transport::ReachArgs;
+
+#[path = "serve_beam.rs"]
+mod serve_beam;
+#[path = "serve_fetch.rs"]
+mod serve_fetch;
+#[path = "serve_ping.rs"]
+mod serve_ping;
+#[path = "serve_speed.rs"]
+mod serve_speed;
+#[cfg(feature = "ssh")]
+#[path = "serve_sshd.rs"]
+mod serve_sshd;
+
+use serve_beam::Beam;
+use serve_fetch::Fetch;
+use serve_ping::Ping;
+use serve_speed::Speed;
+#[cfg(feature = "ssh")]
+use serve_sshd::Sshd;
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
 /// teardown (the remote twin of a local Ctrl-C or a `--for` deadline). The client verb is `swoosh stop`.
@@ -608,77 +626,6 @@ impl Handler for ServiceList {
     }
 }
 
-/// The `beam:` handler swoosh injects: the receive half of PUSH file transfer. It takes one admitted stream
-/// carrying one pushed file, drives `bifrost-wire`'s verified receive into a temp file under `beam_out`, and
-/// moves it into place at the safe relative path the sender named. GATED, because a receive service with no
-/// auth of its own would let anyone write files into the node's output directory; the gate IS its
-/// authentication. Each stream gets a unique tag from a shared counter, so concurrent pushes never contend
-/// for the same temp file.
-struct Beam {
-    out: PathBuf,
-    next_tag: AtomicU64,
-}
-
-impl Beam {
-    fn new(out: PathBuf) -> Self {
-        Self {
-            out,
-            next_tag: AtomicU64::new(0),
-        }
-    }
-}
-
-impl Handler for Beam {
-    // GATED: a receive service with no auth of its own would let anyone write files into the node's output
-    // directory; the gate IS its authentication.
-    type Public = Never;
-
-    async fn serve(
-        &self,
-        _admitted: Admitted,
-        writer: BoxWrite,
-        reader: BoxRead,
-    ) -> eyre::Result<()> {
-        // Each stream gets a unique tag from the shared counter, so concurrent pushes never contend for the
-        // same temp file.
-        let tag = self.next_tag.fetch_add(1, Ordering::Relaxed);
-        let received = beam::receive_file(writer, reader, &self.out, tag).await?;
-        println!(
-            "received {} ({} bytes)",
-            received.path.display(),
-            received.bytes
-        );
-        Ok(())
-    }
-}
-
-/// The `fetch:` handler swoosh injects: the node acts as an HTTP client and streams an origin response back
-/// over the admitted stream. It carries its own SSRF guard, so it does not require the gate (a `--public
-/// fetch:` is a deliberate choice, not an accidental keyless shell).
-///
-/// It holds the operator's [`OriginAllowlist`] baked in at expose time (`serve news=fetch:https://news.example`):
-/// the handler refuses any request whose origin is not in the list before it connects. A bare `fetch:` bakes
-/// an EMPTY allowlist, which is unconstrained (any public origin), so an unscoped service is unchanged.
-struct Fetch {
-    allow: OriginAllowlist,
-}
-
-impl Handler for Fetch {
-    // OPT-IN: `fetch:` carries its own SSRF guard, so a `--public fetch:` is a deliberate choice, not an
-    // accidental keyless shell.
-    type Public = OptIn;
-
-    async fn serve(
-        &self,
-        _admitted: Admitted,
-        mut writer: BoxWrite,
-        mut reader: BoxRead,
-    ) -> eyre::Result<()> {
-        fetch::serve_fetch(&mut writer, &mut reader, &self.allow).await?;
-        Ok(())
-    }
-}
-
 /// The scheme a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE literal
 /// swoosh registers the handler under, not a re-typed string that could drift from it.
 const FETCH_SCHEME: &str = "fetch";
@@ -761,79 +708,6 @@ impl FetchExposure {
                  an unconstrained public fetch is an open relay"
             );
         }
-        Ok(())
-    }
-}
-
-/// The `ping:` handler swoosh injects: the cheap RTT half of reach diagnostics, behind the node's
-/// gate. It answers one ping run over the admitted stream and REFUSES a speed frame at the wire, so a grant
-/// for `ping` can never open the speed drain. GATED for now (an open gate over it, `--public
-/// ping:`, is a deliberate opt-out a node makes to advertise as a public ping responder); a member is
-/// admitted whole-node.
-struct Ping;
-
-impl Handler for Ping {
-    // OPT-IN: an open gate over it (`--public ping:`) is a deliberate opt-out a node makes to advertise as a
-    // public ping responder; a member is otherwise admitted whole-node.
-    type Public = OptIn;
-
-    async fn serve(
-        &self,
-        _admitted: Admitted,
-        mut writer: BoxWrite,
-        mut reader: BoxRead,
-    ) -> eyre::Result<()> {
-        measure::answer_ping(&mut writer, &mut reader).await?;
-        Ok(())
-    }
-}
-
-/// The `speed:` handler swoosh injects: the bandwidth-eating throughput half of reach diagnostics,
-/// behind the node's gate. It answers one speed transfer over the admitted stream and REFUSES a ping frame
-/// at the wire. GATED: `SpeedSource{None}` is a raw diagnostics drain with no responder-side bound yet, so
-/// an open gate over it is a saturable uplink handed to anyone; a node that DELIBERATELY wants to advertise
-/// as a public speedtest server opts in with `--public speed:`. The family gate is the terminator
-/// until the responder-side bound lands.
-struct Speed;
-
-impl Handler for Speed {
-    // OPT-IN: a node that DELIBERATELY wants to advertise as a public speedtest server opts in with
-    // `--public speed:`; otherwise the family gate is the terminator.
-    type Public = OptIn;
-
-    async fn serve(
-        &self,
-        _admitted: Admitted,
-        mut writer: BoxWrite,
-        mut reader: BoxRead,
-    ) -> eyre::Result<()> {
-        measure::answer_speed(&mut writer, &mut reader).await?;
-        Ok(())
-    }
-}
-
-/// The `sshd:` handler swoosh injects under the `ssh` feature: a keyless shell. GATED, because a keyless
-/// shell is remote code execution with no legitimate public use, so the gate IS its authentication; an open
-/// gate over it is refused at [`Exposer::new`]. Captures the ssh host-key seed the caller derived from
-/// swoosh's identity.
-#[cfg(feature = "ssh")]
-struct Sshd {
-    host_seed: [u8; 32],
-}
-
-#[cfg(feature = "ssh")]
-impl Handler for Sshd {
-    // NEVER: a keyless shell is remote code execution with no legitimate public use, so the gate IS its
-    // authentication; an open gate over it is refused at `Exposer::new`.
-    type Public = Never;
-
-    async fn serve(
-        &self,
-        admitted: Admitted,
-        writer: BoxWrite,
-        reader: BoxRead,
-    ) -> eyre::Result<()> {
-        sshh::serve(admitted, self.host_seed, writer, reader).await?;
         Ok(())
     }
 }
