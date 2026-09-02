@@ -141,3 +141,67 @@ pub async fn resolve(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credential::SheerLink;
+
+    /// An `Anonymous` credential (e.g. `forward`) resolves to NO badge: a deliberate stranger dial.
+    #[tokio::test]
+    async fn anonymous_presents_no_badge() {
+        let secret = Secret::ephemeral();
+        let resolved = resolve(Credential::Anonymous, &secret, None)
+            .await
+            .expect("anonymous resolves");
+        assert!(
+            resolved.into_present().is_none(),
+            "an Anonymous dial presents no badge"
+        );
+    }
+
+    /// A `Family` credential with no `--present` slip and no stored badge falls back to the signet
+    /// holder's self-sign, so it ALWAYS resolves to a badge, never `None`. This is the fleet/fetch fix
+    /// at the resolver: a family verb (the diagnostic verbs, `beam`, `stop`, `fleet`, and now `fetch`)
+    /// cannot reach a gated service carrying no badge, because `Family` has no arm that yields nothing.
+    #[tokio::test]
+    async fn family_without_slip_self_signs_a_badge() {
+        let secret = Secret::ephemeral();
+        let resolved = resolve(Credential::Family { present: None }, &secret, None)
+            .await
+            .expect("family resolves");
+        let link = resolved
+            .into_present()
+            .expect("a family dial always presents a badge (self-sign fallback)");
+        assert!(
+            link.starts_with("sheer:"),
+            "the presented badge is a sheer: capability link, got {link}"
+        );
+    }
+
+    /// A `Family` credential WITH a `--present` slip presents that slip verbatim: the delegate override
+    /// wins over the self-badge, the ONE place that rule now lives.
+    #[tokio::test]
+    async fn family_with_slip_presents_the_slip() {
+        let secret = Secret::ephemeral();
+        // A real, parseable `sheer:` link to stand in for a delegate's slip: mint one off a throwaway key.
+        let slip_text = Secret::ephemeral()
+            .member_badge()
+            .expect("mint a stand-in slip");
+        let slip: SheerLink = slip_text.parse().expect("the minted link is a valid SheerLink");
+        let resolved = resolve(
+            Credential::Family {
+                present: Some(slip),
+            },
+            &secret,
+            None,
+        )
+        .await
+        .expect("family-with-slip resolves");
+        assert_eq!(
+            resolved.into_present().as_deref(),
+            Some(slip_text.as_str()),
+            "an explicit --present slip overrides the self-badge"
+        );
+    }
+}

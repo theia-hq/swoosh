@@ -361,7 +361,11 @@ fn reason(status: u16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::origin_url;
+    use clap::Parser as _;
+
+    use super::{FetchCmd, origin_url};
+    use crate::credential::Credential;
+    use crate::reaching::Reaching as _;
 
     #[test]
     fn root_request_uses_the_base_verbatim() {
@@ -376,6 +380,34 @@ mod tests {
         assert_eq!(
             origin_url("https://api.example.com", "/users?id=5"),
             "https://api.example.com/users?id=5"
+        );
+    }
+
+    /// A thin clap wrapper so a test can parse a `FetchCmd` from a real argv the same way the binary does.
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        fetch: FetchCmd,
+    }
+
+    /// `swoosh fetch --via <peer>` is FAMILY-gated by default: its credential is `Family`, so the owner
+    /// reaching their OWN exit node presents the member badge (the fix for the owner-reaching-own-node
+    /// 403). Before this redesign `fetch` was `Anonymous`/slip-only and an owner with no slip was refused.
+    /// The identity derived from `Family` is `PersistedIfPresent`, so the self-badge roots correctly.
+    #[test]
+    fn fetch_is_family_gated_by_default_so_it_presents_a_badge() {
+        let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
+        let cmd = Wrap::try_parse_from(["swoosh", "http://example.com/x", "--via", &key])
+            .expect("fetch parses")
+            .fetch;
+        assert!(
+            matches!(cmd.credential(), Credential::Family { present: None }),
+            "fetch with no --present is Family (presents the member badge), not Anonymous"
+        );
+        assert_eq!(
+            cmd.identity(),
+            crate::identity::Identity::PersistedIfPresent,
+            "a Family credential fuses the identity to PersistedIfPresent so the self-badge roots"
         );
     }
 }
