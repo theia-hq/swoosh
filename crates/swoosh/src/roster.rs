@@ -216,6 +216,14 @@ impl RosterDoc {
 /// Cut a fresh signed roster: canonicalize `doc` and sign it with the signet `identity`, yielding the wire
 /// blob a `roster:` handler serves. The single CUT seam, so the canonicalize-then-sign pair is one call and
 /// a caller cannot sign bytes that are not this doc's canonical form.
+///
+/// DESIGN LOCK (delib-28, the one-writer rule): the SIGNET is the sole cutter. Only the signet SECRET can
+/// produce a signature the signet verifies, so cutting a roster requires the secret (this `identity`), and
+/// there is exactly ONE writer. SERVE (relaying an already-signed blob) needs only the bytes, so any member
+/// node may courier a roster, but none may cut one. Multi-writer is rejected by rule: two signet-holding
+/// devices cutting concurrently is not supported, which is what makes reconciliation trivial (highest epoch
+/// wins, a total order, because one writer never reuses an epoch). Any feature that would need a second
+/// writer (co-owned fleets, delegated cutting) is a new deliberation, not a roster change.
 pub fn cut(identity: &nauthy::Identity, doc: &RosterDoc) -> Vec<u8> {
     identity.sign_document(&doc.canonical_bytes()).encode()
 }

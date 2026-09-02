@@ -377,8 +377,9 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
         .collect();
     let epoch = Epoch(contacts.roster_epoch().unwrap_or(0));
     let doc = RosterDoc::new(epoch, members)?;
-    // The SIGNET is the sole cutter: only the secret can sign a roster that verifies against the signet, so
-    // `cut` here needs the live secret while `serve` (relay-only) needs just the resulting bytes.
+    // One-writer LOCK (delib-28): the SIGNET is the sole cutter. Cutting needs the live secret (only it
+    // signs a roster the signet verifies), so this path holds `secret`; a relay-only `serve` node holds
+    // just the bytes and cannot cut. See `roster::cut` for the full rule and why multi-writer is rejected.
     Ok(roster::cut(&secret.cap_identity()?, &doc))
 }
 
