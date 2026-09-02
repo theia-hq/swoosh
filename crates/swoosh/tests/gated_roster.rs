@@ -19,8 +19,8 @@ use bifrost::{CryptoKind, NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::{Denylist, Identity, VerifyKey};
 use std::sync::Arc;
-use swoosh::contacts::Contacts;
-use swoosh::roster::{self, Epoch, Member, RosterDoc, RosterLabel};
+use swoosh::contacts::{Contacts, DeviceLabel};
+use swoosh::roster::{self, Epoch, Member, RosterDoc};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Services};
 use tokio::io::AsyncReadExt as _;
@@ -59,11 +59,11 @@ async fn proof() {
         vec![
             Member {
                 node: VerifyKey::new([1u8; 32]),
-                label: "desk".parse::<RosterLabel>().unwrap(),
+                label: "desk".parse::<DeviceLabel>().unwrap(),
             },
             Member {
                 node: VerifyKey::new([2u8; 32]),
-                label: "ci-runner".parse::<RosterLabel>().unwrap(),
+                label: "ci-runner".parse::<DeviceLabel>().unwrap(),
             },
         ],
     )

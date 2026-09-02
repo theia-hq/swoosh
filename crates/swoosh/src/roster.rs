@@ -11,17 +11,20 @@
 //!
 //! A member entry is (who, what the operator calls it) and NOTHING else: no last-seen (a pattern-of-life
 //! oracle, delib-28 fix 1) and no capability (a roster that grants is a coordinator, delib-28 fix 2). Both
-//! are TYPE properties here, unrepresentable rather than merely omitted.
-
-use core::fmt;
-use core::str::FromStr;
+//! are TYPE properties here, unrepresentable rather than merely omitted. A member's label is a
+//! [`DeviceLabel`], the SAME type local contacts use: one label type, no lossy seam to cross.
 
 use nauthy::{SignError, Signed, VerifyKey};
 
+use crate::contacts::DeviceLabel;
+
 /// The domain-separating prefix over the signed bytes: a `MAGIC`-prefixed message this key signs can never
-/// be confused with a cap or anything else it signs, and the trailing version byte lets a later layout bump
-/// it so an old verifier refuses rather than misreads.
-const MAGIC: &[u8] = b"theia-roster\x01";
+/// be confused with a cap or anything else it signs.
+const MAGIC: &[u8] = b"theia-roster";
+
+/// The canonical-encoding version, appended after [`MAGIC`]. Bump to force an old verifier to refuse
+/// ([`RosterError::BadMagic`]) rather than misread a layout it does not know.
+const VERSION: u8 = 1;
 
 /// The maximum number of members [`RosterDoc::parse_canonical`] will parse from an untrusted blob. A DoS
 /// bound: a personal fleet is tiny, and a hostile courier must not make a puller allocate for a huge count
@@ -29,12 +32,36 @@ const MAGIC: &[u8] = b"theia-roster\x01";
 const MAX_MEMBERS: usize = 4096;
 
 /// Take `n` bytes from `bytes` at `*cur`, advancing the cursor, or [`RosterError::Truncated`] if the input
-/// runs out. Bounds-checked so untrusted input is a clean error, never a panic.
+/// runs out. Bounds-checked so untrusted input is a clean error, never a panic. The fixed-width readers
+/// ([`take_u64`], [`take_u32`], [`take_u16`], [`take_array`]) build on it.
 fn take<'a>(bytes: &'a [u8], cur: &mut usize, n: usize) -> Result<&'a [u8], RosterError> {
     let end = cur.checked_add(n).ok_or(RosterError::Truncated)?;
     let slice = bytes.get(*cur..end).ok_or(RosterError::Truncated)?;
     *cur = end;
     Ok(slice)
+}
+
+/// Read a big-endian `u64` off the cursor. `take` already returns exactly 8 bytes, so the `try_into` is
+/// infallible; it stays a clean error rather than an `expect`.
+fn take_u64(bytes: &[u8], cur: &mut usize) -> Result<u64, RosterError> {
+    Ok(u64::from_be_bytes(take_array::<8>(bytes, cur)?))
+}
+
+/// Read a big-endian `u32` off the cursor.
+fn take_u32(bytes: &[u8], cur: &mut usize) -> Result<u32, RosterError> {
+    Ok(u32::from_be_bytes(take_array::<4>(bytes, cur)?))
+}
+
+/// Read a big-endian `u16` off the cursor.
+fn take_u16(bytes: &[u8], cur: &mut usize) -> Result<u16, RosterError> {
+    Ok(u16::from_be_bytes(take_array::<2>(bytes, cur)?))
+}
+
+/// Read a fixed `N`-byte array off the cursor.
+fn take_array<const N: usize>(bytes: &[u8], cur: &mut usize) -> Result<[u8; N], RosterError> {
+    take(bytes, cur, N)?
+        .try_into()
+        .map_err(|_| RosterError::Truncated)
 }
 
 /// A monotonically-increasing version of an operator's roster, bumped each time the snapshot is re-cut (a
@@ -44,62 +71,15 @@ fn take<'a>(bytes: &'a [u8], cur: &mut usize, n: usize) -> Result<&'a [u8], Rost
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Epoch(pub u64);
 
-/// A member's advertised label: one non-empty segment, no slash, no whitespace or control bytes, bounded so
-/// the length-prefixed encoding is total. Parse-don't-validate at construction so the canonical encoding can
-/// never carry a byte that would reframe the signed bytes at the puller (a smuggled newline, a slash that
-/// reads as a path). STRICTER than a [`DeviceLabel`](crate::contacts::DeviceLabel): it adds a length bound
-/// and a control-byte reject the canonical encoding requires.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RosterLabel(String);
-
-impl RosterLabel {
-    /// The maximum label length in bytes. Small: a device label (`desk`, `ci-runner`) is never long, and a
-    /// bound keeps the `u16` length prefix in the canonical encoding total.
-    pub const MAX_LEN: usize = 255;
-
-    /// The label as a string slice.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl FromStr for RosterLabel {
-    type Err = RosterError;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if text.is_empty() {
-            return Err(RosterError::LabelEmpty);
-        }
-        if text.len() > Self::MAX_LEN {
-            return Err(RosterError::LabelTooLong);
-        }
-        if text.contains('/') {
-            return Err(RosterError::LabelSlash);
-        }
-        if text
-            .bytes()
-            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-        {
-            return Err(RosterError::LabelBadByte);
-        }
-        Ok(Self(text.to_owned()))
-    }
-}
-
-impl fmt::Display for RosterLabel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// One member advertisement: a fleet node's identity and the operator's own label for it, and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     /// The member node's identity: the key it is dialed at and its badge is bound to.
     pub node: VerifyKey,
     /// The operator's device label for this member (`ci-runner`, `desk`). A display/suggestion string, not
-    /// authority: the puller keeps its OWN petnames (names are local).
-    pub label: RosterLabel,
+    /// authority: the puller keeps its OWN petnames (names are local). The same [`DeviceLabel`] local
+    /// contacts use, so hydrating a member into contacts needs no re-parse.
+    pub label: DeviceLabel,
 }
 
 /// The membership snapshot an operator's signet vouches for: a set of members at an epoch. This is the
@@ -134,73 +114,74 @@ impl RosterDoc {
         &self.members
     }
 
-    /// The exact bytes that get signed and verified. Stable across runs and machines: the same logical doc
-    /// yields the same bytes yields the same signature. Layout (all integers big-endian): `MAGIC` domain
-    /// tag, then `epoch:u64`, then `member_count:u32`, then for each member in sorted order the raw
-    /// `node:[u8; 32]`, a `label_len:u16`, and the label's UTF-8 bytes. Fixed field order, fixed-width keys,
-    /// sorted members, and length-prefixed labels make it a pure function of the doc's content, so no
-    /// delimiter can be spoofed and no insertion order can change the signature.
+    /// The exact bytes that get signed and verified: a pure function of the doc's content, so the same
+    /// logical doc yields the same bytes yields the same signature. Fixed field order, fixed-width keys,
+    /// sorted members, and a length prefix on the only variable field (the label) mean no delimiter can be
+    /// spoofed and no insertion order can change the signature. The wire LAYOUT (shared by the parser):
+    ///
+    /// ```text
+    /// wire layout (all ints big-endian), a pure function of doc content:
+    ///   MAGIC          b"theia-roster"
+    ///   VERSION        u8
+    ///   epoch          u64
+    ///   count          u32                (<= MAX_MEMBERS on parse)
+    ///   per member x count, ascending by node:
+    ///     node         [u8; 32]
+    ///     label_len    u16                (<= DeviceLabel::MAX_LEN)
+    ///     label        [u8; label_len]    (UTF-8, no slash/whitespace/control)
+    /// ```
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(MAGIC.len() + 12 + self.members.len() * 40);
+        let mut out = Vec::with_capacity(MAGIC.len() + 13 + self.members.len() * 40);
         out.extend_from_slice(MAGIC);
+        out.push(VERSION);
         out.extend_from_slice(&self.epoch.0.to_be_bytes());
         // A fleet is small; the count never approaches u32::MAX, and the cast is deterministic.
         out.extend_from_slice(&(self.members.len() as u32).to_be_bytes());
         for member in &self.members {
             out.extend_from_slice(member.node.bytes());
-            let label = member.label.0.as_bytes();
-            // RosterLabel bounds the length to MAX_LEN (< u16::MAX), so this cast never truncates.
+            let label = member.label.as_str().as_bytes();
+            // DeviceLabel bounds the length to MAX_LEN (< u16::MAX), so this cast never truncates.
             out.extend_from_slice(&(label.len() as u16).to_be_bytes());
             out.extend_from_slice(label);
         }
         out
     }
 
-    /// Parse canonical bytes back into a doc. The inverse of [`canonical_bytes`](Self::canonical_bytes),
-    /// bounds-checked so untrusted input is a clean error. The whole blob must be consumed (no trailing
-    /// bytes) and the member list must already be strictly-ascending-by-node: a non-canonical or duplicate
-    /// order is REJECTED, not silently re-sorted, so the wire is non-malleable (one byte-string per doc).
+    /// Parse canonical bytes back into a doc. The inverse of [`canonical_bytes`](Self::canonical_bytes) over
+    /// the layout table documented there, bounds-checked so untrusted input is a clean error. The whole blob
+    /// must be consumed (no trailing bytes) and the member list must already be strictly-ascending-by-node:
+    /// a non-canonical or duplicate order is REJECTED, not silently re-sorted, so the wire is non-malleable
+    /// (one byte-string per doc).
     pub fn parse_canonical(bytes: &[u8]) -> Result<Self, RosterError> {
         let mut cur = 0;
-        if take(bytes, &mut cur, MAGIC.len())? != MAGIC {
+        if take(bytes, &mut cur, MAGIC.len())? != MAGIC
+            || take_array::<1>(bytes, &mut cur)?[0] != VERSION
+        {
             return Err(RosterError::BadMagic);
         }
-        let epoch = Epoch(u64::from_be_bytes(
-            take(bytes, &mut cur, 8)?
-                .try_into()
-                .map_err(|_| RosterError::Truncated)?,
-        ));
-        let count = u32::from_be_bytes(
-            take(bytes, &mut cur, 4)?
-                .try_into()
-                .map_err(|_| RosterError::Truncated)?,
-        ) as usize;
+        let epoch = Epoch(take_u64(bytes, &mut cur)?);
+        let count = take_u32(bytes, &mut cur)? as usize;
         if count > MAX_MEMBERS {
             return Err(RosterError::TooManyMembers);
         }
         let mut members = Vec::with_capacity(count);
         for _ in 0..count {
-            let node: [u8; VerifyKey::LEN] = take(bytes, &mut cur, VerifyKey::LEN)?
-                .try_into()
-                .map_err(|_| RosterError::Truncated)?;
-            let label_len = usize::from(u16::from_be_bytes(
-                take(bytes, &mut cur, 2)?
-                    .try_into()
-                    .map_err(|_| RosterError::Truncated)?,
-            ));
-            let label = core::str::from_utf8(take(bytes, &mut cur, label_len)?)
-                .map_err(|_| RosterError::LabelBadByte)?
-                .parse()?;
-            let node = VerifyKey::new(node);
+            let node = VerifyKey::new(take_array::<{ VerifyKey::LEN }>(bytes, &mut cur)?);
+            let label_len = usize::from(take_u16(bytes, &mut cur)?);
+            let text = core::str::from_utf8(take(bytes, &mut cur, label_len)?)
+                .map_err(|_| RosterError::BadLabel("not valid UTF-8"))?;
+            let label = text.parse::<DeviceLabel>().map_err(|_| {
+                RosterError::BadLabel("empty, too long, or held a slash/whitespace/control byte")
+            })?;
             // Reject rather than re-sort: the members must arrive strictly-ascending-by-node, so a permuted
             // or duplicated wire (which would decode to the same logical doc under a re-sort) is refused and
             // the wire stays canonical, one byte-string per doc. `new`'s sort is the CUT-side canonicalizer;
             // the parse side proves the bytes were already canonical.
-            if let Some(previous) = members.last() {
-                let previous: &Member = previous;
-                if node.bytes() <= previous.node.bytes() {
-                    return Err(RosterError::NonCanonicalOrder);
-                }
+            if members
+                .last()
+                .is_some_and(|previous: &Member| node.bytes() <= previous.node.bytes())
+            {
+                return Err(RosterError::NonCanonicalOrder);
             }
             members.push(Member { node, label });
         }
@@ -254,26 +235,20 @@ pub enum RosterVerifyError {
 /// Why a roster could not be built or parsed.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RosterError {
-    /// A member label was empty.
-    #[error("roster label is empty")]
-    LabelEmpty,
-    /// A member label exceeded [`RosterLabel::MAX_LEN`].
-    #[error("roster label is too long")]
-    LabelTooLong,
-    /// A member label contained a `/`.
-    #[error("roster label cannot contain '/'")]
-    LabelSlash,
-    /// A member label contained whitespace or a control byte.
-    #[error("roster label cannot contain whitespace or control bytes")]
-    LabelBadByte,
+    /// A member label was not a valid device label (empty, too long, or held a slash/whitespace/control
+    /// byte, or was not valid UTF-8). One variant carrying the reason: a caller never branches on WHICH
+    /// label rule failed, only that one did.
+    #[error("invalid roster label: {0}")]
+    BadLabel(&'static str),
     /// Two members shared one node identity.
     #[error("roster lists node {0} twice")]
     DuplicateNode(VerifyKey),
     /// The members were not strictly ascending by node on the wire (a non-canonical or duplicate order).
     #[error("roster members are not in canonical order")]
     NonCanonicalOrder,
-    /// The blob's leading magic did not match: not a roster, or a version this build does not know.
-    #[error("not a roster (bad magic)")]
+    /// The blob's leading magic or version did not match: not a roster, or a version this build does not
+    /// know.
+    #[error("not a roster (bad magic or version)")]
     BadMagic,
     /// The blob ended before a field was complete, or carried trailing bytes.
     #[error("roster blob is truncated or malformed")]

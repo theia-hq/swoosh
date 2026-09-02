@@ -8,7 +8,8 @@ use core::str::FromStr as _;
 
 use nauthy::{Identity, SignError, VerifyKey};
 
-use super::{Epoch, Member, RosterDoc, RosterError, RosterLabel, RosterVerifyError};
+use super::{Epoch, Member, RosterDoc, RosterError, RosterVerifyError};
+use crate::contacts::DeviceLabel;
 
 /// A deterministic signing identity for the sign/verify tests.
 fn identity(seed: u8) -> Identity {
@@ -26,7 +27,7 @@ fn key(n: u8) -> VerifyKey {
 fn member(node: u8, label: &str) -> Member {
     Member {
         node: key(node),
-        label: RosterLabel::from_str(label).unwrap(),
+        label: DeviceLabel::from_str(label).unwrap(),
     }
 }
 
@@ -46,7 +47,8 @@ fn canonical_bytes_change_with_every_field() {
     let other_epoch = RosterDoc::new(Epoch(2), vec![member(1, "desk")]).unwrap();
     let other_node = RosterDoc::new(Epoch(1), vec![member(9, "desk")]).unwrap();
     let other_label = RosterDoc::new(Epoch(1), vec![member(1, "phone")]).unwrap();
-    let extra_member = RosterDoc::new(Epoch(1), vec![member(1, "desk"), member(2, "phone")]).unwrap();
+    let extra_member =
+        RosterDoc::new(Epoch(1), vec![member(1, "desk"), member(2, "phone")]).unwrap();
 
     let bytes = base.canonical_bytes();
     assert_ne!(bytes, other_epoch.canonical_bytes());
@@ -64,16 +66,21 @@ fn canonical_bytes_are_domain_separated() {
 }
 
 #[test]
-fn labels_reject_ambiguous_bytes() {
-    assert_eq!(RosterLabel::from_str(""), Err(RosterError::LabelEmpty));
-    assert_eq!(RosterLabel::from_str("a/b"), Err(RosterError::LabelSlash));
-    assert_eq!(RosterLabel::from_str("a b"), Err(RosterError::LabelBadByte));
-    assert_eq!(RosterLabel::from_str("a\nb"), Err(RosterError::LabelBadByte));
-    assert_eq!(
-        RosterLabel::from_str(&"x".repeat(RosterLabel::MAX_LEN + 1)),
-        Err(RosterError::LabelTooLong)
-    );
-    assert!(RosterLabel::from_str("ci-runner").is_ok());
+fn parse_rejects_a_bad_label_byte_on_the_wire() {
+    // A wire label carrying a control byte (which DeviceLabel forbids) is refused as a BadLabel, so a
+    // smuggled newline can never reframe a later field in the signed bytes.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"theia-roster\x01");
+    bytes.extend_from_slice(&7u64.to_be_bytes());
+    bytes.extend_from_slice(&1u32.to_be_bytes());
+    bytes.extend_from_slice(&[1u8; 32]);
+    let label = b"de\nsk";
+    bytes.extend_from_slice(&(label.len() as u16).to_be_bytes());
+    bytes.extend_from_slice(label);
+    assert!(matches!(
+        RosterDoc::parse_canonical(&bytes),
+        Err(RosterError::BadLabel(_))
+    ));
 }
 
 #[test]
@@ -84,7 +91,11 @@ fn new_rejects_a_duplicate_node() {
 
 #[test]
 fn new_sorts_members_by_node() {
-    let doc = RosterDoc::new(Epoch(1), vec![member(5, "e"), member(1, "a"), member(3, "c")]).unwrap();
+    let doc = RosterDoc::new(
+        Epoch(1),
+        vec![member(5, "e"), member(1, "a"), member(3, "c")],
+    )
+    .unwrap();
     let nodes: Vec<_> = doc.members().iter().map(|m| *m.node.bytes()).collect();
     assert_eq!(nodes, vec![[1u8; 32], [3u8; 32], [5u8; 32]]);
 }

@@ -30,7 +30,7 @@ use tokio::io::AsyncWriteExt as _;
 
 use crate::contacts::{Contacts, Petname};
 use crate::identity::Secret;
-use crate::roster::{self, Epoch, Member, RosterDoc, RosterLabel};
+use crate::roster::{self, Epoch, Member, RosterDoc};
 use crate::transport::ReachArgs;
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
@@ -356,23 +356,16 @@ pub fn registry(host_seed: [u8; 32], beam_out: PathBuf) -> eyre::Result<Registry
 /// The epoch is READ from the persisted roster epoch beside the contacts (default 0 before any is set), so
 /// the puller's anti-rollback floor is not pinned at 0. The BUMP verb (a `swoosh fleet cut` that increments
 /// and re-signs) is deferred to B2; today the read is real, so once the counter advances the floor tracks
-/// it. A `me` device whose label is not a valid roster label is skipped LOUDLY (a warning) rather than
-/// aborting the whole roster.
+/// it. A member's label IS a [`DeviceLabel`], the same type contacts hold, so there is no lossy re-parse.
 pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>> {
     let me: Petname = "me".parse()?;
     let members: Vec<Member> = contacts
         .devices(&me)
         .into_iter()
         .flatten()
-        .filter_map(|(label, node)| match label.as_str().parse::<RosterLabel>() {
-            Ok(label) => Some(Member {
-                node: VerifyKey::new(*node.key()),
-                label,
-            }),
-            Err(error) => {
-                eprintln!("warning: excluding me/{label} from the served roster ({error})");
-                None
-            }
+        .map(|(label, node)| Member {
+            node: VerifyKey::new(*node.key()),
+            label: label.clone(),
         })
         .collect();
     let epoch = Epoch(contacts.roster_epoch().unwrap_or(0));

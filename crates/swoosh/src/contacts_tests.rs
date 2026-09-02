@@ -140,6 +140,30 @@ fn target_resolve_passes_a_raw_key_through_without_the_store() {
 }
 
 #[test]
+fn device_label_rejects_length_and_control_bytes() {
+    // The unified label type gains the length bound and control-byte reject the roster codec requires, so
+    // these hold for local contacts and roster members alike.
+    assert_eq!("".parse::<DeviceLabel>(), Err(DeviceLabelParseError::Empty));
+    assert_eq!(
+        "a/b".parse::<DeviceLabel>(),
+        Err(DeviceLabelParseError::Slash)
+    );
+    assert_eq!(
+        "a b".parse::<DeviceLabel>(),
+        Err(DeviceLabelParseError::BadByte)
+    );
+    assert_eq!(
+        "a\nb".parse::<DeviceLabel>(),
+        Err(DeviceLabelParseError::BadByte)
+    );
+    assert_eq!(
+        "x".repeat(DeviceLabel::MAX_LEN + 1).parse::<DeviceLabel>(),
+        Err(DeviceLabelParseError::TooLong)
+    );
+    assert!("ci-runner".parse::<DeviceLabel>().is_ok());
+}
+
+#[test]
 fn remove_drops_a_device_then_the_now_empty_person() {
     let mut contacts = Contacts::default();
     contacts.add(petname("alice"), Some(device("macbook")), node(1));
@@ -199,14 +223,14 @@ async fn store_roundtrips_across_reload() {
 
 use nauthy::VerifyKey;
 
-use crate::roster::{Epoch, Member, RosterDoc, RosterLabel};
+use crate::roster::{Epoch, Member, RosterDoc};
 
 /// A roster member whose node id is the all-`seed`-byte key, so it hydrates to the same [`node`] fixture,
 /// which doubles as a check that the `VerifyKey -> NodeId` conversion preserves the bytes.
 fn roster_member(seed: u8, label: &str) -> Member {
     Member {
         node: VerifyKey::new([seed; 32]),
-        label: label.parse::<RosterLabel>().expect("valid roster label"),
+        label: label.parse::<DeviceLabel>().expect("valid device label"),
     }
 }
 

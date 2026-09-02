@@ -89,8 +89,12 @@ pub enum PetnameParseError {
 
 /// A label for one device under a petname (`macbook`, `iphone`).
 ///
-/// Same single-segment discipline as a [`Petname`]. A bare `contact add alice <key>` (no `/device`) uses
-/// the reserved [`DEFAULT`](Self::DEFAULT) slot, so a person addressed without a device still resolves.
+/// Same single-segment discipline as a [`Petname`], plus a length bound and a control-byte reject the
+/// signed-roster encoding requires: this is the ONE label type, used both for local contacts and for a
+/// member in a [`RosterDoc`](crate::roster::RosterDoc), so the codec's `u16` length prefix stays total and
+/// no smuggled control byte can reframe the signed bytes at a puller. A bare `contact add alice <key>` (no
+/// `/device`) uses the reserved [`DEFAULT`](Self::DEFAULT) slot, so a person addressed without a device
+/// still resolves.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceLabel(String);
 
@@ -98,6 +102,10 @@ impl DeviceLabel {
     /// The slot a device-less `contact add alice <key>` occupies. Sorts before named devices, so an
     /// unqualified person resolves to their default device first.
     pub const DEFAULT: &'static str = "default";
+
+    /// The maximum label length in bytes. Small: a device label (`desk`, `macbook`) is never long, and a
+    /// bound keeps the `u16` length prefix in the roster's canonical encoding total.
+    pub const MAX_LEN: usize = 255;
 
     /// The underlying label, for display and lookup.
     pub fn as_str(&self) -> &str {
@@ -113,11 +121,20 @@ impl FromStr for DeviceLabel {
         if text.is_empty() {
             return Err(DeviceLabelParseError::Empty);
         }
+        if text.len() > Self::MAX_LEN {
+            return Err(DeviceLabelParseError::TooLong);
+        }
         if text.contains('/') {
             return Err(DeviceLabelParseError::Slash);
         }
-        if text.chars().any(char::is_whitespace) {
-            return Err(DeviceLabelParseError::Whitespace);
+        // Reject whitespace AND other control bytes: whitespace keeps a label a single word, and a control
+        // byte (a smuggled newline) must never enter the roster's signed bytes where it could reframe a
+        // later field.
+        if text
+            .bytes()
+            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
+        {
+            return Err(DeviceLabelParseError::BadByte);
         }
         Ok(Self(text.to_owned()))
     }
@@ -135,12 +152,15 @@ pub enum DeviceLabelParseError {
     /// The label was empty (a trailing `alice/` with nothing after the slash).
     #[error("device label is empty")]
     Empty,
+    /// The label exceeded [`DeviceLabel::MAX_LEN`].
+    #[error("device label is too long")]
+    TooLong,
     /// The label held a further `/`; a device address is exactly `<petname>/<device>`, one level deep.
     #[error("device label cannot contain '/'")]
     Slash,
-    /// The label held whitespace.
-    #[error("device label cannot contain whitespace")]
-    Whitespace,
+    /// The label held whitespace or another control byte.
+    #[error("device label cannot contain whitespace or control bytes")]
+    BadByte,
 }
 
 /// A `<petname>` or `<petname>/<device>` address, as typed on the command line.
@@ -335,8 +355,6 @@ impl Contacts {
     /// A `HandTyped` binding under `me` is NEVER touched (the operator's local choice is sovereign, and a
     /// member is only a suggestion); only `Roster`-sourced entries are in the replace-set. Only the `me`
     /// partition is touched: other petnames (people you know) are never rewritten by your own fleet roster.
-    /// A member whose label is not a valid device label is skipped LOUDLY (a warning), never silently, so a
-    /// vanished member is operator-visible.
     pub fn hydrate(&mut self, roster: &RosterDoc) -> bool {
         let epoch = roster.epoch().0;
         // Refuse a stale or same-epoch snapshot before touching anything: the whole-doc floor is what kills
@@ -350,24 +368,15 @@ impl Contacts {
         // entry never enters the drop-set, so the operator's local choice survives.
         group.retain(|_, binding| binding.source == Source::HandTyped);
         for member in roster.members() {
-            let device = match member.label.as_str().parse::<DeviceLabel>() {
-                Ok(device) => device,
-                Err(error) => {
-                    eprintln!(
-                        "warning: skipping fleet member '{}' ({error})",
-                        member.label
-                    );
-                    continue;
-                }
-            };
-            // A HandTyped binding is sovereign and was kept by `retain`; never clobber it with a member.
-            if let Entry::Occupied(entry) = group.entry(device.clone()) {
+            // The label is already a `DeviceLabel` (one label type across the seam), so there is no lossy
+            // re-parse here. A HandTyped binding is sovereign and was kept by `retain`; never clobber it.
+            if let Entry::Occupied(entry) = group.entry(member.label.clone()) {
                 if entry.get().source == Source::HandTyped {
                     continue;
                 }
             }
             group.insert(
-                device,
+                member.label.clone(),
                 Binding {
                     node: NodeId::new(CryptoKind::Ed25519, *member.node.bytes()),
                     source: Source::Roster { epoch },
