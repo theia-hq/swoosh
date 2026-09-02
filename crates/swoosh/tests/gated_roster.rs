@@ -79,7 +79,7 @@ async fn proof() {
         let gate = tunnel::resolve_gate(false, Some(signet_id), empty_denylist("host").await).unwrap();
         let registry = swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir())
             .unwrap()
-            .with("roster", swoosh::commands::serve::roster_handler(blob));
+            .with("roster", swoosh::commands::serve::Roster::new(blob));
         Exposer::new(services, registry, gate)
             .unwrap()
             .run(&host, CancellationToken::new())

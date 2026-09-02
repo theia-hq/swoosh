@@ -20,10 +20,12 @@ use std::sync::Arc;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
-use futures::FutureExt as _;
-use nauthy::{Denylist, Epoch, Member, RosterDoc, RosterLabel, VerifyKey};
+use nauthy::{Admitted, Denylist, Epoch, Member, RosterDoc, RosterLabel, VerifyKey};
 use tightbeam::duration::Lifetime;
-use tightbeam::tunnel::{self, CancellationToken, Exposer, Handler, Registry, ServeFn, Services};
+use tightbeam::open_policy::{Never, OptIn};
+use tightbeam::tunnel::{
+    self, BoxRead, BoxWrite, CancellationToken, Exposer, Handler, Registry, Services,
+};
 use tokio::io::AsyncWriteExt as _;
 
 use crate::contacts::{Contacts, Petname};
@@ -116,8 +118,8 @@ impl ServeCmd {
         // not serve. The `control.stop` handler is added over the shared base registry with a CLONE of the
         // cancel token, so an admitted caller that reaches it requests the same graceful teardown.
         let registry = registry(host_seed, self.out.clone())?
-            .with("roster", roster_handler(roster_blob))
-            .with(CONTROL_STOP_SERVICE, stop_handler(cancel.clone()));
+            .with("roster", Roster::new(roster_blob))
+            .with(CONTROL_STOP_SERVICE, Stop::new(cancel.clone()));
         let exposer = Exposer::new(services.clone(), registry, gate)?;
 
         if !self.quiet {
@@ -231,12 +233,12 @@ fn humanize(duration: core::time::Duration) -> String {
 /// identical registry swoosh serves rather than a hand-rolled near-copy.
 pub fn registry(host_seed: [u8; 32], beam_out: PathBuf) -> eyre::Result<Registry> {
     let registry = Registry::new()
-        .with("fetch", fetch_handler())
-        .with("ping", ping_handler())
-        .with("speed", speed_handler())
-        .with("beam", beam_handler(beam_out));
+        .with("fetch", Fetch)
+        .with("ping", Ping)
+        .with("speed", Speed)
+        .with("beam", Beam::new(beam_out));
     #[cfg(feature = "ssh")]
-    let registry = registry.with("sshd", sshd_handler(host_seed));
+    let registry = registry.with("sshd", Sshd { host_seed });
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
     Ok(registry)
@@ -273,17 +275,31 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
 /// this node merely serves a pre-cut snapshot, so a popped courier leaks a read of a member-known set, never
 /// authority (the signing secret is not needed to serve, only to have signed). The blob is self-delimiting
 /// and signature-validated by the puller, so the handler just writes it and closes the write half.
-pub fn roster_handler(blob: Arc<Vec<u8>>) -> Handler {
-    let serve: ServeFn = Arc::new(move |_admitted, mut writer, _reader| {
-        let blob = Arc::clone(&blob);
-        async move {
-            writer.write_all(&blob).await?;
-            writer.shutdown().await?;
-            Ok(())
-        }
-        .boxed()
-    });
-    Handler::gated(serve)
+pub struct Roster {
+    blob: Arc<Vec<u8>>,
+}
+
+impl Roster {
+    /// Build the `roster:` handler over the pre-cut, signet-signed membership snapshot it serves.
+    pub fn new(blob: Arc<Vec<u8>>) -> Self {
+        Self { blob }
+    }
+}
+
+impl Handler for Roster {
+    // GATED (a stranger must never read the member set: delib-28 containment): no legitimate public use.
+    type Public = Never;
+
+    async fn serve(
+        &self,
+        _admitted: Admitted,
+        mut writer: BoxWrite,
+        _reader: BoxRead,
+    ) -> eyre::Result<()> {
+        writer.write_all(&self.blob).await?;
+        writer.shutdown().await?;
+        Ok(())
+    }
 }
 
 /// The `control.stop` handler swoosh injects: the remote node-lifecycle stop. It holds a CLONE of the
@@ -305,20 +321,35 @@ pub fn roster_handler(blob: Arc<Vec<u8>>) -> Handler {
 ///
 /// Public so the `gated_stop` proof drives the SAME handler `serve` injects, not a hand-rolled near-copy,
 /// exactly as the `gated_measure` proof reuses `registry`.
-pub fn stop_handler(cancel: CancellationToken) -> Handler {
-    let serve: ServeFn = Arc::new(move |_admitted, mut writer, _reader| {
-        let cancel = cancel.clone();
-        async move {
-            cancel.cancel();
-            // The ack byte: proof to the client that the stop landed. Written after the cancel so a client
-            // reading it knows the teardown was requested, then flushed since the node is about to close.
-            writer.write_all(&[STOP_ACK]).await?;
-            writer.flush().await?;
-            Ok(())
-        }
-        .boxed()
-    });
-    Handler::gated(serve)
+pub struct Stop {
+    cancel: CancellationToken,
+}
+
+impl Stop {
+    /// Build the `control.stop` handler holding a CLONE of the node's teardown token as the node-control
+    /// capability (never a node handle): an admitted caller REQUESTS the graceful teardown by cancelling it.
+    pub fn new(cancel: CancellationToken) -> Self {
+        Self { cancel }
+    }
+}
+
+impl Handler for Stop {
+    // GATED: stopping the node is a mutation with no safe public form; the family gate is its authentication.
+    type Public = Never;
+
+    async fn serve(
+        &self,
+        _admitted: Admitted,
+        mut writer: BoxWrite,
+        _reader: BoxRead,
+    ) -> eyre::Result<()> {
+        self.cancel.cancel();
+        // The ack byte: proof to the client that the stop landed. Written after the cancel so a client
+        // reading it knows the teardown was requested, then flushed since the node is about to close.
+        writer.write_all(&[STOP_ACK]).await?;
+        writer.flush().await?;
+        Ok(())
+    }
 }
 
 /// The single byte `control.stop` writes to confirm the stop was actioned. Any value works (the client only
@@ -331,38 +362,63 @@ pub const STOP_ACK: u8 = b'.';
 /// auth of its own would let anyone write files into the node's output directory; the gate IS its
 /// authentication. Each stream gets a unique tag from a shared counter, so concurrent pushes never contend
 /// for the same temp file.
-fn beam_handler(out: PathBuf) -> Handler {
-    let out = Arc::new(out);
-    let next_tag = Arc::new(AtomicU64::new(0));
-    let serve: ServeFn = Arc::new(move |_admitted, writer, reader| {
-        let out = Arc::clone(&out);
-        let tag = next_tag.fetch_add(1, Ordering::Relaxed);
-        async move {
-            let received = beam::receive_file(writer, reader, &out, tag).await?;
-            println!(
-                "received {} ({} bytes)",
-                received.path.display(),
-                received.bytes
-            );
-            Ok(())
+struct Beam {
+    out: PathBuf,
+    next_tag: AtomicU64,
+}
+
+impl Beam {
+    fn new(out: PathBuf) -> Self {
+        Self {
+            out,
+            next_tag: AtomicU64::new(0),
         }
-        .boxed()
-    });
-    Handler::gated(serve)
+    }
+}
+
+impl Handler for Beam {
+    // GATED: a receive service with no auth of its own would let anyone write files into the node's output
+    // directory; the gate IS its authentication.
+    type Public = Never;
+
+    async fn serve(
+        &self,
+        _admitted: Admitted,
+        writer: BoxWrite,
+        reader: BoxRead,
+    ) -> eyre::Result<()> {
+        // Each stream gets a unique tag from the shared counter, so concurrent pushes never contend for the
+        // same temp file.
+        let tag = self.next_tag.fetch_add(1, Ordering::Relaxed);
+        let received = beam::receive_file(writer, reader, &self.out, tag).await?;
+        println!(
+            "received {} ({} bytes)",
+            received.path.display(),
+            received.bytes
+        );
+        Ok(())
+    }
 }
 
 /// The `fetch:` handler swoosh injects: the node acts as an HTTP client and streams an origin response back
 /// over the admitted stream. It carries its own SSRF guard, so it does not require the gate (a `--public
 /// fetch:` is a deliberate choice, not an accidental keyless shell).
-fn fetch_handler() -> Handler {
-    let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
-        async move {
-            fetch::serve_fetch(&mut writer, &mut reader).await?;
-            Ok(())
-        }
-        .boxed()
-    });
-    Handler::open(serve)
+struct Fetch;
+
+impl Handler for Fetch {
+    // OPT-IN: `fetch:` carries its own SSRF guard, so a `--public fetch:` is a deliberate choice, not an
+    // accidental keyless shell.
+    type Public = OptIn;
+
+    async fn serve(
+        &self,
+        _admitted: Admitted,
+        mut writer: BoxWrite,
+        mut reader: BoxRead,
+    ) -> eyre::Result<()> {
+        fetch::serve_fetch(&mut writer, &mut reader).await?;
+        Ok(())
+    }
 }
 
 /// The `ping:` handler swoosh injects: the cheap RTT half of reach diagnostics, behind the node's
@@ -370,15 +426,22 @@ fn fetch_handler() -> Handler {
 /// for `ping` can never open the speed drain. GATED for now (an open gate over it, `--public
 /// ping:`, is a deliberate opt-out a node makes to advertise as a public ping responder); a member is
 /// admitted whole-node.
-fn ping_handler() -> Handler {
-    let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
-        async move {
-            measure::answer_ping(&mut writer, &mut reader).await?;
-            Ok(())
-        }
-        .boxed()
-    });
-    Handler::gated(serve)
+struct Ping;
+
+impl Handler for Ping {
+    // OPT-IN: an open gate over it (`--public ping:`) is a deliberate opt-out a node makes to advertise as a
+    // public ping responder; a member is otherwise admitted whole-node.
+    type Public = OptIn;
+
+    async fn serve(
+        &self,
+        _admitted: Admitted,
+        mut writer: BoxWrite,
+        mut reader: BoxRead,
+    ) -> eyre::Result<()> {
+        measure::answer_ping(&mut writer, &mut reader).await?;
+        Ok(())
+    }
 }
 
 /// The `speed:` handler swoosh injects: the bandwidth-eating throughput half of reach diagnostics,
@@ -387,15 +450,22 @@ fn ping_handler() -> Handler {
 /// an open gate over it is a saturable uplink handed to anyone; a node that DELIBERATELY wants to advertise
 /// as a public speedtest server opts in with `--public speed:`. The family gate is the terminator
 /// until the responder-side bound lands.
-fn speed_handler() -> Handler {
-    let serve: ServeFn = Arc::new(|_admitted, mut writer, mut reader| {
-        async move {
-            measure::answer_speed(&mut writer, &mut reader).await?;
-            Ok(())
-        }
-        .boxed()
-    });
-    Handler::gated(serve)
+struct Speed;
+
+impl Handler for Speed {
+    // OPT-IN: a node that DELIBERATELY wants to advertise as a public speedtest server opts in with
+    // `--public speed:`; otherwise the family gate is the terminator.
+    type Public = OptIn;
+
+    async fn serve(
+        &self,
+        _admitted: Admitted,
+        mut writer: BoxWrite,
+        mut reader: BoxRead,
+    ) -> eyre::Result<()> {
+        measure::answer_speed(&mut writer, &mut reader).await?;
+        Ok(())
+    }
 }
 
 /// The `sshd:` handler swoosh injects under the `ssh` feature: a keyless shell. GATED, because a keyless
@@ -403,13 +473,23 @@ fn speed_handler() -> Handler {
 /// gate over it is refused at [`Exposer::new`]. Captures the ssh host-key seed the caller derived from
 /// swoosh's identity.
 #[cfg(feature = "ssh")]
-fn sshd_handler(host_seed: [u8; 32]) -> Handler {
-    let serve: ServeFn = Arc::new(move |admitted, writer, reader| {
-        async move {
-            sshh::serve(admitted, host_seed, writer, reader).await?;
-            Ok(())
-        }
-        .boxed()
-    });
-    Handler::gated(serve)
+struct Sshd {
+    host_seed: [u8; 32],
+}
+
+#[cfg(feature = "ssh")]
+impl Handler for Sshd {
+    // NEVER: a keyless shell is remote code execution with no legitimate public use, so the gate IS its
+    // authentication; an open gate over it is refused at `Exposer::new`.
+    type Public = Never;
+
+    async fn serve(
+        &self,
+        admitted: Admitted,
+        writer: BoxWrite,
+        reader: BoxRead,
+    ) -> eyre::Result<()> {
+        sshh::serve(admitted, self.host_seed, writer, reader).await?;
+        Ok(())
+    }
 }

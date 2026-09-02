@@ -25,7 +25,7 @@ use core::time::Duration;
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::{Denylist, Identity};
-use swoosh::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK, stop_handler};
+use swoosh::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Registry, Services};
 use tokio::io::AsyncReadExt as _;
@@ -163,7 +163,7 @@ async fn build_exposer(cancel: CancellationToken) -> Exposer {
     let services =
         Services::parse(&[format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:")]).unwrap();
     let gate = tunnel::resolve_gate(false, Some(signet), empty_denylist().await).unwrap();
-    let registry = Registry::new().with(CONTROL_STOP_SERVICE, stop_handler(cancel));
+    let registry = Registry::new().with(CONTROL_STOP_SERVICE, Stop::new(cancel));
     Exposer::new(services, registry, gate).unwrap()
 }
 
