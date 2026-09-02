@@ -17,45 +17,41 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ::fetch::OriginAllowlist;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
-use fetch::OriginAllowlist;
 use nauthy::{Denylist, Gate, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{self, CancellationToken, Exposer, Registry, Services};
 
 use crate::contacts::{Contacts, Petname};
 use crate::identity::Secret;
-use crate::roster::{self, Epoch, Member, RosterDoc};
+use crate::roster::{Epoch, Member, RosterDoc};
 use crate::transport::ReachArgs;
 
-#[path = "serve_beam.rs"]
-mod serve_beam;
-#[path = "serve_fetch.rs"]
-mod serve_fetch;
-#[path = "serve_ping.rs"]
-mod serve_ping;
-#[path = "serve_roster.rs"]
-mod serve_roster;
-#[path = "serve_services.rs"]
-mod serve_services;
-#[path = "serve_speed.rs"]
-mod serve_speed;
+mod beam;
+mod fetch;
+mod ping;
+mod roster;
+mod services;
+mod speed;
 #[cfg(feature = "ssh")]
-#[path = "serve_sshd.rs"]
-mod serve_sshd;
-#[path = "serve_stop.rs"]
-mod serve_stop;
+mod sshd;
+mod stop;
 
-use serve_beam::Beam;
-use serve_fetch::Fetch;
-use serve_ping::Ping;
-pub use serve_roster::Roster;
-pub use serve_services::ServiceList;
-use serve_speed::Speed;
+// These are all `self::` submodules: `beam` and `fetch` share a name with the extern crates they shadow, so
+// the handler types come through `self::` and the crates are reached as `::beam` / `::fetch` (the
+// `::fetch::OriginAllowlist` import above); `roster` likewise shadows `crate::roster`, reached in full above.
+// The rest take `self::` too, so the whole set reads as one local-submodule import group.
+use self::beam::Beam;
+use self::fetch::Fetch;
+use self::ping::Ping;
+pub use self::roster::Roster;
+pub use self::services::ServiceList;
+use self::speed::Speed;
 #[cfg(feature = "ssh")]
-use serve_sshd::Sshd;
-pub use serve_stop::{STOP_ACK, Stop};
+use self::sshd::Sshd;
+pub use self::stop::{STOP_ACK, Stop};
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
 /// teardown (the remote twin of a local Ctrl-C or a `--for` deadline). The client verb is `swoosh stop`.
@@ -500,7 +496,7 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
     // One-writer LOCK (delib-28): the SIGNET is the sole cutter. Cutting needs the live secret (only it
     // signs a roster the signet verifies), so this path holds `secret`; a relay-only `serve` node holds
     // just the bytes and cannot cut. See `roster::cut` for the full rule and why multi-writer is rejected.
-    Ok(roster::cut(&secret.cap_identity()?, &doc))
+    Ok(crate::roster::cut(&secret.cap_identity()?, &doc))
 }
 
 /// The scheme a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE literal
