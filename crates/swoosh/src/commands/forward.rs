@@ -17,7 +17,7 @@ use crate::transport::ReachArgs;
 /// Bind a peer's served service to a local port, stream it to stdout, or a reserved unix listener.
 #[derive(Debug, Args)]
 pub struct ForwardCmd {
-    /// who to reach: a raw node id, or a `sheer:` capability link
+    /// who to reach: a saved petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` capability link
     // Field is `node`, not `peer`: the clap arg id derives from the field name, so a `peer` field would
     // collide with the `--peer` dial hint in the flattened `ReachArgs`. `value_name` keeps usage as `<peer>`.
     #[arg(value_name = "peer")]
@@ -53,16 +53,25 @@ impl crate::reaching::Reaching for ForwardCmd {
 
     /// Drive the sink `--to` names: bind a local port and forward each connection, stream to stdout, or the
     /// reserved unix listener, all over the overlay. A dial-only client presenting its own `--present`
-    /// link, so it reads nothing from `ctx` (it is `Anonymous`).
+    /// link (it is `Anonymous`), so it reads only `contacts` from `ctx`, to resolve a petname in its peer
+    /// slot the same way `ping`/`beam` do.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
-        _ctx: crate::reaching::ReachCtx<'_>,
+        ctx: crate::reaching::ReachCtx<'_>,
     ) -> eyre::Result<()>
     where
         <T::Session as bifrost::Session>::Write: Send + 'static,
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
-        tunnel_connect::connect(node, self.node, self.service, self.present, self.to).await
+        tunnel_connect::connect(
+            node,
+            ctx.contacts,
+            self.node,
+            self.service,
+            self.present,
+            self.to,
+        )
+        .await
     }
 }

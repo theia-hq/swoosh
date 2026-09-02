@@ -23,6 +23,7 @@ use clap::Args;
 use nauthy::{Cap, SCHEME};
 use tightbeam::tunnel::Connector;
 
+use crate::contacts::{ContactRef, Contacts};
 use crate::transport;
 
 /// Where a reached service's bytes go locally: the one `--to` selector, parsed to a closed enum so the
@@ -71,16 +72,23 @@ impl FromStr for To {
     }
 }
 
-/// What swoosh's connect was pointed at: a bare node id, or a `sheer:` capability link. swoosh's OWN target
-/// type, so its `forward`/ssh-bridge modules never name tightbeam's CLI-layer parse type. A link supersedes the
-/// identity path: it names the node to dial (the cap's root) and presents the token; a bare node id is the
-/// pre-capability path, gated on the proven identity alone.
+/// What swoosh's connect was pointed at: a saved petname, a bare node id, or a `sheer:` capability link.
+/// swoosh's OWN target type, so its `forward`/`beam`/`stop`/ssh-bridge modules never name tightbeam's
+/// CLI-layer parse type. The three arms are tried in a fixed order at the boundary: a `sheer:` link
+/// supersedes the identity path (it names the node to dial, the cap's root, AND presents the token); else a
+/// raw base32 node id is dialed verbatim; else the text is a [`Named`](Self::Named) petname, resolved
+/// against the contact store just before dialing (deferred because the store loads at startup, not at the
+/// clap boundary). This is the SAME resolution the diagnostic verbs' [`Target`](crate::contacts::Target)
+/// does, so `swoosh stop me/qat`, `swoosh beam … alice/box`, and `swoosh forward alice/desk` all reach a
+/// saved contact by name, uniform with `ping`/`speed`/`fetch`.
 #[derive(Debug, Clone)]
 pub enum Dial {
     /// A raw node id to dial; the host gates on the proven identity.
     Node(NodeId),
     /// A `sheer:` capability link to present to a cap-gated host.
     Capability(String),
+    /// A saved petname (`alice`, `me/qat`), resolved against the contact store at dial time.
+    Named(ContactRef),
 }
 
 impl FromStr for Dial {
@@ -92,18 +100,43 @@ impl FromStr for Dial {
             // string is re-parsed at use so the token travels whole to the host.
             Cap::parse(text)?;
             Ok(Dial::Capability(text.to_owned()))
+        } else if let Ok(node) = text.parse::<NodeId>() {
+            // A raw base32 node id is always valid and never a petname (petnames are additive), so try it
+            // before treating the text as a saved name to resolve later.
+            Ok(Dial::Node(node))
         } else {
-            Ok(Dial::Node(text.parse::<NodeId>()?))
+            // Neither a link nor a raw key: a petname address, validated here (a bad trailing slash or
+            // embedded whitespace is a boundary error) and resolved against the store just before dialing.
+            Ok(Dial::Named(text.parse::<ContactRef>()?))
         }
     }
 }
 
-/// Resolve the target into a [`Connector`]: a raw node id (optionally presenting a link) or a link that
-/// supplies both the node to dial and the token.
-fn connector(dial: &Dial, service: String, present: Option<String>) -> eyre::Result<Connector> {
-    match dial {
-        Dial::Node(id) => Ok(Connector::to_node(*id, service, present)),
-        Dial::Capability(link) => Connector::from_link(link, service),
+impl Dial {
+    /// Resolve this target into a [`Connector`]: a raw node id (optionally presenting a link), a link that
+    /// supplies both the node to dial and the token, or a petname resolved against `contacts` to the node
+    /// it names. A bare person (`alice`) with several devices resolves to the FIRST in label order, the
+    /// single-dial analog of the fan-out verbs' first-reachable rule (these verbs dial one node, so they
+    /// take one candidate); address a specific device (`alice/box`) to pin the exact key. An unknown
+    /// petname surfaces the resolver's clean `unknown contact` error here, never a silent nothing.
+    pub fn connector(
+        &self,
+        contacts: &Contacts,
+        service: String,
+        present: Option<String>,
+    ) -> eyre::Result<Connector> {
+        match self {
+            Dial::Node(id) => Ok(Connector::to_node(*id, service, present)),
+            Dial::Capability(link) => Connector::from_link(link, service),
+            Dial::Named(reference) => {
+                let candidate = contacts
+                    .resolve_candidates(reference)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| eyre::eyre!("contact '{reference}' has no device to reach"))?;
+                Ok(Connector::to_node(candidate.node, service, present))
+            }
+        }
     }
 }
 
@@ -113,12 +146,13 @@ fn connector(dial: &Dial, service: String, present: Option<String>) -> eyre::Res
 /// host's reason here and exits non-zero, never a fake banner.
 pub async fn connect<T: Transport, D: Discovery>(
     node: &Node<T, D>,
+    contacts: &Contacts,
     dial: Dial,
     service: String,
     present: Option<String>,
     to: To,
 ) -> eyre::Result<()> {
-    let connector = connector(&dial, service, present)?;
+    let connector = dial.connector(contacts, service, present)?;
     match to {
         To::Port(port) => {
             // Prove the gate admits us BEFORE printing "forwarding …": `preflight` reaches, probes
@@ -180,7 +214,8 @@ impl crate::reaching::Reaching for TunnelConnectCmd {
     }
 
     /// Uniform dispatch: unpack the reach context and run. `tunnel-connect` reads only the resolved
-    /// `present` badge; it ignores `contacts` (its peer is a raw key), `transport`, and `key`.
+    /// `present` badge; its peer is a raw key (`swoosh ssh` resolved any petname before invoking this
+    /// bridge), so the `connect` runner's contact resolution is a no-op for it.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -190,7 +225,8 @@ impl crate::reaching::Reaching for TunnelConnectCmd {
         <T::Session as bifrost::Session>::Write: Send + 'static,
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
-        self.run_tunnel_connect(node, ctx.present).await
+        self.run_tunnel_connect(node, ctx.contacts, ctx.present)
+            .await
     }
 }
 
@@ -205,16 +241,85 @@ impl TunnelConnectCmd {
     async fn run_tunnel_connect<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
+        contacts: &Contacts,
         self_signed: Option<String>,
     ) -> eyre::Result<()> {
         let present = self.present.or(self_signed);
-        connect(node, Dial::Node(self.node), self.service, present, self.to).await
+        connect(
+            node,
+            contacts,
+            Dial::Node(self.node),
+            self.service,
+            present,
+            self.to,
+        )
+        .await
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::To;
+    use bifrost::NodeId;
+
+    use super::{Dial, To};
+    use crate::contacts::{Contacts, Petname};
+
+    /// A distinct node id for a test, derived from a fixed seed so it is stable and comparable.
+    fn node(seed: u8) -> NodeId {
+        NodeId::from_ed25519_secret(&[seed; 32])
+    }
+
+    /// `swoosh stop me/qat` (and every reach verb over `Dial`) resolves the petname through the contact
+    /// store to the saved key, the same resolution `ping`/`fetch` do: the docs promise `swoosh stop me/qat`,
+    /// so a saved contact MUST dial its key, not fail at parse as an "unknown crypto suite tag". A raw key
+    /// still parses to `Node`, and an unknown petname is a clean resolver error, never a silent nothing.
+    #[test]
+    fn a_petname_dial_resolves_through_contacts_to_the_saved_key() {
+        let qat = node(7);
+        let mut contacts = Contacts::default();
+        contacts.add(
+            "me".parse::<Petname>().expect("valid petname"),
+            Some("qat".parse().expect("valid device")),
+            qat,
+        );
+
+        // `me/qat` parses as a `Named` dial (not a raw key, not a link), then resolves to qat's key.
+        let dial = "me/qat"
+            .parse::<Dial>()
+            .expect("a petname parses as a Dial");
+        assert!(
+            matches!(dial, Dial::Named(_)),
+            "a saved-contact address parses as a petname to resolve, not a raw key"
+        );
+        let connector = dial
+            .connector(&contacts, "control.stop".to_owned(), None)
+            .expect("a known petname resolves to a connector");
+        assert_eq!(
+            connector.dial(),
+            qat,
+            "the petname must dial the key it was saved under"
+        );
+
+        // A raw base32 key still parses to `Node` and dials verbatim (petnames are additive, never required).
+        let raw = node(9);
+        let dial = raw.to_string().parse::<Dial>().expect("a raw key parses");
+        assert!(matches!(dial, Dial::Node(_)), "a raw base32 key is a Node");
+        assert_eq!(
+            dial.connector(&contacts, "control.stop".to_owned(), None)
+                .expect("a raw key needs no store")
+                .dial(),
+            raw,
+        );
+
+        // An unknown petname surfaces the resolver's clean error here, never a silent empty dial.
+        let ghost = "ghost".parse::<Dial>().expect("a name parses as a Dial");
+        assert!(
+            ghost
+                .connector(&contacts, "control.stop".to_owned(), None)
+                .is_err(),
+            "an unknown petname is a loud resolve error, not a silent nothing"
+        );
+    }
 
     #[test]
     fn to_parses_each_of_the_three_forms_and_rejects_the_rest() {

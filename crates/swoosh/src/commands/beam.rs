@@ -19,9 +19,9 @@ use clap::Args;
 use eyre::WrapErr as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
-use tightbeam::tunnel::Connector;
 
 use crate::commands::tunnel_connect::Dial;
+use crate::contacts::Contacts;
 use crate::transport::ReachArgs;
 
 /// The service name a receiver publishes and beam reaches: `swoosh serve beam=beam:` receives, `swoosh
@@ -38,7 +38,7 @@ pub struct BeamCmd {
     /// The files or directories to push.
     #[arg(required = true, value_name = "path")]
     pub paths: Vec<PathBuf>,
-    /// who to reach: a raw node id, or a `sheer:` capability link
+    /// who to reach: a saved petname (`alice`, `alice/box`), a raw node id, or a `sheer:` capability link
     // Named `target`, not `peer`: the flattened `ReachArgs` already owns a `--peer` arg (its clap id is
     // `peer`), so a positional field named `peer` collides two args under one clap id (a panic at --help).
     // The help still reads `<peer>` via `value_name`.
@@ -66,8 +66,8 @@ impl crate::reaching::Reaching for BeamCmd {
         self.credential().identity()
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `beam` reads only the resolved `present` badge
-    /// (it takes a `--target` node id or link directly); it ignores `contacts`, `transport`, and `key`.
+    /// Uniform dispatch: unpack the reach context and run. `beam` reads the resolved `present` badge and
+    /// `contacts` (to resolve a petname in its peer slot); it ignores `transport` and `key`.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -77,7 +77,7 @@ impl crate::reaching::Reaching for BeamCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_beam(node, ctx.present).await
+        self.run_beam(node, ctx.contacts, ctx.present).await
     }
 }
 
@@ -89,15 +89,15 @@ impl BeamCmd {
     async fn run_beam<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
+        contacts: &Contacts,
         self_badge: Option<String>,
     ) -> eyre::Result<()> {
         // Present an explicit `--present` link if given, else the self-signed badge minted from this
         // identity: the peer's `beam` service is gated, so each stream must prove membership to be admitted.
         let present = self.present.or(self_badge);
-        let connector = match &self.target {
-            Dial::Node(id) => Connector::to_node(*id, BEAM_SERVICE.to_owned(), present),
-            Dial::Capability(link) => Connector::from_link(link, BEAM_SERVICE.to_owned())?,
-        };
+        let connector = self
+            .target
+            .connector(contacts, BEAM_SERVICE.to_owned(), present)?;
         let dial = connector.dial();
         println!("beaming to {dial}...");
         // A service-scoped session: each `open_bi` speaks the `beam:` request and presents the badge, so

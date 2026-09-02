@@ -17,17 +17,17 @@
 
 use bifrost::{Discovery, Node, Session as _, Transport};
 use clap::Args;
-use tightbeam::tunnel::Connector;
 use tokio::io::AsyncReadExt as _;
 
 use crate::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK};
 use crate::commands::tunnel_connect::Dial;
+use crate::contacts::Contacts;
 use crate::transport::ReachArgs;
 
 /// Stop a peer's node (stop it serving), addressed by its public key or a `sheer:` capability link.
 #[derive(Debug, Args)]
 pub struct StopCmd {
-    /// who to stop: a raw node id, or a `sheer:` capability link
+    /// who to stop: a saved petname (`me/qat`, `alice`), a raw node id, or a `sheer:` capability link
     // Named `target`, not `peer`: the flattened `ReachArgs` already owns a `--peer` arg (its clap id is
     // `peer`), so a positional field named `peer` would collide two args under one clap id. The help still
     // reads `<peer>` via `value_name`.
@@ -56,8 +56,8 @@ impl crate::reaching::Reaching for StopCmd {
         self.credential().identity()
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `stop` reads only the resolved `present`
-    /// badge; it ignores `contacts`, `transport`, and `key`.
+    /// Uniform dispatch: unpack the reach context and run. `stop` reads the resolved `present` badge and
+    /// `contacts` (to resolve a petname like `me/qat` in its peer slot); it ignores `transport` and `key`.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -67,7 +67,7 @@ impl crate::reaching::Reaching for StopCmd {
         <T::Session as bifrost::Session>::Write: Send + 'static,
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
-        self.run_stop(node, ctx.present).await
+        self.run_stop(node, ctx.contacts, ctx.present).await
     }
 }
 
@@ -78,15 +78,15 @@ impl StopCmd {
     async fn run_stop<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
+        contacts: &Contacts,
         self_badge: Option<String>,
     ) -> eyre::Result<()> {
         // Present an explicit `--present` link if given, else the self-signed badge minted from this
         // identity: the `control.stop` service is gated, so the stream must prove membership to be admitted.
         let present = self.present.or(self_badge);
-        let connector = match &self.target {
-            Dial::Node(id) => Connector::to_node(*id, CONTROL_STOP_SERVICE.to_owned(), present),
-            Dial::Capability(link) => Connector::from_link(link, CONTROL_STOP_SERVICE.to_owned())?,
-        };
+        let connector =
+            self.target
+                .connector(contacts, CONTROL_STOP_SERVICE.to_owned(), present)?;
         let dial = connector.dial();
         println!("stopping {dial}...");
 
