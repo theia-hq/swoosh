@@ -1,0 +1,18 @@
+# Fails CI on a layering leak so a future leak is caught by the machine, not by review.
+# A crate must not NAME a consumer-tier theia crate it does not depend on (`tightbeam`,
+# `swoosh`, `sshh`), and a prime library must not allude to a consumer CLI flag
+# (`--for`/`--public`/`--peer`/`--authkey`/`--to`). Pure sh + grep, no toolchain.
+# The check lives in scripts/layering-gate.sh; see notes/reviews/layering-leak-audit.md.
+name: layering-gate
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: layering gate
+        run: sh scripts/layering-gate.sh .
