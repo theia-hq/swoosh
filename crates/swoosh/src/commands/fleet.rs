@@ -39,6 +39,18 @@ pub struct FleetCmd {
     pub reach: ReachArgs,
 }
 
+impl crate::reaching::Reaching for FleetCmd {
+    fn reach_args(&self) -> &crate::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `fleet --pull` reaches the coordination node's family-gated `roster:` service, so it presents the
+    /// member badge rooted at the dialing key. `Family` fuses the identity to `PersistedIfPresent`.
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Family { present: None }
+    }
+}
+
 impl FleetCmd {
     /// Dial the coordination node's gated `roster:` service presenting this device's membership badge, read
     /// the signed blob, verify it against the adopted signet, and hydrate contacts. Refuses loudly if the

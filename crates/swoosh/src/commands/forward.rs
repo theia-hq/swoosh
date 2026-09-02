@@ -35,6 +35,19 @@ pub struct ForwardCmd {
     pub reach: ReachArgs,
 }
 
+impl crate::reaching::Reaching for ForwardCmd {
+    fn reach_args(&self) -> &crate::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `forward` is a dial-only client: it presents its OWN `--present` link (never swoosh's identity),
+    /// so it dials as a stranger by construction. `Anonymous` is a NAMED no-badge, not a forgotten one,
+    /// and derives `Ephemeral`.
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Anonymous
+    }
+}
+
 impl ForwardCmd {
     /// Drive the sink `--to` names: bind a local port and forward each connection, stream to stdout, or the
     /// reserved unix listener, all over the overlay under swoosh's identity.

@@ -44,8 +44,9 @@ use swoosh::commands::tree::TreeCmd;
 use swoosh::commands::tunnel_connect::TunnelConnectCmd;
 use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::identity::Identity;
+use swoosh::reaching::Reaching;
 use swoosh::transport::Peer;
-use swoosh::{config, contacts, identity, transport};
+use swoosh::{config, contacts, credential, identity, reaching, transport};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -296,38 +297,41 @@ impl Reach {
         }
     }
 
-    /// The membership badge to present when dialing, if this verb dials a family-gated node.
-    /// `tunnel-connect` (the `swoosh ssh` bridge) and the diagnostic verbs (`ping`/`speed`/`status`, which
-    /// reach the peer's gated `ping`/`speed` service) present one. Computed here, in the composition root, because
-    /// it needs the resolved secret before the transport consumes it. Every other reach verb presents
-    /// nothing, so returns `None`.
+    /// How this verb authenticates: forwards to each verb's [`Reaching::credential`], the ONE place a
+    /// verb's auth need lives. A thin dispatch (each arm just calls the trait method), so unlike the old
+    /// hand-synced `self_badge()`/`identity()` matches, there is nothing to keep in sync and no wildcard
+    /// to forget an arm in: a new `Reach` variant that omits its arm here does not compile.
+    fn credential(&self) -> credential::Credential {
+        match self {
+            Self::Serve(cmd) => cmd.credential(),
+            Self::Ping(cmd) => cmd.credential(),
+            Self::Speed(cmd) => cmd.credential(),
+            Self::Status(cmd) => cmd.credential(),
+            Self::Fetch(cmd) => cmd.credential(),
+            Self::Forward(cmd) => cmd.credential(),
+            Self::Beam(cmd) => cmd.credential(),
+            Self::Stop(cmd) => cmd.credential(),
+            Self::Fleet(cmd) => cmd.credential(),
+            Self::TunnelConnect(cmd) => cmd.credential(),
+        }
+    }
+
+    /// The membership badge to present when dialing, DERIVED from [`credential`](Self::credential) via the
+    /// single [`resolve`](reaching::resolve) home of the `--present`-overrides-self-badge rule. There is
+    /// no wildcard `_ => Ok(None)`: a verb's badge is whatever its `Credential` resolves to, so a verb
+    /// that reaches a family-gated service without a badge is unrepresentable (the fleet/fetch bug class).
     ///
-    /// Present the STORED signet-signed badge if one exists (an adopted device carries the badge the signet
-    /// minted FOR it: rooted at the signet, bound to this device -- the only credential a signet-rooted gate
-    /// admits). Else self-sign (`member_badge`): the fallback for the signet holder itself (person-zero has
-    /// no stored badge -- it IS the root -- and its self-sign roots at the signet, so it admits). A fresh
-    /// install with neither badge nor signet key self-signs an ephemeral badge that is correctly refused.
+    /// Computed here, in the composition root, because it needs the resolved secret before the transport
+    /// consumes it. `Anonymous` resolves to no badge; `Family` resolves to the STORED signet-signed badge,
+    /// else the signet holder's self-sign, else an ephemeral self-sign a real gate correctly refuses.
     async fn self_badge(
         &self,
         secret: &identity::Secret,
         key: Option<&std::path::Path>,
     ) -> eyre::Result<Option<String>> {
-        match self {
-            // `tunnel-connect` (the `swoosh ssh` bridge) and the diagnostic verbs all reach a family-gated
-            // service. An adopted DEVICE presents its stored signet-signed badge; the signet holder (no
-            // stored badge) self-signs, which roots at the signet and admits.
-            Self::TunnelConnect(_)
-            | Self::Ping(_)
-            | Self::Speed(_)
-            | Self::Status(_)
-            | Self::Beam(_)
-            | Self::Fleet(_)
-            | Self::Stop(_) => match config::load_badge(key).await? {
-                Some(badge) => Ok(Some(badge)),
-                None => Ok(Some(secret.member_badge()?)),
-            },
-            _ => Ok(None),
-        }
+        Ok(reaching::resolve(self.credential(), secret, key)
+            .await?
+            .into_present())
     }
 
     /// The exposer context `serve` needs, resolved before the secret is consumed by the transport bind:

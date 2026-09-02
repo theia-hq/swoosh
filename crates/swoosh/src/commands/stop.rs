@@ -40,6 +40,19 @@ pub struct StopCmd {
     pub reach: ReachArgs,
 }
 
+impl crate::reaching::Reaching for StopCmd {
+    fn reach_args(&self) -> &crate::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `stop` reaches the peer's family-gated `control.stop` service, so it presents the member badge
+    /// rooted at the dialing key (only a family member may stop the node). `Family` fuses the identity to
+    /// `PersistedIfPresent`.
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Family { present: None }
+    }
+}
+
 impl StopCmd {
     /// Reach the peer's gated `control.stop` service and trigger a graceful stop. Presents `self_badge` (the
     /// self-signed membership badge, or an explicit `--present` link) so the node's family gate admits the

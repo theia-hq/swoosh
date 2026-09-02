@@ -37,6 +37,18 @@ pub struct StatusCmd {
     pub reach: ReachArgs,
 }
 
+impl crate::reaching::Reaching for StatusCmd {
+    fn reach_args(&self) -> &crate::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `status` probes the peer's family-gated `ping` service, so it presents the member badge rooted at
+    /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`.
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Family { present: None }
+    }
+}
+
 impl StatusCmd {
     /// Resolve the target to its devices, and for each dial, probe the path and a single RTT, and print a
     /// status line. Reports every device (a person fans out); an unreachable one prints an honest line

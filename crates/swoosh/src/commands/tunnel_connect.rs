@@ -159,6 +159,20 @@ pub struct TunnelConnectCmd {
     pub reach: transport::ReachArgs,
 }
 
+impl crate::reaching::Reaching for TunnelConnectCmd {
+    fn reach_args(&self) -> &crate::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `tunnel-connect` (the `swoosh ssh` bridge) reaches a family-gated host, so it presents the member
+    /// badge rooted at the dialing key. It binds `Persisted` for a different reason (dialing under
+    /// swoosh's OWN key so the gate proves the identity the badge was minted for): a non-forgettable
+    /// override, applied in the composition root, not this derivation.
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Family { present: None }
+    }
+}
+
 impl TunnelConnectCmd {
     /// Stream the peer's service against this process's stdin/stdout, dialing under swoosh's own identity.
     /// Always `--to -` in practice: this leaf exists only as the ssh `ProxyCommand` bridge.

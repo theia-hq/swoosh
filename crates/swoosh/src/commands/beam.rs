@@ -51,6 +51,18 @@ pub struct BeamCmd {
     pub reach: ReachArgs,
 }
 
+impl crate::reaching::Reaching for BeamCmd {
+    fn reach_args(&self) -> &crate::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `beam` pushes to the peer's family-gated `beam:` service, so it presents the member badge rooted
+    /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`.
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Family { present: None }
+    }
+}
+
 impl BeamCmd {
     /// Reach the peer's `beam:` service and push every named file over its own gated stream, expanding
     /// directories first. Presents `self_badge` (the self-signed membership badge, or an explicit

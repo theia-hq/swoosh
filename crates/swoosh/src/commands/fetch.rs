@@ -39,6 +39,19 @@ pub struct FetchCmd {
     pub reach: ReachArgs,
 }
 
+impl crate::reaching::Reaching for FetchCmd {
+    fn reach_args(&self) -> &crate::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// TODO(step 3): `fetch:` is family-gated, so this becomes `Family { present: self.present }` (the
+    /// owner reaching their OWN exit node presents the member badge by default, fixing the 403). Kept
+    /// `Anonymous` for one commit so this step only closes the wildcard; the flip is its own change.
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Anonymous
+    }
+}
+
 impl FetchCmd {
     /// Dial the exit node, bind a loopback listener, print the local URL, and serve each request over its
     /// own bifrost stream until Ctrl-C.

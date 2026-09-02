@@ -73,6 +73,20 @@ pub struct ServeCmd {
     pub reach: ReachArgs,
 }
 
+impl crate::reaching::Reaching for ServeCmd {
+    fn reach_args(&self) -> &crate::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `serve` RECEIVES badges (it is the gate), it never presents one, so it dials as no one:
+    /// `Anonymous`. It must bind `Persisted` (a stable address), which is a SEPARATE, non-forgettable
+    /// concern, not this credential's derived `Ephemeral`: the composition root's identity override, not
+    /// this method, supplies it.
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Anonymous
+    }
+}
+
 impl ServeCmd {
     /// Serve the named services (default `ping:` + `speed:`) under swoosh's identity by driving the
     /// tunnel core directly: parse the services, resolve the gate from swoosh's own signet + denylist (through

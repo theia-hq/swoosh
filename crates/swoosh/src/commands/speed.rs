@@ -56,6 +56,18 @@ pub struct SpeedCmd {
     pub reach: ReachArgs,
 }
 
+impl crate::reaching::Reaching for SpeedCmd {
+    fn reach_args(&self) -> &crate::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `speed` reaches the peer's family-gated `speed` service, so it presents the member badge rooted at
+    /// the dialing key (like `ping`). `Family` fuses the identity to `PersistedIfPresent`.
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Family { present: None }
+    }
+}
+
 impl SpeedCmd {
     /// Dial the first reachable device, run the transfer while a ticker prints the rate each interval,
     /// then report the settled connection path and the per-direction totals.

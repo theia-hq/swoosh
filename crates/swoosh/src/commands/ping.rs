@@ -43,6 +43,19 @@ pub struct PingCmd {
     pub reach: ReachArgs,
 }
 
+impl crate::reaching::Reaching for PingCmd {
+    fn reach_args(&self) -> &transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `ping` reaches the peer's family-gated `ping` service, so it presents the member badge rooted at
+    /// the dialing key. Stating `Family` FUSES the identity to `PersistedIfPresent`, so the self-badge
+    /// roots correctly. `--present` still overrides in `run` (threaded through the resolver).
+    fn credential(&self) -> crate::credential::Credential {
+        crate::credential::Credential::Family { present: None }
+    }
+}
+
 impl PingCmd {
     /// Resolve the target to its devices, and for each dial, probe, and print its path and RTT summary.
     /// Reports every device (a person fans out); an unreachable one prints an honest line and the run
