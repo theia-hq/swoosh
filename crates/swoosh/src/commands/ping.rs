@@ -15,6 +15,7 @@ use core::time::Duration;
 use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
 use clap::Args;
 use measure::{Ping, PingReport, Probe, ProtocolError};
+use tightbeam::tunnel;
 
 use crate::contacts::{Contacts, Target};
 use crate::reach;
@@ -130,13 +131,16 @@ impl PingCmd {
                             let path = reach::conn_path(initial, &session.conn_info());
                             print_device(&candidate.label, transport.name(), &path, &report);
                         }
-                        // The node reached us but does not serve ping: a distinct refusal line, never a
-                        // healthy device line with 100% loss. The run continues to the next device.
+                        // The node was REACHED but refused this probe: a distinct line that says so (not a
+                        // healthy device with 100% loss, and NOT "unreachable"), rendering the reason through
+                        // `refusal_reason` so a bare gate refusal reads descriptively and is never doubled
+                        // (`refused (refused)`). The run continues to the next device.
                         Err(ProtocolError::Refused(reason)) => {
                             println!(
-                                "{} via {}: refused ({reason})",
+                                "{} via {}: reached, but refused ({})",
                                 candidate.label,
-                                transport.name()
+                                transport.name(),
+                                tunnel::refusal_reason(&reason),
                             );
                         }
                         Err(error) => return Err(error.into()),

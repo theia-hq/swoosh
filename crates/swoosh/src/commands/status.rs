@@ -18,6 +18,7 @@ use core::time::Duration;
 use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
 use clap::Args;
 use measure::{Ping, ProtocolError};
+use tightbeam::tunnel;
 
 use crate::contacts::{Contacts, Target};
 use crate::reach;
@@ -211,14 +212,22 @@ impl Line {
 
 impl core::fmt::Display for Line {
     /// `<peer> via <transport>: <path>[, rtt <n>]`, Tailscale-status shaped, or `<peer> via <transport>:
-    /// unreachable` for a device that did not answer, or `<peer> via <transport>: refused (<reason>)` for
-    /// a node that answered but does not serve ping. The path phrase (shared with `ping`/`speed`) names
-    /// the remote when a direct address is known, and reports a relayed-to-direct upgrade when one landed.
+    /// unreachable` for a device that did not answer, or `<peer> via <transport>: reached, but refused
+    /// (<reason>)` for a node that answered but refused the probe. The refused line says it was REACHED (not
+    /// unreachable) and renders the reason through `refusal_reason`, so a bare gate refusal reads
+    /// descriptively and is never doubled (`refused (refused)`). The path phrase (shared with `ping`/`speed`)
+    /// names the remote when a direct address is known, and reports a relayed-to-direct upgrade when one landed.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{} via {}: ", self.label, self.transport)?;
         match &self.state {
             State::Unreachable => f.write_str("unreachable"),
-            State::Refused { reason } => write!(f, "refused ({reason})"),
+            State::Refused { reason } => {
+                write!(
+                    f,
+                    "reached, but refused ({})",
+                    tunnel::refusal_reason(reason)
+                )
+            }
             State::Reached { initial, info, rtt } => {
                 write!(f, "{}", reach::conn_path(*initial, info))?;
                 if let Some(rtt) = rtt {
@@ -227,5 +236,34 @@ impl core::fmt::Display for Line {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Line;
+
+    /// B3: a reached-but-refused line says it was REACHED (distinct from `unreachable`) and renders a bare
+    /// gate refusal descriptively, never echoing the token doubled (`refused (refused)`).
+    #[test]
+    fn a_reached_but_refused_line_is_descriptive_and_not_doubled() {
+        let line = Line::refused(
+            "alice/macbook".to_owned(),
+            "iroh",
+            tightbeam::tunnel::UNIFORM_REFUSAL.to_owned(),
+        )
+        .to_string();
+        assert!(
+            line.contains("reached, but refused"),
+            "a refusal is reached-but-refused, distinct from unreachable: {line}"
+        );
+        assert!(
+            !line.contains("refused (refused)"),
+            "the bare token is not doubled: {line}"
+        );
+        assert!(
+            line.contains("not admitted"),
+            "the uniform refusal is rendered as a reason a person can act on: {line}"
+        );
     }
 }
