@@ -15,12 +15,12 @@ use std::path::Path;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use eyre::WrapErr as _;
-use nauthy::SignedRoster;
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::Connector;
 use tokio::io::AsyncReadExt as _;
 
 use crate::contacts::{self, ContactsStore};
+use crate::roster;
 use crate::transport::ReachArgs;
 
 /// The maximum roster blob a pull reads before refusing. A personal fleet's signed snapshot is far smaller;
@@ -102,20 +102,19 @@ impl FleetCmd {
         let mut bytes = Vec::new();
         recv.take(MAX_ROSTER_BLOB).read_to_end(&mut bytes).await?;
 
-        // Parse, then VERIFY against the signet. A forged or foreign roster is refused here, before any
-        // contact is touched.
-        let signed = SignedRoster::decode(&bytes)?;
-        let doc = signed.verify(signet.verify_key()).map_err(|e| {
+        // VERIFY against the signet, then parse the payload, as ONE seam. A forged or foreign roster is
+        // refused here, before any contact is touched.
+        let doc = roster::verify(&bytes, signet.verify_key()).map_err(|e| {
             eyre::eyre!("roster is not signed by your signet ({e}); refusing to hydrate")
         })?;
 
         // Fold the verified fleet into contacts (never clobbering a local petname you set), and persist.
         let mut store = ContactsStore::open(contacts::path(key)?).await?;
-        store.contacts_mut().hydrate(doc);
+        let members = doc.members().len();
+        store.contacts_mut().hydrate(&doc);
         store.save().await?;
         println!(
-            "pulled {} member(s) into your fleet from {}; reach one with `swoosh ssh me/<device>`",
-            doc.members().len(),
+            "pulled {members} member(s) into your fleet from {}; reach one with `swoosh ssh me/<device>`",
             self.pull.short()
         );
         Ok(())

@@ -23,7 +23,8 @@ use std::collections::btree_map::Entry;
 use std::path::{Path, PathBuf};
 
 use bifrost::{CryptoKind, NodeId};
-use nauthy::RosterDoc;
+
+use crate::roster::RosterDoc;
 
 /// The reserved petname for the operator's own devices: the signet is person-zero, each device it derives
 /// lives under `me/<label>`. A signet-verified roster hydrates into exactly this partition.

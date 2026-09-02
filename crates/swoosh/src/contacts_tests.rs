@@ -197,7 +197,9 @@ async fn store_roundtrips_across_reload() {
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
 
-use nauthy::{Epoch, Member, RosterDoc, RosterLabel, VerifyKey};
+use nauthy::VerifyKey;
+
+use crate::roster::{Epoch, Member, RosterDoc, RosterLabel};
 
 /// A roster member whose node id is the all-`seed`-byte key, so it hydrates to the same [`node`] fixture,
 /// which doubles as a check that the `VerifyKey -> NodeId` conversion preserves the bytes.

@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
-use nauthy::{Admitted, Denylist, Epoch, Member, RosterDoc, RosterLabel, VerifyKey};
+use nauthy::{Admitted, Denylist, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::open_policy::{Never, OptIn};
 use tightbeam::tunnel::{
@@ -30,6 +30,7 @@ use tokio::io::AsyncWriteExt as _;
 
 use crate::contacts::{Contacts, Petname};
 use crate::identity::Secret;
+use crate::roster::{self, Epoch, Member, RosterDoc, RosterLabel};
 use crate::transport::ReachArgs;
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
@@ -370,7 +371,9 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
         })
         .collect();
     let doc = RosterDoc::new(Epoch(0), members)?;
-    Ok(secret.cap_identity()?.sign_roster(&doc).encode())
+    // The SIGNET is the sole cutter: only the secret can sign a roster that verifies against the signet, so
+    // `cut` here needs the live secret while `serve` (relay-only) needs just the resulting bytes.
+    Ok(roster::cut(&secret.cap_identity()?, &doc))
 }
 
 /// The `roster:` handler: serve the signet-signed membership snapshot to an admitted member, then close.

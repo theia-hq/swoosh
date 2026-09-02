@@ -17,9 +17,10 @@ use core::time::Duration;
 
 use bifrost::{CryptoKind, NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{Denylist, Epoch, Identity, Member, RosterDoc, RosterLabel, SignedRoster, VerifyKey};
+use nauthy::{Denylist, Identity, VerifyKey};
 use std::sync::Arc;
 use swoosh::contacts::Contacts;
+use swoosh::roster::{self, Epoch, Member, RosterDoc, RosterLabel};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Services};
 use tokio::io::AsyncReadExt as _;
@@ -67,7 +68,7 @@ async fn proof() {
         ],
     )
     .unwrap();
-    let blob = Arc::new(signet.sign_roster(&doc).encode());
+    let blob = Arc::new(roster::cut(&signet, &doc));
 
     // The coordination node: serves `roster:` behind a family gate rooted at the signet, through the SAME
     // handler the product `serve` path adds.
@@ -100,14 +101,12 @@ async fn proof() {
     let mut bytes = Vec::new();
     recv.read_to_end(&mut bytes).await.expect("read the roster blob");
 
-    let signed = SignedRoster::decode(&bytes).expect("the blob decodes");
-    let verified = signed
-        .verify(signet.node_id())
+    let verified = roster::verify(&bytes, signet.node_id())
         .expect("the roster is signed by the signet we trust");
 
     // Hydrate contacts from the VERIFIED doc and see the whole fleet under `me`, with no id copied by hand.
     let mut contacts = Contacts::default();
-    contacts.hydrate(verified);
+    contacts.hydrate(&verified);
     assert_eq!(
         resolve(&contacts, "me/desk"),
         vec![NodeId::new(CryptoKind::Ed25519, [1u8; 32])]

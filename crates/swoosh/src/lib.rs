@@ -13,4 +13,5 @@ pub mod credential;
 pub mod identity;
 pub mod reach;
 pub mod reaching;
+pub mod roster;
 pub mod transport;
