@@ -36,6 +36,7 @@ use swoosh::commands::identity::IdentityCmd;
 use swoosh::commands::mint::MintCmd;
 use swoosh::commands::ping::PingCmd;
 use swoosh::commands::serve::ServeCmd;
+use swoosh::commands::service::ServiceCmd;
 use swoosh::commands::speed::SpeedCmd;
 use swoosh::commands::ssh::SshCmd;
 use swoosh::commands::status::StatusCmd;
@@ -74,6 +75,8 @@ enum Command {
     Serve(ServeCmd),
     /// Stop a peer's node (stop it serving), addressed by its public key or a `sheer:` link.
     Stop(StopCmd),
+    /// Read a peer's served services (`--at <peer>`): a `SERVICE  GATE` table of what it serves.
+    Service(ServiceCmd),
     /// Measure the round-trip time to a peer, addressed by a petname or their public key.
     Ping(PingCmd),
     /// Measure throughput to a peer: iperf, but over the overlay.
@@ -128,6 +131,10 @@ enum Reach {
     /// membership badge (like `ping`/`speed`/`beam`), so it rides the reach path under the persisted
     /// identity when one exists.
     Stop(StopCmd),
+    /// `swoosh service --at <peer>`: reach a peer's gated `control.services` read and print its
+    /// `SERVICE  GATE` table. Presents a membership badge (like `stop`), so it rides the reach path under
+    /// the persisted identity when one exists.
+    Service(ServiceCmd),
     /// `swoosh fleet --pull`: pull the signed fleet roster from a coordination node and hydrate contacts.
     /// Presents a membership badge (like `ping`/`beam`) and needs the persisted identity (adopt first).
     Fleet(FleetCmd),
@@ -152,6 +159,13 @@ impl Command {
             Self::Beam(cmd) => Verb::Reach(Reach::Beam(cmd)),
             Self::Fleet(cmd) => Verb::Reach(Reach::Fleet(cmd)),
             Self::Stop(cmd) => Verb::Reach(Reach::Stop(cmd)),
+            // `service` reaches a peer's `control.services` ONLY with `--at`; a bare `service` reads your own
+            // node, which needs the daemon (not built yet). Split on that here so the no-peer case reports it
+            // WITHOUT composing a transport it would never use, the same local dispatch `ssh`/`grant` take.
+            Self::Service(cmd) => match cmd.at {
+                Some(_) => Verb::Reach(Reach::Service(cmd)),
+                None => Verb::Service(cmd),
+            },
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
             Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
@@ -177,6 +191,9 @@ enum Verb {
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
     Ssh(SshCmd),
+    /// A bare `swoosh service` (no `--at`): reading your OWN node's services needs the daemon (not built
+    /// yet), so it reports that and needs no transport or store. With `--at` it is a reaching verb instead.
+    Service(ServiceCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(TreeCmd),
     /// Mints, narrows, or revokes a `sheer:` capability link. `share` signs with the persisted key;
@@ -202,6 +219,7 @@ impl Reach {
             Self::Forward(cmd) => cmd.identity(),
             Self::Beam(cmd) => cmd.identity(),
             Self::Stop(cmd) => cmd.identity(),
+            Self::Service(cmd) => cmd.identity(),
             Self::Fleet(cmd) => cmd.identity(),
             Self::TunnelConnect(cmd) => cmd.identity(),
         }
@@ -220,6 +238,7 @@ impl Reach {
             Self::Forward(cmd) => &cmd.reach,
             Self::Beam(cmd) => &cmd.reach,
             Self::Stop(cmd) => &cmd.reach,
+            Self::Service(cmd) => &cmd.reach,
             Self::Fleet(cmd) => &cmd.reach,
             Self::TunnelConnect(cmd) => &cmd.reach,
         }
@@ -264,6 +283,7 @@ impl Reach {
             Self::Beam(cmd) => cmd.run(node, ctx).await,
             Self::Fleet(cmd) => cmd.run(node, ctx).await,
             Self::Stop(cmd) => cmd.run(node, ctx).await,
+            Self::Service(cmd) => cmd.run(node, ctx).await,
             Self::TunnelConnect(cmd) => cmd.run(node, ctx).await,
         }
     }
@@ -282,6 +302,7 @@ impl Reach {
             Self::Forward(cmd) => cmd.credential(),
             Self::Beam(cmd) => cmd.credential(),
             Self::Stop(cmd) => cmd.credential(),
+            Self::Service(cmd) => cmd.credential(),
             Self::Fleet(cmd) => cmd.credential(),
             Self::TunnelConnect(cmd) => cmd.credential(),
         }
@@ -384,6 +405,10 @@ async fn run() -> eyre::Result<()> {
     // book. A reaching verb falls through to bind a transport below.
     let reach = match command.split() {
         Verb::Tree(cmd) => return cmd.run(&Cli::command()),
+        // A bare `swoosh service` (no `--at`): reading your own node needs the daemon (not built yet). Report
+        // it here, before any transport is composed, the same local dispatch the other transport-free verbs
+        // take. With `--at` this verb fell through to the reach path above instead.
+        Verb::Service(cmd) => return cmd.run_local(),
         Verb::Contact(cmd) => {
             let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
             return cmd.run(store).await;

@@ -14,6 +14,7 @@ pub mod mint;
 pub mod ping;
 pub mod revoke;
 pub mod serve;
+pub mod service;
 pub mod share;
 pub mod speed;
 pub mod ssh;
