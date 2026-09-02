@@ -9,6 +9,7 @@ license.workspace = true
 # security-sensitive dependency tree (russh, ssh-key, pty-process) is behind swoosh's `ssh` feature and
 # never lands in a lean client that only reaches out.
 [dependencies]
+blake3 = "1"
 nauthy.workspace = true
 russh.workspace = true
 ssh-key.workspace = true

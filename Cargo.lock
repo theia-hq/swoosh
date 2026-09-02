@@ -4722,6 +4722,7 @@ dependencies = [
 name = "sshh"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "libc",
  "nauthy",
  "pty-process",
@@ -4952,7 +4953,6 @@ dependencies = [
  "bifrost",
  "bifrost-iroh",
  "bifrost-mdns",
- "blake3",
  "clap",
  "eyre",
  "futures",

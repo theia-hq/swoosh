@@ -350,7 +350,10 @@ impl Reach {
             // returns `None`. The roster is cut and signed HERE, where the secret is still live and the
             // contacts store is loaded, then handed to the serve verb (via `attach_expose`) as a pre-cut blob.
             Self::Serve(_) => Ok(Some(swoosh::commands::serve::ExposeContext {
+                #[cfg(feature = "ssh")]
                 host_seed: secret.ssh_host_seed(),
+                #[cfg(not(feature = "ssh"))]
+                host_seed: [0u8; 32],
                 signet: Some(
                     config::load_signet(key)
                         .await?

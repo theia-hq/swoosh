@@ -74,6 +74,20 @@ pub enum ServeError {
     Session(#[source] russh::Error),
 }
 
+/// Derive a node's stable SSH host-key seed from its raw identity secret.
+///
+/// A keyless shell still presents a host key so a client's `known_hosts` can pin the node across
+/// connections (trust-on-first-use, with a later swap detected). That key must be STABLE across runs yet
+/// DISTINCT from the node's identity key (no cross-protocol reuse), so it is a domain-separated derivation
+/// (BLAKE3 `derive_key`) of the raw secret. The caller derives the seed once from its persisted identity and
+/// hands it to [`serve`]; the raw secret itself never enters this crate.
+///
+/// The domain-separator string is FROZEN: a client pins the resulting host key, so changing it would break
+/// every existing `known_hosts` entry.
+pub fn host_seed(secret: &[u8; 32]) -> [u8; 32] {
+    blake3::derive_key("theia sshh host key v1", secret)
+}
+
 /// Run one SSH connection over an already-authenticated, cap-gated stream: accept `none` auth and serve a
 /// pty shell. Returns when the client disconnects or the shell exits.
 ///

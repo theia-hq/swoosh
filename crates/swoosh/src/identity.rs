@@ -91,12 +91,14 @@ impl Secret {
         Ok(badge)
     }
 
-    /// A stable seed for this node's ssh host key, derived from this secret by the same domain-separated
-    /// KDF tightbeam uses, so a swoosh node exposing `ssh=sshd:` under its persisted key presents the SAME
-    /// host key a client pins. Delegates to tightbeam's [`ssh_host_seed`](tightbeam::identity::ssh_host_seed)
-    /// so the derivation lives in exactly one place; the raw secret never leaves the wrapper, only the seed.
+    /// A stable seed for this node's ssh host key, so a swoosh node exposing `ssh=sshd:` under its persisted
+    /// key presents the SAME host key a client pins. Delegates to [`sshh::host_seed`], which owns the
+    /// domain-separated derivation, so it lives in exactly one place; the raw secret never leaves the
+    /// wrapper, only the seed. Gated on the `ssh` feature, like the rest of the shell surface: a lean client
+    /// built without `ssh` neither serves a shell nor needs a host key.
+    #[cfg(feature = "ssh")]
     pub fn ssh_host_seed(&self) -> [u8; 32] {
-        tightbeam::identity::ssh_host_seed(&self.0)
+        sshh::host_seed(&self.0)
     }
 
     /// Sign a membership badge FOR a device, rooted at THIS key (the signet) and bound to `device`.
