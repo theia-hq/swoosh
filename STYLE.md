@@ -155,6 +155,24 @@ to flag the same smell twice._
   An app names a concrete external implementation (a specific transport, driver, or backend) exactly once,
   where it builds its root object. Every subsequent operation is generic over your own traits. If a file
   imports the concrete backend crate outside `main`, that is a leak.
+- **A library speaks only its OWN vocabulary; it never names or alludes to a consumer's flags, binary, or
+  bin-specific concepts, in code OR docs.** A library is consumed by callers it will never enumerate, so a
+  doc, identifier, or comment that reaches UP to one specific consumer (a CLI flag like `serve --for` /
+  `--public` / `--peer`, a named bin, a consumer's own service name) overfits the lib to that one bin and
+  rots the moment another consumer arrives or a flag is renamed. Name the concept the library itself OWNS,
+  never the surface a consumer paints over it: tightbeam owns THE CANCELLATION TOKEN an exposer holds (a
+  caller may hold a clone to trigger teardown, whether from a local deadline timer or an admitted remote stop
+  request), so that is the only vocabulary its docs may use, never `serve --for`; nauthy owns [`Gate::Open`]
+  (building an open gate is the caller's own choice), never `--public`; bifrost owns a DIRECT ADDRESS HINT,
+  never `--peer`; bifrost-core owns the DERIVED-KEY payload a machine adopts, never `--authkey`. The same
+  holds dep->consumer: a dependency never alludes to the app that consumes it, and the consumer bin name
+  (`swoosh`, or any other) NEVER appears in the prime libraries (`nauthy`, `tightbeam`, `bifrost`, `quirk`).
+  Where a lib doc genuinely must gesture at how it is driven, say "a consumer" / "a CLI over this library" /
+  "the caller", never the bin: the library-vs-CLI boundary is worth explaining, the consumer's name is not.
+  This is the up-the-stack twin of "wrap a foreign stack once": that rule stops a consumer leaking a
+  dependency's vocabulary DOWN, this one stops a library leaking a consumer's vocabulary UP. A frozen
+  protocol constant that merely CONTAINS such a token (a KDF domain-separator string) is not an allusion and
+  must not be reworded, since changing it changes the bytes.
 - **Keep layer concerns pure.** A layer touches only its own concern and knows nothing of the layers around
   it: a byte-moving layer knows nothing of files, paths, filenames, temp files, or the filesystem (its
   sources and sinks are `AsyncRead`/`AsyncWrite` the caller supplies); naming and temp-then-rename are the
