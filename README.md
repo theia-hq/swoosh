@@ -7,8 +7,12 @@ internet, across home routers and NATs, without you knowing or caring about the 
 address to look up, no server in the middle.
 
 ```sh
-swoosh serve                 # on one machine: print this machine's key, stay reachable
-swoosh ping alice            # on another: reach that key, measure the round trip
+# on the machine to be reached: print its key and stay reachable.
+swoosh serve                       # gated: only its owner's own devices and granted peers get in
+swoosh serve --public ping,speed   # or open the named services to anyone
+
+# from a machine it admits (one of your own devices, or a peer you granted):
+swoosh ping alice            # reach that key, measure the round trip
 swoosh speed alice           # measure throughput to it
 swoosh status alice          # is the link direct, or relayed?
 swoosh beam report.pdf alice # push a file to it, verified end to end
@@ -42,11 +46,17 @@ A machine's IP address changes: it moves networks, sits behind a router, gets a 
 key does not. Addressing a peer by key means you reach the same peer every time, and the connection is
 authenticated end to end by that key, so you know you reached the machine you meant and no one is in the
 middle. `swoosh serve` prints a key; by default only your own devices and peers you have granted a
-capability can reach it (it is gated to your signet), and `--public` is the deliberate opt-out to anyone.
+capability can reach it (it is gated to your signet). Opening a service to anyone is a deliberate opt-out
+you name explicitly: `swoosh serve --public ping,speed`.
 
 ## A real run
 
-On one machine, be reachable and copy the printed key:
+A peer reaches your node one of two ways: it is one of your own devices, or you opened a service to
+anyone. Here is each.
+
+### Reach your own second device
+
+On the machine you want to reach, stay reachable and mint a one-time key for the new device:
 
 ```sh
 $ swoosh serve
@@ -57,17 +67,61 @@ swoosh ready. peers can reach this node at:
 serving ping, speed (gate: signet bf04mn…). ctrl-c to stop.
 ```
 
-On another, save the key under a name once, then reach it by name:
+```sh
+$ swoosh mint laptop
+authkey:qiwt…
 
+recorded me/laptop -> bf01ld…  [derived]
+hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
+```
+
+On the new machine, adopt the authkey. It becomes that device and trusts the signet, so the gated node
+now admits it:
+
+```sh
+$ swoosh adopt authkey:qiwt…
+adopted this machine as bf01hs…  [mine]
+trusting signet bf01dq…: `swoosh serve` now admits its members and delegates.
+stored your membership badge: this device now reaches your gated services.
+```
+
+Save the first machine's key under a name once, then reach it by name:
+
+```sh
+$ swoosh contact add desk bf01hy…
+$ swoosh ping desk -c 4
+pinging desk (4 probes)
+4 sent, 4 received, 0% loss
+rtt min/avg/max/mdev = 21.4/24.8/33.1/3.2 ms
+
+$ swoosh status desk
+desk via iroh: direct to 203.0.113.7:41641, rtt 24.8 ms
+```
+
+### Let a friend reach you
+
+A friend is not one of your devices, so the default gate turns them away. Open just the services you
+want anyone to reach:
+
+<!-- VERIFY: real paste pending --public live-run -->
+```sh
+$ swoosh serve --public ping,speed
+swoosh ready. peers can reach this node at:
+
+    bf01hy…
+
+serving ping, speed (public: anyone). ctrl-c to stop.
+```
+
+Your friend saves your key and reaches those two services, nothing else:
+
+<!-- VERIFY: real paste pending --public live-run -->
 ```sh
 $ swoosh contact add alice bf01hy…
 $ swoosh ping alice -c 4
 pinging alice (4 probes)
 4 sent, 4 received, 0% loss
 rtt min/avg/max/mdev = 21.4/24.8/33.1/3.2 ms
-
-$ swoosh status alice
-alice via iroh: direct to 203.0.113.7:41641, rtt 24.8 ms
 ```
 
 ## Commands
@@ -86,8 +140,10 @@ gated by default, so members reach both; a per-service grant can hand out ping-o
   when the deadline passes the node stops gracefully, the same teardown a Ctrl-C gives. The banner reads
   `stops in 30m, or ctrl-c`.
 - `--out <dir>` where a `beam:` service saves pushed files (default: the current directory).
-- `--public` serve to anyone, unauthenticated: the deliberate opt-out from the signet gate. Refused for a
-  keyless shell or a raw diagnostics service, which have no safe public form yet.
+- `--public <names>` open the named services to anyone, unauthenticated: a comma list like
+  `--public ping,speed`, the deliberate opt-out from the signet gate for just those services. The list is
+  required (bare `--public` is an error, and there is no `all` or `*`); a service that has no safe public
+  form, such as a keyless shell (`sshd`), is refused by name with an error that says why.
 - `--quiet` suppress the readiness banner, for unattended/CI use.
 
 Every node also answers `control.stop`, always: an admitted peer reaching it triggers a graceful stop
