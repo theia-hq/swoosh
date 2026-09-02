@@ -217,13 +217,19 @@ pub struct Binding {
     pub source: Source,
 }
 
-/// The in-memory address book: every petname mapped to its ordered group of device bindings.
+/// The in-memory address book: every petname mapped to its ordered group of device bindings, plus the
+/// persisted roster epoch floor.
 ///
 /// This is the pure domain view the store loads into and saves back from. It owns the add / list /
 /// remove / resolve / hydrate behaviour; persistence is the [`ContactsStore`]'s job, layered around it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Contacts {
     people: BTreeMap<Petname, BTreeMap<DeviceLabel, Binding>>,
+    /// The highest roster epoch this book has applied: the anti-rollback FLOOR. `None` before any roster is
+    /// hydrated. A snapshot at or below it is refused as stale, so a replayed old-but-genuine roster can
+    /// never roll the fleet back (delib-28 F1). For B1 there is one signet, so one floor; a device in two
+    /// fleets is out of scope until the floor is keyed per-signet.
+    roster_epoch: Option<u64>,
 }
 
 impl Contacts {
@@ -305,40 +311,87 @@ impl Contacts {
         }
     }
 
-    /// Fold a signet-verified roster into the `me` partition (the operator's own fleet), tagging each member
-    /// [`Source::Roster`]. THIS is the moat's write path, and it is safe by construction: the only way to
-    /// obtain a [`RosterDoc`] to pass here is [`nauthy::SignedRoster::verify`], so a `Roster` provenance can
-    /// only ever come from the signet, never from a hand-typed op. Merge rule, per device under `me`:
+    /// This book's roster epoch floor: the highest roster epoch it has applied, or `None` before any roster
+    /// is hydrated. The store persists and reloads it so the anti-rollback floor survives a restart.
+    pub fn roster_epoch(&self) -> Option<u64> {
+        self.roster_epoch
+    }
+
+    /// Fold a signet-verified roster into the `me` partition (the operator's own fleet) as a FLOORED
+    /// SNAPSHOT-REPLACE, tagging each member [`Source::Roster`]. THIS is the moat's write path, and it is
+    /// safe by construction: the only way to obtain a [`RosterDoc`] is [`crate::roster::verify`], so a
+    /// `Roster` provenance can only ever come from the signet, never from a hand-typed op.
     ///
-    /// - a VACANT slot is added;
-    /// - a HAND-TYPED binding is NEVER clobbered (the operator's local choice wins; the member is a
-    ///   suggestion, so a roster can never silently overwrite a name you set);
-    /// - a prior ROSTER binding is refreshed only when the new epoch is at least the old one (a stale
-    ///   re-pull from a lagging courier cannot roll the fleet back).
+    /// A roster is a whole SNAPSHOT, not an op-log, so the correct fold is a REPLACE under a persisted floor
+    /// (delib-28 F1). Returns whether the doc was applied:
     ///
-    /// Only the `me` partition is touched: other petnames (people you know) are never rewritten by your own
-    /// fleet roster. A member whose label is somehow not a valid device label is skipped rather than trusted.
-    pub fn hydrate(&mut self, roster: &RosterDoc) {
+    /// - `doc.epoch <= floor` (a stale or same-epoch replay from a lagging/hostile courier) is REFUSED
+    ///   wholesale, a no-op, so a genuinely-signed OLD roster can never roll the fleet back or re-add a
+    ///   removed member. The first hydrate (floor `None`) always applies.
+    /// - `doc.epoch > floor`: the roster-sourced `me/*` set is REPLACED by the doc's members (add new,
+    ///   refresh changed, and DROP any prior `Roster`-sourced device NOT in the new doc so a removed member
+    ///   disappears), then the floor advances to `doc.epoch`.
+    ///
+    /// A `HandTyped` binding under `me` is NEVER touched (the operator's local choice is sovereign, and a
+    /// member is only a suggestion); only `Roster`-sourced entries are in the replace-set. Only the `me`
+    /// partition is touched: other petnames (people you know) are never rewritten by your own fleet roster.
+    /// A member whose label is not a valid device label is skipped LOUDLY (a warning), never silently, so a
+    /// vanished member is operator-visible.
+    pub fn hydrate(&mut self, roster: &RosterDoc) -> bool {
         let epoch = roster.epoch().0;
+        // Refuse a stale or same-epoch snapshot before touching anything: the whole-doc floor is what kills
+        // F1's removed-member re-add (the old blob never applies at all) and the same-epoch overwrite.
+        if self.roster_epoch.is_some_and(|floor| epoch <= floor) {
+            return false;
+        }
         let group = self.people.entry(Petname(ME.to_owned())).or_default();
+        // Snapshot-REPLACE: drop the prior roster-sourced set, keep every HandTyped binding, then lay the
+        // new doc's members down. Dropping first is what makes a removed member disappear; a hand-typed
+        // entry never enters the drop-set, so the operator's local choice survives.
+        group.retain(|_, binding| binding.source == Source::HandTyped);
         for member in roster.members() {
-            let Ok(device) = member.label.as_str().parse::<DeviceLabel>() else {
-                continue;
-            };
-            match group.get(&device).map(|binding| binding.source) {
-                Some(Source::HandTyped) => {}
-                Some(Source::Roster { epoch: prior }) if epoch < prior => {}
-                _ => {
-                    group.insert(
-                        device,
-                        Binding {
-                            node: NodeId::new(CryptoKind::Ed25519, *member.node.bytes()),
-                            source: Source::Roster { epoch },
-                        },
+            let device = match member.label.as_str().parse::<DeviceLabel>() {
+                Ok(device) => device,
+                Err(error) => {
+                    eprintln!(
+                        "warning: skipping fleet member '{}' ({error})",
+                        member.label
                     );
+                    continue;
+                }
+            };
+            // A HandTyped binding is sovereign and was kept by `retain`; never clobber it with a member.
+            if let Entry::Occupied(entry) = group.entry(device.clone()) {
+                if entry.get().source == Source::HandTyped {
+                    continue;
                 }
             }
+            group.insert(
+                device,
+                Binding {
+                    node: NodeId::new(CryptoKind::Ed25519, *member.node.bytes()),
+                    source: Source::Roster { epoch },
+                },
+            );
         }
+        // An empty `me` group (a roster of only skipped members over no hand-typed entries) should not
+        // linger as an empty person; mirror `remove`'s tidy-up.
+        if self
+            .people
+            .get(&Petname(ME.to_owned()))
+            .is_some_and(BTreeMap::is_empty)
+        {
+            self.people.remove(&Petname(ME.to_owned()));
+        }
+        self.roster_epoch = Some(epoch);
+        true
+    }
+
+    /// Set the persisted roster epoch floor when the store reconstructs a book from disk. For the store's
+    /// codec ONLY: the floor was established by a prior [`hydrate`], and reload just round-trips it, so a
+    /// restart does not reset the anti-rollback high-water mark to zero.
+    pub(crate) fn set_roster_epoch(&mut self, floor: Option<u64>) {
+        self.roster_epoch = floor;
     }
 
     /// Insert a fully-formed binding (node + provenance) under a petname's device. For the store's codec,

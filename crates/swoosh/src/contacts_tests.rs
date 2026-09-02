@@ -275,6 +275,121 @@ fn hydrate_refreshes_on_a_newer_epoch_and_ignores_a_stale_one() {
         Ok(vec![node(2)])
     );
     assert_eq!(me_sources(&contacts), vec![Source::Roster { epoch: 6 }]);
+    // The floor advanced to the highest APPLIED epoch, not the last one seen: the stale 4 did not lower it.
+    assert_eq!(contacts.roster_epoch(), Some(6));
+}
+
+#[test]
+fn hydrate_drops_a_removed_member_on_a_forward_pull() {
+    // F1 (the important one): a member removed in a newer roster must DISAPPEAR, not linger. A snapshot is a
+    // full replace, so `phone` (absent from epoch 6) is dropped, and only `desk` survives.
+    let mut contacts = Contacts::default();
+    contacts.hydrate(&roster(
+        5,
+        vec![roster_member(1, "desk"), roster_member(2, "phone")],
+    ));
+    assert_eq!(
+        contacts
+            .devices(&petname("me"))
+            .expect("me")
+            .map(|(label, _)| label.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["desk".to_owned(), "phone".to_owned()]
+    );
+    contacts.hydrate(&roster(6, vec![roster_member(1, "desk")])); // phone removed at epoch 6
+    assert_eq!(
+        contacts
+            .devices(&petname("me"))
+            .expect("me")
+            .map(|(label, _)| label.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        vec!["desk".to_owned()]
+    );
+    assert!(contacts.devices(&petname("me")).expect("me").all(|_| true));
+}
+
+#[test]
+fn hydrate_refuses_a_replayed_old_roster_and_never_re_adds_a_removed_member() {
+    // F1: after `phone` is removed at epoch 6, a hostile/stale courier replays the genuinely-signed epoch-5
+    // roster that still lists `phone`. The floor (6) refuses the whole doc, so `phone` is NOT resurrected.
+    let mut contacts = Contacts::default();
+    contacts.hydrate(&roster(
+        5,
+        vec![roster_member(1, "desk"), roster_member(2, "phone")],
+    ));
+    assert!(contacts.hydrate(&roster(6, vec![roster_member(1, "desk")])));
+    // Replay the OLD epoch-5 roster: refused (returns false), a no-op.
+    let replayed = contacts.hydrate(&roster(
+        5,
+        vec![roster_member(1, "desk"), roster_member(2, "phone")],
+    ));
+    assert!(!replayed, "a stale roster must be refused");
+    assert!(
+        contacts
+            .devices(&petname("me"))
+            .expect("me")
+            .all(|(label, _)| label.as_str() == "desk"),
+        "the removed member must not be re-added by a replay"
+    );
+    assert_eq!(contacts.roster_epoch(), Some(6));
+}
+
+#[test]
+fn hydrate_refuses_a_same_epoch_re_cut() {
+    // F1: a same-epoch doc is a no-op (not a merge), so a re-cut at the same epoch cannot overwrite.
+    let mut contacts = Contacts::default();
+    contacts.hydrate(&roster(6, vec![roster_member(1, "desk")]));
+    let same = contacts.hydrate(&roster(6, vec![roster_member(2, "desk")]));
+    assert!(!same, "a same-epoch roster must be refused");
+    assert_eq!(
+        resolve(&contacts, &"me/desk".parse().expect("addr")),
+        Ok(vec![node(1)])
+    );
+}
+
+#[test]
+fn hydrate_keeps_hand_typed_across_a_snapshot_replace() {
+    // The snapshot-replace drops the prior roster-sourced set but NEVER a HandTyped binding: the operator's
+    // local `me/laptop` survives a forward pull that does not list it.
+    let mut contacts = Contacts::default();
+    contacts.add(petname("me"), Some(device("laptop")), node(7)); // hand-typed
+    contacts.hydrate(&roster(5, vec![roster_member(1, "desk")]));
+    contacts.hydrate(&roster(6, vec![roster_member(2, "phone")])); // replaces desk, keeps laptop
+    let devices: Vec<_> = contacts
+        .devices(&petname("me"))
+        .expect("me")
+        .map(|(label, _)| label.as_str().to_owned())
+        .collect();
+    assert_eq!(devices, vec!["laptop".to_owned(), "phone".to_owned()]);
+    assert_eq!(
+        resolve(&contacts, &"me/laptop".parse().expect("addr")),
+        Ok(vec![node(7)])
+    );
+}
+
+#[tokio::test]
+async fn store_round_trips_the_roster_epoch_floor() {
+    // F1: the floor must survive a restart, else every reboot resets the anti-rollback high-water to zero
+    // and a replay walks back in.
+    let dir = std::env::temp_dir().join(format!("swoosh-contacts-floor-{}", std::process::id()));
+    let path = dir.join("contacts.toml");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+
+    let mut store = ContactsStore::open(path.clone()).await.expect("open");
+    store
+        .contacts_mut()
+        .hydrate(&roster(6, vec![roster_member(1, "desk")]));
+    store.save().await.expect("save");
+
+    // A fresh open reloads the floor, so a replayed epoch-5 roster is still refused after a restart.
+    let mut reloaded = ContactsStore::open(path.clone()).await.expect("reopen");
+    assert_eq!(reloaded.contacts().roster_epoch(), Some(6));
+    let replayed = reloaded
+        .contacts_mut()
+        .hydrate(&roster(5, vec![roster_member(2, "desk")]));
+    assert!(!replayed, "a replay must be refused after a reload too");
+
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
 
 #[tokio::test]

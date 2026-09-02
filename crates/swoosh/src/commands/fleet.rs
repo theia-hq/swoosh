@@ -109,9 +109,19 @@ impl FleetCmd {
         })?;
 
         // Fold the verified fleet into contacts (never clobbering a local petname you set), and persist.
+        // hydrate REFUSES a stale/replayed snapshot (epoch at or below the persisted floor): a lagging or
+        // hostile courier cannot roll the fleet back, so report the no-op honestly rather than claiming a
+        // pull that did nothing.
         let mut store = ContactsStore::open(contacts::path(key)?).await?;
         let members = doc.members().len();
-        store.contacts_mut().hydrate(&doc);
+        let epoch = doc.epoch().0;
+        if !store.contacts_mut().hydrate(&doc) {
+            println!(
+                "roster epoch {epoch} from {} is not newer than what you already have; nothing to update",
+                self.pull.short()
+            );
+            return Ok(());
+        }
         store.save().await?;
         println!(
             "pulled {members} member(s) into your fleet from {}; reach one with `swoosh ssh me/<device>`",

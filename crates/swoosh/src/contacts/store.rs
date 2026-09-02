@@ -73,23 +73,38 @@ impl ContactsStore {
     }
 }
 
-/// The on-disk shape: petname to device-label to base32 identity string. A separate wire type so no
-/// serde derive touches the domain, and the string keys/values are exactly what a human reads and edits.
-/// The wire value for one device: either the legacy bare key string (a hand-typed binding) or an inline
-/// table `{ key = "...", roster = <epoch> }` for a member the signet vouched for. Modeled as a generic
-/// [`toml::Value`] so both shapes round-trip through one document and files written before provenance
-/// existed still load.
-type Wire = BTreeMap<String, BTreeMap<String, toml::Value>>;
+/// The reserved top-level key carrying the roster epoch FLOOR: an integer beside the petname tables. A
+/// petname's value is a table and this is an integer, so decode dispatches on the key before parsing it as
+/// a petname; the two never collide, and an old file with no such key loads a `None` floor (backward
+/// compatible). It is a reserved slot for the operator's own fleet floor, the same way `me` is reserved for
+/// the fleet itself.
+const ROSTER_EPOCH_KEY: &str = "roster_epoch";
+
+/// The on-disk shape: a top-level table whose keys are petnames (each mapping to a device table) plus the
+/// one reserved [`ROSTER_EPOCH_KEY`] integer. A separate wire type so no serde derive touches the domain,
+/// and the string keys/values are exactly what a human reads and edits. A device value is either the legacy
+/// bare key string (a hand-typed binding) or an inline table `{ key = "...", roster = <epoch> }` for a
+/// member the signet vouched for. Modeled as a generic [`toml::Value`] so every shape round-trips through
+/// one document and files written before provenance or the floor existed still load.
+type Wire = BTreeMap<String, toml::Value>;
 
 /// Parse a contacts TOML document into the strictly-typed domain, validating every name, key, and entry.
 fn decode(text: &str) -> Result<Contacts, StoreError> {
     let wire: Wire = toml::from_str(text).map_err(StoreError::Parse)?;
     let mut contacts = Contacts::default();
-    for (petname, group) in wire {
-        let petname: Petname = petname.parse()?;
+    for (key, value) in wire {
+        // The reserved floor key is an integer, not a petname table; dispatch on it first so it never
+        // reaches the petname parser and a group table never masquerades as the floor.
+        if key == ROSTER_EPOCH_KEY {
+            let floor = value.as_integer().ok_or(StoreError::BadEntry)?;
+            contacts.set_roster_epoch(Some(u64::try_from(floor).map_err(|_| StoreError::BadEntry)?));
+            continue;
+        }
+        let petname: Petname = key.parse()?;
+        let group = value.as_table().ok_or(StoreError::BadEntry)?;
         for (device, value) in group {
             let device: DeviceLabel = device.parse()?;
-            contacts.insert_binding(petname.clone(), device, decode_binding(&value)?);
+            contacts.insert_binding(petname.clone(), device, decode_binding(value)?);
         }
     }
     Ok(contacts)
@@ -132,10 +147,18 @@ fn encode(contacts: &Contacts) -> Result<String, StoreError> {
         let Some(bindings) = contacts.bindings(petname) else {
             continue;
         };
-        let group = bindings
+        let group: toml::value::Table = bindings
             .map(|(label, binding)| (label.as_str().to_owned(), encode_binding(binding)))
             .collect();
-        wire.insert(petname.as_str().to_owned(), group);
+        wire.insert(petname.as_str().to_owned(), toml::Value::Table(group));
+    }
+    // Persist the roster epoch floor so the anti-rollback high-water mark survives a restart; absent until
+    // the first roster is hydrated, so a book with no fleet writes no such key.
+    if let Some(floor) = contacts.roster_epoch() {
+        wire.insert(
+            ROSTER_EPOCH_KEY.to_owned(),
+            toml::Value::Integer(i64::try_from(floor).unwrap_or(i64::MAX)),
+        );
     }
     toml::to_string_pretty(&wire).map_err(StoreError::Encode)
 }
