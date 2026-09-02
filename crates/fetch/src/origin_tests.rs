@@ -3,7 +3,7 @@
 //! matcher gates the normalized (scheme, host, port) triple, never a suffix, and is not fooled by userinfo,
 //! case, a trailing dot, or a scheme/port mismatch. An empty allowlist stays unconstrained (back-compat).
 
-use crate::origin::OriginAllowlist;
+use crate::origin::{OriginAllowlist, compose_url};
 
 /// Parse a request URL through the SAME `reqwest::Url` parse the SSRF guard and the matcher both use, so the
 /// test asks the matcher exactly what the handler asks it.
@@ -91,4 +91,27 @@ fn multiple_origins_each_admit_their_own() {
     assert!(admits(&allow, "https://news.example/story"));
     assert!(admits(&allow, "https://apple.example/mac"));
     assert!(!admits(&allow, "https://other.example/"));
+}
+
+#[test]
+fn compose_url_merges_paths_without_doubling_the_slash() {
+    // A trailing slash on the base and a leading slash on the target compose to ONE slash: the join merges
+    // per the URL grammar, never the `//` a string concatenation would produce.
+    assert_eq!(
+        compose_url("https://api.example.com/", "/users?id=5").expect("composes"),
+        "https://api.example.com/users?id=5"
+    );
+}
+
+#[test]
+fn compose_url_joins_a_path_onto_a_bare_origin() {
+    assert_eq!(
+        compose_url("https://api.example.com", "/users").expect("composes"),
+        "https://api.example.com/users"
+    );
+}
+
+#[test]
+fn compose_url_refuses_a_malformed_base() {
+    assert!(compose_url("not a url", "/x").is_err());
 }

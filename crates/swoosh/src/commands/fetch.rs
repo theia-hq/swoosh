@@ -169,7 +169,7 @@ impl FetchCmd {
             target,
             headers,
         } = parse_request(&head)?;
-        let origin = origin_url(&self.url, &target);
+        let origin = origin_url(&self.url, &target)?;
 
         let (mut writer, mut reader) = session.open_bi().await?;
         Request {
@@ -216,14 +216,21 @@ impl FetchCmd {
     }
 }
 
-/// The origin URL for one request: the base as given for a root request (`/`), else the base with the
-/// inbound path and query appended, so a download hits the exact file and an API proxy forwards the path.
-fn origin_url(base: &str, target: &str) -> String {
+/// The origin URL for one request: the base as given for a root request (`/`), else the inbound path and
+/// query resolved against the base, so a download hits the exact file the base names and an API proxy
+/// forwards the path.
+///
+/// Delegates the composition to [`fetch::compose_url`], which PARSES the base and joins the target as a URL
+/// rather than string-concatenating: joining merges the two paths per the URL grammar, so a base with a
+/// trailing slash and a target with a leading one (`https://x/` + `/a`) yield `https://x/a`, not the
+/// `https://x//a` a raw `format!` produces. A root request (`/`, or empty) keeps the base VERBATIM: the base
+/// already names the exact resource (the download case), and joining `/` would discard any path the base
+/// carries.
+fn origin_url(base: &str, target: &str) -> eyre::Result<String> {
     if target == "/" || target.is_empty() {
-        base.to_owned()
-    } else {
-        format!("{base}{target}")
+        return Ok(base.to_owned());
     }
+    fetch::compose_url(base, target).map_err(|error| eyre::eyre!(error))
 }
 
 /// Read an HTTP request head (up to the blank line) one byte at a time. Bounded so a client that never
@@ -370,16 +377,27 @@ mod tests {
     #[test]
     fn root_request_uses_the_base_verbatim() {
         assert_eq!(
-            origin_url("https://example.com/big.iso", "/"),
+            origin_url("https://example.com/big.iso", "/").unwrap(),
             "https://example.com/big.iso"
         );
     }
 
     #[test]
-    fn a_path_and_query_append_to_the_base() {
+    fn a_path_and_query_resolve_against_the_base() {
         assert_eq!(
-            origin_url("https://api.example.com", "/users?id=5"),
+            origin_url("https://api.example.com", "/users?id=5").unwrap(),
             "https://api.example.com/users?id=5"
+        );
+    }
+
+    /// A base with a trailing slash and a target with a leading one compose to ONE slash, not two: the join
+    /// merges the paths per the URL grammar, so `https://api.example.com/` + `/users` is
+    /// `https://api.example.com/users`, never the `https://api.example.com//users` a raw `format!` yields.
+    #[test]
+    fn a_trailing_slash_base_and_leading_slash_target_do_not_double_the_slash() {
+        assert_eq!(
+            origin_url("https://api.example.com/", "/users").unwrap(),
+            "https://api.example.com/users"
         );
     }
 

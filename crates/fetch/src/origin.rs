@@ -106,6 +106,23 @@ impl OriginAllowlist {
     }
 }
 
+/// Compose the request URL to fetch by resolving `target` (an inbound request path and query) against
+/// `base` (the origin the caller named), joining them per the URL grammar rather than concatenating strings.
+/// A join merges the two paths correctly, so a base with a trailing slash and a target with a leading one
+/// (`https://x/` + `/a`) compose to `https://x/a`, never the `https://x//a` a raw concatenation yields, and a
+/// malformed base or target is a typed error here rather than a broken URL sent to the origin.
+///
+/// A pure edge helper that marshals two strings through the `reqwest::Url` parser (the same parser the SSRF
+/// guard and the origin allowlist use), so the composed URL is well-formed by the same grammar the fetch
+/// then vets. The caller decides how a root request (`/`) is treated; this always joins.
+pub fn compose_url(base: &str, target: &str) -> Result<String, String> {
+    let base = reqwest::Url::parse(base).map_err(|error| format!("invalid fetch url: {error}"))?;
+    let joined = base
+        .join(target)
+        .map_err(|error| format!("invalid request path {target}: {error}"))?;
+    Ok(joined.into())
+}
+
 #[cfg(test)]
 #[path = "origin_tests.rs"]
 mod origin_tests;

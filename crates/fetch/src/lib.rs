@@ -26,5 +26,5 @@ mod http_tests;
 mod serve_tests;
 
 pub use crate::http::{FetchRequest, FetchResponse};
-pub use crate::origin::{Origin, OriginAllowlist};
+pub use crate::origin::{Origin, OriginAllowlist, compose_url};
 pub use crate::serve::serve_fetch;
