@@ -20,14 +20,9 @@ use std::sync::Arc;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use fetch::OriginAllowlist;
-use nauthy::{Admitted, Denylist, Gate, VerifyKey};
+use nauthy::{Denylist, Gate, VerifyKey};
 use tightbeam::duration::Lifetime;
-use tightbeam::open_policy::Never;
-use tightbeam::tunnel::{
-    self, BoxRead, BoxWrite, CancellationToken, Exposer, Handler, Registry, ServiceCatalog,
-    Services,
-};
-use tokio::io::AsyncWriteExt as _;
+use tightbeam::tunnel::{self, CancellationToken, Exposer, Registry, Services};
 
 use crate::contacts::{Contacts, Petname};
 use crate::identity::Secret;
@@ -40,18 +35,27 @@ mod serve_beam;
 mod serve_fetch;
 #[path = "serve_ping.rs"]
 mod serve_ping;
+#[path = "serve_roster.rs"]
+mod serve_roster;
+#[path = "serve_services.rs"]
+mod serve_services;
 #[path = "serve_speed.rs"]
 mod serve_speed;
 #[cfg(feature = "ssh")]
 #[path = "serve_sshd.rs"]
 mod serve_sshd;
+#[path = "serve_stop.rs"]
+mod serve_stop;
 
 use serve_beam::Beam;
 use serve_fetch::Fetch;
 use serve_ping::Ping;
+pub use serve_roster::Roster;
+pub use serve_services::ServiceList;
 use serve_speed::Speed;
 #[cfg(feature = "ssh")]
 use serve_sshd::Sshd;
+pub use serve_stop::{STOP_ACK, Stop};
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
 /// teardown (the remote twin of a local Ctrl-C or a `--for` deadline). The client verb is `swoosh stop`.
@@ -497,133 +501,6 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
     // signs a roster the signet verifies), so this path holds `secret`; a relay-only `serve` node holds
     // just the bytes and cannot cut. See `roster::cut` for the full rule and why multi-writer is rejected.
     Ok(roster::cut(&secret.cap_identity()?, &doc))
-}
-
-/// The `roster:` handler: serve the signet-signed membership snapshot to an admitted member, then close.
-/// GATED (a stranger must never read the member set: delib-28 containment). Only the signet SIGNED the blob;
-/// this node merely serves a pre-cut snapshot, so a popped courier leaks a read of a member-known set, never
-/// authority (the signing secret is not needed to serve, only to have signed). The blob is self-delimiting
-/// and signature-validated by the puller, so the handler just writes it and closes the write half.
-pub struct Roster {
-    blob: Arc<Vec<u8>>,
-}
-
-impl Roster {
-    /// Build the `roster:` handler over the pre-cut, signet-signed membership snapshot it serves.
-    pub fn new(blob: Arc<Vec<u8>>) -> Self {
-        Self { blob }
-    }
-}
-
-impl Handler for Roster {
-    // GATED (a stranger must never read the member set: delib-28 containment): no legitimate public use.
-    type Public = Never;
-
-    async fn serve(
-        &self,
-        _admitted: Admitted,
-        mut writer: BoxWrite,
-        _reader: BoxRead,
-    ) -> eyre::Result<()> {
-        writer.write_all(&self.blob).await?;
-        writer.shutdown().await?;
-        Ok(())
-    }
-}
-
-/// The `control.stop` handler swoosh injects: the remote node-lifecycle stop. It holds a CLONE of the
-/// node's teardown token as the node-control CAPABILITY (never a node handle), so when an admitted caller
-/// reaches it, it REQUESTS the graceful teardown by cancelling that token; the exposer (the one owner of
-/// teardown) sees the cancel and stops the node. GATED, because stopping the node is a mutation with no
-/// safe public form: the family gate is its authentication, so only an admitted member (this node's own
-/// devices, for a single-owner node) can stop it. An open gate over it is refused at [`Exposer::new`].
-///
-/// SAFE FIRST SLICE (delib-18): this ships the FAMILY-GATED stop, correct for a single-owner qat node.
-/// The HARDENED lifecycle (an arm->confirm nonce + a single-use device-bound DESTROY-CAP, ideally
-/// OWNER-only so a delegate cannot casually shut the node down) is the FOLLOW, and needs an Adversary
-/// gating-review before `control.stop` is trusted on a multi-delegate node; the open question there is
-/// whether the `Admitted` witness can distinguish an owner device from a delegate.
-///
-/// On admission the handler cancels the token, then writes ONE ack byte so the client can confirm the stop
-/// was actioned (not merely that the dial was admitted): a positive, explicit confirmation, the honest
-/// counterpart to the loud typed refusal a non-admitted caller gets at the gate.
-///
-/// Public so the `gated_stop` proof drives the SAME handler `serve` injects, not a hand-rolled near-copy,
-/// exactly as the `gated_measure` proof reuses `registry`.
-pub struct Stop {
-    cancel: CancellationToken,
-}
-
-impl Stop {
-    /// Build the `control.stop` handler holding a CLONE of the node's teardown token as the node-control
-    /// capability (never a node handle): an admitted caller REQUESTS the graceful teardown by cancelling it.
-    pub fn new(cancel: CancellationToken) -> Self {
-        Self { cancel }
-    }
-}
-
-impl Handler for Stop {
-    // GATED: stopping the node is a mutation with no safe public form; the family gate is its authentication.
-    type Public = Never;
-
-    async fn serve(
-        &self,
-        _admitted: Admitted,
-        mut writer: BoxWrite,
-        _reader: BoxRead,
-    ) -> eyre::Result<()> {
-        self.cancel.cancel();
-        // The ack byte: proof to the client that the stop landed. Written after the cancel so a client
-        // reading it knows the teardown was requested, then flushed since the node is about to close.
-        writer.write_all(&[STOP_ACK]).await?;
-        writer.flush().await?;
-        Ok(())
-    }
-}
-
-/// The single byte `control.stop` writes to confirm the stop was actioned. Any value works (the client only
-/// needs to read one byte on an admitted stream); a printable `.` keeps a raw wire dump legible.
-pub const STOP_ACK: u8 = b'.';
-
-/// The `control.services` handler swoosh injects: the node-lifecycle READ. It holds a pre-cut
-/// [`ServiceCatalog`] snapshot (the names + effective posture of what this node serves, taken once at serve
-/// start from the parsed services and the resolved gate) and, on an admitted stream, writes its
-/// self-delimiting encoding and closes. A pure READ: no mutable state, no [`CancellationToken`], no authority
-/// granted, so a popped courier leaks only a member-known service menu, never a lever on the node.
-///
-/// GATED (`type Public = Never`): the service menu is member-only (delib-18 containment), so a stranger is
-/// refused at the gate and never learns what the node serves. The blob is self-delimiting (a count then
-/// length-prefixed entries), so the handler just writes it and closes the write half, the same shape the
-/// `roster:` handler uses for its signed membership snapshot.
-///
-/// Public so the `control.services` integration proof drives the SAME handler `serve` injects, not a
-/// hand-rolled near-copy (as `gated_stop` reuses `Stop`).
-pub struct ServiceList {
-    catalog: ServiceCatalog,
-}
-
-impl ServiceList {
-    /// Build the `control.services` handler over the pre-cut catalog snapshot it serves.
-    pub fn new(catalog: ServiceCatalog) -> Self {
-        Self { catalog }
-    }
-}
-
-impl Handler for ServiceList {
-    // GATED: the served-service menu is member-only (delib-18: existence and shape revealed only after
-    // admission), so no legitimate public use.
-    type Public = Never;
-
-    async fn serve(
-        &self,
-        _admitted: Admitted,
-        mut writer: BoxWrite,
-        _reader: BoxRead,
-    ) -> eyre::Result<()> {
-        writer.write_all(&self.catalog.encode()).await?;
-        writer.shutdown().await?;
-        Ok(())
-    }
 }
 
 /// The scheme a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE literal
