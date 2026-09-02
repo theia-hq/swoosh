@@ -24,7 +24,8 @@ use nauthy::{Admitted, Denylist, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::open_policy::{Never, OptIn};
 use tightbeam::tunnel::{
-    self, BoxRead, BoxWrite, CancellationToken, Exposer, Handler, Registry, Services,
+    self, BoxRead, BoxWrite, CancellationToken, Exposer, Handler, Registry, ServiceCatalog,
+    Services,
 };
 use tokio::io::AsyncWriteExt as _;
 
@@ -41,6 +42,18 @@ use crate::transport::ReachArgs;
 /// gated exact-name, so a grant for one method can never open another. Public so the `swoosh stop` client
 /// verb requests the SAME name the served handler is keyed under, one source of truth for the wire string.
 pub const CONTROL_STOP_SERVICE: &str = "control.stop";
+
+/// The node-control service that LISTS what this node serves: an admitted caller reaching it reads back the
+/// node's served services, each with its NAME and reach posture (gated behind a member badge, or open to
+/// anyone). A pure READ of what the exposer was built with, no mutable state and no authority granted. The
+/// client verb is `swoosh service --at <peer>`.
+///
+/// GATED (`type Public = Never`, like `control.stop`): the service menu is member-only, so a stranger never
+/// learns what a node serves (delib-18: existence and shape are revealed only AFTER admission; this is the
+/// teaching read the wrong-name path deliberately withholds). One unified `control.*` family, the dotted
+/// scheme is the verbatim registry key. Public so the `swoosh service` client requests the SAME name the
+/// served handler is keyed under, one source of truth for the wire string.
+pub const CONTROL_SERVICES_SERVICE: &str = "control.services";
 
 /// The default services `serve` publishes when none is named: swoosh's own gated `ping` and
 /// `speed` handlers, under the names a client requests. ping and speed are TWO independent services (cheap
@@ -159,7 +172,9 @@ impl crate::reaching::Reaching for ServeCmd {
             roster_blob,
         }) = self.expose.take()
         else {
-            eyre::bail!("internal: serve reached run without its expose context (composition-root bug)");
+            eyre::bail!(
+                "internal: serve reached run without its expose context (composition-root bug)"
+            );
         };
         self.run_serve(node, host_seed, signet, denylist, roster_blob)
             .await
@@ -207,10 +222,19 @@ impl ServeCmd {
         // same family gate as everything else, so only an admitted caller (a member of this node's family)
         // can reach it (see `stop_handler`). Pointed at the `control.stop:` handler injected below.
         requested.push(format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:"));
+        // Every node also answers its own gated `control.services` read: the node-lifecycle READ twin of
+        // `control.stop`, part of being a node. Pointed at the `control.services:` handler injected below.
+        requested.push(format!(
+            "{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"
+        ));
         let services = Services::parse(&requested)?;
         // Resolve the gate before announcing readiness: an unprovisioned node with no `--public` fails
         // HERE, through the ONE shared policy point, rather than ever serving on a permissive default.
         let gate = tunnel::resolve_gate(self.public, signet, denylist)?;
+        // Snapshot the served catalog (names + effective posture under this gate) ONCE, here, for the
+        // `control.services` read handler to serve. A pure read of the parsed services and the resolved gate,
+        // no mutable state: what this node serves is fixed for the run, so the snapshot is the whole answer.
+        let catalog = services.catalog(&gate);
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
         // `--for` timer and the gated `control.stop` handler each hold a CLONE as the node-control
         // capability -- they may REQUEST the stop, never tear the node down themselves. So this one token is
@@ -223,7 +247,8 @@ impl ServeCmd {
         // cancel token, so an admitted caller that reaches it requests the same graceful teardown.
         let registry = registry(host_seed, self.out.clone())?
             .with("roster", Roster::new(roster_blob))
-            .with(CONTROL_STOP_SERVICE, Stop::new(cancel.clone()));
+            .with(CONTROL_STOP_SERVICE, Stop::new(cancel.clone()))
+            .with(CONTROL_SERVICES_SERVICE, ServiceList::new(catalog));
         let exposer = Exposer::new(services.clone(), registry, gate)?;
 
         if !self.quiet {
@@ -520,6 +545,47 @@ impl Handler for Stop {
 /// The single byte `control.stop` writes to confirm the stop was actioned. Any value works (the client only
 /// needs to read one byte on an admitted stream); a printable `.` keeps a raw wire dump legible.
 pub const STOP_ACK: u8 = b'.';
+
+/// The `control.services` handler swoosh injects: the node-lifecycle READ. It holds a pre-cut
+/// [`ServiceCatalog`] snapshot (the names + effective posture of what this node serves, taken once at serve
+/// start from the parsed services and the resolved gate) and, on an admitted stream, writes its
+/// self-delimiting encoding and closes. A pure READ: no mutable state, no [`CancellationToken`], no authority
+/// granted, so a popped courier leaks only a member-known service menu, never a lever on the node.
+///
+/// GATED (`type Public = Never`): the service menu is member-only (delib-18 containment), so a stranger is
+/// refused at the gate and never learns what the node serves. The blob is self-delimiting (a count then
+/// length-prefixed entries), so the handler just writes it and closes the write half, the same shape the
+/// `roster:` handler uses for its signed membership snapshot.
+///
+/// Public so the `control.services` integration proof drives the SAME handler `serve` injects, not a
+/// hand-rolled near-copy (as `gated_stop` reuses `Stop`).
+pub struct ServiceList {
+    catalog: ServiceCatalog,
+}
+
+impl ServiceList {
+    /// Build the `control.services` handler over the pre-cut catalog snapshot it serves.
+    pub fn new(catalog: ServiceCatalog) -> Self {
+        Self { catalog }
+    }
+}
+
+impl Handler for ServiceList {
+    // GATED: the served-service menu is member-only (delib-18: existence and shape revealed only after
+    // admission), so no legitimate public use.
+    type Public = Never;
+
+    async fn serve(
+        &self,
+        _admitted: Admitted,
+        mut writer: BoxWrite,
+        _reader: BoxRead,
+    ) -> eyre::Result<()> {
+        writer.write_all(&self.catalog.encode()).await?;
+        writer.shutdown().await?;
+        Ok(())
+    }
+}
 
 /// The `beam:` handler swoosh injects: the receive half of PUSH file transfer. It takes one admitted stream
 /// carrying one pushed file, drives `bifrost-wire`'s verified receive into a temp file under `beam_out`, and
