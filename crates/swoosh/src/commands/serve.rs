@@ -353,8 +353,10 @@ pub fn registry(host_seed: [u8; 32], beam_out: PathBuf) -> eyre::Result<Registry
 /// serves. The SIGNET signs it (via [`Secret::cap_identity`]), so any member node can serve it and none can
 /// forge it. Cut ONCE at serve start (a snapshot); a member added later is picked up on the next `serve`.
 ///
-/// B1 ships epoch 0: a single hand-repointed coordination node needs no ordering yet, and the epoch counter
-/// rides B2's `fleet` re-cut. A `me` device whose label is not a valid roster label is skipped rather than
+/// The epoch is READ from the persisted roster epoch beside the contacts (default 0 before any is set), so
+/// the puller's anti-rollback floor is not pinned at 0. The BUMP verb (a `swoosh fleet cut` that increments
+/// and re-signs) is deferred to B2; today the read is real, so once the counter advances the floor tracks
+/// it. A `me` device whose label is not a valid roster label is skipped LOUDLY (a warning) rather than
 /// aborting the whole roster.
 pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>> {
     let me: Petname = "me".parse()?;
@@ -362,15 +364,19 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
         .devices(&me)
         .into_iter()
         .flatten()
-        .filter_map(|(label, node)| {
-            let label = label.as_str().parse::<RosterLabel>().ok()?;
-            Some(Member {
+        .filter_map(|(label, node)| match label.as_str().parse::<RosterLabel>() {
+            Ok(label) => Some(Member {
                 node: VerifyKey::new(*node.key()),
                 label,
-            })
+            }),
+            Err(error) => {
+                eprintln!("warning: excluding me/{label} from the served roster ({error})");
+                None
+            }
         })
         .collect();
-    let doc = RosterDoc::new(Epoch(0), members)?;
+    let epoch = Epoch(contacts.roster_epoch().unwrap_or(0));
+    let doc = RosterDoc::new(epoch, members)?;
     // The SIGNET is the sole cutter: only the secret can sign a roster that verifies against the signet, so
     // `cut` here needs the live secret while `serve` (relay-only) needs just the resulting bytes.
     Ok(roster::cut(&secret.cap_identity()?, &doc))
