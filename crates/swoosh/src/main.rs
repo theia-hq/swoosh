@@ -218,7 +218,12 @@ impl Reach {
             // so it dials under the persisted identity when one exists; a node with no signet errors clearly
             // ("adopt first") rather than dialing as a stranger.
             Self::Fleet(_) => Identity::PersistedIfPresent,
-            Self::Fetch(_) => Identity::Ephemeral,
+            // `fetch --via` reaches a GATED `fetch:` service presenting a member badge (like the diagnostic
+            // verbs and `beam`/`stop`/`fleet`), so it dials under the persisted identity when one exists
+            // (the badge roots at the dialing key: the owner reaching their OWN exit node admits), ephemeral
+            // on a fresh install. This is the identity half of the owner-reaching-own-node 403 fix; step 4
+            // collapses this whole match into `credential().identity()`.
+            Self::Fetch(_) => Identity::PersistedIfPresent,
         }
     }
 
@@ -278,7 +283,9 @@ impl Reach {
             Self::Ping(cmd) => cmd.run(node, contacts, transport, self_badge).await,
             Self::Speed(cmd) => cmd.run(node, contacts, transport, self_badge).await,
             Self::Status(cmd) => cmd.run(node, contacts, transport, self_badge).await,
-            Self::Fetch(cmd) => cmd.run(node, contacts, transport).await,
+            // `fetch` reaches the peer's GATED `fetch:` service, so it presents the self-signed membership
+            // badge (minted below in `self_badge`) by default, an explicit `--present` slip overriding.
+            Self::Fetch(cmd) => cmd.run(node, contacts, transport, self_badge).await,
             Self::Forward(cmd) => cmd.run(node).await,
             // `beam` presents the self-signed membership badge (minted below) to the peer's gated `beam:`
             // service, the same way the diagnostic verbs and `tunnel-connect` do.

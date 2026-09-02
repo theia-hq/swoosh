@@ -29,9 +29,11 @@ pub struct FetchCmd {
     /// The node to fetch through: a saved petname (`usa`, `alice/box`) or a raw key.
     #[arg(long, value_name = "peer")]
     pub via: Target,
-    /// Present a `sheer:` capability link to a cap-gated node.
+    /// Present a `sheer:` capability link to a cap-gated node (a delegate's slip; overrides the default
+    /// member badge). Parsed at the boundary via [`SheerLink`]'s `FromStr`, so a malformed link is a clap
+    /// error here, not an opaque refusal at the exit node.
     #[arg(long, value_name = "link")]
-    pub present: Option<String>,
+    pub present: Option<crate::credential::SheerLink>,
     /// Pin the local listener port (default: an OS-assigned free port).
     #[arg(long, value_name = "port")]
     pub port: Option<u16>,
@@ -44,22 +46,31 @@ impl crate::reaching::Reaching for FetchCmd {
         &self.reach
     }
 
-    /// TODO(step 3): `fetch:` is family-gated, so this becomes `Family { present: self.present }` (the
-    /// owner reaching their OWN exit node presents the member badge by default, fixing the 403). Kept
-    /// `Anonymous` for one commit so this step only closes the wildcard; the flip is its own change.
+    /// `fetch:` is FAMILY-GATED: the owner reaching their OWN exit node presents the member badge by
+    /// default (rooted at the dialing key), and a delegate may override with `--present <slip>`. Stating
+    /// `Family` FUSES the identity to `PersistedIfPresent`, so the owner's self-badge roots at the same
+    /// key the dial binds under and admits: this is the one-line fix for the owner-reaching-own-node 403
+    /// (the verb used to dial `Ephemeral` + slip-only, so an owner with no slip was refused).
     fn credential(&self) -> crate::credential::Credential {
-        crate::credential::Credential::Anonymous
+        crate::credential::Credential::Family {
+            present: self.present.clone(),
+        }
     }
 }
 
 impl FetchCmd {
     /// Dial the exit node, bind a loopback listener, print the local URL, and serve each request over its
     /// own bifrost stream until Ctrl-C.
+    ///
+    /// `present` is the ALREADY-RESOLVED badge from the composition root: the member badge rooted at the
+    /// dialing key by default (so the owner reaching their OWN gated exit node admits), a `--present` slip
+    /// if the caller gave one. `fetch:` is family-gated, so every per-request stream presents it.
     pub async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
+        present: Option<String>,
     ) -> eyre::Result<()> {
         let Reached { session, label } = reach::dial(node, contacts, &self.via, transport).await?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
@@ -86,7 +97,7 @@ impl FetchCmd {
                             continue;
                         }
                     };
-                    pipes.push(self.serve(tcp, &session));
+                    pipes.push(self.serve(tcp, &session, present.as_deref()));
                 }
                 Some(result) = pipes.next(), if !pipes.is_empty() => {
                     if let Err(error) = result {
@@ -100,9 +111,14 @@ impl FetchCmd {
     /// Serve one inbound HTTP request. A failure BEFORE any response bytes are written serves a `502` so
     /// a downloader sees a real HTTP error, not a bare connection reset; a failure once the response has
     /// begun just closes the socket (a second HTTP response into the body would corrupt it).
-    async fn serve<S: Session>(&self, mut tcp: TcpStream, session: &S) -> eyre::Result<()> {
+    async fn serve<S: Session>(
+        &self,
+        mut tcp: TcpStream,
+        session: &S,
+        present: Option<&str>,
+    ) -> eyre::Result<()> {
         let mut responded = false;
-        if let Err(error) = self.relay(&mut tcp, session, &mut responded).await {
+        if let Err(error) = self.relay(&mut tcp, session, present, &mut responded).await {
             if !responded {
                 // A failure before any response (an open, a parse, a stream drop) is a bad-gateway
                 // condition, not an authorization one, so `502`. The refusal path inside `relay` serves
@@ -125,6 +141,7 @@ impl FetchCmd {
         &self,
         tcp: &mut TcpStream,
         session: &S,
+        present: Option<&str>,
         responded: &mut bool,
     ) -> eyre::Result<()> {
         let head = read_head(tcp).await?;
@@ -138,7 +155,7 @@ impl FetchCmd {
         let (mut writer, mut reader) = session.open_bi().await?;
         Request {
             service: "fetch".to_owned(),
-            capability: self.present.clone(),
+            capability: present.map(str::to_owned),
         }
         .write(&mut writer)
         .await?;
