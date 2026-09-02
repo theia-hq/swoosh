@@ -161,8 +161,8 @@ to flag the same smell twice._
   `--public` / `--peer`, a named bin, a consumer's own service name) overfits the lib to that one bin and
   rots the moment another consumer arrives or a flag is renamed. Name the concept the library itself OWNS,
   never the surface a consumer paints over it: tightbeam owns THE CANCELLATION TOKEN an exposer holds (a
-  caller may hold a clone to trigger teardown, whether from a local deadline timer or an admitted remote stop
-  request), so that is the only vocabulary its docs may use, never `serve --for`; nauthy owns [`Gate::Open`]
+  caller may hold a clone to trigger teardown; who fires it, and why, is the consumer's concern and goes
+  unnamed here), so that is the only vocabulary its docs may use, never `serve --for`; nauthy owns [`Gate::Open`]
   (building an open gate is the caller's own choice), never `--public`; bifrost owns a DIRECT ADDRESS HINT,
   never `--peer`; bifrost-core owns the DERIVED-KEY payload a machine adopts, never `--authkey`. The same
   holds dep->consumer: a dependency never alludes to the app that consumes it, and the consumer bin name
