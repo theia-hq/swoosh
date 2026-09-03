@@ -546,3 +546,39 @@ fn public_flag_requires_a_value_and_splits_on_commas() {
         "no --public means nothing is opened"
     );
 }
+
+/// The duration timer moved off `--for` onto `--expires` (`--for` is now the WHO family, reserved for
+/// `grant issue`). `--expires 30m` parses into the local timer; `--for 30m` no longer parses (the flag is
+/// gone), so the overloaded word can never mean two things.
+#[test]
+fn serve_duration_is_expires_not_for() {
+    use clap::Parser as _;
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        serve: super::ServeCmd,
+    }
+
+    // `--expires 30m` arms the bounded-time timer.
+    let wrap = Wrap::try_parse_from(["x", "--expires", "30m"]).expect("--expires parses");
+    let expires = wrap.serve.expires.expect("the timer is armed");
+    assert_eq!(
+        expires.duration(),
+        core::time::Duration::from_secs(30 * 60),
+        "--expires 30m arms a 30-minute local timer"
+    );
+
+    // `--for 30m` no longer parses as a duration: the flag is gone from `serve`.
+    assert!(
+        Wrap::try_parse_from(["x", "--for", "30m"]).is_err(),
+        "serve --for is gone; the duration is --expires now"
+    );
+
+    // Omitting it leaves the node running until Ctrl-C (no timer).
+    let wrap = Wrap::try_parse_from(["x"]).expect("no timer parses");
+    assert!(
+        wrap.serve.expires.is_none(),
+        "no --expires means run until stopped"
+    );
+}

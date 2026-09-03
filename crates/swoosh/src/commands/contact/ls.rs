@@ -42,11 +42,13 @@ fn print_overview(contacts: &Contacts) {
     let mut any = false;
     for petname in contacts.petnames() {
         any = true;
+        let signet = contacts.signet(petname).map(|binding| &binding.node);
         let devices: Vec<_> = contacts.devices(petname).into_iter().flatten().collect();
-        match devices.as_slice() {
-            // A person with only the implicit default device is one line: name, then its key inline. No
-            // `(default)` noise, since a device-less contact never named a device to begin with.
-            [(label, node)] if label.as_str() == DeviceLabel::DEFAULT => {
+        match (signet, devices.as_slice()) {
+            // A person with only the implicit default device AND no signet is one line: name, then its
+            // key inline. No `(default)` noise, since a device-less contact never named a device to begin
+            // with. A recorded signet always forces the block form below, so it is never invisible.
+            (None, [(label, node)]) if label.as_str() == DeviceLabel::DEFAULT => {
                 println!(
                     "{:<width$}{}",
                     petname.as_str(),
@@ -54,11 +56,11 @@ fn print_overview(contacts: &Contacts) {
                     width = NAME_COL
                 );
             }
-            // A multi- or named-device person is a header with its devices indented beneath, columns
-            // aligned so the keys line up down the block.
+            // Anyone else is a header with their signet (if recorded) and devices indented beneath,
+            // columns aligned so the keys line up down the block.
             _ => {
                 println!("{petname}");
-                print_devices(&devices, NodeId::short);
+                print_block(signet, &devices, NodeId::short);
             }
         }
     }
@@ -67,8 +69,9 @@ fn print_overview(contacts: &Contacts) {
     }
 }
 
-/// The detail for one person: a header and their devices indented beneath with FULL keys, so a key can
-/// be copied straight out of the block. An unknown name names the fix, matching the resolve error.
+/// The detail for one person: a header, then their signet (if recorded) and devices indented beneath with
+/// FULL keys, so any key can be copied straight out of the block. An unknown name names the fix, matching
+/// the resolve error.
 fn print_detail(contacts: &Contacts, petname: &Petname) -> eyre::Result<()> {
     let Some(devices) = contacts.devices(petname) else {
         eyre::bail!(
@@ -76,7 +79,10 @@ fn print_detail(contacts: &Contacts, petname: &Petname) -> eyre::Result<()> {
         );
     };
     println!("{petname}");
-    print_devices(&devices.collect::<Vec<_>>(), |node| node.to_string());
+    let signet = contacts.signet(petname).map(|binding| &binding.node);
+    print_block(signet, &devices.collect::<Vec<_>>(), |node| {
+        node.to_string()
+    });
     Ok(())
 }
 
@@ -87,14 +93,25 @@ fn print_names(contacts: &Contacts) {
     }
 }
 
-/// Print a person's devices as an aligned `  label  key` block, rendering each key with `key` (short in
-/// the overview, full in the detail). The label column is padded to the widest label so the keys align.
-fn print_devices(devices: &[(&DeviceLabel, &NodeId)], key: impl Fn(&NodeId) -> String) {
+/// Print a person's block: the signet (if recorded) as the FIRST line, then the device lines, as an
+/// aligned `  label  key` table. Each key renders with `key` (short in the overview, full in the detail);
+/// the label column is padded to the widest label, signet included, so the keys line up down the block.
+/// The `signet` pseudo-label is unambiguous by construction: the label is reserved
+/// ([`DeviceLabel::SIGNET_RESERVED`]), so a device can never occupy that row.
+fn print_block(
+    signet: Option<&NodeId>,
+    devices: &[(&DeviceLabel, &NodeId)],
+    key: impl Fn(&NodeId) -> String,
+) {
     let width = devices
         .iter()
         .map(|(label, _)| label.as_str().len())
+        .chain(signet.map(|_| DeviceLabel::SIGNET_RESERVED.len()))
         .max()
         .unwrap_or(0);
+    if let Some(node) = signet {
+        println!("  {:<width$}  {}", DeviceLabel::SIGNET_RESERVED, key(node));
+    }
     for (label, node) in devices {
         println!("  {:<width$}  {}", label.as_str(), key(node));
     }

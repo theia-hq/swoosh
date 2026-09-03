@@ -103,6 +103,13 @@ impl DeviceLabel {
     /// unqualified person resolves to their default device first.
     pub const DEFAULT: &'static str = "default";
 
+    /// The label reserved for a person's SIGNET root, refused as a device label. A signet is a person's
+    /// root, not a device, and it persists under this exact key in the person's table (`store::SIGNET_KEY`),
+    /// so a device literally labelled `signet` would collide with it on save. This is the ONE source of
+    /// truth for that reserved string, shared with the store codec so the parse-reject and the on-disk key
+    /// can never drift apart.
+    pub(crate) const SIGNET_RESERVED: &'static str = "signet";
+
     /// The maximum label length in bytes. Small: a device label (`desk`, `macbook`) is never long, and a
     /// bound keeps the `u16` length prefix in the roster's canonical encoding total.
     pub const MAX_LEN: usize = 255;
@@ -136,6 +143,16 @@ impl FromStr for DeviceLabel {
         {
             return Err(DeviceLabelParseError::BadByte);
         }
+        // `signet` is reserved for a person's signet root (it persists under the same key in the person's
+        // table), so it can never be a device label: rejecting it here makes the device/signet collision
+        // unrepresentable, the same reserved-word discipline the store's reserved keys use. For the ROSTER
+        // path this same reject fires UPSTREAM, at `roster::parse_canonical` (which parses each member label
+        // through here): a `signet`-labelled member fails the WHOLE already-signature-verified roster there,
+        // so `hydrate` never re-parses a label and needs no reserved-word gate of its own (one could never
+        // fire, since it only ever sees `DeviceLabel`s that already passed this check).
+        if text == Self::SIGNET_RESERVED {
+            return Err(DeviceLabelParseError::Reserved);
+        }
         Ok(Self(text.to_owned()))
     }
 }
@@ -161,6 +178,9 @@ pub enum DeviceLabelParseError {
     /// The label held whitespace or another control byte.
     #[error("device label cannot contain whitespace or control bytes")]
     BadByte,
+    /// The label was `signet`, reserved for a person's signet root (record it with `contact signet`).
+    #[error("device label 'signet' is reserved for a person's signet root")]
+    Reserved,
 }
 
 /// A `<petname>` or `<petname>/<device>` address, as typed on the command line.
@@ -237,6 +257,33 @@ pub struct Binding {
     pub source: Source,
 }
 
+/// One person in the address book: their device bindings plus, optionally, their SIGNET root.
+///
+/// A signet is the key a person's fleet roots at (the root that vouches for their devices); it is NOT a
+/// device, so it lives in its own at-most-one slot, never in `devices`. Keeping it out of `devices` keeps
+/// it out of reach fan-out ([`resolve_candidates`](Contacts::resolve_candidates)) and out of `contact ls`'s
+/// device columns: you never dial a signet, you BIND a fleet grant to it (`grant issue --for fleet:<petname>`).
+/// Modeling it as a distinct `Option` makes "a person has zero-or-one signet" the only representable shape.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Person {
+    /// This person's device identities, label -> binding, in label order (unchanged from the old value type).
+    devices: BTreeMap<DeviceLabel, Binding>,
+    /// This person's signet root, if recorded. `None` until hand-added (v1) or federation-hydrated (later).
+    /// Reuses [`Binding`] so the signet carries the SAME [`Source`] provenance the moat depends on: a
+    /// hand-typed signet is [`Source::HandTyped`]; a future synced roster could vouch one as
+    /// [`Source::Roster`].
+    signet: Option<Binding>,
+}
+
+impl Person {
+    /// A person with no devices AND no signet: nothing left to keep. Used by `remove`/`hydrate` tidy-up so a
+    /// signet-only person (you recorded alice's signet before any device) is NOT swept away, but a truly
+    /// empty person still is.
+    fn is_empty(&self) -> bool {
+        self.devices.is_empty() && self.signet.is_none()
+    }
+}
+
 /// The in-memory address book: every petname mapped to its ordered group of device bindings, plus the
 /// persisted roster epoch floor.
 ///
@@ -244,7 +291,7 @@ pub struct Binding {
 /// remove / resolve / hydrate behaviour; persistence is the [`ContactsStore`]'s job, layered around it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Contacts {
-    people: BTreeMap<Petname, BTreeMap<DeviceLabel, Binding>>,
+    people: BTreeMap<Petname, Person>,
     /// The highest roster epoch this book has applied: the anti-rollback FLOOR. `None` before any roster is
     /// hydrated. A snapshot at or below it is refused as stale, so a replayed old-but-genuine roster can
     /// never roll the fleet back (delib-28 F1). For B1 there is one signet, so one floor; a device in two
@@ -259,12 +306,12 @@ impl Contacts {
     /// [`DEFAULT`](DeviceLabel::DEFAULT) slot.
     pub fn add(&mut self, petname: Petname, device: Option<DeviceLabel>, node: NodeId) -> Added {
         let device = device.unwrap_or(DeviceLabel(DeviceLabel::DEFAULT.to_owned()));
-        let group = self.people.entry(petname).or_default();
+        let person = self.people.entry(petname).or_default();
         let binding = Binding {
             node,
             source: Source::HandTyped,
         };
-        match group.insert(device, binding) {
+        match person.devices.insert(device, binding) {
             Some(previous) if previous.node == node => Added::Unchanged,
             Some(previous) => Added::Replaced(previous.node),
             None => Added::Created,
@@ -282,9 +329,12 @@ impl Contacts {
         &self,
         petname: &Petname,
     ) -> Option<impl Iterator<Item = (&DeviceLabel, &NodeId)>> {
-        self.people
-            .get(petname)
-            .map(|group| group.iter().map(|(label, binding)| (label, &binding.node)))
+        self.people.get(petname).map(|person| {
+            person
+                .devices
+                .iter()
+                .map(|(label, binding)| (label, &binding.node))
+        })
     }
 
     /// Every device binding under a petname WITH its provenance, in label order, for the store's codec and
@@ -295,7 +345,7 @@ impl Contacts {
         &self,
         petname: &Petname,
     ) -> Option<impl Iterator<Item = (&DeviceLabel, &Binding)>> {
-        self.people.get(petname).map(|group| group.iter())
+        self.people.get(petname).map(|person| person.devices.iter())
     }
 
     /// Resolve an address to its ordered [`Candidate`]s, each carrying the `<petname>/<device>` label it
@@ -307,7 +357,7 @@ impl Contacts {
     /// never an empty success, so a reach verb never silently dials nothing. The labels let a fan-out
     /// verb (`ping`, `status`) report per device by name, not by an opaque key.
     pub fn resolve_candidates(&self, target: &ContactRef) -> Result<Vec<Candidate>, ResolveError> {
-        let group = self
+        let person = self
             .people
             .get(&target.petname)
             .ok_or_else(|| ResolveError::UnknownPetname(target.petname.clone()))?;
@@ -315,12 +365,15 @@ impl Contacts {
             label: format!("{}/{device}", target.petname),
             node,
         };
+        // Only DEVICES are candidates; the signet is never dialed (it vouches, it is not a reachable peer).
         match &target.device {
-            None => Ok(group
+            None => Ok(person
+                .devices
                 .iter()
                 .map(|(device, binding)| candidate(device, binding.node))
                 .collect()),
-            Some(device) => group
+            Some(device) => person
+                .devices
                 .get(device)
                 .map(|binding| binding.node)
                 .map(|node| vec![candidate(device, node)])
@@ -362,20 +415,24 @@ impl Contacts {
         if self.roster_epoch.is_some_and(|floor| epoch <= floor) {
             return false;
         }
-        let group = self.people.entry(Petname(ME.to_owned())).or_default();
-        // Snapshot-REPLACE: drop the prior roster-sourced set, keep every HandTyped binding, then lay the
-        // new doc's members down. Dropping first is what makes a removed member disappear; a hand-typed
-        // entry never enters the drop-set, so the operator's local choice survives.
-        group.retain(|_, binding| binding.source == Source::HandTyped);
+        let person = self.people.entry(Petname(ME.to_owned())).or_default();
+        // Snapshot-REPLACE the DEVICE set only; the fence: hydrate never touches `person.signet` (a roster
+        // carries no signet in v1), so a hand-typed `me` signet survives every pull. Drop the prior
+        // roster-sourced devices, keep every HandTyped binding, then lay the new doc's members down.
+        // Dropping first is what makes a removed member disappear; a hand-typed entry never enters the
+        // drop-set, so the operator's local choice survives.
+        person
+            .devices
+            .retain(|_, binding| binding.source == Source::HandTyped);
         for member in roster.members() {
             // The label is already a `DeviceLabel` (one label type across the seam), so there is no lossy
             // re-parse here. A HandTyped binding is sovereign and was kept by `retain`; never clobber it.
-            if let Entry::Occupied(entry) = group.entry(member.label.clone()) {
+            if let Entry::Occupied(entry) = person.devices.entry(member.label.clone()) {
                 if entry.get().source == Source::HandTyped {
                     continue;
                 }
             }
-            group.insert(
+            person.devices.insert(
                 member.label.clone(),
                 Binding {
                     node: NodeId::new(CryptoKind::Ed25519, *member.node.bytes()),
@@ -383,12 +440,13 @@ impl Contacts {
                 },
             );
         }
-        // An empty `me` group (a roster of only skipped members over no hand-typed entries) should not
-        // linger as an empty person; mirror `remove`'s tidy-up.
+        // An empty `me` person (a roster of only skipped members over no hand-typed device AND no signet)
+        // should not linger; mirror `remove`'s tidy-up. A `me` that kept a hand-typed signet is NOT empty,
+        // so it survives a device-only pull.
         if self
             .people
             .get(&Petname(ME.to_owned()))
-            .is_some_and(BTreeMap::is_empty)
+            .is_some_and(Person::is_empty)
         {
             self.people.remove(&Petname(ME.to_owned()));
         }
@@ -415,12 +473,46 @@ impl Contacts {
         self.people
             .entry(petname)
             .or_default()
+            .devices
             .insert(device, binding);
     }
 
-    /// Remove a whole petname (all its devices) or, with a device, just that one device. Returns whether
-    /// anything was removed. Removing a person's last device removes the now-empty person too, so an
-    /// empty group never lingers.
+    /// Record (or overwrite) a person's SIGNET root, hand-typed. Idempotent, mirroring [`add`](Self::add):
+    /// re-setting the same key is a no-op the caller can report; a different key is a [`Replaced`](Added::Replaced)
+    /// the caller can warn on rather than silently clobbering a signet the operator may not mean to lose.
+    /// Always [`Source::HandTyped`] in v1 (federation-synced signets arrive via a future `hydrate`, never
+    /// this path).
+    pub fn set_signet(&mut self, petname: Petname, node: NodeId) -> Added {
+        let person = self.people.entry(petname).or_default();
+        let binding = Binding {
+            node,
+            source: Source::HandTyped,
+        };
+        match person.signet.replace(binding) {
+            Some(prev) if prev.node == node => Added::Unchanged,
+            Some(prev) => Added::Replaced(prev.node),
+            None => Added::Created,
+        }
+    }
+
+    /// A person's recorded signet binding (node + provenance), or `None` if none is on file. The resolver
+    /// reads `.node`; `contact ls` reads `.source` to mark a hand-typed vs vouched signet.
+    pub fn signet(&self, petname: &Petname) -> Option<&Binding> {
+        self.people
+            .get(petname)
+            .and_then(|person| person.signet.as_ref())
+    }
+
+    /// Insert a fully-formed signet binding (node + provenance) under a petname. For the store codec ONLY,
+    /// reconstructing a persisted signet INCLUDING a future `Roster` provenance, exactly as
+    /// [`insert_binding`](Self::insert_binding) does for devices.
+    pub(crate) fn set_signet_binding(&mut self, petname: Petname, binding: Binding) {
+        self.people.entry(petname).or_default().signet = Some(binding);
+    }
+
+    /// Remove a whole petname (all its devices and signet) or, with a device, just that one device. Returns
+    /// whether anything was removed. Removing a person's last device removes the now-empty person too, UNLESS
+    /// a signet keeps them (a signet-only person is kept), so an empty person never lingers.
     pub fn remove(&mut self, petname: &Petname, device: Option<&DeviceLabel>) -> Removed {
         let Entry::Occupied(mut entry) = self.people.entry(petname.clone()) else {
             return Removed::Absent;
@@ -431,11 +523,13 @@ impl Contacts {
                 Removed::Removed
             }
             Some(device) => {
-                let group = entry.get_mut();
-                if group.remove(device).is_none() {
+                let person = entry.get_mut();
+                if person.devices.remove(device).is_none() {
                     return Removed::Absent;
                 }
-                if group.is_empty() {
+                // Tidy only a TRULY empty person: removing a person's last DEVICE keeps a signet-only person
+                // alive (you may have recorded their signet before any device).
+                if person.is_empty() {
                     entry.remove();
                 }
                 Removed::Removed

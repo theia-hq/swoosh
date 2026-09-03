@@ -12,7 +12,7 @@
 //! itself (`fetch:`, `ping:`/`speed:`, and `sshd:` under the `ssh` feature), builds the gate through the shared
 //! [`resolve_gate`](tightbeam::tunnel::resolve_gate) policy, and prints its OWN readiness banner. `--public`
 //! and `--quiet` live on THIS verb (not root), and reach comes via the shared
-//! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb. `--for` is a
+//! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb. `--expires` is a
 //! LOCAL timer with no security surface: when its deadline passes the node ends by itself, the same
 //! graceful teardown a Ctrl-C gives.
 
@@ -61,7 +61,7 @@ use self::sshd::Sshd;
 pub use self::stop::{STOP_ACK, Stop};
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
-/// teardown (the remote twin of a local Ctrl-C or a `--for` deadline). The client verb is `swoosh stop`.
+/// teardown (the remote twin of a local Ctrl-C or a `--expires` deadline). The client verb is `swoosh stop`.
 ///
 /// SETTLED name (delib-23, Principal-ruled): one unified `control.*` family over both the reads
 /// (`control.status`) and the mutations (`control.stop`); the dotted scheme is the verbatim registry key,
@@ -116,7 +116,7 @@ pub struct ServeCmd {
     pub out: PathBuf,
     /// serve for a bounded time, then stop (`30m`, `2h`, `1d`)
     #[arg(long, value_name = "duration")]
-    pub r#for: Option<Lifetime>,
+    pub expires: Option<Lifetime>,
     #[command(flatten)]
     pub reach: ReachArgs,
     /// What `serve` needs beyond the bound node, resolved by the composition root BEFORE the transport
@@ -298,9 +298,9 @@ impl ServeCmd {
         // request `with_public` proves below, so a name reads `open` only when the proof would also pass.
         let catalog = services.catalog(&gate, &public);
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
-        // `--for` timer and the gated `control.stop` handler each hold a CLONE as the node-control
+        // `--expires` timer and the gated `control.stop` handler each hold a CLONE as the node-control
         // capability -- they may REQUEST the stop, never tear the node down themselves. So this one token is
-        // the join point for every way the node can stop: a Ctrl-C, a `--for` deadline, or a remote
+        // the join point for every way the node can stop: a Ctrl-C, a `--expires` deadline, or a remote
         // `swoosh stop`.
         let cancel = CancellationToken::new();
         // Assemble the registry: the base handlers, then one `Fetch` instance per fetch service under its own
@@ -345,7 +345,7 @@ impl ServeCmd {
             // `Available` case so the banner is complete; the `Blocked` render path is built and ready to
             // wire (see `reach_section`).
             let mdns = MdnsState::Available;
-            let stop_line = match self.r#for {
+            let stop_line = match self.expires {
                 Some(lifetime) => {
                     format!(
                         "runs for {}, then stops (or ctrl-c)",
@@ -370,10 +370,10 @@ impl ServeCmd {
             );
         }
 
-        // A `--for` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
+        // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
         // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives. Spawn it
-        // beside the run holding a CLONE of the one token; if no `--for` is set, no timer is spawned.
-        if let Some(lifetime) = self.r#for {
+        // beside the run holding a CLONE of the one token; if no `--expires` is set, no timer is spawned.
+        if let Some(lifetime) = self.expires {
             let cancel = cancel.clone();
             let deadline = lifetime.duration();
             tokio::spawn(async move {
@@ -382,7 +382,7 @@ impl ServeCmd {
             });
         }
 
-        // Run until a stop, distinguishing a GRACEFUL stop (an owner-requested `control.stop` or a `--for`
+        // Run until a stop, distinguishing a GRACEFUL stop (an owner-requested `control.stop` or a `--expires`
         // deadline, or a Ctrl-C) from an ERRORED teardown. The exposer returns `Ok` when the token fires and
         // an `Err` only on a real failure, so `run_until_stopped` maps that into a typed [`Stopped`] reason
         // for a graceful end and propagates the error otherwise. A requested stop is SUCCESS: a deliberate
@@ -402,7 +402,7 @@ impl ServeCmd {
 
     /// Drive the exposer until it stops, returning WHY it stopped for a graceful end or propagating the
     /// error for a failed teardown. The one seam that classifies a stop: the exposer's `run` returns `Ok`
-    /// the instant the teardown token fires (an owner's `control.stop`, or a `--for` deadline) and an `Err`
+    /// the instant the teardown token fires (an owner's `control.stop`, or a `--expires` deadline) and an `Err`
     /// only on a real failure, so an `Ok` return is a [`Stopped::Requested`]; a Ctrl-C is a
     /// [`Stopped::Interrupted`] (the local operator asking for the same graceful stop). A returned `Err` is
     /// a genuine teardown failure the caller propagates, so the process exits non-zero ONLY then.
@@ -416,7 +416,7 @@ impl ServeCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        // The exposer owns the teardown: it returns when the token fires (a `--for` deadline, or an admitted
+        // The exposer owns the teardown: it returns when the token fires (a `--expires` deadline, or an admitted
         // `control.stop` caller). A Ctrl-C is the same graceful stop, driven here by cancelling the token so
         // there is ONE stop path, then letting the run finish.
         tokio::select! {
@@ -758,7 +758,7 @@ fn serving_section(
 /// on the success path. This is the distinction the qat CI action reads, a deliberate stop is green.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopped {
-    /// An owner requested the stop: an admitted `control.stop` caller, or a `--for` deadline. The exposer's
+    /// An owner requested the stop: an admitted `control.stop` caller, or a `--expires` deadline. The exposer's
     /// `run` returned `Ok` because its teardown token fired, the ordinary end of a node's life.
     Requested,
     /// The local operator pressed Ctrl-C: the same graceful stop, driven from the keyboard rather than the
@@ -777,7 +777,7 @@ impl Stopped {
     }
 }
 
-/// Render a `--for` duration back to a short human span for the banner (`90m` -> `1h 30m`, `3600s` ->
+/// Render a `--expires` duration back to a short human span for the banner (`90m` -> `1h 30m`, `3600s` ->
 /// `1h`), so the readiness line reads the way the operator thinks about it rather than in raw seconds.
 /// Coarsest non-zero units only, at most two, so `1d` stays `1d` and `5400s` reads `1h 30m`.
 fn humanize(duration: core::time::Duration) -> String {
@@ -793,7 +793,7 @@ fn humanize(duration: core::time::Duration) -> String {
             break;
         }
     }
-    // A sub-second `--for` cannot occur (`Lifetime` rejects zero and parses whole seconds), so `parts` is
+    // A sub-second `--expires` cannot occur (`Lifetime` rejects zero and parses whole seconds), so `parts` is
     // never empty; guard defensively rather than unwrap.
     if parts.is_empty() {
         "0s".to_owned()

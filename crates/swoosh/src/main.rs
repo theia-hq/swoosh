@@ -93,7 +93,7 @@ enum Command {
     Beam(BeamCmd),
     /// Learn your fleet: pull the signed roster from a coordination node and fold it into your contacts.
     Fleet(FleetCmd),
-    /// Manage local petnames: save, list, and remove peer aliases.
+    /// Manage local petnames: add a device, record a person's fleet signet, list, and remove.
     #[command(subcommand)]
     Contact(ContactCmd),
     /// Print this node's identity (its NodeId), minting a key if there is none.

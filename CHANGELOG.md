@@ -7,13 +7,14 @@ All notable changes to swoosh, newest first.
 Grant one service to a device, a whole person, or anyone; a clearer serve banner.
 
 ### New
-- **`swoosh grant issue <svc> --for <device>`** a device-bound slip: standing access to one service,
-  locked to one machine's key. A stolen copy is inert for anyone else, and it cannot be passed on. Revoke
-  it any time; it needs no short expiry.
-- **`swoosh grant issue <svc> --for-fleet <signet-key>`** a signet-bound slip: one service, open to every
-  device a person's signet vouches for, now or later. Issue it once to bring a whole person onto a
-  service; revoke it once to cut their whole fleet. Theft-resistant, non-delegable. (Today you paste
-  their raw signet key.)
+- **`swoosh grant issue <svc> --for <who>`** bind a slip to a device or a whole fleet, with the kind in a
+  typed prefix: `--for <person>/<device>` or a raw key binds ONE device (standing access, locked to one
+  machine's key, inert if stolen, non-delegable); `--for fleet:<person>` or `--for fleet:<signet-key>`
+  binds a whole fleet (every device that person's signet vouches for, now or later, revocable at once). A
+  bare `--for <person>` is refused: you type `fleet:` to widen, so a device bind never silently becomes a
+  fleet bind. `fleet:<person>` binds that person's signet recorded with `swoosh contact signet`.
+- **`swoosh contact signet <petname> <key>`** record a person's signet root under their petname, so
+  `grant issue --for fleet:<petname>` binds their fleet by name instead of a pasted key.
 - **`swoosh grant ls`** list the grants you have issued, grouped by service, each with its holder and
   remaining lifetime.
 - **`swoosh grant revoke <peer>`** refuse every grant you issued to a device or person at once; the
@@ -24,6 +25,12 @@ Grant one service to a device, a whole person, or anyone; a clearer serve banner
   is refused by name.
 
 ### Changed
+- **`signet` is now a reserved device label.** A contact device literally labelled `signet` (added as
+  `alice/signet` before this release) is now read as that person's signet root, not a device. Pre-release
+  this is near-zero incidence; if you have one, re-add it under a different label.
+- **`swoosh serve --for <duration>` is now `--expires <duration>`.** `--for` is reserved for naming WHO a
+  grant binds (`grant issue --for`), so serve's bounded-time timer moved to `--expires`, matching
+  `grant issue --expires`. Same local timer; `--for` no longer sets a duration.
 - **Reformatted `swoosh serve` banner.** The node id stands alone, copy-clean; a `how peers reach you`
   section names each channel (internet, LAN, direct); services are grouped by who can reach them, safest
   first, with one escalating danger marker so an open service always reads louder than a gated one.

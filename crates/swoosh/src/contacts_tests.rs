@@ -76,6 +76,20 @@ fn add_creates_then_reports_unchanged_and_replaced() {
 }
 
 #[test]
+fn set_signet_creates_then_reports_unchanged_and_replaced() {
+    let mut contacts = Contacts::default();
+
+    let created = contacts.set_signet(petname("alice"), node(1));
+    assert_eq!(created, Added::Created);
+
+    let unchanged = contacts.set_signet(petname("alice"), node(1));
+    assert_eq!(unchanged, Added::Unchanged);
+
+    let replaced = contacts.set_signet(petname("alice"), node(2));
+    assert_eq!(replaced, Added::Replaced(node(1)));
+}
+
+#[test]
 fn resolve_maps_name_to_node_and_passes_through_device() {
     let mut contacts = Contacts::default();
     contacts.add(petname("alice"), Some(device("macbook")), node(1));
@@ -420,6 +434,130 @@ async fn store_round_trips_roster_provenance() {
         .1
         .source;
     assert_eq!(alice, Source::HandTyped);
+
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+}
+
+#[test]
+fn signet_is_a_reserved_device_label() {
+    // `signet` is the reserved per-person key for a signet root, so it can never be a device label. This is
+    // what makes the device/signet collision unrepresentable: a device labelled `signet` cannot be parsed.
+    assert_eq!(
+        "signet".parse::<DeviceLabel>(),
+        Err(DeviceLabelParseError::Reserved)
+    );
+    // And it cannot slip in as the device part of a contact address.
+    assert!("alice/signet".parse::<ContactRef>().is_err());
+}
+
+#[test]
+fn hydrate_keeps_a_hand_typed_signet_and_touches_only_devices() {
+    // The write-fence: `hydrate` folds a roster's DEVICES under `me` and never reads or writes the signet, so
+    // a hand-typed `me` signet survives every pull while the roster devices land.
+    let mut contacts = Contacts::default();
+    contacts.set_signet(petname("me"), node(7));
+    contacts.hydrate(&roster(
+        9,
+        vec![roster_member(1, "desk"), roster_member(2, "phone")],
+    ));
+
+    assert_eq!(
+        contacts.signet(&petname("me")).map(|binding| binding.node),
+        Some(node(7)),
+        "hydrate leaves the hand-typed signet untouched"
+    );
+    assert_eq!(
+        resolve(&contacts, &"me/desk".parse().expect("addr")),
+        Ok(vec![node(1)]),
+        "the roster devices land under me"
+    );
+    assert_eq!(
+        resolve(&contacts, &"me/phone".parse().expect("addr")),
+        Ok(vec![node(2)])
+    );
+}
+
+#[tokio::test]
+async fn store_round_trips_a_signet_and_keeps_the_device_map() {
+    let dir = std::env::temp_dir().join(format!("swoosh-contacts-signet-{}", std::process::id()));
+    let path = dir.join("contacts.toml");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+
+    let mut store = ContactsStore::open(path.clone()).await.expect("open");
+    store.contacts_mut().set_signet(petname("alice"), node(3));
+    store
+        .contacts_mut()
+        .add(petname("alice"), Some(device("laptop")), node(1));
+    store.save().await.expect("save");
+
+    // The signet persists as a reserved `signet` key co-located in alice's own block.
+    let text = tokio::fs::read_to_string(&path).await.expect("read file");
+    assert!(
+        text.contains("signet = "),
+        "the signet round-trips as a reserved key in the person's table: {text}"
+    );
+
+    // Reload: the signet comes back HandTyped, and the device map is unaffected.
+    let reloaded = ContactsStore::open(path.clone()).await.expect("reopen");
+    let contacts = reloaded.contacts();
+    let signet = contacts
+        .signet(&petname("alice"))
+        .expect("alice has a signet");
+    assert_eq!(signet.node, node(3), "the signet key round-trips");
+    assert_eq!(
+        signet.source,
+        Source::HandTyped,
+        "a hand-typed signet reloads HandTyped"
+    );
+    assert_eq!(
+        resolve(contacts, &"alice/laptop".parse().expect("addr")),
+        Ok(vec![node(1)]),
+        "the device map is unaffected by the signet"
+    );
+
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+}
+
+#[tokio::test]
+async fn a_signet_only_person_survives_tidy_up_and_reload() {
+    // A signet is a reason to keep a person even with no devices: removing a person's last DEVICE keeps a
+    // signet-only person alive, and a signet-only person round-trips through persistence.
+    let dir = std::env::temp_dir().join(format!("swoosh-contacts-sonly-{}", std::process::id()));
+    let path = dir.join("contacts.toml");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+
+    let mut store = ContactsStore::open(path.clone()).await.expect("open");
+    store.contacts_mut().set_signet(petname("bob"), node(2));
+    store
+        .contacts_mut()
+        .add(petname("bob"), Some(device("laptop")), node(1));
+
+    // Removing bob's only device does NOT sweep bob away: the signet keeps the person.
+    assert_eq!(
+        store
+            .contacts_mut()
+            .remove(&petname("bob"), Some(&device("laptop"))),
+        Removed::Removed
+    );
+    assert!(
+        store.contacts().signet(&petname("bob")).is_some(),
+        "a signet-only person is not tidied away"
+    );
+    // Removing an absent device is a no-op that also leaves the signet-only person intact.
+    assert_eq!(
+        store
+            .contacts_mut()
+            .remove(&petname("bob"), Some(&device("ghost"))),
+        Removed::Absent
+    );
+    store.save().await.expect("save");
+
+    let reloaded = ContactsStore::open(path.clone()).await.expect("reopen");
+    assert_eq!(
+        reloaded.contacts().signet(&petname("bob")).map(|b| b.node),
+        Some(node(2)),
+        "a signet-only person round-trips through encode/decode"
+    );
 
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }

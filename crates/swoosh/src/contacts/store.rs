@@ -80,6 +80,14 @@ impl ContactsStore {
 /// the fleet itself.
 const ROSTER_EPOCH_KEY: &str = "roster_epoch";
 
+/// The reserved per-person key carrying that person's SIGNET root. A person table's other keys are device
+/// labels; [`decode`] dispatches on this key FIRST (like [`ROSTER_EPOCH_KEY`] at the top level) so it never
+/// reaches the device parser, and [`encode`] writes it FIRST. The value reuses the device wire form: a bare
+/// string is a hand-typed signet, an inline `{ key, roster }` table is a (future) roster-vouched signet, so
+/// [`decode_binding`]/[`encode_binding`] handle both. Bound to the ONE reserved string on [`DeviceLabel`], so
+/// the on-disk key and the device-label reject can never drift apart.
+const SIGNET_KEY: &str = DeviceLabel::SIGNET_RESERVED;
+
 /// The on-disk shape: a top-level table whose keys are petnames (each mapping to a device table) plus the
 /// one reserved [`ROSTER_EPOCH_KEY`] integer. A separate wire type so no serde derive touches the domain,
 /// and the string keys/values are exactly what a human reads and edits. A device value is either the legacy
@@ -104,8 +112,14 @@ fn decode(text: &str) -> Result<Contacts, StoreError> {
         }
         let petname: Petname = key.parse()?;
         let group = value.as_table().ok_or(StoreError::BadEntry)?;
-        for (device, value) in group {
-            let device: DeviceLabel = device.parse()?;
+        for (label, value) in group {
+            // The reserved signet key holds the person's signet root, not a device; dispatch on it first so
+            // it never reaches the device parser (which would reject `signet` as a reserved label anyway).
+            if label == SIGNET_KEY {
+                contacts.set_signet_binding(petname.clone(), decode_binding(value)?);
+                continue;
+            }
+            let device: DeviceLabel = label.parse()?;
             contacts.insert_binding(petname.clone(), device, decode_binding(value)?);
         }
     }
@@ -149,9 +163,21 @@ fn encode(contacts: &Contacts) -> Result<String, StoreError> {
         let Some(bindings) = contacts.bindings(petname) else {
             continue;
         };
-        let group: toml::value::Table = bindings
+        let mut group: toml::value::Table = bindings
             .map(|(label, binding)| (label.as_str().to_owned(), encode_binding(binding)))
             .collect();
+        // The signet persists under the reserved key inside the person's OWN table, so alice's whole record
+        // (devices + signet) stays one `[alice]` block; a person with a signet but no devices still writes a
+        // block, so a signet-only contact round-trips. `signet` can never collide with a device key (it is a
+        // reserved device label), so this insert never clobbers one.
+        if let Some(binding) = contacts.signet(petname) {
+            group.insert(SIGNET_KEY.to_owned(), encode_binding(binding));
+        }
+        // Skip a person with neither devices nor a signet: an empty table is nothing to persist. (`petnames`
+        // yields only non-empty people today, but a future signet-only-then-cleared path must not write one.)
+        if group.is_empty() {
+            continue;
+        }
         wire.insert(petname.as_str().to_owned(), toml::Value::Table(group));
     }
     // Persist the roster epoch floor so the anti-rollback high-water mark survives a restart; absent until
