@@ -97,7 +97,9 @@ fn decode(text: &str) -> Result<Contacts, StoreError> {
         // reaches the petname parser and a group table never masquerades as the floor.
         if key == ROSTER_EPOCH_KEY {
             let floor = value.as_integer().ok_or(StoreError::BadEntry)?;
-            contacts.set_roster_epoch(Some(u64::try_from(floor).map_err(|_| StoreError::BadEntry)?));
+            contacts.set_roster_epoch(Some(
+                u64::try_from(floor).map_err(|_| StoreError::BadEntry)?,
+            ));
             continue;
         }
         let petname: Petname = key.parse()?;
@@ -171,7 +173,10 @@ fn encode_binding(binding: &Binding) -> toml::Value {
         Source::HandTyped => toml::Value::String(binding.node.to_string()),
         Source::Roster { epoch } => {
             let mut table = toml::value::Table::new();
-            table.insert("key".to_owned(), toml::Value::String(binding.node.to_string()));
+            table.insert(
+                "key".to_owned(),
+                toml::Value::String(binding.node.to_string()),
+            );
             table.insert(
                 "roster".to_owned(),
                 toml::Value::Integer(i64::try_from(epoch).unwrap_or(i64::MAX)),

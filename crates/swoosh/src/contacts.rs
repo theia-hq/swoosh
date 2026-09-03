@@ -406,8 +406,16 @@ impl Contacts {
     /// Insert a fully-formed binding (node + provenance) under a petname's device. For the store's codec,
     /// which reconstructs persisted state INCLUDING a `Roster` provenance; the trust for that provenance was
     /// established when it was first hydrated from a verified roster, and persistence just round-trips it.
-    pub(crate) fn insert_binding(&mut self, petname: Petname, device: DeviceLabel, binding: Binding) {
-        self.people.entry(petname).or_default().insert(device, binding);
+    pub(crate) fn insert_binding(
+        &mut self,
+        petname: Petname,
+        device: DeviceLabel,
+        binding: Binding,
+    ) {
+        self.people
+            .entry(petname)
+            .or_default()
+            .insert(device, binding);
     }
 
     /// Remove a whole petname (all its devices) or, with a device, just that one device. Returns whether

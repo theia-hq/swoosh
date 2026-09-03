@@ -19,12 +19,11 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::io::{self, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
-use tokio::sync::watch;
-
 use pty_process::{Command, Size};
 use russh::server::{Handler, Msg, Session};
 use russh::{Channel, ChannelId};
+use tokio::io::{self, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::sync::watch;
 
 /// The maximum number of concurrent shells this process serves across ALL connections. A shell has no
 /// login of its own, so an admitted peer (or a leaked slip) could otherwise open unbounded channels and

@@ -188,7 +188,9 @@ mod tests {
         let slip_text = Secret::ephemeral()
             .member_badge()
             .expect("mint a stand-in slip");
-        let slip: SheerLink = slip_text.parse().expect("the minted link is a valid SheerLink");
+        let slip: SheerLink = slip_text
+            .parse()
+            .expect("the minted link is a valid SheerLink");
         let resolved = resolve(
             Credential::Family {
                 present: Some(slip),

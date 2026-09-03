@@ -360,15 +360,14 @@ impl Reach {
                         .unwrap_or_else(|| secret.node_id()),
                 ),
                 denylist: nauthy::Denylist::load(config::revoked_path(key)?).await?,
-                roster_blob: std::sync::Arc::new(
-                    swoosh::commands::serve::cut_roster(contacts, secret)?,
-                ),
+                roster_blob: std::sync::Arc::new(swoosh::commands::serve::cut_roster(
+                    contacts, secret,
+                )?),
             })),
             _ => Ok(None),
         }
     }
 }
-
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
