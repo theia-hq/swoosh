@@ -1,7 +1,11 @@
 # Builds checksummed linux + macOS binaries and attaches them to a GitHub Release on a `v*` tag.
-# swoosh declares its theia crates as git deps, so cargo fetches them from GitHub at build time; no sibling
-# checkout is needed. NOTE: those git deps are unpinned (default-branch HEAD), so a tag is not yet fully
-# reproducible; pin a rev per release to fix (see the release-reproducibility entry in notes/02-DECISIONS.md).
+# swoosh declares its theia crates as git deps pinned to an exact rev (see swoosh/Cargo.toml), so cargo
+# fetches them from GitHub at build time; no sibling checkout is needed. The build is `--locked`, so a tag
+# reproduces the exact dep graph recorded in the committed Cargo.lock. The `verify reproducible pins` step
+# then re-asserts, from the lock cargo actually resolved, that each sibling came from its pinned git rev
+# and NOT a local path patch: this catches a silent path-patch regression (a lock accidentally regenerated
+# with theia-hq/.cargo/config.toml on the path would record path entries with no git source, so CI would
+# not be reproducible). See the release-reproducibility entry in notes/02-DECISIONS.md.
 name: release
 on:
   push:
@@ -36,7 +40,42 @@ jobs:
           targets: ${{ matrix.target }}
       - name: build
         working-directory: swoosh
-        run: cargo build --release -p swoosh --target ${{ matrix.target }}
+        # --locked: build the exact graph in the committed Cargo.lock, never re-resolve. Fails loudly if the
+        # lock is stale (e.g. a rev bump in Cargo.toml was not carried into the lock), which is what we want
+        # for a release. The checkout is at `swoosh/` with no parent .cargo/config.toml, so there is no path
+        # patch: cargo resolves the pinned git revs as an outside user would.
+        run: cargo build --release --locked -p swoosh --target ${{ matrix.target }}
+      - name: verify reproducible pins
+        working-directory: swoosh
+        # Re-assert, from the lock cargo actually used, that each sibling resolved to its pinned git rev and
+        # NOT a local path patch. If theia-hq/.cargo/config.toml ever leaked onto the path when the lock was
+        # regenerated, the sibling would appear as a path entry with no `source = "git+..."` line and this
+        # step would fail, blocking a non-reproducible release. Expected revs are read from Cargo.toml (single
+        # source of truth), so this also catches a lock/manifest rev drift that --locked alone would miss.
+        run: |
+          set -euo pipefail
+          fail=0
+          for repo in nauthy tightbeam bifrost; do
+            rev=$(sed -n "s|.*\"https://github.com/theia-hq/${repo}\", rev = \"\([0-9a-f]\{40\}\)\".*|\1|p" Cargo.toml | head -n1)
+            if [ -z "$rev" ]; then
+              echo "FAIL: no pinned rev for '$repo' in Cargo.toml (expected a 40-char sha)"
+              fail=1
+              continue
+            fi
+            # The lock records a rev-pinned git dep as: source = "git+<url>?rev=<rev>#<full-sha>". Require a
+            # git source for this repo carrying the expected rev; a path patch would have NO `git+` source
+            # line at all, so this fails closed on a path-patch regression.
+            if grep -Eq "^source = \"git\+https://github.com/theia-hq/${repo}[^\"]*${rev}\"" Cargo.lock; then
+              echo "OK: $repo pinned to git rev $rev"
+            else
+              echo "FAIL: Cargo.lock has no git source for '$repo' at rev $rev"
+              echo "      (a path-patch regression, or the lock was not regenerated after a rev bump)"
+              echo "      lock entries mentioning '$repo':"
+              grep -n "theia-hq/${repo}" Cargo.lock || echo "        <none: '$repo' is likely a path entry>"
+              fail=1
+            fi
+          done
+          exit $fail
       - name: package + checksum
         run: |
           cp "swoosh/target/${{ matrix.target }}/release/swoosh" "${{ matrix.asset }}"

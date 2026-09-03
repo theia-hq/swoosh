@@ -8,15 +8,21 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-# theia
-bifrost = { git = "https://github.com/theia-hq/bifrost" }
-bifrost-core = { git = "https://github.com/theia-hq/bifrost" }
-bifrost-iroh = { git = "https://github.com/theia-hq/bifrost" }
-bifrost-mdns = { git = "https://github.com/theia-hq/bifrost" }
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost" }
-bifrost-quirk = { git = "https://github.com/theia-hq/bifrost" }
-nauthy = { git = "https://github.com/theia-hq/nauthy" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam" }
+# theia. Each sibling git-dep is pinned to an EXACT rev so a `swoosh vX` tag records exactly which
+# nauthy/tightbeam/bifrost commit compiled in, instead of floating on default-branch HEAD (an unpinned
+# HEAD is how a past auth-bypass slipped in unnoticed). The local dev `.cargo/config.toml` still [patch]es
+# these by URL to sibling PATH checkouts, so a `rev` here does NOT slow local builds: the patch wins
+# locally regardless of the rev; CI (no parent config) resolves the rev from GitHub. All bifrost-* crates
+# live in one repo, so they share one rev. Bump these deliberately each release (see the reproducible-build
+# gate in .github/workflows/release.yml and the lock-regen step in notes/02-DECISIONS.md).
+bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "79574b60906d20944074179014df311228c6347c" }
+bifrost-core = { git = "https://github.com/theia-hq/bifrost", rev = "79574b60906d20944074179014df311228c6347c" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "79574b60906d20944074179014df311228c6347c" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "79574b60906d20944074179014df311228c6347c" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "79574b60906d20944074179014df311228c6347c" }
+bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "79574b60906d20944074179014df311228c6347c" }
+nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "0e9e357db137c74522d188e9147b3c62071e75bb" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "ac6614d0202b86241dd45be12b81f376e3c714ca" }
 beam = { path = "crates/beam" }
 fetch = { path = "crates/fetch" }
 measure = { path = "crates/measure" }
