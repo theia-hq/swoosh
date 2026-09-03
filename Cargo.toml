@@ -22,7 +22,7 @@ bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "26e8272d890
 bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "26e8272d890b0b424bc6960b9d38e09b40cc428d" }
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "26e8272d890b0b424bc6960b9d38e09b40cc428d" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "0e9e357db137c74522d188e9147b3c62071e75bb" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "ac6614d0202b86241dd45be12b81f376e3c714ca" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "46905c6dfc008f008b6a1003e75e68736ae16c17" }
 beam = { path = "crates/beam" }
 fetch = { path = "crates/fetch" }
 measure = { path = "crates/measure" }
