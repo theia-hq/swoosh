@@ -39,6 +39,14 @@ pub fn revoked_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
     Ok(config_dir(key)?.join("revoked"))
 }
 
+/// The persisted mint-log ledger location, `<config-dir>/grants`. Records one line per grant this node has
+/// issued (service, kind, holder, root revocation id, expiry), the issuer-side index that makes revoke-by-
+/// holder and `grant ls` possible. A who-can-reach-what record, so [`Grants`](crate::grants::Grants) writes
+/// it `0600`; the expose gate never reads it (issuer-side audit and revoke only).
+pub fn grants_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
+    Ok(config_dir(key)?.join("grants"))
+}
+
 /// The persisted membership-badge location, `<config-dir>/badge`. Holds one thing: the signet-signed,
 /// device-bound membership badge (a `sheer:` link) this device presents on connect, written once by
 /// provisioning (`swoosh adopt`) from the authkey's badge field. Public material (the signet already

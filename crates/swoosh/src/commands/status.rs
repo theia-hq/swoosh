@@ -20,20 +20,22 @@ use clap::Args;
 use measure::{Ping, ProtocolError};
 use tightbeam::tunnel;
 
-use crate::contacts::{Contacts, Target};
+use crate::contacts::Contacts;
+use crate::peer::Peer;
 use crate::reach;
 use crate::transport::{self, ReachArgs};
 
 /// Report the connection path to a peer: transport, direct vs relayed, remote address, and live RTT.
 #[derive(Debug, Args)]
 pub struct StatusCmd {
-    /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
-    pub target: Target,
+    pub peer: Peer,
     /// Present a membership badge or capability link to a family/cap-gated peer. Defaults to the
-    /// self-signed badge minted from this identity when it dials under a persisted key.
+    /// self-signed badge minted from this identity when it dials under a persisted key. Parsed at the
+    /// boundary via [`SheerLink`](crate::credential::SheerLink)'s `FromStr`.
     #[arg(long, value_name = "link")]
-    pub present: Option<String>,
+    pub present: Option<crate::credential::SheerLink>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -44,9 +46,17 @@ impl crate::reaching::Reaching for StatusCmd {
     }
 
     /// `status` probes the peer's family-gated `ping` service, so it presents the member badge rooted at
-    /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`.
+    /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. The
+    /// effective slip is the FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`,
+    /// threaded INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> crate::credential::Credential {
-        crate::credential::Credential::Family { present: None }
+        crate::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        }
+    }
+
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.peer.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> crate::identity::Identity {
@@ -64,8 +74,14 @@ impl crate::reaching::Reaching for StatusCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_status(node, ctx.contacts, ctx.transport, ctx.present)
-            .await
+        self.run_status(
+            node,
+            ctx.contacts,
+            ctx.transport,
+            ctx.present,
+            ctx.membership,
+        )
+        .await
     }
 }
 
@@ -78,12 +94,15 @@ impl StatusCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
-        self_badge: Option<String>,
+        present: Option<String>,
+        membership: Option<String>,
     ) -> eyre::Result<()> {
-        let candidates = reach::candidates(&self.target, contacts)?;
-        // Present an explicit `--present` link if given, else the self-signed badge minted from this
-        // identity: the peer's `ping` service is gated, so the RTT probe must prove membership to run.
-        let present = self.present.or(self_badge);
+        // The redundant-present conflict is rejected ONCE in the composition root via
+        // `Reaching::reject_redundant_present`, before this runs.
+        let candidates = reach::candidates(&self.peer, contacts)?;
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
+        // link-as-peer through that same resolver, so the verb never threads `--present` itself.
 
         // Report each device; track whether any device was HEALTHY (reached and served the probe), so a
         // fan-out where every device was unreachable OR refused ends non-zero rather than exiting clean
@@ -91,13 +110,18 @@ impl StatusCmd {
         // is not healthy: it must not hold the exit code green the way a real status line does.
         let mut any_healthy = false;
         for candidate in &candidates {
-            let line =
-                match reach::connect_service(node, candidate, reach::PING_SERVICE, present.clone())
-                    .await
-                {
-                    Ok(session) => probe(&session, &candidate.label, transport).await,
-                    Err(_error) => Line::unreachable(&candidate.label, transport.name()),
-                };
+            let line = match reach::connect_service(
+                node,
+                candidate,
+                reach::PING_SERVICE,
+                present.clone(),
+                membership.clone(),
+            )
+            .await
+            {
+                Ok(session) => probe(&session, &candidate.label, transport).await,
+                Err(_error) => Line::unreachable(&candidate.label, transport.name()),
+            };
             any_healthy |= line.is_healthy();
             println!("{line}");
         }
@@ -107,7 +131,7 @@ impl StatusCmd {
             Ok(())
         } else {
             Err(reach::hint(
-                eyre::eyre!("could not reach {}", self.target),
+                eyre::eyre!("could not reach {}", self.peer),
                 transport,
             ))
         }

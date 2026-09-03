@@ -9,6 +9,7 @@ pub mod fetch;
 pub mod fleet;
 pub mod forward;
 pub mod grant;
+pub mod grant_ls;
 pub mod identity;
 pub mod mint;
 pub mod ping;

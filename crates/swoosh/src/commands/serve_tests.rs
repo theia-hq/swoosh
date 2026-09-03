@@ -3,9 +3,200 @@
 //! process exits non-zero). The end-to-end proof that a member `control.stop` makes the exposer return `Ok`
 //! (which the run turns into [`Stopped::Requested`], exit 0) lives in `tests/gated_stop.rs`.
 
-use tightbeam::tunnel::{Exposer, PublicRequest, Services};
+use core::net::SocketAddr;
+use std::collections::{HashMap, HashSet};
 
-use super::{FetchScope, Stopped};
+use tightbeam::tunnel::{Exposer, ManifestEntry, Posture, PublicRequest, Services, TargetKind};
+
+use super::{
+    FetchScope, MdnsState, ReachKind, Stopped, describe, display_targets, reach_section,
+    render_ready_banner, serving_section,
+};
+
+/// A gated handler entry for a banner test (the common case: everything behind the family gate).
+fn entry_gated(name: &str, kind: TargetKind, amplifier: bool) -> ManifestEntry {
+    ManifestEntry {
+        name: name.to_owned(),
+        posture: Posture::Gated,
+        kind,
+        amplifier,
+    }
+}
+
+/// An opened (public) handler entry for a banner test.
+fn entry_open(name: &str, kind: TargetKind, amplifier: bool) -> ManifestEntry {
+    ManifestEntry {
+        name: name.to_owned(),
+        posture: Posture::Open,
+        kind,
+        amplifier,
+    }
+}
+
+/// The default `swoosh serve` manifest (gated ping + speed + the two control.* reads), name-sorted as the
+/// exposer returns it, so a banner test exercises the same shape the product path builds.
+fn default_manifest() -> Vec<ManifestEntry> {
+    vec![
+        entry_gated("control.services", TargetKind::Handler, false),
+        entry_gated("control.stop", TargetKind::Handler, false),
+        entry_gated("ping", TargetKind::Handler, true),
+        entry_gated("speed", TargetKind::Handler, true),
+    ]
+}
+
+/// The display map the default serve builds (control.* + ping + speed point at their own schemes).
+fn default_targets() -> HashMap<String, String> {
+    display_targets(&[
+        "ping=ping:".to_owned(),
+        "speed=speed:".to_owned(),
+        "control.stop=control.stop:".to_owned(),
+        "control.services=control.services:".to_owned(),
+    ])
+}
+
+/// The default iroh + mDNS-on banner: a copy-clean full id, an `internet` channel that says "automatic" and
+/// never names the backend, an mDNS LAN line, one family-gated group with the `control.*` fold, no public
+/// group, and the plain stop line.
+#[test]
+fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
+    let banner = render_ready_banner(
+        "bf01exampleid",
+        ReachKind::Internet,
+        MdnsState::Available,
+        &[],
+        &default_manifest(),
+        &default_targets(),
+        &HashSet::new(),
+        "ctrl-c to stop",
+    );
+
+    assert!(
+        banner.starts_with("swoosh ready\n\n    bf01exampleid\n\n"),
+        "{banner}"
+    );
+    assert!(banner.contains("how peers reach you"), "{banner}");
+    assert!(
+        banner.contains("internet"),
+        "an iroh node shows the internet channel: {banner}"
+    );
+    assert!(
+        !banner.contains("iroh"),
+        "the backend is never named: {banner}"
+    );
+    // "automatic" leads BOTH auto channels (the Newcomer fix), not just LAN.
+    assert_eq!(banner.matches("automatic").count(), 2, "{banner}");
+    assert!(
+        banner.contains("(mDNS)"),
+        "the LAN line is an mDNS tell: {banner}"
+    );
+    assert!(banner.contains("family-gated"), "{banner}");
+    assert!(
+        banner.contains("control.*")
+            && !banner.contains("control.stop")
+            && !banner.contains("control.services"),
+        "the two control reads fold to one control.* line: {banner}"
+    );
+    assert!(
+        !banner.contains("public"),
+        "no public group when nothing is opened: {banner}"
+    );
+    assert!(banner.trim_end().ends_with("ctrl-c to stop"), "{banner}");
+}
+
+/// The mix banner: a public amplifier carries a QUIET inline caveat (no loud glyph), the public-UNSAFE group
+/// sits last carrying the loudest marker, `name -> target` renders only when they differ, and the danger
+/// vocabulary is monotonic (the `public` marker is strictly shorter/quieter than `public-UNSAFE`).
+#[test]
+fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
+    let manifest = vec![
+        entry_open("logs", TargetKind::RawStream, false),
+        entry_gated("ping", TargetKind::Handler, true),
+        entry_open("speed", TargetKind::Handler, true),
+        entry_gated("ssh", TargetKind::Handler, false),
+    ];
+    let targets = display_targets(&[
+        "ping=ping:".to_owned(),
+        "speed=speed:".to_owned(),
+        "ssh=sshd:".to_owned(),
+        "logs=file:/var/log/app.log".to_owned(),
+    ]);
+    let section = serving_section(&manifest, &targets, &HashSet::new());
+
+    // `name -> target` only when they differ: `ssh -> sshd`, but `speed` alone (name == scheme).
+    assert!(section.contains("ssh -> sshd"), "{section}");
+    assert!(
+        section.contains("logs -> file:/var/log/app.log"),
+        "{section}"
+    );
+    assert!(
+        section.contains("\n    speed ") || section.contains("\n    speed\n"),
+        "a name that equals its scheme renders without an arrow: {section}"
+    );
+    // The public amplifier caveat is quiet prose, NOT a competing loud glyph.
+    assert!(
+        section.contains("unmetered: a stranger can drain your uplink"),
+        "{section}"
+    );
+    assert!(
+        !section.contains("[!]"),
+        "the amplifier caveat is not a loud glyph: {section}"
+    );
+
+    // Groups are safest-first and the danger marker is monotonic down the list.
+    let family = section.find("family-gated").expect("family group present");
+    let public = section.find("public !").expect("public group present");
+    let unsafe_grp = section
+        .find("public-UNSAFE !!")
+        .expect("public-UNSAFE group present");
+    assert!(
+        family < public && public < unsafe_grp,
+        "safest-first ordering: {section}"
+    );
+}
+
+/// The reach section flips the LAN line to a next-step down-state when mDNS is blocked, and a quirk node with
+/// a routable hint prints a `direct` channel with the address on its own copy-clean line.
+#[test]
+fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
+    let blocked = reach_section(ReachKind::Internet, MdnsState::Blocked, &[]);
+    assert!(blocked.contains("off; multicast blocked here"), "{blocked}");
+    assert!(
+        blocked.contains("over the internet"),
+        "the down-state says what to do instead: {blocked}"
+    );
+
+    let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
+    let quirk = reach_section(ReachKind::DirectOnly, MdnsState::Available, &[routable]);
+    assert!(
+        !quirk.contains("internet"),
+        "a direct-only node shows no internet channel: {quirk}"
+    );
+    assert!(quirk.contains("direct"), "{quirk}");
+    assert!(quirk.contains("hand a peer this address:"), "{quirk}");
+    assert!(quirk.contains("192.168.1.20:58131"), "{quirk}");
+
+    // A loopback-only bind reads "on this machine only", never "hand a peer" an un-handable address.
+    let loop_addr: SocketAddr = "127.0.0.1:58131".parse().expect("valid addr");
+    let local = reach_section(ReachKind::DirectOnly, MdnsState::Available, &[loop_addr]);
+    assert!(local.contains("reachable on this machine only:"), "{local}");
+    assert!(!local.contains("hand a peer"), "{local}");
+}
+
+/// A de-merged fetch service glosses by name (its synthetic scheme is unspellable, so it never leaks into the
+/// `name -> target` arrow), while a plain forward shows its address.
+#[test]
+fn a_fetch_service_glosses_by_name_and_never_leaks_the_synthetic_scheme() {
+    let entry = entry_gated("news", TargetKind::Handler, false);
+    let mut fetch_names = HashSet::new();
+    fetch_names.insert("news".to_owned());
+    let (label, gloss) = describe(&entry, &HashMap::new(), &fetch_names);
+    assert_eq!(label, "news", "no synthetic scheme in the label");
+    assert!(gloss.contains("fetches"), "{gloss}");
+    assert!(
+        !label.contains("fetch_"),
+        "the synthetic scheme never appears: {label}"
+    );
+}
 
 /// Every graceful-stop reason reports a distinct, non-empty line, so a CI action log (the qat teardown)
 /// reads a deliberate stop as a clean end rather than a bare exit. The line names WHY the node stopped.

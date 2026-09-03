@@ -15,7 +15,9 @@
 use core::fmt;
 use core::str::FromStr;
 
+use bifrost::NodeId;
 use nauthy::Cap;
+use tightbeam::identity::AsNodeId as _;
 
 /// A parsed, structurally-valid `sheer:` capability link.
 ///
@@ -51,6 +53,23 @@ impl SheerLink {
     pub fn into_link(self) -> String {
         let Self(link) = self;
         link
+    }
+
+    /// The node this link self-addresses: the cap's ROOT key as a bifrost [`NodeId`], the node a connector
+    /// dials when the link is the peer. The same target [`Connector::from_link`](tightbeam::tunnel::Connector::from_link)
+    /// computes (`Cap::parse(link)?.root().node_id()`), exposed so a link-as-peer can dial it without
+    /// re-implementing the cap->node conversion in a caller that should not reach into nauthy directly.
+    pub fn dial_node(&self) -> Result<NodeId, nauthy::CapError> {
+        Ok(self.cap()?.root().node_id())
+    }
+
+    /// The short form for output: the root key's short id, uniform with a raw key's short form. The cap
+    /// re-parse cannot fail (validated at construction), so the fallback is unreachable; it names the link
+    /// text rather than panicking, keeping this infallible for a display path.
+    pub fn short(&self) -> String {
+        self.dial_node()
+            .map(|node| node.short())
+            .unwrap_or_else(|_| self.0.clone())
     }
 }
 

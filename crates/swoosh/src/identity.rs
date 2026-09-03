@@ -175,11 +175,27 @@ pub async fn resolve(intent: Identity, explicit: Option<&Path>) -> eyre::Result<
     }
 }
 
+/// Reject a `--key` that names a directory, with a teaching error instead of the bare `Is a directory
+/// (os error 21)` the raw file IO would surface. `--key` wants a key FILE (its sidecars -- the signet,
+/// the badge, the contacts book -- live beside it in the parent dir), and pointing it at a directory is
+/// the mistake everyone makes, so name the fix. A no-op for the default path (always `identity.key`) and
+/// for a not-yet-created file; it only fires on an existing directory.
+fn reject_key_directory(path: &Path) -> eyre::Result<()> {
+    if path.is_dir() {
+        return Err(eyre!(
+            "--key wants a key file, not a directory: {dir}. Name a file inside it, e.g. {dir}/identity.key",
+            dir = path.display(),
+        ));
+    }
+    Ok(())
+}
+
 /// Load the secret at `path` if the file exists and holds a 32-byte key, else `None`. Unlike
 /// [`load_or_create`], never writes: an outward dial reads a provisioned identity but does not mint one.
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 async fn load_existing(path: &Path) -> eyre::Result<Option<Secret>> {
+    reject_key_directory(path)?;
     match tokio::fs::read(path).await {
         Ok(mut bytes) => {
             let secret = <[u8; 32]>::try_from(bytes.as_slice()).ok().map(Secret);
@@ -193,6 +209,7 @@ async fn load_existing(path: &Path) -> eyre::Result<Option<Secret>> {
 
 /// Load the secret at `path`, creating and saving a fresh one on first use.
 async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
+    reject_key_directory(path)?;
     if let Ok(mut bytes) = tokio::fs::read(path).await {
         if let Ok(secret) = <[u8; 32]>::try_from(bytes.as_slice()) {
             bytes.zeroize();
@@ -221,6 +238,7 @@ pub async fn write(seed: &[u8; 32], explicit: Option<&Path>) -> eyre::Result<()>
         Some(p) => p.to_path_buf(),
         None => default_path()?,
     };
+    reject_key_directory(&path)?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }

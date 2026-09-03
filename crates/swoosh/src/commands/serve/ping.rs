@@ -14,6 +14,11 @@ impl Handler for Ping {
     // public ping responder; a member is otherwise admitted whole-node.
     type Public = OptIn;
 
+    // AMPLIFIER: `ping` answers any caller with no responder-side rate limit yet, so a PUBLIC one lets an
+    // anonymous stranger drain this node's uplink. Declared here so the readiness banner narrates the caveat
+    // where the danger is, rather than swoosh hardcoding a `ping`/`speed` name list (delib-40/41).
+    const AMPLIFIER: bool = true;
+
     async fn serve(
         &self,
         _admitted: Admitted,

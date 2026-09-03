@@ -15,6 +15,11 @@ impl Handler for Speed {
     // `--public speed:`; otherwise the family gate is the terminator.
     type Public = OptIn;
 
+    // AMPLIFIER: `speed` is a raw throughput drain with no responder-side bound yet, so a PUBLIC one hands a
+    // saturable uplink to any anonymous caller. Declared here so the readiness banner narrates the caveat
+    // where the danger is, rather than swoosh hardcoding a `ping`/`speed` name list (delib-40/41).
+    const AMPLIFIER: bool = true;
+
     async fn serve(
         &self,
         _admitted: Admitted,

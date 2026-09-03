@@ -90,8 +90,9 @@ old one-key demo could never have run over iroh. Two identities is the honest sh
 
 ## Part 2: the member reaches the server over quirk (our own QUIC)
 
-quirk is direct-only (no NAT traversal yet), so `serve` prints a copy-pasteable `--peer <key>=<addr>`
-hint that the client feeds back. That hint is quirk's discovery.
+quirk is direct-only (no NAT traversal yet), so `serve` prints the node's key and the machine address
+it is reachable at. The client feeds both back as `--peer <key>=<addr>`. That address is quirk's
+discovery.
 
 ```sh
 # on the server
@@ -99,13 +100,22 @@ SWOOSH_KEY=$SERVER swoosh serve --transport quirk
 ```
 
 ```
-swoosh ready. peers can reach this node at:
+swoosh ready
 
     bf01dqd6hpuofhyhfxccpluqrkttqw4zmfx5oi3gcqfm7nlh5nswntgq
 
-    --peer bf01dqd6hpuofhyhfxccpluqrkttqw4zmfx5oi3gcqfm7nlh5nswntgq=127.0.0.1:61110
+how peers reach you
+  LAN      automatic; your devices just need the key (mDNS)
+  direct   reachable on this machine only:
+           127.0.0.1:61110
 
-serving ping, speed (gate: self (person-zero: this node and its devices)). ctrl-c to stop.
+serving
+  family-gated   your devices + peers you've granted
+    ping        round-trip probe
+    speed       throughput test
+    control.*   node control (always family-gated)
+
+ctrl-c to stop
 ```
 
 The member dials, feeding back the printed key and hint. It presents the badge the server's signet minted

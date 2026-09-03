@@ -29,8 +29,11 @@ pub struct ReachArgs {
     #[arg(long, value_enum, default_value_t, value_name = "iroh|quirk")]
     pub transport: Transport,
     /// Direct address hint for a peer, `<key>=<addr>` (repeatable)
-    #[arg(long, value_name = "key=addr")]
-    pub peer: Vec<Peer>,
+    // The clap id is `peer-hint`, not `peer`: this frees the id `peer` for the positional `<peer>` slot
+    // every dialing verb now names, so a verb hosts both this `--peer` HINT and a positional peer without a
+    // clap id collision. The flag NAME stays `--peer` (no user-facing change).
+    #[arg(id = "peer-hint", long = "peer", value_name = "key=addr")]
+    pub peer: Vec<PeerHint>,
 }
 
 /// Which concrete transport to bind under the shared identity. Default [`iroh`](Self::Iroh).
@@ -59,10 +62,18 @@ impl Transport {
 /// from `<key>=<host:port>`, where the host may be an IP OR a DNS name (a Docker service, a LAN host): it
 /// resolves via the system resolver, so a readable `nodea:9000` reaches a peer by name. Layered under LAN
 /// mDNS to form the discovery both transports use.
+///
+/// A DIFFERENT concept from the dial target [`Peer`](crate::peer::Peer): a hint says WHERE to find a key,
+/// the dial target says WHO to reach. Named `PeerHint` so the two never share the `Peer` name that used to
+/// force the collision gymnastics. It retains its ORIGINAL text so `swoosh ssh` can forward it verbatim
+/// into the tunnel-connect bridge, resolving the address at the actual dial site, not the launcher.
 #[derive(Debug, Clone)]
-pub struct Peer {
+pub struct PeerHint {
     node: NodeId,
     addrs: Vec<SocketAddr>,
+    /// The original `<key>=<addr>` text, retained so `ssh` forwards the hint verbatim (DNS resolves at the
+    /// dial site, not here).
+    text: String,
 }
 
 /// The discovery both transports compose: explicit `--peer` hints layered over LAN mDNS.
@@ -72,7 +83,13 @@ pub struct Peer {
 /// which is how iroh keeps self-discovering when nothing is known locally.
 pub type Discovery = Layered<StaticDiscovery, MdnsDiscovery>;
 
-impl Peer {
+impl PeerHint {
+    /// The original `<key>=<addr>` token, for `ssh` to forward verbatim into the ProxyCommand so the
+    /// address resolves at the actual dial site (`tunnel-connect`), not at the launcher.
+    pub fn as_arg(&self) -> &str {
+        &self.text
+    }
+
     /// Compose the discovery for a freshly bound `transport`: the `--peer` hints layered over an mDNS
     /// resolver that advertises this node at its bound local addresses and browses the LAN for peers.
     ///
@@ -84,7 +101,7 @@ impl Peer {
         peers: impl IntoIterator<Item = Self>,
     ) -> Discovery {
         let mut hints = StaticDiscovery::new();
-        for Self { node, addrs } in peers {
+        for Self { node, addrs, .. } in peers {
             hints.insert(node, addrs);
         }
         let local = transport.local_addr();
@@ -99,7 +116,7 @@ impl Peer {
     }
 }
 
-impl FromStr for Peer {
+impl FromStr for PeerHint {
     /// `eyre::Report` so the clap boundary surfaces a source-chained parse failure; swoosh is a binary,
     /// so it speaks eyre rather than a typed library error here.
     type Err = eyre::Report;
@@ -117,6 +134,11 @@ impl FromStr for Peer {
         if addrs.is_empty() {
             eyre::bail!("peer address {host:?} resolved to no addresses");
         }
-        Ok(Self { node, addrs })
+        // Retain the original token so `ssh` can forward it verbatim (DNS resolves at the dial site).
+        Ok(Self {
+            node,
+            addrs,
+            text: text.to_owned(),
+        })
     }
 }

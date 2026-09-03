@@ -16,7 +16,8 @@ use tightbeam::protocol::{Request, Response};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::contacts::{Contacts, Target};
+use crate::contacts::Contacts;
+use crate::peer::Peer;
 use crate::reach::{self, Reached};
 use crate::transport::{self, ReachArgs};
 
@@ -26,12 +27,10 @@ pub struct FetchCmd {
     /// The origin URL to fetch (path and query on the local URL resolve against it).
     #[arg(value_name = "url")]
     pub url: String,
-    /// The node to fetch through: a saved petname (`usa`, `alice/box`) or a raw key.
+    /// the node to fetch through: a petname (`usa`, `alice/box`), a raw node id, or a `sheer:` link
     #[arg(long, value_name = "peer")]
-    pub via: Target,
-    /// Present a `sheer:` capability link to a cap-gated node (a delegate's slip; overrides the default
-    /// member badge). Parsed at the boundary via [`SheerLink`]'s `FromStr`, so a malformed link is a clap
-    /// error here, not an opaque refusal at the exit node.
+    pub via: Peer,
+    /// present a `sheer:` cap link to a cap-gated node (a delegate's slip)
     #[arg(long, value_name = "link")]
     pub present: Option<crate::credential::SheerLink>,
     /// Pin the local listener port (default: an OS-assigned free port).
@@ -50,11 +49,17 @@ impl crate::reaching::Reaching for FetchCmd {
     /// default (rooted at the dialing key), and a delegate may override with `--present <slip>`. Stating
     /// `Family` FUSES the identity to `PersistedIfPresent`, so the owner's self-badge roots at the same
     /// key the dial binds under and admits: this is the one-line fix for the owner-reaching-own-node 403
-    /// (the verb used to dial `Ephemeral` + slip-only, so an owner with no slip was refused).
+    /// (the verb used to dial `Ephemeral` + slip-only, so an owner with no slip was refused). The effective
+    /// slip is the FOLD of a self-addressing `sheer:` link in the `--via` peer with an explicit `--present`,
+    /// threaded INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> crate::credential::Credential {
         crate::credential::Credential::Family {
-            present: self.present.clone(),
+            present: self.via.self_present().or_else(|| self.present.clone()),
         }
+    }
+
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.via.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> crate::identity::Identity {
@@ -72,8 +77,14 @@ impl crate::reaching::Reaching for FetchCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_fetch(node, ctx.contacts, ctx.transport, ctx.present)
-            .await
+        self.run_fetch(
+            node,
+            ctx.contacts,
+            ctx.transport,
+            ctx.present,
+            ctx.membership,
+        )
+        .await
     }
 }
 
@@ -90,7 +101,10 @@ impl FetchCmd {
         contacts: &Contacts,
         transport: transport::Transport,
         present: Option<String>,
+        membership: Option<String>,
     ) -> eyre::Result<()> {
+        // The redundant-present conflict is rejected ONCE in the composition root via
+        // `Reaching::reject_redundant_present`, before this runs.
         let Reached { session, label } = reach::dial(node, contacts, &self.via, transport).await?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
         let addr = listener.local_addr()?;
@@ -116,7 +130,7 @@ impl FetchCmd {
                             continue;
                         }
                     };
-                    pipes.push(self.serve(tcp, &session, present.as_deref()));
+                    pipes.push(self.serve(tcp, &session, present.as_deref(), membership.as_deref()));
                 }
                 Some(result) = pipes.next(), if !pipes.is_empty() => {
                     if let Err(error) = result {
@@ -135,9 +149,13 @@ impl FetchCmd {
         mut tcp: TcpStream,
         session: &S,
         present: Option<&str>,
+        membership: Option<&str>,
     ) -> eyre::Result<()> {
         let mut responded = false;
-        if let Err(error) = self.relay(&mut tcp, session, present, &mut responded).await {
+        if let Err(error) = self
+            .relay(&mut tcp, session, present, membership, &mut responded)
+            .await
+        {
             if !responded {
                 // A failure before any response (an open, a parse, a stream drop) is a bad-gateway
                 // condition, not an authorization one, so `502`. The refusal path inside `relay` serves
@@ -161,6 +179,7 @@ impl FetchCmd {
         tcp: &mut TcpStream,
         session: &S,
         present: Option<&str>,
+        membership: Option<&str>,
         responded: &mut bool,
     ) -> eyre::Result<()> {
         let head = read_head(tcp).await?;
@@ -175,6 +194,7 @@ impl FetchCmd {
         Request {
             service: "fetch".to_owned(),
             capability: present.map(str::to_owned),
+            membership: membership.map(str::to_owned),
         }
         .write(&mut writer)
         .await?;

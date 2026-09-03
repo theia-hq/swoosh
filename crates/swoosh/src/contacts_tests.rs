@@ -112,34 +112,6 @@ fn resolve_unknown_name_is_a_clean_error_not_an_empty_dial() {
 }
 
 #[test]
-fn target_parses_raw_node_id_and_falls_back_to_petname() {
-    let raw = node(7).to_string();
-    assert_eq!(raw.parse::<Target>(), Ok(Target::Raw(node(7))));
-
-    let named: Target = "alice/macbook".parse().expect("petname target");
-    match named {
-        Target::Named(reference) => {
-            assert_eq!(reference.petname(), &petname("alice"));
-            assert_eq!(reference.device(), Some(&device("macbook")));
-        }
-        Target::Raw(_) => panic!("expected a named target"),
-    }
-}
-
-#[test]
-fn target_resolve_passes_a_raw_key_through_without_the_store() {
-    let contacts = Contacts::default();
-    let target = Target::Raw(node(3));
-    let candidates = target.candidates(&contacts).expect("raw key resolves");
-    assert_eq!(
-        candidates.iter().map(|c| c.node).collect::<Vec<_>>(),
-        vec![node(3)]
-    );
-    // A raw key labels itself by its short form, since there is no petname to name it.
-    assert_eq!(candidates[0].label, node(3).short());
-}
-
-#[test]
 fn device_label_rejects_length_and_control_bytes() {
     // The unified label type gains the length bound and control-byte reject the roster codec requires, so
     // these hold for local contacts and roster members alike.

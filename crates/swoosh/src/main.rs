@@ -46,7 +46,7 @@ use swoosh::commands::tunnel_connect::TunnelConnectCmd;
 use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::identity::Identity;
 use swoosh::reaching::Reaching;
-use swoosh::transport::Peer;
+use swoosh::transport::PeerHint;
 use swoosh::{config, contacts, credential, identity, reaching, transport};
 
 #[derive(Debug, Parser)]
@@ -62,7 +62,9 @@ use swoosh::{config, contacts, credential, identity, reaching, transport};
     arg_required_else_help = true
 )]
 struct Cli {
-    /// Pin a persisted identity dir [env: SWOOSH_KEY]
+    /// Use this identity key file
+    // clap appends the `[env: SWOOSH_KEY=]` annotation itself from `env` below, so the help must NOT
+    // spell the env var again (doing so double-prints it).
     #[arg(long = "key", id = "identity-key", env = "SWOOSH_KEY", global = true)]
     key: Option<PathBuf>,
     #[command(subcommand)]
@@ -102,7 +104,7 @@ enum Command {
     Adopt(AdoptCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(SshCmd),
-    /// Mint, narrow, or revoke a `sheer:` capability link.
+    /// Issue, list, narrow, or revoke `sheer:` capability links.
     #[command(subcommand)]
     Grant(GrantCmd),
     /// Print this command tree (spec vs binary).
@@ -308,22 +310,44 @@ impl Reach {
         }
     }
 
-    /// The membership badge to present when dialing, DERIVED from [`credential`](Self::credential) via the
-    /// single [`resolve`](reaching::resolve) home of the `--present`-overrides-self-badge rule. There is
-    /// no wildcard `_ => Ok(None)`: a verb's badge is whatever its `Credential` resolves to, so a verb
-    /// that reaches a family-gated service without a badge is unrepresentable (the fleet/fetch bug class).
+    /// Reject a redundant `--present` alongside a self-addressing `sheer:` link peer, ONCE for every
+    /// reaching verb: forwards to each verb's [`Reaching::reject_redundant_present`], the compiler-forced
+    /// conflict check. A thin dispatch like [`credential`](Self::credential), so a new `Reach` variant that
+    /// omits its arm does not compile, and the guard can never be forgotten in a verb's own `run`.
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        match self {
+            Self::Serve(cmd) => cmd.reject_redundant_present(),
+            Self::Ping(cmd) => cmd.reject_redundant_present(),
+            Self::Speed(cmd) => cmd.reject_redundant_present(),
+            Self::Status(cmd) => cmd.reject_redundant_present(),
+            Self::Fetch(cmd) => cmd.reject_redundant_present(),
+            Self::Forward(cmd) => cmd.reject_redundant_present(),
+            Self::Beam(cmd) => cmd.reject_redundant_present(),
+            Self::Stop(cmd) => cmd.reject_redundant_present(),
+            Self::Service(cmd) => cmd.reject_redundant_present(),
+            Self::Fleet(cmd) => cmd.reject_redundant_present(),
+            Self::TunnelConnect(cmd) => cmd.reject_redundant_present(),
+        }
+    }
+
+    /// The two credential slots to present when dialing, DERIVED from [`credential`](Self::credential) via
+    /// the single [`resolve`](reaching::resolve) home of the `--present`-overrides-self-badge rule: slot 1
+    /// the grant, slot 2 a membership badge for a signet-bound slip's AND. There is no wildcard
+    /// `_ => Ok((None, None))`: a verb's badge is whatever its `Credential` resolves to, so a verb that
+    /// reaches a family-gated service without a badge is unrepresentable (the fleet/fetch bug class).
     ///
     /// Computed here, in the composition root, because it needs the resolved secret before the transport
-    /// consumes it. `Anonymous` resolves to no badge; `Family` resolves to the STORED signet-signed badge,
-    /// else the signet holder's self-sign, else an ephemeral self-sign a real gate correctly refuses.
-    async fn self_badge(
+    /// consumes it. `Anonymous` resolves to no slots; `Family` resolves slot 2 to the STORED signet-signed
+    /// badge, else the signet holder's self-sign, and slot 1 to a `--present` slip if given, else the same
+    /// badge mirrored.
+    async fn present_slots(
         &self,
         secret: &identity::Secret,
         key: Option<&std::path::Path>,
-    ) -> eyre::Result<Option<String>> {
+    ) -> eyre::Result<(Option<String>, Option<String>)> {
         Ok(reaching::resolve(self.credential(), secret, key)
             .await?
-            .into_present())
+            .into_slots())
     }
 
     /// The exposer context `serve` needs, resolved before the secret is consumed by the transport bind:
@@ -428,13 +452,23 @@ async fn run() -> eyre::Result<()> {
         // key path; binds no transport and touches no address book.
         Verb::Adopt(cmd) => return cmd.run(cli.key.as_deref()).await,
         // The `grant` group: `share` signs a link with the persisted key; `attenuate`/`revoke` are wholly
-        // offline. No leaf binds a transport or reads the address book, so the group dispatches here beside
-        // the local verbs rather than falling through to the reach path.
+        // offline. No leaf binds a transport, so the group dispatches here beside the local verbs rather
+        // than falling through to the reach path; `issue --for` reads the address book to resolve a device.
         Verb::Grant(cmd) => {
             return match cmd {
-                GrantCmd::Issue(cmd) => cmd.run(cli.key.as_deref()).await,
+                // `issue` and `revoke` read the address book (to resolve a `--for`/holder petname to a
+                // device), so they open the store; neither binds a transport.
+                GrantCmd::Issue(cmd) => {
+                    let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
+                    cmd.run(store, cli.key.as_deref()).await
+                }
+                GrantCmd::Revoke(cmd) => {
+                    let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
+                    cmd.run(store, cli.key.as_deref()).await
+                }
+                // `ls` reads only swoosh's own mint-log ledger, so it needs neither the store nor a transport.
+                GrantCmd::Ls(cmd) => cmd.run(cli.key.as_deref()).await,
                 GrantCmd::Narrow(cmd) => cmd.run(),
-                GrantCmd::Revoke(cmd) => cmd.run(cli.key.as_deref()).await,
             };
         }
         // A launcher: read the store to resolve the peer, then hand off to the system `ssh` (which runs
@@ -463,12 +497,16 @@ async fn run() -> eyre::Result<()> {
     // the backend and the dial hints are read off the chosen reaching verb, not a root global.
     let transport = reach.args().transport;
     let peers = reach.args().peer.clone();
+    // Reject a redundant `--present` alongside a self-addressing `sheer:` link peer ONCE here, before any
+    // dial, so the conflict is loud and compiler-forced for every verb (each states its own check via
+    // `Reaching::reject_redundant_present`), never a per-verb one-liner a new verb could forget.
+    reach.reject_redundant_present()?;
     // Resolve the membership badge to present BEFORE the secret is consumed by the transport bind: an
     // adopted device presents its STORED signet-signed badge (bound to this key, which the dial then binds
     // under, so the far gate's device-binding matches); the signet holder self-signs one against the same
     // key for the same reason. The exposer context (`serve`) is resolved before the bind too: its ssh
     // host seed derives from the secret before the bind consumes it.
-    let self_badge = reach.self_badge(&secret, cli.key.as_deref()).await?;
+    let (present, membership) = reach.present_slots(&secret, cli.key.as_deref()).await?;
     let expose = reach
         .expose_context(&secret, store.contacts(), cli.key.as_deref())
         .await?;
@@ -480,7 +518,8 @@ async fn run() -> eyre::Result<()> {
     let ctx = reaching::ReachCtx {
         contacts: &contacts,
         transport,
-        present: self_badge,
+        present,
+        membership,
         key: cli.key.as_deref(),
     };
     match transport {
@@ -490,7 +529,7 @@ async fn run() -> eyre::Result<()> {
         // known locally the resolve is empty and iroh self-discovers exactly as before.
         transport::Transport::Iroh => {
             let endpoint = bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?;
-            let discovery = Peer::discovery(&endpoint, peers);
+            let discovery = PeerHint::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
             reach.run(&node, ctx).await
         }
@@ -498,7 +537,7 @@ async fn run() -> eyre::Result<()> {
         // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
         transport::Transport::Quirk => {
             let endpoint = bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?;
-            let discovery = Peer::discovery(&endpoint, peers);
+            let discovery = PeerHint::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
             reach.run(&node, ctx).await
         }
@@ -646,5 +685,66 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A real `sheer:` capability link, minted through the library so a parse test exercises the true
+    /// boundary (a `Peer::Capability` arm), not a fake token a lenient parser would wave through.
+    fn sheer_link() -> String {
+        let work = nauthy::Identity::from_secret(&[3u8; 32]).expect("valid work secret");
+        let fleet = nauthy::Identity::from_secret(&[4u8; 32])
+            .expect("valid fleet secret")
+            .node_id();
+        tightbeam::tunnel::mint_signet_link(
+            &work,
+            &"ssh".parse().expect("valid service"),
+            fleet,
+            core::time::Duration::from_secs(3600),
+        )
+        .expect("mint a sheer: link")
+    }
+
+    /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `sheer:` link all
+    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/`beam`/`stop`/`service --at`/
+    /// `fetch --via`/`ssh`/`fleet --pull`.
+    #[test]
+    fn every_dialing_verb_takes_a_petname_a_key_and_a_link() {
+        let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
+        let link = sheer_link();
+        for peer in ["alice", key.as_str(), link.as_str()] {
+            let cases: [&[&str]; 10] = [
+                &["swoosh", "ping", peer],
+                &["swoosh", "speed", peer],
+                &["swoosh", "status", peer],
+                &["swoosh", "forward", peer, "--to", "5432"],
+                &["swoosh", "beam", "afile", peer],
+                &["swoosh", "stop", peer],
+                &["swoosh", "service", "--at", peer],
+                &["swoosh", "fetch", "http://example.com/x", "--via", peer],
+                &["swoosh", "ssh", peer],
+                &["swoosh", "fleet", "--pull", peer],
+            ];
+            for argv in cases {
+                assert!(
+                    Cli::try_parse_from(argv).is_ok(),
+                    "{argv:?} should accept the peer form {peer:?}"
+                );
+            }
+        }
+    }
+
+    /// The `--peer` HINT flag still parses, now under its de-collided clap id `peer-hint`, alongside a
+    /// verb's positional `<peer>` with no clap id collision.
+    #[test]
+    fn the_peer_hint_flag_still_parses() {
+        let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
+        let cli = Cli::try_parse_from([
+            "swoosh",
+            "ping",
+            "alice",
+            "--peer",
+            &format!("{key}=127.0.0.1:9000"),
+        ])
+        .expect("the --peer hint parses under its new id peer-hint");
+        assert!(matches!(cli.command, Some(Command::Ping(_))));
     }
 }

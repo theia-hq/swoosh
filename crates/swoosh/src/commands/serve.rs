@@ -12,8 +12,12 @@
 //! itself (`fetch:`, `ping:`/`speed:`, and `sshd:` under the `ssh` feature), builds the gate through the shared
 //! [`resolve_gate`](tightbeam::tunnel::resolve_gate) policy, and prints its OWN readiness banner. `--public`
 //! and `--quiet` live on THIS verb (not root), and reach comes via the shared
-//! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb.
+//! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb. `--for` is a
+//! LOCAL timer with no security surface: when its deadline passes the node ends by itself, the same
+//! graceful teardown a Ctrl-C gives.
 
+use core::net::SocketAddr;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -22,7 +26,10 @@ use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use nauthy::{Denylist, VerifyKey};
 use tightbeam::duration::Lifetime;
-use tightbeam::tunnel::{self, CancellationToken, Exposer, PublicRequest, Registry, Services};
+use tightbeam::tunnel::{
+    self, CancellationToken, Exposer, ManifestEntry, Posture, PublicRequest, Registry, Services,
+    TargetKind,
+};
 
 use crate::contacts::{Contacts, Petname};
 use crate::identity::Secret;
@@ -87,22 +94,27 @@ pub struct ServeCmd {
     /// publish local services as `name=svc` (bare = `ping=ping: speed=speed:`, reach diagnostics)
     #[arg(value_name = "name=svc")]
     pub services: Vec<String>,
-    /// Open these NAMED services to anyone, unauthenticated (comma-list, repeatable: `--public speed,fetch`
-    /// or `--public speed --public fetch`): the per-service opt-out from the signet gate. Each name must be a
-    /// service you serve. A keyless shell (`sshd:`, remote code execution) is refused with a teaching error,
-    /// and `control.stop`/`control.services` can never be opened. `ping`/`speed` MAY be opened, but they have
-    /// no responder-side rate limit yet, so an open one lets an anonymous caller drain this node's uplink (an
-    /// amplifier); the readiness banner says so.
-    #[arg(long, value_name = "svc", value_delimiter = ',')]
+    /// open named services to anyone, unauthenticated (comma-list, repeatable)
+    #[arg(
+        long,
+        value_name = "svc",
+        value_delimiter = ',',
+        long_help = "Open these NAMED services to anyone, unauthenticated (comma-list, repeatable: \
+                     `--public speed,fetch` or `--public speed --public fetch`): the per-service opt-out \
+                     from the signet gate. Each name must be a service you serve.\n\nA keyless shell \
+                     (`sshd:`, remote code execution) is refused with a teaching error, and \
+                     `control.stop`/`control.services` can never be opened. `ping`/`speed` MAY be opened, \
+                     but they have no responder-side rate limit yet, so an open one lets an anonymous \
+                     caller drain this node's uplink (an amplifier); the readiness banner says so."
+    )]
     pub public: Vec<String>,
-    /// Suppress the readiness banner (the node id, services, and gate), for unattended/CI use.
+    /// suppress the readiness banner (for unattended/CI use)
     #[arg(long)]
     pub quiet: bool,
     /// Directory a `beam:` service saves pushed files into (received files land here).
     #[arg(long, value_name = "dir", default_value = ".")]
     pub out: PathBuf,
-    /// Serve for a bounded time, then stop by itself (`30m`, `2h`, `1d`). A local timer, no security
-    /// surface: the node ends when the deadline passes, the same graceful teardown a Ctrl-C gives.
+    /// serve for a bounded time, then stop (`30m`, `2h`, `1d`)
     #[arg(long, value_name = "duration")]
     pub r#for: Option<Lifetime>,
     #[command(flatten)]
@@ -158,6 +170,12 @@ impl crate::reaching::Reaching for ServeCmd {
     /// this method, supplies it.
     fn credential(&self) -> crate::credential::Credential {
         crate::credential::Credential::Anonymous
+    }
+
+    /// `serve` is the gate: it dials no peer and takes no `--present`, so there is no self-addressing link
+    /// peer to conflict with. The check is vacuously satisfied.
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        Ok(())
     }
 
     /// `serve` MUST be reachable at one stable address across runs, so it declares `Persisted` EXPLICITLY
@@ -306,41 +324,50 @@ impl ServeCmd {
 
         if !self.quiet {
             let addr = node.local_addr();
-            println!("swoosh ready. peers can reach this node at:\n");
-            println!("    {}\n", addr.node);
-            // Direct-only transports (quirk) cannot discover this address, so print the dialable hint a
-            // client feeds back via `--peer`. Self-discovering transports (iroh) carry no local hints here,
-            // so this loop prints nothing for them.
-            for hint in &addr.hints {
-                println!("    --peer {}={hint}\n", addr.node);
-            }
-            let names: Vec<&str> = services.names().collect();
-            let stop = match self.r#for {
-                Some(lifetime) => format!("stops in {}, or ctrl-c", humanize(lifetime.duration())),
+            // A display map of served name -> target address, read off the SAME requested strings tightbeam
+            // parsed (fetch already de-merged out), so the banner renders `name -> target` from what the
+            // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
+            // amplifier caveat). Fetch names are handled by gloss (their synthetic scheme is unspellable).
+            let addr_by_name = display_targets(&requested);
+            let fetch_names: HashSet<String> = fetch
+                .services()
+                .iter()
+                .map(|s| s.name().to_owned())
+                .collect();
+            // Reach-kind is the selected transport, not an inference from whether hints are present (which
+            // conflates the channel with the hint state): iroh routes across the internet, quirk is
+            // direct-only. mDNS availability is a SEPARATE reachability fact (see `MdnsState`).
+            let reach = ReachKind::of(self.reach.transport);
+            // FLAG(Systems-Architect): the live mDNS-available bit is computed at the composition seam
+            // (`PeerHint::discovery`, transport.rs) and is NOT reachable from this generic `run` today. Sourcing
+            // it needs a crate seam (return it from `PeerHint::discovery` into `ReachCtx`, or an accessor on the
+            // composed `Discovery`) that is outside this serve-surface blast radius. Defaulted to the common
+            // `Available` case so the banner is complete; the `Blocked` render path is built and ready to
+            // wire (see `reach_section`).
+            let mdns = MdnsState::Available;
+            let stop_line = match self.r#for {
+                Some(lifetime) => {
+                    format!(
+                        "runs for {}, then stops (or ctrl-c)",
+                        humanize(lifetime.duration())
+                    )
+                }
                 None => "ctrl-c to stop".to_owned(),
             };
-            println!(
-                "serving {} (gate: {}). {stop}.",
-                names.join(", "),
-                self.gate_description(signet, addr.node),
+            let manifest = exposer.manifest();
+            print!(
+                "{}",
+                render_ready_banner(
+                    &addr.node.to_string(),
+                    reach,
+                    mdns,
+                    &addr.hints,
+                    &manifest,
+                    &addr_by_name,
+                    &fetch_names,
+                    &stop_line,
+                )
             );
-            if !self.public.is_empty() {
-                println!(
-                    "open to anyone, unauthenticated: {}.",
-                    self.public.join(", ")
-                );
-            }
-            // Honesty (delib-39 B2/MAJOR-1): a public `ping`/`speed` answers any anonymous caller with no
-            // responder-side rate limit yet, so it lets a stranger drain this node's uplink. State the
-            // amplification plainly so the operator's opt-in is informed.
-            let amplifiers = public_amplifiers(&requested, &self.public);
-            if !amplifiers.is_empty() {
-                println!(
-                    "  note: {} answer anyone with no rate limit yet, so an anonymous caller can drain \
-                     this node's uplink (an amplifier).",
-                    amplifiers.join(", ")
-                );
-            }
         }
 
         // A `--for` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
@@ -362,7 +389,13 @@ impl ServeCmd {
         // `swoosh stop` (or a timer, or a Ctrl-C) must exit 0 so the qat CI action reads a clean teardown as
         // green, not a crash; only a genuine error teardown exits non-zero.
         let stopped = self.run_until_stopped(exposer, node, cancel).await?;
-        println!("{}", stopped.message());
+        // The teardown line is best-effort: a piped consumer (a supervisor, `swoosh serve | head`) may have
+        // already closed stdout by the time the node stops, so a broken-pipe write must NOT turn a clean stop
+        // into a panic. `println!` panics on a write error, so write directly and ignore a closed pipe.
+        {
+            use std::io::Write as _;
+            let _ = writeln!(std::io::stdout(), "{}", stopped.message());
+        }
         node.close().await;
         Ok(())
     }
@@ -402,40 +435,320 @@ impl ServeCmd {
             }
         }
     }
+}
 
-    /// A one-line description of the node's BASE gate, for the readiness banner: trust made visible. `self_id`
-    /// is this node's own id, so the banner can say "self" when the gate roots at the node's OWN key (a
-    /// person-zero node with no provisioned signet self-trusts) rather than naming its own id as a "signet".
-    /// The base is always the family gate now; services opened with `--public` are reported on their own line,
-    /// not folded into the base description.
-    fn gate_description(&self, signet: Option<NodeId>, self_id: NodeId) -> String {
-        match signet {
-            Some(root) if root == self_id => {
-                "self (person-zero: this node and its devices)".to_owned()
-            }
-            Some(root) => format!("signet {}", root.short()),
-            None => "unprovisioned".to_owned(),
+/// Build the `name -> target` display map from the SAME requested strings tightbeam parsed: each `name=addr`
+/// (a bare entry defaults its name to `default`, matching `Services::parse`). This is swoosh's own render
+/// vocabulary; tightbeam's manifest supplies the load-bearing facts (posture, kind, the amplifier caveat).
+/// Fetch entries are already de-merged out of `requested`, so they never appear here (the banner glosses them
+/// by name instead, their synthetic scheme being unspellable).
+fn display_targets(requested: &[String]) -> HashMap<String, String> {
+    requested
+        .iter()
+        .map(|entry| match entry.split_once('=') {
+            Some((name, addr)) => (name.to_owned(), addr.to_owned()),
+            None => ("default".to_owned(), entry.clone()),
+        })
+        .collect()
+}
+
+/// How peers reach this node, for the banner's `how peers reach you` section: whether the bound transport
+/// routes across the internet (an `internet` channel) or is LAN/direct-only. Read off the SELECTED transport
+/// at the composition seam, never inferred from whether hints are present (that would conflate the channel
+/// with the hint state, delib-41 CLI-Architect note). An enum, not a bool, so a third reach kind forces a
+/// decision here rather than defaulting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReachKind {
+    /// The transport routes across the internet and NATs (iroh): a peer reaches this node by the key alone.
+    Internet,
+    /// The transport is LAN/direct-only (quirk): a peer reaches this node on the LAN via mDNS, or by a
+    /// handed-over address.
+    DirectOnly,
+}
+
+impl ReachKind {
+    /// Map the selected transport to its reach kind. The one place the transport identity becomes a reach
+    /// tell for the banner; every other surface stays transport-blind.
+    fn of(transport: crate::transport::Transport) -> Self {
+        match transport {
+            crate::transport::Transport::Iroh => Self::Internet,
+            crate::transport::Transport::Quirk => Self::DirectOnly,
         }
     }
 }
 
-/// The public service names that are reach-diagnostic AMPLIFIERS (`ping`/`speed`): a public one answers any
-/// anonymous caller with no responder-side rate limit yet, so the banner names them so the operator's opt-in
-/// is informed (delib-39 B2/MAJOR-1). Reads the resolved request entries (`name=addr`, control.* and defaults
-/// already folded in), so a renamed amplifier (`fast=speed:`) is caught by its `speed:`/`ping:` scheme, not
-/// by a hard-coded name. A bare `ping:`/`speed:` with no name defaults to `default`, matching `Services::parse`.
-fn public_amplifiers(requested: &[String], public: &[String]) -> Vec<String> {
-    requested
-        .iter()
-        .filter_map(|entry| {
-            let (name, addr) = match entry.split_once('=') {
-                Some((name, addr)) => (name, addr),
-                None => ("default", entry.as_str()),
+/// Whether LAN mDNS discovery is advertising or blocked (multicast unavailable). A first-class reachability
+/// tell: when blocked, the `LAN` line flips and states what to do instead (delib-41 Newcomer fix). An enum,
+/// not a bool, so the down-state is a named case a reader must handle, never a bare `false`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MdnsState {
+    /// mDNS is advertising this node on the LAN: devices find it by the key alone.
+    Available,
+    /// Multicast is blocked here, so LAN auto-discovery is off; reach falls to the internet or a handed
+    /// address.
+    // FLAG(Systems-Architect): the render path for this down-state is built and unit-tested, but the live
+    // mDNS-available bit is not yet threaded from the composition seam (`PeerHint::discovery`) to this generic
+    // `run`, so `Blocked` is never constructed today. `#[expect]` keeps the ready path without silencing a
+    // real dead-code signal: it will error the day the bit is wired and the attribute is no longer needed.
+    // `not(test)` because the render tests DO construct `Blocked` (the down-state path is exercised there);
+    // only the non-test build sees it unconstructed, pending the flagged seam.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the mDNS-blocked render path is ready and tested; sourcing the live bit is a \
+                      flagged transport seam"
+        )
+    )]
+    Blocked,
+}
+
+/// The posture group a served service sits under in the banner, safest-first. The security weight lives on the
+/// GROUP and escalates monotonically DOWN the list (delib-41 Newcomer fix): `FamilyGated` (no marker) <
+/// `Public` (a marker) < `PublicUnsafe` (the loudest). A per-service caveat (an amplifier) is quiet inline
+/// prose, never a marker louder than the group above it, so a reader can never conclude a `public` service is
+/// scarier than a `public-UNSAFE` one. Ordered so the derived `Ord` IS the safest-first render order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Group {
+    FamilyGated,
+    Public,
+    PublicUnsafe,
+}
+
+impl Group {
+    /// Which group a service sits under: gated is always family-gated; an OPEN raw stream is the loudest
+    /// (public-UNSAFE: raw bytes to anyone), any other open service is public. Reads the manifest's declared
+    /// posture + kind, so the split is tightbeam's, not a swoosh string match.
+    fn of(entry: &ManifestEntry) -> Self {
+        match (entry.posture, entry.kind) {
+            (Posture::Gated, _) => Self::FamilyGated,
+            (Posture::Open, TargetKind::RawStream) => Self::PublicUnsafe,
+            (Posture::Open, _) => Self::Public,
+        }
+    }
+
+    /// The header this group renders: its name carrying the monotonic danger marker, and its one-line
+    /// audience gloss. The marker escalates down the list and is the ONLY loud danger glyph in the section.
+    // FLAG(CLI-Architect): the exact marker glyphs (`!` / `!!`) and the audience wording are a banner-format
+    // detail; picked here to satisfy the monotonic-loudness rule, open to the owner's final call.
+    fn header(self) -> (&'static str, &'static str) {
+        match self {
+            Self::FamilyGated => ("family-gated", "your devices + peers you've granted"),
+            Self::Public => ("public !", "anyone, unauthenticated"),
+            Self::PublicUnsafe => ("public-UNSAFE !!", "raw bytes to anyone who connects"),
+        }
+    }
+}
+
+/// The gloss for a bare handler scheme, the terse right-column description (delib-41 CLI-Architect gloss set).
+/// An unrecognized scheme falls back to a plain `<scheme> service`, so a future handler still renders a line.
+fn handler_gloss(scheme: &str) -> String {
+    match scheme {
+        "ping" => "round-trip probe".to_owned(),
+        "speed" => "throughput test".to_owned(),
+        "sshd" => "a shell on this machine".to_owned(),
+        "beam" => "receives pushed files".to_owned(),
+        other => format!("{other} service"),
+    }
+}
+
+/// The rendered `<label>` and `<gloss>` for one service row: `name -> target` when the name points elsewhere
+/// (`ssh -> sshd`, `logs -> file:...`), or just `name` when the name IS the target scheme (`speed`). Fetch
+/// services gloss by name (their synthetic scheme is unspellable). The kind is tightbeam's declared
+/// [`TargetKind`], so a raw stream vs a forward vs a handler is not re-derived from the address string.
+fn describe(
+    entry: &ManifestEntry,
+    addr_by_name: &HashMap<String, String>,
+    fetch_names: &HashSet<String>,
+) -> (String, String) {
+    let name = entry.name.as_str();
+    // A de-merged fetch's row glosses by name only (its origin is not reconstructed here, the synthetic
+    // scheme being unspellable). `fetches URLs for callers` names the object for parallelism with the
+    // sibling glosses (`receives pushed files`, the round-trip probes).
+    if fetch_names.contains(name) {
+        return (name.to_owned(), "fetches URLs for callers".to_owned());
+    }
+    let addr = addr_by_name
+        .get(name)
+        .map(String::as_str)
+        .unwrap_or_default();
+    match entry.kind {
+        TargetKind::Handler => {
+            let scheme = addr.strip_suffix(':').unwrap_or(addr);
+            let label = if name == scheme {
+                name.to_owned()
+            } else {
+                format!("{name} -> {scheme}")
             };
-            (matches!(addr, "ping:" | "speed:") && public.iter().any(|p| p == name))
-                .then(|| name.to_owned())
-        })
-        .collect()
+            (label, handler_gloss(scheme))
+        }
+        TargetKind::Forward => (format!("{name} -> {addr}"), "local TCP service".to_owned()),
+        TargetKind::RawStream => (
+            format!("{name} -> {addr}"),
+            "streams raw bytes to any caller, no auth".to_owned(),
+        ),
+    }
+}
+
+/// Render the full readiness banner as ONE string (pure, so it is unit-testable and printed once): the
+/// `swoosh ready` header, the copy-clean node id, the `how peers reach you` section, the grouped `serving`
+/// section, and the stop line. Every line is a tell (delib-41): no raw dial flags, no split posture, one
+/// monotonic danger vocabulary. Blank-line framed so the id (and any direct address) is copy-paste-clean.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the banner is assembled from independent facts (id, reach kind, mDNS state, hints, the \
+              declared manifest, swoosh's display map, the fetch names, the stop line); bundling them into \
+              one struct would only move the argument list, not remove it"
+)]
+fn render_ready_banner(
+    node_id: &str,
+    reach: ReachKind,
+    mdns: MdnsState,
+    hints: &[SocketAddr],
+    manifest: &[ManifestEntry],
+    addr_by_name: &HashMap<String, String>,
+    fetch_names: &HashSet<String>,
+    stop_line: &str,
+) -> String {
+    let mut out = String::new();
+    out.push_str("swoosh ready\n\n");
+    // The FULL node id, alone, indented, blank-framed, no trailing gloss (a trailing label would spoil a
+    // select-to-end-of-line copy). The next section explains what the key is for.
+    out.push_str(&format!("    {node_id}\n\n"));
+    out.push_str(&reach_section(reach, mdns, hints));
+    out.push('\n');
+    out.push_str(&serving_section(manifest, addr_by_name, fetch_names));
+    out.push('\n');
+    out.push_str(stop_line);
+    out.push('\n');
+    out
+}
+
+/// The `how peers reach you` section: one channel per line with a short label column that scans at a glance.
+/// The `internet` channel appears only when the transport routes across the internet; `direct` only when the
+/// transport is direct-only AND hands out address hints. "automatic" leads both auto channels, and mDNS is a
+/// first-class tell that flips to an off-state naming what to do instead when multicast is blocked.
+// FLAG(CLI-Architect): the channel glosses (wording, "even across NATs", the off-state next-step) are a
+// banner-format detail; picked here to satisfy the Newcomer fixes (no backend name, "automatic" on both, a
+// down-state next-step), open to the owner's final call.
+fn reach_section(reach: ReachKind, mdns: MdnsState, hints: &[SocketAddr]) -> String {
+    let direct = matches!(reach, ReachKind::DirectOnly) && !hints.is_empty();
+    // Width the label column to the widest channel label actually shown.
+    let mut labels: Vec<&str> = Vec::new();
+    if reach == ReachKind::Internet {
+        labels.push("internet");
+    }
+    labels.push("LAN");
+    if direct {
+        labels.push("direct");
+    }
+    let width = labels.iter().map(|l| l.len()).max().unwrap_or(0);
+    let gutter = 3;
+    let gloss_col = 2 + width + gutter;
+
+    let mut out = String::from("how peers reach you\n");
+    if reach == ReachKind::Internet {
+        out.push_str(&reach_line(
+            width,
+            gutter,
+            "internet",
+            "automatic; peers reach you by the key above, even across NATs",
+        ));
+    }
+    let lan = match (mdns, reach) {
+        (MdnsState::Available, _) => "automatic; your devices just need the key (mDNS)".to_owned(),
+        (MdnsState::Blocked, ReachKind::Internet) => {
+            "off; multicast blocked here, so reach by the key over the internet".to_owned()
+        }
+        (MdnsState::Blocked, ReachKind::DirectOnly) => {
+            "off; multicast blocked here, so hand a peer the address below".to_owned()
+        }
+    };
+    out.push_str(&reach_line(width, gutter, "LAN", &lan));
+    if direct {
+        // Loopback hints cannot be handed to a peer (they resolve to the peer's own machine), so a
+        // loopback-only bind reads "reachable on this machine only" rather than "hand a peer this address".
+        let (routable, loopback): (Vec<&SocketAddr>, Vec<&SocketAddr>) =
+            hints.iter().partition(|addr| !addr.ip().is_loopback());
+        let (header, addrs): (&str, Vec<&SocketAddr>) = if routable.is_empty() {
+            ("reachable on this machine only:", loopback)
+        } else if routable.len() == 1 {
+            ("hand a peer this address:", routable)
+        } else {
+            ("hand a peer one of these:", routable)
+        };
+        out.push_str(&reach_line(width, gutter, "direct", header));
+        // Each address on its own line, bare and copy-clean (the same standard as the node id), aligned
+        // under the header's gloss column.
+        for addr in addrs {
+            out.push_str(&format!("{:gloss_col$}{addr}\n", ""));
+        }
+    }
+    out
+}
+
+/// One `how peers reach you` line: `  <label padded>   <gloss>`.
+fn reach_line(width: usize, gutter: usize, label: &str, gloss: &str) -> String {
+    format!("  {label:<width$}{:gutter$}{gloss}\n", "")
+}
+
+/// The `serving` section: services grouped by posture, safest-first, empty groups omitted. `control.*` folds
+/// to one always-family-gated line. Within a group the gloss column aligns (per group, so a long raw-stream
+/// row never widens the tight family block). The danger weight is monotonic on the GROUP headers; a
+/// per-service amplifier caveat is quiet inline prose, never a marker louder than the group above it.
+fn serving_section(
+    manifest: &[ManifestEntry],
+    addr_by_name: &HashMap<String, String>,
+    fetch_names: &HashSet<String>,
+) -> String {
+    // (label, gloss, optional quiet caveat) rows per group; the manifest is already name-sorted, so rows keep
+    // that order. A BTreeMap keyed by `Group` iterates safest-first (the derived `Ord`).
+    let mut rows: BTreeMap<Group, Vec<(String, String, Option<String>)>> = BTreeMap::new();
+    let mut has_control = false;
+    for entry in manifest {
+        // `control.stop` / `control.services` fold into one row: node plumbing an operator never opts into,
+        // never a hidden service. Detected by the `control.` prefix, the verbatim registry family.
+        if entry.name.starts_with("control.") {
+            has_control = true;
+            continue;
+        }
+        let (label, gloss) = describe(entry, addr_by_name, fetch_names);
+        let caveat = (entry.amplifier && entry.posture == Posture::Open)
+            .then(|| "unmetered: a stranger can drain your uplink".to_owned());
+        rows.entry(Group::of(entry))
+            .or_default()
+            .push((label, gloss, caveat));
+    }
+    if has_control {
+        rows.entry(Group::FamilyGated).or_default().push((
+            "control.*".to_owned(),
+            "node control (always family-gated)".to_owned(),
+            None,
+        ));
+    }
+
+    let mut out = String::from("serving\n");
+    for (group, group_rows) in &rows {
+        let (name, audience) = group.header();
+        // The header carries its audience on a fixed short gutter (so a long raw-stream row never shoves the
+        // header audience far to the right); the SERVICE ROWS align their gloss column among THEMSELVES, per
+        // group, so the tight family block is never widened by a long `public-UNSAFE` row below it.
+        out.push_str(&format!("  {name}   {audience}\n"));
+        let col = group_rows
+            .iter()
+            .map(|(label, _, _)| 4 + label.len())
+            .max()
+            .unwrap_or(0)
+            + 3;
+        for (label, gloss, caveat) in group_rows {
+            out.push_str(&format!("{:<col$}{gloss}", format!("    {label}")));
+            if let Some(caveat) = caveat {
+                out.push_str(&format!("   {caveat}"));
+            }
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a

@@ -17,7 +17,7 @@
 
 use bifrost::{NodeId, NodeIdParseError};
 use data_encoding::BASE32_NOPAD;
-use zeroize::Zeroize as _;
+use zeroize::{Zeroize as _, Zeroizing};
 
 /// The `authkey:` scheme prefix.
 pub const SCHEME: &str = "authkey:";
@@ -65,8 +65,12 @@ pub fn parse(token: &str) -> Result<Authkey, AuthkeyError> {
         None => (rest, None),
     };
     let signet = signet.parse::<NodeId>().map_err(AuthkeyError::Signet)?;
+    // `BASE32_NOPAD` decodes uppercase only, but the encoded seed is lowercase (see `encode`), so it must be
+    // uppercased first. That uppercase copy IS secret-equivalent material (the base32 of the child seed), so
+    // hold it in a zeroizing buffer that wipes on drop rather than leaving it in freed heap.
+    let upper = Zeroizing::new(seed.to_uppercase());
     let mut bytes = BASE32_NOPAD
-        .decode(seed.to_uppercase().as_bytes())
+        .decode(upper.as_bytes())
         .map_err(|_| AuthkeyError::Encoding)?;
     let seed = <[u8; 32]>::try_from(bytes.as_slice()).map_err(|_| AuthkeyError::Length);
     bytes.zeroize();

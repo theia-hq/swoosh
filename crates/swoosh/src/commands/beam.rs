@@ -20,8 +20,8 @@ use eyre::WrapErr as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 
-use crate::commands::tunnel_connect::Dial;
 use crate::contacts::Contacts;
+use crate::peer::Peer;
 use crate::transport::ReachArgs;
 
 /// The service name a receiver publishes and beam reaches: `swoosh serve beam=beam:` receives, `swoosh
@@ -38,15 +38,13 @@ pub struct BeamCmd {
     /// The files or directories to push.
     #[arg(required = true, value_name = "path")]
     pub paths: Vec<PathBuf>,
-    /// who to reach: a saved petname (`alice`, `alice/box`), a raw node id, or a `sheer:` capability link
-    // Named `target`, not `peer`: the flattened `ReachArgs` already owns a `--peer` arg (its clap id is
-    // `peer`), so a positional field named `peer` collides two args under one clap id (a panic at --help).
-    // The help still reads `<peer>` via `value_name`.
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
-    pub target: Dial,
-    /// present a `sheer:` capability link alongside a raw node id
+    pub peer: Peer,
+    /// present a `sheer:` capability link alongside a raw node id (parsed at the boundary via
+    /// [`SheerLink`](crate::credential::SheerLink)'s `FromStr`)
     #[arg(long, value_name = "link")]
-    pub present: Option<String>,
+    pub present: Option<crate::credential::SheerLink>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -57,9 +55,18 @@ impl crate::reaching::Reaching for BeamCmd {
     }
 
     /// `beam` pushes to the peer's family-gated `beam:` service, so it presents the member badge rooted
-    /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`.
+    /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The effective slip is the
+    /// FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded INTO the
+    /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
+    /// badge exactly as a `--present` link does).
     fn credential(&self) -> crate::credential::Credential {
-        crate::credential::Credential::Family { present: None }
+        crate::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        }
+    }
+
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.peer.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> crate::identity::Identity {
@@ -77,27 +84,30 @@ impl crate::reaching::Reaching for BeamCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_beam(node, ctx.contacts, ctx.present).await
+        self.run_beam(node, ctx.contacts, ctx.present, ctx.membership)
+            .await
     }
 }
 
 impl BeamCmd {
     /// Reach the peer's `beam:` service and push every named file over its own gated stream, expanding
-    /// directories first. Presents `self_badge` (the self-signed membership badge, or an explicit
+    /// directories first. Presents the resolved `present` (the self-signed membership badge, or an explicit
     /// `--present` link) so the receiver's family gate admits each stream. A file that cannot be read is
     /// skipped and reported; the run ends non-zero if any item failed.
     async fn run_beam<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        self_badge: Option<String>,
+        present: Option<String>,
+        membership: Option<String>,
     ) -> eyre::Result<()> {
-        // Present an explicit `--present` link if given, else the self-signed badge minted from this
-        // identity: the peer's `beam` service is gated, so each stream must prove membership to be admitted.
-        let present = self.present.or(self_badge);
-        let connector = self
-            .target
-            .connector(contacts, BEAM_SERVICE.to_owned(), present)?;
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
+        // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
+        // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
+        let connector =
+            self.peer
+                .connector(contacts, BEAM_SERVICE.to_owned(), present, membership)?;
         let dial = connector.dial();
         println!("beaming to {dial}...");
         // A service-scoped session: each `open_bi` speaks the `beam:` request and presents the badge, so

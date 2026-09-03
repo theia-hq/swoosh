@@ -1,4 +1,4 @@
-//! Resolve a [`Target`] to a live session: turn a petname or key into a connected peer.
+//! Resolve a [`Peer`] to a live session: turn a petname or key into a connected peer.
 //!
 //! The reach-outward verbs share one need: take the peer slot the user typed, resolve it against the
 //! contact store, and connect. How they use the resolved set differs, so this module offers two shapes:
@@ -12,7 +12,8 @@ use core::time::Duration;
 use bifrost::{ConnInfo, Discovery, Node, Path, Transport};
 use tightbeam::tunnel::{Connector, ServiceSession};
 
-use crate::contacts::{Candidate, Contacts, Target};
+use crate::contacts::{Candidate, Contacts};
+use crate::peer::Peer;
 use crate::transport;
 
 /// The two diagnostic services a peer serves, independent so a node may offer one without the other: `ping`
@@ -55,7 +56,7 @@ pub struct Reached<S> {
 pub async fn dial<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     contacts: &Contacts,
-    target: &Target,
+    target: &Peer,
     transport: transport::Transport,
 ) -> eyre::Result<Reached<T::Session>> {
     let candidates = target.candidates(contacts)?;
@@ -108,9 +109,9 @@ pub async fn connect<T: Transport, D: Discovery>(
 }
 
 /// Resolve `target` to the ordered [`Candidate`]s a fan-out verb reports each of. A thin pass-through to
-/// [`Target::candidates`] so a verb resolves without reaching into the contacts module directly.
-pub fn candidates(target: &Target, contacts: &Contacts) -> eyre::Result<Vec<Candidate>> {
-    Ok(target.candidates(contacts)?)
+/// [`Peer::candidates`] so a verb resolves without reaching into the peer module directly.
+pub fn candidates(target: &Peer, contacts: &Contacts) -> eyre::Result<Vec<Candidate>> {
+    target.candidates(contacts)
 }
 
 /// A reached peer's GATED measure service: the [`ServiceSession`] to run measure over, plus the label of the
@@ -133,16 +134,25 @@ pub struct Resolved<S> {
 pub async fn dial_service<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     contacts: &Contacts,
-    target: &Target,
+    target: &Peer,
     service: &str,
     present: Option<String>,
+    membership: Option<String>,
     transport: transport::Transport,
 ) -> eyre::Result<Resolved<T::Session>> {
     let candidates = target.candidates(contacts)?;
 
     let mut last_error = None;
     for candidate in candidates {
-        match connect_service(node, &candidate, service, present.clone()).await {
+        match connect_service(
+            node,
+            &candidate,
+            service,
+            present.clone(),
+            membership.clone(),
+        )
+        .await
+        {
             Ok(session) => {
                 return Ok(Resolved {
                     session,
@@ -169,8 +179,13 @@ pub async fn connect_service<T: Transport, D: Discovery>(
     candidate: &Candidate,
     service: &str,
     present: Option<String>,
+    membership: Option<String>,
 ) -> eyre::Result<ServiceSession<T::Session>> {
-    let connector = Connector::to_node(candidate.node, service.to_owned(), present);
+    let mut connector = Connector::to_node(candidate.node, service.to_owned(), present);
+    // Slot 2: a badge under the foreign fleet a signet-bound slip in slot 1 names. A no-op for a plain dial.
+    if let Some(badge) = membership {
+        connector = connector.with_membership(badge);
+    }
     // Bound the base connect the same way [`connect`] does, so a wedged device does not strand the
     // reachable ones. The ping/speed handshake rides each stream later, so this bounds only reaching the peer.
     match tokio::time::timeout(DIAL_TIMEOUT, connector.open_service(node)).await {

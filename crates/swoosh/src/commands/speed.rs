@@ -17,7 +17,8 @@ use bifrost::{Discovery, Node, Session, Transport};
 use clap::{ArgGroup, Args};
 use measure::{Limit, Mode, Progress, ProtocolError, SpeedReport, Speedtest, Throughput};
 
-use crate::contacts::{Contacts, Target};
+use crate::contacts::Contacts;
+use crate::peer::Peer;
 use crate::reach::{self, Resolved};
 use crate::transport::{self, ReachArgs};
 
@@ -30,13 +31,14 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 #[command(group = ArgGroup::new("way").args(["up", "down", "bidir"]))]
 #[command(group = ArgGroup::new("bound").args(["secs", "bytes"]))]
 pub struct SpeedCmd {
-    /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
-    pub target: Target,
+    pub peer: Peer,
     /// Present a membership badge or capability link to a family/cap-gated peer. Defaults to the
-    /// self-signed badge minted from this identity when it dials under a persisted key.
+    /// self-signed badge minted from this identity when it dials under a persisted key. Parsed at the
+    /// boundary via [`SheerLink`](crate::credential::SheerLink)'s `FromStr`.
     #[arg(long, value_name = "link")]
-    pub present: Option<String>,
+    pub present: Option<crate::credential::SheerLink>,
     /// Measure the upload direction (this node sends).
     #[arg(long)]
     pub up: bool,
@@ -62,9 +64,17 @@ impl crate::reaching::Reaching for SpeedCmd {
     }
 
     /// `speed` reaches the peer's family-gated `speed` service, so it presents the member badge rooted at
-    /// the dialing key (like `ping`). `Family` fuses the identity to `PersistedIfPresent`.
+    /// the dialing key (like `ping`). `Family` fuses the identity to `PersistedIfPresent`. The effective
+    /// slip is the FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded
+    /// INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> crate::credential::Credential {
-        crate::credential::Credential::Family { present: None }
+        crate::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        }
+    }
+
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.peer.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> crate::identity::Identity {
@@ -82,8 +92,14 @@ impl crate::reaching::Reaching for SpeedCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_speed(node, ctx.contacts, ctx.transport, ctx.present)
-            .await
+        self.run_speed(
+            node,
+            ctx.contacts,
+            ctx.transport,
+            ctx.present,
+            ctx.membership,
+        )
+        .await
     }
 }
 
@@ -95,19 +111,23 @@ impl SpeedCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
-        self_badge: Option<String>,
+        present: Option<String>,
+        membership: Option<String>,
     ) -> eyre::Result<()> {
+        // The redundant-present conflict is rejected ONCE in the composition root via
+        // `Reaching::reject_redundant_present`, before this runs.
         let mode = self.mode();
         let limit = self.limit();
-        // Present an explicit `--present` link if given, else the resolved member badge from the root:
-        // the peer's `speed` service is gated, so a diagnostic must prove membership to run.
-        let present = self.present.or(self_badge);
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
+        // link-as-peer through that same resolver, so the verb never threads `--present` itself.
         let Resolved { session, label } = reach::dial_service(
             node,
             contacts,
-            &self.target,
+            &self.peer,
             reach::SPEED_SERVICE,
             present,
+            membership,
             transport,
         )
         .await?;

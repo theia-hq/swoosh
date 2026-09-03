@@ -494,37 +494,6 @@ pub enum ResolveError {
     },
 }
 
-/// A reach verb's peer slot: a raw [`NodeId`] or a petname, before resolution.
-///
-/// This replaces the bare `NodeId` a reach verb used to take, so `swoosh ping alice` and `swoosh ping
-/// bf01...` both parse in the same slot. Parsing is petname-free: a raw base32 key is recognized as a
-/// [`Raw`](Self::Raw) here (it always works, petnames are additive and never mandatory), and anything
-/// else is kept as a [`Named`](Self::Named) address to resolve against the store just before dialing.
-/// Resolution is deferred because the store is loaded once at startup, not at the clap boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    /// A literal node id, dialed verbatim with no store lookup.
-    Raw(NodeId),
-    /// A petname (optionally a specific device), resolved against the store at dial time.
-    Named(ContactRef),
-}
-
-impl Target {
-    /// The ordered [`Candidate`]s this target names, each labeled as the user would recognize it. A raw
-    /// key is one candidate labeled by its short form; a petname resolves to one device or the person's
-    /// whole ordered set (see [`Contacts::resolve_candidates`]). An unknown name is a clean
-    /// [`ResolveError`], never a silent empty dial. The labels are what a fan-out verb prints per device.
-    pub fn candidates(&self, contacts: &Contacts) -> Result<Vec<Candidate>, ResolveError> {
-        match self {
-            Self::Raw(node) => Ok(vec![Candidate {
-                label: node.short(),
-                node: *node,
-            }]),
-            Self::Named(reference) => contacts.resolve_candidates(reference),
-        }
-    }
-}
-
 /// One resolved peer to try: the identity to dial and the label to print for it.
 ///
 /// A reach verb dials the [`node`](Self::node) and reports the [`label`](Self::label) (`alice/macbook`,
@@ -536,30 +505,6 @@ pub struct Candidate {
     pub node: NodeId,
     /// How to name this candidate in output: `alice/macbook`, or a raw key's short form.
     pub label: String,
-}
-
-impl core::fmt::Display for Target {
-    /// The target as the user would recognize it: the short key for a raw id, the name for a petname.
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Raw(node) => f.write_str(&node.short()),
-            Self::Named(reference) => reference.fmt(f),
-        }
-    }
-}
-
-impl FromStr for Target {
-    type Err = ContactRefParseError;
-
-    /// Try a raw node id first (the always-valid literal form); on failure treat it as a petname
-    /// address. A syntactically invalid petname (embedded whitespace, a bare trailing slash) still
-    /// errors here at the boundary rather than deferring to a lookup that would miss.
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        match text.parse::<NodeId>() {
-            Ok(node) => Ok(Self::Raw(node)),
-            Err(_) => Ok(Self::Named(text.parse()?)),
-        }
-    }
 }
 
 /// The default contacts file, `~/.config/swoosh/contacts.toml`, beside the identity key.

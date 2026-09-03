@@ -10,10 +10,11 @@
 //! carries swoosh's key, so a membership badge presented there binds to the identity the family gate
 //! proves. `swoosh ssh alice` is a drop-in for `ssh <host>`.
 //!
-//! The peer resolves in-process, BEFORE ssh runs, through the same `Target`/contact-store lookup
+//! The peer resolves in-process, BEFORE ssh runs, through the same [`Peer`]/contact-store lookup
 //! `ping`/`speed` use, so `alice/desk` is fine here (ssh never sees the `/`; it sees only the resolved
-//! key in the `ProxyCommand` and a stable placeholder host). Everything after `--` is forwarded to ssh
-//! verbatim (a remote command, `-p`, `-i`), so swoosh interprets nothing the user means for ssh.
+//! key in the `ProxyCommand` and a stable placeholder host). A `sheer:` link is a peer too now: it
+//! self-addresses to its cap root and forwards as the presented slip. Everything after `--` is forwarded
+//! to ssh verbatim (a remote command, `-p`, `-i`), so swoosh interprets nothing the user means for ssh.
 //!
 //! `ssh` is spec'd as a group that will also own `ssh config` (emit `~/.ssh/config` blocks) once contacts
 //! carry advertised-service metadata; that leaf is HELD and deliberately not built. This one shipping op
@@ -41,7 +42,10 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 
-use crate::contacts::{Contacts, Target};
+use crate::contacts::Contacts;
+use crate::credential::SheerLink;
+use crate::peer::Peer;
+use crate::transport;
 
 /// The exposed service name reached when the user names none: a host's sshd under the default label.
 const DEFAULT_SERVICE: &str = "ssh";
@@ -54,16 +58,18 @@ const SSH: &str = "ssh";
 /// Reach a peer's sshd over the overlay; runs the system ssh.
 #[derive(Debug, Args)]
 pub struct SshCmd {
-    /// The peer to reach: a saved petname (`alice`, `alice/desk`) or a raw bifrost node id.
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
-    pub peer: Target,
+    pub peer: Peer,
     /// The exposed service name to reach on the host.
     #[arg(long, value_name = "service", default_value = DEFAULT_SERVICE)]
     pub service: String,
-    /// Present a `sheer:` capability link to a cap-gated host (e.g. an ssh slip minted with `swoosh grant
-    /// issue`). Without it, the tunnel-connect bridge self-signs a membership badge from swoosh's key.
+    /// present a `sheer:` cap link to a cap-gated host (a delegate's slip)
     #[arg(long, value_name = "link")]
-    pub present: Option<String>,
+    pub present: Option<SheerLink>,
+    /// direct address hint for the peer, `<key>=<addr>` (repeatable)
+    #[arg(id = "peer-hint", long = "peer", value_name = "key=addr")]
+    pub peer_hint: Vec<transport::PeerHint>,
     /// Args forwarded verbatim to the system ssh, after `--`.
     #[arg(
         trailing_var_arg = true,
@@ -78,9 +84,19 @@ impl SshCmd {
     /// overlay. On success swoosh's PID *becomes* ssh (unix); a resolve or PATH failure returns before any
     /// exec, so a caller prints its clean message and exits non-zero. Prints nothing on the success path.
     pub fn run(self, contacts: &Contacts, identity_key: Option<&Path>) -> eyre::Result<()> {
+        // A `sheer:` link peer already presents its own credential, so a second explicit `--present` is a
+        // loud conflict, not a silent pick.
+        self.peer.reject_redundant_present(self.present.as_ref())?;
+        // The fold: a `sheer:` link-as-peer supplies its own slip (self-addressing), else the explicit
+        // `--present`. `ssh` computes no slots; it forwards this slip as `--present <link>` into the
+        // ProxyCommand, where the re-invoked `tunnel-connect` runs the ONE resolver (so a signet-bound
+        // link-as-peer gets its slot-2 badge there, for free, through the existing `--present` path).
+        let present = self.peer.self_present().or_else(|| self.present.clone());
+
         // Resolve in-process, before ssh sees anything: take the first device for a bare petname (as
-        // `speed` does), the exact one for `alice/desk`, and pass a raw key straight through. The peer as
-        // typed is kept for the placeholder host, so known_hosts stays stable per peer.
+        // `speed` does), the exact one for `alice/desk`, a raw key straight through, and a `sheer:` link's
+        // cap root (its one self-addressed candidate). The peer as typed is kept for the placeholder host,
+        // so known_hosts stays stable per peer.
         let candidates = self.peer.candidates(contacts)?;
         let Some(first) = candidates.into_iter().next() else {
             // `candidates` never yields an empty success (an unknown name is a clean error), but a match
@@ -109,10 +125,11 @@ impl SshCmd {
             &proxy,
             &key,
             &self.service,
-            self.present.as_deref(),
+            present.as_ref().map(SheerLink::link),
             &host,
             &known_hosts,
             identity_key.as_deref(),
+            &self.peer_hint,
             &self.args,
         );
         exec_ssh(argv)
@@ -124,21 +141,22 @@ impl SshCmd {
 ///
 /// Pure so it is unit-testable (the `exec` itself is not): given the shell-quoted `proxy` (this binary's
 /// own path, see [`self_invocation`]), the resolved `key`, the `service`, an optional `present` capability
-/// link, the placeholder `host`, the private `known_hosts` path, and the user's trailing ssh `args`, it
-/// assembles the exact argv [`exec_ssh`] hands to `ssh`. The `ProxyCommand` value is `<self>
-/// tunnel-connect <key> --service <name> --to - [--present <link>]`: ssh runs it to bridge the overlay
-/// stream in-process, under swoosh's own identity, with no `tightbeam` binary and no `$PATH` lookup. ssh
-/// splits `ProxyCommand` on whitespace, so `proxy` is pre-quoted and the other tokens are whitespace-free
-/// (a `NodeId` is base32, the service is a single name, a `sheer:` link is one token like a key).
+/// link, the placeholder `host`, the private `known_hosts` path, the direct-address `hints`, and the user's
+/// trailing ssh `args`, it assembles the exact argv [`exec_ssh`] hands to `ssh`. The `ProxyCommand` value is
+/// `<self> tunnel-connect <key> --service <name> --to - [--present <link>] [--peer <key>=<addr>]...`: ssh
+/// runs it to bridge the overlay stream in-process, under swoosh's own identity, with no `tightbeam` binary
+/// and no `$PATH` lookup. ssh splits `ProxyCommand` on whitespace, so `proxy` is pre-quoted and the other
+/// tokens are whitespace-free (a `NodeId` is base32, the service is a single name, a `sheer:` link is one
+/// token like a key, a `<key>=<addr>` hint is one token too).
 ///
 /// The four host-key options (see the module docs) come BEFORE the passthrough args: ssh honors the first
 /// occurrence of an option, so swoosh's intent wins over a user's trailing `-o`. `HostKeyAlias` keys the
 /// pin on the node id, not the mutable placeholder host; the `UserKnownHostsFile` path is double-quoted so
 /// an install dir with a space stays one filename to ssh.
 // ssh's argv has this many genuinely distinct, independent inputs (the proxy bridge, the resolved identity,
-// the service, an optional cap link, the host placeholder, the known_hosts path, and the passthrough args);
-// bundling them into a struct would only rename the same fields without making any illegal state
-// unrepresentable, so keep the flat signature of a pure argv-assembler.
+// the service, an optional cap link, the host placeholder, the known_hosts path, the address hints, and the
+// passthrough args); bundling them into a struct would only rename the same fields without making any
+// illegal state unrepresentable, so keep the flat signature of a pure argv-assembler.
 #[allow(clippy::too_many_arguments)]
 fn ssh_argv(
     proxy: &str,
@@ -148,6 +166,7 @@ fn ssh_argv(
     host: &str,
     known_hosts: &Path,
     identity_key: Option<&Path>,
+    hints: &[transport::PeerHint],
     args: &[String],
 ) -> Vec<String> {
     // `--to -` streams the overlay service over stdin/stdout (the ProxyCommand shape). `-` is one
@@ -163,6 +182,14 @@ fn ssh_argv(
     // whitespace-split ProxyCommand. Appended only when present; without it the bridge self-signs a badge.
     if let Some(link) = present {
         proxy_command.push_str(&format!(" --present {link}"));
+    }
+    // Forward each `--peer <key>=<addr>` hint verbatim into the bridge's own reach flags, where the dial
+    // actually happens (so DNS resolves at the dial site, not this launcher). A `<key>=<host:port>` hint is
+    // whitespace-free (base32 key, `=`, host:port), so it rides unquoted in the whitespace-split
+    // ProxyCommand like the key and the link. The bridge's flattened `ReachArgs` receives them as any other
+    // reach verb would.
+    for hint in hints {
+        proxy_command.push_str(&format!(" --peer {}", hint.as_arg()));
     }
     let mut argv = vec![
         "-o".to_owned(),
@@ -294,6 +321,8 @@ fn exec_ssh(argv: Vec<String>) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser as _;
+
     use super::*;
 
     /// A real base32 `NodeId` string, so the assembled `ProxyCommand` carries the exact key form a
@@ -309,6 +338,40 @@ mod tests {
         PathBuf::from("/home/me/.config/swoosh/known_hosts")
     }
 
+    /// A thin clap wrapper so a test parses a real `SshCmd` from an argv the same way the binary does (its
+    /// fields flatten in, so the peer positional leads and `--peer`/`--present` are options after it).
+    #[derive(clap::Parser)]
+    struct WrapSsh {
+        #[command(flatten)]
+        ssh: SshCmd,
+    }
+
+    /// Parse an `SshCmd` from an argv (`["prog", <peer>, ...]`), as the CLI boundary would.
+    fn parse_ssh(argv: &[&str]) -> SshCmd {
+        WrapSsh::try_parse_from(argv).expect("ssh args parse").ssh
+    }
+
+    /// A real `sheer:` link (work issues a signet-bound slip for a foreign fleet), so a link-as-peer test
+    /// exercises the true parse/self-address path rather than a fake token.
+    fn signet_link() -> String {
+        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
+        let fleet = nauthy::Identity::from_secret(&[2u8; 32])
+            .expect("valid fleet secret")
+            .node_id();
+        tightbeam::tunnel::mint_signet_link(
+            &work,
+            &"ssh".parse().expect("valid service"),
+            fleet,
+            core::time::Duration::from_secs(3600),
+        )
+        .expect("mint a signet-bound slip")
+    }
+
+    /// A direct-address hint parsed through the real boundary, keyed on `KEY` and an IP:port (no DNS).
+    fn hint(addr: &str) -> transport::PeerHint {
+        format!("{KEY}={addr}").parse().expect("a hint parses")
+    }
+
     #[test]
     fn argv_wires_the_proxy_then_pinning_options_then_host() {
         let argv = ssh_argv(
@@ -319,6 +382,7 @@ mod tests {
             "alice/desk",
             &known_hosts(),
             None,
+            &[],
             &[],
         );
         assert_eq!(
@@ -353,6 +417,7 @@ mod tests {
             &known_hosts(),
             Some(Path::new("/tmp/yah")),
             &[],
+            &[],
         );
         assert!(
             with_key.iter().any(|a| a
@@ -360,7 +425,17 @@ mod tests {
             "the ProxyCommand must carry --key so the dial uses the given identity: {with_key:?}"
         );
         // Absent, no --key rides the ProxyCommand: the bridge uses swoosh's default identity, as before.
-        let without = ssh_argv(PROXY, KEY, "ssh", None, "alice", &known_hosts(), None, &[]);
+        let without = ssh_argv(
+            PROXY,
+            KEY,
+            "ssh",
+            None,
+            "alice",
+            &known_hosts(),
+            None,
+            &[],
+            &[],
+        );
         assert!(without.iter().all(|a| !a.contains("--key")));
     }
 
@@ -377,6 +452,7 @@ mod tests {
             &known_hosts(),
             None,
             &[],
+            &[],
         );
         assert!(argv.contains(&format!("HostKeyAlias={KEY}")));
         assert!(argv.contains(&"StrictHostKeyChecking=accept-new".to_owned()));
@@ -386,7 +462,17 @@ mod tests {
     #[test]
     fn argv_forwards_passthrough_args_after_the_host() {
         let args = vec!["-p".to_owned(), "2222".to_owned(), "ls".to_owned()];
-        let argv = ssh_argv(PROXY, KEY, "ssh", None, "bob", &known_hosts(), None, &args);
+        let argv = ssh_argv(
+            PROXY,
+            KEY,
+            "ssh",
+            None,
+            "bob",
+            &known_hosts(),
+            None,
+            &[],
+            &args,
+        );
         // The passthrough args land last, after the host and after swoosh's own options, so swoosh's
         // host-key options (ssh honors the first occurrence) win over any the user trails.
         let host_at = argv.iter().position(|a| a == "bob").expect("host present");
@@ -404,6 +490,7 @@ mod tests {
             "alice",
             &known_hosts(),
             None,
+            &[],
             &[],
         );
         assert_eq!(
@@ -426,12 +513,121 @@ mod tests {
             &known_hosts(),
             None,
             &[],
+            &[],
         );
         assert_eq!(
             argv[1],
             format!(
                 "ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to - --present {link}"
             )
+        );
+    }
+
+    #[test]
+    fn argv_forwards_peer_hints_into_the_proxy_command() {
+        // Each `--peer <key>=<addr>` hint rides verbatim in the ProxyCommand, appended after `--to -` (and
+        // after any `--present`), one whitespace-free token per hint, so the whitespace-split ProxyCommand
+        // hands them to the bridge intact for the bridge to resolve at the dial site.
+        let hints = [hint("127.0.0.1:9000"), hint("198.51.100.4:22")];
+        let argv = ssh_argv(
+            PROXY,
+            KEY,
+            "ssh",
+            None,
+            "alice",
+            &known_hosts(),
+            None,
+            &hints,
+            &[],
+        );
+        assert_eq!(
+            argv[1],
+            format!(
+                "ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to - \
+                 --peer {KEY}=127.0.0.1:9000 --peer {KEY}=198.51.100.4:22"
+            )
+        );
+    }
+
+    #[test]
+    fn a_link_peer_forwards_present_and_dials_the_root() {
+        // `swoosh ssh sheer:<link>`: the link is a self-addressing peer, so it self-presents its own slip
+        // and self-addresses to the cap root. The forwarded ProxyCommand dials that root key and appends
+        // `--present <link>` (the fold), so the bridge presents the slip the user named as the peer.
+        let link = signet_link();
+        let cmd = parse_ssh(&["swoosh", &link]);
+        assert!(
+            matches!(cmd.peer, Peer::Capability(_)),
+            "a sheer: link parses as a Capability peer"
+        );
+        let present = cmd
+            .peer
+            .self_present()
+            .expect("a link peer self-presents its own slip");
+        assert_eq!(
+            present.link(),
+            link,
+            "the forwarded present is the link itself"
+        );
+        let root = cmd
+            .peer
+            .candidates(&Contacts::default())
+            .expect("a link self-addresses with no store")
+            .into_iter()
+            .next()
+            .expect("one candidate")
+            .node
+            .to_string();
+        let argv = ssh_argv(
+            PROXY,
+            &root,
+            "ssh",
+            Some(present.link()),
+            &cmd.peer.to_string(),
+            &known_hosts(),
+            None,
+            &[],
+            &[],
+        );
+        assert_eq!(
+            argv[1],
+            format!(
+                "ProxyCommand={PROXY} tunnel-connect {root} --service ssh --to - --present {link}"
+            )
+        );
+
+        // A `Named`/`Raw` peer does NOT self-present, so the fold forwards the EXPLICIT `--present` instead.
+        let cmd = parse_ssh(&["swoosh", "alice", "--present", &link]);
+        assert!(
+            cmd.peer.self_present().is_none(),
+            "a petname peer supplies no self-credential"
+        );
+        let present = cmd
+            .peer
+            .self_present()
+            .or_else(|| cmd.present.clone())
+            .expect("the explicit --present is the forwarded slip");
+        assert_eq!(present.link(), link);
+    }
+
+    #[test]
+    fn ssh_hosts_both_a_positional_peer_and_a_peer_hint() {
+        // The `--peer` HINT (clap id `peer-hint`) and the positional `peer` coexist with no clap id
+        // collision: this used to panic at parse because both derived the id `peer`.
+        let cmd = parse_ssh(&[
+            "swoosh",
+            "alice",
+            "--peer",
+            &format!("{KEY}=127.0.0.1:9000"),
+        ]);
+        assert!(
+            matches!(cmd.peer, Peer::Named(_)),
+            "the positional is the peer to reach"
+        );
+        assert_eq!(
+            cmd.peer_hint.len(),
+            1,
+            "the --peer address hint parses under its own id alongside the positional peer"
         );
     }
 

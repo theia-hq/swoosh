@@ -20,22 +20,20 @@ use clap::Args;
 use tokio::io::AsyncReadExt as _;
 
 use crate::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK};
-use crate::commands::tunnel_connect::Dial;
 use crate::contacts::Contacts;
+use crate::peer::Peer;
 use crate::transport::ReachArgs;
 
 /// Stop a peer's node (stop it serving), addressed by its public key or a `sheer:` capability link.
 #[derive(Debug, Args)]
 pub struct StopCmd {
-    /// who to stop: a saved petname (`me/qat`, `alice`), a raw node id, or a `sheer:` capability link
-    // Named `target`, not `peer`: the flattened `ReachArgs` already owns a `--peer` arg (its clap id is
-    // `peer`), so a positional field named `peer` would collide two args under one clap id. The help still
-    // reads `<peer>` via `value_name`.
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
-    pub target: Dial,
-    /// present a `sheer:` capability link alongside a raw node id
+    pub peer: Peer,
+    /// present a `sheer:` capability link alongside a raw node id (parsed at the boundary via
+    /// [`SheerLink`](crate::credential::SheerLink)'s `FromStr`)
     #[arg(long, value_name = "link")]
-    pub present: Option<String>,
+    pub present: Option<crate::credential::SheerLink>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -47,9 +45,16 @@ impl crate::reaching::Reaching for StopCmd {
 
     /// `stop` reaches the peer's family-gated `control.stop` service, so it presents the member badge
     /// rooted at the dialing key (only a family member may stop the node). `Family` fuses the identity to
-    /// `PersistedIfPresent`.
+    /// `PersistedIfPresent`. The effective slip is the FOLD of a self-addressing `sheer:` link-as-peer with
+    /// an explicit `--present`, threaded INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> crate::credential::Credential {
-        crate::credential::Credential::Family { present: None }
+        crate::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        }
+    }
+
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.peer.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> crate::identity::Identity {
@@ -67,26 +72,33 @@ impl crate::reaching::Reaching for StopCmd {
         <T::Session as bifrost::Session>::Write: Send + 'static,
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
-        self.run_stop(node, ctx.contacts, ctx.present).await
+        self.run_stop(node, ctx.contacts, ctx.present, ctx.membership)
+            .await
     }
 }
 
 impl StopCmd {
-    /// Reach the peer's gated `control.stop` service and trigger a graceful stop. Presents `self_badge` (the
-    /// self-signed membership badge, or an explicit `--present` link) so the node's family gate admits the
-    /// stream; a node that does not admit this caller refuses LOUDLY here, never a silent no-op.
+    /// Reach the peer's gated `control.stop` service and trigger a graceful stop. Presents the resolved
+    /// `present` (the self-signed membership badge, or an explicit `--present` link) so the node's family
+    /// gate admits the stream; a node that does not admit this caller refuses LOUDLY here, never a silent
+    /// no-op.
     async fn run_stop<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        self_badge: Option<String>,
+        present: Option<String>,
+        membership: Option<String>,
     ) -> eyre::Result<()> {
-        // Present an explicit `--present` link if given, else the self-signed badge minted from this
-        // identity: the `control.stop` service is gated, so the stream must prove membership to be admitted.
-        let present = self.present.or(self_badge);
-        let connector =
-            self.target
-                .connector(contacts, CONTROL_STOP_SERVICE.to_owned(), present)?;
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
+        // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
+        // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
+        let connector = self.peer.connector(
+            contacts,
+            CONTROL_STOP_SERVICE.to_owned(),
+            present,
+            membership,
+        )?;
         let dial = connector.dial();
         println!("stopping {dial}...");
 

@@ -17,16 +17,17 @@ use clap::Args;
 use measure::{Ping, PingReport, Probe, ProtocolError};
 use tightbeam::tunnel;
 
-use crate::contacts::{Contacts, Target};
+use crate::contacts::Contacts;
+use crate::peer::Peer;
 use crate::reach;
 use crate::transport::{self, ReachArgs};
 
 /// Measure the round-trip time to a peer, addressed by a petname or their public key.
 #[derive(Debug, Args)]
 pub struct PingCmd {
-    /// The peer to reach: a saved petname (`alice`, `alice/macbook`) or a raw bifrost node id.
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
-    pub target: Target,
+    pub peer: Peer,
     /// How many probes to send.
     #[arg(short = 'c', long, value_name = "count", default_value_t = 4)]
     pub count: u32,
@@ -34,9 +35,11 @@ pub struct PingCmd {
     #[arg(short = 'i', long, value_name = "seconds", default_value_t = 1.0)]
     pub interval: f64,
     /// Present a membership badge or capability link to a family/cap-gated peer. Defaults to the
-    /// self-signed badge minted from this identity when it dials under a persisted key.
+    /// self-signed badge minted from this identity when it dials under a persisted key. Parsed at the
+    /// boundary via [`SheerLink`](crate::credential::SheerLink)'s `FromStr`, so a malformed link is a clap
+    /// error here, not an opaque refusal at the peer.
     #[arg(long, value_name = "link")]
-    pub present: Option<String>,
+    pub present: Option<crate::credential::SheerLink>,
     /// Print a line per probe as it lands, showing the path at that moment (watch iroh punch to direct).
     #[arg(short = 'v', long)]
     pub verbose: bool,
@@ -51,9 +54,19 @@ impl crate::reaching::Reaching for PingCmd {
 
     /// `ping` reaches the peer's family-gated `ping` service, so it presents the member badge rooted at
     /// the dialing key. Stating `Family` FUSES the identity to `PersistedIfPresent`, so the self-badge
-    /// roots correctly. `--present` still overrides in `run` (threaded through the resolver).
+    /// roots correctly. A `--present` slip is threaded INTO the credential so the ONE resolver
+    /// ([`resolve`](crate::reaching::resolve)) owns both slots: slot 1 (present-or-badge) and the
+    /// privacy-aware slot 2 (a fleet badge, only for a signet-bound slip). The effective slip is the FOLD of
+    /// a self-addressing `sheer:` link-as-peer with an explicit `--present`, so a link-as-peer resolves
+    /// through the same slot path as a `--present` link.
     fn credential(&self) -> crate::credential::Credential {
-        crate::credential::Credential::Family { present: None }
+        crate::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        }
+    }
+
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.peer.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> crate::identity::Identity {
@@ -71,8 +84,14 @@ impl crate::reaching::Reaching for PingCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_ping(node, ctx.contacts, ctx.transport, ctx.present)
-            .await
+        self.run_ping(
+            node,
+            ctx.contacts,
+            ctx.transport,
+            ctx.present,
+            ctx.membership,
+        )
+        .await
     }
 }
 
@@ -85,12 +104,15 @@ impl PingCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
-        self_badge: Option<String>,
+        present: Option<String>,
+        membership: Option<String>,
     ) -> eyre::Result<()> {
-        let candidates = reach::candidates(&self.target, contacts)?;
-        // Present an explicit `--present` link if given, else the resolved member badge from the root:
-        // the peer's `ping` service is gated, so each probe must prove membership to run.
-        let present = self.present.or(self_badge);
+        // The redundant-present conflict (a `sheer:` link peer plus an explicit `--present`) is rejected
+        // ONCE in the composition root via `Reaching::reject_redundant_present`, before this runs.
+        let candidates = reach::candidates(&self.peer, contacts)?;
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver: slot 1 (`present`) is
+        // the `--present` slip or the member badge, slot 2 (`membership`) is a fleet badge only for a
+        // signet-bound slip. The verb no longer threads `--present` itself, so it cannot desync the two.
         let plan = Ping {
             count: self.count,
             interval: Duration::from_secs_f64(self.interval),
@@ -102,8 +124,14 @@ impl PingCmd {
         // rendered as `100% loss`.
         let mut any_healthy = false;
         for candidate in &candidates {
-            match reach::connect_service(node, candidate, reach::PING_SERVICE, present.clone())
-                .await
+            match reach::connect_service(
+                node,
+                candidate,
+                reach::PING_SERVICE,
+                present.clone(),
+                membership.clone(),
+            )
+            .await
             {
                 Ok(session) => {
                     // Path at connect, so the phrases below can report a relayed-to-direct upgrade that
@@ -158,7 +186,7 @@ impl PingCmd {
             Ok(())
         } else {
             Err(reach::hint(
-                eyre::eyre!("could not reach {}", self.target),
+                eyre::eyre!("could not reach {}", self.peer),
                 transport,
             ))
         }

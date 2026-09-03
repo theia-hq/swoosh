@@ -11,26 +11,27 @@
 use bifrost::{Discovery, Node, Transport};
 use clap::Args;
 
-use crate::commands::tunnel_connect::{self, Dial, To};
+use crate::commands::tunnel_connect::{self, To};
+use crate::credential::SheerLink;
+use crate::peer::Peer;
 use crate::transport::ReachArgs;
 
 /// Bind a peer's served service to a local port, stream it to stdout, or a reserved unix listener.
 #[derive(Debug, Args)]
 pub struct ForwardCmd {
-    /// who to reach: a saved petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` capability link
-    // Field is `node`, not `peer`: the clap arg id derives from the field name, so a `peer` field would
-    // collide with the `--peer` dial hint in the flattened `ReachArgs`. `value_name` keeps usage as `<peer>`.
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
-    pub node: Dial,
+    pub peer: Peer,
     /// where to put the stream: a local port, `-` for stdout, or `unix:<path>`
     #[arg(long, value_name = "port | - | unix:PATH")]
     pub to: To,
     /// which served service to reach
     #[arg(long, value_name = "service", default_value = "default")]
     pub service: String,
-    /// present a `sheer:` capability link alongside a raw node id
+    /// present a `sheer:` capability link alongside a raw node id (parsed at the boundary via
+    /// [`SheerLink`]'s `FromStr`)
     #[arg(long, value_name = "link")]
-    pub present: Option<String>,
+    pub present: Option<SheerLink>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -45,6 +46,10 @@ impl crate::reaching::Reaching for ForwardCmd {
     /// and derives `Ephemeral`.
     fn credential(&self) -> crate::credential::Credential {
         crate::credential::Credential::Anonymous
+    }
+
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.peer.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> crate::identity::Identity {
@@ -64,12 +69,25 @@ impl crate::reaching::Reaching for ForwardCmd {
         <T::Session as bifrost::Session>::Write: Send + 'static,
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
+        // The redundant-present conflict is rejected ONCE in the composition root via
+        // `Reaching::reject_redundant_present`, before this runs.
+        // `forward` is `Anonymous`, so `resolve()` yields no slots; it computes its effective slot 1 the same
+        // way every verb does now: the peer's OWN link (a `sheer:` link-as-peer) folded with an explicit
+        // `--present`, so a link-as-peer and a `--present` link flow through ONE path (defect #2: `forward`
+        // no longer hand-threads a raw slot 1 divergent from the family verbs). Slot 2 is always empty: a
+        // dial-only client presents its own link, never a fleet badge to AND.
+        let slot1 = self
+            .peer
+            .self_present()
+            .or_else(|| self.present.clone())
+            .map(SheerLink::into_link);
         tunnel_connect::connect(
             node,
             ctx.contacts,
-            self.node,
+            &self.peer,
             self.service,
-            self.present,
+            slot1,
+            None,
             self.to,
         )
         .await

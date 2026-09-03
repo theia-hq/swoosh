@@ -20,20 +20,21 @@ use tightbeam::tunnel::ServiceCatalog;
 use tokio::io::AsyncReadExt as _;
 
 use crate::commands::serve::CONTROL_SERVICES_SERVICE;
-use crate::commands::tunnel_connect::Dial;
 use crate::contacts::Contacts;
+use crate::peer::Peer;
 use crate::transport::ReachArgs;
 
 /// Read a peer's served services: reach its `control.services` and print a `SERVICE  GATE` table.
 #[derive(Debug, Args)]
 pub struct ServiceCmd {
-    /// the peer to read: a saved petname (`me/qat`, `alice`), a raw node id, or a `sheer:` capability link.
+    /// the peer to read: a petname (`me/qat`, `alice`), a raw node id, or a `sheer:` link.
     /// Omit it and `service` reports that reading your own node needs the daemon (not built yet).
     #[arg(long, value_name = "peer")]
-    pub at: Option<Dial>,
-    /// present a `sheer:` capability link alongside a raw node id
+    pub at: Option<Peer>,
+    /// present a `sheer:` capability link alongside a raw node id (parsed at the boundary via
+    /// [`SheerLink`](crate::credential::SheerLink)'s `FromStr`)
     #[arg(long, value_name = "link")]
-    pub present: Option<String>,
+    pub present: Option<crate::credential::SheerLink>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -45,9 +46,24 @@ impl crate::reaching::Reaching for ServiceCmd {
 
     /// `service` reaches the peer's family-gated `control.services` read, so it presents the member badge
     /// rooted at the dialing key (only a family member may read the menu). `Family` fuses the identity to
-    /// `PersistedIfPresent`, like `stop`/`status`.
+    /// `PersistedIfPresent`, like `stop`/`status`. The effective slip is the FOLD of a self-addressing
+    /// `sheer:` link in the `--at` peer with an explicit `--present`, threaded INTO the credential so the
+    /// ONE resolver owns both slots.
     fn credential(&self) -> crate::credential::Credential {
-        crate::credential::Credential::Family { present: None }
+        crate::credential::Credential::Family {
+            present: self
+                .at
+                .as_ref()
+                .and_then(Peer::self_present)
+                .or_else(|| self.present.clone()),
+        }
+    }
+
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        match &self.at {
+            Some(peer) => peer.reject_redundant_present(self.present.as_ref()),
+            None => Ok(()),
+        }
     }
 
     fn identity(&self) -> crate::identity::Identity {
@@ -67,7 +83,8 @@ impl crate::reaching::Reaching for ServiceCmd {
         <T::Session as bifrost::Session>::Write: Send + 'static,
         <T::Session as bifrost::Session>::Read: Send + 'static,
     {
-        self.run_service(node, ctx.contacts, ctx.present).await
+        self.run_service(node, ctx.contacts, ctx.present, ctx.membership)
+            .await
     }
 }
 
@@ -83,27 +100,35 @@ impl ServiceCmd {
         )
     }
 
-    /// Reach the peer's gated `control.services` read and print its `SERVICE  GATE` table. Presents
-    /// `self_badge` (the self-signed membership badge, or an explicit `--present` link) so the peer's family
-    /// gate admits the read; a peer that does not admit this caller refuses LOUDLY here, never a silent empty
-    /// table. `--at` is required to reach this path (a bare `service` split to [`run_local`](Self::run_local)),
-    /// so a missing target is a root-dispatch bug, surfaced as an internal error rather than a user one.
+    /// Reach the peer's gated `control.services` read and print its `SERVICE  GATE` table. Presents the
+    /// resolved `present` (the self-signed membership badge, or an explicit `--present` link) so the peer's
+    /// family gate admits the read; a peer that does not admit this caller refuses LOUDLY here, never a
+    /// silent empty table. `--at` is required to reach this path (a bare `service` split to
+    /// [`run_local`](Self::run_local)), so a missing target is a root-dispatch bug, surfaced as an internal
+    /// error rather than a user one.
     async fn run_service<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        self_badge: Option<String>,
+        present: Option<String>,
+        membership: Option<String>,
     ) -> eyre::Result<()> {
-        let Some(target) = self.at else {
+        let Some(peer) = self.at else {
             eyre::bail!(
                 "internal: `service` reached the reach path without `--at` (root-dispatch bug)"
             );
         };
 
-        // Present an explicit `--present` link if given, else the self-signed badge minted from this
-        // identity: `control.services` is gated, so the read must prove membership to be admitted.
-        let present = self.present.or(self_badge);
-        let connector = target.connector(contacts, CONTROL_SERVICES_SERVICE.to_owned(), present)?;
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
+        // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
+        // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
+        let connector = peer.connector(
+            contacts,
+            CONTROL_SERVICES_SERVICE.to_owned(),
+            present,
+            membership,
+        )?;
         let dial = connector.dial();
 
         // A service-scoped session whose one `open_bi` speaks the `control.services` request and presents the
