@@ -1,23 +1,14 @@
 # swoosh
 
-`swoosh` works with another machine addressed by its public key instead of its IP: reach it, measure
-the link, send files, forward ports, share access, and fetch through it. You give
-it a peer's key (a short base32 string) and it dials that peer directly, wherever the peer is on the
-internet, across home routers and NATs, without you knowing or caring about the peer's address. No
-address to look up, no server in the middle.
+swoosh reaches a machine by its public key instead of its IP address: ping it, measure the link, ssh
+in, send files, forward ports, fetch through it, and share access. You give it a peer's key (a short
+base32 string) and it dials that peer directly, wherever the peer is, across home routers and NATs. No
+address to look up, no account, no server in the middle.
 
-```sh
-# on the machine to be reached: print its key and stay reachable.
-swoosh serve                       # gated: only its owner's own devices and granted peers get in
-swoosh serve --public ping,speed   # or open the named services to anyone
+A key does not change when a machine moves networks, and the connection is authenticated end to end by
+that key, so you reach the machine you meant and no one sits in the middle.
 
-# from a machine it admits (one of your own devices, or a peer you granted):
-swoosh ping alice            # reach that key, measure the round trip
-swoosh speed alice           # measure throughput to it
-swoosh status alice          # is the link direct, or relayed?
-swoosh beam report.pdf alice # push a file to it, verified end to end
-swoosh stop alice            # tell it to stop serving
-```
+> Experimental. The CLI, wire protocol, and identity format will change; not ready for production use.
 
 ## Install
 
@@ -25,431 +16,46 @@ swoosh stop alice            # tell it to stop serving
 curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/install.sh | sh
 ```
 
-Downloads the right binary for your platform from the [latest release](https://github.com/theia-hq/swoosh/releases),
-verifies its SHA-256 checksum (and, if you have the GitHub CLI, its build-provenance attestation), and
-installs it to `~/.local/bin`. Set `INSTALL_DIR` to change where it lands. Prefer to do it yourself? Grab a
-binary from the releases page; each carries a checksum and a keyless signature you can verify with
-`gh attestation verify <binary> --repo theia-hq/swoosh`.
+Downloads the right binary for your platform, verifies its checksum (and, with the GitHub CLI, its
+build-provenance attestation), and installs it to `~/.local/bin`. Prefer to do it yourself? Grab a
+binary from the [releases page](https://github.com/theia-hq/swoosh/releases); each carries a checksum
+and a keyless signature.
 
-Powered by [bifrost](https://github.com/theia-hq/bifrost) for the keyed connection and
-[tightbeam](https://github.com/theia-hq/tightbeam) for the keyed byte-streams that carry a forwarded port.
+## First reach
 
-**The name.** *swoosh* is the sound of something sent across: this is the one command you type to
-reach a machine by its key and do things with it, from measuring the link to opening a shell to
-sending a file.
-
-> Experimental. The CLI, wire protocol, and identity format will change; not ready for production use.
-
-## Why a key instead of an address
-
-A machine's IP address changes: it moves networks, sits behind a router, gets a new lease. Its public
-key does not. Addressing a peer by key means you reach the same peer every time, and the connection is
-authenticated end to end by that key, so you know you reached the machine you meant and no one is in the
-middle. `swoosh serve` prints a key; by default only your own devices and peers you have granted a
-capability can reach it (it is gated to your signet). Opening a service to anyone is a deliberate opt-out
-you name explicitly: `swoosh serve --public ping,speed`.
-
-## A real run
-
-A peer reaches your node one of two ways: it is one of your own devices, or you opened a service to
-anyone. Here is each.
-
-### Reach your own second device
-
-On the machine you want to reach, stay reachable and mint a one-time key for the new device:
+On the machine you want to reach, stay online and note the key it prints:
 
 ```sh
-$ swoosh serve
-swoosh ready
-
-    bf01hy…
-
-how peers reach you
-  internet   automatic; peers reach you by the key above, even across NATs
-  LAN        automatic; your devices just need the key (mDNS)
-
-serving
-  family-gated   your devices + peers you've granted
-    ping        round-trip probe
-    speed       throughput test
-    control.*   node control (always family-gated)
-
-ctrl-c to stop
+swoosh serve
 ```
+
+From another machine, reach it by that key:
 
 ```sh
-$ swoosh mint laptop
-authkey:qiwt…
-
-recorded me/laptop -> bf01ld…  [derived]
-hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
+swoosh ping bf01hcq6…      # round trip, by key, across NATs
+swoosh contact add desk bf01hcq6…   # name it once
+swoosh ping desk           # then reach it by name
 ```
 
-On the new machine, adopt the authkey. It becomes that device and trusts the signet, so the gated node
-now admits it:
-
-```sh
-$ swoosh adopt authkey:qiwt…
-adopted this machine as bf01hs…  [mine]
-trusting signet bf01dq…: `swoosh serve` now admits its members and delegates.
-stored your membership badge: this device now reaches your gated services.
-```
-
-Save the first machine's key under a name once, then reach it by name:
-
-```sh
-$ swoosh contact add desk bf01hy…
-$ swoosh ping desk -c 4
-pinging desk (4 probes)
-4 sent, 4 received, 0% loss
-rtt min/avg/max/mdev = 21.4/24.8/33.1/3.2 ms
-
-$ swoosh status desk
-desk via iroh: direct to 203.0.113.7:41641, rtt 24.8 ms
-```
-
-### Let a friend reach you
-
-A friend is not one of your devices, so the default gate turns them away. Open just the services you
-want anyone to reach:
-
-```sh
-$ swoosh serve --public ping,speed
-swoosh ready
-
-    bf01hy…
-
-how peers reach you
-  internet   automatic; peers reach you by the key above, even across NATs
-  LAN        automatic; your devices just need the key (mDNS)
-
-serving
-  family-gated   your devices + peers you've granted
-    control.*   node control (always family-gated)
-  public !   anyone, unauthenticated
-    ping    round-trip probe   unmetered: a stranger can drain your uplink
-    speed   throughput test   unmetered: a stranger can drain your uplink
-
-ctrl-c to stop
-```
-
-Your friend saves your key and reaches those two services, nothing else:
-
-<!-- VERIFY: real paste pending --public live-run -->
-```sh
-$ swoosh contact add alice bf01hy…
-$ swoosh ping alice -c 4
-pinging alice (4 probes)
-4 sent, 4 received, 0% loss
-rtt min/avg/max/mdev = 21.4/24.8/33.1/3.2 ms
-```
-
-## Who can reach your node
-
-`swoosh serve` puts a gate in front of every service. For each peer that dials, the gate answers one
-question: are you allowed? It phones no server to decide. The answer is a signature it checks on the
-spot, against a key you hold. (The readiness banner calls this gate the *family* gate: your devices,
-plus peers you granted.)
-
-The words this section uses:
-
-- Your **signet** is your root identity: one key that means "me." Everything below is signed by it.
-- Each machine you own is a **device**, with its own key. `swoosh mint` (on a machine that holds your
-  signet) and `swoosh adopt` (on the new machine) derive a device and hand it a **badge**: a signature,
-  made by your signet and locked to that device's key, that proves the device is yours.
-- Your **fleet** is one person's devices: everything their signet vouches for. Grant a fleet and every
-  device that person owns, now or ever, is covered.
-- A **slip** is a grant to one of your services. Its shareable form is a `sheer:` link: a signed token,
-  rooted at your key and checked offline, with no server and no allowlist to keep in sync. (For now you
-  present a slip each time you dial; a node auto-remembering a slip you were handed is coming.)
-
-A device carrying your badge reaches every gated service on any of your nodes. That is how your laptop,
-your desktop, and a CI runner all get in, with no per-service step.
-
-For everyone else, you issue a slip. There are five ways in, tightest first:
-
-- **Your own devices** adopt them (above). Whole-node, standing, nothing per service.
-- **One device, one service:** `swoosh grant issue ssh --for alice/laptop`. A slip locked to that one
-  machine's key. `--for` takes a device: a `petname/device` like `alice/laptop`, or a raw device key. It
-  rejects a bare person (`alice`), because a person is a fleet, not one machine, use `--for-fleet` for
-  that. A stolen copy is useless to anyone else, it cannot be passed on, and it stays valid until you
-  revoke it. For giving one machine standing access to one service.
-- **A whole person, one service:** `swoosh grant issue ssh --for-fleet <their-signet-key>`. A slip locked
-  to a person's signet, so every machine they own, now or later, can use it. Theft-resistant, cannot be
-  passed on. Issue it once to bring a new teammate onto one service without a slip per machine of theirs.
-  Revoke it once and their whole fleet loses access. Today `--for-fleet` takes a raw signet key, which
-  the teammate reads with `swoosh identity` on their signet-holding machine and pastes to you; naming a
-  fleet by petname there is a known gap, not yet wired.
-- **Whoever holds the link:** `swoosh grant issue ssh`. A bearer slip: anyone with a copy may use it. It
-  is short-lived by default, and expiry is how it goes away. Add `--delegable` to let the holder narrow it
-  and hand it on. For a quick, one-off hand-off.
-- **Anyone:** `swoosh serve --public ping,speed`. Open the named services to everyone, no credential. For
-  a service meant to be public.
-
-The trade the crypto enforces: a slip bound to a device or a person is theft-resistant and cannot be
-delegated; a bearer slip can be delegated but is meant to be short-lived. You choose binding or
-delegation, never both.
-
-**Revoking.** `swoosh grant ls` lists what you have issued. `swoosh grant revoke <link>` refuses one link
-and anything narrowed from it; `swoosh grant revoke <peer>` refuses every grant you gave a device or
-person at once, and revoking a fleet slip drops the whole fleet in one step.
-
-The denylist a revoke writes is **node-local**: it takes effect on THIS node, on the next connection. A
-peer already connected finishes its session (in-flight sessions drain); the next dial is turned away. A
-revoke is not instant and not global. If you run more than one node, revoke on each: revoking on your
-laptop does not reach your desktop.
-
-One limit to know: a slip bound to a whole fleet stays usable from any device that person still holds. If
-a teammate's laptop is stolen and they revoke it on their side, a node you granted the fleet cannot see
-that: it only knows the fleet's signet, not which of the fleet's devices are gone. So a stolen fleet
-device keeps its access to your node until you revoke or expire the fleet slip. Keep fleet slips
-short-lived so a stray device ages out on its own.
-
-## Commands
-
-### `swoosh serve`
-
-Stay online and reachable. Prints this machine's key, then answers `ping`, `speed`, and `status` from
-any peer that dials it. The key is stable across restarts, so peers can save it once.
-
-Diagnostics are two services, `ping` (cheap RTT) and `speed` (bandwidth-eating throughput),
-so a node MAY offer one without the other. Bare `swoosh serve` publishes both; `swoosh serve
-ping=ping:` answers ping but not speed (and `speed=speed:` the reverse). Each is
-gated by default, so members reach both; a per-service grant can hand out ping-only.
-
-- `--for <duration>` serve for a bounded time, then stop by itself (`30m`, `2h`, `1d`). A local timer:
-  when the deadline passes the node stops gracefully, the same teardown a Ctrl-C gives. The banner reads
-  `runs for 30m, then stops (or ctrl-c)`.
-- `--out <dir>` where a `beam:` service saves pushed files (default: the current directory).
-- `--public <names>` open the named services to anyone, unauthenticated: a comma list like
-  `--public ping,speed`, the deliberate opt-out from the signet gate for just those services. The list is
-  required (bare `--public` is an error, and there is no `all` or `*`); a service that has no safe public
-  form, such as a keyless shell (`sshd`), is refused by name with an error that says why.
-- `--quiet` suppress the readiness banner, for unattended/CI use.
-
-Every node also answers `control.stop`, always: an admitted peer reaching it triggers a graceful stop
-(this is what `swoosh stop` dials). It is gated like the diagnostics, so for a single-owner node only
-your own devices can stop it.
-
-### `swoosh ping <peer>`
-
-Dial a peer and measure the round-trip time, like `ping(8)` but addressed by key.
-
-- `-c, --count <N>` how many probes to send (default 4)
-- `-i, --interval <SECS>` seconds between probes (default 1.0)
-- `-v, --verbose` print a line per probe as it lands (watch iroh punch to direct)
-
-With `-v`, ping prints a line per probe as it arrives, like `tailscale ping`, sampling the path beside
-each pong. Over iroh a session often starts relayed and hole-punches to direct mid-run, so you watch it
-flip live: the exact probe that lands direct reads `(upgraded from relayed)`. The `ping(8)` summary still
-follows.
-
-```sh
-$ swoosh ping alice -v -c 4
-alice/macbook via iroh: relayed, seq 0 rtt 61.200 ms
-alice/macbook via iroh: relayed, seq 1 rtt 58.900 ms
-alice/macbook via iroh: direct to 203.0.113.7:41641 (upgraded from relayed), seq 2 rtt 24.800 ms
-alice/macbook via iroh: direct to 203.0.113.7:41641 (upgraded from relayed), seq 3 rtt 23.100 ms
-alice/macbook via iroh: direct to 203.0.113.7:41641 (upgraded from relayed)
-  4 sent, 4 received, 0% loss
-  rtt min/avg/max/mdev = 23.100/42.000/61.200/18.400 ms
-```
-
-If the peer refuses the service (a node serving `ping` but not `speed`, or one that never admitted you),
-`ping`, `speed`, `status`, and `fetch` say so plainly and exit non-zero, rather than reporting a healthy
-line, 100% loss, or 0.00 MiB/s.
-
-### `swoosh speed <peer>`
-
-Measure throughput to a peer, like `iperf` but addressed by key.
-
-- `--up` / `--down` which direction to measure (default down)
-- `-t, --secs <SECS>` run for a fixed time (default 5)
-- `-n, --bytes <N>` transfer a fixed number of bytes instead
-
-### `swoosh status <peer>`
-
-Dial a peer and report the connection path: direct or relayed, the remote address, and a live RTT.
-Answers the one question a p2p connection always raises: am I actually talking to the peer directly, or
-bouncing through a relay?
-
-### `swoosh ssh <peer>`
-
-Open an ssh session to a peer over the overlay, by name or key: `swoosh ssh alice/desk`. It resolves the
-peer and points the system `ssh` at it through a private forward, then hands off, so anything after works
-as usual: `swoosh ssh alice/desk -- ls`, or `swoosh ssh alice/desk -p 2222`. Auth is your normal ssh keys.
-The peer serves its sshd once with `swoosh serve ssh=sshd:` (a keyless shell, gated to your
-signet), or points at an existing sshd with `swoosh serve ssh=127.0.0.1:22`.
-
-### `swoosh fetch <url>`
-
-Fetch a URL through a node you name, handed out as a plain local URL. `swoosh fetch
-https://example.com/big.iso --via usa` prints `http://127.0.0.1:PORT/`; whatever pulls from that (curl,
-xget) is served by `usa`'s machine fetching the origin and streaming it back, `Range` intact so a
-resumable download resumes. The exit is a node *you* run (your own overlay HTTP proxy, no vendor): serve
-it there with `swoosh serve fetch=fetch:` (gated to your signet) and hand out a `sheer:` slip to `--via`.
-Scoped to the one origin you name, not an open proxy.
-
-### `swoosh serve <name>=<svc>` and `swoosh forward <peer>`
-
-Publish local services under this node's key, and reach a peer's service on a local port (the `ssh -L`
-shape, but pubkey-addressed and p2p).
-
-- `serve <name=svc>...` publish local services under this node's key, gated by your signet. A bare
-  `swoosh serve` publishes `ping=ping:` and `speed=speed:` (reach diagnostics, two
-  services so a node may offer one without the other); name more to publish more.
-- `forward <peer> --to <port | - | unix:PATH>` reach a peer's published service and put it on a local
-  port (a plain local client talks to it as if it were on `127.0.0.1`) or stream it to stdout with `--to -`
-  (compose with the shell, e.g. `--to - | mpv -`). `unix:<path>` (a local socket listener) is reserved.
-
-### `swoosh beam <path>... <peer>`
-
-Push a file or directory to a peer, verified end to end. You send; the peer receives. The receiver stays
-online with `swoosh serve beam=beam:` (saving into the current directory, or `--out <dir>`), and you push
-to it: `swoosh beam report.pdf photos/ alice`. A directory expands to every file under it, files stream
-over concurrent streams, and each is hashed with BLAKE3 and re-checked on arrival, so a truncated or
-tampered transfer is rejected, never written. The `beam:` service is gated by your signet like `ssh` and
-the diagnostics, so only members (or a `sheer:` slip you present with `--present`) can push to your node.
-
-### `swoosh stop <peer>`
-
-Tell a peer's node to stop serving, addressed by its key or a `sheer:` link: `swoosh stop alice`. It dials
-the node's gated `control.stop` service and, once admitted, triggers the same graceful stop a Ctrl-C or a
-`serve --for` deadline gives. This stops the node (it stops serving); it does NOT power off the machine.
-Because `control.stop` is gated like the diagnostics, for a single-owner node only your own devices can
-stop it, and a node that refuses you says so and exits non-zero. A natural end to a bounded session:
-`swoosh serve --for 30m` on one side, `swoosh stop me/<node>` to tear it down early from another.
-
-### `swoosh grant`
-
-Issue, list, narrow, or revoke a `sheer:` link: a signed grant to one of your services, rooted at your
-key and checked offline, with no server and no allowlist to keep in sync. See
-[Who can reach your node](#who-can-reach-your-node) for when to reach for each.
-
-- `grant issue <service>` mint a slip for one service. Bare, it is a bearer slip anyone holding it may
-  use, expiring (`--expires <dur>`, default `1h`); `--delegable` lets the holder narrow and re-share it.
-  `--for <device>` locks it to one device, `--for-fleet <signet-key>` to a whole fleet; both are
-  theft-resistant and cannot be delegated.
-- `grant ls` list the grants you have issued, grouped by service.
-- `grant narrow <link>` narrow a link offline before handing it on (only ever adds limits).
-- `grant revoke <peer|link>` refuse a link, or every grant you issued to a device or person, at once, on
-  this node. Node-local: revoke on each node you run.
-
-### `swoosh identity`
-
-Print this machine's key (its NodeId), minting one if there is none. A local command: it stands up no
-transport, it just resolves the key `--key`/`SWOOSH_KEY` points at (or the default) and prints the key a
-node bound under it will present.
-
-On an adopted device this prints that DEVICE's key, not your signet. Your signet is the key from the
-machine where you first created your identity (an adopted device only holds its own device key plus the
-signet it trusts). That is why a fleet grant needs the person's signet, read on their signet-holding
-machine, not a device key.
-
-Use it to provision an identity ahead of time: mint a key here, save its NodeId as a contact, then hand
-the key file to the machine that will adopt it (a CI runner, say) so you can reach it by a name you
-already know.
-
-### `swoosh mint` and `swoosh adopt`
-
-Provision a second machine under an identity you control, without copying a key by hand. On the machine
-that holds your signet, `swoosh mint <label>` derives a device identity and emits a one-time authkey; on
-the new machine, `swoosh adopt <authkey>` becomes that device identity and trusts the signet that minted
-it. The two ends of one handshake: use them to bring a laptop or a CI runner onto your overlay.
-
-The authkey is a device secret, so `adopt` takes it without forcing it onto argv (where `ps` and `/proc`
-can read it): pass `-` to read stdin, `@<path>` to read a file, or set `SWOOSH_AUTHKEY`. A value read from
-the env var is taken verbatim, so a leading `-` or `@` there is part of the secret, not a redirection.
-
-### `swoosh contact`: name your peers
-
-Keys are unwieldy to type. Save a peer's key under a short name once, then use the name anywhere a
-command wants a peer: `swoosh ping alice` instead of pasting base32. Names are yours alone, stored in
-plain TOML beside the identity they belong to: `~/.config/swoosh/contacts.toml` by default, or next to
-the key `--key`/`SWOOSH_KEY` points at (so one `--key` moves the whole identity, address book and all).
-`alice` means whoever you pointed it at, no registry and no one else's permission.
-
-```sh
-swoosh contact add alice bf01hy…   # save alice -> that key
-swoosh contact ls                  # list your contacts
-swoosh contact rm alice            # forget her
-```
-
-- `contact add <name> <key>` save (or re-point) a name. Re-adding the same name replaces the key.
-- `contact ls [name]` list every contact, or the devices saved under one name.
-- `contact rm <name>` forget a contact or one of its devices.
-
-One person can have several machines. `contact add alice/laptop <key>` files a key under `alice`'s
-`laptop`; `swoosh ping alice` then tries each of alice's machines and takes the first that answers, or
-reach a specific one with `swoosh ping alice/laptop`.
-
-### `swoosh tree`
-
-Print the command tree with each verb's one-line summary, read straight from the parser, so it can never
-drift from `--help`.
-
-## Identity
-
-Every `swoosh` command runs under a key of its own. `serve` needs to be reachable at one stable address,
-so it saves its key at `~/.config/swoosh/identity.key` and reuses it across runs. The outward commands
-(`ping`, `speed`, `status`) only dial out and are never dialed back, so they generate a throwaway key
-each run, nothing to set up and nothing left on disk. Pass `--key <path>` (or set `SWOOSH_KEY`) to pin
-any command to a saved key when you want a stable address.
-
-## Transports
-
-`swoosh` can carry a connection two ways, chosen with `--transport`:
-
-- `iroh` (default) finds and reaches peers across the internet, punching through NATs.
-- [`quirk`](https://github.com/theia-hq/quirk) is a from-scratch QUIC implementation, direct or same-LAN
-  only.
-
-The key is the same either way, so switching transports reaches the same peer. On a shared LAN, peers
-find each other automatically. Across networks, feed a peer the address its `swoosh serve` printed with
-`--peer <key>=<addr>`.
-
-## Roadmap
-
-`swoosh` is one umbrella for doing things with a machine addressed by its key. Every planned verb is the
-same primitive underneath (a cap-gated byte-stream to a key) with a thin front door per job, so the
-surface stays broad while the core stays one thing. Shipped today is ticked; the rest is planned and
-lands as it is built.
-
-- [x] `serve`: be online, answer reach diagnostics under a persisted key; `--for` bounds its own life
-- [x] `ping`: round-trip time to a peer, `ping(8)`-shaped
-- [x] `speed`: throughput to a peer, `iperf`-shaped
-- [x] `status`: connection path to a peer: direct vs relayed
-- [x] `contact`: a local, self-sovereign address book (`add` / `ls` / `rm`), petname resolution in every
-  reach verb, several devices under one name
-- [x] `tree`: print the command tree, read from the parser
-- [x] `identity`: print this machine's key, minting one if absent, to provision a node ahead of time
-- [x] `mint` / `adopt`: provision a second machine under an identity you control, via a one-time authkey
-- [x] `ssh`: open an ssh session to a peer over the overlay (`swoosh ssh alice/desk`)
-- [x] `serve <name=svc>` / `forward`: publish local services under this node's key; reach a peer's service
-  on a local port or stream it to stdout (`--to -`, the shape `ssh` `ProxyCommand` uses)
-- [x] `grant issue`: mint a `sheer:` link to one service, bearer or bound to a device (`--for`) or a
-  fleet (`--for-fleet`), signed and checked offline
-- [x] `grant ls`: list the grants you have issued, grouped by service
-- [x] `grant narrow`: narrow a capability link offline and print a tighter one
-- [x] `grant revoke`: refuse a link, or every grant to a device or person, at this node at once
-- [x] `fetch`: mint a local URL whose fetch egresses at a remote node you reach (choose the exit region)
-- [x] `beam`: push a file or directory to a peer, verified end to end (the receiver serves `beam=beam:`)
-- [x] `stop`: tell a peer's node to stop serving, over the gated `control.stop` service
-- [ ] `beam` (more sources): the same verb for piped stdin, the clipboard, or a fetched URL's result,
-  delivered to a key
-- [ ] `ssh config`: emit `ssh` `Host` aliases for devices that advertise ssh (waits on advertised services)
-- [ ] `cluster` + `grant issue cluster`: name a local set of machines; share the whole group as one capability
-- [ ] `run`: run code at a peer addressed by its key (the north star)
-- [ ] MagicDNS `.theia` names: type `ssh desk.alice` or `http://blog.alice.theia` into any app
+The [getting-started guide](docs/getting-started.md) walks this end to end in two minutes.
+
+## Docs
+
+- [Getting started](docs/getting-started.md) zero to your first reach.
+- [Keys](docs/keys.md) the whole model: five nouns, one gate, one trade. Read it early.
+- [Use cases](docs/use-cases/README.md) reach your own devices, admit a household, grant a contractor,
+  and more.
+- [Commands](docs/reference/commands.md) every verb and flag.
+- [Transports](docs/transports.md) · [Troubleshooting](docs/troubleshooting.md) ·
+  [Demo](docs/demo.md) · [Roadmap](docs/roadmap.md)
 
 ## Layout
 
-- `crates/beam` the `beam:` service: receive a pushed file over one admitted stream, verified end to end,
-  saved under a safe relative path.
-- `crates/fetch` the `fetch:` service: fetch an origin URL on the requester's behalf and stream the
-  response back, scoped to one origin.
-- `crates/measure` the measurement engine (ping, speed): a small versioned protocol, a responder, and the
-  two clients.
+- `crates/beam` the `beam:` service: receive a pushed file over one admitted stream, verified end to
+  end.
+- `crates/fetch` the `fetch:` service: fetch an origin URL on the requester's behalf, scoped to one
+  origin.
+- `crates/measure` the measurement engine (ping, speed): a small versioned protocol and its clients.
 - `crates/swoosh` the CLI: binds one node under the chosen key and transport, then runs a command.
 
 ## License
