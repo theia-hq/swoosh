@@ -27,7 +27,7 @@ serving
   family-gated   your devices + peers you've granted
     ssh -> sshd            a shell on this machine
     tv -> 127.0.0.1:8096   local TCP service
-    control.*              node control (always family-gated)
+    control.*              node control (never public)
 
 ctrl-c to stop
 ```

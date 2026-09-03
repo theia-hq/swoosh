@@ -46,7 +46,7 @@ how peers reach you
 serving
   family-gated   your devices + peers you've granted
     ssh -> sshd   a shell on this machine
-    control.*     node control (always family-gated)
+    control.*     node control (never public)
 
 ctrl-c to stop
 ```

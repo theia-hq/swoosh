@@ -36,7 +36,7 @@ serving
   family-gated   your devices + peers you've granted
     ping        round-trip probe
     speed       throughput test
-    control.*   node control (always family-gated)
+    control.*   node control (never public)
 
 ctrl-c to stop
 ```

@@ -97,8 +97,8 @@ fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
         "the two control reads fold to one control.* line: {banner}"
     );
     assert!(
-        !banner.contains("public"),
-        "no public group when nothing is opened: {banner}"
+        !banner.contains("anyone"),
+        "no group is opened to anyone when nothing is public: {banner}"
     );
     assert!(banner.trim_end().ends_with("ctrl-c to stop"), "{banner}");
 }

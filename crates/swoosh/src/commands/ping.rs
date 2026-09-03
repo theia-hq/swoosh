@@ -34,11 +34,13 @@ pub struct PingCmd {
     /// Seconds between probes.
     #[arg(short = 'i', long, value_name = "seconds", default_value_t = 1.0)]
     pub interval: f64,
-    /// Present a membership badge or capability link to a family/cap-gated peer. Defaults to the
-    /// self-signed badge minted from this identity when it dials under a persisted key. Parsed at the
-    /// boundary via [`SheerLink`](crate::credential::SheerLink)'s `FromStr`, so a malformed link is a clap
-    /// error here, not an opaque refusal at the peer.
-    #[arg(long, value_name = "link")]
+    /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
+    #[arg(
+        long,
+        value_name = "link",
+        long_help = "Optional: your own devices need no link, the dial presents the self-signed \
+                     membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
+    )]
     pub present: Option<crate::credential::SheerLink>,
     /// Print a line per probe as it lands, showing the path at that moment (watch iroh punch to direct).
     #[arg(short = 'v', long)]
@@ -123,6 +125,7 @@ impl PingCmd {
         // ping, so it prints a distinct line and does not hold the exit code green: a refusal is never
         // rendered as `100% loss`.
         let mut any_healthy = false;
+        let mut any_refused = false;
         for candidate in &candidates {
             match reach::connect_service(
                 node,
@@ -164,6 +167,7 @@ impl PingCmd {
                         // `refusal_reason` so a bare gate refusal reads descriptively and is never doubled
                         // (`refused (refused)`). The run continues to the next device.
                         Err(ProtocolError::Refused(reason)) => {
+                            any_refused = true;
                             println!(
                                 "{} via {}: reached, but refused ({})",
                                 candidate.label,
@@ -182,14 +186,7 @@ impl PingCmd {
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;
-        if any_healthy {
-            Ok(())
-        } else {
-            Err(reach::hint(
-                eyre::eyre!("could not reach {}", self.peer),
-                transport,
-            ))
-        }
+        reach::fanout_outcome(any_healthy, any_refused, &self.peer, transport)
     }
 }
 

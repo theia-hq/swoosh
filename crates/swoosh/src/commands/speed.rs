@@ -34,10 +34,13 @@ pub struct SpeedCmd {
     /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
-    /// Present a membership badge or capability link to a family/cap-gated peer. Defaults to the
-    /// self-signed badge minted from this identity when it dials under a persisted key. Parsed at the
-    /// boundary via [`SheerLink`](crate::credential::SheerLink)'s `FromStr`.
-    #[arg(long, value_name = "link")]
+    /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
+    #[arg(
+        long,
+        value_name = "link",
+        long_help = "Optional: your own devices need no link, the dial presents the self-signed \
+                     membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
+    )]
     pub present: Option<crate::credential::SheerLink>,
     /// Measure the upload direction (this node sends).
     #[arg(long)]

@@ -97,6 +97,7 @@ enum Command {
     #[command(subcommand)]
     Contact(ContactCmd),
     /// Print this node's identity (its NodeId), minting a key if there is none.
+    #[command(visible_alias = "id")]
     Identity(IdentityCmd),
     /// Derive a device identity from your signet and emit an authkey for a machine to adopt.
     Mint(MintCmd),

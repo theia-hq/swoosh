@@ -28,9 +28,13 @@ pub struct ForwardCmd {
     /// which served service to reach
     #[arg(long, value_name = "service", default_value = "default")]
     pub service: String,
-    /// present a `sheer:` capability link alongside a raw node id (parsed at the boundary via
-    /// [`SheerLink`]'s `FromStr`)
-    #[arg(long, value_name = "link")]
+    /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
+    #[arg(
+        long,
+        value_name = "link",
+        long_help = "Optional. `forward` dials as a stranger by construction (it never presents this \
+                     node's identity), so pass a `sheer:` slip to reach a cap-gated service."
+    )]
     pub present: Option<SheerLink>,
     #[command(flatten)]
     pub reach: ReachArgs,

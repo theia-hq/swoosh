@@ -693,7 +693,8 @@ fn reach_line(width: usize, gutter: usize, label: &str, gloss: &str) -> String {
 }
 
 /// The `serving` section: services grouped by posture, safest-first, empty groups omitted. `control.*` folds
-/// to one always-family-gated line. Within a group the gloss column aligns (per group, so a long raw-stream
+/// to one line, glossed `never public` (it can never be opened with `--public`, unlike the other gated
+/// services). Within a group the gloss column aligns (per group, so a long raw-stream
 /// row never widens the tight family block). The danger weight is monotonic on the GROUP headers; a
 /// per-service amplifier caveat is quiet inline prose, never a marker louder than the group above it.
 fn serving_section(
@@ -722,7 +723,7 @@ fn serving_section(
     if has_control {
         rows.entry(Group::FamilyGated).or_default().push((
             "control.*".to_owned(),
-            "node control (always family-gated)".to_owned(),
+            "node control (never public)".to_owned(),
             None,
         ));
     }

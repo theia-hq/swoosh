@@ -31,10 +31,13 @@ pub struct StatusCmd {
     /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
-    /// Present a membership badge or capability link to a family/cap-gated peer. Defaults to the
-    /// self-signed badge minted from this identity when it dials under a persisted key. Parsed at the
-    /// boundary via [`SheerLink`](crate::credential::SheerLink)'s `FromStr`.
-    #[arg(long, value_name = "link")]
+    /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
+    #[arg(
+        long,
+        value_name = "link",
+        long_help = "Optional: your own devices need no link, the dial presents the self-signed \
+                     membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
+    )]
     pub present: Option<crate::credential::SheerLink>,
     #[command(flatten)]
     pub reach: ReachArgs,
@@ -109,6 +112,7 @@ impl StatusCmd {
         // on a screen full of failures. A refused device answered the dial but does not serve ping, so it
         // is not healthy: it must not hold the exit code green the way a real status line does.
         let mut any_healthy = false;
+        let mut any_refused = false;
         for candidate in &candidates {
             let line = match reach::connect_service(
                 node,
@@ -123,18 +127,12 @@ impl StatusCmd {
                 Err(_error) => Line::unreachable(&candidate.label, transport.name()),
             };
             any_healthy |= line.is_healthy();
+            any_refused |= line.is_refused();
             println!("{line}");
         }
 
         node.close().await;
-        if any_healthy {
-            Ok(())
-        } else {
-            Err(reach::hint(
-                eyre::eyre!("could not reach {}", self.peer),
-                transport,
-            ))
-        }
+        reach::fanout_outcome(any_healthy, any_refused, &self.peer, transport)
     }
 }
 
@@ -231,6 +229,13 @@ impl Line {
     /// having refused. Only a healthy device keeps the fan-out's exit code green.
     fn is_healthy(&self) -> bool {
         matches!(self.state, State::Reached { .. })
+    }
+
+    /// Whether this device was REACHED but refused the probe (answered the dial, does not serve ping). It
+    /// keeps the fan-out non-zero like an unreachable device, but distinguishes a refusal so the final
+    /// error is a refusal, not a misleading `could not reach` + transport reach hint.
+    fn is_refused(&self) -> bool {
+        matches!(self.state, State::Refused { .. })
     }
 }
 

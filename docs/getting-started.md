@@ -33,7 +33,7 @@ how peers reach you
 
 serving
   family-gated   your devices + peers you've granted
-    control.*   node control (always family-gated)
+    control.*   node control (never public)
   public !   anyone, unauthenticated
     ping    round-trip probe   unmetered: a stranger can drain your uplink
     speed   throughput test   unmetered: a stranger can drain your uplink

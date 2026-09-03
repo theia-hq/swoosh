@@ -219,6 +219,29 @@ pub fn hint(error: eyre::Report, transport: transport::Transport) -> eyre::Repor
     }
 }
 
+/// The exit outcome of a fan-out reach verb (`ping`, `status`) from what its devices reported.
+///
+/// A fan-out ends non-zero unless at least one device answered the probe, but the two failing shapes carry
+/// DIFFERENT errors so a refusal is never dressed as an addressing problem. If every device was
+/// unreachable, the error carries the transport's reach [`hint`] (over quirk, the `--peer`/discovery
+/// remedy). But if any device was REACHED and only refused the probe, reach was NOT the problem: the error
+/// says so plainly and carries no reach hint, so a refused stranger over quirk never sees the misleading
+/// "quirk is direct-only: pass --peer ..." line after it already reached the node.
+pub fn fanout_outcome(
+    any_healthy: bool,
+    any_refused: bool,
+    target: &impl core::fmt::Display,
+    transport: transport::Transport,
+) -> eyre::Result<()> {
+    if any_healthy {
+        Ok(())
+    } else if any_refused {
+        Err(eyre::eyre!("{target}: reached, but refused"))
+    } else {
+        Err(hint(eyre::eyre!("could not reach {target}"), transport))
+    }
+}
+
 /// The path phrase for a session's [`ConnInfo`], comparing the path at connect (`initial`) to the path
 /// now: `direct to <addr>` / `direct to <addr> (upgraded from relayed)` / `relayed` / `mixed (...)` /
 /// `path unknown`. Reports the current state plainly rather than hedging: iroh often connects relayed
@@ -251,5 +274,39 @@ pub fn conn_path(initial: Path, info: &ConnInfo) -> String {
         // The transport does not expose its path (in-process, or not yet instrumented). Say so rather
         // than fabricating a reassuring answer.
         Path::Unknown => "path unknown".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A refused fan-out is a REFUSAL, never dressed as an addressing problem: the node was reached, so the
+    // error says so and carries NO quirk `--peer`/discovery hint (the bug: a refused stranger over quirk
+    // used to print `reached, but refused` and THEN `could not reach ... quirk is direct-only ...`).
+    #[test]
+    fn a_reached_but_refused_fanout_is_a_refusal_without_the_reach_hint() {
+        let err = fanout_outcome(false, true, &"alice", transport::Transport::Quirk)
+            .expect_err("a refusal is non-zero");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("reached, but refused"), "{msg}");
+        assert!(!msg.contains("could not reach"), "{msg}");
+        assert!(!msg.contains("quirk is direct-only"), "{msg}");
+    }
+
+    // An all-unreachable fan-out DOES carry the transport's reach hint: over quirk, the `--peer` remedy.
+    #[test]
+    fn an_all_unreachable_fanout_carries_the_quirk_reach_hint() {
+        let err = fanout_outcome(false, false, &"alice", transport::Transport::Quirk)
+            .expect_err("all-unreachable is non-zero");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("could not reach alice"), "{msg}");
+        assert!(msg.contains("quirk is direct-only"), "{msg}");
+    }
+
+    // Any healthy device keeps the fan-out green, whatever the others did.
+    #[test]
+    fn any_healthy_device_makes_the_fanout_succeed() {
+        assert!(fanout_outcome(true, true, &"alice", transport::Transport::Quirk).is_ok());
     }
 }
