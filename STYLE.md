@@ -172,13 +172,28 @@ to flag the same smell twice._
   (building an open gate is the caller's own choice), never `--public`; bifrost owns a DIRECT ADDRESS HINT,
   never `--peer`; bifrost-core owns the DERIVED-KEY payload a machine adopts, never `--authkey`. The same
   holds dep->consumer: a dependency never alludes to the app that consumes it, and the consumer bin name
-  (`swoosh`, or any other) NEVER appears in the prime libraries (`nauthy`, `tightbeam`, `bifrost`, `quirk`).
-  Where a lib doc genuinely must gesture at how it is driven, say "a consumer" / "a CLI over this library" /
-  "the caller", never the bin: the library-vs-CLI boundary is worth explaining, the consumer's name is not.
+  (`swoosh`, or any other) NEVER appears in a prime library's CODE (`nauthy`, `tightbeam`, `bifrost`,
+  `quirk`: identifiers, types, error strings, comments). Where a lib doc genuinely must gesture at how it is
+  driven, say "a consumer" / "a CLI over this library" / "the caller", never the bin, with ONE exception: a
+  README may carry a single honest POINTER to a real, existing consumer as a worked example (see the
+  doc-pointer rule below). The library-vs-CLI boundary is worth explaining, the consumer's name is not, and
+  its COMMAND LINE never is.
   This is the up-the-stack twin of "wrap a foreign stack once": that rule stops a consumer leaking a
   dependency's vocabulary DOWN, this one stops a library leaking a consumer's vocabulary UP. A frozen
   protocol constant that merely CONTAINS such a token (a KDF domain-separator string) is not an allusion and
   must not be reworded, since changing it changes the bytes.
+- **A library README may POINT at a real consumer, but never spell its COMMANDS or flags; the layering gate
+  scans docs, not just code.** A reader who wants a tool is well served by one honest pointer, so a README
+  may name a real, existing consumer and link to it ONCE as a worked example ("swoosh is a tool built on
+  this; see it for a worked consumer"). That bare pointer, a link or the crate name, is the whole of what is
+  allowed. The leak is spelling the consumer's COMMAND PATTERNS (`swoosh serve`, `... | swoosh serve
+  cam=stdin`, `swoosh ssh`) or its FLAGS: those overfit the library's docs to one bin's surface and rot the
+  moment a verb is renamed or another consumer arrives. Document the library in ITS OWN vocabulary (the types
+  and wire it owns); when a scenario needs a command line to be worth showing, that line belongs in the
+  CONSUMER's docs, linked to, never transcribed here. This is mechanically gated: the layering check scans a
+  crate's README and docs for a `<consumer> <verb>` command pattern (a named or linked consumer followed by a
+  subcommand), not only its `src/`, so a doc that spells a consumer's commands fails the gate the same way a
+  leaked identifier does.
 - **Keep layer concerns pure.** A layer touches only its own concern and knows nothing of the layers around
   it: a byte-moving layer knows nothing of files, paths, filenames, temp files, or the filesystem (its
   sources and sinks are `AsyncRead`/`AsyncWrite` the caller supplies); naming and temp-then-rename are the

@@ -138,6 +138,29 @@ done
 BL='(^|[^A-Za-z0-9_-])'    # left identifier boundary
 BR='([^A-Za-z0-9_-]|$)'    # right identifier boundary
 
+# extract_code_contexts DOC -- emit only the parts of a Markdown doc where a COMMAND can
+# live, so the doc command-pattern check (3 below) never fires on prose. A `<consumer>
+# <verb>` inside a code fence or an inline `backtick` span is unambiguously a command; the
+# same words in a sentence ("swoosh is a tool") are a description and must pass. Each emitted
+# line is `<orig-lineno><TAB><code-text>`, so the caller recovers the true file:line. The
+# lineno is always BEFORE the first tab, and the tab that separates it doubles as a left word
+# boundary, so a name at the very start of a span still binds. Pure awk, no dependencies.
+extract_code_contexts() {
+  awk '
+    # A fence line (```, ```sh, ~~~, ...) toggles block state and is itself never scanned.
+    /^[[:space:]]*(```|~~~)/ { in_fence = !in_fence; next }
+    in_fence { print NR "\t" $0; next }
+    {
+      # Outside a fence, only the contents of inline `...` spans are command contexts.
+      rest = $0
+      while (match(rest, /`[^`]*`/)) {
+        print NR "\t" substr(rest, RSTART + 1, RLENGTH - 2)
+        rest = substr(rest, RSTART + RLENGTH)
+      }
+    }
+  ' "$1"
+}
+
 fail=0
 crates=0
 
@@ -207,6 +230,77 @@ for manifest in $manifests; do
       fi
     done
   fi
+
+  # 3. DOC COMMAND-PATTERN check: a library's README/docs may POINT at a real consumer (a
+  # link, or the crate name in prose) but must never SPELL its COMMANDS. The distinction is
+  # deliberate: a NAME/LINK is a signpost; a NAME followed by a SUBCOMMAND (`swoosh serve`,
+  # `... | swoosh serve cam=stdin`, `swoosh ssh`) adopts the consumer's command grammar and
+  # rots when a verb is renamed or another consumer arrives. Code (checks 1/2 + the compiler)
+  # is already policed; DOCS were the blind spot that let a `swoosh serve` example sit in a
+  # README behind a green gate.
+  #
+  # Scope, per crate (mirroring how checks 1/2 scope to a crate's own files): the crate's own
+  # `*.md` directly under its dir, plus a `docs/` tree if present. A repo/workspace root that
+  # is not itself a crate (no `[package]`) is skipped by the outer loop, so its README is out
+  # of scope here, same as today.
+  docs=$(find "$dir" -maxdepth 1 -name '*.md' \
+    -not -path '*/target/*' -not -path '*/_archived/*' 2>/dev/null)
+  if [ -d "$dir/docs" ]; then
+    docs="$docs
+$(find "$dir/docs" -name '*.md' -not -path '*/target/*' -not -path '*/_archived/*' 2>/dev/null)"
+  fi
+
+  for doc in $docs; do
+    [ -f "$doc" ] || continue
+
+    # 3b. Derive the consumer names to police FROM THE DOC ITSELF: any theia crate the doc
+    # LINKS to (`github.com/theia-hq/N`). Nothing is hardcoded, so a doc that links no
+    # consumer polices none, and a bare name that shares a word with prose never trips. From
+    # that link set, drop this crate's OWN foundation: its own name, a co-located sibling
+    # LIBRARY (`LOCAL_PKGS`, shared substrate), and any DECLARED DEPENDENCY (a downward link,
+    # always legal -- tightbeam's README links its deps bifrost/nauthy). What survives is a
+    # genuine CONSUMER the doc points UP at (swoosh), the only thing a library must not
+    # overfit its docs to.
+    linknames=$(grep -oE 'github\.com/theia-hq/[A-Za-z0-9_-]+' "$doc" 2>/dev/null \
+      | sed 's#.*/theia-hq/##' | sort -u)
+
+    for n in $linknames; do
+      [ -n "$n" ] || continue
+      [ "$n" = "$own" ] && continue
+      case "$LOCAL_PKGS" in *" $n "*) continue ;; esac
+      if grep -Eq "^[[:space:]]*${n}[[:space:]=.]" "$manifest"; then continue; fi
+
+      # 3c/3d. Flag `<consumer> <verb>` (a name then one-or-more spaces then a lowercase verb
+      # token) ONLY inside a code context (fence or inline span), where it is unambiguously a
+      # command. `extract_code_contexts` already stripped prose, so the pointer carve-out
+      # falls out for free -- no stopword list. `ffmpeg | swoosh serve ...` still matches on
+      # its `swoosh serve` tail; the pipeline prefix is irrelevant.
+      hits=$(extract_code_contexts "$doc" \
+        | grep -E "${BL}${n}[[:space:]]+[a-z][a-z0-9-]*" 2>/dev/null || true)
+      [ -n "$hits" ] || continue
+
+      # Report per surviving original line, honoring a same-line `layering-gate:allow` marker
+      # on the ORIGINAL doc line (the extracted context may not carry it, so re-read the
+      # source line). The header names the first offending `<consumer> <verb>`.
+      reported=""
+      first=""
+      for L in $(printf '%s\n' "$hits" | sed 's/	.*//' | grep -E '^[0-9]+$' | sort -un); do
+        orig=$(sed -n "${L}p" "$doc")
+        case "$orig" in *"$ALLOW_MARK"*) continue ;; esac
+        if [ -z "$first" ]; then
+          first=$(printf '%s' "$orig" | grep -oE "${n}[[:space:]]+[a-z][a-z0-9-]*" | head -n1)
+        fi
+        reported="${reported}${doc}:${L}: ${orig}
+"
+      done
+      if [ -n "$reported" ]; then
+        printf 'LEAK  crate %-16s spells consumer command pattern "%s" in docs:\n' \
+          "$own" "${first:-$n <verb>}"
+        printf '%s' "$reported" | sed 's/^/        /'
+        fail=1
+      fi
+    done
+  done
 done
 
 if [ "$fail" -ne 0 ]; then
