@@ -89,8 +89,9 @@ or points at an existing sshd with `swoosh serve ssh=127.0.0.1:22`.
 ## The honest limit
 
 A device carrying your badge reaches every gated service on any node you run. If a device is lost or
-stolen, revoke it (`swoosh grant revoke me/laptop`) on each node you run; a revoke is node-local and
-takes effect on the next dial, not instantly and not everywhere at once.
+stolen, revoke it (`swoosh grant revoke me/laptop`) on each node you run, then restart `serve` there. A
+revoke is node-local and takes effect on the node's next `serve` (the gate loads the denylist at startup),
+not instantly and not everywhere at once; live revocation lands with the daemon.
 
 ## Next
 

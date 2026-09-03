@@ -78,12 +78,15 @@ $ swoosh grant revoke bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
 revoked 1 grant(s) to bf01o6vqymgz727g… (…/revoked)
 ```
 
-## Two honest limits
+## Honest limits
 
 - **No family group yet.** You grant each member one by one. A named group that holds people (grant it
   once, everyone in it is covered) is [planned](../roadmap.md).
 - **Revoke is per household.** Revoking mum's signet drops her whole fleet at once. There is no way yet
   to drop one of her devices while keeping the rest, so keep fleet slips short-lived.
+- **A revoke needs a `serve` restart.** The gate loads the denylist when `serve` starts, so revoking mum
+  drops her on the box's next `serve`, not mid-session. Restart `serve` on the box to apply it now; live
+  revocation lands with the daemon.
 
 ## Next
 

@@ -18,11 +18,20 @@ Grant one service to a device, a whole person, or anyone; a clearer serve banner
 - **`swoosh grant ls`** list the grants you have issued, grouped by service, each with its holder and
   remaining lifetime.
 - **`swoosh grant revoke <peer>`** refuse every grant you issued to a device or person at once; the
-  existing `revoke <link>` still refuses a single link. Both write a node-local denylist the gate checks
-  on the next connect.
+  existing `revoke <link>` still refuses a single link. Both write a node-local denylist the gate loads
+  when `serve` starts, so a revoke takes effect on the node's next `serve`, not on a running one (live
+  revocation lands with the daemon).
 - **`swoosh serve --public <svc>`** open named services to anyone, unauthenticated, per service: the
   deliberate opt-out from the signet gate. A service with no safe public form, such as a keyless shell,
   is refused by name.
+- **`swoosh service --at <peer>`** read the services a peer serves and the gate on each, a `SERVICE  GATE`
+  table; you see only what that peer's gate admits you for. Reading your OWN node's services is coming with
+  the daemon.
+- **`swoosh serve <name>=fetch:<origin>`** pin a fetch service to one origin: the node fetches only that
+  origin and refuses any other before it connects. A bare `fetch:` is unconstrained, but opening one to the
+  public (`--public`) now requires a scope, so an open fetch service can never be an anonymous any-origin
+  relay. Origin URLs carrying userinfo are rejected.
+- **`swoosh id`** a short alias for `swoosh identity`: print this node's key, minting one if there is none.
 
 ### Changed
 - **`signet` is now a reserved device label.** A contact device literally labelled `signet` (added as
@@ -37,6 +46,19 @@ Grant one service to a device, a whole person, or anyone; a clearer serve banner
 - **`swoosh adopt` no longer takes the authkey on argv.** The authkey is a device secret, and the command
   line is visible to other processes (`ps`, `/proc`). Pass it as `-` (stdin), `@<path>` (a file), or set
   `SWOOSH_AUTHKEY`; a literal still works but is discouraged.
+- **Clearer `--present` help.** The `sheer:` link flag on the reach verbs (`ping`, `speed`, `status`,
+  `beam`, `forward`, `service`, `stop`) now reads plainly: your own devices need no link, the dial
+  presents your membership badge; pass a `sheer:` slip only to reach as a delegate.
+- **`control.*` reads `never public` in the serve banner.** The always-gated node-control line is glossed
+  `never public` (it can never be opened with `--public`, unlike the other gated services), instead of
+  `always family-gated`.
+- **A refused fan-out no longer reads as unreachable.** When `ping` or `status` reaches a peer but the gate
+  refuses the probe, the error says `reached, but refused` and stops there. Over quirk it no longer also
+  prints the `pass --peer` addressing hint, which applies only when the peer was never reached at all.
+- **Reach verbs take petnames uniformly.** `stop` and the other reach verbs now resolve a petname
+  (`alice`, `me/laptop`) the same way `ping` did, instead of taking only a raw key.
+- **`swoosh serve` exits 0 on a graceful `control.stop`.** A requested stop is a success, so a stopped node
+  no longer exits non-zero.
 
 ## v0.6.0
 

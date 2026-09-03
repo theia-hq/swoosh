@@ -40,9 +40,11 @@ sides can reach the internet. `swoosh status <peer>` reports the path once a lin
 
 ## A revoke did not take effect
 
-A revoke is **node-local** and takes effect on the **next** dial:
+A revoke is **node-local** and takes effect on the node's **next `serve`**, not on a running one:
 
-- An in-flight session finishes; the next one is refused.
+- The gate loads the denylist once, when `swoosh serve` starts. A revoke you make while the node is serving
+  does not bite until you restart it, so restart `serve` on the node to apply it. (Live revocation, cutting
+  a held slip without a restart, lands with the daemon.)
 - It applies to the node you ran it on. If you serve from more than one node, revoke on each.
 - A fleet slip stays usable from any device that person still holds until it expires or you revoke it.
   Keep fleet slips short-lived.

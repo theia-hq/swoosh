@@ -335,7 +335,8 @@ sheer:bf01hcq6…
 **Things to know.** A bare person (`--for alice`) is refused: you must type `fleet:alice` to widen, so a
 device bind never silently becomes a fleet bind. A bind is theft-resistant and cannot be delegated; a
 bearer slip can be delegated but is meant to be short-lived (the [one trade](../keys.md#the-one-trade)).
-A revoke is node-local: revoke on each node you run.
+A revoke is node-local, and the gate loads the denylist when `serve` starts: it takes effect on the node's
+next `serve`, not on a running one (live revocation lands with the daemon). Revoke on each node you run.
 
 ## <a id="tree"></a>`swoosh tree`
 

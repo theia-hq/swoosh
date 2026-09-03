@@ -6,6 +6,12 @@ another machine, done. Auth, names, and sharing come after, each a small additio
 
 You will need two machines (your laptop and a desktop, a home box, or a cheap VPS).
 
+> **Only one machine?** Try the whole loop on it with quirk, which dials a direct address instead of
+> discovering the peer. In one terminal, serve and note the `direct` address it prints
+> (`127.0.0.1:<port>`): `swoosh serve --public ping,speed --transport quirk`. In a second terminal, reach
+> it there: `swoosh ping <key> --transport quirk --peer <key>=127.0.0.1:<port>`. The two-machine steps
+> below are the same, without `--transport quirk` or the address. See [transports](transports.md#quirk).
+
 ## 1. Install
 
 ```console

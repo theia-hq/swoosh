@@ -73,6 +73,10 @@ The only list the gate ever keeps is a **denylist** a revoke writes. There is no
 a valid signature gets in, so a new device you enroll or a new person you grant just works, with nothing
 to sync.
 
+A revoke takes effect on the node's next `serve`: the gate reads the denylist at startup, so a revoke made
+while a node is running applies when you restart it. Live revocation, cutting a held slip without a
+restart, lands with the daemon.
+
 ## Sharing access: fleets and slips
 
 Two more nouns cover letting other people in.
