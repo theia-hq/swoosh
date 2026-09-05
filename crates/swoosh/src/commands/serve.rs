@@ -428,7 +428,9 @@ impl ServeCmd {
             use std::io::Write as _;
             let _ = writeln!(std::io::stdout(), "{}", stopped.message());
         }
-        node.close().await;
+        // The bound node's teardown (iroh's graceful `Endpoint::close`) is owned by the composition root,
+        // which closes it after every reaching verb returns; `serve` only drives the exposer's own graceful
+        // drain above, then hands back so the root closes once for the whole family.
         Ok(())
     }
 

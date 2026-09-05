@@ -532,7 +532,7 @@ async fn run() -> eyre::Result<()> {
             let endpoint = bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?;
             let discovery = PeerHint::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
-            reach.run(&node, ctx).await
+            run_and_close(reach, &node, ctx).await
         }
         // quirk is direct-only with no internal discovery, so the composed discovery is its only way
         // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
@@ -540,9 +540,29 @@ async fn run() -> eyre::Result<()> {
             let endpoint = bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?;
             let discovery = PeerHint::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
-            reach.run(&node, ctx).await
+            run_and_close(reach, &node, ctx).await
         }
     }
+}
+
+/// Run a reaching verb against the bound node, then CLOSE the node on the way out on EVERY path (a clean
+/// return and an error alike). The composition root owns the node's lifetime, so teardown lives here in one
+/// place for the whole reaching family: iroh's `Endpoint` logs a red "Aborting ungracefully" if it drops
+/// without an awaited close, so a verb that binds iroh must close it before the node drops (quirk's close is
+/// a no-op). One owner of teardown, so no verb re-implements it; `serve`'s own graceful-drain still returns
+/// first, and this is the single close that follows it.
+async fn run_and_close<T: Transport, D: Discovery>(
+    reach: Reach,
+    node: &Node<T, D>,
+    ctx: reaching::ReachCtx<'_>,
+) -> eyre::Result<()>
+where
+    <T::Session as bifrost::Session>::Write: Send + 'static,
+    <T::Session as bifrost::Session>::Read: Send + 'static,
+{
+    let result = reach.run(node, ctx).await;
+    node.close().await;
+    result
 }
 
 /// The contacts file to open: beside an explicit `--key`, else the default config location.

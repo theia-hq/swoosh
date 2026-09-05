@@ -16,7 +16,7 @@
 
 use bifrost::{Discovery, Node, Session as _, Transport};
 use clap::Args;
-use tightbeam::tunnel::ServiceCatalog;
+use tightbeam::tunnel;
 use tokio::io::AsyncReadExt as _;
 
 use crate::commands::serve::CONTROL_SERVICES_SERVICE;
@@ -139,20 +139,31 @@ impl ServiceCmd {
         // badge. On admission the peer writes the self-delimiting catalog blob and closes; a refusal maps to a
         // loud stream error here (a refusal is a typed loud error, never a silent empty read).
         let session = connector.open_service(node).await?;
-        let (writer, mut reader) = session
-            .open_bi()
-            .await
-            .map_err(|error| eyre::eyre!("could not read services from {dial}: {error}"))?;
+        let (writer, mut reader) = match session.open_bi().await {
+            Ok(halves) => halves,
+            // The family-gated `control.services` read refuses a non-member: surface it as the SAME teaching
+            // refusal the ping/status ladder gives, not the bare transport word. The reason lives in the
+            // error's SOURCE (a `bifrost::Error::Stream` renders as just "stream"), recovered by
+            // `gate_refusal_reason` and rendered through `refusal_reason` so the uniform token reads
+            // descriptively and is never doubled (`refused (refused)`). A genuine i/o failure keeps its own
+            // message; a refusal is not "the peer serves nothing".
+            Err(error) => match tunnel::gate_refusal_reason(&error) {
+                Some(reason) => eyre::bail!(
+                    "{dial}: reached, but refused ({})",
+                    tunnel::refusal_reason(&reason)
+                ),
+                None => eyre::bail!("could not read services from {dial}: {error}"),
+            },
+        };
         // The read sends nothing; drop the write half so the peer's handler write completes (the same shape
         // the roster read uses).
         drop(writer);
 
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
-        let catalog = ServiceCatalog::decode(&bytes)?;
+        let catalog = tunnel::ServiceCatalog::decode(&bytes)?;
 
         print_catalog(&catalog);
-        node.close().await;
         Ok(())
     }
 }
@@ -160,7 +171,7 @@ impl ServiceCmd {
 /// Print the catalog as a terse `SERVICE  GATE` table, header then one row per service (name-sorted by the
 /// catalog). An empty catalog prints just the header, so "the peer serves nothing" reads as an empty table
 /// rather than no output.
-fn print_catalog(catalog: &ServiceCatalog) {
+fn print_catalog(catalog: &tunnel::ServiceCatalog) {
     // Width the SERVICE column to the widest name (min the header width), so the GATE column lines up.
     let width = catalog
         .entries()
