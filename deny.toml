@@ -1,0 +1,14 @@
+# cargo-deny sources allow-list (Track C, release-robustness-spec.md §2).
+#
+# The hand-rolled scripts/lock-guard.sh owns path-drift, sibling rev, and own-version skew. This
+# owns the complementary SUPPLY-CHAIN question it does not: no crate may resolve from an
+# unexpected git host or registry (a typosquat, a hijacked mirror, an accidental `git = "a-fork"`).
+# Only our own siblings (github.com/theia-hq) and crates.io are allowed by source.
+#
+# Scope is deliberately `sources` ONLY for Track C. advisories/bans/licenses are valuable but a
+# separate policy; do not scope-creep this into a full supply-chain gate. Run: cargo deny check sources
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
+allow-git        = ["https://github.com/theia-hq"]

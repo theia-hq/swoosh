@@ -1,0 +1,12 @@
+#!/bin/sh
+# pre-commit -- block a commit that would record a drifted Cargo.lock.
+#
+# Runs the lock-source guard against the STAGED tree (lock-guard.sh reads the git index, i.e.
+# exactly what this commit would record), so a path-drifted, rev-mismatched, or version-skewed
+# lock cannot be committed. This is the local first line; CI runs the same script as the hard
+# backstop (hooks are opt-in per clone). Enable in every repo with `just install-hooks` (sets
+# `git config core.hooksPath scripts/hooks`), or per repo: git config core.hooksPath scripts/hooks
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+sh "$root/scripts/lock-guard.sh" "$root"
