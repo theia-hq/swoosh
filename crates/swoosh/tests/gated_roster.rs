@@ -22,7 +22,9 @@ use nauthy::{Denylist, Identity, VerifyKey};
 use swoosh::contacts::{Contacts, DeviceLabel};
 use swoosh::roster::{self, Epoch, Member, RosterDoc};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Services};
+use tightbeam::tunnel::{
+    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Services,
+};
 use tokio::io::AsyncReadExt as _;
 
 /// The signet's fixed secret: its ed25519 public half is the signet the gate trusts and the key that signs
@@ -81,7 +83,7 @@ async fn proof() {
         let registry = swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir())
             .unwrap()
             .with("roster", swoosh::commands::serve::Roster::new(blob));
-        Exposer::new(services, registry, gate)
+        Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
             .unwrap()
             .run(&host, CancellationToken::new())
             .await

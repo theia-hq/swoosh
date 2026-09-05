@@ -21,7 +21,9 @@ use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, Speedtest};
 use nauthy::Denylist;
 use swoosh::commands::serve::{CONTROL_STOP_SERVICE, Stop};
-use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, PublicRequest, Services};
+use tightbeam::tunnel::{
+    self, CancellationToken, Connector, Exposer, PublicRequest, PublicUnsafeRequest, Services,
+};
 
 /// The signet's fixed secret: its public half is the family the gate trusts. No badge here is rooted at it,
 /// because the whole point is that a STRANGER (rooted nowhere the gate trusts) still reaches the OPEN service.
@@ -70,7 +72,7 @@ async fn proof() {
             .with(CONTROL_STOP_SERVICE, Stop::new(CancellationToken::new()));
         // `--public speed` SUCCEEDS: `speed` is OptIn (openable), and `control.stop` (Never) is left gated by
         // set non-membership, so `with_public` does not refuse the node. This is the build that used to die.
-        let exposer = Exposer::new(services, registry, gate)
+        let exposer = Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
             .unwrap()
             .with_public(PublicRequest::new(["speed".to_owned()]))
             .expect("`--public speed` builds: speed is openable, control.stop stays gated");

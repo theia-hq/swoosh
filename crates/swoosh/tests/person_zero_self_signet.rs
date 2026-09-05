@@ -31,7 +31,9 @@ use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, Speedtest};
 use nauthy::{Denylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Services};
+use tightbeam::tunnel::{
+    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Services,
+};
 
 /// The person-zero node's OWN secret. Its ed25519 public half is BOTH the node's identity key AND the signet
 /// root its self-gate trusts, because a person-zero node IS its own signet root. This is the value the
@@ -82,7 +84,7 @@ async fn proof() {
                 tunnel::resolve_gate(Some(self_signet), empty_denylist("self").await).unwrap();
             let registry =
                 swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir()).unwrap();
-            Exposer::new(services, registry, gate)
+            Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
                 .unwrap()
                 .run(&host, CancellationToken::new())
                 .await

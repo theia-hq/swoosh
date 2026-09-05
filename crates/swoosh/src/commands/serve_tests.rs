@@ -6,30 +6,36 @@
 use core::net::SocketAddr;
 use std::collections::{HashMap, HashSet};
 
-use tightbeam::tunnel::{Exposer, ManifestEntry, Posture, PublicRequest, Services, TargetKind};
+use tightbeam::tunnel::{
+    Exposer, ManifestEntry, Posture, PublicRequest, PublicUnsafeRequest, RawSource, Registry,
+    Services, TargetKind,
+};
 
 use super::{
-    FetchScope, MdnsState, ReachKind, Stopped, describe, display_targets, reach_section,
+    FetchScope, Group, MdnsState, ReachKind, Stopped, describe, display_targets, reach_section,
     render_ready_banner, serving_section,
 };
 
-/// A gated handler entry for a banner test (the common case: everything behind the family gate).
+/// A gated handler/forward entry for a banner test (the common case: everything behind the family gate). A
+/// handler or a forward carries no raw source to warn about.
 fn entry_gated(name: &str, kind: TargetKind, amplifier: bool) -> ManifestEntry {
     ManifestEntry {
         name: name.to_owned(),
         posture: Posture::Gated,
         kind,
         amplifier,
+        raw_source: None,
     }
 }
 
-/// An opened (public) handler entry for a banner test.
+/// An opened (public) handler/forward entry for a banner test.
 fn entry_open(name: &str, kind: TargetKind, amplifier: bool) -> ManifestEntry {
     ManifestEntry {
         name: name.to_owned(),
         posture: Posture::Open,
         kind,
         amplifier,
+        raw_source: None,
     }
 }
 
@@ -464,6 +470,7 @@ fn public_speed_builds_and_public_unknown_is_refused() {
         services(),
         super::registry([0u8; 32], std::env::temp_dir()).unwrap(),
         gated(),
+        PublicUnsafeRequest::none(),
     )
     .unwrap()
     .with_public(PublicRequest::new(["speed".to_owned()]));
@@ -477,6 +484,7 @@ fn public_speed_builds_and_public_unknown_is_refused() {
         services(),
         super::registry([0u8; 32], std::env::temp_dir()).unwrap(),
         gated(),
+        PublicUnsafeRequest::none(),
     )
     .unwrap();
     let Err(error) = assembled.with_public(PublicRequest::new(["nope".to_owned()])) else {
@@ -485,6 +493,118 @@ fn public_speed_builds_and_public_unknown_is_refused() {
     assert!(
         error.to_string().contains("no service named"),
         "an unknown public name is refused with the served list: {error}"
+    );
+}
+
+/// `serve logs=file:<path> --public-unsafe logs` lights the `public-UNSAFE` banner tier end-to-end: the raw
+/// stream the operator KNOWINGLY named reaches `Posture::Open`, so `Group::of` sorts it into `PublicUnsafe`,
+/// and the banner carries BOTH the loud `public-UNSAFE !!` marker and the RESOLVED ABSOLUTE path of the
+/// source (the delib-11 exfil tell: the operator sees the exact bytes a stranger can read). Built through the
+/// real `Exposer::new` + `manifest` path so the posture-union and `raw_source` resolution are exercised, not
+/// a hand-built manifest.
+#[test]
+fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
+    let path = std::env::temp_dir().join("swoosh-public-unsafe-banner");
+    let services = Services::parse(&[format!("logs=file:{}", path.display())]).unwrap();
+    // A family BASE gate (not `Gate::Open`), so `new`'s whole-node raw-stream door never fires; the unsafe
+    // OVERLAY alone opens `logs` (swoosh's per-service model). An empty registry suffices: a `file:` source is
+    // a raw stream, not a handler, so it needs nothing registered.
+    let exposer = Exposer::new(
+        services,
+        Registry::new(),
+        gated(),
+        PublicUnsafeRequest::new(["logs".to_owned()]),
+    )
+    .expect("a raw stream named in the unsafe overlay builds under a family gate");
+    let manifest = exposer.manifest();
+    let logs = manifest
+        .iter()
+        .find(|entry| entry.name == "logs")
+        .expect("`logs` is in the manifest");
+    assert_eq!(
+        logs.posture,
+        Posture::Open,
+        "the unsafe-open raw stream reads Open, so its posture lights the loud tier"
+    );
+    assert_eq!(
+        super::Group::of(logs),
+        Group::PublicUnsafe,
+        "an open raw stream sorts into the loudest group"
+    );
+    let RawSource::Path(absolute) = logs
+        .raw_source
+        .as_ref()
+        .expect("an open raw stream declares its resolved source")
+    else {
+        panic!("a file: source resolves to an absolute Path, not Stdin: {logs:?}");
+    };
+
+    let banner = render_ready_banner(
+        "bf01exampleid",
+        ReachKind::Internet,
+        MdnsState::Available,
+        &[],
+        &manifest,
+        &display_targets(&[format!("logs=file:{}", path.display())]),
+        &HashSet::new(),
+        "ctrl-c to stop",
+    );
+    assert!(
+        banner.contains("public-UNSAFE !!"),
+        "the open raw stream fires the loud banner tier: {banner}"
+    );
+    assert!(
+        banner.contains(absolute.as_str()),
+        "the banner names the RESOLVED ABSOLUTE path of the bytes at risk ({absolute}): {banner}"
+    );
+}
+
+/// `serve logs=file:<path> --public logs` (the SAFE overlay, not the unsafe one) is REFUSED at build with the
+/// unified redirect (STRING A): a raw byte source has no auth of its own, so `--public` will not serve it, and
+/// the message points the operator at the distinct louder opt-in. This is the accident-vs-intent wall: a raw
+/// stream never slips open through the everyday flag.
+#[test]
+fn plain_public_refuses_a_raw_stream_and_points_at_public_unsafe() {
+    let path = std::env::temp_dir().join("swoosh-plain-public-raw");
+    let services = Services::parse(&[format!("logs=file:{}", path.display())]).unwrap();
+    let assembled = Exposer::new(
+        services,
+        Registry::new(),
+        gated(),
+        PublicUnsafeRequest::none(),
+    )
+    .expect("assembles under a family gate with no unsafe opt-in");
+    let Err(error) = assembled.with_public(PublicRequest::new(["logs".to_owned()])) else {
+        panic!("`--public` naming a raw stream must be refused, not silently opened");
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("raw byte source") && message.contains("unsafe raw-stream set"),
+        "the refusal redirects a raw stream to the distinct louder opt-in: {message:?}"
+    );
+}
+
+/// `--public-unsafe ping` (a HANDLER, not a raw stream) is REFUSED with the reverse redirect (STRING B): the
+/// unsafe overlay is ONLY for raw byte sources, and a handler is opened through the everyday public overlay
+/// instead. The disjoint-token partition holds in both directions, so neither flag silently opens the other's
+/// class.
+#[test]
+fn public_unsafe_naming_a_non_raw_service_is_refused() {
+    let services = Services::parse(&["ping=ping:".to_owned()]).unwrap();
+    // `ping` must be a registered handler so `Exposer::new`'s handler check passes and control reaches the
+    // `prove_unsafe` wall, where naming a handler in the unsafe overlay is the redirect under test.
+    let registry = super::registry([0u8; 32], std::env::temp_dir()).unwrap();
+    let Err(error) = Exposer::new(
+        services,
+        registry,
+        gated(),
+        PublicUnsafeRequest::new(["ping".to_owned()]),
+    ) else {
+        panic!("a handler named in the unsafe overlay must be redirected, not opened");
+    };
+    assert!(
+        error.to_string().contains("not a raw byte source"),
+        "the unsafe overlay redirects a handler to the public overlay: {error}"
     );
 }
 
@@ -497,7 +617,7 @@ fn public_sshd_is_refused_with_a_teaching_error() {
     // The `ssh` feature registers the `sshd` handler; without it, `Exposer::new` would refuse it as
     // unregistered before `with_public` ever runs, which is why this test is feature-gated.
     let registry = super::registry([0u8; 32], std::env::temp_dir()).unwrap();
-    let assembled = Exposer::new(services, registry, gated()).unwrap();
+    let assembled = Exposer::new(services, registry, gated(), PublicUnsafeRequest::none()).unwrap();
     let Err(error) = assembled.with_public(PublicRequest::new(["ssh".to_owned()])) else {
         panic!("`--public ssh` (a keyless shell) must be refused");
     };

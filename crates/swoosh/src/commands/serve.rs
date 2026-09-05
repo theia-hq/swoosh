@@ -27,8 +27,8 @@ use clap::Args;
 use nauthy::{Denylist, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{
-    self, CancellationToken, Exposer, ManifestEntry, Posture, PublicRequest, Registry, Services,
-    TargetKind,
+    self, CancellationToken, Exposer, ManifestEntry, Posture, PublicRequest, PublicUnsafeRequest,
+    RawSource, Registry, Services, TargetKind,
 };
 
 use crate::contacts::{Contacts, Petname};
@@ -105,9 +105,30 @@ pub struct ServeCmd {
                      (`sshd:`, remote code execution) is refused with a teaching error, and \
                      `control.stop`/`control.services` can never be opened. `ping`/`speed` MAY be opened, \
                      but they have no responder-side rate limit yet, so an open one lets an anonymous \
-                     caller drain this node's uplink (an amplifier); the readiness banner says so."
+                     caller drain this node's uplink (an amplifier); the readiness banner says so.\n\nA \
+                     raw-stream service (file:/fifo:/stdin:) has no auth of its own, so --public refuses it \
+                     and points you at --public-unsafe, the distinct, louder opt-in."
     )]
     pub public: Vec<String>,
+    /// serve named RAW-STREAM services (file:/fifo:/stdin:) to anyone, unauthenticated (comma-list, repeatable)
+    // CLI-Architect round-3 (Rulings 1 & 2): the founder's `--public <svc>!` bang-suffix was REJECTED (a
+    // name-dependent shell footgun that reopens the accident-vs-intent gap); the separate `--public-unsafe
+    // <names>` value-grammar sibling of `--public` is KEPT. Unlike the thin bin, swoosh has a family base, so
+    // a named raw stream is opened by this overlay alone: NO `requires` (the thin bin's whole-node `--public`
+    // is why it alone carries `requires = "public"`).
+    #[arg(
+        long,
+        value_name = "svc",
+        value_delimiter = ',',
+        long_help = "Serve these NAMED raw-stream services (file:/fifo:/stdin:) to anyone, unauthenticated \
+                     (comma-list, repeatable). This is the DISTINCT, louder opt-in for a source that has NO \
+                     auth of its own: --public refuses a raw stream and points you here. The readiness \
+                     banner names the RESOLVED ABSOLUTE PATH of each, because `--public-unsafe logs` where \
+                     `logs=file:~/.ssh/id_rsa` would hand that file's bytes to anyone who reaches this node. \
+                     Each name must be a raw-stream service you serve; a handler or a forward is redirected \
+                     to --public."
+    )]
+    pub public_unsafe: Vec<String>,
     /// suppress the readiness banner (for unattended/CI use)
     #[arg(long)]
     pub quiet: bool,
@@ -284,9 +305,14 @@ impl ServeCmd {
         // below is the wall that proves each one exposed and open-safe (per-service), turning it into the
         // gate's proven overlay; a `Never` service or an unknown name bails there.
         let public = PublicRequest::new(self.public.clone());
+        // The operator's raw UNSAFE raw-stream request: the UNPROVEN set of raw-stream names to serve to
+        // strangers. `Exposer::new` below is the wall that proves each one an exposed raw stream (a handler or
+        // a forward named here is redirected to `--public`, an unknown name bails). Kept DISJOINT from
+        // `public` so the louder opt-in stays a distinct, deliberate thing.
+        let public_unsafe = PublicUnsafeRequest::new(self.public_unsafe.clone());
         // Resolve the node BASE gate before announcing readiness: an unprovisioned node fails HERE, through
         // the ONE shared policy point, rather than ever serving on a permissive default. Opening individual
-        // services is the separate `--public` overlay, never a node-wide value.
+        // services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
         let gate = tunnel::resolve_gate(signet, denylist)?;
         // Refuse an unconstrained PUBLIC fetch per-service: for each fetch service NAMED in `--public` whose
         // allowlist is unconstrained, bail at build time (an open egress relay). With per-service scopes in
@@ -296,7 +322,7 @@ impl ServeCmd {
         // Snapshot the served catalog (names + effective PER-SERVICE posture: open iff opened by `--public`,
         // else gated) ONCE, here, for the `control.services` read handler to serve. Built from the same raw
         // request `with_public` proves below, so a name reads `open` only when the proof would also pass.
-        let catalog = services.catalog(&gate, &public);
+        let catalog = services.catalog(&gate, &public, &public_unsafe);
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
         // `--expires` timer and the gated `control.stop` handler each hold a CLONE as the node-control
         // capability -- they may REQUEST the stop, never tear the node down themselves. So this one token is
@@ -320,7 +346,8 @@ impl ServeCmd {
             .with("roster", Roster::new(roster_blob))
             .with(CONTROL_STOP_SERVICE, Stop::new(cancel.clone()))
             .with(CONTROL_SERVICES_SERVICE, ServiceList::new(catalog));
-        let exposer = Exposer::new(services.clone(), registry, gate)?.with_public(public)?;
+        let exposer =
+            Exposer::new(services.clone(), registry, gate, public_unsafe)?.with_public(public)?;
 
         if !self.quiet {
             let addr = node.local_addr();
@@ -583,10 +610,27 @@ fn describe(
             (label, handler_gloss(scheme))
         }
         TargetKind::Forward => (format!("{name} -> {addr}"), "local TCP service".to_owned()),
-        TargetKind::RawStream => (
-            format!("{name} -> {addr}"),
-            "streams raw bytes to any caller, no auth".to_owned(),
-        ),
+        // The label keeps the operator's typed target (`logs -> file:~/...`); the GLOSS is where the danger
+        // is loud. An OPEN raw stream names the RESOLVED ABSOLUTE source (from tightbeam's declared
+        // `raw_source`, not the un-resolved typed string) so the warning shows the exact bytes at risk; the
+        // loud path is reserved for the actually-open case, so it fires exactly where the danger is. A GATED
+        // raw stream keeps the quiet gloss (the family gate terminates it).
+        TargetKind::RawStream => {
+            let gloss = match (entry.posture, &entry.raw_source) {
+                (Posture::Open, Some(RawSource::Path(absolute))) => {
+                    format!("serving the raw bytes of {absolute} to anyone, no auth")
+                }
+                (Posture::Open, Some(RawSource::Stdin)) => {
+                    "serving this process's piped stdin to anyone, no auth".to_owned()
+                }
+                // Open but no declared source (defensive: a raw stream always declares one) or gated: the
+                // quiet gloss the family-gated case has always shown.
+                (Posture::Open, None) | (Posture::Gated, _) => {
+                    "streams raw bytes to any caller, no auth".to_owned()
+                }
+            };
+            (format!("{name} -> {addr}"), gloss)
+        }
     }
 }
 

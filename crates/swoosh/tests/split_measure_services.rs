@@ -25,7 +25,9 @@ use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, ProtocolError, Speedtest};
 use nauthy::{Denylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Services};
+use tightbeam::tunnel::{
+    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Services,
+};
 
 /// The node's OWN secret: its ed25519 public half is both its identity key and the self-signet its gate
 /// roots at (a person-zero node is its own signet root), so a member badge rooted here is admitted.
@@ -170,7 +172,7 @@ async fn expose(services: &[String]) -> NodeId {
     tokio::task::spawn_local(async move {
         let gate = tunnel::resolve_gate(Some(self_signet), empty_denylist("offer").await).unwrap();
         let registry = swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir()).unwrap();
-        Exposer::new(services, registry, gate)
+        Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
             .unwrap()
             .run(&host, CancellationToken::new())
             .await
