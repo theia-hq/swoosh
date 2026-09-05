@@ -11,4 +11,12 @@
 unknown-registry = "deny"
 unknown-git      = "deny"
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
-allow-git        = ["https://github.com/theia-hq"]
+
+# Allow the whole theia-hq GitHub ORG (every sibling: bifrost, nauthy, ...), which is exactly the
+# ratified trust boundary stated above. A bare `allow-git = ["https://github.com/theia-hq"]` does NOT
+# express this: cargo-deny's `allow-git` matches a FULL repository URL, so an org-only prefix matches no
+# source at all (each sibling resolves from `github.com/theia-hq/<repo>`, and cargo-deny warns
+# `unmatched-source`). `allow-org.github` is the org-level match cargo-deny provides for precisely this
+# "our whole org is trusted" case; the trust surface is unchanged (theia-hq org + crates.io only).
+[sources.allow-org]
+github = ["theia-hq"]
