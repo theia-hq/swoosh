@@ -4991,7 +4991,7 @@ dependencies = [
 [[package]]
 name = "tightbeam"
 version = "0.3.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=1c59a69032a2cb266bf302cb9fdf8c7c378c555a#1c59a69032a2cb266bf302cb9fdf8c7c378c555a"
+source = "git+https://github.com/theia-hq/tightbeam?rev=88a9015ce0383e032a7e5b89967f52b7b82220fd#88a9015ce0383e032a7e5b89967f52b7b82220fd"
 dependencies = [
  "bifrost",
  "bifrost-iroh",

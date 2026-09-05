@@ -638,6 +638,12 @@ fn describe(
             };
             (format!("{name} -> {addr}"), gloss)
         }
+        // tightbeam's built-in loopback reflector: it opens no host resource and reflects only the caller's
+        // own bytes, so it carries no danger gloss (an open echo sits in the plain `public` group, never
+        // `public-UNSAFE`). The name reads alone (like `speed`), the target being the built-in itself.
+        // FLAG(CLI-Architect/Scribe): the echo row label/gloss wording is a reversible default kept minimal to
+        // render the new kind; open to the owner's final call.
+        TargetKind::Echo => (name.to_owned(), "echoes your bytes back to you".to_owned()),
     }
 }
 
