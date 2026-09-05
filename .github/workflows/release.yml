@@ -73,8 +73,21 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: ${{ matrix.asset }}
+      - name: extract release notes
+        working-directory: swoosh
+        # Fill the GH release body from the matching CHANGELOG section (v0.7.0 shipped an empty body). Fails
+        # if the section is missing, which also enforces the reconcile-CHANGELOG-before-tag rule.
+        run: |
+          v="${GITHUB_REF_NAME}"
+          awk -v h="## $v" '
+            $0 ~ "^"h"([[:space:]]|$)" {p=1; next}
+            p && /^## / {exit}
+            p {print}
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          test -s RELEASE_NOTES.md || { echo "no CHANGELOG section for $v"; exit 1; }
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: swoosh/RELEASE_NOTES.md
           files: |
             ${{ matrix.asset }}
             ${{ matrix.asset }}.sha256
