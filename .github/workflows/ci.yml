@@ -23,10 +23,14 @@ jobs:
         run: cargo test --locked
       - name: clippy
         run: cargo clippy --all-targets -- -D warnings
-      - name: cargo-deny (sources)
-        uses: EmbarkStudios/cargo-deny-action@v2
+      # Run cargo-deny on the runner (not the action's container): swoosh pins a toolchain in
+      # rust-toolchain.toml, which the containerized action cannot honor. On the runner, rustup resolves it.
+      - name: install cargo-deny
+        uses: taiki-e/install-action@v2
         with:
-          command: check sources
+          tool: cargo-deny
+      - name: cargo-deny (sources)
+        run: cargo deny check sources
   fmt:
     runs-on: ubuntu-latest
     steps:
