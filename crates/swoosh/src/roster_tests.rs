@@ -107,13 +107,13 @@ fn a_cut_roster_verifies_against_its_signet() {
     let id = identity(7);
     let doc = sample_doc();
     let blob = super::cut(&id, &doc);
-    assert_eq!(super::verify(&blob, id.node_id()), Ok(doc));
+    assert_eq!(super::verify(&blob, id.verifying_key()), Ok(doc));
 }
 
 #[test]
 fn verify_rejects_a_foreign_signet() {
     let blob = super::cut(&identity(7), &sample_doc());
-    let stranger = identity(8).node_id();
+    let stranger = identity(8).verifying_key();
     assert_eq!(
         super::verify(&blob, stranger),
         Err(RosterVerifyError::Signature(SignError::ForeignSigner))
@@ -129,7 +129,7 @@ fn verify_rejects_a_tampered_payload() {
     let last = blob.len() - 1;
     blob[last] ^= 0xff;
     assert_eq!(
-        super::verify(&blob, id.node_id()),
+        super::verify(&blob, id.verifying_key()),
         Err(RosterVerifyError::Signature(SignError::BadSignature))
     );
 }

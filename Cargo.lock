@@ -2727,14 +2727,16 @@ dependencies = [
 
 [[package]]
 name = "nauthy"
-version = "0.0.0"
-source = "git+https://github.com/theia-hq/nauthy?rev=0e9e357db137c74522d188e9147b3c62071e75bb#0e9e357db137c74522d188e9147b3c62071e75bb"
+version = "0.1.0"
+source = "git+https://github.com/theia-hq/nauthy?rev=d00f41366201f583c8e7a7431b15254719de1f93#d00f41366201f583c8e7a7431b15254719de1f93"
 dependencies = [
  "biscuit-auth",
  "data-encoding",
  "ed25519-dalek 2.2.0",
+ "rand_core 0.6.4",
  "thiserror 2.0.20",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -4989,7 +4991,7 @@ dependencies = [
 [[package]]
 name = "tightbeam"
 version = "0.3.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=46905c6dfc008f008b6a1003e75e68736ae16c17#46905c6dfc008f008b6a1003e75e68736ae16c17"
+source = "git+https://github.com/theia-hq/tightbeam?rev=717ab33ece12cae57121116cce483c0c8043751b#717ab33ece12cae57121116cce483c0c8043751b"
 dependencies = [
  "bifrost",
  "bifrost-iroh",

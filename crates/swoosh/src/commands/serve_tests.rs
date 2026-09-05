@@ -453,9 +453,9 @@ fn a_gated_bare_fetch_is_allowed() {
 /// A minimal family gate for a construction test: an empty, non-persisting family gate, so `with_public`'s
 /// per-service proof runs without standing up a signet.
 fn gated() -> nauthy::Gate {
-    nauthy::Gate::family(
+    nauthy::Gate::rooted(
         nauthy::VerifyKey::new([1u8; 32]),
-        nauthy::Denylist::empty(std::path::PathBuf::new()),
+        nauthy::FileDenylist::empty(std::path::PathBuf::new()),
     )
 }
 

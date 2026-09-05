@@ -357,7 +357,7 @@ mod tests {
         let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
         let fleet = nauthy::Identity::from_secret(&[2u8; 32])
             .expect("valid fleet secret")
-            .node_id();
+            .verifying_key();
         tightbeam::tunnel::mint_signet_link(
             &work,
             &"ssh".parse().expect("valid service"),

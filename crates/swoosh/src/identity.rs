@@ -29,7 +29,7 @@ use zeroize::{Zeroize as _, ZeroizeOnDrop};
 /// One year is the chosen point: long enough that a device provisioned once keeps reaching family
 /// services across a normal ownership span without a re-mint chore, short enough that a badge whose
 /// device fell out of the family without being denylisted does not stand indefinitely. Revocation stays
-/// the primary, immediate control (the `Denylist`, offline + live); the TTL is the backstop. A signet
+/// the primary, immediate control (the `FileDenylist`, offline + live); the TTL is the backstop. A signet
 /// holder can re-mint (`swoosh mint`) and re-adopt to refresh a badge before it lapses.
 const DEVICE_BADGE_TTL: core::time::Duration = core::time::Duration::from_secs(365 * 24 * 60 * 60);
 
@@ -85,7 +85,10 @@ impl Secret {
         let ttl = Duration::from_secs(5 * 60);
         let badge = self
             .cap_identity()?
-            .mint_member(self.node_id().verify_key(), nauthy::expires_in(ttl))?
+            .mint_member(
+                self.node_id().verify_key(),
+                nauthy::Request::expires_in(ttl),
+            )?
             .seal()?
             .link()?;
         Ok(badge)
@@ -117,7 +120,10 @@ impl Secret {
     pub fn sign_device_badge(&self, device: NodeId) -> eyre::Result<String> {
         let badge = self
             .cap_identity()?
-            .mint_member(device.verify_key(), nauthy::expires_in(DEVICE_BADGE_TTL))?
+            .mint_member(
+                device.verify_key(),
+                nauthy::Request::expires_in(DEVICE_BADGE_TTL),
+            )?
             .seal()?
             .link()?;
         Ok(badge)

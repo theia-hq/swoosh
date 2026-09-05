@@ -384,7 +384,7 @@ impl Reach {
                         .await?
                         .unwrap_or_else(|| secret.node_id()),
                 ),
-                denylist: nauthy::Denylist::load(config::revoked_path(key)?).await?,
+                denylist: nauthy::FileDenylist::load(config::revoked_path(key)?).await?,
                 roster_blob: std::sync::Arc::new(swoosh::commands::serve::cut_roster(
                     contacts, secret,
                 )?),
@@ -694,7 +694,7 @@ mod tests {
         let work = nauthy::Identity::from_secret(&[3u8; 32]).expect("valid work secret");
         let fleet = nauthy::Identity::from_secret(&[4u8; 32])
             .expect("valid fleet secret")
-            .node_id();
+            .verifying_key();
         tightbeam::tunnel::mint_signet_link(
             &work,
             &"ssh".parse().expect("valid service"),

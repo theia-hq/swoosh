@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use bifrost::{CryptoKind, NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{Denylist, Identity, VerifyKey};
+use nauthy::{FileDenylist, Identity, VerifyKey};
 use swoosh::contacts::{Contacts, DeviceLabel};
 use swoosh::roster::{self, Epoch, Member, RosterDoc};
 use tightbeam::identity::AsVerifyKey as _;
@@ -108,7 +108,7 @@ async fn proof() {
         .await
         .expect("read the roster blob");
 
-    let verified = roster::verify(&bytes, signet.node_id())
+    let verified = roster::verify(&bytes, signet.verifying_key())
         .expect("the roster is signed by the signet we trust");
 
     // Hydrate contacts from the VERIFIED doc and see the whole fleet under `me`, with no id copied by hand.
@@ -152,7 +152,7 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
         .unwrap()
         .mint_member(
             bound.verify_key(),
-            nauthy::expires_in(Duration::from_secs(300)),
+            nauthy::Request::expires_in(Duration::from_secs(300)),
         )
         .unwrap()
         .seal()
@@ -161,9 +161,9 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
         .unwrap()
 }
 
-async fn empty_denylist(tag: &str) -> Denylist {
+async fn empty_denylist(tag: &str) -> FileDenylist {
     let path =
         std::env::temp_dir().join(format!("swoosh-gated-roster-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    Denylist::load(path).await.unwrap()
+    FileDenylist::load(path).await.unwrap()
 }

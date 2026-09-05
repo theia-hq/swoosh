@@ -24,7 +24,7 @@ use std::sync::Arc;
 use ::fetch::OriginAllowlist;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
-use nauthy::{Denylist, VerifyKey};
+use nauthy::{FileDenylist, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{
     self, CancellationToken, Exposer, ManifestEntry, Posture, PublicRequest, PublicUnsafeRequest,
@@ -146,8 +146,13 @@ pub struct ServeCmd {
     /// `serve` reads its OWN context (Craftsman): it is deliberately NOT a `ReachCtx` field, so the reach
     /// context stays uniform, and the old `Option<ExposeContext>` threaded through the generic reach
     /// dispatch plus its "internal: serve reached without its expose context" runtime guard are gone.
+    // Boxed so the runtime context (which embeds a `FileDenylist`, itself carrying a `Mutex` and its
+    // live-reload state) does not bloat `ServeCmd` inline: `Serve(ServeCmd)` is a variant of the clap
+    // command enums, and an unboxed context makes that one variant far larger than the rest
+    // (`clippy::large_enum_variant`). A `Box` keeps `ServeCmd` pointer-sized here; the context is a
+    // root-attached, run-once value, so the one allocation is free of any hot path.
     #[arg(skip)]
-    pub expose: Option<ExposeContext>,
+    pub expose: Option<Box<ExposeContext>>,
 }
 
 /// What `serve` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, the revocation
@@ -162,14 +167,14 @@ pub struct ExposeContext {
     /// key (person-zero self-trusts).
     pub signet: Option<NodeId>,
     /// The revocation denylist the gate honors.
-    pub denylist: Denylist,
+    pub denylist: FileDenylist,
     /// The signet-signed roster blob the `roster:` handler serves, cut once per `serve` from the
     /// operator's contacts while the secret is still live.
     pub roster_blob: Arc<Vec<u8>>,
 }
 
 impl core::fmt::Debug for ExposeContext {
-    /// `Denylist` holds a `Mutex` (not `Debug`), so this impl names the fields it can and elides that one,
+    /// `FileDenylist` holds a `Mutex` (not `Debug`), so this impl names the fields it can and elides that one,
     /// which is enough for the derived `Debug` on `ServeCmd`/`Command` to compile.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExposeContext")
@@ -226,17 +231,17 @@ impl crate::reaching::Reaching for ServeCmd {
         // composition-root bug, not a user error. Surface it as an internal error rather than panicking:
         // unlike the OLD guard, this is not a threaded `Option` a whole family of verbs could trip, it is
         // serve reading its own field, so the failure is local and one verb wide.
-        let Some(ExposeContext {
-            host_seed,
-            signet,
-            denylist,
-            roster_blob,
-        }) = self.expose.take()
-        else {
+        let Some(expose) = self.expose.take() else {
             eyre::bail!(
                 "internal: serve reached run without its expose context (composition-root bug)"
             );
         };
+        let ExposeContext {
+            host_seed,
+            signet,
+            denylist,
+            roster_blob,
+        } = *expose;
         self.run_serve(node, host_seed, signet, denylist, roster_blob)
             .await
     }
@@ -248,7 +253,7 @@ impl ServeCmd {
     /// runnable, so a `serve` that reached `run` without one is a root bug, not a representable state a
     /// user hits.
     pub fn with_expose(mut self, expose: ExposeContext) -> Self {
-        self.expose = Some(expose);
+        self.expose = Some(Box::new(expose));
         self
     }
 }
@@ -266,7 +271,7 @@ impl ServeCmd {
         node: &Node<T, D>,
         host_seed: [u8; 32],
         signet: Option<NodeId>,
-        denylist: Denylist,
+        denylist: FileDenylist,
         roster_blob: Arc<Vec<u8>>,
     ) -> eyre::Result<()>
     where

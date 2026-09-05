@@ -23,7 +23,7 @@ use core::time::Duration;
 use bifrost::wire::{Blob, Transfer};
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{Denylist, Identity};
+use nauthy::{FileDenylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{
     self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Services,
@@ -163,7 +163,7 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
         .unwrap()
         .mint_member(
             bound.verify_key(),
-            nauthy::expires_in(Duration::from_secs(300)),
+            nauthy::Request::expires_in(Duration::from_secs(300)),
         )
         .unwrap()
         .seal()
@@ -173,8 +173,8 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
 }
 
 /// An empty revocation denylist (an absent file is an empty set). `tag` keeps parallel tests' paths apart.
-async fn empty_denylist(tag: &str) -> Denylist {
+async fn empty_denylist(tag: &str) -> FileDenylist {
     let path = std::env::temp_dir().join(format!("swoosh-gated-beam-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    Denylist::load(path).await.unwrap()
+    FileDenylist::load(path).await.unwrap()
 }

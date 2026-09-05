@@ -74,7 +74,7 @@ impl ShareCmd {
         // The absolute expiry recorded in the ledger. `mint_*_link` recomputes its own from the same lifetime,
         // so the two agree to within the sub-millisecond between these calls, which is expiry enough for an
         // audit record.
-        let expiry = nauthy::expires_in(lifetime);
+        let expiry = nauthy::Request::expires_in(lifetime);
         // One `--for` token, kind carried in its typed prefix: a device bind, a fleet bind, or (no `--for`) a
         // bearer slip. The shape of the grant (its link, kind, delegability, and recorded holder) follows from
         // which. One `Option` cannot hold two binds, so a device-AND-fleet state is unrepresentable here.
@@ -380,10 +380,10 @@ mod tests {
         let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
         let service: Service = "ssh".parse().expect("valid service");
         let cap = work
-            .mint_signet_slip(
+            .mint_authority_slip(
                 &service,
                 resolved,
-                nauthy::expires_in(core::time::Duration::from_secs(3600)),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
             )
             .expect("mint signet slip");
         let record = GrantRecord {
@@ -392,7 +392,7 @@ mod tests {
             delegation: Delegation::Sealed,
             holder: resolved.to_string(),
             root_id: cap.root_revocation_id().expect("root id"),
-            expiry: nauthy::expires_in(core::time::Duration::from_secs(3600)),
+            expiry: nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
         };
         assert_eq!(record.kind, GrantKind::Fleet);
         assert_eq!(
@@ -492,13 +492,13 @@ mod tests {
         let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
         let fleet = nauthy::Identity::from_secret(&[2u8; 32])
             .expect("valid fleet secret")
-            .node_id();
+            .verifying_key();
         let service: Service = "ssh".parse().expect("valid service");
         let cap = work
-            .mint_signet_slip(
+            .mint_authority_slip(
                 &service,
                 fleet,
-                nauthy::expires_in(core::time::Duration::from_secs(3600)),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
             )
             .expect("mint signet slip");
         let record = GrantRecord {
@@ -507,7 +507,7 @@ mod tests {
             delegation: Delegation::Sealed,
             holder: fleet.to_string(),
             root_id: cap.root_revocation_id().expect("root id"),
-            expiry: nauthy::expires_in(core::time::Duration::from_secs(3600)),
+            expiry: nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
         };
         let blurb = frame(&record, "ssh", core::time::Duration::from_secs(3600));
         assert!(

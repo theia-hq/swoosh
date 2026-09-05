@@ -182,7 +182,7 @@ pub async fn resolve(
                     let pins_own_fleet = slip
                         .cap()
                         .ok()
-                        .and_then(|cap| cap.signet_bound_fleet().ok().flatten())
+                        .and_then(|cap| cap.authority_bound_root().ok().flatten())
                         .is_some_and(|pinned| pinned == own_fleet.verify_key());
                     Ok(Resolved::Family {
                         grant: slip.into_link(),
@@ -319,7 +319,7 @@ mod tests {
     /// ADV1: a signet-bound slip pinning a DIFFERENT (foreign/attacker) fleet attaches NO slot 2. The
     /// dialer's own fleet badge would never verify at that fleet's gate, so sending it only leaks this
     /// device's fleet-signet linkage for no admission gain. The predicate is a fleet MATCH, not the bare
-    /// `is_signet_bound()` boolean the earlier slice used.
+    /// `is_authority_bound()` boolean the earlier slice used.
     #[tokio::test]
     async fn family_with_a_foreign_fleet_slip_attaches_no_membership_badge() {
         let secret = Secret::ephemeral();
@@ -327,7 +327,7 @@ mod tests {
         // A fleet that is NOT the dialer's own (the dialer self-signs at `secret.node_id()` with no --key).
         let foreign_fleet = nauthy::Identity::from_secret(&[2u8; 32])
             .expect("valid fleet secret")
-            .node_id();
+            .verifying_key();
         let slip_text = tightbeam::tunnel::mint_signet_link(
             &work,
             &"ssh".parse().expect("valid service"),

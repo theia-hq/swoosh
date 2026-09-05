@@ -6,7 +6,7 @@
 //!
 //! The 7 diagnostic/control verbs used to thread `--present` themselves and declare
 //! `credential() -> Family { present: None }`, so `resolve()` never saw the slip, never ran
-//! `is_signet_bound()`, and left slot 2 empty. This test drives the REAL verb (clap-parsed, exactly as the
+//! `is_authority_bound()`, and left slot 2 empty. This test drives the REAL verb (clap-parsed, exactly as the
 //! CLI builds it) through `credential() -> resolve() -> slots`, the chain the old `resolve()`-direct unit
 //! test bypassed by hand-constructing `Family { present: Some(slip) }` (a state the verbs never produced).
 //! It also proves the Adversary privacy fix survives the verb path: a NON-signet `--present` leaves slot 2
@@ -146,7 +146,7 @@ async fn a_verb_with_a_foreign_fleet_link_as_peer_leaves_slot_two_empty() {
     // pasting an attacker's signet-bound link as the peer never leaks the dialer's own fleet-signet badge.
     let secret = Secret::ephemeral();
     let work = Identity::from_secret(&[1u8; 32]).unwrap();
-    let foreign_fleet = Identity::from_secret(&[2u8; 32]).unwrap().node_id();
+    let foreign_fleet = Identity::from_secret(&[2u8; 32]).unwrap().verifying_key();
     let service: Service = "ping".parse().unwrap();
     let link = tightbeam::tunnel::mint_signet_link(
         &work,

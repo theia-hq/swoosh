@@ -8,13 +8,13 @@
 //!
 //! The flow mirrors the product path exactly: `grant issue --for` mints a bound link and records the grant;
 //! `grant revoke <holder>` (driven here through the real [`RevokeCmd`]) loads the ledger, finds the root id,
-//! and denylists it. A live exposer's gate consults [`Denylist::is_revoked`] on every dial, so asserting it
+//! and denylists it. A live exposer's gate consults [`FileDenylist::is_revoked`] on every dial, so asserting it
 //! now refuses the cap is asserting the gate refuses it.
 
 use core::time::Duration;
 
 use bifrost::NodeId;
-use nauthy::{Cap, Denylist, Request, Service};
+use nauthy::{Cap, FileDenylist, Request, Service};
 use swoosh::commands::revoke::RevokeCmd;
 use swoosh::config;
 use swoosh::contacts::ContactsStore;
@@ -58,7 +58,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
         delegation: Delegation::Sealed,
         holder: holder.clone(),
         root_id,
-        expiry: nauthy::expires_in(Duration::from_secs(3600)),
+        expiry: nauthy::Request::expires_in(Duration::from_secs(3600)),
     };
     Grants::at(config::grants_path(Some(&key)).unwrap())
         .append(&record)
@@ -71,7 +71,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
         cap_identity.verify(&cap, &request).is_ok(),
         "the freshly minted device-bound cap grants its service to its device"
     );
-    let denylist = Denylist::load(config::revoked_path(Some(&key)).unwrap())
+    let denylist = FileDenylist::load(config::revoked_path(Some(&key)).unwrap())
         .await
         .unwrap();
     assert!(
@@ -92,7 +92,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     .unwrap();
 
     // After revocation: the gate's revocation check (the seam a live exposer consults) now refuses the cap.
-    let denylist = Denylist::load(config::revoked_path(Some(&key)).unwrap())
+    let denylist = FileDenylist::load(config::revoked_path(Some(&key)).unwrap())
         .await
         .unwrap();
     assert!(

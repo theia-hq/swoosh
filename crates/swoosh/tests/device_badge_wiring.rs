@@ -13,7 +13,7 @@
 //!
 //! - `mint` emits a THREE-field authkey `authkey:<seed>.<signet>.<badge>` (the badge field is new);
 //! - the badge is signet-ROOTED (root == the signet, never the device's own key) and BOUND to the device's
-//!   derived node id, so it is the exact credential `verify_member_at_root` admits at the signet root;
+//!   derived node id, so it is the exact credential `verify_member_at_root_without_revocation` admits at the signet root;
 //! - `adopt` STORES that badge beside the seed (the `badge` file under the device's `--key` dir), which is
 //!   what `self_badge` presents on connect instead of self-signing;
 //! - the stored badge is NOT the device's self-sign: a device self-sign roots at the device key, which the
@@ -134,13 +134,14 @@ fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet
 
     // (c) admits for the bound device at the signet root.
     let now = std::time::SystemTime::now();
-    cap.verify_member_at_root(now, device_vk, signet_vk)
+    cap.verify_member_at_root_without_revocation(now, device_vk, signet_vk)
         .expect("the badge admits the bound device as a member at the signet root");
 
     // (d) an intercepted badge replayed from ANOTHER key fails the bound_device binding.
     let stranger = NodeId::from_ed25519_secret(&[0x5a; 32]).verify_key();
     assert!(
-        cap.verify_member_at_root(now, stranger, signet_vk).is_err(),
+        cap.verify_member_at_root_without_revocation(now, stranger, signet_vk)
+            .is_err(),
         "the badge must NOT admit a different proven dialer (bound_device binds)"
     );
 

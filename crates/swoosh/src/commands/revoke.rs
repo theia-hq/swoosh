@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use clap::Args;
-use nauthy::{Denylist, RevocationId};
+use nauthy::{FileDenylist, RevocationId};
 
 use crate::contacts::{ContactRef, Contacts, ContactsStore};
 use crate::grants::{self, Grants};
@@ -33,7 +33,7 @@ impl RevokeCmd {
     /// A `sheer:` target takes the link path; anything else is a holder looked up in the ledger. Reads the
     /// address book only to resolve a petname holder to its canonical node id (the link path never does).
     pub async fn run(self, store: ContactsStore, key: Option<&Path>) -> eyre::Result<()> {
-        let mut denylist = Denylist::load(crate::config::revoked_path(key)?).await?;
+        let mut denylist = FileDenylist::load(crate::config::revoked_path(key)?).await?;
         // A `sheer:` prefix is the one unambiguous mark of a link: parse-don't-validate on the object's shape.
         // A malformed link still routes here (and fails as a bad link), rather than being misread as a peer.
         if self.target.starts_with(nauthy::SCHEME) {
@@ -65,7 +65,7 @@ impl RevokeCmd {
     /// record matches on the literal target OR any resolved node id.
     async fn revoke_holder(
         self,
-        denylist: &mut Denylist,
+        denylist: &mut FileDenylist,
         contacts: &Contacts,
         key: Option<&Path>,
     ) -> eyre::Result<()> {
