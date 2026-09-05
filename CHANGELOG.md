@@ -2,6 +2,38 @@
 
 All notable changes to swoosh, newest first.
 
+## v0.8.0
+
+Try it in one line with echo, open raw streams only when you say so, clean shutdown on every verb.
+
+### New
+- **`echo:` service.** `swoosh serve demo=echo:` serves a symmetric reflector that sends back whatever a
+  peer sends. It is safe to open to anyone with a plain `--public` (no `--public-unsafe`), so it is the
+  easiest first thing to try across two machines. The serve banner names it plainly.
+- **`swoosh serve --public-unsafe <names>`.** Open a named raw stream (`file:`, `fifo:`, `stdin:`) to
+  strangers. `--public` alone opens handlers, forwards, and `echo:`; a raw byte source hands out bytes with
+  no responder to gate them, so it stays gated unless you additionally name it here. Requires `--public`,
+  and a keyless shell is still refused outright.
+
+### Changed
+- **Rooted on nauthy 0.1.0.** The authentication core is now the first standalone nauthy release, with its
+  generic capability vocabulary and rooted gate. swoosh keeps its own signet and fleet vocabulary on top;
+  no command changes.
+- **Every reaching verb closes the node before exiting.** `ping`, `speed`, `beam`, `forward`, and the rest
+  now tear the connection down cleanly instead of printing `Aborting ungracefully`, so the peer sees a
+  clean close rather than a dropped connection it has to time out.
+- **`swoosh service --at <your-own-node>` teaches instead of failing.** Reading your own node's services is
+  not wired yet (it lands with the daemon); asking for it now says so plainly.
+
+### Fixed
+- **Serving a `file:` source to a Linux peer works.** A regular file cannot register with epoll on Linux,
+  so `file:` sources failed to start there while working on macOS; fixed in the pinned tightbeam.
+
+### Internal
+- **Release robustness (Track C).** A lock-source guard and pre-commit hook keep the committed lock in
+  shipping-form, cargo-deny checks dependency sources in CI, and the release build asserts the exact rev
+  pins (decision (A)) and fills the GitHub release notes from this CHANGELOG. No behaviour change.
+
 ## v0.7.0
 
 Grant one service to a device, a whole person, or anyone; a clearer serve banner.
