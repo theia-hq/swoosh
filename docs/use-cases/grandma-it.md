@@ -51,45 +51,8 @@ serving
 ctrl-c to stop
 ```
 
-Set that `swoosh serve ssh=sshd:` to run at login, so the machine is reachable whenever it is on. That is
-the last thing they ever have to touch. Use what the OS already gives you, no extra software.
-
-On Linux, a systemd user service:
-
-```ini
-# ~/.config/systemd/user/swoosh.service
-[Unit]
-Description=swoosh remote shell
-[Service]
-ExecStart=%h/.local/bin/swoosh serve ssh=sshd:
-Restart=always
-[Install]
-WantedBy=default.target
-```
-
-```console
-$ systemctl --user enable --now swoosh
-$ sudo loginctl enable-linger "$USER"   # keep it running after they log out
-```
-
-On macOS, a launchd agent at `~/Library/LaunchAgents/swoosh-remote.plist`:
-
-```xml
-<plist version="1.0"><dict>
-  <key>Label</key><string>swoosh-remote</string>
-  <key>ProgramArguments</key>
-  <array><string>/usr/local/bin/swoosh</string><string>serve</string><string>ssh=sshd:</string></array>
-  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-</dict></plist>
-```
-
-```console
-$ launchctl load ~/Library/LaunchAgents/swoosh-remote.plist
-```
-
-(When the swoosh daemon lands, this collapses to a single resident command that survives reboots on its
-own. Under the hood the daemon leans on exactly these OS supervisors, so what you set up here is what it
-will manage for you later.)
+Set that `swoosh serve ssh=sshd:` to run at login (a launchd or systemd unit, or a startup item), so the
+machine is reachable whenever it is on. That is the last thing they ever have to touch.
 
 ## Fix it from home, any time
 
