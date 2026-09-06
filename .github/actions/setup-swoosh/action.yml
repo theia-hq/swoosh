@@ -1,0 +1,22 @@
+name: Setup swoosh
+description: Install the swoosh CLI on a CI runner and put it on PATH (checksum-verified, provenance-checked when gh is present).
+
+inputs:
+  version:
+    description: Release tag to install, e.g. v0.8.0, or "latest".
+    required: false
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - name: install swoosh
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        # Install into a runner-scoped dir and add it to PATH, so no sudo and no PATH surprises.
+        INSTALL_DIR: ${{ runner.temp }}/swoosh-bin
+      run: |
+        # The installer script lives on main (it reads VERSION to pick which release binary to fetch).
+        curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/install.sh | sh
+        echo "${RUNNER_TEMP}/swoosh-bin" >> "$GITHUB_PATH"

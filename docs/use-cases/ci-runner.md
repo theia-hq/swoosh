@@ -25,11 +25,16 @@ Store that authkey as a CI secret named `SWOOSH_AUTHKEY`. The runner adopts it a
 
 ```yaml
 # in your CI job
-- run: curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/install.sh | sh
+- uses: theia-hq/swoosh/.github/actions/setup-swoosh@v0.8.0   # installs swoosh, puts it on PATH
+  with:
+    version: v0.8.0
 - run: swoosh adopt          # reads SWOOSH_AUTHKEY from the environment
   env:
     SWOOSH_AUTHKEY: ${{ secrets.SWOOSH_AUTHKEY }}
 ```
+
+(No action runner? The one-liner still works: `curl -fsSL
+https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/install.sh | sh`.)
 
 After `adopt`, the runner is a device your signet trusts.
 
