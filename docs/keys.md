@@ -121,6 +121,32 @@ expire soon. You pick binding or delegation per slip; the math will not give you
 **The honest limit.** A bearer slip is a bearer token: whoever holds an unexpired, un-revoked one gets
 that one service until it expires or you revoke it. Keep bearer slips short-lived.
 
+## Using a grant you were given
+
+Everything above is how you hand access OUT. Using a slip someone handed YOU is the mirror image. A
+`sheer:` link carries both the node to reach and the grant to present, so you pass it in place of a peer on
+any reach verb:
+
+<!-- capture: swoosh ssh sheer:… -->
+```console
+$ swoosh ssh sheer:bf01hcq6….<token>
+$ swoosh forward sheer:bf01hcq6….<token> --to 2222
+```
+
+Nothing else is needed: the link names the node, names the one service it grants, and proves you may reach
+it. It works only for that service, and stops the moment it expires or the issuer revokes it.
+
+When you already reach a node another way (a petname you recorded, say) but hold a separate slip, present it
+with `--present`:
+
+<!-- capture: swoosh forward alice/box --present sheer:… --to 2222 -->
+```console
+$ swoosh forward alice/box --present sheer:… --to 2222
+```
+
+Your own devices never need a slip: their badge gets them in. Reach for `--present` only to reach as a
+delegate holding someone's grant.
+
 ## Glossary
 
 | Noun | What it is |
