@@ -54,8 +54,8 @@ Usage: swoosh stop [OPTIONS] <peer>
 
 **Example.** `swoosh stop me/box` gracefully stops a node you started with `serve --expires`, early.
 
-**Things to know.** This stops the node serving; it does not power off the machine. `control.stop` is
-gated, so for a single-owner node only your own devices can stop it.
+**Things to know.** This stops the serving node, not the machine it runs on. `control.stop` is gated, so
+for a single-owner node only your own devices can stop it.
 
 ## <a id="service"></a>`swoosh service`
 
