@@ -32,18 +32,12 @@ case "$arch" in
   *) die "unsupported architecture '$arch'" ;;
 esac
 asset="${BIN}-${arch}-${os}"
-# VERSION selects the release tag; default "latest". Lets a pinned CI install a specific version.
-VERSION="${VERSION:-latest}"
-if [ "$VERSION" = latest ]; then
-  base="https://github.com/${REPO}/releases/latest/download"
-else
-  base="https://github.com/${REPO}/releases/download/${VERSION}"
-fi
+base="https://github.com/${REPO}/releases/latest/download"
 
 tmp=$(mktemp -d) || die "mktemp failed"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
-say "downloading ${asset} (${VERSION})..."
+say "downloading ${asset} from the latest release..."
 curl -fsSL "${base}/${asset}" -o "${tmp}/${BIN}" || die "could not download ${asset}"
 curl -fsSL "${base}/${asset}.sha256" -o "${tmp}/${BIN}.sha256" || die "could not download the checksum"
 
