@@ -33,7 +33,14 @@ impl RevokeCmd {
     /// A `sheer:` target takes the link path; anything else is a holder looked up in the ledger. Reads the
     /// address book only to resolve a petname holder to its canonical node id (the link path never does).
     pub async fn run(self, store: ContactsStore, key: Option<&Path>) -> eyre::Result<()> {
-        let mut denylist = FileDenylist::load(crate::config::revoked_path(key)?).await?;
+        let revoked = crate::config::revoked_path(key)?;
+        // nauthy writes only its own file; the store dir is swoosh's to provision. Create it 0700 before any
+        // persist below, since a revoke into a never-provisioned store (`grant revoke` as the first write to
+        // this `--key`) would otherwise fail with no parent directory.
+        if let Some(parent) = revoked.parent() {
+            crate::config::create_store_dir(parent)?;
+        }
+        let mut denylist = FileDenylist::load(revoked).await?;
         // A `sheer:` prefix is the one unambiguous mark of a link: parse-don't-validate on the object's shape.
         // A malformed link still routes here (and fails as a bad link), rather than being misread as a peer.
         if self.target.starts_with(nauthy::SCHEME) {
