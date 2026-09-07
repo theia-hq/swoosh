@@ -87,8 +87,8 @@ deploybox -- <command>` from the job.
 
 ## Cut the runner off
 
-Revoke the runner's device on each machine it reaches, then restart `serve` there so the gate reloads its
-denylist and stops admitting the badge:
+Revoke the runner's device on each machine it reaches. The running `serve` there reloads its denylist the
+moment the file changes, so it stops admitting the badge on the next dial, no restart needed:
 
 ```console
 $ swoosh grant revoke me/ci-runner
@@ -99,9 +99,9 @@ To rotate instead of revoke, mint a fresh authkey, update the CI secret, and rev
 ## The honest limit
 
 Anyone who can read the `SWOOSH_AUTHKEY` secret can adopt that device identity, so scope the secret to
-the job that needs it and rotate it like any credential. A revoke is node-local and applies on the node's
-next `serve` (the gate loads the denylist at startup, so restart `serve` to apply it; live revocation lands
-with the daemon): revoke on every machine the runner reaches.
+the job that needs it and rotate it like any credential. A revoke is node-local: it writes that node's own
+denylist, and the running `serve` reloads it live (on the next dial once the file changes, no restart), so
+revoke on every machine the runner reaches.
 
 ## Next
 

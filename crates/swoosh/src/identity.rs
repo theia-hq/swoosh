@@ -21,17 +21,25 @@ use eyre::eyre;
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::{Zeroize as _, ZeroizeOnDrop};
 
-/// How long a signet-signed, STORED device membership badge stands before it must be re-minted.
+/// The DEFAULT lifetime a signet-signed, STORED device membership badge stands before it must be
+/// re-minted, applied by `swoosh mint` only when the operator passes no `--expires`. A default, not a
+/// hardcoded law: the CLI threads an explicit window straight into [`sign_device_badge`], and falls back
+/// to this value when none is given.
 ///
-/// The adversary's one rider (deliberation 10): a stored badge is a longer-lived bearer credential than
-/// the 5-minute self-sign a signet holder mints per dial, so it must carry a FINITE lifetime, not
-/// "forever" -- a lost, un-denylisted device then ages out on its own even absent an explicit revoke.
-/// One year is the chosen point: long enough that a device provisioned once keeps reaching family
-/// services across a normal ownership span without a re-mint chore, short enough that a badge whose
-/// device fell out of the family without being denylisted does not stand indefinitely. Revocation stays
-/// the primary, immediate control (the `FileDenylist`, offline + live); the TTL is the backstop. A signet
-/// holder can re-mint (`swoosh mint`) and re-adopt to refresh a badge before it lapses.
-const DEVICE_BADGE_TTL: core::time::Duration = core::time::Duration::from_secs(365 * 24 * 60 * 60);
+/// A stored badge is a longer-lived bearer credential than the 5-minute self-sign a signet holder mints
+/// per dial, so it must carry a FINITE lifetime, not "forever" -- a lost, un-denylisted device then ages
+/// out on its own even absent an explicit revoke. Offline there is no control plane to split the authkey's
+/// leak-window from the badge lifetime, so this value IS the worst-case leak window for a mint that is
+/// never revoked. 90 days is the chosen default: a real re-mint cadence (about quarterly) a homelab owner
+/// can absorb, and a 90-day backstop instead of a year, matching the auth-key default operators expect. A
+/// longer window (up to a year via `swoosh mint --expires 365d`, for a controlled reused-secret case such
+/// as qat) stays reachable, but is now a conscious opt-in rather than the silent, only value. Revocation
+/// stays the primary, immediate control (the `FileDenylist`, offline + live); the TTL is the backstop for
+/// a leak never noticed.
+///
+/// 90d is the ratified default pending final founder confirm.
+pub(crate) const DEVICE_BADGE_TTL: core::time::Duration =
+    core::time::Duration::from_secs(90 * 24 * 60 * 60);
 
 /// The ed25519 secret key a verb binds under. Wraps the raw bytes so they zeroize on drop and never
 /// cross a boundary as a bare array; unwrap only at the transport bind, the one place the key must be
@@ -114,16 +122,19 @@ impl Secret {
     /// replayed from another key fails the binding.
     ///
     /// FINITE lifetime: unlike the 5-minute self-sign (re-minted per dial), this badge is STORED on the
-    /// device and stands until it expires or is denylisted, so it carries a generous-but-finite TTL
-    /// ([`DEVICE_BADGE_TTL`]) rather than "forever" -- a lost, un-denylisted device eventually ages out.
-    /// The signet secret stays in this wrapper: only the signed public badge (a `sheer:` link) leaves.
-    pub fn sign_device_badge(&self, device: NodeId) -> eyre::Result<String> {
+    /// device and stands until it expires or is denylisted, so it carries a generous-but-finite `ttl`
+    /// rather than "forever" -- a lost, un-denylisted device eventually ages out. The caller owns the
+    /// window: `swoosh mint` passes an explicit `--expires`, or falls back to [`DEVICE_BADGE_TTL`], so
+    /// the lifetime is a default the CLI applies, not a constant buried in this signer. The signet secret
+    /// stays in this wrapper: only the signed public badge (a `sheer:` link) leaves.
+    pub fn sign_device_badge(
+        &self,
+        device: NodeId,
+        ttl: core::time::Duration,
+    ) -> eyre::Result<String> {
         let badge = self
             .cap_identity()?
-            .mint_member(
-                device.verify_key(),
-                nauthy::Request::expires_in(DEVICE_BADGE_TTL),
-            )?
+            .mint_member(device.verify_key(), nauthy::Request::expires_in(ttl))?
             .seal()?
             .link()?;
         Ok(badge)

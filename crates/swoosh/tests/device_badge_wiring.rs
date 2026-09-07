@@ -30,7 +30,8 @@ use std::path::Path;
 use std::process::Command;
 
 use bifrost::NodeId;
-use nauthy::{Cap, VerifyKey};
+use nauthy::{Cap, FileDenylist, VerifyKey};
+use swoosh::config;
 use tightbeam::identity::AsVerifyKey as _;
 
 /// The `authkey:` scheme prefix `mint` prints.
@@ -143,6 +144,76 @@ fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet
         cap.verify_member_at_root_without_revocation(now, stranger, signet_vk)
             .is_err(),
         "the badge must NOT admit a different proven dialer (bound_device binds)"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The mint-then-revoke proof (the ship-blocker, deliberation 2026-09-07): `swoosh mint` now records the
+/// device badge in the mint-log ledger, so `swoosh grant revoke me/<label>` cuts the minted device off at
+/// the gate. Before the fix `mint` recorded ONLY the `me/<label>` contact, never the badge's root id, so
+/// revoke-by-holder found nothing in the ledger and bailed; the badge then stood until its TTL, unrevocable.
+/// This drives both real verbs (`mint` then `grant revoke me/ci-runner`) and proves the gate's revocation
+/// seam refuses the exact badge `mint` produced.
+#[tokio::test]
+async fn mint_then_revoke_refuses_the_minted_device_at_the_gate() {
+    let base = std::env::temp_dir().join(format!("swoosh-mint-revoke-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let signet_dir = base.join("signet-holder");
+    std::fs::create_dir_all(&signet_dir).unwrap();
+    // `mint` and `grant revoke` both read/write the identity+trust unit under this one `--key` dir: the
+    // signet, the `me/ci-runner` contact, the mint-log ledger, and the denylist all live beside it.
+    let signet_key = signet_dir.join("identity.key");
+
+    // MINT under the signet holder's key: derives the device, signs its badge, records the contact
+    // `me/ci-runner` AND (the fix under test) appends the badge to the mint-log ledger.
+    let mint = swoosh(&["mint", "ci-runner", "--key", path_str(&signet_key)]);
+    assert!(mint.status.success(), "mint failed: {}", stderr(&mint));
+    let authkey = first_authkey(&String::from_utf8(mint.stdout).unwrap())
+        .expect("mint prints an authkey: token");
+    // The badge is field three of the authkey; recover its cap so we can assert the gate refuses it.
+    let badge = authkey
+        .strip_prefix(AUTHKEY_SCHEME)
+        .unwrap()
+        .splitn(3, '.')
+        .nth(2)
+        .expect("the authkey carries the badge field");
+    let cap = Cap::parse(badge).expect("the badge parses as a cap");
+
+    // Before revoke: nothing denylists the badge (the gate would admit the device).
+    let denylist = FileDenylist::load(config::revoked_path(Some(&signet_key)).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        !denylist.is_revoked(&cap),
+        "the minted badge is not revoked before `grant revoke`"
+    );
+
+    // REVOKE BY NAME through the real command: `me/ci-runner` resolves through the contact `mint` recorded,
+    // matches the ledger record `mint` appended, and denylists the badge's root. This is the flagship command
+    // on the flagship credential; it must succeed, where before the fix it bailed "no grant issued ... recorded".
+    let revoke = swoosh(&[
+        "grant",
+        "revoke",
+        "me/ci-runner",
+        "--key",
+        path_str(&signet_key),
+    ]);
+    assert!(
+        revoke.status.success(),
+        "grant revoke me/ci-runner failed: {}\n{}",
+        stderr(&revoke),
+        String::from_utf8_lossy(&revoke.stdout)
+    );
+
+    // After revoke: the gate's revocation check (the seam a live exposer consults on every dial) now refuses
+    // the very badge `mint` produced, so the minted device is cut off.
+    let denylist = FileDenylist::load(config::revoked_path(Some(&signet_key)).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        denylist.is_revoked(&cap),
+        "once the minted device is revoked by name, the gate refuses its badge"
     );
 
     let _ = std::fs::remove_dir_all(&base);
