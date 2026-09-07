@@ -1,13 +1,13 @@
 # CI runner
 
-A CI job needs to reach one of your machines: ship a build artifact to a deploy box, or ssh in to
-restart a service. You want the runner to hold a credential you can revoke, not a long-lived SSH key
-copied into a secret store forever.
+A CI job needs to reach one of your machines: ship a build artifact to a deploy box, or let you ssh into
+the runner itself to poke at a failure. You want the runner to hold a credential you can revoke, not a
+long-lived SSH key copied into a secret store forever.
 
 Enroll the runner as a [device](../keys.md#device) of your [signet](../keys.md#signet). It reaches your
 machines like any of your own, and you cut it off by revoking that one device.
 
-## Provision the runner
+## Enroll the runner
 
 From your own machine, mint a device authkey for the runner:
 
@@ -20,20 +20,49 @@ recorded me/ci-runner -> bf01imv3ljql6kjn  [derived]
 hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
-Store that authkey as a CI secret named `SWOOSH_AUTHKEY`. The runner adopts it at the start of a job.
-`adopt` reads the secret from the environment, so it never lands in the process list:
+Store that authkey as a CI secret named `SWOOSH_AUTHKEY`. On GitHub Actions, use the flagship action: it
+installs swoosh, adopts the authkey, and serves the runner's default services (a keyless shell plus
+`ping`/`speed` diagnostics), all gated to your signet:
 
 ```yaml
 # in your CI job
+- uses: theia-hq/swoosh-action@v2
+  with:
+    authkey: ${{ secrets.SWOOSH_AUTHKEY }}
+```
+
+After this step, the runner is a device your signet trusts, reachable over the overlay as `me/ci-runner`.
+
+Not on GitHub Actions? Install swoosh directly and adopt by hand:
+
+```yaml
 - run: curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/install.sh | sh
 - run: swoosh adopt          # reads SWOOSH_AUTHKEY from the environment
   env:
     SWOOSH_AUTHKEY: ${{ secrets.SWOOSH_AUTHKEY }}
 ```
 
-After `adopt`, the runner is a device your signet trusts.
+## Ssh into the runner
 
-## Reach your machine from the job
+To reach the runner interactively (poke at a live failure, say), hold the job open with `minutes` so it
+stays up after the rest of the job finishes:
+
+```yaml
+- uses: theia-hq/swoosh-action@v2
+  with:
+    authkey: ${{ secrets.SWOOSH_AUTHKEY }}
+    minutes: "15"
+```
+
+From your own machine:
+
+```console
+$ swoosh ssh me/ci-runner
+```
+
+The hold ends after 15 minutes, or early if you `touch $RUNNER_TEMP/theia-release` over that ssh session.
+
+## Push an artifact out from the runner
 
 On the deploy box, receive pushed files behind the gate:
 
@@ -41,7 +70,9 @@ On the deploy box, receive pushed files behind the gate:
 $ swoosh serve recv=recv:/srv/releases
 ```
 
-In the job, push the artifact to it by name. The runner's badge admits it:
+Omit `minutes` on the runner's step so the job advances straight to the next step instead of holding
+open; the node keeps serving in the background until the job ends. Push the artifact to the deploy box by
+name, the runner's badge admits it:
 
 <!-- capture: swoosh send app.tar deploybox -->
 ```console
@@ -51,7 +82,7 @@ sent app.tar (204800 bytes)
 ```
 
 Each file is hashed with BLAKE3 and re-checked on arrival, so a truncated or tampered transfer is
-rejected, never written. To ssh in instead, serve `ssh=sshd:` on the target and run `swoosh ssh
+rejected, never written. To ssh into the deploy box instead, serve `ssh=sshd:` there and run `swoosh ssh
 deploybox -- <command>` from the job.
 
 ## Cut the runner off
