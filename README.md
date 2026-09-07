@@ -51,7 +51,7 @@ The [getting-started guide](docs/getting-started.md) walks this end to end in tw
 
 ## Layout
 
-- `crates/beam` the `beam:` service: receive a pushed file over one admitted stream, verified end to
+- `crates/beam` the `recv:` service: receive a pushed file over one admitted stream, verified end to
   end.
 - `crates/fetch` the `fetch:` service: fetch an origin URL on the requester's behalf, scoped to one
   origin.

@@ -18,7 +18,7 @@ rest is planned and lands as it is built.
 - [x] `mint` / `adopt` enroll a second machine under your signet via a one-time authkey
 - [x] `ssh` open an ssh session to a peer over the overlay
 - [x] `forward` put a peer's served service on a local port, stdout, or a unix socket
-- [x] `beam` push a file or directory to a peer, verified end to end
+- [x] `send` push a file or directory to a peer, verified end to end
 - [x] `fetch` mint a local URL whose fetch egresses at a node you name
 - [x] `fleet` pull a signed fleet roster and fold it into your contacts
 - [x] `grant issue` / `ls` / `narrow` / `revoke` `sheer:` slips, bearer or bound to a device or fleet
@@ -30,7 +30,7 @@ rest is planned and lands as it is built.
   running `serve`, and slips a node was handed are remembered instead of presented each dial.
 - [ ] **A people group.** Name a set of people and grant the whole group one service at once, instead of
   granting each member.
-- [ ] `beam` more sources: the same verb for piped stdin, the clipboard, or a fetched URL's result.
+- [ ] `send` more sources: the same verb for piped stdin, the clipboard, or a fetched URL's result.
 - [ ] `ssh config`: emit ssh `Host` aliases for devices that advertise ssh.
 - [ ] A machine group (`cluster`): name a local set of machines and share the whole group as one slip.
 - [ ] `run`: run code at a peer addressed by its key.

@@ -2,6 +2,22 @@
 
 All notable changes to swoosh, newest first.
 
+## Unreleased
+
+### Changed
+- **BREAKING: `swoosh beam` is now `swoosh send`.** The file-push verb was renamed for clarity; the `beam`
+  crate and internals are unchanged, and there is no back-compat alias.
+- **BREAKING: the file-receive scheme `beam:` is now `recv:`, and its output dir rides the scheme.**
+  `swoosh serve inbox=recv:<dir>` sets where arrivals land (a bare `recv:` writes to `.`); the node-wide
+  `--out` flag is gone, since the output dir is a per-service fact. `send --service` defaults to `recv`.
+- **`send` and `fetch` take `--service <name>`** to reach a receiver or exit published under a non-default
+  name, matching `ssh` and `forward`.
+
+### Fixed
+- **Store files were world-readable.** The signet, membership badge, contacts book, and revocation denylist
+  landed `0644` in a `0755` store dir; they are now written `0600` inside a `0700` store dir, so the trust
+  graph and revocation metadata are not exposed to other local users.
+
 ## v0.8.0
 
 Try it in one line with echo, open raw streams only when you say so, clean shutdown on every verb.
