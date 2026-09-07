@@ -1,4 +1,4 @@
-//! `swoosh beam <path>... <peer>`: PUSH a file or directory to a peer, verified end to end.
+//! `swoosh send <path>... <peer>`: PUSH a file or directory to a peer, verified end to end.
 //!
 //! The sender-initiates half of file transfer: you dial a waiting receiver (a node serving `beam:`), open
 //! one stream per file, and drive [`bifrost::wire`]'s verified [`Transfer`](bifrost::wire::Transfer)
@@ -24,8 +24,8 @@ use crate::contacts::Contacts;
 use crate::peer::Peer;
 use crate::transport::ReachArgs;
 
-/// The service name a receiver publishes and beam reaches: `swoosh serve beam=beam:` receives, `swoosh
-/// beam` pushes.
+/// The service name a receiver publishes and `swoosh send` reaches: `swoosh serve beam=beam:` receives,
+/// `swoosh send` pushes.
 pub const BEAM_SERVICE: &str = "beam";
 
 /// Files send concurrently over separate streams, capped so one connection is not flooded. Matches iris's
@@ -41,6 +41,9 @@ pub struct BeamCmd {
     /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
+    /// which served service to reach
+    #[arg(long, value_name = "service", default_value = BEAM_SERVICE)]
+    pub service: String,
     /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
     #[arg(
         long,
@@ -109,11 +112,11 @@ impl BeamCmd {
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
         // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
         // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
-        let connector =
-            self.peer
-                .connector(contacts, BEAM_SERVICE.to_owned(), present, membership)?;
+        let connector = self
+            .peer
+            .connector(contacts, self.service.clone(), present, membership)?;
         let dial = connector.dial();
-        println!("beaming to {dial}...");
+        println!("sending to {dial}...");
         // A service-scoped session: each `open_bi` speaks the `beam:` request and presents the badge, so
         // every per-file stream is admitted by the receiver's gate on its own merits.
         let session = connector.open_service(node).await?;

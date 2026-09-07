@@ -43,10 +43,10 @@ $ swoosh serve beam=beam: --out /srv/releases
 
 In the job, push the artifact to it by name. The runner's badge admits it:
 
-<!-- capture: swoosh beam app.tar deploybox -->
+<!-- capture: swoosh send app.tar deploybox -->
 ```console
-$ swoosh beam app.tar deploybox
-beaming to bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
+$ swoosh send app.tar deploybox
+sending to bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
 sent app.tar (204800 bytes)
 ```
 
@@ -76,4 +76,4 @@ with the daemon): revoke on every machine the runner reaches.
 
 - [Keys](../keys.md#device) what a device and a badge are.
 - [Contractor access](contractor-access.md) a timed slip for a person, not a machine.
-- [Commands](../reference/commands.md#beam) beam, ssh, and the mint/adopt handshake.
+- [Commands](../reference/commands.md#send) send, ssh, and the mint/adopt handshake.

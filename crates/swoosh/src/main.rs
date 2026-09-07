@@ -90,6 +90,7 @@ enum Command {
     /// Put a peer's served service on a local port, stdout (`-`), or a unix socket (ssh's `-L`, keyed).
     Forward(ForwardCmd),
     /// Push a file or directory to a peer, verified end to end.
+    #[command(name = "send")]
     Beam(BeamCmd),
     /// Learn your fleet: pull the signed roster from a coordination node and fold it into your contacts.
     Fleet(FleetCmd),
@@ -127,7 +128,7 @@ enum Reach {
     /// `swoosh forward`: bind a peer's served service to a local port. A dial-only client (it presents a
     /// link, not swoosh's identity), so it rides the reach path like the other reach-outward verbs.
     Forward(ForwardCmd),
-    /// `swoosh beam`: push files to a peer's gated `beam:` service. Presents a membership badge (like
+    /// `swoosh send`: push files to a peer's gated `beam:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
     Beam(BeamCmd),
     /// `swoosh stop`: reach a peer's gated `control.stop` service and trigger a graceful stop. Presents a
@@ -725,7 +726,7 @@ mod tests {
     }
 
     /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `sheer:` link all
-    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/`beam`/`stop`/`service --at`/
+    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/`send`/`stop`/`service --at`/
     /// `fetch --via`/`ssh`/`fleet --pull`.
     #[test]
     fn every_dialing_verb_takes_a_petname_a_key_and_a_link() {
@@ -737,7 +738,7 @@ mod tests {
                 &["swoosh", "speed", peer],
                 &["swoosh", "status", peer],
                 &["swoosh", "forward", peer, "--to", "5432"],
-                &["swoosh", "beam", "afile", peer],
+                &["swoosh", "send", "afile", peer],
                 &["swoosh", "stop", peer],
                 &["swoosh", "service", "--at", peer],
                 &["swoosh", "fetch", "http://example.com/x", "--via", peer],

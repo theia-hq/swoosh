@@ -30,6 +30,9 @@ pub struct FetchCmd {
     /// the node to fetch through: a petname (`usa`, `alice/box`), a raw node id, or a `sheer:` link
     #[arg(long, value_name = "peer")]
     pub via: Peer,
+    /// which served service to reach
+    #[arg(long, value_name = "service", default_value = "fetch")]
+    pub service: String,
     /// present a `sheer:` cap link to a cap-gated node (a delegate's slip)
     #[arg(long, value_name = "link")]
     pub present: Option<crate::credential::SheerLink>,
@@ -192,7 +195,7 @@ impl FetchCmd {
 
         let (mut writer, mut reader) = session.open_bi().await?;
         Request {
-            service: "fetch".to_owned(),
+            service: self.service.clone(),
             capability: present.map(str::to_owned),
             membership: membership.map(str::to_owned),
         }

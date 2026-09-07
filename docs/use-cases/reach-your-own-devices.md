@@ -97,4 +97,4 @@ not instantly and not everywhere at once; live revocation lands with the daemon.
 
 - [Keys](../keys.md#device) what a device and a badge are.
 - [Family media center](family-media-center.md) a box the whole household reaches, owned by no one.
-- [Commands](../reference/commands.md#ssh) ssh, forward, and beam over the overlay.
+- [Commands](../reference/commands.md#ssh) ssh, forward, and send over the overlay.

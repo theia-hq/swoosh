@@ -141,9 +141,10 @@ Mint a local URL that fetches an origin through a node you name.
 <!-- generated: usage from `swoosh fetch -h`; option lines curated -->
 ```
 Usage: swoosh fetch [OPTIONS] --via <peer> <url>
-  <url>          the origin URL to fetch
-  --via <peer>   the node to fetch through
-  --port <port>  pin the local listener port (default: an OS-assigned free port)
+  <url>             the origin URL to fetch
+  --via <peer>      the node to fetch through
+  --service <name>  which served service to reach [default: fetch]
+  --port <port>     pin the local listener port (default: an OS-assigned free port)
 ```
 
 **Example.** `swoosh fetch https://example.com/big.iso --via usa` prints a `http://127.0.0.1:PORT/`;
@@ -170,21 +171,22 @@ Usage: swoosh forward [OPTIONS] --to <port | - | unix:PATH> <peer>
 
 **Things to know.** `--to -` streams to stdout, to compose with the shell (`--to - | mpv -`).
 
-## <a id="beam"></a>`swoosh beam`
+## <a id="send"></a>`swoosh send`
 
 Push a file or directory to a peer, verified end to end.
 
-<!-- generated: usage from `swoosh beam -h`; option lines curated -->
+<!-- generated: usage from `swoosh send -h`; option lines curated -->
 ```
-Usage: swoosh beam [OPTIONS] <path>... <peer>
-  <path>...   the files or directories to push
-  <peer>      a petname, a raw node id, or a sheer: link
+Usage: swoosh send [OPTIONS] <path>... <peer>
+  <path>...           the files or directories to push
+  <peer>              a petname, a raw node id, or a sheer: link
+  --service <name>    which served service to reach [default: beam]
 ```
 
 **Example.**
 ```console
-$ swoosh beam app.tar deploybox
-beaming to bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
+$ swoosh send app.tar deploybox
+sending to bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
 sent app.tar (204800 bytes)
 ```
 

@@ -9,7 +9,7 @@
 //! One node exposes `beam=beam:` behind a family gate rooted at a signet, assembled through the SAME
 //! `registry()` the `swoosh serve` product path builds (so this exercises the identical handler swoosh
 //! serves, into a real temp output directory). A member drives `bifrost-wire`'s verified `Transfer` over
-//! the gated `beam` service exactly as `swoosh beam` does: it opens one stream per file, sends the blob, and
+//! the gated `beam` service exactly as `swoosh send` does: it opens one stream per file, sends the blob, and
 //! the receiver saves it under the safe relative name. A stranger's push is refused at the gate. And a blob
 //! whose bytes do not match its advertised root is rejected by the receiver's BLAKE3 check, so a tampered
 //! transfer leaves no file behind.
@@ -78,7 +78,7 @@ async fn proof() {
     let member = Node::new(MemTransport::bind(), NoDiscovery);
     let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
 
-    // Beam a file exactly as `swoosh beam` does: open the gated `beam` service, then drive `bifrost-wire`'s
+    // Beam a file exactly as `swoosh send` does: open the gated `beam` service, then drive `bifrost-wire`'s
     // verified `Transfer` over one admitted stream, naming the file so the receiver saves it under that name.
     let payload = b"the quick brown fox jumps over the lazy dog".repeat(1000);
     let session = Connector::to_node(host_id, "beam".to_owned(), Some(member_badge.clone()))
