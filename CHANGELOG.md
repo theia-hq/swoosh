@@ -12,11 +12,28 @@ All notable changes to swoosh, newest first.
   `--out` flag is gone, since the output dir is a per-service fact. `send --service` defaults to `recv`.
 - **`send` and `fetch` take `--service <name>`** to reach a receiver or exit published under a non-default
   name, matching `ssh` and `forward`.
+- **BREAKING: `--key <file>` is now `--home <dir>` (env `SWOOSH_HOME`).** A node is selected by its home
+  directory; the key lives at `<home>/identity.key` (the GNUPGHOME model). `--key` errors forward.
+- **BREAKING: `stop` and `service` reshaped for local-vs-peer.** A peer is now `--at <peer>` (a bare command
+  targets your own node, which lands with the daemon); `service` is a group: `ls` / `enable` / `disable`.
+
+### Added
+- **`service enable <svc>` / `disable <svc>`.** Turn a served service off or on live, no restart: the change
+  is written to `<home>/disabled` and the running node honors it on the next connection, the same
+  mtime-watched, fail-closed mechanism as revocation.
+- **`mint --expires <duration>`.** Choose a device badge's lifetime (default 90 days, previously a hardcoded
+  year); a controlled reused-secret case can opt into `--expires 365d`.
 
 ### Fixed
 - **Store files were world-readable.** The signet, membership badge, contacts book, and revocation denylist
   landed `0644` in a `0755` store dir; they are now written `0600` inside a `0700` store dir, so the trust
   graph and revocation metadata are not exposed to other local users.
+- **Minted device badges are now revocable.** `mint` records the badge in the grant ledger, so
+  `swoosh grant revoke me/<label>` cuts a lost or leaked device (it previously found no record and bailed).
+  The default badge lifetime also dropped from 365 to 90 days.
+- **Each `recv:<dir>` receives into its own dir.** Two receive services on one node no longer both write to
+  the first-named directory.
+- **A stale `SWOOSH_KEY` env errors forward** instead of silently selecting the default identity.
 
 ## v0.8.0
 
