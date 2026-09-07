@@ -97,8 +97,7 @@ async fn proof() {
             requested.push("ssh=sshd:".to_owned());
             let services = Services::parse(&requested).unwrap();
             let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-            let registry =
-                swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir()).unwrap();
+            let registry = swoosh::commands::serve::registry(HOST_SEED).unwrap();
             Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
                 .unwrap()
                 .run(&host, CancellationToken::new())

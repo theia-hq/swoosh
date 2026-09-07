@@ -11,13 +11,15 @@ use tightbeam::tunnel::{BoxRead, BoxWrite, Handler};
 /// auth of its own would let anyone write files into the node's output directory; the gate IS its
 /// authentication. Each stream gets a unique tag from a shared counter, so concurrent pushes never contend
 /// for the same temp file.
-pub(super) struct Recv {
+pub struct Recv {
     out: PathBuf,
     next_tag: AtomicU64,
 }
 
 impl Recv {
-    pub(super) fn new(out: PathBuf) -> Self {
+    /// Build a receiver that saves pushed files into `out`. Each de-merged `name=recv:<dir>` service holds
+    /// its OWN `Recv` bound to its OWN `out`, so two receive services never share a sink directory.
+    pub fn new(out: PathBuf) -> Self {
         Self {
             out,
             next_tag: AtomicU64::new(0),

@@ -67,7 +67,7 @@ async fn proof() {
         ];
         let services = Services::parse(&requested).unwrap();
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-        let registry = swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir())
+        let registry = swoosh::commands::serve::registry(HOST_SEED)
             .unwrap()
             .with(CONTROL_STOP_SERVICE, Stop::new(CancellationToken::new()));
         // `--public speed` SUCCEEDS: `speed` is OptIn (openable), and `control.stop` (Never) is left gated by

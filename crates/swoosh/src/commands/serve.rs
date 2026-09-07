@@ -18,7 +18,7 @@
 
 use core::net::SocketAddr;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ::fetch::OriginAllowlist;
@@ -52,7 +52,9 @@ mod stop;
 // the whole set reads as one local-submodule import group.
 use self::fetch::Fetch;
 use self::ping::Ping;
-use self::recv::Recv;
+// `pub use`: the gated send/recv proof (`tests/gated_send.rs`) builds the receive handler directly now that
+// recv is de-merged OUT of the shared `registry()` (like `fetch:`), so it exercises the identical `Recv`.
+pub use self::recv::Recv;
 pub use self::roster::Roster;
 pub use self::services::ServiceList;
 use self::speed::Speed;
@@ -298,16 +300,25 @@ impl ServeCmd {
         // synthetic scheme carries a `_`, which the addr grammar rejects, so no operator entry (`x=fetch_0:`)
         // can ever resolve onto a synthetic instance.
         let fetch = FetchScope::extract(&mut requested)?;
-        // The receive sink directory rides its own scheme (`recv:<dir>`), so the per-service output dir lives
-        // on the per-service token rather than a node-wide flag (a node-wide value cannot say which of two
-        // receive services saves where). `recv:` is a handler scheme whose `Target::Handler` cannot itself
-        // carry the dir, so swoosh reads it off the requested string HERE, before `Services::parse`, and
-        // rewrites each `recv:<dir>` to a bare `recv:` tightbeam parses. A bare `recv:` defaults to `.`.
-        let recv_out = extract_recv_out(&mut requested);
+        // De-merge the receive services the SAME way (delib-39): every `name=recv:<dir>` becomes its OWN
+        // `Recv` instance bound to ONLY its own sink directory, registered under a distinct UNSPELLABLE
+        // synthetic scheme (`recv_0`, `recv_1`, ...). A node-wide sink cannot say which of two receive
+        // services saves where, so the dir rides the per-service instance: `a=recv:/x b=recv:/y` writes
+        // alice's pushes into /x and bob's into /y, each scoped to its own service and grant. A public
+        // fetch's SSRF-pivot argument does not apply (recv is always gated, `Recv::Public = Never`), so this
+        // is the plain per-instance de-merge without an open-relay wall. Extracted BEFORE `Services::parse`,
+        // exactly like fetch, because `recv:`'s `Target::Handler` cannot itself carry the dir. A bare `recv:`
+        // defaults to `.`.
+        let recv = extract_recv_services(&mut requested);
         let mut services = Services::parse(&requested)?;
         for scoped in fetch.services() {
             // Inserted DIRECTLY (bypassing the addr grammar) so the synthetic `_`-bearing scheme is usable.
             services = services.with_handler(scoped.name(), scoped.scheme())?;
+        }
+        for service in &recv {
+            // Same direct insert: each receive service maps its served name to its own `recv_<i>` instance,
+            // the synthetic `_`-bearing scheme bypassing the addr grammar just as fetch's does.
+            services = services.with_handler(service.name(), service.scheme())?;
         }
         // The operator's raw `--public` request: the UNPROVEN set of names to open. `Exposer::with_public`
         // below is the wall that proves each one exposed and open-safe (per-service), turning it into the
@@ -341,7 +352,7 @@ impl ServeCmd {
         // synthetic scheme, then roster + the two `control.*` handlers. `Exposer::new` enforces every named
         // handler is registered and guards a node-wide-open base; `with_public` then proves the per-service
         // overlay (sshd/raw/unknown bail here, before any banner advertises a service it will not serve).
-        let mut registry = registry(host_seed, recv_out)?;
+        let mut registry = registry(host_seed)?;
         for scoped in fetch.services() {
             registry = registry.with(
                 scoped.scheme(),
@@ -349,6 +360,11 @@ impl ServeCmd {
                     allow: scoped.allow().clone(),
                 },
             );
+        }
+        for service in &recv {
+            // One `Recv` instance per receive service, keyed under its own synthetic scheme and holding ONLY
+            // its own sink dir, so a push to one receive service can never land in another's directory.
+            registry = registry.with(service.scheme(), Recv::new(service.out().to_owned()));
         }
         let registry = registry
             .with("roster", Roster::new(roster_blob))
@@ -363,7 +379,14 @@ impl ServeCmd {
             // parsed (fetch already de-merged out), so the banner renders `name -> target` from what the
             // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
             // amplifier caveat). Fetch names are handled by gloss (their synthetic scheme is unspellable).
-            let addr_by_name = display_targets(&requested);
+            let mut addr_by_name = display_targets(&requested);
+            for service in &recv {
+                // Receive services are de-merged out of `requested` (their `recv_<i>` scheme is unspellable),
+                // so re-add each under its served name pointing at the bare `recv:` scheme. The banner then
+                // renders it through the SAME handler-scheme path as any other handler (`in -> recv`,
+                // "receives pushed files"), never leaking the synthetic scheme.
+                addr_by_name.insert(service.name().to_owned(), format!("{RECV_SCHEME}:"));
+            }
             let fetch_names: HashSet<String> = fetch
                 .services()
                 .iter()
@@ -864,32 +887,25 @@ fn humanize(duration: core::time::Duration) -> String {
 }
 
 /// Assemble the BASE handler registry swoosh serves: the two gated diagnostic services `ping:` and `speed:`,
-/// the gated file-receive `recv:`, and (under the `ssh` feature) the keyless shell `sshd:`. swoosh is the one
-/// crate that depends on every service crate, so it is the one place these are wired: tightbeam names no
-/// service crate and ships no built-in, and this function injects them all with `.with(...)`.
+/// and (under the `ssh` feature) the keyless shell `sshd:`. swoosh is the one crate that depends on every
+/// service crate, so it is the one place these are wired: tightbeam names no service crate and ships no
+/// built-in, and this function injects them all with `.with(...)`.
 ///
-/// Fetch is NOT here: each fetch service is de-merged into its OWN `Fetch` instance holding only its own
-/// origin scope, registered by `run_serve` under a distinct synthetic scheme (delib-39 BLOCKER-3), so there
-/// is no single shared `fetch:` handler to over-permit. `roster:` and the two `control.*` handlers are
-/// likewise added by `run_serve` (they hold per-run state: the signed roster blob, the teardown token, the
-/// catalog snapshot).
+/// Fetch is NOT here, and neither is recv: each is de-merged into its OWN handler instance holding only its
+/// own scope, registered by `run_serve` under a distinct synthetic scheme (delib-39). A fetch instance holds
+/// only its own origin allowlist (so there is no single shared `fetch:` handler to over-permit, BLOCKER-3); a
+/// `Recv` instance holds only its own sink directory (so `a=recv:/x b=recv:/y` writes each peer's pushes into
+/// its OWN dir, not the first-named one). `roster:` and the two `control.*` handlers are likewise added by
+/// `run_serve` (they hold per-run state: the signed roster blob, the teardown token, the catalog snapshot).
 ///
 /// ping and speed are TWO independent services so a node may offer ping without speed (or the reverse),
 /// and each carries its own gate: `ping` answers only ping frames, `speed` only speed frames, refusing the
 /// other method at the wire (`ProtocolError::WrongService`), so a grant for one can never open the other.
 ///
-/// `recv_out` is the directory a `recv:` service saves pushed files into; the handler reduces each
-/// sender-supplied name to a safe relative path under it (`transfer::safe_relative_path`), so a peer can never
-/// write outside the directory. The dir rides the `recv:<dir>` scheme (`extract_recv_out`), so a bare
-/// `recv:` defaults to `.`.
-///
 /// The ONE assembly the product verb and the `gated_measure` proof test both build, so the test exercises the
 /// identical handlers swoosh serves rather than a hand-rolled near-copy.
-pub fn registry(host_seed: [u8; 32], recv_out: PathBuf) -> eyre::Result<Registry> {
-    let registry = Registry::new()
-        .with("ping", Ping)
-        .with("speed", Speed)
-        .with("recv", Recv::new(recv_out));
+pub fn registry(host_seed: [u8; 32]) -> eyre::Result<Registry> {
+    let registry = Registry::new().with("ping", Ping).with("speed", Speed);
     #[cfg(feature = "ssh")]
     let registry = registry.with("sshd", Sshd { host_seed });
     #[cfg(not(feature = "ssh"))]
@@ -929,40 +945,76 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
 /// (the same literal the registry keys the handler under), not a re-typed string that could drift from it.
 const RECV_SCHEME: &str = "recv";
 
-/// Read the receive sink directory off the `recv:<dir>` scheme and rewrite each `recv:<dir>` entry down to a
-/// bare `recv:` (a `Target::Handler` `Services::parse` accepts), returning the dir the injected `recv`
-/// handler saves into. A bare `recv:` (no dir) defaults to `.`, exactly as a bare `fetch:` defaults to
-/// unconstrained. The dir rides the scheme because it is a per-service fact, not a node-wide one; `recv:` is
-/// a handler scheme whose `Target::Handler` cannot itself hold the dir, so swoosh reads it off the requested
-/// string here, before parse, the same shape as the fetch de-merge.
-///
-/// swoosh registers ONE `recv` handler, so a single sink dir is threaded: the FIRST `recv:<dir>` naming a
-/// non-empty dir wins, and every `recv:` entry is rewritten bare so it resolves onto that one handler.
-fn extract_recv_out(requested: &mut [String]) -> PathBuf {
-    let mut out: Option<PathBuf> = None;
-    for entry in requested.iter_mut() {
-        // Only the addr side of `name=addr` names a scheme; a bare entry (no `=`) is its own addr.
+/// One de-merged receive service: its served NAME (the wire name `swoosh send --service` requests, e.g. the
+/// default `recv`), the UNSPELLABLE synthetic registry scheme its own `Recv` instance is keyed under
+/// (`recv_0`, `recv_1`, ...), and ONLY its own sink directory. Because each receive service holds its own
+/// instance under its own scheme, `a=recv:/x b=recv:/y` writes alice's pushes into /x and bob's into /y: a
+/// node-wide sink cannot say which of two receive services saves where, so the dir rides the per-service
+/// instance (delib-39 de-merge, mirroring `fetch:`).
+struct RecvService {
+    name: String,
+    scheme: String,
+    out: PathBuf,
+}
+
+impl RecvService {
+    /// The served name a dialer requests (`swoosh send --service <name>`).
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The synthetic, unspellable registry scheme this service's own `Recv` instance is keyed under.
+    fn scheme(&self) -> &str {
+        &self.scheme
+    }
+
+    /// This service's own sink directory (only its own; never shared with another receive service).
+    fn out(&self) -> &Path {
+        &self.out
+    }
+}
+
+/// De-merges the receive services out of the requested set: a `name=recv:<dir>` entry hands tightbeam a sink
+/// directory its bare-scheme `Target::Handler` cannot hold, so swoosh separates each into its OWN
+/// [`RecvService`] (name + a distinct synthetic scheme + its own sink dir) here, before `Services::parse`,
+/// the same shape as the `fetch:` de-merge. A bare `recv:` (no dir) defaults to `.` under the `default` name
+/// (matching `Services::parse`'s bare-entry rule); a `name=recv:<dir>` is a named, dir-scoped receiver.
+/// Non-recv entries are left in place, in order. Infallible: any string is a valid directory path, so unlike
+/// the fetch origin parse there is nothing to reject here.
+fn extract_recv_services(requested: &mut Vec<String>) -> Vec<RecvService> {
+    let mut services: Vec<RecvService> = Vec::new();
+    let mut remaining: Vec<String> = Vec::new();
+    for entry in requested.drain(..) {
+        // Split off the optional `name=` prefix; a bare entry (no `=`) is its own addr under the `default`
+        // name. Only the ADDR side names a scheme, so the dir is read from there.
         let (name, addr) = match entry.split_once('=') {
-            Some((name, addr)) => (Some(name.to_owned()), addr),
-            None => (None, entry.as_str()),
+            Some((name, addr)) => (name.to_owned(), addr),
+            None => ("default".to_owned(), entry.as_str()),
         };
+        // A receive service is `recv:` optionally followed by a dir. A non-recv entry passes through
+        // unchanged, in order, for `Services::parse`.
         let Some(dir) = addr
             .strip_prefix(RECV_SCHEME)
             .and_then(|rest| rest.strip_prefix(':'))
         else {
+            remaining.push(entry);
             continue;
         };
-        // A bare `recv:` keeps the `.` default; `recv:<dir>` saves into <dir>. First non-empty dir wins.
-        if !dir.is_empty() {
-            out.get_or_insert_with(|| PathBuf::from(dir));
-        }
-        // Rewrite to a bare `recv:` so `Services::parse` sees a plain handler target keyed under `recv`.
-        *entry = match name {
-            Some(name) => format!("{name}={RECV_SCHEME}:"),
-            None => format!("{RECV_SCHEME}:"),
+        // A bare `recv:` saves into `.`; `recv:<dir>` into <dir>. The dir is this service's OWN, on its OWN
+        // instance, so two receive services never share one sink.
+        let out = if dir.is_empty() {
+            PathBuf::from(".")
+        } else {
+            PathBuf::from(dir)
         };
+        // Each receive service gets its OWN unspellable synthetic scheme, indexed so two never collide; the
+        // `_` it carries is a byte `parse_target` rejects, so no operator entry (`x=recv_0:`) can resolve
+        // onto a synthetic instance.
+        let scheme = format!("{RECV_SCHEME}_{}", services.len());
+        services.push(RecvService { name, scheme, out });
     }
-    out.unwrap_or_else(|| PathBuf::from("."))
+    *requested = remaining;
+    services
 }
 
 /// The scheme prefix a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE

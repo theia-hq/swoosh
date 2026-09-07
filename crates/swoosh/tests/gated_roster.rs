@@ -80,7 +80,7 @@ async fn proof() {
     tokio::task::spawn_local(async move {
         let services = Services::parse(&["roster=roster:".to_owned()]).unwrap();
         let gate = tunnel::resolve_gate(Some(signet_id), empty_denylist("host").await).unwrap();
-        let registry = swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir())
+        let registry = swoosh::commands::serve::registry(HOST_SEED)
             .unwrap()
             .with("roster", swoosh::commands::serve::Roster::new(blob));
         Exposer::new(services, registry, gate, PublicUnsafeRequest::none())

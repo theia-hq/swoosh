@@ -82,8 +82,7 @@ async fn proof() {
             // `resolve_gate(Some(secret.node_id()), ...)` builds it when nothing was adopted.
             let gate =
                 tunnel::resolve_gate(Some(self_signet), empty_denylist("self").await).unwrap();
-            let registry =
-                swoosh::commands::serve::registry(HOST_SEED, std::env::temp_dir()).unwrap();
+            let registry = swoosh::commands::serve::registry(HOST_SEED).unwrap();
             Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
                 .unwrap()
                 .run(&host, CancellationToken::new())

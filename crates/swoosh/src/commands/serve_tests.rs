@@ -450,6 +450,106 @@ fn a_gated_bare_fetch_is_allowed() {
     );
 }
 
+/// Two `name=recv:<dir>` services de-merge into TWO separate `RecvService`s, each with its own served name,
+/// its OWN unspellable synthetic scheme, and ONLY its own sink dir. `extract` removes them from the requested
+/// set (leaving the non-recv entries for `Services::parse`), so `a=recv:/x b=recv:/y` writes each peer's
+/// pushes into its OWN directory rather than the first-named one (the single-sink bug this fix removes).
+#[test]
+fn named_recv_dirs_de_merge_into_per_service_instances() {
+    let mut requested = vec!["a=recv:/tmp/x".to_owned(), "b=recv:/tmp/y".to_owned()];
+    let recv = super::extract_recv_services(&mut requested);
+
+    assert!(
+        requested.is_empty(),
+        "recv entries are removed from the set `Services::parse` then sees"
+    );
+    assert_eq!(
+        recv.len(),
+        2,
+        "two receive services de-merge into two instances"
+    );
+    let a = recv.iter().find(|s| s.name() == "a").expect("service a");
+    let b = recv.iter().find(|s| s.name() == "b").expect("service b");
+    assert_eq!(
+        a.out(),
+        std::path::Path::new("/tmp/x"),
+        "service a keeps its OWN sink dir"
+    );
+    assert_eq!(
+        b.out(),
+        std::path::Path::new("/tmp/y"),
+        "service b's dir is NOT masked by the first-named one"
+    );
+    assert_ne!(
+        a.scheme(),
+        b.scheme(),
+        "each receive service gets its OWN synthetic scheme, never a shared one"
+    );
+}
+
+/// A bare `recv:` (no dir, no name) is the `default`-named receiver saving into `.`: `extract` gives it its
+/// own instance with the `.` sink, mirroring a bare `fetch:`.
+#[test]
+fn bare_recv_is_a_default_named_dot_instance() {
+    let mut requested = vec!["recv:".to_owned()];
+    let recv = super::extract_recv_services(&mut requested);
+
+    assert!(requested.is_empty(), "the bare recv entry is removed");
+    assert_eq!(recv.len(), 1);
+    assert_eq!(
+        recv[0].name(),
+        "default",
+        "a bare recv entry defaults to the `default` name"
+    );
+    assert_eq!(
+        recv[0].out(),
+        std::path::Path::new("."),
+        "a bare `recv:` saves into `.`"
+    );
+}
+
+/// Non-recv services pass through in order, and only recv is de-merged out, so extraction is scoped to recv
+/// and does not disturb the rest of the requested set.
+#[test]
+fn non_recv_services_pass_through_and_only_recv_is_removed() {
+    let mut requested = vec![
+        "ping:".to_owned(),
+        "in=recv:/tmp/x".to_owned(),
+        "web=127.0.0.1:8080".to_owned(),
+    ];
+    let recv = super::extract_recv_services(&mut requested);
+
+    assert_eq!(
+        requested,
+        vec!["ping:".to_owned(), "web=127.0.0.1:8080".to_owned()],
+        "the recv entry is removed; ping and the raw forward are left exactly as given, in order"
+    );
+    assert_eq!(
+        recv.len(),
+        1,
+        "only the one receive service is de-merged out"
+    );
+}
+
+/// The synthetic per-service recv scheme is UNSPELLABLE: it carries a `_`, which the handler-scheme grammar
+/// rejects, so an operator entry `x=recv_0:` is a parse error and can never resolve onto a synthetic recv
+/// instance. The de-merge builds it directly, bypassing that grammar.
+#[test]
+fn the_synthetic_recv_scheme_is_unspellable_by_an_operator_entry() {
+    let mut requested = vec!["a=recv:/tmp/x".to_owned()];
+    let recv = super::extract_recv_services(&mut requested);
+    let scheme = recv[0].scheme().to_owned();
+    assert!(
+        scheme.contains('_'),
+        "the synthetic scheme carries the byte the grammar rejects: {scheme}"
+    );
+    // Spelled as an operator service entry, that same scheme is not a handler; it is a parse error.
+    assert!(
+        Services::parse(&[format!("x={scheme}:")]).is_err(),
+        "`x={scheme}:` must be rejected by the handler-scheme grammar (the sink cannot be spelled onto)"
+    );
+}
+
 /// A minimal family gate for a construction test: an empty, non-persisting family gate, so `with_public`'s
 /// per-service proof runs without standing up a signet.
 fn gated() -> nauthy::Gate {
@@ -468,7 +568,7 @@ fn public_speed_builds_and_public_unknown_is_refused() {
     // `--public speed` builds: `speed` is an OptIn handler, so the overlay proves it open-safe.
     let built = Exposer::new(
         services(),
-        super::registry([0u8; 32], std::env::temp_dir()).unwrap(),
+        super::registry([0u8; 32]).unwrap(),
         gated(),
         PublicUnsafeRequest::none(),
     )
@@ -482,7 +582,7 @@ fn public_speed_builds_and_public_unknown_is_refused() {
     // `--public <unknown>` is refused, naming what the node DOES serve.
     let assembled = Exposer::new(
         services(),
-        super::registry([0u8; 32], std::env::temp_dir()).unwrap(),
+        super::registry([0u8; 32]).unwrap(),
         gated(),
         PublicUnsafeRequest::none(),
     )
@@ -593,7 +693,7 @@ fn public_unsafe_naming_a_non_raw_service_is_refused() {
     let services = Services::parse(&["ping=ping:".to_owned()]).unwrap();
     // `ping` must be a registered handler so `Exposer::new`'s handler check passes and control reaches the
     // `prove_unsafe` wall, where naming a handler in the unsafe overlay is the redirect under test.
-    let registry = super::registry([0u8; 32], std::env::temp_dir()).unwrap();
+    let registry = super::registry([0u8; 32]).unwrap();
     let Err(error) = Exposer::new(
         services,
         registry,
@@ -616,7 +716,7 @@ fn public_sshd_is_refused_with_a_teaching_error() {
     let services = Services::parse(&["ssh=sshd:".to_owned()]).unwrap();
     // The `ssh` feature registers the `sshd` handler; without it, `Exposer::new` would refuse it as
     // unregistered before `with_public` ever runs, which is why this test is feature-gated.
-    let registry = super::registry([0u8; 32], std::env::temp_dir()).unwrap();
+    let registry = super::registry([0u8; 32]).unwrap();
     let assembled = Exposer::new(services, registry, gated(), PublicUnsafeRequest::none()).unwrap();
     let Err(error) = assembled.with_public(PublicRequest::new(["ssh".to_owned()])) else {
         panic!("`--public ssh` (a keyless shell) must be refused");
