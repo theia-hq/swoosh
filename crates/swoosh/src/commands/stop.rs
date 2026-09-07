@@ -1,16 +1,18 @@
-//! `swoosh stop <peer>`: stop a peer's node (stop it serving), addressed by its public key or a `sheer:`
-//! capability link.
+//! `swoosh stop [--at <peer>]`: stop a node (stop it serving).
 //!
-//! The remote half of node lifecycle: you dial a node's gated `control.stop` service and, once admitted,
-//! trigger a graceful teardown, the same stop a Ctrl-C or a `serve --for` deadline gives locally. It stops
-//! the DAEMON (the node stops serving), it does NOT power off the machine.
+//! Follows the one control grammar (delib-47): BARE stops YOUR OWN node, `--at <peer>` stops a peer's. Bare
+//! `stop` needs the resident daemon's control socket to signal the live node, which is Phase 2, so for now it
+//! reports that gracefully and exits non-zero (a foreground `serve` is still stopped with Ctrl-C or an
+//! `--expires` deadline). `stop --at <peer>` is the remote half: you dial the peer's gated `control.stop`
+//! service and, once admitted, trigger a graceful teardown, the same stop a Ctrl-C or a `serve --expires`
+//! deadline gives. It stops the NODE (the node stops serving), it does NOT power off the machine.
 //!
-//! `control.stop` is family-gated like `ping`/`speed`/`send`, so `stop` presents the same self-signed
-//! membership badge (or an explicit `--present` link) to prove membership before the node admits the
-//! stream. For a single-owner node this means only your own devices can stop it, which is correct for the
-//! qat CI-teardown consumer. Hardening the lifecycle further (an arm->confirm nonce + a single-use
-//! device-bound destroy-cap, ideally owner-only) is a flagged follow that needs an Adversary review before
-//! `control.stop` is trusted on a multi-delegate node.
+//! `control.stop` is family-gated like `ping`/`speed`/`send`, so `stop --at` presents the same self-signed
+//! membership badge (or an explicit `--present` link) to prove membership before the node admits the stream.
+//! For a single-owner node this means only your own devices can stop it, which is correct for the qat
+//! CI-teardown consumer. Hardening the lifecycle further (an arm->confirm nonce + a single-use device-bound
+//! destroy-cap, ideally owner-only) is a flagged follow that needs an Adversary review before `control.stop`
+//! is trusted on a multi-delegate node.
 //!
 //! A refusal is a LOUD typed error, never a silent success: if the node's gate does not admit this caller,
 //! opening the control stream fails and `stop` reports the refusal and exits non-zero.
@@ -24,12 +26,13 @@ use crate::contacts::Contacts;
 use crate::peer::Peer;
 use crate::transport::ReachArgs;
 
-/// Stop a peer's node (stop it serving), addressed by its public key or a `sheer:` capability link.
+/// Stop a node (stop it serving): bare stops your own node, `--at <peer>` stops a peer's.
 #[derive(Debug, Args)]
 pub struct StopCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
-    #[arg(value_name = "peer")]
-    pub peer: Peer,
+    /// the peer whose node to stop: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link.
+    /// Omit it and `stop` reports that stopping your own node needs the daemon (not built yet).
+    #[arg(long, value_name = "peer")]
+    pub at: Option<Peer>,
     /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
     #[arg(
         long,
@@ -47,26 +50,35 @@ impl crate::reaching::Reaching for StopCmd {
         &self.reach
     }
 
-    /// `stop` reaches the peer's family-gated `control.stop` service, so it presents the member badge
+    /// `stop --at` reaches the peer's family-gated `control.stop` service, so it presents the member badge
     /// rooted at the dialing key (only a family member may stop the node). `Family` fuses the identity to
-    /// `PersistedIfPresent`. The effective slip is the FOLD of a self-addressing `sheer:` link-as-peer with
-    /// an explicit `--present`, threaded INTO the credential so the ONE resolver owns both slots.
+    /// `PersistedIfPresent`. The effective slip is the FOLD of a self-addressing `sheer:` link in the `--at`
+    /// peer with an explicit `--present`, threaded INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> crate::credential::Credential {
         crate::credential::Credential::Family {
-            present: self.peer.self_present().or_else(|| self.present.clone()),
+            present: self
+                .at
+                .as_ref()
+                .and_then(Peer::self_present)
+                .or_else(|| self.present.clone()),
         }
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {
-        self.peer.reject_redundant_present(self.present.as_ref())
+        match &self.at {
+            Some(peer) => peer.reject_redundant_present(self.present.as_ref()),
+            None => Ok(()),
+        }
     }
 
     fn identity(&self) -> crate::identity::Identity {
         self.credential().identity()
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `stop` reads the resolved `present` badge and
-    /// `contacts` (to resolve a petname like `me/qat` in its peer slot); it ignores `transport` and `key`.
+    /// Uniform dispatch: unpack the reach context and run. `stop --at` reads the resolved `present` badge and
+    /// `contacts` (to resolve a petname like `me/qat` in its `--at` slot); it ignores `transport` and `key`.
+    /// Only reached WITH `--at`: a bare `stop` splits to [`run_local`](Self::run_local) before any transport
+    /// is composed, so `at` is always `Some` here.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -82,10 +94,24 @@ impl crate::reaching::Reaching for StopCmd {
 }
 
 impl StopCmd {
+    /// The bare (no-`--at`) path: stopping YOUR OWN node needs the resident daemon's control socket to signal
+    /// the live node, which is Phase 2. Report that and exit non-zero (a foreground `serve` is still stopped
+    /// with Ctrl-C or a `--expires` deadline). Runs BEFORE any transport is composed (dispatched locally in
+    /// the root), so a bare `swoosh stop` never binds an endpoint it would not use.
+    // FLAG(CLI-Architect): the deferred-behavior wording is the surface owner's; kept in the same voice as the
+    // sibling bare-`service ls` message.
+    pub fn run_local(self) -> eyre::Result<()> {
+        eyre::bail!(
+            "controlling your own node lands with the daemon (not built yet); \
+             stop a peer's with `swoosh stop --at <peer>`"
+        )
+    }
+
     /// Reach the peer's gated `control.stop` service and trigger a graceful stop. Presents the resolved
     /// `present` (the self-signed membership badge, or an explicit `--present` link) so the node's family
     /// gate admits the stream; a node that does not admit this caller refuses LOUDLY here, never a silent
-    /// no-op.
+    /// no-op. `--at` is required to reach this path (a bare `stop` split to [`run_local`](Self::run_local)),
+    /// so a missing target is a root-dispatch bug, surfaced as an internal error rather than a user one.
     async fn run_stop<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -93,11 +119,17 @@ impl StopCmd {
         present: Option<String>,
         membership: Option<String>,
     ) -> eyre::Result<()> {
+        let Some(peer) = self.at else {
+            eyre::bail!(
+                "internal: `stop` reached the reach path without `--at` (root-dispatch bug)"
+            );
+        };
+
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
         // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
         // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
-        let connector = self.peer.connector(
+        let connector = peer.connector(
             contacts,
             CONTROL_STOP_SERVICE.to_owned(),
             present,

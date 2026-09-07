@@ -98,6 +98,21 @@ impl Home {
         self.dir.join("revoked")
     }
 
+    /// `<home>/disabled`: the newline list of DISABLED service names a running `serve` honors live (an
+    /// mtime-watched oracle, the exact shape as [`revoked`](Self::revoked)). `service disable <svc>` adds a
+    /// name and `service enable <svc>` removes one; a disable persists (fail-closed across a restart) and a
+    /// disabled service refuses on the next stream with no restart.
+    pub fn disabled(&self) -> PathBuf {
+        self.dir.join("disabled")
+    }
+
+    /// `<home>/disabled.lock`: the flock file that serializes concurrent `enable`/`disable` edits so two
+    /// racing toggles cannot lose each other's change. Separate from `disabled` itself because the toggle
+    /// rewrites `disabled` by atomic rename (a new inode each time), so the lock must sit on a STABLE inode.
+    pub fn disabled_lock(&self) -> PathBuf {
+        self.dir.join("disabled.lock")
+    }
+
     /// `<home>/grants`: the issuer-side mint-log ledger (0600) that makes revoke-by-holder and `grant ls`
     /// possible.
     pub fn grants(&self) -> PathBuf {

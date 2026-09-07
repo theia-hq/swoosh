@@ -26,6 +26,7 @@ use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use nauthy::{FileDenylist, VerifyKey};
 use tightbeam::duration::Lifetime;
+use tightbeam::enabled::FileDisabledList;
 use tightbeam::tunnel::{
     self, CancellationToken, Exposer, ManifestEntry, Posture, PublicRequest, PublicUnsafeRequest,
     RawSource, Registry, Services, TargetKind,
@@ -167,14 +168,18 @@ pub struct ExposeContext {
     pub signet: Option<NodeId>,
     /// The revocation denylist the gate honors.
     pub denylist: FileDenylist,
+    /// The live enable/disable oracle the exposer's per-stream gate consults (delib-47): a `service disable`
+    /// written to `<home>/disabled` refuses the service live, and a `service enable` restores it, both with no
+    /// restart. The exact mtime-watch shape as the denylist, loaded beside it in the composition root.
+    pub enabled: FileDisabledList,
     /// The signet-signed roster blob the `roster:` handler serves, cut once per `serve` from the
     /// operator's contacts while the secret is still live.
     pub roster_blob: Arc<Vec<u8>>,
 }
 
 impl core::fmt::Debug for ExposeContext {
-    /// `FileDenylist` holds a `Mutex` (not `Debug`), so this impl names the fields it can and elides that one,
-    /// which is enough for the derived `Debug` on `ServeCmd`/`Command` to compile.
+    /// `FileDenylist` and `FileDisabledList` each hold a `Mutex` (not `Debug`), so this impl names the fields
+    /// it can and elides those, which is enough for the derived `Debug` on `ServeCmd`/`Command` to compile.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExposeContext")
             .field("host_seed", &self.host_seed)
@@ -239,9 +244,10 @@ impl crate::reaching::Reaching for ServeCmd {
             host_seed,
             signet,
             denylist,
+            enabled,
             roster_blob,
         } = *expose;
-        self.run_serve(node, host_seed, signet, denylist, roster_blob)
+        self.run_serve(node, host_seed, signet, denylist, enabled, roster_blob)
             .await
     }
 }
@@ -271,6 +277,7 @@ impl ServeCmd {
         host_seed: [u8; 32],
         signet: Option<NodeId>,
         denylist: FileDenylist,
+        enabled: FileDisabledList,
         roster_blob: Arc<Vec<u8>>,
     ) -> eyre::Result<()>
     where
@@ -370,8 +377,12 @@ impl ServeCmd {
             .with("roster", Roster::new(roster_blob))
             .with(CONTROL_STOP_SERVICE, Stop::new(cancel.clone()))
             .with(CONTROL_SERVICES_SERVICE, ServiceList::new(catalog));
-        let exposer =
-            Exposer::new(services.clone(), registry, gate, public_unsafe)?.with_public(public)?;
+        // Wire the live enable/disable oracle (delib-47) alongside the proven public overlay: a stream for a
+        // service named in `<home>/disabled` is refused at the gate seam, live, and a re-enable restores it
+        // with no restart. `with_enabled` cannot fail (it only stores the oracle), so it tails the chain.
+        let exposer = Exposer::new(services.clone(), registry, gate, public_unsafe)?
+            .with_public(public)?
+            .with_enabled(enabled);
 
         if !self.quiet {
             let addr = node.local_addr();

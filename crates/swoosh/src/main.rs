@@ -37,7 +37,7 @@ use swoosh::commands::mint::MintCmd;
 use swoosh::commands::ping::PingCmd;
 use swoosh::commands::send::SendCmd;
 use swoosh::commands::serve::ServeCmd;
-use swoosh::commands::service::ServiceCmd;
+use swoosh::commands::service::{ServiceCmd, ServiceLsCmd, ServiceToggleCmd};
 use swoosh::commands::speed::SpeedCmd;
 use swoosh::commands::ssh::SshCmd;
 use swoosh::commands::status::StatusCmd;
@@ -95,9 +95,10 @@ struct Cli {
 enum Command {
     /// Be a node: publish named services behind your signet gate (bare = answer reach diagnostics).
     Serve(ServeCmd),
-    /// Stop a peer's node (stop it serving), addressed by its public key or a `sheer:` link.
+    /// Stop a node (stop it serving): bare stops your own node, `--at <peer>` stops a peer's.
     Stop(StopCmd),
-    /// Read a peer's served services (`--at <peer>`): a `SERVICE  GATE` table of what it serves.
+    /// Read, enable, or disable this node's services (`ls`/`enable`/`disable`; `ls --at <peer>` reads a peer).
+    #[command(subcommand)]
     Service(ServiceCmd),
     /// Measure the round-trip time to a peer, addressed by a petname or their public key.
     Ping(PingCmd),
@@ -151,14 +152,14 @@ enum Reach {
     /// `swoosh send`: push files to a peer's gated `recv:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
     Send(SendCmd),
-    /// `swoosh stop`: reach a peer's gated `control.stop` service and trigger a graceful stop. Presents a
-    /// membership badge (like `ping`/`speed`/`send`), so it rides the reach path under the persisted
-    /// identity when one exists.
+    /// `swoosh stop --at <peer>`: reach a peer's gated `control.stop` service and trigger a graceful stop.
+    /// Presents a membership badge (like `ping`/`speed`/`send`), so it rides the reach path under the
+    /// persisted identity when one exists. A bare `stop` (your own node) splits to a local report instead.
     Stop(StopCmd),
-    /// `swoosh service --at <peer>`: reach a peer's gated `control.services` read and print its
+    /// `swoosh service ls --at <peer>`: reach a peer's gated `control.services` read and print its
     /// `SERVICE  GATE` table. Presents a membership badge (like `stop`), so it rides the reach path under
-    /// the persisted identity when one exists.
-    Service(ServiceCmd),
+    /// the persisted identity when one exists. A bare `service ls` (your own node) splits to a local report.
+    Service(ServiceLsCmd),
     /// `swoosh fleet --pull`: pull the signed fleet roster from a coordination node and hydrate contacts.
     /// Presents a membership badge (like `ping`/`send`) and needs the persisted identity (adopt first).
     Fleet(FleetCmd),
@@ -182,13 +183,23 @@ impl Command {
             Self::Forward(cmd) => Verb::Reach(Reach::Forward(cmd)),
             Self::Send(cmd) => Verb::Reach(Reach::Send(cmd)),
             Self::Fleet(cmd) => Verb::Reach(Reach::Fleet(cmd)),
-            Self::Stop(cmd) => Verb::Reach(Reach::Stop(cmd)),
-            // `service` reaches a peer's `control.services` ONLY with `--at`; a bare `service` reads your own
-            // node, which needs the daemon (not built yet). Split on that here so the no-peer case reports it
-            // WITHOUT composing a transport it would never use, the same local dispatch `ssh`/`grant` take.
-            Self::Service(cmd) => match cmd.at {
-                Some(_) => Verb::Reach(Reach::Service(cmd)),
-                None => Verb::Service(cmd),
+            // `stop --at <peer>` reaches a peer's `control.stop`; a bare `stop` stops YOUR OWN node, which
+            // needs the daemon's control socket (not built yet). Split on `--at` here so the bare case reports
+            // it WITHOUT composing a transport it would never use, the same local dispatch `ssh`/`grant` take.
+            Self::Stop(cmd) => match cmd.at {
+                Some(_) => Verb::Reach(Reach::Stop(cmd)),
+                None => Verb::Stop(cmd),
+            },
+            // The `service` group: `ls --at <peer>` reaches a peer's `control.services`; bare `ls` reads your
+            // own node (needs the daemon), and `enable`/`disable` are LOCAL file-writes on `<home>/disabled`.
+            // Split each here so the local arms never compose a transport they would not use.
+            Self::Service(cmd) => match cmd {
+                ServiceCmd::Ls(ls) => match ls.at {
+                    Some(_) => Verb::Reach(Reach::Service(ls)),
+                    None => Verb::ServiceLs(ls),
+                },
+                ServiceCmd::Enable(toggle) => Verb::ServiceEnable(toggle),
+                ServiceCmd::Disable(toggle) => Verb::ServiceDisable(toggle),
             },
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
@@ -215,9 +226,16 @@ enum Verb {
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
     Ssh(SshCmd),
-    /// A bare `swoosh service` (no `--at`): reading your OWN node's services needs the daemon (not built
+    /// A bare `swoosh service ls` (no `--at`): reading your OWN node's live menu needs the daemon (not built
     /// yet), so it reports that and needs no transport or store. With `--at` it is a reaching verb instead.
-    Service(ServiceCmd),
+    ServiceLs(ServiceLsCmd),
+    /// `swoosh service enable <svc>`: a LOCAL file-write on `<home>/disabled` (remove a name), no transport.
+    ServiceEnable(ServiceToggleCmd),
+    /// `swoosh service disable <svc>`: a LOCAL file-write on `<home>/disabled` (add a name), no transport.
+    ServiceDisable(ServiceToggleCmd),
+    /// A bare `swoosh stop` (no `--at`): stopping your OWN node needs the daemon (not built yet), so it
+    /// reports that and needs no transport or store. With `--at` it is a reaching verb instead.
+    Stop(StopCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(TreeCmd),
     /// Mints, narrows, or revokes a `sheer:` capability link. `share` signs with the persisted key;
@@ -406,6 +424,10 @@ impl Reach {
                         .unwrap_or_else(|| secret.node_id()),
                 ),
                 denylist: nauthy::FileDenylist::load(home.revoked()).await?,
+                // The live enable/disable oracle (delib-47): the running exposer consults it per stream, so a
+                // `service disable`/`enable` written to `<home>/disabled` is honored with no restart. Loaded
+                // here beside the denylist because both are home files the gate reads.
+                enabled: tightbeam::enabled::FileDisabledList::load(home.disabled()).await?,
                 roster_blob: std::sync::Arc::new(swoosh::commands::serve::cut_roster(
                     contacts, secret,
                 )?),
@@ -430,6 +452,19 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+/// Error FORWARD if the retired `SWOOSH_KEY` env var is set (Phase 1a errored only the flag, so a stale env
+/// was a silent no-op that could select the wrong identity). A pure function over the presence bit, so the
+/// forward message is unit-tested without touching (and racing on) the process environment.
+fn reject_retired_key_env(present: bool) -> eyre::Result<()> {
+    if present {
+        eyre::bail!(
+            "`SWOOSH_KEY` is gone; use `SWOOSH_HOME` (the node is a directory; the key lives at \
+             `$SWOOSH_HOME/identity.key`)"
+        );
+    }
+    Ok(())
+}
+
 /// The real entry point, split from `main` so a failure prints its clean message chain rather than
 /// eyre's `Debug` form (see the note in `main`).
 async fn run() -> eyre::Result<()> {
@@ -447,6 +482,13 @@ async fn run() -> eyre::Result<()> {
             "`--key` is gone; pass `--home <dir>` (the key lives at `<home>/identity.key`)"
         );
     }
+
+    // The retired `SWOOSH_KEY` env var is the SAME clean break as `--key`, and a silent no-op is the danger:
+    // Phase 1a only errored the FLAG, so a stale `SWOOSH_KEY` in a shell profile would sit ignored while
+    // `--home`/`SWOOSH_HOME` (or the default) quietly selected a DIFFERENT identity. Detect it here and error
+    // FORWARD so a stale env can never silently pick the wrong node. Read directly (the field carries no `env`,
+    // deliberately, so clap never binds it); presence alone is the error, whatever its value.
+    reject_retired_key_env(std::env::var_os("SWOOSH_KEY").is_some())?;
 
     // No verb given (a bare `swoosh`, even with `SWOOSH_HOME` set): print the full help and exit non-zero,
     // the same way clap's own `arg_required_else_help` does (full help, non-zero exit, no `Error:` line).
@@ -467,10 +509,17 @@ async fn run() -> eyre::Result<()> {
     // book. A reaching verb falls through to bind a transport below.
     let reach = match command.split() {
         Verb::Tree(cmd) => return cmd.run(&Cli::command()),
-        // A bare `swoosh service` (no `--at`): reading your own node needs the daemon (not built yet). Report
-        // it here, before any transport is composed, the same local dispatch the other transport-free verbs
-        // take. With `--at` this verb fell through to the reach path above instead.
-        Verb::Service(cmd) => return cmd.run_local(),
+        // A bare `swoosh service ls` (no `--at`): reading your own node needs the daemon (not built yet).
+        // Report it here, before any transport is composed, the same local dispatch the other transport-free
+        // verbs take. With `--at` this verb fell through to the reach path above instead.
+        Verb::ServiceLs(cmd) => return cmd.run_local(),
+        // A bare `swoosh stop` (no `--at`): stopping your own node needs the daemon (not built yet). Report it
+        // here too, before any transport is composed. With `--at` it fell through to the reach path above.
+        Verb::Stop(cmd) => return cmd.run_local(),
+        // `service enable`/`disable`: LOCAL file-writes on `<home>/disabled`, honored live by a running
+        // `serve` via the mtime-watched oracle. Need only the home; bind no transport and touch no store.
+        Verb::ServiceEnable(cmd) => return cmd.run_enable(&home),
+        Verb::ServiceDisable(cmd) => return cmd.run_disable(&home),
         Verb::Contact(cmd) => {
             let store = ContactsStore::open(home.contacts()).await?;
             return cmd.run(store).await;
@@ -749,8 +798,9 @@ mod tests {
     }
 
     /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `sheer:` link all
-    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/`send`/`stop`/`service --at`/
-    /// `fetch --via`/`ssh`/`fleet --pull`.
+    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/`send`/`stop --at`/
+    /// `service ls --at`/`fetch --via`/`ssh`/`fleet --pull`. `stop` and `service ls` carry the peer on `--at`
+    /// (bare acts on your own node); the rest carry it positionally.
     #[test]
     fn every_dialing_verb_takes_a_petname_a_key_and_a_link() {
         let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
@@ -762,8 +812,8 @@ mod tests {
                 &["swoosh", "status", peer],
                 &["swoosh", "forward", peer, "--to", "5432"],
                 &["swoosh", "send", "afile", peer],
-                &["swoosh", "stop", peer],
-                &["swoosh", "service", "--at", peer],
+                &["swoosh", "stop", "--at", peer],
+                &["swoosh", "service", "ls", "--at", peer],
                 &["swoosh", "fetch", "http://example.com/x", "--via", peer],
                 &["swoosh", "ssh", peer],
                 &["swoosh", "fleet", "--pull", peer],
@@ -791,5 +841,90 @@ mod tests {
         ])
         .expect("the --peer hint parses under its new id peer-hint");
         assert!(matches!(cli.command, Some(Command::Ping(_))));
+    }
+
+    /// The one control grammar (delib-47): BARE `stop` splits to the local (own-node) path, `stop --at <peer>`
+    /// to the reach path. The bare form takes NO positional peer (the old `stop <peer>` is retired).
+    #[test]
+    fn stop_bare_is_local_and_at_is_the_reach_path() {
+        let key = NodeId::from_ed25519_secret(&[7u8; 32]).to_string();
+
+        // Bare: parses, and splits to the local self-report verb (needs no transport).
+        let bare = Cli::try_parse_from(["swoosh", "stop"]).expect("bare stop parses");
+        assert!(matches!(
+            bare.command.expect("a command").split(),
+            Verb::Stop(_)
+        ));
+
+        // `--at <peer>`: splits to the reach path.
+        let at = Cli::try_parse_from(["swoosh", "stop", "--at", &key]).expect("stop --at parses");
+        assert!(matches!(
+            at.command.expect("a command").split(),
+            Verb::Reach(Reach::Stop(_))
+        ));
+
+        // The retired positional form no longer resolves (pre-1.0 clean break).
+        assert!(
+            Cli::try_parse_from(["swoosh", "stop", &key]).is_err(),
+            "the retired `stop <peer>` positional must not resolve"
+        );
+    }
+
+    /// The `service` group: `ls` splits bare-local vs `--at`-reach, and `enable`/`disable` are local leaves.
+    /// The old flat `service --at <peer>` (a leaf, not a group) is retired.
+    #[test]
+    fn service_group_splits_ls_enable_disable() {
+        let key = NodeId::from_ed25519_secret(&[6u8; 32]).to_string();
+
+        let bare_ls = Cli::try_parse_from(["swoosh", "service", "ls"]).expect("service ls parses");
+        assert!(matches!(
+            bare_ls.command.expect("a command").split(),
+            Verb::ServiceLs(_)
+        ));
+
+        let at_ls = Cli::try_parse_from(["swoosh", "service", "ls", "--at", &key])
+            .expect("service ls --at parses");
+        assert!(matches!(
+            at_ls.command.expect("a command").split(),
+            Verb::Reach(Reach::Service(_))
+        ));
+
+        let enable = Cli::try_parse_from(["swoosh", "service", "enable", "speed"])
+            .expect("service enable parses");
+        assert!(matches!(
+            enable.command.expect("a command").split(),
+            Verb::ServiceEnable(_)
+        ));
+
+        let disable = Cli::try_parse_from(["swoosh", "service", "disable", "speed"])
+            .expect("service disable parses");
+        assert!(matches!(
+            disable.command.expect("a command").split(),
+            Verb::ServiceDisable(_)
+        ));
+
+        // The retired flat leaf form no longer resolves: `service` is a group now, so a bare `--at` with no
+        // subcommand is a parse error, and `enable`/`disable` never take `--at` (you never toggle a peer).
+        assert!(
+            Cli::try_parse_from(["swoosh", "service", "--at", &key]).is_err(),
+            "the retired flat `service --at` must not resolve; it is `service ls --at` now"
+        );
+        assert!(
+            Cli::try_parse_from(["swoosh", "service", "disable", "speed", "--at", &key]).is_err(),
+            "`disable` never takes `--at`: you never remotely toggle a peer's service"
+        );
+    }
+
+    /// The retired `SWOOSH_KEY` env var errors FORWARD (naming `SWOOSH_HOME`), never a silent no-op.
+    #[test]
+    fn a_set_swoosh_key_env_errors_forward() {
+        let error = reject_retired_key_env(true).expect_err("a set SWOOSH_KEY is an error");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("SWOOSH_KEY") && message.contains("SWOOSH_HOME"),
+            "the error names the retired var and its replacement: {message}"
+        );
+        // An unset env is the ordinary path: no error.
+        assert!(reject_retired_key_env(false).is_ok());
     }
 }

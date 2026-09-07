@@ -37,6 +37,10 @@ data-encoding.workspace = true
 eyre.workspace = true
 futures.workspace = true
 httparse = "1"
+# `service enable`/`disable` take an flock around the read-modify-write of `<home>/disabled` so two
+# concurrent toggles cannot lose an edit. std file locking is MSRV-1.89 (this workspace targets 1.85), so
+# the flock rides libc, matching how `sshh` already reaches for the same crate.
+libc.workspace = true
 rand.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "signal"] }
