@@ -222,7 +222,7 @@ mod tests {
 
     /// A `Family` credential with no `--present` slip and no stored badge falls back to the signet
     /// holder's self-sign, so it ALWAYS resolves to a grant, never `None`. This is the fleet/fetch fix
-    /// at the resolver: a family verb (the diagnostic verbs, `beam`, `stop`, `fleet`, and now `fetch`)
+    /// at the resolver: a family verb (the diagnostic verbs, `send`, `stop`, `fleet`, and now `fetch`)
     /// cannot reach a gated service carrying no badge, because `Family` has no arm that yields nothing.
     /// Slot 2 is `None` (no over-share): a plain member dial transmits only the badge in slot 1, exactly as
     /// it did before the signet-bound slice.

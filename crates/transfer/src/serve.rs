@@ -28,7 +28,7 @@ where
     W: io::AsyncWrite + Unpin,
     R: io::AsyncRead + Unpin,
 {
-    let temp = out.join(format!(".beam-{}-{tag}.part", std::process::id()));
+    let temp = out.join(format!(".transfer-{}-{tag}.part", std::process::id()));
     let received = {
         let file = tokio::fs::File::create(&temp).await?;
         let mut sink = file;

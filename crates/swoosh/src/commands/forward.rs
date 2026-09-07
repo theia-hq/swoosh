@@ -63,7 +63,7 @@ impl crate::reaching::Reaching for ForwardCmd {
     /// Drive the sink `--to` names: bind a local port and forward each connection, stream to stdout, or the
     /// reserved unix listener, all over the overlay. A dial-only client presenting its own `--present`
     /// link (it is `Anonymous`), so it reads only `contacts` from `ctx`, to resolve a petname in its peer
-    /// slot the same way `ping`/`beam` do.
+    /// slot the same way `ping`/`send` do.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,

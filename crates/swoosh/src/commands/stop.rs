@@ -5,7 +5,7 @@
 //! trigger a graceful teardown, the same stop a Ctrl-C or a `serve --for` deadline gives locally. It stops
 //! the DAEMON (the node stops serving), it does NOT power off the machine.
 //!
-//! `control.stop` is family-gated like `ping`/`speed`/`beam`, so `stop` presents the same self-signed
+//! `control.stop` is family-gated like `ping`/`speed`/`send`, so `stop` presents the same self-signed
 //! membership badge (or an explicit `--present` link) to prove membership before the node admits the
 //! stream. For a single-owner node this means only your own devices can stop it, which is correct for the
 //! qat CI-teardown consumer. Hardening the lifecycle further (an arm->confirm nonce + a single-use

@@ -2,8 +2,8 @@
 // test-attributed functions); panicking on failed test setup is exactly the intent.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! The gated beam (PUSH file transfer), end to end over the in-process transport: the proof that a pushed
-//! file rides the family gate (a MEMBER can beam a file to a gated node, a STRANGER cannot), that the bytes
+//! The gated send/recv (PUSH file transfer), end to end over the in-process transport: the proof that a
+//! pushed file rides the family gate (a MEMBER can send a file to a gated node, a STRANGER cannot), that the bytes
 //! are verified end to end, and that a tampered blob is REJECTED, never written.
 //!
 //! One node exposes `recv=recv:` behind a family gate rooted at a signet, assembled through the SAME
@@ -33,12 +33,12 @@ use tightbeam::tunnel::{
 /// every membership badge minted here.
 const SIGNET_SECRET: [u8; 32] = [7u8; 32];
 
-/// The ssh host-key seed the exposer's registry carries. Unused by this test (it exercises `beam`, not
+/// The ssh host-key seed the exposer's registry carries. Unused by this test (it exercises `recv`, not
 /// `sshd`), but the shared `registry()` derives `sshd` from it, so a fixed value keeps the build stable.
 const HOST_SEED: [u8; 32] = [9u8; 32];
 
 #[test]
-fn a_member_beams_a_file_a_stranger_is_refused_and_a_tampered_blob_is_rejected() {
+fn a_member_sends_a_file_a_stranger_is_refused_and_a_tampered_blob_is_rejected() {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -54,7 +54,7 @@ fn a_member_beams_a_file_a_stranger_is_refused_and_a_tampered_blob_is_rejected()
         .unwrap();
 }
 
-/// The proof body: expose a gated beam-receive node, beam a file as a member, refuse a stranger, reject a
+/// The proof body: expose a gated recv node, send a file as a member, refuse a stranger, reject a
 /// tampered blob.
 async fn proof() {
     let out = out_dir();
@@ -78,7 +78,7 @@ async fn proof() {
     let member = Node::new(MemTransport::bind(), NoDiscovery);
     let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
 
-    // Beam a file exactly as `swoosh send` does: open the gated `beam` service, then drive `bifrost-wire`'s
+    // Send a file exactly as `swoosh send` does: open the gated `recv` service, then drive `bifrost-wire`'s
     // verified `Transfer` over one admitted stream, naming the file so the receiver saves it under that name.
     let payload = b"the quick brown fox jumps over the lazy dog".repeat(1000);
     let session = Connector::to_node(host_id, "recv".to_owned(), Some(member_badge.clone()))
@@ -94,10 +94,10 @@ async fn proof() {
 
     // The file landed under the receiver's output directory, byte-for-byte.
     let landed = wait_for_file(&out.join("report.txt")).await;
-    assert_eq!(landed, payload, "the beamed file arrives byte-for-byte");
+    assert_eq!(landed, payload, "the sent file arrives byte-for-byte");
 
     // A STRANGER: a self-signed badge rooted at a random key the gate never trusts. Its push is refused at
-    // the gate, so opening the beam stream fails; no file is written.
+    // the gate, so opening the recv stream fails; no file is written.
     let stranger = Node::new(MemTransport::bind(), NoDiscovery);
     let stranger_badge = signet_badge(&[3u8; 32], stranger.node_id());
     let refused = Connector::to_node(host_id, "recv".to_owned(), Some(stranger_badge))
@@ -138,7 +138,7 @@ async fn proof() {
 
 /// A fresh, empty output directory for this test run's received files.
 fn out_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("swoosh-gated-beam-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("swoosh-gated-send-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     dir
@@ -153,7 +153,7 @@ async fn wait_for_file(path: &std::path::Path) -> Vec<u8> {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("beamed file never landed at {}", path.display());
+    panic!("sent file never landed at {}", path.display());
 }
 
 /// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven node id). See
@@ -174,7 +174,7 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
 
 /// An empty revocation denylist (an absent file is an empty set). `tag` keeps parallel tests' paths apart.
 async fn empty_denylist(tag: &str) -> FileDenylist {
-    let path = std::env::temp_dir().join(format!("swoosh-gated-beam-{tag}-{}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("swoosh-gated-send-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
     FileDenylist::load(path).await.unwrap()
 }

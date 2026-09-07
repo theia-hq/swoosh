@@ -1,4 +1,4 @@
-//! beam: receive a pushed file at a keyed node, off an admitted stream.
+//! transfer: receive a pushed file at a keyed node, off an admitted stream.
 //!
 //! The PUSH half of file transfer: a sender dials, opens one stream per file, and drives
 //! [`bifrost::wire`]'s verified [`Transfer`](bifrost::wire::Transfer) to a waiting receiver. This crate is

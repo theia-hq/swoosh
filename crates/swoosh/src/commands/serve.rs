@@ -36,9 +36,9 @@ use crate::identity::Secret;
 use crate::roster::{Epoch, Member, RosterDoc};
 use crate::transport::ReachArgs;
 
-mod beam;
 mod fetch;
 mod ping;
+mod recv;
 mod roster;
 mod services;
 mod speed;
@@ -46,13 +46,13 @@ mod speed;
 mod sshd;
 mod stop;
 
-// These are all `self::` submodules: `beam` and `fetch` share a name with the extern crates they shadow, so
-// the handler types come through `self::` and the crates are reached as `::beam` / `::fetch` (the
-// `::fetch::OriginAllowlist` import above); `roster` likewise shadows `crate::roster`, reached in full above.
-// The rest take `self::` too, so the whole set reads as one local-submodule import group.
-use self::beam::Beam;
+// These are all `self::` submodules: `fetch` shares a name with the extern crate it shadows, so the handler
+// type comes through `self::` and the crate is reached as `::fetch` (the `::fetch::OriginAllowlist` import
+// above); `roster` likewise shadows `crate::roster`, reached in full above. The rest take `self::` too, so
+// the whole set reads as one local-submodule import group.
 use self::fetch::Fetch;
 use self::ping::Ping;
+use self::recv::Recv;
 pub use self::roster::Roster;
 pub use self::services::ServiceList;
 use self::speed::Speed;
@@ -879,7 +879,7 @@ fn humanize(duration: core::time::Duration) -> String {
 /// other method at the wire (`ProtocolError::WrongService`), so a grant for one can never open the other.
 ///
 /// `recv_out` is the directory a `recv:` service saves pushed files into; the handler reduces each
-/// sender-supplied name to a safe relative path under it (`beam::safe_relative_path`), so a peer can never
+/// sender-supplied name to a safe relative path under it (`transfer::safe_relative_path`), so a peer can never
 /// write outside the directory. The dir rides the `recv:<dir>` scheme (`extract_recv_out`), so a bare
 /// `recv:` defaults to `.`.
 ///
@@ -889,7 +889,7 @@ pub fn registry(host_seed: [u8; 32], recv_out: PathBuf) -> eyre::Result<Registry
     let registry = Registry::new()
         .with("ping", Ping)
         .with("speed", Speed)
-        .with("recv", Beam::new(recv_out));
+        .with("recv", Recv::new(recv_out));
     #[cfg(feature = "ssh")]
     let registry = registry.with("sshd", Sshd { host_seed });
     #[cfg(not(feature = "ssh"))]

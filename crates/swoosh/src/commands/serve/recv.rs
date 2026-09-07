@@ -5,18 +5,18 @@ use nauthy::Admitted;
 use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{BoxRead, BoxWrite, Handler};
 
-/// The `beam:` handler swoosh injects: the receive half of PUSH file transfer. It takes one admitted stream
-/// carrying one pushed file, drives `bifrost-wire`'s verified receive into a temp file under `beam_out`, and
+/// The `recv:` handler swoosh injects: the receive half of PUSH file transfer. It takes one admitted stream
+/// carrying one pushed file, drives `bifrost-wire`'s verified receive into a temp file under `out`, and
 /// moves it into place at the safe relative path the sender named. GATED, because a receive service with no
 /// auth of its own would let anyone write files into the node's output directory; the gate IS its
 /// authentication. Each stream gets a unique tag from a shared counter, so concurrent pushes never contend
 /// for the same temp file.
-pub(super) struct Beam {
+pub(super) struct Recv {
     out: PathBuf,
     next_tag: AtomicU64,
 }
 
-impl Beam {
+impl Recv {
     pub(super) fn new(out: PathBuf) -> Self {
         Self {
             out,
@@ -25,7 +25,7 @@ impl Beam {
     }
 }
 
-impl Handler for Beam {
+impl Handler for Recv {
     // GATED: a receive service with no auth of its own would let anyone write files into the node's output
     // directory; the gate IS its authentication.
     type Public = Never;
@@ -39,7 +39,7 @@ impl Handler for Beam {
         // Each stream gets a unique tag from the shared counter, so concurrent pushes never contend for the
         // same temp file.
         let tag = self.next_tag.fetch_add(1, Ordering::Relaxed);
-        let received = beam::receive_file(writer, reader, &self.out, tag).await?;
+        let received = transfer::receive_file(writer, reader, &self.out, tag).await?;
         println!(
             "received {} ({} bytes)",
             received.path.display(),

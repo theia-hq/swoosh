@@ -16,7 +16,7 @@
 //! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
 //! key and keeps a stable address across runs (and across transports: `--transport iroh|quirk` swaps the
 //! backend without changing the key). The outward verbs only dial out, so they mint a throwaway key each
-//! run unless you pin one with `--key`/`SWOOSH_KEY`. The full verb arc (send/beam, tunnel, share, fetch,
+//! run unless you pin one with `--key`/`SWOOSH_KEY`. The full verb arc (send, tunnel, share, fetch,
 //! run, cluster, MagicDNS names) is tracked in the README's Roadmap; it ticks as it ships.
 
 use std::path::PathBuf;
@@ -26,7 +26,6 @@ use clap::{CommandFactory, Parser, Subcommand};
 // The verb modules live in the swoosh LIBRARY (`lib.rs`), so an integration test can drive the same pieces
 // this binary composes. The binary owns only the CLI surface below (the clap tree and composition root).
 use swoosh::commands::adopt::AdoptCmd;
-use swoosh::commands::beam::BeamCmd;
 use swoosh::commands::contact::ContactCmd;
 use swoosh::commands::fetch::FetchCmd;
 use swoosh::commands::fleet::FleetCmd;
@@ -35,6 +34,7 @@ use swoosh::commands::grant::GrantCmd;
 use swoosh::commands::identity::IdentityCmd;
 use swoosh::commands::mint::MintCmd;
 use swoosh::commands::ping::PingCmd;
+use swoosh::commands::send::SendCmd;
 use swoosh::commands::serve::ServeCmd;
 use swoosh::commands::service::ServiceCmd;
 use swoosh::commands::speed::SpeedCmd;
@@ -91,7 +91,7 @@ enum Command {
     Forward(ForwardCmd),
     /// Push a file or directory to a peer, verified end to end.
     #[command(name = "send")]
-    Beam(BeamCmd),
+    Send(SendCmd),
     /// Learn your fleet: pull the signed roster from a coordination node and fold it into your contacts.
     Fleet(FleetCmd),
     /// Manage local petnames: add a device, record a person's fleet signet, list, and remove.
@@ -130,9 +130,9 @@ enum Reach {
     Forward(ForwardCmd),
     /// `swoosh send`: push files to a peer's gated `recv:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
-    Beam(BeamCmd),
+    Send(SendCmd),
     /// `swoosh stop`: reach a peer's gated `control.stop` service and trigger a graceful stop. Presents a
-    /// membership badge (like `ping`/`speed`/`beam`), so it rides the reach path under the persisted
+    /// membership badge (like `ping`/`speed`/`send`), so it rides the reach path under the persisted
     /// identity when one exists.
     Stop(StopCmd),
     /// `swoosh service --at <peer>`: reach a peer's gated `control.services` read and print its
@@ -140,7 +140,7 @@ enum Reach {
     /// the persisted identity when one exists.
     Service(ServiceCmd),
     /// `swoosh fleet --pull`: pull the signed fleet roster from a coordination node and hydrate contacts.
-    /// Presents a membership badge (like `ping`/`beam`) and needs the persisted identity (adopt first).
+    /// Presents a membership badge (like `ping`/`send`) and needs the persisted identity (adopt first).
     Fleet(FleetCmd),
     TunnelConnect(TunnelConnectCmd),
 }
@@ -160,7 +160,7 @@ impl Command {
             Self::Grant(cmd) => Verb::Grant(cmd),
             Self::TunnelConnect(cmd) => Verb::Reach(Reach::TunnelConnect(cmd)),
             Self::Forward(cmd) => Verb::Reach(Reach::Forward(cmd)),
-            Self::Beam(cmd) => Verb::Reach(Reach::Beam(cmd)),
+            Self::Send(cmd) => Verb::Reach(Reach::Send(cmd)),
             Self::Fleet(cmd) => Verb::Reach(Reach::Fleet(cmd)),
             Self::Stop(cmd) => Verb::Reach(Reach::Stop(cmd)),
             // `service` reaches a peer's `control.services` ONLY with `--at`; a bare `service` reads your own
@@ -221,7 +221,7 @@ impl Reach {
             Self::Status(cmd) => cmd.identity(),
             Self::Fetch(cmd) => cmd.identity(),
             Self::Forward(cmd) => cmd.identity(),
-            Self::Beam(cmd) => cmd.identity(),
+            Self::Send(cmd) => cmd.identity(),
             Self::Stop(cmd) => cmd.identity(),
             Self::Service(cmd) => cmd.identity(),
             Self::Fleet(cmd) => cmd.identity(),
@@ -240,7 +240,7 @@ impl Reach {
             Self::Status(cmd) => &cmd.reach,
             Self::Fetch(cmd) => &cmd.reach,
             Self::Forward(cmd) => &cmd.reach,
-            Self::Beam(cmd) => &cmd.reach,
+            Self::Send(cmd) => &cmd.reach,
             Self::Stop(cmd) => &cmd.reach,
             Self::Service(cmd) => &cmd.reach,
             Self::Fleet(cmd) => &cmd.reach,
@@ -284,7 +284,7 @@ impl Reach {
             Self::Status(cmd) => cmd.run(node, ctx).await,
             Self::Fetch(cmd) => cmd.run(node, ctx).await,
             Self::Forward(cmd) => cmd.run(node, ctx).await,
-            Self::Beam(cmd) => cmd.run(node, ctx).await,
+            Self::Send(cmd) => cmd.run(node, ctx).await,
             Self::Fleet(cmd) => cmd.run(node, ctx).await,
             Self::Stop(cmd) => cmd.run(node, ctx).await,
             Self::Service(cmd) => cmd.run(node, ctx).await,
@@ -304,7 +304,7 @@ impl Reach {
             Self::Status(cmd) => cmd.credential(),
             Self::Fetch(cmd) => cmd.credential(),
             Self::Forward(cmd) => cmd.credential(),
-            Self::Beam(cmd) => cmd.credential(),
+            Self::Send(cmd) => cmd.credential(),
             Self::Stop(cmd) => cmd.credential(),
             Self::Service(cmd) => cmd.credential(),
             Self::Fleet(cmd) => cmd.credential(),
@@ -324,7 +324,7 @@ impl Reach {
             Self::Status(cmd) => cmd.reject_redundant_present(),
             Self::Fetch(cmd) => cmd.reject_redundant_present(),
             Self::Forward(cmd) => cmd.reject_redundant_present(),
-            Self::Beam(cmd) => cmd.reject_redundant_present(),
+            Self::Send(cmd) => cmd.reject_redundant_present(),
             Self::Stop(cmd) => cmd.reject_redundant_present(),
             Self::Service(cmd) => cmd.reject_redundant_present(),
             Self::Fleet(cmd) => cmd.reject_redundant_present(),

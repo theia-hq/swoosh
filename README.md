@@ -51,11 +51,11 @@ The [getting-started guide](docs/getting-started.md) walks this end to end in tw
 
 ## Layout
 
-- `crates/beam` the `recv:` service: receive a pushed file over one admitted stream, verified end to
-  end.
 - `crates/fetch` the `fetch:` service: fetch an origin URL on the requester's behalf, scoped to one
   origin.
 - `crates/measure` the measurement engine (ping, speed): a small versioned protocol and its clients.
+- `crates/transfer` the `recv:` service: receive a pushed file over one admitted stream, verified end to
+  end.
 - `crates/swoosh` the CLI: binds one node under the chosen key and transport, then runs a command.
 
 ## License

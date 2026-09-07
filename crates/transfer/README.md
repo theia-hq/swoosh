@@ -1,4 +1,4 @@
-# beam
+# transfer
 
 Receive a pushed file at a keyed node, off an admitted stream. This is the receive half of file transfer: a
 sender dials the node, opens one stream per file, and drives a verified transfer to a waiting receiver. This
@@ -11,7 +11,7 @@ rejected rather than saved.
 
 ## How it composes
 
-`beam` is a service crate: it knows what to DO with an admitted stream, never how the peer was reached or
+`transfer` is a service crate: it knows what to DO with an admitted stream, never how the peer was reached or
 gated. The composing consumer wraps `receive_file` in a GATED handler and injects it into the tunnel's
 handler registry, so every pushed file rides the same gate as every other service. The sender side (dial,
 expand directories, pipeline concurrent streams) is a client verb driving `bifrost-wire` directly.

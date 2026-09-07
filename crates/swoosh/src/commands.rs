@@ -3,7 +3,6 @@
 
 pub mod adopt;
 pub mod attenuate;
-pub mod beam;
 pub mod contact;
 pub mod fetch;
 pub mod fleet;
@@ -14,6 +13,7 @@ pub mod identity;
 pub mod mint;
 pub mod ping;
 pub mod revoke;
+pub mod send;
 pub mod serve;
 pub mod service;
 pub mod share;

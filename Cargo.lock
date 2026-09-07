@@ -325,15 +325,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "beam"
-version = "0.0.0"
-dependencies = [
- "bifrost",
- "eyre",
- "tokio",
-]
-
-[[package]]
 name = "bifrost"
 version = "0.0.0"
 source = "git+https://github.com/theia-hq/bifrost?rev=26e8272d890b0b424bc6960b9d38e09b40cc428d#26e8272d890b0b424bc6960b9d38e09b40cc428d"
@@ -4833,7 +4824,6 @@ dependencies = [
 name = "swoosh"
 version = "0.8.0"
 dependencies = [
- "beam",
  "bifrost",
  "bifrost-core",
  "bifrost-iroh",
@@ -4856,6 +4846,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "transfer",
  "zeroize",
 ]
 
@@ -5329,6 +5320,15 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "transfer"
+version = "0.0.0"
+dependencies = [
+ "bifrost",
+ "eyre",
+ "tokio",
 ]
 
 [[package]]

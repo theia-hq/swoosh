@@ -6,7 +6,7 @@
 //! under it, and files pipeline over concurrent streams (capped so one connection is not flooded); a file
 //! that cannot be read is skipped and reported, not fatal, so a courier sends what it can.
 //!
-//! The `recv:` service is family-gated like `ping`/`speed`, so beam presents the same self-signed
+//! The `recv:` service is family-gated like `ping`/`speed`, so send presents the same self-signed
 //! membership badge (or an explicit `--present` link) to prove membership before the receiver admits a
 //! stream. Integrity is checked end to end by `bifrost-wire`: the sender hashes each file with BLAKE3 and
 //! the receiver re-hashes as bytes arrive, so a truncated or tampered transfer is rejected, never written.
@@ -34,7 +34,7 @@ const MAX_INFLIGHT: usize = 16;
 
 /// Push a file or directory to a peer, addressed by their public key, verified end to end.
 #[derive(Debug, Args)]
-pub struct BeamCmd {
+pub struct SendCmd {
     /// The files or directories to push.
     #[arg(required = true, value_name = "path")]
     pub paths: Vec<PathBuf>,
@@ -56,12 +56,12 @@ pub struct BeamCmd {
     pub reach: ReachArgs,
 }
 
-impl crate::reaching::Reaching for BeamCmd {
+impl crate::reaching::Reaching for SendCmd {
     fn reach_args(&self) -> &crate::transport::ReachArgs {
         &self.reach
     }
 
-    /// `beam` pushes to the peer's family-gated `recv:` service, so it presents the member badge rooted
+    /// `send` pushes to the peer's family-gated `recv:` service, so it presents the member badge rooted
     /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The effective slip is the
     /// FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded INTO the
     /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
@@ -80,7 +80,7 @@ impl crate::reaching::Reaching for BeamCmd {
         self.credential().identity()
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `beam` reads the resolved `present` badge and
+    /// Uniform dispatch: unpack the reach context and run. `send` reads the resolved `present` badge and
     /// `contacts` (to resolve a petname in its peer slot); it ignores `transport` and `key`.
     async fn run<T: Transport, D: Discovery>(
         self,
@@ -91,17 +91,17 @@ impl crate::reaching::Reaching for BeamCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_beam(node, ctx.contacts, ctx.present, ctx.membership)
+        self.run_send(node, ctx.contacts, ctx.present, ctx.membership)
             .await
     }
 }
 
-impl BeamCmd {
+impl SendCmd {
     /// Reach the peer's `recv:` service and push every named file over its own gated stream, expanding
     /// directories first. Presents the resolved `present` (the self-signed membership badge, or an explicit
     /// `--present` link) so the receiver's family gate admits each stream. A file that cannot be read is
     /// skipped and reported; the run ends non-zero if any item failed.
-    async fn run_beam<T: Transport, D: Discovery>(
+    async fn run_send<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,

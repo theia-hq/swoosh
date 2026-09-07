@@ -20,7 +20,6 @@ ssh = ["dep:sshh"]
 
 [dependencies]
 # theia
-beam.workspace = true
 bifrost.workspace = true
 bifrost-core.workspace = true
 bifrost-iroh.workspace = true
@@ -31,6 +30,7 @@ measure.workspace = true
 nauthy.workspace = true
 sshh = { workspace = true, optional = true }
 tightbeam.workspace = true
+transfer.workspace = true
 
 clap.workspace = true
 data-encoding.workspace = true

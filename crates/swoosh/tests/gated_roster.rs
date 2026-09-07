@@ -11,7 +11,7 @@
 //! The only thing it does not cover is the real GitHub-runner dial (step 6), which needs a live box.
 //!
 //! Over `mem` the proven peer is the transport's synthetic node id, so a member badge binds to whatever id
-//! the mem transport proves for the dialer; see `gated_beam.rs` for the full note.
+//! the mem transport proves for the dialer; see `gated_send.rs` for the full note.
 
 use core::time::Duration;
 use std::sync::Arc;

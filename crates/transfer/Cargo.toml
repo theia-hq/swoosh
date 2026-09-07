@@ -1,6 +1,6 @@
 [package]
 publish = false  # git-only for now, not published to crates.io
-name = "beam"
+name = "transfer"
 version = "0.0.0"
 edition.workspace = true
 rust-version.workspace = true
