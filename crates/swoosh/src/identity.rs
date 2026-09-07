@@ -226,7 +226,10 @@ async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
 
     let secret = Secret::ephemeral();
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        // Owner-only (`0700`): this store holds the secret key beside the signet and denylist, so its dir
+        // must never be group/world-traversable (see [`config::create_store_dir`](crate::config)). The key
+        // file itself is tightened to `0600` by `restrict` just below.
+        crate::config::create_store_dir(parent)?;
     }
     tokio::fs::write(path, secret.0).await?;
     restrict(path).await?;
@@ -246,7 +249,9 @@ pub async fn write(seed: &[u8; 32], explicit: Option<&Path>) -> eyre::Result<()>
     };
     reject_key_directory(&path)?;
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        // Owner-only (`0700`) store dir, as in `load_or_create`; the seed file is tightened to `0600` by
+        // `restrict` just below (see [`config::create_store_dir`](crate::config)).
+        crate::config::create_store_dir(parent)?;
     }
     tokio::fs::write(&path, seed).await?;
     restrict(&path).await?;

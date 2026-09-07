@@ -58,14 +58,25 @@ impl ContactsStore {
     pub async fn save(&self) -> Result<(), StoreError> {
         let text = encode(&self.contacts)?;
         if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(StoreError::Write)?;
+            // The address book is this node's trust graph (which petname maps to which key), as sensitive as
+            // the identity it sits beside, so the store dir is created owner-only (`0700`); see
+            // [`config::create_store_dir`](crate::config).
+            crate::config::create_store_dir(parent).map_err(StoreError::Write)?;
         }
         let temp = self.path.with_extension("toml.tmp");
         tokio::fs::write(&temp, text)
             .await
             .map_err(StoreError::Write)?;
+        // Tighten the temp to `0600` before the rename carries that mode onto the target, so the book is
+        // owner-only; the `0700` dir already keeps the transient temp unreadable to other local users.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            tokio::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
+                .await
+                .map_err(StoreError::Write)?;
+        }
         tokio::fs::rename(&temp, &self.path)
             .await
             .map_err(StoreError::Write)?;

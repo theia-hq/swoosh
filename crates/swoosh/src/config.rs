@@ -70,14 +70,11 @@ pub async fn load_signet(key: Option<&Path>) -> eyre::Result<Option<NodeId>> {
 }
 
 /// Write this node's signet: the public [`NodeId`] its default gate will trust, as `adopt` sets it from an
-/// authkey. Overwrites any prior signet (re-provisioning re-trusts), creating the config dir.
+/// authkey. Overwrites any prior signet (re-provisioning re-trusts), creating the config dir. Written
+/// `0600` beside the secret identity: the signet roots this node's whole trust decision (whose devices it
+/// admits), so it must not be world-readable to a local user who could read or (worse) rewrite it.
 pub async fn write_signet(key: Option<&Path>, signet: NodeId) -> eyre::Result<()> {
-    let path = signet_path(key)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    tokio::fs::write(&path, format!("{signet}\n")).await?;
-    Ok(())
+    write_private(&signet_path(key)?, format!("{signet}\n").as_bytes()).await
 }
 
 /// Load this device's stored membership badge: the signet-signed, device-bound `sheer:` link it presents
@@ -99,13 +96,68 @@ pub async fn load_badge(key: Option<&Path>) -> eyre::Result<Option<String>> {
 
 /// Write this device's membership badge: the signet-signed, device-bound `sheer:` link it presents on
 /// connect, as `adopt` stores it from an authkey's badge field. Overwrites any prior badge (re-provisioning
-/// re-badges), creating the config dir. Public material (the signet already signed it, it carries no
-/// secret), so it lands beside the identity, mirroring [`write_signet`].
+/// re-badges), creating the config dir. It lands beside the identity, mirroring [`write_signet`], and is
+/// written `0600`: though the signet already signed it (it carries no secret), it is a device-bound
+/// membership credential and this store is owner-only throughout, so it is not left world-readable either.
 pub async fn write_badge(key: Option<&Path>, badge: &str) -> eyre::Result<()> {
-    let path = badge_path(key)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+    write_private(&badge_path(key)?, format!("{badge}\n").as_bytes()).await
+}
+
+/// Create swoosh's store directory owner-only (`0700`) on Unix, recursively, if it does not already exist.
+///
+/// The store holds the secret identity, the signet, the badge, and the denylist, so it must never be
+/// group/world-traversable. Mirrors the mint-log's dir-create ([`Grants::append`](crate::grants::Grants)):
+/// create-with-mode tightens only a dir WE make and is a no-op on an existing one, so an already-provisioned
+/// store another verb (or the user) made is left as they set it, never chmod'd out from under them.
+pub(crate) fn create_store_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
     }
-    tokio::fs::write(&path, format!("{badge}\n")).await?;
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Write `contents` to `path` as an owner-only (`0600` on Unix) file, creating the store dir `0700` first.
+///
+/// The trust files beside the identity (the signet, the badge) are as sensitive as the store they live in,
+/// so this asserts the private posture on every write: the dir is created `0700`, and the file is created
+/// `0600` AND reasserted `0600` even when it already existed (create's mode fires only on first creation),
+/// so a file loosened after an earlier write is retightened. Truncates any prior contents. Non-Unix has no
+/// mode bits; the write still creates the dir and replaces the file.
+async fn write_private(path: &Path, contents: &[u8]) -> eyre::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    if let Some(parent) = path.parent() {
+        create_store_dir(parent)?;
+    }
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // tokio's `OpenOptions` carries the `mode` setter inherently under the `fs` feature (as the mint-log
+    // does), so no `OpenOptionsExt` import is needed.
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Reassert 0600 on a pre-existing file (create's mode fired only on first creation).
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
+    file.write_all(contents).await?;
+    file.flush().await?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "config_tests.rs"]
+mod config_tests;

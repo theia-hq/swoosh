@@ -207,6 +207,52 @@ async fn store_roundtrips_across_reload() {
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_saved_book_is_owner_only_in_an_owner_only_store() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // A nested store dir that does not exist yet, so the first save exercises the 0700 create. The address
+    // book is this node's trust graph, so a co-tenant local user must not be able to read it.
+    let dir = std::env::temp_dir().join(format!(
+        "swoosh-contacts-perms-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    let path = dir.join("contacts.toml");
+
+    let mut store = ContactsStore::open(path.clone())
+        .await
+        .expect("open empty into a fresh store dir");
+    store
+        .contacts_mut()
+        .add(petname("alice"), Some(device("macbook")), node(1));
+    store.save().await.expect("save creates the store dir");
+
+    let dir_mode = std::fs::metadata(&dir)
+        .expect("stat the store dir")
+        .permissions()
+        .mode();
+    assert_eq!(
+        dir_mode & 0o777,
+        0o700,
+        "the store dir is created 0700 (owner-only), not left group/world-traversable"
+    );
+
+    let file_mode = std::fs::metadata(&path)
+        .expect("stat the contacts book")
+        .permissions()
+        .mode();
+    assert_eq!(
+        file_mode & 0o777,
+        0o600,
+        "the saved contacts book is 0600 (owner read/write only) via its 0600 temp, never world-readable"
+    );
+
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+}
+
 use nauthy::VerifyKey;
 
 use crate::roster::{Epoch, Member, RosterDoc};
