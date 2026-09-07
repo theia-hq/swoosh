@@ -12,7 +12,6 @@
 //! stored signet (`swoosh contact signet`).
 
 use core::str::FromStr;
-use std::path::Path;
 
 use bifrost::NodeId;
 use clap::Args;
@@ -22,6 +21,7 @@ use tightbeam::identity::AsVerifyKey as _;
 
 use crate::contacts::{ContactRef, ContactRefParseError, Contacts, ContactsStore, Petname};
 use crate::grants::{self, Delegation, GrantKind, GrantRecord, Grants};
+use crate::home::Home;
 use crate::identity::{self, Identity};
 
 /// Mint a `sheer:` capability link granting one service.
@@ -57,7 +57,7 @@ impl ShareCmd {
     /// Sign the link under swoosh's persisted identity, record it, frame the mint on stderr, and print the
     /// link on stdout. Reads the store to resolve a `--for` device address to its key or a `--for fleet:<person>`
     /// to that person's stored signet; the bearer path never touches the address book.
-    pub async fn run(self, store: ContactsStore, key: Option<&Path>) -> eyre::Result<()> {
+    pub async fn run(self, store: ContactsStore, home: &Home) -> eyre::Result<()> {
         // A bound grant is theft-resistant, so it cannot be re-shared: `--delegable` is only meaningful for a
         // bearer link. Reject the combination with a message that says WHY (a bound slip cannot be delegated),
         // rather than clap's generic "cannot be used with" line.
@@ -68,7 +68,7 @@ impl ShareCmd {
         }
         // The link roots at swoosh's stable key (the one an exposed service is reached at), so resolve the
         // persisted identity, creating one on first use exactly as `swoosh identity` would.
-        let secret = identity::resolve(Identity::Persisted, key).await?;
+        let secret = identity::resolve(Identity::Persisted, home).await?;
         let cap_identity = secret.cap_identity()?;
         let lifetime = self.expires.duration();
         // The absolute expiry recorded in the ledger. `mint_*_link` recomputes its own from the same lifetime,
@@ -149,9 +149,7 @@ impl ShareCmd {
             root_id,
             expiry,
         };
-        Grants::at(crate::config::grants_path(key)?)
-            .append(&record)
-            .await?;
+        Grants::at(home.grants()).append(&record).await?;
         // Frame the mint on STDERR (what was minted, its blast radius, and how to revoke it) so a person sees
         // the consequence; STDOUT gets ONLY the link, so `swoosh grant issue ... > link.txt` stays clean.
         eprint!("{}", frame(&record, self.service.as_str(), lifetime));

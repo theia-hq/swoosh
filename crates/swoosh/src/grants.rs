@@ -6,8 +6,8 @@
 //! from grantee to the cap's ROOT revocation id, the id that, once recorded in the denylist, kills the grant
 //! and everything delegated from it. This ledger IS that index. It is a who-can-reach-what record, so it is
 //! written `0600` and the gate NEVER reads it: it is issuer-side audit and revoke only, never an admission
-//! input. It lives beside the identity, dir-derived from `--key` like the denylist and the contacts file, so
-//! one `--key` moves the whole identity+trust unit as a unit.
+//! input. It lives in the node home beside the identity, like the denylist and the contacts file, so one
+//! home moves the whole identity+trust unit as a unit.
 
 use core::num::ParseIntError;
 use core::str::FromStr;
@@ -22,8 +22,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use nauthy::{RevocationId, Service, ServiceParseError};
 use tokio::io::AsyncWriteExt as _;
 
-/// The persisted mint-log ledger backing a `--key` dir. Owns the load / append / read logic over its path;
-/// the location is the caller's to choose (see [`config::grants_path`](crate::config::grants_path)).
+/// The persisted mint-log ledger backing a node home. Owns the load / append / read logic over its path;
+/// the location is the caller's to choose (see [`Home::grants`](crate::home::Home::grants)).
 pub struct Grants {
     path: PathBuf,
 }

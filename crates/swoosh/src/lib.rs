@@ -11,6 +11,7 @@ pub mod config;
 pub mod contacts;
 pub mod credential;
 pub mod grants;
+pub mod home;
 pub mod identity;
 pub mod peer;
 pub mod reach;

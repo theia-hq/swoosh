@@ -6,8 +6,6 @@
 //! A local verb: it reads your key and edits the address book, binds no transport, reaches nobody. The
 //! signet stays on this box; only the derived child seed leaves, inside the authkey.
 
-use std::path::Path;
-
 use bifrost::NodeId;
 use clap::Args;
 use nauthy::{Cap, Service};
@@ -17,6 +15,7 @@ use zeroize::Zeroize as _;
 use crate::authkey;
 use crate::contacts::{ContactsStore, DeviceLabel, Petname};
 use crate::grants::{Delegation, GrantKind, GrantRecord, Grants};
+use crate::home::Home;
 use crate::identity::{self, Identity};
 
 /// The reserved petname for your own devices: your signet is person-zero, and each device it derives
@@ -54,12 +53,12 @@ pub struct MintCmd {
 
 impl MintCmd {
     /// Derive the child, record `me/<label>`, and print its authkey.
-    pub async fn run(self, mut store: ContactsStore, key: Option<&Path>) -> eyre::Result<()> {
+    pub async fn run(self, mut store: ContactsStore, home: &Home) -> eyre::Result<()> {
         // Validate the label as a device label before touching the key, so a bad name fails fast.
         let device: DeviceLabel = self.label.parse()?;
         // Deriving needs the signet present, so resolve it as a persisted identity (creating one on first
         // use, exactly as `swoosh identity` would).
-        let signet = identity::resolve(Identity::Persisted, key).await?;
+        let signet = identity::resolve(Identity::Persisted, home).await?;
 
         let mut seed = signet.derive_child_seed(device.as_str());
         let node = NodeId::from_ed25519_secret(&seed);
@@ -102,9 +101,7 @@ impl MintCmd {
             root_id,
             expiry: nauthy::Request::expires_in(ttl),
         };
-        Grants::at(crate::config::grants_path(key)?)
-            .append(&record)
-            .await?;
+        Grants::at(home.grants()).append(&record).await?;
 
         // The authkey is the secret to hand off; the recorded line is what you keep. Blank-frame the token
         // so it is copy-obvious, like `serve` frames the node id.

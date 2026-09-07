@@ -10,9 +10,9 @@ The `Usage` line under each command is generated from the parser, so it cannot d
 
 These apply to most commands and are omitted from the per-command signatures below:
 
-- `--key <path>` (or `SWOOSH_KEY`) use a specific identity key file. This pins the whole identity: the
-  key, its contacts, the signet it trusts, and its badge all live beside it, so one `--key` moves the
-  whole identity.
+- `--home <dir>` (or `SWOOSH_HOME`) use a specific node home directory. The home is the whole profile: the
+  key lives at `<home>/identity.key`, and its contacts, the signet it trusts, and its badge all live
+  beside it, so one `--home` moves the whole identity. Without it the default `~/.config/swoosh` applies.
 - `--transport <iroh|quirk>` which backend to bind. `iroh` (default) reaches peers across the internet;
   `quirk` is direct-only for diagnostics. See [transports](../transports.md).
 - `--peer <key=addr>` a direct address hint, for when discovery cannot reach a peer (mainly quirk). See

@@ -5,17 +5,20 @@
 
 use std::path::PathBuf;
 
-/// A unique store dir under the temp dir, given as the `--key` path inside it (so [`config_dir`] derives the
-/// store from the key's parent). Returns `(key_path, store_dir)`; the store dir does not exist yet, so a
-/// write under it exercises the `0700` create.
-fn store(tag: &str) -> (PathBuf, PathBuf) {
+use crate::home::Home;
+
+/// A unique store dir under the temp dir, resolved as an explicit [`Home`] (so its trust files derive from
+/// that dir). Returns `(home, store_dir)`; the store dir does not exist yet, so a write under it exercises
+/// the `0700` create.
+fn store(tag: &str) -> (Home, PathBuf) {
     let dir = std::env::temp_dir().join(format!(
         "swoosh-config-{tag}-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    (dir.join("identity.key"), dir)
+    let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
+    (home, dir)
 }
 
 #[cfg(unix)]
@@ -23,8 +26,8 @@ fn store(tag: &str) -> (PathBuf, PathBuf) {
 async fn a_written_badge_is_owner_only_in_an_owner_only_store() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let (key, dir) = store("badge-perms");
-    super::write_badge(Some(&key), "sheer:example-badge-link")
+    let (home, dir) = store("badge-perms");
+    super::write_badge(&home, "sheer:example-badge-link")
         .await
         .expect("write the badge into a fresh store");
 
@@ -38,7 +41,7 @@ async fn a_written_badge_is_owner_only_in_an_owner_only_store() {
         "the store dir is created 0700 (owner-only), not left group/world-traversable"
     );
 
-    let file_mode = std::fs::metadata(super::badge_path(Some(&key)).expect("badge path"))
+    let file_mode = std::fs::metadata(home.badge())
         .expect("stat the badge")
         .permissions()
         .mode();
@@ -56,15 +59,15 @@ async fn a_written_badge_is_owner_only_in_an_owner_only_store() {
 async fn a_loosened_trust_file_is_retightened_on_rewrite() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let (key, dir) = store("badge-retighten");
-    super::write_badge(Some(&key), "sheer:first")
+    let (home, dir) = store("badge-retighten");
+    super::write_badge(&home, "sheer:first")
         .await
         .expect("first badge write");
-    let badge = super::badge_path(Some(&key)).expect("badge path");
+    let badge = home.badge();
     // Simulate a file loosened after an earlier write; the next write must reassert 0600.
     std::fs::set_permissions(&badge, std::fs::Permissions::from_mode(0o644))
         .expect("loosen the badge");
-    super::write_badge(Some(&key), "sheer:second")
+    super::write_badge(&home, "sheer:second")
         .await
         .expect("second badge write");
 

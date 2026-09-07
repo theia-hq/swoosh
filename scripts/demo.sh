@@ -4,7 +4,7 @@
 # run, reach it by its public key over BOTH transports (iroh and our own QUIC,
 # quirk), and watch a stranger who was never admitted get refused at the gate.
 #
-# Three identities, each in its own key dir, so this is a real membership story:
+# Three identities, each in its own home dir, so this is a real membership story:
 #   - the SERVER runs the node and gates diagnostics behind its signet.
 #   - the MEMBER is minted + adopted, so the server's signet trusts it; it
 #     reaches the server's gated ping/speed service over quirk AND over iroh.
@@ -40,12 +40,13 @@ SERVE_PID=""
 # swoosh may be running on this host.
 trap 'if [ -n "$SERVE_PID" ]; then kill "$SERVE_PID" 2>/dev/null || true; fi; rm -rf "$WORK"' EXIT
 
-# Three sovereign identities, one per key dir. `--key` pins the whole identity
-# dir (key + address book + signet + badge), so three dirs is three identities.
-SERVER="$WORK/server/identity.key"
-MEMBER="$WORK/member/identity.key"
-STRANGER="$WORK/stranger/identity.key"
-mkdir -p "$WORK/server" "$WORK/member" "$WORK/stranger"
+# Three sovereign identities, one per home dir. `--home` pins the whole node
+# home (key + address book + signet + badge), so three homes is three identities.
+# The key lives at `<home>/identity.key` within each.
+SERVER="$WORK/server"
+MEMBER="$WORK/member"
+STRANGER="$WORK/stranger"
+mkdir -p "$SERVER" "$MEMBER" "$STRANGER"
 
 banner() { printf '\n=== %s ===\n' "$1"; }
 
@@ -53,7 +54,7 @@ banner() { printf '\n=== %s ===\n' "$1"; }
 # banner, and set SERVE_PID + SERVER_KEY + SERVER_ADDR. $1 is the transport.
 start_server() {
   local transport="$1" out="$WORK/serve-$1.out"
-  SWOOSH_KEY="$SERVER" "$BIN" serve --transport "$transport" >"$out" 2>&1 &
+  SWOOSH_HOME="$SERVER" "$BIN" serve --transport "$transport" >"$out" 2>&1 &
   SERVE_PID=$!
   local i
   for i in $(seq 1 60); do
@@ -79,11 +80,11 @@ stop_server() {
 # becoming a device identity the server's signet trusts.
 # ---------------------------------------------------------------------------
 banner "server mints an authkey for the member"
-AUTHKEY="$(SWOOSH_KEY="$SERVER" "$BIN" mint laptop | head -1)"
+AUTHKEY="$(SWOOSH_HOME="$SERVER" "$BIN" mint laptop | head -1)"
 echo "$AUTHKEY"
 
-banner "member adopts it (distinct key dir: its own identity + the trusted signet)"
-SWOOSH_KEY="$MEMBER" "$BIN" adopt "$AUTHKEY"
+banner "member adopts it (distinct home: its own identity + the trusted signet)"
+SWOOSH_HOME="$MEMBER" "$BIN" adopt "$AUTHKEY"
 
 # ---------------------------------------------------------------------------
 # Part 2: the member reaches the server over quirk (our own from-scratch QUIC).
@@ -93,18 +94,18 @@ start_server quirk
 QUIRK_KEY="$SERVER_KEY"
 
 banner "member ping over quirk (admitted: its badge roots at the server's signet)"
-SWOOSH_KEY="$MEMBER" "$BIN" ping "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" -c 5 -i 0.2
+SWOOSH_HOME="$MEMBER" "$BIN" ping "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" -c 5 -i 0.2
 
 banner "member speed --down over quirk"
-SWOOSH_KEY="$MEMBER" "$BIN" speed "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" --down -t 3
+SWOOSH_HOME="$MEMBER" "$BIN" speed "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" --down -t 3
 
 banner "member speed --up over quirk"
-SWOOSH_KEY="$MEMBER" "$BIN" speed "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" --up -t 3
+SWOOSH_HOME="$MEMBER" "$BIN" speed "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" --up -t 3
 
 # The stranger, never adopted, is refused at the gate. A refusal is SUCCESS
 # here, so invert the exit and assert it failed.
 banner "stranger ping over quirk (never adopted: expect REFUSED)"
-if SWOOSH_KEY="$STRANGER" "$BIN" ping "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" -c 3 -i 0.2; then
+if SWOOSH_HOME="$STRANGER" "$BIN" ping "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" -c 3 -i 0.2; then
   echo "UNEXPECTED: the stranger was admitted; the gate did not hold." >&2
   exit 1
 else
@@ -132,12 +133,12 @@ fi
 # dial as a documented network condition, not a demo failure: report it and
 # carry on (the quirk leg + the gate already stand on their own).
 banner "member ping over iroh (identical command, no --peer: iroh self-discovers)"
-if SWOOSH_KEY="$MEMBER" "$BIN" ping "$SERVER_KEY" --transport iroh -c 5 -i 0.2; then
+if SWOOSH_HOME="$MEMBER" "$BIN" ping "$SERVER_KEY" --transport iroh -c 5 -i 0.2; then
   banner "member speed --down over iroh"
-  SWOOSH_KEY="$MEMBER" "$BIN" speed "$SERVER_KEY" --transport iroh --down -t 3
+  SWOOSH_HOME="$MEMBER" "$BIN" speed "$SERVER_KEY" --transport iroh --down -t 3
 
   banner "stranger ping over iroh (never adopted: expect REFUSED)"
-  if SWOOSH_KEY="$STRANGER" "$BIN" ping "$SERVER_KEY" --transport iroh -c 3 -i 0.2; then
+  if SWOOSH_HOME="$STRANGER" "$BIN" ping "$SERVER_KEY" --transport iroh -c 3 -i 0.2; then
     echo "UNEXPECTED: the stranger was admitted over iroh; the gate did not hold." >&2
     exit 1
   else

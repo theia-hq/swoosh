@@ -1,26 +1,26 @@
 //! `swoosh grant ls`: list the grants this node has issued, grouped by service.
 //!
-//! A local, offline read of swoosh's own mint-log ledger (dir-derived from `--key` like the rest of its
-//! store). It reports only what this node DIRECTLY issued, never the narrower leaves a holder may have
-//! delegated onward: those never touch this machine, so no issuer can enumerate them. Reading the ledger
-//! grants no access and needs no identity or transport.
+//! A local, offline read of swoosh's own mint-log ledger (in the node home like the rest of its store). It
+//! reports only what this node DIRECTLY issued, never the narrower leaves a holder may have delegated
+//! onward: those never touch this machine, so no issuer can enumerate them. Reading the ledger grants no
+//! access and needs no identity or transport.
 
-use std::path::Path;
 use std::time::SystemTime;
 
 use clap::Args;
 
 use crate::grants::{self, GrantRecord, Grants};
+use crate::home::Home;
 
 /// List the grants you have issued, grouped by service.
 #[derive(Debug, Args)]
 pub struct LsCmd {}
 
 impl LsCmd {
-    /// Read the ledger under this `--key` dir and print each issued grant, grouped by service, as
+    /// Read the ledger in the home and print each issued grant, grouped by service, as
     /// `kind  holder  lifetime  caveat`. An empty ledger prints a friendly line, not a blank.
-    pub async fn run(self, key: Option<&Path>) -> eyre::Result<()> {
-        let mut records = Grants::at(crate::config::grants_path(key)?).load().await?;
+    pub async fn run(self, home: &Home) -> eyre::Result<()> {
+        let mut records = Grants::at(home.grants()).load().await?;
         if records.is_empty() {
             println!("no grants issued yet");
             return Ok(());

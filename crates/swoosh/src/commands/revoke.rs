@@ -5,16 +5,15 @@
 //! unchanged). Given a PEER instead (a node id or a `petname/device` you granted), it looks that holder up in
 //! swoosh's own mint-log ledger, takes the ROOT revocation id recorded when the grant was issued, and revokes
 //! at the root, cutting off the grant AND everything the holder delegated from it. Either way it writes
-//! swoosh's OWN denylist (dir-derived from `--key` like the rest of the store); the next `swoosh serve` reads
+//! swoosh's OWN denylist (in the node home like the rest of the store); the next `swoosh serve` reads
 //! the same denylist, so the grant is refused at once rather than waiting for expiry.
-
-use std::path::Path;
 
 use clap::Args;
 use nauthy::{FileDenylist, RevocationId};
 
 use crate::contacts::{ContactRef, Contacts, ContactsStore};
 use crate::grants::{self, Grants};
+use crate::home::Home;
 
 /// Revoke a grant so this node refuses it at once, without waiting for expiry.
 ///
@@ -29,14 +28,14 @@ pub struct RevokeCmd {
 }
 
 impl RevokeCmd {
-    /// Revoke the target into swoosh's persisted denylist under the same `--key` dir the expose gate reads.
+    /// Revoke the target into swoosh's persisted denylist in the same home the expose gate reads.
     /// A `sheer:` target takes the link path; anything else is a holder looked up in the ledger. Reads the
     /// address book only to resolve a petname holder to its canonical node id (the link path never does).
-    pub async fn run(self, store: ContactsStore, key: Option<&Path>) -> eyre::Result<()> {
-        let revoked = crate::config::revoked_path(key)?;
+    pub async fn run(self, store: ContactsStore, home: &Home) -> eyre::Result<()> {
+        let revoked = home.revoked();
         // nauthy writes only its own file; the store dir is swoosh's to provision. Create it 0700 before any
         // persist below, since a revoke into a never-provisioned store (`grant revoke` as the first write to
-        // this `--key`) would otherwise fail with no parent directory.
+        // this home) would otherwise fail with no parent directory.
         if let Some(parent) = revoked.parent() {
             crate::config::create_store_dir(parent)?;
         }
@@ -58,7 +57,7 @@ impl RevokeCmd {
                  `swoosh grant ls`"
             );
         }
-        self.revoke_holder(&mut denylist, store.contacts(), key)
+        self.revoke_holder(&mut denylist, store.contacts(), home)
             .await
     }
 
@@ -74,9 +73,9 @@ impl RevokeCmd {
         self,
         denylist: &mut FileDenylist,
         contacts: &Contacts,
-        key: Option<&Path>,
+        home: &Home,
     ) -> eyre::Result<()> {
-        let ledger = Grants::at(crate::config::grants_path(key)?);
+        let ledger = Grants::at(home.grants());
         let records = ledger.load().await?;
         // The holder strings that count as a hit: the literal target, plus the canonical node id of every
         // device it resolves to (an unknown petname resolves to nothing, leaving just the literal).

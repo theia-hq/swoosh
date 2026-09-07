@@ -111,7 +111,7 @@ pub async fn connect<T: Transport, D: Discovery>(
 pub struct TunnelConnectCmd {
     /// the peer to reach, a raw node id already resolved by `swoosh ssh`
     // A raw `NodeId`, not the unified `Peer`, by design: this is an internal ABI, and `swoosh ssh` resolves
-    // any petname in-process (against the same `--key` store) BEFORE re-invoking this bridge, so the
+    // any petname in-process (against the same home store) BEFORE re-invoking this bridge, so the
     // re-invocation always carries a resolved key. Petname resolution happens once, at the launcher.
     #[arg(value_name = "peer")]
     pub node: NodeId,

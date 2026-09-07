@@ -16,8 +16,9 @@
 //! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
 //! key and keeps a stable address across runs (and across transports: `--transport iroh|quirk` swaps the
 //! backend without changing the key). The outward verbs only dial out, so they mint a throwaway key each
-//! run unless you pin one with `--key`/`SWOOSH_KEY`. The full verb arc (send, tunnel, share, fetch,
-//! run, cluster, MagicDNS names) is tracked in the README's Roadmap; it ticks as it ships.
+//! run unless you pin a home with `--home`/`SWOOSH_HOME` (the key then lives at `<home>/identity.key`).
+//! The full verb arc (send, tunnel, share, fetch, run, cluster, MagicDNS names) is tracked in the README's
+//! Roadmap; it ticks as it ships.
 
 use std::path::PathBuf;
 
@@ -44,10 +45,11 @@ use swoosh::commands::stop::StopCmd;
 use swoosh::commands::tree::TreeCmd;
 use swoosh::commands::tunnel_connect::TunnelConnectCmd;
 use swoosh::contacts::{Contacts, ContactsStore};
+use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::reaching::Reaching;
 use swoosh::transport::PeerHint;
-use swoosh::{config, contacts, credential, identity, reaching, transport};
+use swoosh::{config, credential, identity, reaching, transport};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -55,18 +57,36 @@ use swoosh::{config, contacts, credential, identity, reaching, transport};
     version,
     about = "Work with a machine addressed by its public key: reach it, measure it, and more.",
     // A bare `swoosh` is a mistake, not a default action: print the full help and exit non-zero. This
-    // must hold even with `SWOOSH_KEY` set, but an env-backed global `--key` counts as an arg to clap,
+    // must hold even with `SWOOSH_HOME` set, but an env-backed global `--home` counts as an arg to clap,
     // so `arg_required_else_help` would fall to a terse "subcommand required" line there instead of the
     // help. So the subcommand is `Option` and the no-verb case is handled in `run`, one behavior whether
     // or not the env var is set.
     arg_required_else_help = true
 )]
 struct Cli {
-    /// Use this identity key file
-    // clap appends the `[env: SWOOSH_KEY=]` annotation itself from `env` below, so the help must NOT
+    /// the node home: key, trust, contacts (the key lives at <home>/identity.key)
+    // clap appends the `[env: SWOOSH_HOME=]` annotation itself from `env` below, so the help must NOT
     // spell the env var again (doing so double-prints it).
-    #[arg(long = "key", id = "identity-key", env = "SWOOSH_KEY", global = true)]
-    key: Option<PathBuf>,
+    #[arg(
+        long = "home",
+        id = "node-home",
+        value_name = "dir",
+        env = "SWOOSH_HOME",
+        global = true
+    )]
+    home: Option<PathBuf>,
+    /// Retired: the node is a DIRECTORY now, so `--key <file>` became `--home <dir>` (the key lives at
+    /// `<home>/identity.key`). Kept hidden, with no env and no default, ONLY so a stale `--key` gets a
+    /// teaching error that names the replacement, rather than clap's bare "unexpected argument". A clean
+    /// break: it selects nothing, it just triggers the forward message in `run`.
+    #[arg(
+        long = "key",
+        id = "retired-key",
+        value_name = "file",
+        hide = true,
+        global = true
+    )]
+    retired_key: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -183,12 +203,12 @@ impl Command {
 enum Verb {
     /// Edits the address book; needs no transport.
     Contact(ContactCmd),
-    /// Prints this node's identity; needs no transport and no store, only the key path.
+    /// Prints this node's identity; needs no transport and no store, only the home.
     Identity(IdentityCmd),
     /// Derives a device identity and records `me/<label>`; needs the key (the signet) and the store, no
     /// transport.
     Mint(MintCmd),
-    /// Adopts an authkey: writes the device identity + trusted signet; needs the key path, no store or
+    /// Adopts an authkey: writes the device identity + trusted signet; needs the home, no store or
     /// transport.
     Adopt(AdoptCmd),
     /// Reads the address book to resolve a peer, then execs the system `ssh` over the overlay. A launcher:
@@ -212,7 +232,7 @@ impl Reach {
     /// a verb states it). A thin dispatch like [`credential`](Self::credential): for the reach-outward
     /// verbs `identity()` derives from the credential (`Family -> PersistedIfPresent`,
     /// `Anonymous -> Ephemeral`), so identity and badge cannot disagree; `serve`/`tunnel-connect` declare
-    /// `Persisted` explicitly there. An explicit `--key` still overrides either (see [`identity::resolve`]).
+    /// `Persisted` explicitly there. An explicit `--home` still overrides either (see [`identity::resolve`]).
     fn identity(&self) -> Identity {
         match self {
             Self::Serve(cmd) => cmd.identity(),
@@ -266,7 +286,7 @@ impl Reach {
     /// ONE uniform [`ReachCtx`] (`cmd.run(node, ctx)`), not a per-verb argument-threading match. Every verb
     /// is generic over `Node<T, D>`, so this stays transport-blind: the concrete transport was chosen once,
     /// at the seam below. A verb reads the ctx fields it needs (`contacts` to resolve a petname, the
-    /// `transport` label to report, the resolved `present` badge, the `key`) and ignores the rest; `serve`
+    /// `transport` label to report, the resolved `present` badge, the `home`) and ignores the rest; `serve`
     /// reads its own attached [`serve::ExposeContext`] instead.
     async fn run<T: Transport, D: Discovery>(
         self,
@@ -345,18 +365,18 @@ impl Reach {
     async fn present_slots(
         &self,
         secret: &identity::Secret,
-        key: Option<&std::path::Path>,
+        home: &Home,
     ) -> eyre::Result<(Option<String>, Option<String>)> {
-        Ok(reaching::resolve(self.credential(), secret, key)
+        Ok(reaching::resolve(self.credential(), secret, home)
             .await?
             .into_slots())
     }
 
     /// The exposer context `serve` needs, resolved before the secret is consumed by the transport bind:
     /// swoosh's ssh host seed (derived from the secret), the signet its default gate trusts,
-    /// and the revocation denylist the gate honors. All read from swoosh's OWN store, dir-derived from
-    /// `--key` like the contacts file, so a swoosh node gates on the signet `swoosh adopt` set under the same
-    /// `--key`. Every other verb returns `None`. Async because the signet and denylist are read from disk.
+    /// and the revocation denylist the gate honors. All read from swoosh's OWN store, the node home, so a
+    /// swoosh node gates on the signet `swoosh adopt` set under the same `--home`. Every other verb returns
+    /// `None`. Async because the signet and denylist are read from disk.
     ///
     /// Person-zero self-signet: a node with its OWN key but no PROVISIONED signet (no `adopt`) gates on its
     /// OWN identity key as the signet root, rather than failing "no signet to gate on". A node self-trusts:
@@ -369,7 +389,7 @@ impl Reach {
         &self,
         secret: &identity::Secret,
         contacts: &Contacts,
-        key: Option<&std::path::Path>,
+        home: &Home,
     ) -> eyre::Result<Option<swoosh::commands::serve::ExposeContext>> {
         match self {
             // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
@@ -381,11 +401,11 @@ impl Reach {
                 #[cfg(not(feature = "ssh"))]
                 host_seed: [0u8; 32],
                 signet: Some(
-                    config::load_signet(key)
+                    config::load_signet(home)
                         .await?
                         .unwrap_or_else(|| secret.node_id()),
                 ),
-                denylist: nauthy::FileDenylist::load(config::revoked_path(key)?).await?,
+                denylist: nauthy::FileDenylist::load(home.revoked()).await?,
                 roster_blob: std::sync::Arc::new(swoosh::commands::serve::cut_roster(
                     contacts, secret,
                 )?),
@@ -419,7 +439,16 @@ async fn run() -> eyre::Result<()> {
 
     let cli = Cli::parse();
 
-    // No verb given (a bare `swoosh`, even with `SWOOSH_KEY` set): print the full help and exit non-zero,
+    // The retired `--key` is a clean break, not a silent alias: a stale invocation gets a teaching error
+    // that names the replacement (the node is a DIRECTORY now), checked before anything else so it fires
+    // whatever verb (or no verb) follows. See the `retired_key` field on `Cli`.
+    if cli.retired_key.is_some() {
+        eyre::bail!(
+            "`--key` is gone; pass `--home <dir>` (the key lives at `<home>/identity.key`)"
+        );
+    }
+
+    // No verb given (a bare `swoosh`, even with `SWOOSH_HOME` set): print the full help and exit non-zero,
     // the same way clap's own `arg_required_else_help` does (full help, non-zero exit, no `Error:` line).
     // See the note on `Cli` for why this is handled here rather than by that attribute alone.
     let Some(command) = cli.command else {
@@ -427,6 +456,11 @@ async fn run() -> eyre::Result<()> {
         help.print_help()?;
         std::process::exit(2);
     };
+
+    // The node home, resolved ONCE from `--home`/`SWOOSH_HOME` (else the default `~/.config/swoosh`): every
+    // node path (identity key, signet, badge, contacts, denylist, ledger) derives from it, so a verb never
+    // re-derives one and two verbs can never disagree on where the store is.
+    let home = Home::resolve(cli.home)?;
 
     // Local verbs run here, before any transport is composed and (for `tree`) before the store is even
     // opened: `tree` is pure introspection over clap's own model, and `contact` only edits the address
@@ -438,21 +472,21 @@ async fn run() -> eyre::Result<()> {
         // take. With `--at` this verb fell through to the reach path above instead.
         Verb::Service(cmd) => return cmd.run_local(),
         Verb::Contact(cmd) => {
-            let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
+            let store = ContactsStore::open(home.contacts()).await?;
             return cmd.run(store).await;
         }
-        // Prints this node's NodeId (minting a key if absent). Needs only the key path, not the store or
+        // Prints this node's NodeId (minting a key if absent). Needs only the home, not the store or
         // a transport, so it dispatches here beside the other local verbs.
-        Verb::Identity(cmd) => return cmd.run(cli.key.as_deref()).await,
+        Verb::Identity(cmd) => return cmd.run(&home).await,
         // Derives a device identity from the signet and records `me/<label>`. Needs the key (to derive)
         // and the store (to record the contact); binds no transport.
         Verb::Mint(cmd) => {
-            let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
-            return cmd.run(store, cli.key.as_deref()).await;
+            let store = ContactsStore::open(home.contacts()).await?;
+            return cmd.run(store, &home).await;
         }
         // Provisions this machine from an authkey (writes the tightbeam identity + signet). Needs only the
-        // key path; binds no transport and touches no address book.
-        Verb::Adopt(cmd) => return cmd.run(cli.key.as_deref()).await,
+        // home; binds no transport and touches no address book.
+        Verb::Adopt(cmd) => return cmd.run(&home).await,
         // The `grant` group: `share` signs a link with the persisted key; `attenuate`/`revoke` are wholly
         // offline. No leaf binds a transport, so the group dispatches here beside the local verbs rather
         // than falling through to the reach path; `issue --for` reads the address book to resolve a device.
@@ -461,15 +495,15 @@ async fn run() -> eyre::Result<()> {
                 // `issue` and `revoke` read the address book (to resolve a `--for`/holder petname to a
                 // device), so they open the store; neither binds a transport.
                 GrantCmd::Issue(cmd) => {
-                    let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
-                    cmd.run(store, cli.key.as_deref()).await
+                    let store = ContactsStore::open(home.contacts()).await?;
+                    cmd.run(store, &home).await
                 }
                 GrantCmd::Revoke(cmd) => {
-                    let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
-                    cmd.run(store, cli.key.as_deref()).await
+                    let store = ContactsStore::open(home.contacts()).await?;
+                    cmd.run(store, &home).await
                 }
                 // `ls` reads only swoosh's own mint-log ledger, so it needs neither the store nor a transport.
-                GrantCmd::Ls(cmd) => cmd.run(cli.key.as_deref()).await,
+                GrantCmd::Ls(cmd) => cmd.run(&home).await,
                 GrantCmd::Narrow(cmd) => cmd.run(),
             };
         }
@@ -477,20 +511,20 @@ async fn run() -> eyre::Result<()> {
         // tightbeam as its `ProxyCommand`). swoosh binds no transport here; on unix `run` execs and does
         // not return on success.
         Verb::Ssh(cmd) => {
-            let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
-            return cmd.run(store.contacts(), cli.key.as_deref());
+            let store = ContactsStore::open(home.contacts()).await?;
+            return cmd.run(store.contacts(), &home);
         }
         Verb::Reach(reach) => reach,
     };
 
-    // The address book lives beside the identity, honoring `--key`'s dir when it points elsewhere, else
-    // the default config dir. A reach verb reads it to resolve a petname in its peer slot.
-    let store = ContactsStore::open(contacts_path(cli.key.as_deref())?).await?;
+    // The address book lives in the node home, `<home>/contacts.toml`. A reach verb reads it to resolve a
+    // petname in its peer slot.
+    let store = ContactsStore::open(home.contacts()).await?;
 
     // The verb decides its identity: `serve` persists so it is reachable at one address, the reach-
-    // outward verbs mint a fresh ephemeral key, and an explicit `--key` pins either. Resolve it before
+    // outward verbs mint a fresh ephemeral key, and an explicit `--home` pins either. Resolve it before
     // binding, since the secret is what the transport is bound under.
-    let secret = identity::resolve(reach.identity(), cli.key.as_deref()).await?;
+    let secret = identity::resolve(reach.identity(), &home).await?;
     let contacts = Contacts::clone(store.contacts());
 
     // The one and only place a concrete transport is named. Everything downstream speaks `bifrost`. The
@@ -508,9 +542,9 @@ async fn run() -> eyre::Result<()> {
     // under, so the far gate's device-binding matches); the signet holder self-signs one against the same
     // key for the same reason. The exposer context (`serve`) is resolved before the bind too: its ssh
     // host seed derives from the secret before the bind consumes it.
-    let (present, membership) = reach.present_slots(&secret, cli.key.as_deref()).await?;
+    let (present, membership) = reach.present_slots(&secret, &home).await?;
     let expose = reach
-        .expose_context(&secret, store.contacts(), cli.key.as_deref())
+        .expose_context(&secret, store.contacts(), &home)
         .await?;
     // Attach the resolved exposer context to the `serve` verb (a no-op otherwise), so `serve` reads its OWN
     // context and every verb dispatches through the uniform `ReachCtx` below.
@@ -522,7 +556,7 @@ async fn run() -> eyre::Result<()> {
         transport,
         present,
         membership,
-        key: cli.key.as_deref(),
+        home: &home,
     };
     match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
@@ -564,17 +598,6 @@ where
     let result = reach.run(node, ctx).await;
     node.close().await;
     result
-}
-
-/// The contacts file to open: beside an explicit `--key`, else the default config location.
-///
-/// A pinned `--key` moves the whole identity dir, so the address book follows it and stays one identity,
-/// one address book. Without it the default `~/.config/swoosh/contacts.toml` applies.
-fn contacts_path(key: Option<&std::path::Path>) -> eyre::Result<PathBuf> {
-    match key.and_then(std::path::Path::parent) {
-        Some(dir) => Ok(dir.join("contacts.toml")),
-        None => Ok(contacts::default_path()?),
-    }
 }
 
 #[cfg(test)]
@@ -681,9 +704,9 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("swoosh-person-zero-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create an empty config dir");
-        let key = dir.join("identity.key");
+        let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
 
-        // An in-memory secret standing in for the persisted identity; the dir it points at has no signet.
+        // An in-memory secret standing in for the persisted identity; the home it points at has no signet.
         let secret = identity::Secret::ephemeral();
         let reach = match Cli::try_parse_from(["swoosh", "serve"])
             .expect("bare serve parses")
@@ -696,7 +719,7 @@ mod tests {
         };
 
         let expose = reach
-            .expose_context(&secret, &Contacts::default(), Some(&key))
+            .expose_context(&secret, &Contacts::default(), &home)
             .await
             .expect("expose context resolves")
             .expect("serve carries an expose context");

@@ -14,9 +14,9 @@
 use bifrost::NodeId;
 use nauthy::Service;
 use swoosh::commands::share::{GrantFor, ShareCmd};
-use swoosh::config;
 use swoosh::contacts::ContactsStore;
 use swoosh::grants::{Delegation, GrantKind, Grants};
+use swoosh::home::Home;
 use tightbeam::duration::Lifetime;
 
 /// A `ShareCmd` for `svc`, with the `--for` token and `--delegable` set explicitly. The token parses through
@@ -41,21 +41,18 @@ async fn issuing_for_a_raw_signet_records_a_fleet_grant_keyed_by_the_signet() {
     let dir = std::env::temp_dir().join(format!("swoosh-grant-fleet-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let key = dir.join("identity.key");
+    let home = Home::resolve(Some(dir.clone())).unwrap();
 
     // The hire's signet, handed over out of band as a raw node id.
     let hire_signet = NodeId::from_ed25519_secret(&[2u8; 32]);
 
     share("ssh", Some(&format!("fleet:{hire_signet}")), false)
-        .run(store_at(&dir).await, Some(&key))
+        .run(store_at(&dir).await, &home)
         .await
         .expect("issuing a fleet grant for a raw signet succeeds");
 
     // The ledger records exactly one Fleet grant, sealed, keyed by the signet key string.
-    let records = Grants::at(config::grants_path(Some(&key)).unwrap())
-        .load()
-        .await
-        .unwrap();
+    let records = Grants::at(home.grants()).load().await.unwrap();
     let [record] = records.as_slice() else {
         panic!("expected exactly one recorded grant, got {}", records.len());
     };
@@ -92,7 +89,7 @@ async fn issuing_for_a_petname_binds_that_persons_stored_signet() {
     let dir = std::env::temp_dir().join(format!("swoosh-grant-fleet-name-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let key = dir.join("identity.key");
+    let home = Home::resolve(Some(dir.clone())).unwrap();
 
     // Alice's signet, recorded locally by hand (`swoosh contact signet alice <key>`).
     let alice_signet = NodeId::from_ed25519_secret(&[4u8; 32]);
@@ -104,14 +101,11 @@ async fn issuing_for_a_petname_binds_that_persons_stored_signet() {
 
     // `--for fleet:alice` resolves alice's stored signet and binds the fleet grant to it.
     share("ssh", Some("fleet:alice"), false)
-        .run(store_at(&dir).await, Some(&key))
+        .run(store_at(&dir).await, &home)
         .await
         .expect("a petname with a stored signet resolves and mints");
 
-    let records = Grants::at(config::grants_path(Some(&key)).unwrap())
-        .load()
-        .await
-        .unwrap();
+    let records = Grants::at(home.grants()).load().await.unwrap();
     let [record] = records.as_slice() else {
         panic!("expected exactly one recorded grant, got {}", records.len());
     };
@@ -130,11 +124,11 @@ async fn for_fleet_refuses_delegable() {
     let dir = std::env::temp_dir().join(format!("swoosh-grant-fleet-deleg-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let key = dir.join("identity.key");
+    let home = Home::resolve(Some(dir.clone())).unwrap();
     let hire_signet = NodeId::from_ed25519_secret(&[3u8; 32]);
 
     let error = share("ssh", Some(&format!("fleet:{hire_signet}")), true)
-        .run(store_at(&dir).await, Some(&key))
+        .run(store_at(&dir).await, &home)
         .await
         .expect_err("a bound fleet grant cannot be delegable");
     let message = format!("{error:#}");
@@ -152,12 +146,12 @@ async fn for_fleet_with_an_unknown_petname_teaches_the_hand_add_recipe() {
         std::env::temp_dir().join(format!("swoosh-grant-fleet-petname-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let key = dir.join("identity.key");
+    let home = Home::resolve(Some(dir.clone())).unwrap();
 
     // `--for fleet:alice` with NO signet on file: a teaching error naming the hand-add recipe, never a
     // paste-a-raw-key dead end.
     let error = share("ssh", Some("fleet:alice"), false)
-        .run(store_at(&dir).await, Some(&key))
+        .run(store_at(&dir).await, &home)
         .await
         .expect_err("a petname with no stored signet cannot resolve");
     let message = format!("{error:#}");

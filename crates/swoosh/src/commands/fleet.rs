@@ -10,16 +10,15 @@
 //! the fleet you already know) is a later, offline slice (delib-30 B2); B1 ships the `--pull` that populates
 //! it.
 
-use std::path::Path;
-
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use eyre::WrapErr as _;
 use tightbeam::identity::AsVerifyKey as _;
 use tokio::io::AsyncReadExt as _;
 
-use crate::contacts::{self, Contacts, ContactsStore};
+use crate::contacts::{Contacts, ContactsStore};
 use crate::credential::SheerLink;
+use crate::home::Home;
 use crate::peer::Peer;
 use crate::roster;
 use crate::transport::ReachArgs;
@@ -67,7 +66,7 @@ impl crate::reaching::Reaching for FleetCmd {
     }
 
     /// Uniform dispatch: unpack the reach context and run. `fleet` reads `contacts` (to resolve a petname in
-    /// its `--pull` peer), the resolved `present` badge, and the `key` (it opens its OWN store to WRITE
+    /// its `--pull` peer), the resolved `present` badge, and the `home` (it opens its OWN store to WRITE
     /// hydrated contacts, unlike the read-only `contacts`); it ignores `transport`.
     async fn run<T: Transport, D: Discovery>(
         self,
@@ -78,7 +77,7 @@ impl crate::reaching::Reaching for FleetCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_fleet(node, ctx.contacts, ctx.present, ctx.membership, ctx.key)
+        self.run_fleet(node, ctx.contacts, ctx.present, ctx.membership, ctx.home)
             .await
     }
 }
@@ -94,14 +93,14 @@ impl FleetCmd {
         contacts: &Contacts,
         self_badge: Option<String>,
         membership: Option<String>,
-        key: Option<&Path>,
+        home: &Home,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
         // The signet we verify against: the key our own gate trusts, written by `adopt`.
-        let signet = crate::config::load_signet(key).await?.ok_or_else(|| {
+        let signet = crate::config::load_signet(home).await?.ok_or_else(|| {
             eyre::eyre!("this node has no signet; run `swoosh adopt <authkey>` first")
         })?;
 
@@ -131,7 +130,7 @@ impl FleetCmd {
         // hydrate REFUSES a stale/replayed snapshot (epoch at or below the persisted floor): a lagging or
         // hostile courier cannot roll the fleet back, so report the no-op honestly rather than claiming a
         // pull that did nothing.
-        let mut store = ContactsStore::open(contacts::path(key)?).await?;
+        let mut store = ContactsStore::open(home.contacts()).await?;
         let members = doc.members().len();
         let epoch = doc.epoch().0;
         if !store.contacts_mut().hydrate(&doc) {

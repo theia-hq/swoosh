@@ -18,6 +18,7 @@ use bifrost::NodeId;
 use clap::Parser;
 use nauthy::{Identity, Service};
 use swoosh::commands::ping::PingCmd;
+use swoosh::home::Home;
 use swoosh::identity::Secret;
 use swoosh::reaching::{self, Reaching};
 use tightbeam::identity::AsVerifyKey as _;
@@ -48,7 +49,10 @@ fn ping_with_peer(peer: &str) -> PingCmd {
 /// test controls the dialer's own fleet, which the fleet-match slot-2 rule compares against) and read the
 /// two wire slots, the exact path the composition root runs before dialing.
 async fn slots_for(cmd: &PingCmd, secret: &Secret) -> (Option<String>, Option<String>) {
-    reaching::resolve(cmd.credential(), secret, None)
+    // The default home (no stored badge), so a `Family` dial falls back to the self-sign, exactly as an
+    // unprovisioned dialer does.
+    let home = Home::resolve(None).expect("resolve the default home");
+    reaching::resolve(cmd.credential(), secret, &home)
         .await
         .expect("resolve the verb's credential into wire slots")
         .into_slots()
@@ -57,7 +61,7 @@ async fn slots_for(cmd: &PingCmd, secret: &Secret) -> (Option<String>, Option<St
 #[tokio::test]
 async fn a_verb_with_a_signet_bound_present_slip_fills_slot_two() {
     // Work issues a signet-bound slip pinning the DIALER'S OWN fleet; a hire runs `ping <work> --present
-    // <slip>`. With no `--key`, the dialer self-signs its badge at `secret.node_id()`, so the slip must pin
+    // <slip>`. On the default home, the dialer self-signs its badge at `secret.node_id()`, so the slip must pin
     // that fleet for slot 2 to help admission (and thus be attached) under the fleet-match rule.
     let secret = Secret::ephemeral();
     let work = Identity::from_secret(&[1u8; 32]).unwrap();

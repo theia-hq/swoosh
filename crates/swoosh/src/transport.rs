@@ -21,8 +21,8 @@ use eyre::WrapErr as _;
 /// The flags every reaching verb shares and no local verb has: which backend to bind and any direct
 /// address hints. Flattened into each reach command (`serve`/`ping`/`speed`/`status`) rather than made
 /// a root global, so `contact add/ls/rm` (which bind no transport and dial nobody) are never offered a
-/// `--transport` or `--peer` that would do nothing there. `--key` stays a root global, since it names
-/// the identity dir the address book AND the bound key both live in, meaningful to both families.
+/// `--transport` or `--peer` that would do nothing there. `--home` stays a root global, since it names
+/// the node home the address book AND the bound key both live in, meaningful to both families.
 #[derive(Debug, Args)]
 pub struct ReachArgs {
     /// Backend to bind under this identity

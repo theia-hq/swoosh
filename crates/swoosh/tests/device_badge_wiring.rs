@@ -14,7 +14,7 @@
 //! - `mint` emits a THREE-field authkey `authkey:<seed>.<signet>.<badge>` (the badge field is new);
 //! - the badge is signet-ROOTED (root == the signet, never the device's own key) and BOUND to the device's
 //!   derived node id, so it is the exact credential `verify_member_at_root_without_revocation` admits at the signet root;
-//! - `adopt` STORES that badge beside the seed (the `badge` file under the device's `--key` dir), which is
+//! - `adopt` STORES that badge beside the seed (the `badge` file in the device's home), which is
 //!   what `self_badge` presents on connect instead of self-signing;
 //! - the stored badge is NOT the device's self-sign: a device self-sign roots at the device key, which the
 //!   gate refuses, so proving root == signet (and root != device) is the whole point of the fix;
@@ -31,7 +31,7 @@ use std::process::Command;
 
 use bifrost::NodeId;
 use nauthy::{Cap, FileDenylist, VerifyKey};
-use swoosh::config;
+use swoosh::home::Home;
 use tightbeam::identity::AsVerifyKey as _;
 
 /// The `authkey:` scheme prefix `mint` prints.
@@ -48,15 +48,15 @@ fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet
     std::fs::create_dir_all(&signet_dir).unwrap();
     std::fs::create_dir_all(&device_dir).unwrap();
 
-    // The `--key` a verb reads/writes is a FILE path; its parent dir is the identity+trust unit. `mint`
-    // reads/creates the signet at the signet holder's key; `adopt` writes the device identity + signet +
-    // badge under the device's key.
+    // `--home <dir>` names the identity+trust unit; the key lives inside it at `identity.key`. `mint`
+    // reads/creates the signet in the signet holder's home; `adopt` writes the device identity + signet +
+    // badge in the device's home. The key file paths are kept for the on-disk assertions below.
     let signet_key = signet_dir.join("identity.key");
     let device_key = device_dir.join("identity.key");
 
-    // 1. MINT: run the real `swoosh mint ci-runner` under the signet holder's key. It derives the child,
+    // 1. MINT: run the real `swoosh mint ci-runner` in the signet holder's home. It derives the child,
     //    signs the device badge, and prints the three-field authkey.
-    let mint = swoosh(&["mint", "ci-runner", "--key", path_str(&signet_key)]);
+    let mint = swoosh(&["mint", "ci-runner", "--home", path_str(&signet_dir)]);
     assert!(mint.status.success(), "mint failed: {}", stderr(&mint));
     let authkey = first_authkey(&String::from_utf8(mint.stdout).unwrap())
         .expect("mint prints an authkey: token");
@@ -99,7 +99,7 @@ fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet
 
     // 2. ADOPT: run the real `swoosh adopt <authkey>` under the DEVICE's key. It writes the child seed as
     //    the device identity, records the trusted signet, and STORES the badge beside them.
-    let adopt = swoosh(&["adopt", &authkey, "--key", path_str(&device_key)]);
+    let adopt = swoosh(&["adopt", &authkey, "--home", path_str(&device_dir)]);
     assert!(adopt.status.success(), "adopt failed: {}", stderr(&adopt));
 
     // adopt STORED the badge (this is what `self_badge` presents on connect, in place of a self-sign).
@@ -161,13 +161,13 @@ async fn mint_then_revoke_refuses_the_minted_device_at_the_gate() {
     let _ = std::fs::remove_dir_all(&base);
     let signet_dir = base.join("signet-holder");
     std::fs::create_dir_all(&signet_dir).unwrap();
-    // `mint` and `grant revoke` both read/write the identity+trust unit under this one `--key` dir: the
-    // signet, the `me/ci-runner` contact, the mint-log ledger, and the denylist all live beside it.
-    let signet_key = signet_dir.join("identity.key");
+    // `mint` and `grant revoke` both read/write the identity+trust unit in this one home: the signet, the
+    // `me/ci-runner` contact, the mint-log ledger, and the denylist all live inside it.
+    let signet_home = Home::resolve(Some(signet_dir.clone())).unwrap();
 
-    // MINT under the signet holder's key: derives the device, signs its badge, records the contact
+    // MINT in the signet holder's home: derives the device, signs its badge, records the contact
     // `me/ci-runner` AND (the fix under test) appends the badge to the mint-log ledger.
-    let mint = swoosh(&["mint", "ci-runner", "--key", path_str(&signet_key)]);
+    let mint = swoosh(&["mint", "ci-runner", "--home", path_str(&signet_dir)]);
     assert!(mint.status.success(), "mint failed: {}", stderr(&mint));
     let authkey = first_authkey(&String::from_utf8(mint.stdout).unwrap())
         .expect("mint prints an authkey: token");
@@ -181,9 +181,7 @@ async fn mint_then_revoke_refuses_the_minted_device_at_the_gate() {
     let cap = Cap::parse(badge).expect("the badge parses as a cap");
 
     // Before revoke: nothing denylists the badge (the gate would admit the device).
-    let denylist = FileDenylist::load(config::revoked_path(Some(&signet_key)).unwrap())
-        .await
-        .unwrap();
+    let denylist = FileDenylist::load(signet_home.revoked()).await.unwrap();
     assert!(
         !denylist.is_revoked(&cap),
         "the minted badge is not revoked before `grant revoke`"
@@ -196,8 +194,8 @@ async fn mint_then_revoke_refuses_the_minted_device_at_the_gate() {
         "grant",
         "revoke",
         "me/ci-runner",
-        "--key",
-        path_str(&signet_key),
+        "--home",
+        path_str(&signet_dir),
     ]);
     assert!(
         revoke.status.success(),
@@ -208,9 +206,7 @@ async fn mint_then_revoke_refuses_the_minted_device_at_the_gate() {
 
     // After revoke: the gate's revocation check (the seam a live exposer consults on every dial) now refuses
     // the very badge `mint` produced, so the minted device is cut off.
-    let denylist = FileDenylist::load(config::revoked_path(Some(&signet_key)).unwrap())
-        .await
-        .unwrap();
+    let denylist = FileDenylist::load(signet_home.revoked()).await.unwrap();
     assert!(
         denylist.is_revoked(&cap),
         "once the minted device is revoked by name, the gate refuses its badge"
@@ -224,7 +220,7 @@ async fn mint_then_revoke_refuses_the_minted_device_at_the_gate() {
 fn swoosh(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .args(args)
-        // Isolate from any real `~/.config/swoosh`: every path this test uses is explicit via `--key`, but
+        // Isolate from any real `~/.config/swoosh`: every path this test uses is explicit via `--home`, but
         // pin HOME to the scratch base so nothing can fall back to the operator's store.
         .env("HOME", std::env::temp_dir())
         .output()

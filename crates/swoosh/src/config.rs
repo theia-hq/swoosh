@@ -1,59 +1,17 @@
-//! Where swoosh keeps its trust files: the signet it gates on and the revocation denylist.
+//! Reading and writing swoosh's trust files: the signet it gates on, the membership badge it presents, and
+//! the revocation denylist.
 //!
-//! These live beside swoosh's identity, dir-derived from `--key` exactly as [`contacts`](crate::contacts)
-//! is: a pinned `--key` moves the whole identity+trust unit (identity.key + contacts.toml + signet +
-//! revoked) as one, so `swoosh adopt --key /custom` and `swoosh serve --key /custom` read and write
-//! the SAME dir. Without `--key` the default `~/.config/swoosh/` applies. swoosh owns these outright: it
-//! never reaches into tightbeam's config, so the store dir is a function of swoosh's own `--key`.
+//! The paths themselves live on [`Home`](crate::home::Home) (every node file is a function of the one home
+//! dir); this module owns the IO over them, and the PRIVATE posture that IO asserts: a trust file is
+//! created owner-only (`0600`) in an owner-only (`0700`) store dir, so a co-tenant local user cannot read
+//! this node's trust graph. All three files move as one unit when the home moves, since they all hang off
+//! the same [`Home`].
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use bifrost::NodeId;
-use eyre::eyre;
 
-/// The swoosh config directory: beside an explicit `--key`, else the default `~/.config/swoosh`.
-///
-/// Mirrors [`contacts_path`](crate::contacts::default_path)'s convention so one `--key` moves the whole
-/// identity+trust unit together.
-fn config_dir(key: Option<&Path>) -> eyre::Result<PathBuf> {
-    match key.and_then(Path::parent) {
-        Some(dir) => Ok(dir.to_path_buf()),
-        None => {
-            let home =
-                std::env::var_os("HOME").ok_or_else(|| eyre!("HOME is not set; pass --key"))?;
-            Ok(PathBuf::from(home).join(".config").join("swoosh"))
-        }
-    }
-}
-
-/// The persisted signet location, `<config-dir>/signet`. Holds one thing: the public [`NodeId`] of the
-/// signet this node trusts, written once by provisioning (`swoosh adopt`). Public material (a key you
-/// already share), so it sits beside the secret identity, never inside it.
-pub fn signet_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
-    Ok(config_dir(key)?.join("signet"))
-}
-
-/// The persisted revocation-denylist location, `<config-dir>/revoked`. Records the biscuit revocation ids
-/// of caps this node has revoked, which the next `swoosh serve` reads.
-pub fn revoked_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
-    Ok(config_dir(key)?.join("revoked"))
-}
-
-/// The persisted mint-log ledger location, `<config-dir>/grants`. Records one line per grant this node has
-/// issued (service, kind, holder, root revocation id, expiry), the issuer-side index that makes revoke-by-
-/// holder and `grant ls` possible. A who-can-reach-what record, so [`Grants`](crate::grants::Grants) writes
-/// it `0600`; the expose gate never reads it (issuer-side audit and revoke only).
-pub fn grants_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
-    Ok(config_dir(key)?.join("grants"))
-}
-
-/// The persisted membership-badge location, `<config-dir>/badge`. Holds one thing: the signet-signed,
-/// device-bound membership badge (a `sheer:` link) this device presents on connect, written once by
-/// provisioning (`swoosh adopt`) from the authkey's badge field. Public material (the signet already
-/// signed it and it carries no secret), so it sits beside the secret identity, never inside it.
-pub fn badge_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
-    Ok(config_dir(key)?.join("badge"))
-}
+use crate::home::Home;
 
 /// Load this node's signet: the [`NodeId`] it was provisioned to trust, or `None` if it was never
 /// provisioned. The file is a single public node id; an absent file means unprovisioned, which `serve`
@@ -61,8 +19,8 @@ pub fn badge_path(key: Option<&Path>) -> eyre::Result<PathBuf> {
 /// refuses strangers), never a silent open.
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
-pub async fn load_signet(key: Option<&Path>) -> eyre::Result<Option<NodeId>> {
-    match tokio::fs::read_to_string(signet_path(key)?).await {
+pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
+    match tokio::fs::read_to_string(home.signet()).await {
         Ok(text) => Ok(Some(text.trim().parse::<NodeId>()?)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -70,11 +28,11 @@ pub async fn load_signet(key: Option<&Path>) -> eyre::Result<Option<NodeId>> {
 }
 
 /// Write this node's signet: the public [`NodeId`] its default gate will trust, as `adopt` sets it from an
-/// authkey. Overwrites any prior signet (re-provisioning re-trusts), creating the config dir. Written
+/// authkey. Overwrites any prior signet (re-provisioning re-trusts), creating the store dir. Written
 /// `0600` beside the secret identity: the signet roots this node's whole trust decision (whose devices it
 /// admits), so it must not be world-readable to a local user who could read or (worse) rewrite it.
-pub async fn write_signet(key: Option<&Path>, signet: NodeId) -> eyre::Result<()> {
-    write_private(&signet_path(key)?, format!("{signet}\n").as_bytes()).await
+pub async fn write_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
+    write_private(&home.signet(), format!("{signet}\n").as_bytes()).await
 }
 
 /// Load this device's stored membership badge: the signet-signed, device-bound `sheer:` link it presents
@@ -83,8 +41,8 @@ pub async fn write_signet(key: Option<&Path>, signet: NodeId) -> eyre::Result<()
 /// self-signing. Mirrors [`load_signet`].
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
-pub async fn load_badge(key: Option<&Path>) -> eyre::Result<Option<String>> {
-    match tokio::fs::read_to_string(badge_path(key)?).await {
+pub async fn load_badge(home: &Home) -> eyre::Result<Option<String>> {
+    match tokio::fs::read_to_string(home.badge()).await {
         Ok(text) => {
             let badge = text.trim();
             Ok((!badge.is_empty()).then(|| badge.to_owned()))
@@ -96,11 +54,11 @@ pub async fn load_badge(key: Option<&Path>) -> eyre::Result<Option<String>> {
 
 /// Write this device's membership badge: the signet-signed, device-bound `sheer:` link it presents on
 /// connect, as `adopt` stores it from an authkey's badge field. Overwrites any prior badge (re-provisioning
-/// re-badges), creating the config dir. It lands beside the identity, mirroring [`write_signet`], and is
+/// re-badges), creating the store dir. It lands beside the identity, mirroring [`write_signet`], and is
 /// written `0600`: though the signet already signed it (it carries no secret), it is a device-bound
 /// membership credential and this store is owner-only throughout, so it is not left world-readable either.
-pub async fn write_badge(key: Option<&Path>, badge: &str) -> eyre::Result<()> {
-    write_private(&badge_path(key)?, format!("{badge}\n").as_bytes()).await
+pub async fn write_badge(home: &Home, badge: &str) -> eyre::Result<()> {
+    write_private(&home.badge(), format!("{badge}\n").as_bytes()).await
 }
 
 /// Create swoosh's store directory owner-only (`0700`) on Unix, recursively, if it does not already exist.

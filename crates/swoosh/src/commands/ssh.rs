@@ -44,6 +44,7 @@ use clap::Args;
 
 use crate::contacts::Contacts;
 use crate::credential::SheerLink;
+use crate::home::Home;
 use crate::peer::Peer;
 use crate::transport;
 
@@ -83,7 +84,7 @@ impl SshCmd {
     /// Resolve the peer to a raw key, then replace this process with the system `ssh` reaching it over the
     /// overlay. On success swoosh's PID *becomes* ssh (unix); a resolve or PATH failure returns before any
     /// exec, so a caller prints its clean message and exits non-zero. Prints nothing on the success path.
-    pub fn run(self, contacts: &Contacts, identity_key: Option<&Path>) -> eyre::Result<()> {
+    pub fn run(self, contacts: &Contacts, home: &Home) -> eyre::Result<()> {
         // A `sheer:` link peer already presents its own credential, so a second explicit `--present` is a
         // loud conflict, not a silent pick.
         self.peer.reject_redundant_present(self.present.as_ref())?;
@@ -116,11 +117,16 @@ impl SshCmd {
         }
 
         let proxy = self_invocation()?;
-        // Thread the effective --key into the ProxyCommand so the re-invoked tunnel-connect dials under the
-        // SAME identity `swoosh ssh` was given, not swoosh's default. Absolute, since the re-invocation may
-        // not share this CWD. Without this, `swoosh ssh --key X` silently dialed as the DEFAULT identity: the
-        // "one flag, a second surface that ignores it" bug that faked an auth bypass.
-        let identity_key = identity_key.map(std::path::absolute).transpose()?;
+        // Thread the effective --home into the ProxyCommand so the re-invoked tunnel-connect dials under the
+        // SAME identity `swoosh ssh` was given, not swoosh's default. ONLY when the home was named explicitly
+        // (the default carries forward on its own): an explicit home pins the identity, so the bridge must
+        // see the same --home or it would silently fall back to the default, the "one flag, a second surface
+        // that ignores it" bug that faked an auth bypass. Absolute, since the re-invocation may not share
+        // this CWD.
+        let home_arg = home
+            .is_explicit()
+            .then(|| std::path::absolute(home.dir()))
+            .transpose()?;
         let argv = ssh_argv(
             &proxy,
             &key,
@@ -128,7 +134,7 @@ impl SshCmd {
             present.as_ref().map(SheerLink::link),
             &host,
             &known_hosts,
-            identity_key.as_deref(),
+            home_arg.as_deref(),
             &self.peer_hint,
             &self.args,
         );
@@ -165,18 +171,18 @@ fn ssh_argv(
     present: Option<&str>,
     host: &str,
     known_hosts: &Path,
-    identity_key: Option<&Path>,
+    home: Option<&Path>,
     hints: &[transport::PeerHint],
     args: &[String],
 ) -> Vec<String> {
     // `--to -` streams the overlay service over stdin/stdout (the ProxyCommand shape). `-` is one
     // whitespace-free token, safe in ssh's whitespace-split ProxyCommand, like the key and the service.
     let mut proxy_command = format!("{proxy} tunnel-connect {key} --service {service} --to -");
-    // Carry the caller's identity dir into the re-invocation, so `swoosh ssh --key X` dials as X (its
-    // membership badge roots at X). `--key` is a global, valid after the subcommand; double-quoted so a
-    // dir with a space stays one token. Absent, the bridge uses swoosh's default identity, as before.
-    if let Some(path) = identity_key {
-        proxy_command.push_str(&format!(" --key \"{}\"", path.display()));
+    // Carry the caller's home into the re-invocation, so `swoosh ssh --home X` dials as X's identity (its
+    // membership badge roots at X's key). `--home` is a global, valid after the subcommand; double-quoted so
+    // a dir with a space stays one token. Absent, the bridge uses swoosh's default identity, as before.
+    if let Some(path) = home {
+        proxy_command.push_str(&format!(" --home \"{}\"", path.display()));
     }
     // A `sheer:` link is whitespace-free (a single token, like the key), so it is safe unquoted in the
     // whitespace-split ProxyCommand. Appended only when present; without it the bridge self-signs a badge.
@@ -404,11 +410,11 @@ mod tests {
     }
 
     #[test]
-    fn argv_threads_the_identity_key_into_the_proxy_command() {
-        // `swoosh ssh --key <dir>` must DIAL under that identity: the re-invoked tunnel-connect gets the
-        // same --key, so its membership badge roots at that key. Without this, --key was silently dropped
-        // and the dial used swoosh's default identity -- the bug that faked an auth bypass.
-        let with_key = ssh_argv(
+    fn argv_threads_the_home_into_the_proxy_command() {
+        // `swoosh ssh --home <dir>` must DIAL under that home's identity: the re-invoked tunnel-connect gets
+        // the same --home, so its membership badge roots at that key. Without this, --home was silently
+        // dropped and the dial used swoosh's default identity -- the bug that faked an auth bypass.
+        let with_home = ssh_argv(
             PROXY,
             KEY,
             "ssh",
@@ -420,11 +426,11 @@ mod tests {
             &[],
         );
         assert!(
-            with_key.iter().any(|a| a
-                == &format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to - --key \"/tmp/yah\"")),
-            "the ProxyCommand must carry --key so the dial uses the given identity: {with_key:?}"
+            with_home.iter().any(|a| a
+                == &format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to - --home \"/tmp/yah\"")),
+            "the ProxyCommand must carry --home so the dial uses the given identity: {with_home:?}"
         );
-        // Absent, no --key rides the ProxyCommand: the bridge uses swoosh's default identity, as before.
+        // Absent, no --home rides the ProxyCommand: the bridge uses swoosh's default identity, as before.
         let without = ssh_argv(
             PROXY,
             KEY,
@@ -436,7 +442,7 @@ mod tests {
             &[],
             &[],
         );
-        assert!(without.iter().all(|a| !a.contains("--key")));
+        assert!(without.iter().all(|a| !a.contains("--home")));
     }
 
     #[test]

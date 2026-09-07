@@ -12,15 +12,14 @@
 //! reserved [`DeviceLabel::DEFAULT`] slot, so `contact add alice <key>` and `contact add alice/macbook
 //! <key>` coexist under one petname.
 //!
-//! The store persists beside the identity key as `~/.config/swoosh/contacts.toml` (honoring the same
-//! `SWOOSH_KEY`-adjacent config dir the identity module uses), a plain TOML table of `petname -> { device
-//! -> node id }`. It is LOCAL STATE, not a wire or registry format, so a human-editable TOML file is the
-//! right representation.
+//! The store persists in the node home as `<home>/contacts.toml` (the same directory the identity key
+//! and the trust files live in, [`Home::contacts`](crate::home::Home::contacts)), a plain TOML table of
+//! `petname -> { device -> node id }`. It is LOCAL STATE, not a wire or registry format, so a
+//! human-editable TOML file is the right representation.
 
 use core::str::FromStr;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
-use std::path::{Path, PathBuf};
 
 use bifrost::{CryptoKind, NodeId};
 
@@ -599,27 +598,6 @@ pub struct Candidate {
     pub node: NodeId,
     /// How to name this candidate in output: `alice/macbook`, or a raw key's short form.
     pub label: String,
-}
-
-/// The default contacts file, `~/.config/swoosh/contacts.toml`, beside the identity key.
-///
-/// Honors the same config-dir convention as the identity module: the store lives next to the one
-/// identity it belongs to, one box, one address book.
-pub fn default_path() -> Result<PathBuf, StoreError> {
-    let home = std::env::var_os("HOME").ok_or(StoreError::NoHome)?;
-    Ok(Path::new(&home)
-        .join(".config")
-        .join("swoosh")
-        .join("contacts.toml"))
-}
-
-/// The contacts file for a given `--key`: beside the key's dir when one is set (so one `--key` moves the
-/// whole config), else [`default_path`]. Lets a command open its own store from the key alone.
-pub fn path(key: Option<&Path>) -> Result<PathBuf, StoreError> {
-    match key.and_then(Path::parent) {
-        Some(dir) => Ok(dir.join("contacts.toml")),
-        None => default_path(),
-    }
 }
 
 #[cfg(test)]

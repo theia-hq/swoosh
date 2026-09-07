@@ -5,8 +5,8 @@
 //! keeps its address. A verb that only *reaches outward* ([`ping`](crate::commands::ping),
 //! [`speed`](crate::commands::speed), [`status`](crate::commands::status)) needs no lasting identity,
 //! so it mints a fresh random ephemeral key each run: nothing on disk, no address to pin, no key file to
-//! provision before a speed test. An explicit key (`--key <path>` or `SWOOSH_KEY`) overrides either way,
-//! for the caller who does want a pinned identity even when reaching outward.
+//! provision before a speed test. An explicit home (`--home <dir>` or `SWOOSH_HOME`) overrides either way,
+//! pinning the identity at `<home>/identity.key` even when reaching outward, for the caller who wants it.
 //!
 //! The secret is a [`Secret`] newtype, never a bare `[u8; 32]`: it zeroizes its bytes on drop so the
 //! key does not linger in freed memory, and it is only unwrapped at the single boundary where the
@@ -14,12 +14,13 @@
 //!
 //! The persisted default lives at `~/.config/swoosh/identity.key`, mode 0600.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use bifrost::NodeId;
-use eyre::eyre;
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::{Zeroize as _, ZeroizeOnDrop};
+
+use crate::home::Home;
 
 /// The DEFAULT lifetime a signet-signed, STORED device membership badge stands before it must be
 /// re-minted, applied by `swoosh mint` only when the operator passes no `--expires`. A default, not a
@@ -154,7 +155,7 @@ impl Secret {
 ///
 /// The distinction that drives the whole module: `serve` must be reachable at the same address across
 /// runs, so it [`Persisted`](Self::Persisted); the reach-outward verbs address a peer and never need to
-/// be found again, so they are [`Ephemeral`](Self::Ephemeral). An explicit `--key`/`SWOOSH_KEY`
+/// be found again, so they are [`Ephemeral`](Self::Ephemeral). An explicit home (`--home`/`SWOOSH_HOME`)
 /// overrides either intent (see [`resolve`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Identity {
@@ -171,40 +172,28 @@ pub enum Identity {
     PersistedIfPresent,
 }
 
-/// Resolve the secret a verb binds under, honoring an explicit override before the verb's [`Identity`].
+/// Resolve the secret a verb binds under from its home, honoring an explicit home before the verb's
+/// [`Identity`].
 ///
-/// An explicit key path (`--key` or `SWOOSH_KEY`) always wins: load it, creating and saving one if it
-/// does not exist yet, whatever the verb's intent. With no override, [`Persisted`](Identity::Persisted)
-/// loads-or-creates the default key file and [`Ephemeral`](Identity::Ephemeral) mints a random key that
-/// never touches disk.
-pub async fn resolve(intent: Identity, explicit: Option<&Path>) -> eyre::Result<Secret> {
-    match (explicit, intent) {
-        (Some(path), _) => load_or_create(path).await,
-        (None, Identity::Persisted) => load_or_create(&default_path()?).await,
-        (None, Identity::Ephemeral) => Ok(Secret::ephemeral()),
+/// The key is always `<home>/identity.key`. An explicit home (`--home`/`SWOOSH_HOME`, see
+/// [`Home::is_explicit`]) pins the identity: load it, creating and saving one if it does not exist yet,
+/// whatever the verb's intent. With the DEFAULT home, [`Persisted`](Identity::Persisted) loads-or-creates
+/// the key and [`Ephemeral`](Identity::Ephemeral) mints a random key that never touches disk.
+pub async fn resolve(intent: Identity, home: &Home) -> eyre::Result<Secret> {
+    let key = home.identity_key();
+    match (home.is_explicit(), intent) {
+        // An explicit home pins the identity (load-or-create) even for a reach-outward verb, the override
+        // the retired explicit `--key` carried; `Persisted` always loads-or-creates too.
+        (true, _) | (_, Identity::Persisted) => load_or_create(&key).await,
+        (false, Identity::Ephemeral) => Ok(Secret::ephemeral()),
         // Load the persisted key only if it already exists; never create it. So a provisioned operator's
         // outward dial roots at their own key (their self-badge admits at their gated node) while a fresh
         // install dials out ephemerally, with nothing written to disk.
-        (None, Identity::PersistedIfPresent) => match load_existing(&default_path()?).await? {
+        (false, Identity::PersistedIfPresent) => match load_existing(&key).await? {
             Some(secret) => Ok(secret),
             None => Ok(Secret::ephemeral()),
         },
     }
-}
-
-/// Reject a `--key` that names a directory, with a teaching error instead of the bare `Is a directory
-/// (os error 21)` the raw file IO would surface. `--key` wants a key FILE (its sidecars -- the signet,
-/// the badge, the contacts book -- live beside it in the parent dir), and pointing it at a directory is
-/// the mistake everyone makes, so name the fix. A no-op for the default path (always `identity.key`) and
-/// for a not-yet-created file; it only fires on an existing directory.
-fn reject_key_directory(path: &Path) -> eyre::Result<()> {
-    if path.is_dir() {
-        return Err(eyre!(
-            "--key wants a key file, not a directory: {dir}. Name a file inside it, e.g. {dir}/identity.key",
-            dir = path.display(),
-        ));
-    }
-    Ok(())
 }
 
 /// Load the secret at `path` if the file exists and holds a 32-byte key, else `None`. Unlike
@@ -212,7 +201,6 @@ fn reject_key_directory(path: &Path) -> eyre::Result<()> {
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 async fn load_existing(path: &Path) -> eyre::Result<Option<Secret>> {
-    reject_key_directory(path)?;
     match tokio::fs::read(path).await {
         Ok(mut bytes) => {
             let secret = <[u8; 32]>::try_from(bytes.as_slice()).ok().map(Secret);
@@ -226,7 +214,6 @@ async fn load_existing(path: &Path) -> eyre::Result<Option<Secret>> {
 
 /// Load the secret at `path`, creating and saving a fresh one on first use.
 async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
-    reject_key_directory(path)?;
     if let Ok(mut bytes) = tokio::fs::read(path).await {
         if let Ok(secret) = <[u8; 32]>::try_from(bytes.as_slice()) {
             bytes.zeroize();
@@ -247,18 +234,13 @@ async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
     Ok(secret)
 }
 
-/// Write `seed` as the persisted identity at `explicit` (or the default path), mode 0600, creating the
-/// directory. This is how [`adopt`](crate::commands::adopt) provisions the device identity a later
-/// `serve` binds: it MUST land in the same store [`resolve`] reads, so the node comes up AS the adopted
-/// device. (Writing tightbeam's separate store instead was the qat identity-mismatch bug: `serve` bound
-/// swoosh's own key, never the adopted one, so the exposed node had a different id than the contact
-/// pointed at.)
-pub async fn write(seed: &[u8; 32], explicit: Option<&Path>) -> eyre::Result<()> {
-    let path = match explicit {
-        Some(p) => p.to_path_buf(),
-        None => default_path()?,
-    };
-    reject_key_directory(&path)?;
+/// Write `seed` as the persisted identity at `<home>/identity.key`, mode 0600, creating the store dir.
+/// This is how [`adopt`](crate::commands::adopt) provisions the device identity a later `serve` binds: it
+/// MUST land in the same store [`resolve`] reads, so the node comes up AS the adopted device. (Writing
+/// tightbeam's separate store instead was the qat identity-mismatch bug: `serve` bound swoosh's own key,
+/// never the adopted one, so the exposed node had a different id than the contact pointed at.)
+pub async fn write(seed: &[u8; 32], home: &Home) -> eyre::Result<()> {
+    let path = home.identity_key();
     if let Some(parent) = path.parent() {
         // Owner-only (`0700`) store dir, as in `load_or_create`; the seed file is tightened to `0600` by
         // `restrict` just below (see [`config::create_store_dir`](crate::config)).
@@ -267,15 +249,6 @@ pub async fn write(seed: &[u8; 32], explicit: Option<&Path>) -> eyre::Result<()>
     tokio::fs::write(&path, seed).await?;
     restrict(&path).await?;
     Ok(())
-}
-
-/// The default persisted key location, `~/.config/swoosh/identity.key`.
-pub(crate) fn default_path() -> eyre::Result<PathBuf> {
-    let home = std::env::var_os("HOME").ok_or_else(|| eyre!("HOME is not set; pass --key"))?;
-    Ok(PathBuf::from(home)
-        .join(".config")
-        .join("swoosh")
-        .join("identity.key"))
 }
 
 #[cfg(unix)]

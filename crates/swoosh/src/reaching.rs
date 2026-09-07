@@ -12,13 +12,13 @@
 //! composition root.
 
 use core::future::Future;
-use std::path::Path;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::contacts::Contacts;
 use crate::credential::{Credential, MemberBadge};
+use crate::home::Home;
 use crate::identity::{Identity, Secret};
 use crate::{config, transport};
 
@@ -28,7 +28,7 @@ use crate::{config, transport};
 /// It carries what a reach-outward verb needs and no more: the [`contacts`](Self::contacts) to resolve a
 /// petname, the bound [`transport`](Self::transport) label a verb reports and a failed dial names, the
 /// ALREADY-RESOLVED [`present`](Self::present) badge (minted once by [`resolve`], so the verb never
-/// re-derives it), and the [`key`](Self::key) path a verb that opens its own store needs. A verb ignores
+/// re-derives it), and the [`home`](Self::home) a verb that opens its own store needs. A verb ignores
 /// the fields it does not use. `serve`'s `ExposeContext` is DELIBERATELY not here (Craftsman): it lives on
 /// [`ServeCmd`](crate::commands::serve::ServeCmd), which reads its own, so this context stays uniform.
 pub struct ReachCtx<'a> {
@@ -45,9 +45,9 @@ pub struct ReachCtx<'a> {
     /// far gate verifies under the FOREIGN fleet a slip in slot 1 names. Always the stored/self-signed
     /// badge on a `Family` dial (mirrored into slot 1 when no slip overrides), `None` for `Anonymous`.
     pub membership: Option<String>,
-    /// The key path, for a verb that opens its OWN store (`fleet` writes contacts; a write, unlike the
-    /// read-only `contacts` the reach verbs share).
-    pub key: Option<&'a Path>,
+    /// The node home, for a verb that opens its OWN store (`fleet` writes contacts; a write, unlike the
+    /// read-only `contacts` the reach verbs share) or reads a trust file (its signet).
+    pub home: &'a Home,
 }
 
 /// A verb that reaches a peer over a transport, stating how it authenticates and how it runs.
@@ -147,11 +147,7 @@ impl Resolved {
 ///   explicit `--present` slip wins; else the STORED signet-signed device badge; else the signet
 ///   holder's own self-sign (person-zero: it IS the root, so its self-sign admits). A fresh install with
 ///   neither badge nor signet self-signs an ephemeral badge that the peer's gate correctly refuses.
-pub async fn resolve(
-    cred: Credential,
-    secret: &Secret,
-    key: Option<&Path>,
-) -> eyre::Result<Resolved> {
+pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Result<Resolved> {
     match cred {
         Credential::Anonymous => Ok(Resolved::None),
         Credential::Family { present } => {
@@ -160,11 +156,11 @@ pub async fn resolve(
             // roots at this key. The badge is the whole grant on a plain member dial (slot 1), and its OWN
             // fleet is the only fleet a slot-2 badge can help admit (a badge never verifies at a fleet you
             // are not in), so the fleet is computed here beside the badge for the slot-2 decision below.
-            let (badge, own_fleet) = match config::load_badge(key).await? {
+            let (badge, own_fleet) = match config::load_badge(home).await? {
                 // A stored badge exists only after `adopt`, which also wrote the signet it roots at; fall
                 // back to self defensively if the signet file is somehow absent (fails closed: no slot 2).
                 Some(stored) => {
-                    let signet = config::load_signet(key)
+                    let signet = config::load_signet(home)
                         .await?
                         .unwrap_or_else(|| secret.node_id());
                     (MemberBadge::new(stored), signet)
@@ -205,12 +201,18 @@ mod tests {
     use crate::credential::SheerLink;
     use crate::peer::Peer;
 
+    /// The default home for a resolver test: no stored badge/signet, so a `Family` dial falls back to the
+    /// self-sign, exactly as an unprovisioned reach-outward verb does. Mirrors the old `None` key argument.
+    fn test_home() -> Home {
+        Home::resolve(None).expect("resolve the default home")
+    }
+
     /// An `Anonymous` credential (e.g. `forward`) resolves to NO slot: a deliberate stranger dial presents
     /// neither a grant nor a membership badge.
     #[tokio::test]
     async fn anonymous_presents_no_slots() {
         let secret = Secret::ephemeral();
-        let resolved = resolve(Credential::Anonymous, &secret, None)
+        let resolved = resolve(Credential::Anonymous, &secret, &test_home())
             .await
             .expect("anonymous resolves");
         assert_eq!(
@@ -229,7 +231,7 @@ mod tests {
     #[tokio::test]
     async fn family_without_slip_presents_only_the_member_badge_in_slot_one() {
         let secret = Secret::ephemeral();
-        let resolved = resolve(Credential::Family { present: None }, &secret, None)
+        let resolved = resolve(Credential::Family { present: None }, &secret, &test_home())
             .await
             .expect("family resolves");
         let (grant, membership) = resolved.into_slots();
@@ -260,7 +262,7 @@ mod tests {
                 present: Some(slip),
             },
             &secret,
-            None,
+            &test_home(),
         )
         .await
         .expect("family-with-plain-slip resolves");
@@ -282,7 +284,8 @@ mod tests {
     #[tokio::test]
     async fn family_with_a_signet_bound_slip_attaches_the_membership_badge() {
         let secret = Secret::ephemeral();
-        // A real signet-bound slip pinning the DIALER'S OWN fleet (with no `--key`, the self-signed badge
+        // A real signet-bound slip pinning the DIALER'S OWN fleet (the default home has no stored badge, so
+        // the self-signed badge
         // roots at `secret.node_id()`, so that is the fleet slot 2 can help admit at). Work issues it.
         let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
         let fleet = secret.node_id().verify_key();
@@ -299,7 +302,7 @@ mod tests {
                 present: Some(slip),
             },
             &secret,
-            None,
+            &test_home(),
         )
         .await
         .expect("family-with-signet-slip resolves");
@@ -324,7 +327,7 @@ mod tests {
     async fn family_with_a_foreign_fleet_slip_attaches_no_membership_badge() {
         let secret = Secret::ephemeral();
         let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
-        // A fleet that is NOT the dialer's own (the dialer self-signs at `secret.node_id()` with no --key).
+        // A fleet that is NOT the dialer's own (the dialer self-signs at `secret.node_id()`, default home).
         let foreign_fleet = nauthy::Identity::from_secret(&[2u8; 32])
             .expect("valid fleet secret")
             .verifying_key();
@@ -341,7 +344,7 @@ mod tests {
                 present: Some(slip),
             },
             &secret,
-            None,
+            &test_home(),
         )
         .await
         .expect("family-with-foreign-fleet-slip resolves")
@@ -382,7 +385,7 @@ mod tests {
         let cred = Credential::Family {
             present: peer.self_present(),
         };
-        let (grant, membership) = resolve(cred, &secret, None)
+        let (grant, membership) = resolve(cred, &secret, &test_home())
             .await
             .expect("family-with-link-peer resolves")
             .into_slots();
@@ -412,7 +415,7 @@ mod tests {
         let cred = Credential::Family {
             present: peer.self_present(),
         };
-        let (grant, membership) = resolve(cred, &secret, None)
+        let (grant, membership) = resolve(cred, &secret, &test_home())
             .await
             .expect("family-with-plain-link-peer resolves")
             .into_slots();

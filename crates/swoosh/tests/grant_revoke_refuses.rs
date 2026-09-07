@@ -16,9 +16,9 @@ use core::time::Duration;
 use bifrost::NodeId;
 use nauthy::{Cap, FileDenylist, Request, Service};
 use swoosh::commands::revoke::RevokeCmd;
-use swoosh::config;
 use swoosh::contacts::ContactsStore;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
+use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -27,12 +27,10 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     let dir = std::env::temp_dir().join(format!("swoosh-grant-revoke-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    let key = dir.join("identity.key");
+    let home = Home::resolve(Some(dir.clone())).unwrap();
 
-    // The issuer identity, persisted at `key` exactly as `grant issue` resolves it.
-    let secret = identity::resolve(Identity::Persisted, Some(&key))
-        .await
-        .unwrap();
+    // The issuer identity, persisted in `home` exactly as `grant issue` resolves it.
+    let secret = identity::resolve(Identity::Persisted, &home).await.unwrap();
     let cap_identity = secret.cap_identity().unwrap();
     let service: Service = "ssh".parse().unwrap();
 
@@ -60,10 +58,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
         root_id,
         expiry: nauthy::Request::expires_in(Duration::from_secs(3600)),
     };
-    Grants::at(config::grants_path(Some(&key)).unwrap())
-        .append(&record)
-        .await
-        .unwrap();
+    Grants::at(home.grants()).append(&record).await.unwrap();
 
     // Before revocation: the cap is a valid grant for the bound device, and nothing revokes it.
     let request = Request::now(service.clone()).bound_to(device.verify_key());
@@ -71,9 +66,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
         cap_identity.verify(&cap, &request).is_ok(),
         "the freshly minted device-bound cap grants its service to its device"
     );
-    let denylist = FileDenylist::load(config::revoked_path(Some(&key)).unwrap())
-        .await
-        .unwrap();
+    let denylist = FileDenylist::load(home.revoked()).await.unwrap();
     assert!(
         !denylist.is_revoked(&cap),
         "the cap is not revoked before `grant revoke`"
@@ -81,20 +74,16 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
 
     // Revoke BY HOLDER (the raw node id) through the real command path: loads the ledger, finds the root id,
     // denylists it. An empty address book suffices, since the target is already a canonical node id.
-    let store = ContactsStore::open(dir.join("contacts.toml"))
-        .await
-        .unwrap();
+    let store = ContactsStore::open(home.contacts()).await.unwrap();
     RevokeCmd {
         target: holder.clone(),
     }
-    .run(store, Some(&key))
+    .run(store, &home)
     .await
     .unwrap();
 
     // After revocation: the gate's revocation check (the seam a live exposer consults) now refuses the cap.
-    let denylist = FileDenylist::load(config::revoked_path(Some(&key)).unwrap())
-        .await
-        .unwrap();
+    let denylist = FileDenylist::load(home.revoked()).await.unwrap();
     assert!(
         denylist.is_revoked(&cap),
         "once the holder is revoked, the gate refuses the very cap that was issued"
