@@ -6,10 +6,10 @@
 //! file rides the family gate (a MEMBER can beam a file to a gated node, a STRANGER cannot), that the bytes
 //! are verified end to end, and that a tampered blob is REJECTED, never written.
 //!
-//! One node exposes `beam=beam:` behind a family gate rooted at a signet, assembled through the SAME
+//! One node exposes `recv=recv:` behind a family gate rooted at a signet, assembled through the SAME
 //! `registry()` the `swoosh serve` product path builds (so this exercises the identical handler swoosh
 //! serves, into a real temp output directory). A member drives `bifrost-wire`'s verified `Transfer` over
-//! the gated `beam` service exactly as `swoosh send` does: it opens one stream per file, sends the blob, and
+//! the gated `recv` service exactly as `swoosh send` does: it opens one stream per file, sends the blob, and
 //! the receiver saves it under the safe relative name. A stranger's push is refused at the gate. And a blob
 //! whose bytes do not match its advertised root is rejected by the receiver's BLAKE3 check, so a tampered
 //! transfer leaves no file behind.
@@ -63,7 +63,7 @@ async fn proof() {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
     let out_for_host = out.clone();
     tokio::task::spawn_local(async move {
-        let services = Services::parse(&["beam=beam:".to_owned()]).unwrap();
+        let services = Services::parse(&["recv=recv:".to_owned()]).unwrap();
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
         let registry = swoosh::commands::serve::registry(HOST_SEED, out_for_host).unwrap();
         Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
@@ -81,11 +81,11 @@ async fn proof() {
     // Beam a file exactly as `swoosh send` does: open the gated `beam` service, then drive `bifrost-wire`'s
     // verified `Transfer` over one admitted stream, naming the file so the receiver saves it under that name.
     let payload = b"the quick brown fox jumps over the lazy dog".repeat(1000);
-    let session = Connector::to_node(host_id, "beam".to_owned(), Some(member_badge.clone()))
+    let session = Connector::to_node(host_id, "recv".to_owned(), Some(member_badge.clone()))
         .open_service(&member)
         .await
-        .expect("member reaches the beam service");
-    let (send, recv) = session.open_bi().await.expect("member is admitted at beam");
+        .expect("member reaches the recv service");
+    let (send, recv) = session.open_bi().await.expect("member is admitted at recv");
     let blob = Blob::hash(&mut payload.as_slice()).await.unwrap();
     Transfer::new(send, recv)
         .send(b"report.txt", &blob, &mut payload.as_slice())
@@ -100,22 +100,22 @@ async fn proof() {
     // the gate, so opening the beam stream fails; no file is written.
     let stranger = Node::new(MemTransport::bind(), NoDiscovery);
     let stranger_badge = signet_badge(&[3u8; 32], stranger.node_id());
-    let refused = Connector::to_node(host_id, "beam".to_owned(), Some(stranger_badge))
+    let refused = Connector::to_node(host_id, "recv".to_owned(), Some(stranger_badge))
         .open_service(&stranger)
         .await
         .expect("the base connect lands; the gate refuses per-stream");
     assert!(
         refused.open_bi().await.is_err(),
-        "a stranger must be refused at the gated beam service"
+        "a stranger must be refused at the gated recv service"
     );
 
     // A TAMPERED blob: a member advertises one root but sends different bytes. The receiver's BLAKE3 check
     // fails, so the send is NAKed (an error to the sender) and no file with that name is written.
-    let session = Connector::to_node(host_id, "beam".to_owned(), Some(member_badge))
+    let session = Connector::to_node(host_id, "recv".to_owned(), Some(member_badge))
         .open_service(&member)
         .await
-        .expect("member reaches the beam service");
-    let (send, recv) = session.open_bi().await.expect("member is admitted at beam");
+        .expect("member reaches the recv service");
+    let (send, recv) = session.open_bi().await.expect("member is admitted at recv");
     let honest = b"the bytes I hashed".to_vec();
     let blob = Blob::hash(&mut honest.as_slice()).await.unwrap();
     // Send DIFFERENT bytes than the hash names (same length, so only the content check can catch it).

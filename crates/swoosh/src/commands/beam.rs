@@ -1,12 +1,12 @@
 //! `swoosh send <path>... <peer>`: PUSH a file or directory to a peer, verified end to end.
 //!
-//! The sender-initiates half of file transfer: you dial a waiting receiver (a node serving `beam:`), open
+//! The sender-initiates half of file transfer: you dial a waiting receiver (a node serving `recv:`), open
 //! one stream per file, and drive [`bifrost::wire`]'s verified [`Transfer`](bifrost::wire::Transfer)
-//! directly, the same engine `swoosh serve beam=beam:` receives with. A directory expands to every file
+//! directly, the same engine `swoosh serve recv=recv:` receives with. A directory expands to every file
 //! under it, and files pipeline over concurrent streams (capped so one connection is not flooded); a file
 //! that cannot be read is skipped and reported, not fatal, so a courier sends what it can.
 //!
-//! The `beam:` service is family-gated like `ping`/`speed`, so beam presents the same self-signed
+//! The `recv:` service is family-gated like `ping`/`speed`, so beam presents the same self-signed
 //! membership badge (or an explicit `--present` link) to prove membership before the receiver admits a
 //! stream. Integrity is checked end to end by `bifrost-wire`: the sender hashes each file with BLAKE3 and
 //! the receiver re-hashes as bytes arrive, so a truncated or tampered transfer is rejected, never written.
@@ -24,9 +24,9 @@ use crate::contacts::Contacts;
 use crate::peer::Peer;
 use crate::transport::ReachArgs;
 
-/// The service name a receiver publishes and `swoosh send` reaches: `swoosh serve beam=beam:` receives,
+/// The service name a receiver publishes and `swoosh send` reaches: `swoosh serve recv=recv:` receives,
 /// `swoosh send` pushes.
-pub const BEAM_SERVICE: &str = "beam";
+pub const RECV_SERVICE: &str = "recv";
 
 /// Files send concurrently over separate streams, capped so one connection is not flooded. Matches iris's
 /// pipeline depth; a receiver's exposer accepts these streams concurrently too, so both sides fan out.
@@ -42,7 +42,7 @@ pub struct BeamCmd {
     #[arg(value_name = "peer")]
     pub peer: Peer,
     /// which served service to reach
-    #[arg(long, value_name = "service", default_value = BEAM_SERVICE)]
+    #[arg(long, value_name = "service", default_value = RECV_SERVICE)]
     pub service: String,
     /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
     #[arg(
@@ -61,7 +61,7 @@ impl crate::reaching::Reaching for BeamCmd {
         &self.reach
     }
 
-    /// `beam` pushes to the peer's family-gated `beam:` service, so it presents the member badge rooted
+    /// `beam` pushes to the peer's family-gated `recv:` service, so it presents the member badge rooted
     /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The effective slip is the
     /// FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded INTO the
     /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
@@ -97,7 +97,7 @@ impl crate::reaching::Reaching for BeamCmd {
 }
 
 impl BeamCmd {
-    /// Reach the peer's `beam:` service and push every named file over its own gated stream, expanding
+    /// Reach the peer's `recv:` service and push every named file over its own gated stream, expanding
     /// directories first. Presents the resolved `present` (the self-signed membership badge, or an explicit
     /// `--present` link) so the receiver's family gate admits each stream. A file that cannot be read is
     /// skipped and reported; the run ends non-zero if any item failed.
@@ -117,7 +117,7 @@ impl BeamCmd {
             .connector(contacts, self.service.clone(), present, membership)?;
         let dial = connector.dial();
         println!("sending to {dial}...");
-        // A service-scoped session: each `open_bi` speaks the `beam:` request and presents the badge, so
+        // A service-scoped session: each `open_bi` speaks the `recv:` request and presents the badge, so
         // every per-file stream is admitted by the receiver's gate on its own merits.
         let session = connector.open_service(node).await?;
 

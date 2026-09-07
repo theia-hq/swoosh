@@ -128,7 +128,7 @@ enum Reach {
     /// `swoosh forward`: bind a peer's served service to a local port. A dial-only client (it presents a
     /// link, not swoosh's identity), so it rides the reach path like the other reach-outward verbs.
     Forward(ForwardCmd),
-    /// `swoosh send`: push files to a peer's gated `beam:` service. Presents a membership badge (like
+    /// `swoosh send`: push files to a peer's gated `recv:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
     Beam(BeamCmd),
     /// `swoosh stop`: reach a peer's gated `control.stop` service and trigger a graceful stop. Presents a

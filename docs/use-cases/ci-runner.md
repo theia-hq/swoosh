@@ -38,7 +38,7 @@ After `adopt`, the runner is a device your signet trusts.
 On the deploy box, receive pushed files behind the gate:
 
 ```console
-$ swoosh serve beam=beam: --out /srv/releases
+$ swoosh serve recv=recv:/srv/releases
 ```
 
 In the job, push the artifact to it by name. The runner's badge admits it:

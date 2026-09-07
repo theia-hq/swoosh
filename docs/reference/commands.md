@@ -30,7 +30,6 @@ Be a node: publish named services behind your signet gate. Bare, it answers reac
 Usage: swoosh serve [OPTIONS] [name=svc]...
   [name=svc]...          publish a service, e.g. ssh=sshd:, tv=127.0.0.1:8096 (bare = ping + speed)
   --public <svc>         open named services to anyone, unauthenticated (comma-list, repeatable)
-  --out <dir>            where a beam: service saves pushed files [default: .]
   --expires <duration>   serve for a bounded time, then stop (30m, 2h, 1d)
   --quiet                suppress the readiness banner (for unattended/CI use)
 ```
@@ -39,7 +38,8 @@ Usage: swoosh serve [OPTIONS] [name=svc]...
 gated to your signet.
 
 **Things to know.** A service form is `name=target`: `ping:` / `speed:` (built-in diagnostics),
-`sshd:` (a keyless shell), `beam:` (receive files), `fetch:` (fetch URLs for callers), or `host:port`
+`sshd:` (a keyless shell), `recv:<dir>` (receive pushed files into `<dir>`, bare `recv:` uses `.`),
+`fetch:` (fetch URLs for callers), or `host:port`
 (front any local TCP service). `control.stop` and `control.services` are always served and always gated.
 
 ## <a id="stop"></a>`swoosh stop`
@@ -180,7 +180,7 @@ Push a file or directory to a peer, verified end to end.
 Usage: swoosh send [OPTIONS] <path>... <peer>
   <path>...           the files or directories to push
   <peer>              a petname, a raw node id, or a sheer: link
-  --service <name>    which served service to reach [default: beam]
+  --service <name>    which served service to reach [default: recv]
 ```
 
 **Example.**
@@ -190,8 +190,8 @@ sending to bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
 sent app.tar (204800 bytes)
 ```
 
-**Things to know.** The receiver stays online with `swoosh serve beam=beam:` (saving into the current
-directory, or `--out <dir>`). Each file is hashed with BLAKE3 and re-checked on arrival, so a truncated
+**Things to know.** The receiver stays online with `swoosh serve recv=recv:` (saving into the current
+directory, or `recv:<dir>`). Each file is hashed with BLAKE3 and re-checked on arrival, so a truncated
 or tampered transfer is rejected, never written.
 
 ## <a id="fleet"></a>`swoosh fleet`
