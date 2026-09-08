@@ -76,7 +76,7 @@ async fn issuing_for_a_raw_signet_records_a_fleet_grant_keyed_by_the_signet() {
         "the holder is the resolved signet key, so `grant revoke <signet>` matches it"
     );
     assert_eq!(
-        record.service.as_str(),
+        record.target.as_str(),
         "ssh",
         "the grant records the service it was issued for"
     );

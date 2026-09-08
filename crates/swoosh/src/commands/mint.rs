@@ -8,27 +8,19 @@
 
 use bifrost::NodeId;
 use clap::Args;
-use nauthy::{Cap, Service};
+use nauthy::Cap;
 use tightbeam::duration::Lifetime;
 use zeroize::Zeroize as _;
 
 use crate::authkey;
 use crate::contacts::{ContactsStore, DeviceLabel, Petname};
-use crate::grants::{Delegation, GrantKind, GrantRecord, Grants};
+use crate::grants::{Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use crate::home::Home;
 use crate::identity::{self, Identity};
 
 /// The reserved petname for your own devices: your signet is person-zero, and each device it derives
 /// lives under `me/<label>`, addressed exactly like a saved contact (`swoosh ssh me/ci-runner`).
 const ME: &str = "me";
-
-/// The service a device-membership badge records in the mint-log ledger. A `member(true)` badge is NOT
-/// scoped to one service (it admits the device at the whole family gate), but a [`GrantRecord`] carries a
-/// mandatory service, so a minted badge records under this reserved word. It is what `swoosh grant ls`
-/// groups the badge under; the value (and whether `ls` should render membership distinctly from a real
-/// service) is a display/vocabulary call flagged to the CLI-Architect + Product-Lead. The ledger record
-/// exists to make the badge REVOCABLE by holder; revoke-by-holder keys on holder + root id, never this.
-const MEMBER_BADGE_SERVICE: &str = "member";
 
 /// Derive a device identity under your signet and print an authkey for the machine to adopt.
 #[derive(Debug, Args)]
@@ -94,7 +86,11 @@ impl MintCmd {
             eyre::eyre!("minted device badge has no authority block to key revocation on")
         })?;
         let record = GrantRecord {
-            service: MEMBER_BADGE_SERVICE.parse::<Service>()?,
+            // A `member(true)` badge is NOT scoped to one service (it admits the device at the whole family
+            // gate), so it records as Membership directly: `grant ls` groups it under the bare `membership`
+            // heading. The record exists to make the badge REVOCABLE by holder; revoke-by-holder keys on
+            // holder + root id, never this target.
+            target: GrantTarget::Membership,
             kind: GrantKind::Device,
             delegation: Delegation::Sealed,
             holder: node.to_string(),

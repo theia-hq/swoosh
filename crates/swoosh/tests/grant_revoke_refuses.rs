@@ -17,7 +17,7 @@ use bifrost::NodeId;
 use nauthy::{Cap, FileDenylist, Request, Service};
 use swoosh::commands::revoke::RevokeCmd;
 use swoosh::contacts::ContactsStore;
-use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
+use swoosh::grants::{Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
 use tightbeam::identity::AsVerifyKey as _;
@@ -51,7 +51,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
 
     // Record the grant in the mint-log ledger, as `grant issue --for` does.
     let record = GrantRecord {
-        service: service.clone(),
+        target: GrantTarget::Service(service.clone()),
         kind: GrantKind::Device,
         delegation: Delegation::Sealed,
         holder: holder.clone(),
@@ -87,6 +87,79 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     assert!(
         denylist.is_revoked(&cap),
         "once the holder is revoked, the gate refuses the very cap that was issued"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Holder-only revoke is target-blind: a holder with BOTH a membership badge line and a service grant
+/// line loses both when revoked by holder, the same set as before the target enum (R2). The revoke filter
+/// keys on holder only and never on the target word, so the mixed ledger revokes as one set.
+#[tokio::test]
+async fn revoking_a_holder_with_a_badge_plus_a_service_grant_cuts_both() {
+    let dir =
+        std::env::temp_dir().join(format!("swoosh-grant-revoke-mixed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let home = Home::resolve(Some(dir.clone())).unwrap();
+
+    let secret = identity::resolve(Identity::Persisted, &home).await.unwrap();
+    let cap_identity = secret.cap_identity().unwrap();
+    let service: Service = "ssh".parse().unwrap();
+    let device = NodeId::from_ed25519_secret(&[9u8; 32]);
+    let holder = device.to_string();
+
+    // A membership badge, minted the way `mint` does (device-bound, signet-rooted).
+    let badge_link = secret
+        .sign_device_badge(device, Duration::from_secs(3600))
+        .unwrap();
+    let badge = Cap::parse(&badge_link).unwrap();
+    let badge_root = badge.root_revocation_id().unwrap();
+    // A service grant, minted the way `grant issue --for` does.
+    let link = tightbeam::tunnel::mint_bound_link(
+        &cap_identity,
+        &service,
+        device.verify_key(),
+        Duration::from_secs(3600),
+    )
+    .unwrap();
+    let cap = Cap::parse(&link).unwrap();
+    let root_id = cap.root_revocation_id().unwrap();
+
+    // One holder, two ledger lines: a badge plus a service grant.
+    for record in [
+        GrantRecord {
+            target: GrantTarget::Membership,
+            kind: GrantKind::Device,
+            delegation: Delegation::Sealed,
+            holder: holder.clone(),
+            root_id: badge_root,
+            expiry: nauthy::Request::expires_in(Duration::from_secs(3600)),
+        },
+        GrantRecord {
+            target: GrantTarget::Service(service),
+            kind: GrantKind::Device,
+            delegation: Delegation::Sealed,
+            holder: holder.clone(),
+            root_id,
+            expiry: nauthy::Request::expires_in(Duration::from_secs(3600)),
+        },
+    ] {
+        Grants::at(home.grants()).append(&record).await.unwrap();
+    }
+
+    let store = ContactsStore::open(home.contacts()).await.unwrap();
+    RevokeCmd {
+        target: holder.clone(),
+    }
+    .run(store, &home)
+    .await
+    .unwrap();
+
+    let denylist = FileDenylist::load(home.revoked()).await.unwrap();
+    assert!(
+        denylist.is_revoked(&badge) && denylist.is_revoked(&cap),
+        "revoking the holder cuts both the badge and the service grant"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

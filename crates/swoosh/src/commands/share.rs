@@ -20,7 +20,7 @@ use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::contacts::{ContactRef, ContactRefParseError, Contacts, ContactsStore, Petname};
-use crate::grants::{self, Delegation, GrantKind, GrantRecord, Grants};
+use crate::grants::{self, Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use crate::home::Home;
 use crate::identity::{self, Identity};
 
@@ -64,6 +64,16 @@ impl ShareCmd {
         if self.delegable && self.bind.is_some() {
             eyre::bail!(
                 "a bound grant (--for) is theft-resistant and cannot be delegated; drop --delegable, or issue a bearer link (no --for) if you need to delegate"
+            );
+        }
+        // `member` and `membership` are reserved for family membership, not services: issuing a service by
+        // either name would write a line the ledger reads as membership, so the parse refuses them here,
+        // at the word the issuer typed, before any mint. `GrantTarget::is_issuable_service_name` owns the
+        // word list; this is its teaching surface.
+        if !GrantTarget::is_issuable_service_name(self.service.as_str()) {
+            eyre::bail!(
+                "grant issue failed: '{}' is reserved for family membership, pick another service name",
+                self.service.as_str()
             );
         }
         // The link roots at swoosh's stable key (the one an exposed service is reached at), so resolve the
@@ -142,7 +152,7 @@ impl ShareCmd {
             eyre::eyre!("minted capability has no authority block to key revocation on")
         })?;
         let record = GrantRecord {
-            service: Service::clone(&self.service),
+            target: GrantTarget::Service(Service::clone(&self.service)),
             kind,
             delegation,
             holder,
@@ -385,7 +395,7 @@ mod tests {
             )
             .expect("mint signet slip");
         let record = GrantRecord {
-            service: Service::clone(&service),
+            target: GrantTarget::Service(Service::clone(&service)),
             kind: GrantKind::Fleet,
             delegation: Delegation::Sealed,
             holder: resolved.to_string(),
@@ -483,6 +493,19 @@ mod tests {
         ));
     }
 
+    /// `grant issue` reserves the two membership words at the word the issuer typed: `member` and
+    /// `membership` are teaching errors naming the fix, never minted service grants.
+    #[test]
+    fn issue_rejects_the_reserved_membership_words() {
+        for word in ["member", "membership"] {
+            assert!(
+                !GrantTarget::is_issuable_service_name(word),
+                "{word} is reserved for family membership"
+            );
+        }
+        assert!(GrantTarget::is_issuable_service_name("ssh"));
+    }
+
     /// A `--for fleet:` mint's stderr frame echoes the RESOLVED signet key (so the issuer can catch a wrong
     /// paste), names the fleet posture, and gives the `grant revoke <signet>` recipe keyed by that key.
     #[test]
@@ -500,7 +523,7 @@ mod tests {
             )
             .expect("mint signet slip");
         let record = GrantRecord {
-            service: Service::clone(&service),
+            target: GrantTarget::Service(Service::clone(&service)),
             kind: GrantKind::Fleet,
             delegation: Delegation::Sealed,
             holder: fleet.to_string(),

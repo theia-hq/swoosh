@@ -116,8 +116,10 @@ impl Grants {
 /// capability).
 #[derive(Clone, PartialEq, Eq)]
 pub struct GrantRecord {
-    /// The service the grant reaches (e.g. `ssh`), the key `ls` groups by.
-    pub service: Service,
+    /// What the grant reaches: one named service (e.g. `ssh`), or family membership itself. An enum, not
+    /// a service name, so a service can never be named `membership` and a membership line can never read
+    /// as a service.
+    pub target: GrantTarget,
     /// How the grant is bound: device, fleet, or bearer.
     pub kind: GrantKind,
     /// Whether the holder may narrow and re-share it: a bound grant is always [`Sealed`](Delegation::Sealed);
@@ -161,10 +163,10 @@ impl GrantRecord {
     /// (hex).
     fn to_line(&self) -> String {
         format!(
-            "{kind}{FIELD}{delegation}{FIELD}{service}{FIELD}{holder}{FIELD}{expiry}{FIELD}{root}",
+            "{kind}{FIELD}{delegation}{FIELD}{target}{FIELD}{holder}{FIELD}{expiry}{FIELD}{root}",
             kind = self.kind.as_str(),
             delegation = self.delegation.as_str(),
-            service = self.service.as_str(),
+            target = self.target.as_str(),
             holder = self.holder,
             expiry = unix_secs(self.expiry),
             root = self.root_id.to_hex(),
@@ -178,7 +180,7 @@ impl GrantRecord {
         let mut next = || fields.next().ok_or(LedgerError::Malformed);
         let kind = next()?.parse::<GrantKind>()?;
         let delegation = next()?.parse::<Delegation>()?;
-        let service = next()?.parse::<Service>().map_err(LedgerError::Service)?;
+        let target = next()?.parse::<GrantTarget>()?;
         let holder = next()?.to_owned();
         let expiry = from_unix_secs(next()?.parse::<u64>().map_err(LedgerError::Expiry)?);
         let root_id = RevocationId::from_hex(next()?).map_err(|_| LedgerError::RootId)?;
@@ -187,13 +189,76 @@ impl GrantRecord {
             return Err(LedgerError::Malformed);
         }
         Ok(Self {
-            service,
+            target,
             kind,
             delegation,
             holder,
             root_id,
             expiry,
         })
+    }
+}
+
+/// What a grant reaches: one named service, or family membership itself.
+///
+/// The line word is the service name verbatim, or `membership`. Legacy `member` fails closed (a parse
+/// error, surfaced per line by [`Grants::load`]): it was the old badge sentinel and must never relabel
+/// into Membership. A service named `member` or `membership` is unrepresentable by construction: both are
+/// rejected at this boundary and at `grant issue`, so no service line can ever contain either word and no
+/// membership line contains a service name.
+///
+/// The reservation lives HERE (this parse plus [`GrantTarget::is_issuable_service_name`], enforced by
+/// `grant issue`), not in the [`Service`] type itself: `Service` is owned by the `nauthy` crate, a separate
+/// repo pinned by rev in shipping form, so a swoosh-side parse reservation is the whole of what this task
+/// can ship. A `Service` carrying either word can still exist as a value; it can never enter the ledger
+/// through either write path (`grant issue`, `mint`), and any stray line carrying one fails this parse.
+/// Flagged to the Systems-Architect as a possible nauthy-side follow-up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GrantTarget {
+    /// One named service (e.g. `ssh`).
+    Service(Service),
+    /// Family membership: the whole family gate, not one service.
+    Membership,
+}
+
+impl GrantTarget {
+    /// The ledger word for membership.
+    pub const MEMBERSHIP_WORD: &str = "membership";
+    /// The legacy word, never written, always rejected.
+    pub const LEGACY_MEMBER_WORD: &str = "member";
+
+    /// The word this target is stored and displayed as: the service name verbatim, or `membership`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Service(service) => service.as_str(),
+            Self::Membership => Self::MEMBERSHIP_WORD,
+        }
+    }
+
+    /// Whether `service` names a service that may be issued. The two membership words are reserved out of
+    /// the service namespace: a service named `member` would relabel into membership anywhere it is
+    /// displayed, and one named `membership` would collide with the real membership line.
+    pub fn is_issuable_service_name(text: &str) -> bool {
+        text != Self::MEMBERSHIP_WORD && text != Self::LEGACY_MEMBER_WORD
+    }
+}
+
+impl FromStr for GrantTarget {
+    type Err = LedgerError;
+
+    /// The word alone decides: `membership` is Membership, legacy `member` fails closed, anything else is
+    /// parsed as a service name, with both reserved words rejected here as well as at issue time. No
+    /// dual-parse branch, no kind guard: the word decides, and the legacy word is a typed error the
+    /// per-line warning in [`Grants::load`] reports.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text == Self::MEMBERSHIP_WORD {
+            return Ok(Self::Membership);
+        }
+        if !Self::is_issuable_service_name(text) {
+            return Err(LedgerError::ReservedTarget(text.to_owned()));
+        }
+        let service = text.parse::<Service>().map_err(LedgerError::Service)?;
+        Ok(Self::Service(service))
     }
 }
 
@@ -316,6 +381,10 @@ pub enum LedgerError {
     /// A line's service field was not a valid service name.
     #[error("grants ledger has an invalid service name")]
     Service(#[source] ServiceParseError),
+    /// A line's target word is reserved for family membership (`member` or `membership` as a service), so
+    /// it fails closed rather than relabeling into a service grant.
+    #[error("grants ledger has a reserved target word {0:?}; it is not a service")]
+    ReservedTarget(String),
     /// A line's expiry field was not a decimal number of seconds.
     #[error("grants ledger has an invalid expiry")]
     Expiry(#[source] ParseIntError),
