@@ -95,6 +95,14 @@ _The doc voice, proven across every repo. A README, crate description, or `--hel
 - **If the name is a metaphor, a "The name." note earns it** after the reader already knows what the thing does. State the what plainly first; then, in one to three sentences, say why it carries that name. The payoff comes after the what, never as the lead.
 - **When a README outgrows one file, split by the reader's JOB into a `docs/` tree, index in front; the README shrinks to first-success + a map.** The core model goes on ONE ramped page whose headers are the definition home the rest links to; use-cases are a scenario menu plus one page per situation; reference is ONE page, an example + a gotcha + a GENERATED signature. Every subpage links up to the concept it leans on, down from its index, and across via a `## Next`. Full architecture in `notes/design/DOC-VOICE.md`.
 - **Mark every shown command block so CI can keep it true.** Deterministic output: precede the block with `<!-- capture: <command> -->` so a harness re-runs it, normalizes volatile tokens (fresh keys, ports), and diffs; a doc cannot show a line the binary does not print. Non-deterministic output (real network numbers): tag `<!-- live-run: ... -->` with real captured numbers, or `<!-- pending live-run: ... -->` if uncaptured. Never invent a number.
+18. **Lib/bin separation.** Libs show API plus examples, never bin flags; bins show verbs plus output,
+    never lib types. A lib README may carry ONE pointer to a real consumer (a link, no commands), gated
+    by the layering check. (STYLE.md House rules already gates this; this states the doc side.)
+19. **Single behavior home.** A behavior (revocation liveness, an expiry default, an output format) is
+    defined ONCE at its canonical anchor (usually the core-model page) and LINKED everywhere else, never
+    re-explained. Two wordings of one behavior is a blocker, not a nit.
+20. **Reference minimalism.** A reference page carries generated usage plus one gotcha per command, no
+    behavior prose that can drift. Behavior lives in concept pages; reference links to it.
 
 ## Code layout & readability
 - **Top-down story.** Lay items out so meaning is discovered reading downward: a high-level item on line 1 references helpers defined below it, so a reader chasing a detail reads *on* until satisfied, then exits, never scrolls up to assemble context first.

@@ -264,13 +264,16 @@ Derive a device identity from your signet and emit a one-time authkey for a mach
 ```
 Usage: swoosh mint [OPTIONS] <label>
   <label>   the device label, e.g. ci-runner or desk (recorded as me/<label>)
+  --expires <duration>   how long the minted badge stays valid [default: 90d]
 ```
 
 **Example.** `swoosh mint laptop` prints an authkey and records `me/laptop`. Run it on the machine that
-holds your signet.
+holds your signet. `swoosh mint qat --expires 365d` mints a year-long badge for a long-lived box.
 
 **Things to know.** The authkey is a device secret. Hand it to the new machine over something private;
-`adopt` reads it without putting it on the command line.
+`adopt` reads it without putting it on the command line. The badge expiry is the leak window: a leaked
+authkey stays adoptable until the badge expires, and the gate checks expiry on dial, so mint immediately
+before the machine adopts.
 
 ## <a id="adopt"></a>`swoosh adopt`
 
@@ -337,8 +340,7 @@ sheer:bf01hcq6…
 **Things to know.** A bare person (`--for alice`) is refused: you must type `fleet:alice` to widen, so a
 device bind never silently becomes a fleet bind. A bind is theft-resistant and cannot be delegated; a
 bearer slip can be delegated but is meant to be short-lived (the [one trade](../keys.md#the-one-trade)).
-A revoke is node-local, and the gate loads the denylist when `serve` starts: it takes effect on the node's
-next `serve`, not on a running one (live revocation lands with the daemon). Revoke on each node you run.
+A revoke is node-local: see [revocation](../keys.md#revocation). Revoke on each node you run.
 
 ## <a id="tree"></a>`swoosh tree`
 

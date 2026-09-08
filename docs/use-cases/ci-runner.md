@@ -20,6 +20,8 @@ recorded me/ci-runner -> bf01imv3ljql6kjn  [derived]
 hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
+A minted badge lasts 90 days unless you pass `--expires`; see [`swoosh mint`](../reference/commands.md#mint).
+
 Store that authkey as a CI secret named `SWOOSH_AUTHKEY`. On GitHub Actions, use the flagship action: it
 installs swoosh, adopts the authkey, and serves the runner's default services (a keyless shell plus
 `ping`/`speed` diagnostics), all gated to your signet:
@@ -87,8 +89,8 @@ deploybox -- <command>` from the job.
 
 ## Cut the runner off
 
-Revoke the runner's device on each machine it reaches. The running `serve` there reloads its denylist the
-moment the file changes, so it stops admitting the badge on the next dial, no restart needed:
+Revokes land live: a [revoke](../keys.md#revocation) written while a node runs takes effect on the next
+dial, no restart:
 
 ```console
 $ swoosh grant revoke me/ci-runner
@@ -100,8 +102,7 @@ To rotate instead of revoke, mint a fresh authkey, update the CI secret, and rev
 
 Anyone who can read the `SWOOSH_AUTHKEY` secret can adopt that device identity, so scope the secret to
 the job that needs it and rotate it like any credential. A revoke is node-local: it writes that node's own
-denylist, and the running `serve` reloads it live (on the next dial once the file changes, no restart), so
-revoke on every machine the runner reaches.
+denylist, so revoke on every machine the runner reaches. See [revocation](../keys.md#revocation).
 
 ## Next
 
