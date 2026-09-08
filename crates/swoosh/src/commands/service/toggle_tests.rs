@@ -3,7 +3,9 @@
 
 use std::collections::BTreeSet;
 
-use super::{FileLock, ServiceToggleCmd, read};
+#[cfg(unix)]
+use super::FileLock;
+use super::{ServiceToggleCmd, read};
 use crate::home::Home;
 
 /// A fresh, empty home under a unique temp dir, so parallel tests never share a `<home>/disabled`.
@@ -89,7 +91,8 @@ fn enable_of_an_untouched_service_is_a_noop() {
 
 /// The flock path is re-entrant across SEQUENTIAL acquisitions: taking the lock, dropping it, then taking it
 /// again must not deadlock. This is the guard the read-modify-write relies on to serialize concurrent toggles
-/// without wedging the common one-at-a-time case.
+/// without wedging the common one-at-a-time case. Unix-only: the lock itself is unix-gated.
+#[cfg(unix)]
 #[test]
 fn the_lock_is_reacquirable_after_release() {
     let home = temp_home("lock");

@@ -16,6 +16,7 @@
 
 use std::collections::BTreeSet;
 use std::io;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd as _;
 use std::path::Path;
 
@@ -62,9 +63,13 @@ impl ServiceToggleCmd {
 /// concurrent toggles serialize (neither loses the other's edit). The disabled set is a [`BTreeSet`] so the
 /// rewritten file is name-sorted and stable (a clean diff, and the same shape the denylist writes).
 fn edit(home: &Home, mutate: impl FnOnce(&mut BTreeSet<String>)) -> eyre::Result<()> {
-    // The home may not exist yet (a toggle before the first `serve`/`adopt`); create it so the write lands,
-    // mirroring how the contacts store provisions its parent on first save.
-    std::fs::create_dir_all(home.dir())?;
+    // The home may not exist yet (a toggle before the first `serve`/`adopt`); create it owner-only
+    // (`0700`), mirroring how the contacts store provisions its parent on first save, so the disabled
+    // list and its lock file never sit in a group/world-traversable dir. An already-provisioned dir is
+    // left as set, never chmod'd.
+    crate::config::create_store_dir(home.dir()).map_err(|error| {
+        eyre::eyre!("cannot create store dir {}: {error}", home.dir().display())
+    })?;
     // Hold the lock across the WHOLE read-modify-write. Dropped at function end (and released for free on the
     // fd close), so a crash never strands the lock.
     let _lock = FileLock::acquire(&home.disabled_lock())?;
@@ -92,27 +97,52 @@ fn read(path: &Path) -> eyre::Result<BTreeSet<String>> {
 
 /// Rewrite `<home>/disabled` atomically: write the sorted names to a temp sibling, then rename over the
 /// target. The rename is all-or-nothing, so a reader (the running `serve`'s oracle) sees the old file or the
-/// new one, never a torn one. An EMPTY set still writes an (empty) file rather than deleting it, so the oracle
+/// new one, never a torn one. `rename` keeps its portable replace semantics: on unix it atomically
+/// replaces the target, and the temp's `0600` mode rides along onto it. An EMPTY set still writes an
+/// (empty) file rather than deleting it, so the oracle
 /// reads "nothing disabled" from a present file and the mtime-watch tracks the change cleanly.
 fn write_atomic(path: &Path, disabled: &BTreeSet<String>) -> eyre::Result<()> {
     let mut body = disabled.iter().cloned().collect::<Vec<_>>().join("\n");
     body.push('\n');
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, body)?;
+    // Tighten the temp to `0600` before the rename carries that mode onto the target: the disabled set
+    // leaks which services this node runs, so it stays owner-only, the same posture as the contacts
+    // store and the revocation denylist. The `0700` dir already keeps the transient temp unreadable to
+    // other local users in the meantime.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
 /// An exclusive advisory lock held for the lifetime of a read-modify-write of `<home>/disabled`.
 ///
+/// Unix-only for now: the lock rides `flock`, and neither std's file locking (MSRV 1.89, this workspace
+/// targets 1.85) nor a portable helper is available yet. A non-unix build fails LOUD here naming the seam
+/// and the fix (a portable helper over `LockFileEx` on Windows, or std locking once the MSRV allows it),
+/// rather than silently shipping an unlocked read-modify-write.
+///
 /// The lock sits on a SEPARATE `<home>/disabled.lock` file, not on `disabled` itself, because the atomic
 /// rewrite replaces `disabled`'s inode each time; a lock on that moving inode would not serialize the racing
 /// writers. The lock file's inode is stable, so two `swoosh service disable` invocations contend on the SAME
 /// lock and run their edits one after another.
+#[cfg(unix)]
 struct FileLock {
     file: std::fs::File,
 }
 
+#[cfg(not(unix))]
+compile_error!(
+    "service toggle locking needs a portable helper on this platform: flock (below) is unix-only. \
+     Add a LockFileEx-backed lock on Windows (or std file locking once the MSRV passes 1.89)."
+);
+
+#[cfg(unix)]
 impl FileLock {
     /// Take the exclusive lock, creating the lock file if absent. Blocks (`LOCK_EX`, no `LOCK_NB`) until any
     /// other in-flight toggle releases, so a concurrent toggle waits rather than failing.
@@ -131,6 +161,7 @@ impl FileLock {
     }
 }
 
+#[cfg(unix)]
 impl Drop for FileLock {
     fn drop(&mut self) {
         // Best-effort explicit unlock; closing the fd (right after) releases the flock regardless, so a
