@@ -4,7 +4,8 @@
 //! This IS the node. `swoosh serve` with no services answers reach diagnostics (`ping`/`speed`) from
 //! peers your signet admits: `ping` (RTT) and `speed` (throughput) are the default services, two
 //! so a node may offer one without the other. `swoosh serve ssh=sshd: ping=ping:` publishes a
-//! shell and a public-able ping responder without exposing speed. It drives tightbeam's tunnel LIBRARY
+//! shell and a public-able ping responder without exposing speed. Every entry after `serve` names its
+//! service (`ping=ping:`, never a bare `ping:`). It drives tightbeam's tunnel LIBRARY
 //! (`Exposer`) directly under swoosh's OWN persisted identity:
 //! the node binds the same key `swoosh ssh` and a minted `swoosh grant issue` link root at, gates on the
 //! signet read from swoosh's own store, and derives the ssh host seed from swoosh's secret, so an
@@ -94,7 +95,7 @@ const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 /// Be a node: publish these services behind your signet gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// publish local services as `name=svc` (bare = `ping=ping: speed=speed:`, reach diagnostics)
+    /// publish local services as `name=svc` (empty = `ping=ping: speed=speed:`, reach diagnostics)
     #[arg(value_name = "name=svc")]
     pub services: Vec<String>,
     /// open named services to anyone, unauthenticated (comma-list, repeatable)
@@ -314,9 +315,9 @@ impl ServeCmd {
         // alice's pushes into /x and bob's into /y, each scoped to its own service and grant. A public
         // fetch's SSRF-pivot argument does not apply (recv is always gated, `Recv::Public = Never`), so this
         // is the plain per-instance de-merge without an open-relay wall. Extracted BEFORE `Services::parse`,
-        // exactly like fetch, because `recv:`'s `Target::Handler` cannot itself carry the dir. A bare `recv:`
-        // defaults to `.`.
-        let recv = extract_recv_services(&mut requested);
+        // exactly like fetch, because `recv:`'s `Target::Handler` cannot itself carry the dir. A `name=recv:`
+        // (no dir) saves into `.`.
+        let recv = extract_recv_services(&mut requested)?;
         let mut services = Services::parse(&requested)?;
         for scoped in fetch.services() {
             // Inserted DIRECTLY (bypassing the addr grammar) so the synthetic `_`-bearing scheme is usable.
@@ -343,7 +344,7 @@ impl ServeCmd {
         // Refuse an unconstrained PUBLIC fetch per-service: for each fetch service NAMED in `--public` whose
         // allowlist is unconstrained, bail at build time (an open egress relay). With per-service scopes in
         // hand this reasons about "is THIS public fetch unconstrained", so a second origin-scoped fetch can no
-        // longer mask a bare public one. Stays swoosh-side; tightbeam's `with_public` handles the sshd/raw wall.
+        // longer mask a named public one. Stays swoosh-side; tightbeam's `with_public` handles the sshd/raw wall.
         fetch.refuse_open_relay(&public)?;
         // Snapshot the served catalog (names + effective PER-SERVICE posture: open iff opened by `--public`,
         // else gated) ONCE, here, for the `control.services` read handler to serve. Built from the same raw
@@ -390,10 +391,10 @@ impl ServeCmd {
             // parsed (fetch already de-merged out), so the banner renders `name -> target` from what the
             // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
             // amplifier caveat). Fetch names are handled by gloss (their synthetic scheme is unspellable).
-            let mut addr_by_name = display_targets(&requested);
+            let mut addr_by_name = display_targets(&requested)?;
             for service in &recv {
                 // Receive services are de-merged out of `requested` (their `recv_<i>` scheme is unspellable),
-                // so re-add each under its served name pointing at the bare `recv:` scheme. The banner then
+                // so re-add each under its served name pointing at the `recv:` scheme. The banner then
                 // renders it through the SAME handler-scheme path as any other handler (`in -> recv`,
                 // "receives pushed files"), never leaking the synthetic scheme.
                 addr_by_name.insert(service.name().to_owned(), format!("{RECV_SCHEME}:"));
@@ -508,19 +509,23 @@ impl ServeCmd {
     }
 }
 
-/// Build the `name -> target` display map from the SAME requested strings tightbeam parsed: each `name=addr`
-/// (a bare entry defaults its name to `default`, matching `Services::parse`). This is swoosh's own render
-/// vocabulary; tightbeam's manifest supplies the load-bearing facts (posture, kind, the amplifier caveat).
-/// Fetch entries are already de-merged out of `requested`, so they never appear here (the banner glosses them
-/// by name instead, their synthetic scheme being unspellable).
-fn display_targets(requested: &[String]) -> HashMap<String, String> {
-    requested
-        .iter()
-        .map(|entry| match entry.split_once('=') {
-            Some((name, addr)) => (name.to_owned(), addr.to_owned()),
-            None => ("default".to_owned(), entry.clone()),
-        })
-        .collect()
+/// Build the `name -> target` display map from the SAME requested strings tightbeam parsed: each
+/// `name=addr`. This is swoosh's own render vocabulary; tightbeam's manifest supplies the load-bearing
+/// facts (posture, kind, the amplifier caveat). Fetch entries are already de-merged out of `requested`,
+/// so they never appear here (the banner glosses them by name instead, their synthetic scheme being
+/// unspellable). A bare entry (no `=`) is a teaching error, mirroring [`Services::parse`](tunnel::Services).
+fn display_targets(requested: &[String]) -> eyre::Result<HashMap<String, String>> {
+    let mut map = HashMap::with_capacity(requested.len());
+    for entry in requested {
+        let Some((name, addr)) = entry.split_once('=') else {
+            eyre::bail!(
+                "`{entry}` names no service. Every serve entry must be `name=addr`, e.g. \
+                 `ping=ping:`, `web=127.0.0.1:8080`"
+            );
+        };
+        map.insert(name.to_owned(), addr.to_owned());
+    }
+    Ok(map)
 }
 
 /// How peers reach this node, for the banner's `how peers reach you` section: whether the bound transport
@@ -988,19 +993,19 @@ impl RecvService {
 /// De-merges the receive services out of the requested set: a `name=recv:<dir>` entry hands tightbeam a sink
 /// directory its bare-scheme `Target::Handler` cannot hold, so swoosh separates each into its OWN
 /// [`RecvService`] (name + a distinct synthetic scheme + its own sink dir) here, before `Services::parse`,
-/// the same shape as the `fetch:` de-merge. A bare `recv:` (no dir) defaults to `.` under the `default` name
-/// (matching `Services::parse`'s bare-entry rule); a `name=recv:<dir>` is a named, dir-scoped receiver.
-/// Non-recv entries are left in place, in order. Infallible: any string is a valid directory path, so unlike
-/// the fetch origin parse there is nothing to reject here.
-fn extract_recv_services(requested: &mut Vec<String>) -> Vec<RecvService> {
+/// the same shape as the `fetch:` de-merge. A `name=recv:` (no dir) saves into `.`. An entry without `=`
+/// is a teaching error, mirroring [`Services::parse`](tunnel::Services::parse).
+/// Non-recv entries are left in place, in order.
+fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<RecvService>> {
     let mut services: Vec<RecvService> = Vec::new();
     let mut remaining: Vec<String> = Vec::new();
     for entry in requested.drain(..) {
-        // Split off the optional `name=` prefix; a bare entry (no `=`) is its own addr under the `default`
-        // name. Only the ADDR side names a scheme, so the dir is read from there.
-        let (name, addr) = match entry.split_once('=') {
-            Some((name, addr)) => (name.to_owned(), addr),
-            None => ("default".to_owned(), entry.as_str()),
+        // Split off the `name=` prefix; only the ADDR side names a scheme, so the dir is read from there.
+        let Some((name, addr)) = entry.split_once('=') else {
+            eyre::bail!(
+                "`{entry}` names no service. Every serve entry must be `name=addr`, e.g. \
+                 `inbox=recv:/tmp/x`"
+            );
         };
         // A receive service is `recv:` optionally followed by a dir. A non-recv entry passes through
         // unchanged, in order, for `Services::parse`.
@@ -1011,7 +1016,7 @@ fn extract_recv_services(requested: &mut Vec<String>) -> Vec<RecvService> {
             remaining.push(entry);
             continue;
         };
-        // A bare `recv:` saves into `.`; `recv:<dir>` into <dir>. The dir is this service's OWN, on its OWN
+        // A `name=recv:` (no dir) saves into `.`; `name=recv:<dir>` into <dir>. The dir is this service's OWN, on its OWN
         // instance, so two receive services never share one sink.
         let out = if dir.is_empty() {
             PathBuf::from(".")
@@ -1022,10 +1027,14 @@ fn extract_recv_services(requested: &mut Vec<String>) -> Vec<RecvService> {
         // `_` it carries is a byte `parse_target` rejects, so no operator entry (`x=recv_0:`) can resolve
         // onto a synthetic instance.
         let scheme = format!("{RECV_SCHEME}_{}", services.len());
-        services.push(RecvService { name, scheme, out });
+        services.push(RecvService {
+            name: name.to_owned(),
+            scheme,
+            out,
+        });
     }
     *requested = remaining;
-    services
+    Ok(services)
 }
 
 /// The scheme prefix a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE
@@ -1064,9 +1073,10 @@ impl FetchService {
 /// origin its bare-scheme `Target::Handler` cannot hold, so swoosh separates each into its OWN
 /// [`FetchService`] (name + a distinct synthetic scheme + its own origin scope) here, before `Services::parse`.
 ///
-/// A pure edge adapter over the raw request strings. A bare `fetch:` (no origin) is an unconstrained fetch
-/// under the name `default` (matching `Services::parse`'s bare-entry rule); a `name=fetch:<origin>` is a
-/// named, origin-scoped fetch. A malformed origin fails HERE, at expose time, not at dial time.
+/// A pure edge adapter over the raw request strings. A `name=fetch:` (no origin) is an unconstrained fetch
+/// under its own name; a `name=fetch:<origin>` is a named, origin-scoped fetch. An entry without `=`
+/// names no service and is a teaching error, mirroring [`Services::parse`](tunnel::Services::parse).
+/// A malformed origin fails HERE, at expose time, not at dial time.
 struct FetchScope;
 
 impl FetchScope {
@@ -1078,11 +1088,13 @@ impl FetchScope {
         let mut services: Vec<FetchService> = Vec::new();
         let mut remaining: Vec<String> = Vec::new();
         for entry in requested.drain(..) {
-            // Split off the optional `name=` prefix; a bare entry (no `=`) is its own addr under the `default`
-            // name. Only the ADDR side names a scheme, so the origin is read from there.
-            let (name, addr) = match entry.split_once('=') {
-                Some((name, addr)) => (name.to_owned(), addr),
-                None => ("default".to_owned(), entry.as_str()),
+            // Split off the `name=` prefix; only the ADDR side names a scheme, so the origin is read
+            // from there.
+            let Some((name, addr)) = entry.split_once('=') else {
+                eyre::bail!(
+                    "`{entry}` names no service. Every serve entry must be `name=addr`, e.g. \
+                     `news=fetch:https://news.example`"
+                );
             };
             // A fetch service is `fetch:` optionally followed by an origin. A non-fetch entry passes through
             // unchanged, in order, for `Services::parse`.
@@ -1102,7 +1114,7 @@ impl FetchScope {
             };
             let scheme = format!("{FETCH_SCHEME}_{}", services.len());
             services.push(FetchService {
-                name,
+                name: name.to_owned(),
                 scheme,
                 allow,
             });

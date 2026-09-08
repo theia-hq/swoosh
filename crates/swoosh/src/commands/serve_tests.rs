@@ -58,6 +58,7 @@ fn default_targets() -> HashMap<String, String> {
         "control.stop=control.stop:".to_owned(),
         "control.services=control.services:".to_owned(),
     ])
+    .expect("explicit entries display")
 }
 
 /// The default iroh + mDNS-on banner: a copy-clean full id, an `internet` channel that says "automatic" and
@@ -125,7 +126,8 @@ fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
         "speed=speed:".to_owned(),
         "ssh=sshd:".to_owned(),
         "logs=file:/var/log/app.log".to_owned(),
-    ]);
+    ])
+    .expect("explicit entries display");
     let section = serving_section(&manifest, &targets, &HashSet::new());
 
     // `name -> target` only when they differ: `ssh -> sshd`, but `speed` alone (name == scheme).
@@ -278,24 +280,17 @@ fn named_fetch_origins_de_merge_into_per_service_instances() {
     );
 }
 
-/// A bare `fetch:` (no origin, no name) is the UNSCOPED singleton under the `default` name: `extract` gives it
-/// its own instance with an empty (unconstrained) allowlist.
+/// A bare `fetch:` (no `=`, no name) names no service and is refused with the `name=addr` teaching
+/// error: only `name=fetch:<origin>` is spelled.
 #[test]
-fn bare_fetch_is_a_default_named_unconstrained_instance() {
+fn bare_fetch_is_refused_with_the_name_addr_teaching_error() {
     let mut requested = vec!["fetch:".to_owned()];
-    let fetch = FetchScope::extract(&mut requested).expect("no origins to parse");
-
-    assert!(requested.is_empty(), "the bare fetch entry is removed");
-    let services = fetch.services();
-    assert_eq!(services.len(), 1);
-    assert_eq!(
-        services[0].name(),
-        "default",
-        "a bare fetch entry defaults to the `default` name"
-    );
+    let Err(error) = FetchScope::extract(&mut requested) else {
+        panic!("a bare `fetch:` should be refused, not served");
+    };
     assert!(
-        services[0].allow().is_unconstrained(),
-        "a bare `fetch:` declares no origin, so its own allowlist is unconstrained"
+        error.to_string().contains("name=addr"),
+        "the refusal teaches the grammar: {error}"
     );
 }
 
@@ -304,7 +299,7 @@ fn bare_fetch_is_a_default_named_unconstrained_instance() {
 #[test]
 fn non_fetch_services_pass_through_and_only_fetch_is_removed() {
     let mut requested = vec![
-        "ping:".to_owned(),
+        "ping=ping:".to_owned(),
         "web=127.0.0.1:8080".to_owned(),
         "gh=fetch:https://api.github.com".to_owned(),
     ];
@@ -312,7 +307,7 @@ fn non_fetch_services_pass_through_and_only_fetch_is_removed() {
 
     assert_eq!(
         requested,
-        vec!["ping:".to_owned(), "web=127.0.0.1:8080".to_owned()],
+        vec!["ping=ping:".to_owned(), "web=127.0.0.1:8080".to_owned()],
         "the fetch entry is removed; ping and the raw forward are left exactly as given, in order"
     );
     assert_eq!(
@@ -390,33 +385,33 @@ fn a_public_fetch_instance_cannot_reach_a_gated_fetch_s_origins() {
     );
 }
 
-/// BLOCKER-3 masking sub-attack: an origin-scoped GATED fetch beside a bare PUBLIC fetch must NOT mask the
-/// open relay. Per-service, `refuse_open_relay` reasons about the PUBLIC fetch's own scope, so a bare public
-/// fetch is refused even when a second, scoped, gated fetch is present.
+/// BLOCKER-3 masking sub-attack: an origin-scoped GATED fetch beside an unconstrained PUBLIC fetch must NOT
+/// mask the open relay. Per-service, `refuse_open_relay` reasons about the PUBLIC fetch's own scope, so an
+/// unconstrained public fetch is refused even when a second, scoped, gated fetch is present.
 #[test]
 fn a_scoped_gated_fetch_does_not_mask_a_bare_public_open_relay() {
     let mut requested = vec![
         "internal=fetch:http://10.0.0.5".to_owned(), // scoped, gated
-        "pub=fetch:".to_owned(),                     // bare, public
+        "pub=fetch:".to_owned(),                     // unconstrained, public
     ];
     let fetch = FetchScope::extract(&mut requested).expect("parse");
     let public = PublicRequest::new(["pub".to_owned()]);
     assert!(
         fetch.refuse_open_relay(&public).is_err(),
-        "a bare public fetch is an open relay even beside a scoped gated fetch (no masking)"
+        "an unconstrained public fetch is an open relay even beside a scoped gated fetch (no masking)"
     );
 }
 
-/// MAJOR-1: a bare, unconstrained fetch NAMED in `--public` is refused at build time with a teaching error
+/// MAJOR-1: an unconstrained fetch NAMED in `--public` is refused at build time with a teaching error
 /// that names the problem and the fix, mirroring the sshd-cannot-be-public refusal.
 #[test]
 fn an_unconstrained_public_fetch_is_refused_as_an_open_relay() {
     let mut requested = vec!["api=fetch:".to_owned()];
-    let fetch = FetchScope::extract(&mut requested).expect("bare fetch parses");
+    let fetch = FetchScope::extract(&mut requested).expect("unconstrained fetch parses");
     let public = PublicRequest::new(["api".to_owned()]);
     let error = fetch
         .refuse_open_relay(&public)
-        .expect_err("a public bare fetch is an open relay and must be refused");
+        .expect_err("a public unconstrained fetch is an open relay and must be refused");
     let message = format!("{error}");
     assert!(
         message.contains("origin-scoped") && message.contains("open relay"),
@@ -437,16 +432,16 @@ fn a_scoped_public_fetch_is_allowed() {
     );
 }
 
-/// A bare `fetch:` that is NOT named in `--public` stays legal: it is gated (the family gate terminates it),
+/// A `name=fetch:` that is NOT named in `--public` stays legal: it is gated (the family gate terminates it),
 /// so an unconstrained allowlist is not an open relay. Only a PUBLIC unconstrained fetch is refused.
 #[test]
 fn a_gated_bare_fetch_is_allowed() {
     let mut requested = vec!["api=fetch:".to_owned()];
-    let fetch = FetchScope::extract(&mut requested).expect("bare fetch parses");
+    let fetch = FetchScope::extract(&mut requested).expect("unconstrained fetch parses");
     // `api` is served but NOT public.
     assert!(
         fetch.refuse_open_relay(&PublicRequest::none()).is_ok(),
-        "a gated (member-only) bare fetch is unchanged; the family gate terminates it"
+        "a gated (member-only) fetch is unchanged; the family gate terminates it"
     );
 }
 
@@ -457,7 +452,7 @@ fn a_gated_bare_fetch_is_allowed() {
 #[test]
 fn named_recv_dirs_de_merge_into_per_service_instances() {
     let mut requested = vec!["a=recv:/tmp/x".to_owned(), "b=recv:/tmp/y".to_owned()];
-    let recv = super::extract_recv_services(&mut requested);
+    let recv = super::extract_recv_services(&mut requested).expect("entries parse");
 
     assert!(
         requested.is_empty(),
@@ -487,24 +482,17 @@ fn named_recv_dirs_de_merge_into_per_service_instances() {
     );
 }
 
-/// A bare `recv:` (no dir, no name) is the `default`-named receiver saving into `.`: `extract` gives it its
-/// own instance with the `.` sink, mirroring a bare `fetch:`.
+/// A bare `recv:` (no `=`, no name) names no service and is refused with the `name=addr` teaching
+/// error: only `name=recv:<dir>` is spelled.
 #[test]
-fn bare_recv_is_a_default_named_dot_instance() {
+fn bare_recv_is_refused_with_the_name_addr_teaching_error() {
     let mut requested = vec!["recv:".to_owned()];
-    let recv = super::extract_recv_services(&mut requested);
-
-    assert!(requested.is_empty(), "the bare recv entry is removed");
-    assert_eq!(recv.len(), 1);
-    assert_eq!(
-        recv[0].name(),
-        "default",
-        "a bare recv entry defaults to the `default` name"
-    );
-    assert_eq!(
-        recv[0].out(),
-        std::path::Path::new("."),
-        "a bare `recv:` saves into `.`"
+    let Err(error) = super::extract_recv_services(&mut requested) else {
+        panic!("a bare `recv:` should be refused, not served");
+    };
+    assert!(
+        error.to_string().contains("name=addr"),
+        "the refusal teaches the grammar: {error}"
     );
 }
 
@@ -513,15 +501,15 @@ fn bare_recv_is_a_default_named_dot_instance() {
 #[test]
 fn non_recv_services_pass_through_and_only_recv_is_removed() {
     let mut requested = vec![
-        "ping:".to_owned(),
+        "ping=ping:".to_owned(),
         "in=recv:/tmp/x".to_owned(),
         "web=127.0.0.1:8080".to_owned(),
     ];
-    let recv = super::extract_recv_services(&mut requested);
+    let recv = super::extract_recv_services(&mut requested).expect("entries parse");
 
     assert_eq!(
         requested,
-        vec!["ping:".to_owned(), "web=127.0.0.1:8080".to_owned()],
+        vec!["ping=ping:".to_owned(), "web=127.0.0.1:8080".to_owned()],
         "the recv entry is removed; ping and the raw forward are left exactly as given, in order"
     );
     assert_eq!(
@@ -537,7 +525,7 @@ fn non_recv_services_pass_through_and_only_recv_is_removed() {
 #[test]
 fn the_synthetic_recv_scheme_is_unspellable_by_an_operator_entry() {
     let mut requested = vec!["a=recv:/tmp/x".to_owned()];
-    let recv = super::extract_recv_services(&mut requested);
+    let recv = super::extract_recv_services(&mut requested).expect("entries parse");
     let scheme = recv[0].scheme().to_owned();
     assert!(
         scheme.contains('_'),
@@ -645,7 +633,8 @@ fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
         MdnsState::Available,
         &[],
         &manifest,
-        &display_targets(&[format!("logs=file:{}", path.display())]),
+        &display_targets(&[format!("logs=file:{}", path.display())])
+            .expect("explicit entries display"),
         &HashSet::new(),
         "ctrl-c to stop",
     );

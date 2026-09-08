@@ -28,7 +28,7 @@ Be a node: publish named services behind your signet gate. Bare, it answers reac
 <!-- generated: usage from `swoosh serve -h`; option lines curated -->
 ```
 Usage: swoosh serve [OPTIONS] [name=svc]...
-  [name=svc]...          publish a service, e.g. ssh=sshd:, tv=127.0.0.1:8096 (bare = ping + speed)
+  [name=svc]...          publish a service, e.g. ssh=sshd:, tv=127.0.0.1:8096 (empty = ping + speed)
   --public <svc>         open named services to anyone, unauthenticated (comma-list, repeatable)
   --expires <duration>   serve for a bounded time, then stop (30m, 2h, 1d)
   --quiet                suppress the readiness banner (for unattended/CI use)
@@ -37,10 +37,12 @@ Usage: swoosh serve [OPTIONS] [name=svc]...
 **Example.** `swoosh serve ssh=sshd: tv=127.0.0.1:8096` publishes a shell and a local TCP service, both
 gated to your signet.
 
-**Things to know.** A service form is `name=target`: `ping:` / `speed:` (built-in diagnostics),
-`sshd:` (a keyless shell), `recv:<dir>` (receive pushed files into `<dir>`, bare `recv:` uses `.`),
-`fetch:` (fetch URLs for callers), or `host:port`
-(front any local TCP service). `control.stop` and `control.services` are always served and always gated.
+**Things to know.** A service form is `name=target`: `ping=ping:` / `speed=speed:` (built-in diagnostics),
+`ssh=sshd:` (a keyless shell), `inbox=recv:<dir>` (receive pushed files into `<dir>`, `inbox=recv:` uses `.`),
+`news=fetch:<origin>` (fetch URLs for callers), or `web=127.0.0.1:8080`
+(front any local TCP service). Every entry must be `name=target`: a bare `ping` or `ping:` is refused with a
+message naming this form.
+`control.stop` and `control.services` are always served and always gated.
 
 ## <a id="stop"></a>`swoosh stop`
 
@@ -191,8 +193,8 @@ sending to bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
 sent app.tar (204800 bytes)
 ```
 
-**Things to know.** The receiver stays online with `swoosh serve recv=recv:` (saving into the current
-directory, or `recv:<dir>`). Each file is hashed with BLAKE3 and re-checked on arrival, so a truncated
+**Things to know.** The receiver stays online with `swoosh serve inbox=recv:/srv/releases` (saving into that
+directory). Each file is hashed with BLAKE3 and re-checked on arrival, so a truncated
 or tampered transfer is rejected, never written.
 
 ## <a id="fleet"></a>`swoosh fleet`

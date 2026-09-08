@@ -93,7 +93,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Be a node: publish named services behind your signet gate (bare = answer reach diagnostics).
+    /// Be a node: publish named services behind your signet gate (empty = answer reach diagnostics).
     Serve(ServeCmd),
     /// Stop a node (stop it serving): bare stops your own node, `--at <peer>` stops a peer's.
     Stop(StopCmd),
