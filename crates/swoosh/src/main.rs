@@ -431,6 +431,9 @@ impl Reach {
                 roster_blob: std::sync::Arc::new(swoosh::commands::serve::cut_roster(
                     contacts, secret,
                 )?),
+                // The SAME home the root resolved once: the resident socket/lock derive from it, so a
+                // `--resident` serve and its future control clients name the same paths by construction.
+                home: home.clone(),
             })),
             _ => Ok(None),
         }

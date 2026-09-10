@@ -43,7 +43,7 @@ httparse = "1"
 libc.workspace = true
 rand.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "macros", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal"] }
 toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

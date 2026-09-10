@@ -123,6 +123,93 @@ impl Home {
     pub fn contacts(&self) -> PathBuf {
         self.dir.join("contacts.toml")
     }
+
+    /// The 8-char hex key scoping this home's resident state: inline 64-bit FNV-1a over the
+    /// canonicalized home path, lower 32 bits rendered as 8 lowercase hex chars. Dependency free
+    /// and stable across daemon and client because both binaries carry this same function. Two
+    /// different homes hash differently, so two `--home`s never share a socket or lock.
+    pub fn home_key(&self) -> String {
+        let canonical = std::fs::canonicalize(&self.dir).unwrap_or_else(|_| {
+            if self.dir.is_absolute() {
+                self.dir.clone()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(&self.dir)
+            }
+        });
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in canonical.as_os_str().as_encoded_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        format!("{:08x}", (hash & 0xffff_ffff) as u32)
+    }
+
+    /// `<runtime>/swoosh-<uid>/<key>` (macOS) or `$XDG_RUNTIME_DIR/swoosh/<key>` (Linux): the
+    /// per-home dir holding this node's resident socket and lock. A pure function of the home
+    /// (via [`home_key`](Self::home_key)) over the per-user runtime root, so daemon and client
+    /// resolve the same paths. Never `~/.config`, never `/tmp`, never an abstract socket.
+    pub fn runtime_dir(&self) -> eyre::Result<PathBuf> {
+        Ok(runtime_root()?.join(self.home_key()))
+    }
+
+    /// `<runtime_dir>/control.sock`: the local control socket rendezvous. See
+    /// [`runtime_dir`](Self::runtime_dir).
+    pub fn control_socket(&self) -> eyre::Result<PathBuf> {
+        Ok(self.runtime_dir()?.join("control.sock"))
+    }
+
+    /// `<runtime_dir>/control.lock`: the flock file that is the single-instance truth. See
+    /// [`runtime_dir`](Self::runtime_dir).
+    pub fn control_lock(&self) -> eyre::Result<PathBuf> {
+        Ok(self.runtime_dir()?.join("control.lock"))
+    }
+}
+
+/// The per-user runtime root resident state lives under: `$XDG_RUNTIME_DIR/swoosh` on Linux,
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)` + `swoosh-<uid>` on macOS. Created 0700 by the single-instance
+/// acquire, never assumed. Unset `XDG_RUNTIME_DIR` on Linux is a loud error, never a `/tmp` fallback.
+pub fn runtime_root() -> eyre::Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: `confstr` with a null buffer and zero length only returns the needed size; the
+        // second call writes into a live `Vec` sized from that result. Both calls pass a valid
+        // constant and a valid-or-null buffer, so no memory is touched out of bounds.
+        let len =
+            unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, core::ptr::null_mut(), 0) };
+        if len == 0 {
+            return Err(eyre!(
+                "could not resolve the per-user temp dir (confstr failed)"
+            ));
+        }
+        let mut buf = vec![0 as libc::c_char; len];
+        let got = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr(), len) };
+        if got == 0 {
+            return Err(eyre!(
+                "could not resolve the per-user temp dir (confstr failed)"
+            ));
+        }
+        let bytes: Vec<u8> = buf
+            .iter()
+            .take_while(|c| **c != 0)
+            .map(|c| *c as u8)
+            .collect();
+        let dir = String::from_utf8(bytes)
+            .map_err(|_| eyre!("the per-user temp dir is not valid UTF-8"))?;
+        let uid = unsafe { libc::geteuid() };
+        Ok(PathBuf::from(dir).join(format!("swoosh-{uid}")))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let root = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
+            eyre!(
+                "XDG_RUNTIME_DIR is not set; resident serve needs it (no /tmp fallback). \
+                 Set it, e.g. XDG_RUNTIME_DIR=/run/user/$(id -u)"
+            )
+        })?;
+        Ok(PathBuf::from(root).join("swoosh"))
+    }
 }
 
 /// The default home, `~/.config/swoosh`. Reads `HOME`, so it fails with a teaching error when unset (a

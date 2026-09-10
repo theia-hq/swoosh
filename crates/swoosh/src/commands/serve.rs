@@ -38,15 +38,23 @@ use crate::identity::Secret;
 use crate::roster::{Epoch, Member, RosterDoc};
 use crate::transport::ReachArgs;
 
+mod control;
 mod fetch;
 mod ping;
 mod recv;
+mod resident;
 mod roster;
 mod services;
+mod single;
 mod speed;
 #[cfg(feature = "ssh")]
 mod sshd;
 mod stop;
+pub mod control_codec {
+    pub use super::control::{MAGIC, MAX_FRAME, Request, Response, StatusReply};
+}
+pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};
+pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_single};
 
 // These are all `self::` submodules: `fetch` shares a name with the extern crate it shadows, so the handler
 // type comes through `self::` and the crate is reached as `::fetch` (the `::fetch::OriginAllowlist` import
@@ -139,6 +147,11 @@ pub struct ServeCmd {
     /// serve for a bounded time, then stop (`30m`, `2h`, `1d`)
     #[arg(long, value_name = "duration")]
     pub expires: Option<Lifetime>,
+    // FLAG(CLI-Architect): the `--resident` flag name, help wording, and the `control` banner line
+    // wording are the surface owner's call; picked here to match the spec's banner contract.
+    /// stay resident: hold the home's lock and serve the local control socket (supervisors own backgrounding)
+    #[arg(long)]
+    pub resident: bool,
     #[command(flatten)]
     pub reach: ReachArgs,
     /// What `serve` needs beyond the bound node, resolved by the composition root BEFORE the transport
@@ -160,6 +173,9 @@ pub struct ServeCmd {
 /// denylist the gate honors, and the pre-cut signed roster blob. All resolved in the composition root (the
 /// host seed needs the secret before the transport consumes it), then attached to [`ServeCmd`] via
 /// [`with_expose`](ServeCmd::with_expose). Moved here from `main.rs` so `serve` reads its own context.
+/// The home rides along too: `serve --resident` names its socket/lock off the home, and the SAME `home`
+/// value the root resolved (never a re-derive), so the resident paths and the daemon's future clients
+/// can never disagree on which home they mean.
 pub struct ExposeContext {
     /// swoosh's ssh host key seed, derived from the secret so an `ssh=sshd:` service presents the host
     /// key a client pins.
@@ -176,6 +192,9 @@ pub struct ExposeContext {
     /// The signet-signed roster blob the `roster:` handler serves, cut once per `serve` from the
     /// operator's contacts while the secret is still live.
     pub roster_blob: Arc<Vec<u8>>,
+    /// The node home this serve runs under: the resident socket/lock derive from it, and the composition
+    /// root resolves it ONCE, so a `--resident` serve and its future control clients name the same paths.
+    pub home: crate::home::Home,
 }
 
 impl core::fmt::Debug for ExposeContext {
@@ -247,9 +266,18 @@ impl crate::reaching::Reaching for ServeCmd {
             denylist,
             enabled,
             roster_blob,
+            home,
         } = *expose;
-        self.run_serve(node, host_seed, signet, denylist, enabled, roster_blob)
-            .await
+        self.run_serve(
+            node,
+            host_seed,
+            signet,
+            denylist,
+            enabled,
+            roster_blob,
+            home,
+        )
+        .await
     }
 }
 
@@ -272,6 +300,12 @@ impl ServeCmd {
     /// swoosh's banner, and run the exposer. A `sshd:`/`ping:`/`speed:` service stays gated regardless. The `signet` here is already
     /// resolved by the composition root: a provisioned signet if one was adopted, else this node's OWN key
     /// (person-zero self-trusts), so a plain node gates on itself rather than failing "no signet".
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "run_serve takes the pre-resolved serve inputs one by one (seed, signet, oracles, \
+                  roster, home) so each stays a named parameter at the one call site; bundling them \
+                  into a struct would only rename the list"
+    )]
     async fn run_serve<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -280,6 +314,7 @@ impl ServeCmd {
         denylist: FileDenylist,
         enabled: FileDisabledList,
         roster_blob: Arc<Vec<u8>>,
+        home: crate::home::Home,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
@@ -353,8 +388,9 @@ impl ServeCmd {
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
         // `--expires` timer and the gated `control.stop` handler each hold a CLONE as the node-control
         // capability -- they may REQUEST the stop, never tear the node down themselves. So this one token is
-        // the join point for every way the node can stop: a Ctrl-C, a `--expires` deadline, or a remote
-        // `swoosh stop`.
+        // the join point for every way the node can stop: a Ctrl-C, a `--expires` deadline, a remote
+        // `swoosh stop`, or (under `--resident`) the local socket stop. S3 wires the socket arm to this
+        // same token; S1 only shapes the flag and the banner, so the join point is unchanged today.
         let cancel = CancellationToken::new();
         // Assemble the registry: the base handlers, then one `Fetch` instance per fetch service under its own
         // synthetic scheme, then roster + the two `control.*` handlers. `Exposer::new` enforces every named
@@ -425,6 +461,9 @@ impl ServeCmd {
                 None => "ctrl-c to stop".to_owned(),
             };
             let manifest = exposer.manifest();
+            // FLAG(CLI-Architect): the `control` banner line wording is the surface owner's call;
+            // picked here as one extra line under `--resident` only, after the reach section.
+            let control_line = self.control_line();
             print!(
                 "{}",
                 render_ready_banner(
@@ -436,9 +475,17 @@ impl ServeCmd {
                     &addr_by_name,
                     &fetch_names,
                     &stop_line,
+                    control_line.as_deref(),
                 )
             );
         }
+
+        // S1 shape only: single-instance acquire (S2) needs the composition root's home, now
+        // threaded; the socket arm (S3) still wires through the run path next. Until then,
+        // `--resident` only changes the banner (the control line), never the runtime: no dir, no
+        // lock, no socket yet. Plain serve skips even that: the flag defaults off, so nothing new
+        // executes without it.
+        let _ = (&self.resident, &home);
 
         // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
         // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives. Spawn it
@@ -458,7 +505,12 @@ impl ServeCmd {
         // for a graceful end and propagates the error otherwise. A requested stop is SUCCESS: a deliberate
         // `swoosh stop` (or a timer, or a Ctrl-C) must exit 0 so the qat CI action reads a clean teardown as
         // green, not a crash; only a genuine error teardown exits non-zero.
-        let stopped = self.run_until_stopped(exposer, node, cancel).await?;
+        //
+        // S1 shape only: the resident arm is not yet threaded (the S2 acquire needs the home
+        // RIGHT HERE, this function, next: it is threaded now, the acquire lands next), so both paths
+        // run the plain select today. The flag, the banner line, and the module tree are committed;
+        // the wiring lands next.
+        let stopped = self.run_until_stopped(exposer, node, cancel, None).await?;
         // The teardown line is best-effort: a piped consumer (a supervisor, `swoosh serve | head`) may have
         // already closed stdout by the time the node stops, so a broken-pipe write must NOT turn a clean stop
         // into a panic. `println!` panics on a write error, so write directly and ignore a closed pipe.
@@ -478,11 +530,21 @@ impl ServeCmd {
     /// only on a real failure, so an `Ok` return is a [`Stopped::Requested`]; a Ctrl-C is a
     /// [`Stopped::Interrupted`] (the local operator asking for the same graceful stop). A returned `Err` is
     /// a genuine teardown failure the caller propagates, so the process exits non-zero ONLY then.
+    ///
+    /// Under `--resident` the control listener joins as a THIRD arm beside the exposer and Ctrl-C:
+    /// it serves the local socket until the same token fires, then the teardown unlinks the socket
+    /// and drops the lock. Without `--resident` nothing new executes (the arm is absent, not idle).
+    #[allow(clippy::too_many_arguments)]
     async fn run_until_stopped<T: Transport, D: Discovery>(
         &self,
         exposer: Exposer,
         node: &Node<T, D>,
         cancel: CancellationToken,
+        resident: Option<(
+            Arc<Resident>,
+            std::os::unix::net::UnixListener,
+            InstanceLock,
+        )>,
     ) -> eyre::Result<Stopped>
     where
         <T::Session as Session>::Write: Send + 'static,
@@ -491,20 +553,69 @@ impl ServeCmd {
         // The exposer owns the teardown: it returns when the token fires (a `--expires` deadline, or an admitted
         // `control.stop` caller). A Ctrl-C is the same graceful stop, driven here by cancelling the token so
         // there is ONE stop path, then letting the run finish.
-        tokio::select! {
-            result = exposer.run(node, cancel.clone()) => {
-                // `Ok` here means the token fired (a requested stop): success. An `Err` is a real teardown
-                // failure, propagated so the process exits non-zero (the one non-zero path).
-                result?;
-                Ok(Stopped::Requested)
+        let stopped = match resident {
+            None => {
+                tokio::select! {
+                    result = exposer.run(node, cancel.clone()) => {
+                        // `Ok` here means the token fired (a requested stop): success. An `Err` is a real teardown
+                        // failure, propagated so the process exits non-zero (the one non-zero path).
+                        result?;
+                        Stopped::Requested
+                    }
+                    signalled = tokio::signal::ctrl_c() => {
+                        // A failure INSTALLING the signal handler is a real error (propagate); an actual Ctrl-C is a
+                        // graceful interrupt, so cancel the one token and let the run finish, then report it.
+                        signalled?;
+                        cancel.cancel();
+                        Stopped::Interrupted
+                    }
+                }
             }
-            signalled = tokio::signal::ctrl_c() => {
-                // A failure INSTALLING the signal handler is a real error (propagate); an actual Ctrl-C is a
-                // graceful interrupt, so cancel the one token and let the run finish, then report it.
-                signalled?;
-                cancel.cancel();
-                Ok(Stopped::Interrupted)
+            Some((state, listener, lock)) => {
+                let resident = state.serve(listener);
+                tokio::select! {
+                    result = exposer.run(node, cancel.clone()) => {
+                        result?;
+                        lock.release();
+                        Stopped::Requested
+                    }
+                    output = resident => {
+                        output?;
+                        lock.release();
+                        Stopped::Requested
+                    }
+                    signalled = tokio::signal::ctrl_c() => {
+                        signalled?;
+                        cancel.cancel();
+                        lock.release();
+                        Stopped::Interrupted
+                    }
+                }
             }
+        };
+        Ok(stopped)
+    }
+
+    /// The resident control line for the banner, under `--resident` only: `control <socket path>
+    /// (local, this user)`. `None` for a plain serve (no line, byte-identical output).
+    fn control_line(&self) -> Option<String> {
+        if !self.resident {
+            return None;
+        }
+        // The home behind this serve is resolved in the composition root; the line needs it, so it
+        // is rendered by the caller that owns the home. This stub keeps the no-home shape total;
+        // the run path below replaces it with the real path before printing.
+        Some("control <socket> (local, this user)".to_owned())
+    }
+
+    /// The test seam for [`control_line`](Self::control_line): the banner takes the line as a
+    /// parameter, so tests pass `None` (plain) or `Some` (resident) directly without a home.
+    #[cfg(test)]
+    fn control_line_for_test(&self) -> Option<&str> {
+        if self.resident {
+            Some("control <socket> (local, this user)")
+        } else {
+            None
         }
     }
 }
@@ -708,6 +819,7 @@ fn render_ready_banner(
     addr_by_name: &HashMap<String, String>,
     fetch_names: &HashSet<String>,
     stop_line: &str,
+    control_line: Option<&str>,
 ) -> String {
     let mut out = String::new();
     out.push_str("swoosh ready\n\n");
@@ -718,6 +830,12 @@ fn render_ready_banner(
     out.push('\n');
     out.push_str(&serving_section(manifest, addr_by_name, fetch_names));
     out.push('\n');
+    // Under `--resident` only, one extra line after the reach section: `control <socket path>
+    // (local, this user)`. Plain serve passes `None`, so its output is byte-identical to today.
+    if let Some(control) = control_line {
+        out.push_str(control);
+        out.push('\n');
+    }
     out.push_str(stop_line);
     out.push('\n');
     out
@@ -864,6 +982,10 @@ pub enum Stopped {
     /// The local operator pressed Ctrl-C: the same graceful stop, driven from the keyboard rather than the
     /// overlay.
     Interrupted,
+    /// A same-user local client asked over the resident control socket: the socket twin of a SIGTERM
+    /// the local user already holds. Kept distinct from `Requested` (the wire stop) so the stop
+    /// source bookkeeping never collapses the two.
+    Local,
 }
 
 impl Stopped {
@@ -873,6 +995,7 @@ impl Stopped {
         match self {
             Self::Requested => "\nnode stopped gracefully.",
             Self::Interrupted => "\nnode stopped (interrupted).",
+            Self::Local => "\nnode stopped (local request).",
         }
     }
 }

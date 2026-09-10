@@ -38,7 +38,7 @@ rand = "0.8"
 russh = "0.63"
 ssh-key = { version = "=0.7.0-rc.11", features = ["ed25519"] }
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

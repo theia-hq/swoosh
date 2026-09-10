@@ -75,6 +75,7 @@ fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
         &default_targets(),
         &HashSet::new(),
         "ctrl-c to stop",
+        None,
     );
 
     assert!(
@@ -212,6 +213,7 @@ fn a_fetch_service_glosses_by_name_and_never_leaks_the_synthetic_scheme() {
 fn each_graceful_stop_reason_has_a_distinct_legible_message() {
     let requested = Stopped::Requested.message();
     let interrupted = Stopped::Interrupted.message();
+    let local = Stopped::Local.message();
 
     assert!(
         requested.contains("gracefully"),
@@ -221,25 +223,133 @@ fn each_graceful_stop_reason_has_a_distinct_legible_message() {
         interrupted.contains("interrupted"),
         "a Ctrl-C reads as an interrupt: {interrupted:?}"
     );
+    assert!(
+        local.contains("local"),
+        "a socket stop reads as a local stop: {local:?}"
+    );
     assert_ne!(
         requested, interrupted,
         "the two graceful reasons print distinct lines, so a log tells them apart"
     );
+    assert_ne!(requested, local, "the socket stop prints its own line");
 }
 
 /// `Stopped` exists ONLY on the success path: it has an arm for each way an owner GRACEFULLY stops the
-/// node (a requested `control.stop`/`--for`, or a Ctrl-C), and NO arm for a failure. A real teardown error
-/// stays an `Err` the run propagates, so a graceful stop and an errored teardown are unconflatable by
-/// construction: this is why a deliberate `swoosh stop` exits 0 while a crash exits non-zero.
+/// node (a requested `control.stop`/`--expires`, a socket stop, or a Ctrl-C), and NO arm for a
+/// failure. A real teardown error stays an `Err` the run propagates, so a graceful stop and an
+/// errored teardown are unconflatable by construction: this is why a deliberate `swoosh stop`
+/// exits 0 while a crash exits non-zero.
 #[test]
 fn stopped_has_an_arm_only_for_graceful_reasons() {
     // A total match over `Stopped`: every arm is a graceful (exit-0) reason, so adding a non-graceful arm
     // would fail to compile here, forcing the author to keep failures OFF this type and on the `Err` path.
-    for reason in [Stopped::Requested, Stopped::Interrupted] {
+    for reason in [Stopped::Requested, Stopped::Interrupted, Stopped::Local] {
         let graceful = match reason {
-            Stopped::Requested | Stopped::Interrupted => true,
+            Stopped::Requested | Stopped::Interrupted | Stopped::Local => true,
         };
         assert!(graceful, "{reason:?} is a graceful, exit-0 stop");
+    }
+}
+
+/// Plain serve creates no runtime state: no dir, no lock, no socket. The flag alone never touches
+/// the filesystem (S2/S3 wire the acquire; S1 only shapes the CLI), so a plain serve in-process
+/// with a temp runtime root leaves nothing behind.
+#[test]
+fn plain_serve_creates_no_runtime_state() {
+    use clap::Parser as _;
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        serve: super::ServeCmd,
+    }
+    let wrap = Wrap::try_parse_from(["x"]).expect("plain serve parses");
+    assert!(
+        !wrap.serve.resident,
+        "plain serve carries no residency: the flag defaults off"
+    );
+    // The banner without the flag carries no control line: byte-identical to today.
+    let banner = super::render_ready_banner(
+        "bf01exampleid",
+        super::ReachKind::Internet,
+        super::MdnsState::Available,
+        &[],
+        &default_manifest(),
+        &default_targets(),
+        &HashSet::new(),
+        "ctrl-c to stop",
+        wrap.serve.control_line_for_test(),
+    );
+    assert!(
+        !banner.contains("(local, this user)"),
+        "plain serve prints no resident control line: {banner}"
+    );
+}
+
+/// The resident banner differs from the plain one ONLY by the control line.
+#[test]
+fn resident_banner_differs_only_by_the_control_line() {
+    let plain = super::render_ready_banner(
+        "bf01exampleid",
+        super::ReachKind::Internet,
+        super::MdnsState::Available,
+        &[],
+        &default_manifest(),
+        &default_targets(),
+        &HashSet::new(),
+        "ctrl-c to stop",
+        None,
+    );
+    let resident = super::render_ready_banner(
+        "bf01exampleid",
+        super::ReachKind::Internet,
+        super::MdnsState::Available,
+        &[],
+        &default_manifest(),
+        &default_targets(),
+        &HashSet::new(),
+        "ctrl-c to stop",
+        Some("control /run/swoosh/x/control.sock (local, this user)"),
+    );
+    let stripped = resident.replacen(
+        "control /run/swoosh/x/control.sock (local, this user)\n",
+        "",
+        1,
+    );
+    assert_eq!(
+        stripped, plain,
+        "the resident banner is the plain banner plus exactly one control line"
+    );
+    assert!(
+        resident.contains("(local, this user)"),
+        "the control line names its local-only scope: {resident}"
+    );
+}
+
+/// No self-daemonizing: `--resident` stays foreground (runs until cancelled, exits on a stop) and
+/// serves no supervisor semantics. Proven at the type level: `ServeCmd` carries no daemonize flag,
+/// no fork, no setsid, and the run path joins the exposer rather than re-executing itself.
+#[test]
+fn no_self_daemonize() {
+    use clap::Parser as _;
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        serve: super::ServeCmd,
+    }
+    let wrap = Wrap::try_parse_from(["x", "--resident"]).expect("--resident parses");
+    assert!(
+        wrap.serve.resident,
+        "--resident opts in; plain serve stays byte-identical"
+    );
+    // The source carries no self-backgrounding: grep-level gate over this file's own vocabulary.
+    let source = include_str!("serve.rs");
+    for token in ["fork", "setsid", "daemon(", "current_exe"] {
+        assert!(
+            !source.contains(token),
+            "serve carries no self-daemonizing primitive ({token})"
+        );
     }
 }
 
@@ -637,6 +747,7 @@ fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
             .expect("explicit entries display"),
         &HashSet::new(),
         "ctrl-c to stop",
+        None,
     );
     assert!(
         banner.contains("public-UNSAFE !!"),
