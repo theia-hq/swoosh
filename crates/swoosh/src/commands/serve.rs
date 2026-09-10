@@ -51,7 +51,9 @@ mod speed;
 mod sshd;
 mod stop;
 pub mod control_codec {
-    pub use super::control::{MAGIC, MAX_FRAME, Request, Response, StatusReply};
+    pub use super::control::{
+        DisabledList, MAGIC, MAX_FRAME, MAX_STATUS_STRING, Request, Response, StatusReply,
+    };
 }
 pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};
 pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_single};
@@ -557,8 +559,11 @@ impl ServeCmd {
     /// Under `--resident` the control listener joins as a THIRD arm beside the exposer and Ctrl-C:
     /// it serves the local socket until the same token fires, then the teardown unlinks the socket
     /// and drops the lock. Without `--resident` nothing new executes (the arm is absent, not idle).
-    /// Each arm reports its own [`Stopped`] kind: the exposer arm is the wire/expires `Requested`,
-    /// the socket arm is the local `Local`, so the two never collapse into one kind.
+    /// Because the socket `Stop` cancels the SAME token the exposer watches, every resident arm
+    /// classifies its result from the recorded [`StopSource`] rather than from the arm that won
+    /// the poll: a socket stop renders [`Stopped::Local`], a wire
+    /// `control.stop` or a `--expires` deadline renders [`Stopped::Requested`], and a Ctrl-C records
+    /// itself and renders [`Stopped::Interrupted`], so the kinds never collapse into one.
     #[allow(clippy::too_many_arguments)]
     async fn run_until_stopped<T: Transport, D: Discovery>(
         &self,
@@ -597,23 +602,31 @@ impl ServeCmd {
                 }
             }
             Some((state, listener, lock)) => {
+                // The stop source is read AFTER the select, never inferred from the arm that won:
+                // a socket `Stop` records its kind and cancels the same token the exposer watches,
+                // so both the exposer arm and the resident arm become ready together and tokio may
+                // complete either. Classifying from the record keeps the socket stop on the local
+                // line even when the exposer arm wins the poll, while a wire `control.stop` (which
+                // records nothing) still renders as the requested stop.
+                let source = state.stop_source();
                 let resident = state.serve(listener);
                 tokio::select! {
                     result = exposer.run(node, cancel.clone()) => {
                         result?;
                         lock.release();
-                        Stopped::Requested
+                        classify_stop(source.first())
                     }
                     output = resident => {
                         output?;
                         lock.release();
-                        Stopped::Local
+                        classify_stop(source.first())
                     }
                     signalled = tokio::signal::ctrl_c() => {
                         signalled?;
+                        source.note(StopKind::Interrupted);
                         cancel.cancel();
                         lock.release();
-                        Stopped::Interrupted
+                        classify_stop(source.first())
                     }
                 }
             }
@@ -1051,6 +1064,19 @@ impl Stopped {
             Self::Interrupted => "\nnode stopped (interrupted).",
             Self::Local => "\nnode stopped (local request).",
         }
+    }
+}
+
+/// Classify a finished resident run from its recorded [`StopSource`], never from the select arm
+/// that happened to complete: the socket `Stop` records [`StopKind::Socket`] before it cancels the
+/// token, so the local stop stays [`Stopped::Local`] even when the exposer arm wins the poll. A
+/// wire `control.stop` records nothing and a `--expires` deadline records nothing, so both render
+/// as [`Stopped::Requested`]; a Ctrl-C records itself and renders [`Stopped::Interrupted`].
+fn classify_stop(source: Option<StopKind>) -> Stopped {
+    match source {
+        Some(StopKind::Socket) => Stopped::Local,
+        Some(StopKind::Interrupted) => Stopped::Interrupted,
+        Some(StopKind::Expires | StopKind::Wire) | None => Stopped::Requested,
     }
 }
 

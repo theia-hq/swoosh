@@ -18,6 +18,11 @@ pub const MAGIC: [u8; 4] = *b"SWC1";
 /// connection closed, before a byte of it is read.
 pub const MAX_FRAME: usize = 8 * 1024;
 
+/// The longest string one status reply carries: a disabled name or an explicit-unknown reason.
+/// Both the encoder and the decoder enforce it, so an encode can never produce a status frame its
+/// own decode refuses.
+pub const MAX_STATUS_STRING: usize = 256;
+
 /// The only requests a local control client can make: two reads and a stop. There is deliberately
 /// NO toggle/revoke variant: enabling or disabling a service is a file-write on `<home>/disabled`,
 /// never a socket RPC, so the compiler enforces the mutate-free rule at every match site.
@@ -104,6 +109,19 @@ impl Request {
     }
 }
 
+/// The live disabled list in a status reply: the names, or an explicit unknown when the file could
+/// not be read. An enum, not an empty vector, so a read failure never renders as "nothing disabled"
+/// while the gate still refuses the service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisabledList {
+    /// The names currently disabled. An empty list means the file is absent or empty: nothing is
+    /// disabled, and the gate agrees.
+    Known(Vec<String>),
+    /// The file exists but could not be read or exceeded the bounded read: the gate still refuses
+    /// whatever it honors, so the oracle reports an explicit unknown instead of a false empty.
+    Unknown(String),
+}
+
 /// The node's status over the local socket: the public SHAPE only (id, pid, address, uptime, the
 /// served catalog, the live disabled list). Never key material, never badge bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,12 +137,13 @@ pub struct StatusReply {
     /// The served catalog snapshot.
     pub catalog: ServiceCatalog,
     /// The live disabled list, re-read per query.
-    pub disabled: Vec<String>,
+    pub disabled: DisabledList,
 }
 
 impl StatusReply {
-    /// Encode the reply to its length-prefixed wire form.
-    pub fn encode(&self) -> Vec<u8> {
+    /// Encode the reply to its length-prefixed wire form. Fallible only when a disabled-unknown
+    /// reason cannot fit the u16 string prefix, never silently truncated.
+    pub fn encode(&self) -> io::Result<Vec<u8>> {
         let mut out = Vec::new();
         out.extend_from_slice(self.node_id.key());
         out.extend_from_slice(&self.pid.to_be_bytes());
@@ -142,13 +161,28 @@ impl StatusReply {
         let catalog = self.catalog.encode();
         out.extend_from_slice(&(catalog.len() as u32).to_be_bytes());
         out.extend_from_slice(&catalog);
-        out.extend_from_slice(&(self.disabled.len() as u32).to_be_bytes());
-        for name in &self.disabled {
-            let bytes = name.as_bytes();
-            out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-            out.extend_from_slice(bytes);
+        match &self.disabled {
+            DisabledList::Known(names) => {
+                out.push(0);
+                out.extend_from_slice(&(names.len() as u32).to_be_bytes());
+                for name in names {
+                    if name.len() > MAX_STATUS_STRING {
+                        return Err(io::Error::other("disabled name too long"));
+                    }
+                    let bytes = name.as_bytes();
+                    out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+                    out.extend_from_slice(bytes);
+                }
+            }
+            DisabledList::Unknown(reason) => {
+                if reason.len() > MAX_STATUS_STRING {
+                    return Err(io::Error::other("disabled unknown reason too long"));
+                }
+                out.push(1);
+                write_str_into(&mut out, reason)?;
+            }
         }
-        out
+        Ok(out)
     }
 
     /// Decode a reply written by [`encode`](Self::encode). Bounds-checked against untrusted input.
@@ -186,23 +220,49 @@ impl StatusReply {
         }
         let catalog = ServiceCatalog::decode(take(bytes, &mut cursor, catalog_len)?)
             .map_err(ControlError::Catalog)?;
-        let disabled_count = u32::from_be_bytes(take_array(bytes, &mut cursor)?) as usize;
-        if disabled_count > 1024 {
-            return Err(ControlError::Protocol(
-                "status names too many disabled".to_owned(),
-            ));
-        }
-        let mut disabled = Vec::with_capacity(disabled_count);
-        for _ in 0..disabled_count {
-            let len = usize::from(u16::from_be_bytes(take_array(bytes, &mut cursor)?));
-            if len > 256 {
-                return Err(ControlError::Protocol("disabled name too long".to_owned()));
+        let disabled = match take_byte(bytes, &mut cursor)? {
+            0 => {
+                let disabled_count = u32::from_be_bytes(take_array(bytes, &mut cursor)?) as usize;
+                if disabled_count > 1024 {
+                    return Err(ControlError::Protocol(
+                        "status names too many disabled".to_owned(),
+                    ));
+                }
+                let mut names = Vec::with_capacity(disabled_count);
+                for _ in 0..disabled_count {
+                    let len = usize::from(u16::from_be_bytes(take_array(bytes, &mut cursor)?));
+                    if len > MAX_STATUS_STRING {
+                        return Err(ControlError::Protocol("disabled name too long".to_owned()));
+                    }
+                    let name = core::str::from_utf8(take(bytes, &mut cursor, len)?)
+                        .map_err(|_| {
+                            ControlError::Protocol("disabled name is not UTF-8".to_owned())
+                        })?
+                        .to_owned();
+                    names.push(name);
+                }
+                DisabledList::Known(names)
             }
-            let name = core::str::from_utf8(take(bytes, &mut cursor, len)?)
-                .map_err(|_| ControlError::Protocol("disabled name is not UTF-8".to_owned()))?
-                .to_owned();
-            disabled.push(name);
-        }
+            1 => {
+                let len = usize::from(u16::from_be_bytes(take_array(bytes, &mut cursor)?));
+                if len > MAX_STATUS_STRING {
+                    return Err(ControlError::Protocol(
+                        "disabled unknown reason too long".to_owned(),
+                    ));
+                }
+                let reason = core::str::from_utf8(take(bytes, &mut cursor, len)?)
+                    .map_err(|_| {
+                        ControlError::Protocol("disabled unknown reason is not UTF-8".to_owned())
+                    })?
+                    .to_owned();
+                DisabledList::Unknown(reason)
+            }
+            other => {
+                return Err(ControlError::Protocol(format!(
+                    "unknown disabled presence {other:#04x}"
+                )));
+            }
+        };
         if cursor != bytes.len() {
             return Err(ControlError::Protocol(
                 "status has trailing bytes".to_owned(),
@@ -250,7 +310,7 @@ impl Response {
     pub async fn write<W: io::AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
         let payload = match self {
             Self::Catalog(catalog) => catalog.encode(),
-            Self::Status(status) => status.encode(),
+            Self::Status(status) => status.encode()?,
             Self::Ack => Vec::new(),
             Self::Refused(reason) | Self::Error(reason) => {
                 let mut out = Vec::new();

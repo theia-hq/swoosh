@@ -251,6 +251,32 @@ fn stopped_has_an_arm_only_for_graceful_reasons() {
     }
 }
 
+/// M3: a resident stop is classified from the recorded source, never from which select arm the
+/// reactor completed. A socket stop renders the local line even if the exposer arm wins the poll;
+/// a wire `control.stop` or a `--expires` (both record nothing) renders the requested line.
+#[test]
+fn resident_stop_classifies_from_its_source() {
+    use super::{StopKind, classify_stop};
+
+    assert_eq!(
+        classify_stop(Some(StopKind::Socket)),
+        Stopped::Local,
+        "the socket stop renders as the local stop"
+    );
+    for source in [None, Some(StopKind::Wire), Some(StopKind::Expires)] {
+        assert_eq!(
+            classify_stop(source),
+            Stopped::Requested,
+            "a wire or expires stop renders as requested: {source:?}"
+        );
+    }
+    assert_eq!(
+        classify_stop(Some(StopKind::Interrupted)),
+        Stopped::Interrupted,
+        "a recorded interrupt renders as interrupted"
+    );
+}
+
 /// Plain serve creates no runtime state: no dir, no lock, no socket. The flag alone never touches
 /// the filesystem (S2/S3 wire the acquire; S1 only shapes the CLI), so a plain serve in-process
 /// with a temp runtime root leaves nothing behind.

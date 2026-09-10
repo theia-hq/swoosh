@@ -1,5 +1,6 @@
 //! S2 blocker tests: flock truth, stale rebind, live refusal, crash recovery, per-home split.
 
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::io::AsRawFd as _;
 use std::os::unix::net::UnixListener;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -252,6 +253,21 @@ fn per_home_paths_never_collide() {
         first.home_key(),
         first.home.home_key(),
         "the FNV key is stable across resolutions of the same dir"
+    );
+    // The widened full-width hash: 16 lowercase hex chars, never the old 32-bit 8-char key.
+    let key = first.home_key();
+    assert_eq!(key.len(), 16, "the key renders the full 64 bits: {key}");
+    assert!(
+        key.chars().all(|c| c.is_ascii_hexdigit()),
+        "the key stays lowercase hex: {key}"
+    );
+    // The widened key adds eight chars but must still fit sun_path on both platforms (104 on
+    // macOS, 108 on Linux; assert the tighter one), or the bind would fail on a long temp root.
+    let socket = first.home.control_socket().expect("socket path");
+    assert!(
+        socket.as_os_str().as_bytes().len() < 104,
+        "the resident socket path fits sun_path: {}",
+        socket.display()
     );
     let (a_lock, _) = acquire(&first.home).expect("first home starts");
     let (b_lock, _) = acquire(&second.home).expect("second home starts alongside");

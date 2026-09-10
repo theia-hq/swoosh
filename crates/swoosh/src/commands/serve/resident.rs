@@ -16,7 +16,9 @@ use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
-use super::control::{ControlError, Request, Response, StatusReply};
+use super::control::{
+    ControlError, DisabledList, MAX_STATUS_STRING, Request, Response, StatusReply,
+};
 
 /// Seconds a control connection may sit idle before it is reaped (the slow-loris bound).
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -24,6 +26,18 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Concurrent control connections served at once; past the cap, connections queue at the listener
 /// (the `MAX_SESSIONS` backpressure pattern), so a flood queues rather than pinning a task each.
 pub const MAX_CONTROL_CONNS: usize = 8;
+
+/// The largest slice of `<home>/disabled` one status read inspects: enough for any legitimate
+/// disable list, bounded so a same-uid writer cannot make the daemon allocate on demand.
+pub const DISABLED_BYTES_CAP: u64 = 64 * 1024;
+
+/// The most disabled names one status reply reports, mirroring the codec's decode cap
+/// (`control.rs`), so a grown file can never produce a reply the client refuses to decode.
+pub const DISABLED_NAMES_CAP: usize = 1024;
+
+/// How long the accept loop waits after a recoverable accept error before retrying: enough for
+/// transient resource pressure (EMFILE/ENOBUFS) to clear, short enough that a stop lands promptly.
+pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
 /// The resident state the accept loop serves from. Built once at `--resident` start; every query
 /// reads the LIVE disabled file, never a cached copy, so the socket is never a data channel into
@@ -116,7 +130,7 @@ impl Resident {
     }
 
     /// The live disabled list, re-read per query.
-    pub fn disabled_names(&self) -> Vec<String> {
+    pub fn disabled_names(&self) -> DisabledList {
         read_disabled_names(&self.disabled_path)
     }
 
@@ -132,21 +146,34 @@ impl Resident {
         loop {
             tokio::select! {
                 () = self.cancel.cancelled() => return Ok(()),
-                accepted = listener.accept() => {
-                    let Ok((stream, _)) = accepted else {
-                        continue;
-                    };
-                    // Acquire BEFORE any spawn: past the cap, connections queue at the listener
-                    // instead of each pinning a task set.
-                    let Ok(permit) = self.conns.clone().try_acquire_owned() else {
-                        drop(stream);
-                        continue;
-                    };
-                    let this = Arc::clone(&self);
-                    tokio::spawn(async move {
-                        let _permit = permit;
-                        this.serve_one(stream).await;
-                    });
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _)) => {
+                        // Acquire BEFORE any spawn: past the cap, connections queue at the listener
+                        // instead of each pinning a task set.
+                        let Ok(permit) = self.conns.clone().try_acquire_owned() else {
+                            drop(stream);
+                            continue;
+                        };
+                        let this = Arc::clone(&self);
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            this.serve_one(stream).await;
+                        });
+                    }
+                    Err(error) if accept_error_fatal(&error) => {
+                        // A listener-level error (a bad descriptor, a non-socket) cannot clear by
+                        // retrying: stop the arm so the run fails loudly instead of backing off
+                        // forever on a control socket that can never answer.
+                        return Err(eyre::eyre!("control listener failed: {error}"));
+                    }
+                    Err(error) => {
+                        // A recoverable error (fd pressure: EMFILE/ENFILE/ENOBUFS) would re-fire
+                        // immediately and spin the same runtime the exposer serves on, so wait one
+                        // short bounded backoff before the next accept. The loop re-checks the
+                        // cancel token after it, so a stop during the backoff lands promptly.
+                        tracing::warn!(%error, "control accept failed; backing off");
+                        tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    }
                 }
             }
         }
@@ -201,18 +228,55 @@ impl Resident {
 /// Read the live disabled names from `<home>/disabled`: one trimmed non-empty name per line, an
 /// absent file meaning none. Total (any name is a valid thing to disable), mirroring the oracle's
 /// decode without depending on its debounce state.
-fn read_disabled_names(path: &std::path::Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
+///
+/// Bounded and honest: at most [`DISABLED_BYTES_CAP`] bytes are read, at most
+/// [`DISABLED_NAMES_CAP`] names reported, and every name must fit the reply's own
+/// [`MAX_STATUS_STRING`] cap; a read failure, an oversized file, or an oversize name is an
+/// explicit [`DisabledList::Unknown`], never an empty "nothing disabled" the gate would contradict
+/// or a frame the client refuses to decode.
+fn read_disabled_names(path: &std::path::Path) -> DisabledList {
+    use std::io::Read as _;
+
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+            return DisabledList::Known(Vec::new());
+        }
+        Err(error) => return DisabledList::Unknown(error.to_string()),
     };
-    let mut names: Vec<String> = text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_owned)
-        .collect();
+    // Read one byte past the cap so an oversized file is detectable, not silently truncated: a
+    // truncated list would under-report exactly like the false empty this fix removes.
+    let mut reader = file.take(DISABLED_BYTES_CAP + 1);
+    let mut text = String::new();
+    if let Err(error) = reader.read_to_string(&mut text) {
+        return DisabledList::Unknown(error.to_string());
+    }
+    if text.len() as u64 > DISABLED_BYTES_CAP {
+        return DisabledList::Unknown("the disabled file exceeds the read cap".to_owned());
+    }
+    let mut names = Vec::new();
+    for name in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if name.len() > MAX_STATUS_STRING {
+            return DisabledList::Unknown(format!(
+                "a disabled name exceeds the {MAX_STATUS_STRING}-byte reply cap"
+            ));
+        }
+        names.push(name.to_owned());
+    }
     names.sort();
-    names
+    names.truncate(DISABLED_NAMES_CAP);
+    DisabledList::Known(names)
+}
+
+/// Whether an accept error is fatal for the listener: a bad descriptor or a non-socket cannot
+/// clear by retrying, so the arm ends the run instead of backing off forever. Everything else
+/// (fd pressure, connection aborts) is treated as recoverable and takes the bounded backoff;
+/// `WouldBlock`/`EINTR` never reach here because tokio's readiness machinery absorbs them.
+fn accept_error_fatal(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EBADF | libc::EFAULT | libc::EINVAL | libc::ENOTSOCK)
+    )
 }
 
 /// Which path fired the teardown token. Recorded once (first writer wins), never collapsing the

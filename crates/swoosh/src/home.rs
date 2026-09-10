@@ -124,10 +124,11 @@ impl Home {
         self.dir.join("contacts.toml")
     }
 
-    /// The 8-char hex key scoping this home's resident state: inline 64-bit FNV-1a over the
-    /// canonicalized home path, lower 32 bits rendered as 8 lowercase hex chars. Dependency free
-    /// and stable across daemon and client because both binaries carry this same function. Two
-    /// different homes hash differently, so two `--home`s never share a socket or lock.
+    /// The 16-char hex key scoping this home's resident state: inline 64-bit FNV-1a over the
+    /// canonicalized home path, the full 64 bits rendered as 16 lowercase hex chars. Dependency
+    /// free and stable across daemon and client because both binaries carry this same function.
+    /// Two different homes hash differently (the full-width hash, so collisions need a 2^64
+    /// birthday, not 2^32), so two `--home`s never share a socket or lock.
     pub fn home_key(&self) -> String {
         let canonical = std::fs::canonicalize(&self.dir).unwrap_or_else(|_| {
             if self.dir.is_absolute() {
@@ -143,7 +144,7 @@ impl Home {
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x0100_0000_01b3);
         }
-        format!("{:08x}", (hash & 0xffff_ffff) as u32)
+        format!("{hash:016x}")
     }
 
     /// `<runtime>/swoosh-<uid>/<key>` (macOS) or `$XDG_RUNTIME_DIR/swoosh/<key>` (Linux): the
