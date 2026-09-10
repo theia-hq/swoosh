@@ -28,20 +28,22 @@ fn xdg_runtime_env() -> MutexGuard<'static, ()> {
 
 /// A scratch home with an isolated `XDG_RUNTIME_DIR` per test. Restores the ambient value on drop.
 /// The mutation is only safe under the per-test [`xdg_runtime_env`] guard, which `Scratch` does not
-/// take itself: `per_home_paths_never_collide` owns two.
+/// take itself: `per_home_paths_never_collide` owns two. Drop removes exactly the per-test `root`,
+/// never its parent: on macOS the parent of a scratch leaf is the real per-user temp dir.
 struct Scratch {
     home: Home,
+    root: std::path::PathBuf,
     runtime: std::path::PathBuf,
+    leaf: std::path::PathBuf,
     prior: Option<std::ffi::OsString>,
 }
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        // Under the macOS per-user temp dir (already 0700): the macOS runtime root IS that temp
-        // dir, so a scratch runtime directly under it inherits the verified shape with no
-        // fixups. Linux tests set XDG_RUNTIME_DIR to the scratch dir instead.
-        #[cfg(target_os = "macos")]
-        let runtime = std::env::temp_dir().join(format!(
+        // One per-test root under the system temp dir. The runtime leaf is that root on macOS
+        // (whose runtime root IS the per-user temp dir) and `root/run` on Linux, where
+        // `XDG_RUNTIME_DIR` names the leaf's parent.
+        let root = std::env::temp_dir().join(format!(
             "swoosh-single-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -49,41 +51,34 @@ impl Scratch {
                 .map(|d| d.as_nanos())
                 .unwrap_or(0)
         ));
+        #[cfg(target_os = "macos")]
+        let runtime = root.clone();
         #[cfg(not(target_os = "macos"))]
-        let runtime = {
-            let base = std::env::temp_dir().join(format!(
-                "swoosh-single-{name}-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos())
-                    .unwrap_or(0)
-            ));
-            base.join("run")
-        };
+        let runtime = root.join("run");
         let home_dir = runtime.join("home");
         std::fs::create_dir_all(&home_dir).expect("scratch home");
         std::fs::create_dir_all(&runtime).expect("scratch runtime");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
+            // Only the scratch root is chmod'd, never the shared system temp dir: the macOS chain
+            // verifier reads that dir's mode, but this test does not own it.
+            let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700));
             let _ = std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700));
-            // The macOS runtime root derives from confstr, ignoring XDG_RUNTIME_DIR: point the
-            // leaf's whole chain at 0700 as well, since the temp dir may carry ACLs the mode
-            // check reads through differently. Best-effort; the verifier decides.
-            let _ = std::fs::set_permissions(
-                std::env::temp_dir(),
-                std::fs::Permissions::from_mode(0o700),
-            );
         }
         let prior = std::env::var_os("XDG_RUNTIME_DIR");
         // SAFETY: the test holding `XDG_RUNTIME_ENV` is the only one mutating this process-global
         // variable at a time, and it restores the prior value on drop.
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &runtime) };
         let home = Home::resolve(Some(home_dir)).expect("explicit home resolves");
+        // The resolved leaf under the per-user runtime root, cleaned on drop so a macOS run does
+        // not leave `swoosh-<uid>/<key>` behind in the real temp dir.
+        let leaf = home.runtime_dir().unwrap_or_default();
         Self {
             home,
+            root,
             runtime,
+            leaf,
             prior,
         }
     }
@@ -101,7 +96,8 @@ impl Drop for Scratch {
             // SAFETY: no ambient value existed, so remove what we set.
             None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
         }
-        let _ = std::fs::remove_dir_all(self.runtime.parent().unwrap_or(&self.runtime));
+        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = std::fs::remove_dir_all(&self.leaf);
     }
 }
 
