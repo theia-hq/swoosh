@@ -382,15 +382,16 @@ impl ServeCmd {
         // longer mask a named public one. Stays swoosh-side; tightbeam's `with_public` handles the sshd/raw wall.
         fetch.refuse_open_relay(&public)?;
         // Snapshot the served catalog (names + effective PER-SERVICE posture: open iff opened by `--public`,
-        // else gated) ONCE, here, for the `control.services` read handler to serve. Built from the same raw
-        // request `with_public` proves below, so a name reads `open` only when the proof would also pass.
+        // else gated) ONCE, here, for the `control.services` read handler AND the resident socket read to
+        // serve. Both serve the same snapshot: the handler takes one clone, the resident state below takes
+        // the other. Built from the same raw request `with_public` proves below, so a name reads `open`
+        // only when the proof would also pass.
         let catalog = services.catalog(&gate, &public, &public_unsafe);
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
-        // `--expires` timer and the gated `control.stop` handler each hold a CLONE as the node-control
-        // capability -- they may REQUEST the stop, never tear the node down themselves. So this one token is
-        // the join point for every way the node can stop: a Ctrl-C, a `--expires` deadline, a remote
-        // `swoosh stop`, or (under `--resident`) the local socket stop. S3 wires the socket arm to this
-        // same token; S1 only shapes the flag and the banner, so the join point is unchanged today.
+        // `--expires` timer, the gated `control.stop` handler, and (under `--resident`) the local socket
+        // `Stop` each hold a CLONE as the node-control capability: they may REQUEST the stop, never tear
+        // the node down themselves. So this one token is the join point for every way the node can stop:
+        // a Ctrl-C, a `--expires` deadline, a remote `swoosh stop`, or the local socket stop.
         let cancel = CancellationToken::new();
         // Assemble the registry: the base handlers, then one `Fetch` instance per fetch service under its own
         // synthetic scheme, then roster + the two `control.*` handlers. `Exposer::new` enforces every named
@@ -413,7 +414,10 @@ impl ServeCmd {
         let registry = registry
             .with("roster", Roster::new(roster_blob))
             .with(CONTROL_STOP_SERVICE, Stop::new(cancel.clone()))
-            .with(CONTROL_SERVICES_SERVICE, ServiceList::new(catalog));
+            .with(
+                CONTROL_SERVICES_SERVICE,
+                ServiceList::new(tightbeam::tunnel::ServiceCatalog::clone(&catalog)),
+            );
         // Wire the live enable/disable oracle (delib-47) alongside the proven public overlay: a stream for a
         // service named in `<home>/disabled` is refused at the gate seam, live, and a re-enable restores it
         // with no restart. `with_enabled` cannot fail (it only stores the oracle), so it tails the chain.
@@ -421,8 +425,33 @@ impl ServeCmd {
             .with_public(public)?
             .with_enabled(enabled);
 
+        // The resident listener arm (S4), after the proven overlay so a refused serve never binds
+        // a socket. Order: (1) plain serve acquires nothing (byte-identical, no dir, no lock, no
+        // socket); (2) `--resident` acquires single-instance off the THREADED home (flock truth +
+        // bound listener, held for life); the LIVE catalog snapshot above plus a CLONE of the node's
+        // one teardown token ride the `Resident` state the accept loop serves from. The bound
+        // address rides along as the status `addr`, carried with the arm (no second `local_addr`).
+        // Snapshot the address only when something reads it (the arm, or the banner): a plain
+        // quiet serve performs no new read at all.
+        let addr = (self.resident || !self.quiet).then(|| node.local_addr());
+        let resident = if self.resident {
+            let addr = addr.clone().unwrap_or_else(|| node.local_addr());
+            Some(self.resident_parts(
+                &home,
+                tightbeam::tunnel::ServiceCatalog::clone(&catalog),
+                addr.node,
+                addr.hints.first().copied(),
+                &cancel,
+            )?)
+        } else {
+            None
+        };
+
         if !self.quiet {
-            let addr = node.local_addr();
+            // The banner reads the same `local_addr` snapshot the resident arm carried above, so the
+            // id, the hints, and the status `addr` can never disagree within one run. Under
+            // `--quiet` there is no banner and no second read either: the arm already carried it.
+            let addr = addr.unwrap_or_else(|| node.local_addr());
             // A display map of served name -> target address, read off the SAME requested strings tightbeam
             // parsed (fetch already de-merged out), so the banner renders `name -> target` from what the
             // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
@@ -463,7 +492,8 @@ impl ServeCmd {
             let manifest = exposer.manifest();
             // FLAG(CLI-Architect): the `control` banner line wording is the surface owner's call;
             // picked here as one extra line under `--resident` only, after the reach section.
-            let control_line = self.control_line();
+            let resident_socket = resident.as_ref().map(|(_, _, lock)| lock.socket_path());
+            let control_line = self.control_line(resident_socket);
             print!(
                 "{}",
                 render_ready_banner(
@@ -480,13 +510,9 @@ impl ServeCmd {
             );
         }
 
-        // S1 shape only: single-instance acquire (S2) needs the composition root's home, now
-        // threaded; the socket arm (S3) still wires through the run path next. Until then,
-        // `--resident` only changes the banner (the control line), never the runtime: no dir, no
-        // lock, no socket yet. Plain serve skips even that: the flag defaults off, so nothing new
-        // executes without it.
-        let _ = (&self.resident, &home);
-
+        // The acquire above already ran: nothing new executes here. Plain serve ran nothing at all
+        // (the flag defaults off), so it stays byte-identical: no dir, no lock, no socket.
+        //
         // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
         // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives. Spawn it
         // beside the run holding a CLONE of the one token; if no `--expires` is set, no timer is spawned.
@@ -504,13 +530,11 @@ impl ServeCmd {
         // an `Err` only on a real failure, so `run_until_stopped` maps that into a typed [`Stopped`] reason
         // for a graceful end and propagates the error otherwise. A requested stop is SUCCESS: a deliberate
         // `swoosh stop` (or a timer, or a Ctrl-C) must exit 0 so the qat CI action reads a clean teardown as
-        // green, not a crash; only a genuine error teardown exits non-zero.
-        //
-        // S1 shape only: the resident arm is not yet threaded (the S2 acquire needs the home
-        // RIGHT HERE, this function, next: it is threaded now, the acquire lands next), so both paths
-        // run the plain select today. The flag, the banner line, and the module tree are committed;
-        // the wiring lands next.
-        let stopped = self.run_until_stopped(exposer, node, cancel, None).await?;
+        // green, not a crash; only a genuine error teardown exits non-zero. The resident arm (when `Some`)
+        // joins as the third select arm there; plain serve passes `None`, so nothing new executes.
+        let stopped = self
+            .run_until_stopped(exposer, node, cancel, resident)
+            .await?;
         // The teardown line is best-effort: a piped consumer (a supervisor, `swoosh serve | head`) may have
         // already closed stdout by the time the node stops, so a broken-pipe write must NOT turn a clean stop
         // into a panic. `println!` panics on a write error, so write directly and ignore a closed pipe.
@@ -534,6 +558,8 @@ impl ServeCmd {
     /// Under `--resident` the control listener joins as a THIRD arm beside the exposer and Ctrl-C:
     /// it serves the local socket until the same token fires, then the teardown unlinks the socket
     /// and drops the lock. Without `--resident` nothing new executes (the arm is absent, not idle).
+    /// Each arm reports its own [`Stopped`] kind: the exposer arm is the wire/expires `Requested`,
+    /// the socket arm is the local `Local`, so the two never collapse into one kind.
     #[allow(clippy::too_many_arguments)]
     async fn run_until_stopped<T: Transport, D: Discovery>(
         &self,
@@ -582,7 +608,7 @@ impl ServeCmd {
                     output = resident => {
                         output?;
                         lock.release();
-                        Stopped::Requested
+                        Stopped::Local
                     }
                     signalled = tokio::signal::ctrl_c() => {
                         signalled?;
@@ -597,15 +623,45 @@ impl ServeCmd {
     }
 
     /// The resident control line for the banner, under `--resident` only: `control <socket path>
-    /// (local, this user)`. `None` for a plain serve (no line, byte-identical output).
-    fn control_line(&self) -> Option<String> {
+    /// (local, this user)`. `None` for a plain serve (no line, byte-identical output). The socket
+    /// path comes from the acquired lock (the threaded home, never a re-derive), so the banner names
+    /// the same path the listener bound and future clients dial.
+    fn control_line(&self, socket: Option<&Path>) -> Option<String> {
         if !self.resident {
             return None;
         }
-        // The home behind this serve is resolved in the composition root; the line needs it, so it
-        // is rendered by the caller that owns the home. This stub keeps the no-home shape total;
-        // the run path below replaces it with the real path before printing.
-        Some("control <socket> (local, this user)".to_owned())
+        let path = socket
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<socket>".to_owned());
+        Some(format!("control {path} (local, this user)"))
+    }
+
+    /// Start the resident arm off the threaded home: the flock truth plus the bound listener (held
+    /// for process life), the live catalog snapshot, and a clone of the node's one teardown token. A
+    /// method so the acquire reads as part of the serve run, not a free helper beside it. The two
+    /// catalog clones above are the only extra copies: one per consumer of the same snapshot.
+    fn resident_parts(
+        &self,
+        home: &crate::home::Home,
+        catalog: tightbeam::tunnel::ServiceCatalog,
+        node_id: NodeId,
+        addr: Option<SocketAddr>,
+        cancel: &CancellationToken,
+    ) -> eyre::Result<(
+        Arc<Resident>,
+        std::os::unix::net::UnixListener,
+        InstanceLock,
+    )> {
+        let (lock, listener) = acquire_single(home).map_err(|error| eyre::eyre!(error))?;
+        let disabled_path = home.disabled();
+        let state = Arc::new(Resident::new(
+            node_id,
+            addr,
+            catalog,
+            disabled_path,
+            cancel.clone(),
+        ));
+        Ok((state, listener, lock))
     }
 
     /// The test seam for [`control_line`](Self::control_line): the banner takes the line as a
