@@ -433,9 +433,8 @@ impl ServeCmd {
         // address rides along as the status `addr`, carried with the arm (no second `local_addr`).
         // Snapshot the address only when something reads it (the arm, or the banner): a plain
         // quiet serve performs no new read at all.
-        let addr = (self.resident || !self.quiet).then(|| node.local_addr());
         let resident = if self.resident {
-            let addr = addr.clone().unwrap_or_else(|| node.local_addr());
+            let addr = node.local_addr();
             Some(self.resident_parts(
                 &home,
                 tightbeam::tunnel::ServiceCatalog::clone(&catalog),
@@ -448,10 +447,10 @@ impl ServeCmd {
         };
 
         if !self.quiet {
-            // The banner reads the same `local_addr` snapshot the resident arm carried above, so the
-            // id, the hints, and the status `addr` can never disagree within one run. Under
-            // `--quiet` there is no banner and no second read either: the arm already carried it.
-            let addr = addr.unwrap_or_else(|| node.local_addr());
+            // The banner reads its own `local_addr` snapshot beside the one the resident arm already
+            // carried: a plain serve (resident `None`) reads exactly once here, as today, and the
+            // resident arm carries the status `addr` from the same bound node.
+            let addr = node.local_addr();
             // A display map of served name -> target address, read off the SAME requested strings tightbeam
             // parsed (fetch already de-merged out), so the banner renders `name -> target` from what the
             // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
@@ -638,8 +637,7 @@ impl ServeCmd {
 
     /// Start the resident arm off the threaded home: the flock truth plus the bound listener (held
     /// for process life), the live catalog snapshot, and a clone of the node's one teardown token. A
-    /// method so the acquire reads as part of the serve run, not a free helper beside it. The two
-    /// catalog clones above are the only extra copies: one per consumer of the same snapshot.
+    /// method so the acquire reads as part of the serve run, not a free helper beside it.
     fn resident_parts(
         &self,
         home: &crate::home::Home,
