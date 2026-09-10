@@ -152,7 +152,15 @@ impl Home {
     /// (via [`home_key`](Self::home_key)) over the per-user runtime root, so daemon and client
     /// resolve the same paths. Never `~/.config`, never `/tmp`, never an abstract socket.
     pub fn runtime_dir(&self) -> eyre::Result<PathBuf> {
-        Ok(runtime_root()?.join(self.home_key()))
+        Ok(self.runtime_leaf(&runtime_root()?))
+    }
+
+    /// `<root>/<home_key>`: the per-home runtime leaf under an already-resolved per-user runtime
+    /// root. The ONE derivation, shared by the client path ([`runtime_dir`](Self::runtime_dir),
+    /// which resolves the root from the environment) and the daemon, which takes the root as a
+    /// value from the composition edge and never reads the environment mid-stack.
+    pub fn runtime_leaf(&self, root: &Path) -> PathBuf {
+        root.join(self.home_key())
     }
 
     /// `<runtime_dir>/control.sock`: the local control socket rendezvous. See

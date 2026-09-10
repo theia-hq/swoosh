@@ -1,112 +1,81 @@
-//! S2 blocker tests: flock truth, stale rebind, live refusal, crash recovery, per-home split.
+//! S2 tests: flock truth, stale rebind, live refusal, per-home split, graceful release.
+//!
+//! Every case threads its own per-test runtime root into `acquire`; nothing here mutates a
+//! process-global (`XDG_RUNTIME_DIR` is never touched), so the suite is parallel-safe by
+//! construction rather than by a shared environment mutex.
 
+use core::sync::atomic::{AtomicU32, Ordering};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::io::AsRawFd as _;
 use std::os::unix::net::UnixListener;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::path::PathBuf;
 
 use super::{SingleError, acquire};
 use crate::home::Home;
 
-/// Serializes tests that mutate the process-global `XDG_RUNTIME_DIR`.
-///
-/// The test harness runs cases on parallel threads, and on Linux the resident runtime root is read
-/// from `XDG_RUNTIME_DIR`, so two `Scratch`-owning tests would race each other's roots and their
-/// restores (the race that failed CI; on macOS the root comes from `confstr`, the variable is
-/// ignored, and the race is invisible locally). Every test in this file holds this for its whole
-/// body.
-static XDG_RUNTIME_ENV: Mutex<()> = Mutex::new(());
+/// Serializes scratch base names within this test process; the pid keeps two concurrent runs of the
+/// binary apart. Names stay short on purpose: the base sits under the per-user temp dir and the
+/// socket path must still fit `sun_path` (104 bytes on macOS).
+static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 
-/// Take the process-wide slot for a test that mutates `XDG_RUNTIME_DIR`. A poisoned lock is
-/// recovered: the sibling panic that poisoned it is already the reported failure, and cascading
-/// poison errors would only hide it.
-fn xdg_runtime_env() -> MutexGuard<'static, ()> {
-    XDG_RUNTIME_ENV
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-}
-
-/// A scratch home with an isolated `XDG_RUNTIME_DIR` per test. Restores the ambient value on drop.
-/// The mutation is only safe under the per-test [`xdg_runtime_env`] guard, which `Scratch` does not
-/// take itself: `per_home_paths_never_collide` owns two. Drop removes exactly the per-test `root`,
-/// never its parent: on macOS the parent of a scratch leaf is the real per-user temp dir.
+/// A scratch home plus an isolated runtime root per test, both under one owned base dir. Drop
+/// removes exactly that base (`remove_dir_all`), never a parent: on macOS the parent of a scratch
+/// leaf would be the real per-user temp dir. The root shape mirrors production: on macOS the base
+/// IS the runtime root (whose parent, the per-user temp dir, is the verifier's base); elsewhere
+/// `<base>` plays the XDG base and `<base>/run` the runtime root handed to `acquire`.
 struct Scratch {
+    base: PathBuf,
+    root: PathBuf,
     home: Home,
-    root: std::path::PathBuf,
-    runtime: std::path::PathBuf,
-    leaf: std::path::PathBuf,
-    prior: Option<std::ffi::OsString>,
 }
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        // One per-test root under the system temp dir. The runtime leaf is that root on macOS
-        // (whose runtime root IS the per-user temp dir) and `root/run` on Linux, where
-        // `XDG_RUNTIME_DIR` names the leaf's parent.
-        let root = std::env::temp_dir().join(format!(
-            "swoosh-single-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        ));
+        let short: String = name.chars().take(8).collect();
+        let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("sw-{short}-{}-{seq}", std::process::id()));
         #[cfg(target_os = "macos")]
-        let runtime = root.clone();
+        let root = base.clone();
         #[cfg(not(target_os = "macos"))]
-        let runtime = root.join("run");
-        let home_dir = runtime.join("home");
+        let root = base.join("run");
+        let home_dir = base.join("home");
         std::fs::create_dir_all(&home_dir).expect("scratch home");
-        std::fs::create_dir_all(&runtime).expect("scratch runtime");
-        #[cfg(unix)]
+        std::fs::create_dir_all(&root).expect("scratch runtime root");
         {
             use std::os::unix::fs::PermissionsExt as _;
-            // Only the scratch root is chmod'd, never the shared system temp dir: the macOS chain
-            // verifier reads that dir's mode, but this test does not own it.
+            // 0700 on the two dirs the chain verifier stats; the per-home leaf is created 0700 by
+            // `acquire` itself.
+            let _ = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
             let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700));
-            let _ = std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700));
         }
-        let prior = std::env::var_os("XDG_RUNTIME_DIR");
-        // SAFETY: the test holding `XDG_RUNTIME_ENV` is the only one mutating this process-global
-        // variable at a time, and it restores the prior value on drop.
-        unsafe { std::env::set_var("XDG_RUNTIME_DIR", &runtime) };
         let home = Home::resolve(Some(home_dir)).expect("explicit home resolves");
-        // The resolved leaf under the per-user runtime root, cleaned on drop so a macOS run does
-        // not leave `swoosh-<uid>/<key>` behind in the real temp dir.
-        let leaf = home.runtime_dir().unwrap_or_default();
-        Self {
-            home,
-            root,
-            runtime,
-            leaf,
-            prior,
-        }
+        Self { base, root, home }
     }
 
     fn home_key(&self) -> String {
         self.home.home_key()
     }
+
+    /// The per-home runtime leaf under this test's root: the same derivation `acquire` uses.
+    fn leaf(&self) -> PathBuf {
+        self.home.runtime_leaf(&self.root)
+    }
 }
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        match self.prior.take() {
-            // SAFETY: same single-test-ownership contract as `new`: restores the ambient value.
-            Some(value) => unsafe { std::env::set_var("XDG_RUNTIME_DIR", value) },
-            // SAFETY: no ambient value existed, so remove what we set.
-            None => unsafe { std::env::remove_var("XDG_RUNTIME_DIR") },
-        }
-        let _ = std::fs::remove_dir_all(&self.root);
-        let _ = std::fs::remove_dir_all(&self.leaf);
+        let _ = std::fs::remove_dir_all(&self.base);
     }
 }
 
-/// Two concurrent starts on one home: exactly one wins, the loser names the winner's pid.
+/// Two starts on one home: exactly one wins, the loser names the winner's pid.
 #[test]
 fn two_resident_starts_one_home_exactly_one_wins() {
-    let _env = xdg_runtime_env();
     let scratch = Scratch::new("duel");
-    let (first, second) = (acquire(&scratch.home), acquire(&scratch.home));
+    let (first, second) = (
+        acquire(&scratch.home, &scratch.root),
+        acquire(&scratch.home, &scratch.root),
+    );
     match (first, second) {
         (Ok((lock, _)), Err(SingleError::AlreadyResident { pid })) => {
             assert_eq!(pid, lock.pid(), "the loser names the winner's pid");
@@ -124,14 +93,14 @@ fn two_resident_starts_one_home_exactly_one_wins() {
 /// A dropped-but-not-unlinked listener leaves a stale path: the next start probes, unlinks, rebinds.
 #[test]
 fn stale_socket_is_probed_then_unlinked_and_rebound() {
-    let _env = xdg_runtime_env();
     let scratch = Scratch::new("stale");
     // Establish the runtime leaf through one clean acquire first (creating it 0700), then plant
     // the stale socket inside it: the stale-rebind path is under test, not the create path.
     // `drop` the lock WITHOUT `release` (the crash shape) and `forget` the listener WITHOUT
     // unlink (the stale plant): both teardowns leave the dead path behind.
     let socket = {
-        let (lock, listener) = acquire(&scratch.home).expect("first acquire creates the leaf");
+        let (lock, listener) =
+            acquire(&scratch.home, &scratch.root).expect("first acquire creates the leaf");
         let socket = lock.socket_path().to_path_buf();
         // Shut the listener DOWN (no more answers) but leave the path: `shutdown` stops the
         // accept queue so the probe gets ECONNREFUSED, while the path stays behind as the stale
@@ -143,7 +112,7 @@ fn stale_socket_is_probed_then_unlinked_and_rebound() {
         socket
     };
     // The listener is gone (path stale): the next start must succeed and rebind it.
-    let (lock, _) = acquire(&scratch.home).expect("stale socket rebinds");
+    let (lock, _) = acquire(&scratch.home, &scratch.root).expect("stale socket rebinds");
     assert!(socket.exists(), "the rebound socket exists");
     let _ = lock;
 }
@@ -154,17 +123,17 @@ fn stale_socket_is_probed_then_unlinked_and_rebound() {
 /// the live plant and refuses.
 #[test]
 fn live_socket_under_lock_refuses_start() {
-    let _env = xdg_runtime_env();
     let scratch = Scratch::new("live");
     // The leaf must exist 0700 before the plant binds inside it.
-    let (seed, seed_listener) = acquire(&scratch.home).expect("seed acquire creates the leaf");
+    let (seed, seed_listener) =
+        acquire(&scratch.home, &scratch.root).expect("seed acquire creates the leaf");
     let socket = seed.socket_path().to_path_buf();
     drop(seed);
     drop(seed_listener);
     let _ = std::fs::remove_file(&socket);
     let live = UnixListener::bind(&socket).expect("plant a live listener");
     // The borrowed lock: a second flock fd held open across the start below.
-    let lock_path = scratch.home.control_lock().expect("lock path");
+    let lock_path = scratch.leaf().join("control.lock");
     let squat = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -178,7 +147,7 @@ fn live_socket_under_lock_refuses_start() {
     assert_eq!(locked, 0, "the squat takes the borrowed lock");
     // The second start contends on the borrowed lock: it loses with AlreadyResident (the truth),
     // and the live socket is never unlinked. The probe-alive refusal is proven directly below.
-    let refused = acquire(&scratch.home).is_err();
+    let refused = acquire(&scratch.home, &scratch.root).is_err();
     assert!(refused, "a live socket under the lock refuses start");
     assert!(socket.exists(), "the live socket is never unlinked");
     // Direct: the probe hears the live plant (connect succeeds), so a start UNDER this borrowed
@@ -195,10 +164,10 @@ fn live_socket_under_lock_refuses_start() {
 /// connect answer `EACCES`, an outcome the unlink policy must refuse.
 #[test]
 fn unclassified_probe_refuses_and_never_unlinks() {
-    let _env = xdg_runtime_env();
     let scratch = Scratch::new("unclassified");
     // The leaf must exist 0700 before the plant binds inside it.
-    let (seed, seed_listener) = acquire(&scratch.home).expect("seed acquire creates the leaf");
+    let (seed, seed_listener) =
+        acquire(&scratch.home, &scratch.root).expect("seed acquire creates the leaf");
     let socket = seed.socket_path().to_path_buf();
     drop(seed);
     drop(seed_listener);
@@ -212,7 +181,7 @@ fn unclassified_probe_refuses_and_never_unlinks() {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000))
             .expect("chmod the live socket to 000");
     }
-    let refused = acquire(&scratch.home);
+    let refused = acquire(&scratch.home, &scratch.root);
     assert!(
         matches!(refused, Err(SingleError::ProbeUnclassified)),
         "an unclassified probe refuses start"
@@ -224,20 +193,19 @@ fn unclassified_probe_refuses_and_never_unlinks() {
 /// Dropping the lock fd without clean shutdown (the crash): the next start succeeds.
 #[test]
 fn crash_releases_flock_next_start_rebinds() {
-    let _env = xdg_runtime_env();
     let scratch = Scratch::new("crash");
     {
-        let (_lock, _listener) = acquire(&scratch.home).expect("first start");
+        let (_lock, _listener) = acquire(&scratch.home, &scratch.root).expect("first start");
         // Drop without `release`: the crash path. The OS releases the flock; the socket stays.
     }
-    let (lock, _) = acquire(&scratch.home).expect("next start rebinds after a crash");
+    let (lock, _) =
+        acquire(&scratch.home, &scratch.root).expect("next start rebinds after a crash");
     let _ = lock;
 }
 
 /// Two homes never collide: sockets and locks differ, and the FNV key is stable per home.
 #[test]
 fn per_home_paths_never_collide() {
-    let _env = xdg_runtime_env();
     let first = Scratch::new("home-a");
     let second = Scratch::new("home-b");
     assert_ne!(
@@ -259,14 +227,14 @@ fn per_home_paths_never_collide() {
     );
     // The widened key adds eight chars but must still fit sun_path on both platforms (104 on
     // macOS, 108 on Linux; assert the tighter one), or the bind would fail on a long temp root.
-    let socket = first.home.control_socket().expect("socket path");
+    let socket = first.leaf().join("control.sock");
     assert!(
         socket.as_os_str().as_bytes().len() < 104,
         "the resident socket path fits sun_path: {}",
         socket.display()
     );
-    let (a_lock, _) = acquire(&first.home).expect("first home starts");
-    let (b_lock, _) = acquire(&second.home).expect("second home starts alongside");
+    let (a_lock, _) = acquire(&first.home, &first.root).expect("first home starts");
+    let (b_lock, _) = acquire(&second.home, &second.root).expect("second home starts alongside");
     assert_ne!(
         a_lock.socket_path(),
         b_lock.socket_path(),
@@ -275,12 +243,11 @@ fn per_home_paths_never_collide() {
     let _ = (a_lock, b_lock);
 }
 
-/// A 0755 (or wrong-owner) runtime dir refuses the start AND the client must not trust it.
+/// A 0755 runtime leaf refuses the start (owner and mode are created AND verified, never assumed).
 #[test]
 fn runtime_dir_mode_owner_verified() {
-    let _env = xdg_runtime_env();
     let scratch = Scratch::new("insecure");
-    let dir = scratch.home.runtime_dir().expect("runtime dir");
+    let dir = scratch.leaf();
     std::fs::create_dir_all(&dir).expect("runtime dir");
     #[cfg(unix)]
     {
@@ -289,6 +256,39 @@ fn runtime_dir_mode_owner_verified() {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
             .expect("loosen the dir");
     }
-    let refused = acquire(&scratch.home).is_err();
-    assert!(refused, "a 0755 runtime dir refuses start");
+    let refused = acquire(&scratch.home, &scratch.root);
+    assert!(
+        matches!(refused, Err(SingleError::RuntimeDirInsecure { .. })),
+        "a 0755 runtime dir refuses start"
+    );
+}
+
+/// Graceful teardown unlinks the socket this instance bound: the path identity captured at bind is
+/// the same filesystem object `release` stats, so the unlink fires.
+#[test]
+fn release_unlinks_its_own_socket() {
+    let scratch = Scratch::new("release-own");
+    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("resident start");
+    let socket = lock.socket_path().to_path_buf();
+    assert!(socket.exists(), "the bound socket exists while held");
+    lock.release();
+    assert!(!socket.exists(), "release unlinks its own socket");
+    drop(listener);
+}
+
+/// A same-uid swap must not cost the foreign process its file: `release` compares against the path
+/// identity captured at bind, and a different inode (a second listener renamed onto the path while
+/// both exist, so the inodes are provably distinct) is left alone.
+#[test]
+fn release_spares_a_foreign_inode_swapped_onto_the_path() {
+    let scratch = Scratch::new("release-foreign");
+    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("resident start");
+    let socket = lock.socket_path().to_path_buf();
+    let foreign_path = scratch.root.join("foreign.sock");
+    let foreign = UnixListener::bind(&foreign_path).expect("plant the foreign listener");
+    std::fs::rename(&foreign_path, &socket).expect("swap the foreign inode onto the path");
+    drop(listener);
+    lock.release();
+    assert!(socket.exists(), "release never unlinks a foreign inode");
+    drop(foreign);
 }

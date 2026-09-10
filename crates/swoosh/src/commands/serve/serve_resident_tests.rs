@@ -1,44 +1,68 @@
-//! S3 blocker tests: codec round-trips, uid refusal, frame cap, concurrency cap.
+//! S3 tests: codec round-trips, the uid gate and flood cap through the real serve path, the
+//! injected slow-loris timeout, and the stop-Ack ordering.
 
+use core::pin::Pin;
+use core::sync::atomic::{AtomicU32, Ordering};
+use core::task::{Context, Poll};
 use std::sync::Arc;
 
 use bifrost::NodeId;
 use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
+use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-use super::{MAX_CONTROL_CONNS, Resident};
+use super::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident};
 use crate::commands::serve::control_codec::{
     DisabledList, MAGIC, MAX_FRAME, MAX_STATUS_STRING, Request, Response, StatusReply,
 };
+
+/// Serializes scratch dir names within this test process; the pid keeps two concurrent runs of the
+/// binary apart. Names stay short on purpose: the control socket path must fit `sun_path` (104
+/// bytes on macOS).
+static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// An empty catalog: the codec tests exercise framing, not service content.
 fn empty_catalog() -> ServiceCatalog {
     ServiceCatalog::decode(&0u32.to_be_bytes()).expect("an empty catalog decodes")
 }
 
-/// A unique scratch dir for the resident tests.
+/// A unique short scratch dir for the resident tests.
 fn scratch_dir(tag: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "swoosh-resident-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
+    let short: String = tag.chars().take(8).collect();
+    let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("swr-{short}-{}-{seq}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("resident scratch");
     dir
 }
 
 /// A resident over temp state, for driving the accept path directly.
 fn test_resident() -> Resident {
+    test_resident_with(CancellationToken::new())
+}
+
+/// A resident over temp state holding `cancel` (the same token clone the run holds), so a test can
+/// observe the shared teardown token.
+fn test_resident_with(cancel: CancellationToken) -> Resident {
     let dir = scratch_dir("state");
     Resident::new(
         NodeId::from_ed25519_secret(&[9u8; 32]),
         None,
         empty_catalog(),
         dir.join("disabled"),
-        CancellationToken::new(),
+        cancel,
     )
+}
+
+/// Poll until the resident holds `want` permits, bounded: the accept loop drains slots
+/// asynchronously, so a test waits for the drain rather than assuming it.
+async fn wait_for_permits(resident: &Resident, want: usize) {
+    let deadline = tokio::time::Instant::now() + core::time::Duration::from_secs(5);
+    while resident.semaphore().available_permits() != want {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the resident never settled at {want} permits"
+        );
+        tokio::time::sleep(core::time::Duration::from_millis(5)).await;
+    }
 }
 
 /// Every request tag round-trips through the frame codec.
@@ -116,106 +140,200 @@ async fn oversized_frame_is_rejected() {
     );
 }
 
-/// A fake checker returning `uid`: drives `answer` through the public path instead of the
-/// socket seam (the socket seam needs a live fd pair per check, which races the parallel runner).
-fn answer_with(uid: u32, euid: u32) -> bool {
-    uid == euid
+/// A fake peer-credential checker reporting a uid that is never ours (a faked foreign peer, no root
+/// needed), shaped as a plain `fn` so it coerces to the checker seam.
+fn foreign_uid(_: i32) -> std::io::Result<u32> {
+    // SAFETY: `geteuid` takes no arguments and touches no memory.
+    Ok(if unsafe { libc::geteuid() } == 0 {
+        1
+    } else {
+        0
+    })
 }
 
-/// The injected peer-cred check admits our own uid and refuses a faked foreign one, before a byte
-/// is read. The real cross-uid probe needs root, so it stays a faked check here.
+/// The uid gate on the REAL serve path: a foreign checker gets EOF before a byte is served; the
+/// production `real_peer_uid` admits our own uid over a live fd pair and answers a status read.
 #[tokio::test]
 async fn accepts_own_uid_refuses_foreign_uid() {
-    let resident = test_resident();
-    // SAFETY: `geteuid` takes no arguments and touches no memory.
-    let euid = unsafe { libc::geteuid() };
-    assert!(answer_with(euid, euid), "our own uid is admitted");
-    let foreign: u32 = if euid == 0 { 1 } else { 0 };
-    assert!(!answer_with(foreign, euid), "a foreign uid is refused");
-    // The refusal happens before the served counter moves: answering nothing serves nothing.
-    assert_eq!(resident.served(), 0, "no connection served by a pure check");
-}
-
-/// 64 parallel answers against the 8-permit cap: the cap bounds CONCURRENT sockets, and every
-/// answer still completes.
-#[tokio::test]
-async fn control_flood_is_capped() {
-    use tokio::sync::Semaphore;
-
-    let cap = Arc::new(Semaphore::new(MAX_CONTROL_CONNS));
-    let resident = Arc::new(test_resident());
-    // The cap is what the accept loop acquires BEFORE spawning: hold all 8 permits, then prove a
-    // 9th task queues (try_acquire fails) while a real answer still completes underneath.
-    let mut held = Vec::new();
-    for _ in 0..MAX_CONTROL_CONNS {
-        held.push(cap.clone().try_acquire_owned().expect("cap has room"));
-    }
-    assert!(
-        cap.clone().try_acquire_owned().is_err(),
-        "past the cap, connections queue instead of spawning"
-    );
-    drop(held);
-    let mut tasks = Vec::new();
-    for _ in 0..64 {
-        let this = Arc::clone(&resident);
-        tasks.push(tokio::spawn(async move {
-            let reply = this.answer(Request::Status);
-            assert!(
-                matches!(reply, Response::Status(_)),
-                "a good request answers"
-            );
-        }));
-    }
-    for task in tasks {
-        task.await.expect("a flood task joins");
-    }
+    let refused = Arc::new(test_resident());
+    let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+    let task = tokio::spawn({
+        let this = Arc::clone(&refused);
+        async move {
+            this.serve_checked_with(server, foreign_uid, READ_TIMEOUT)
+                .await;
+        }
+    });
+    // The refusal can close the server end before this write lands, so a broken pipe is itself a
+    // refusal outcome here; either way the client must see EOF, never a reply.
+    let _ = Request::Status.write(&mut client).await;
+    let reply = tokio::time::timeout(READ_TIMEOUT, Response::read(&mut client))
+        .await
+        .expect("the refusal closes the stream");
+    assert!(reply.is_err(), "a foreign uid gets no reply, only EOF");
+    task.await.expect("the serve task joins");
     assert_eq!(
-        MAX_CONTROL_CONNS, 8,
-        "the concurrency cap is the specified 8"
+        refused.served(),
+        0,
+        "the uid gate sits before the first byte"
     );
+
+    let admitted = Arc::new(test_resident());
+    let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+    let task = tokio::spawn({
+        let this = Arc::clone(&admitted);
+        async move {
+            this.serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT)
+                .await;
+        }
+    });
+    Request::Status
+        .write(&mut client)
+        .await
+        .expect("request writes");
+    let reply = Response::read(&mut client)
+        .await
+        .expect("our uid is served");
+    assert!(
+        matches!(reply, Response::Status(_)),
+        "a status reply comes back"
+    );
+    task.await.expect("the serve task joins");
+    assert_eq!(admitted.served(), 1, "the admitted connection was served");
 }
 
-/// One byte sent, then silence: the frame never completes, so the read timeout is the only way
-/// the slot frees. Proven by a one-byte frame failing to decode: the accept loop wraps this read
-/// in the 5s timeout and reaps it.
+/// The accept cap queues instead of dropping: with every slot held by a silent client, a ninth
+/// one-shot client stays queued at the listener (neither a reply nor EOF in the bounded window),
+/// and freeing one slot admits it. This drives `Resident::serve`, so deleting the slot gate is not
+/// silently green.
+#[tokio::test]
+async fn control_flood_queues_rather_than_drops() {
+    let dir = scratch_dir("flood");
+    let socket = dir.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    let cancel = CancellationToken::new();
+    let resident = Arc::new(test_resident_with(cancel.clone()));
+    let serving = tokio::spawn({
+        let this = Arc::clone(&resident);
+        async move { this.serve(listener).await }
+    });
+
+    // Every slot held by a connected-but-silent client: each serve task parks on the read timeout.
+    let mut silent = Vec::new();
+    for _ in 0..MAX_CONTROL_CONNS {
+        silent.push(
+            tokio::net::UnixStream::connect(&socket)
+                .await
+                .expect("a silent client connects"),
+        );
+    }
+    wait_for_permits(&resident, 0).await;
+
+    // A one-shot client behind the flood writes its request: past the cap it waits at the listener,
+    // so the bounded read sees neither a reply nor EOF (the drop shape would end the stream here).
+    let mut queued = tokio::net::UnixStream::connect(&socket)
+        .await
+        .expect("the queued client connects");
+    Request::Status
+        .write(&mut queued)
+        .await
+        .expect("queued request writes");
+    let mut first_byte = [0u8; 1];
+    let early = tokio::time::timeout(
+        core::time::Duration::from_millis(100),
+        queued.read_exact(&mut first_byte),
+    )
+    .await;
+    assert!(
+        early.is_err(),
+        "past the cap the request queues, no reply yet"
+    );
+
+    // Free one slot: the queued client is admitted and its request answered.
+    drop(silent.pop());
+    let reply = tokio::time::timeout(
+        core::time::Duration::from_secs(5),
+        Response::read(&mut queued),
+    )
+    .await
+    .expect("the queued client is served once a slot frees")
+    .expect("the queued request gets a reply");
+    assert!(
+        matches!(reply, Response::Status(_)),
+        "the queued request is answered"
+    );
+    assert_eq!(
+        resident.served(),
+        (MAX_CONTROL_CONNS + 1) as u64,
+        "every admitted connection is counted"
+    );
+
+    cancel.cancel();
+    serving
+        .await
+        .expect("the serve task joins")
+        .expect("serve ends Ok");
+}
+
+/// One byte sent, then silence: the frame never completes, so the injected timeout is the only way
+/// the task ends. Deleting the wrapper hangs the join, so this is not a constant against itself.
 #[tokio::test]
 async fn slow_loris_is_timed_out() {
-    use super::READ_TIMEOUT;
-
-    assert_eq!(
-        READ_TIMEOUT,
-        core::time::Duration::from_secs(5),
-        "the slow-loris bound is the specified 5s"
-    );
-    let mut buf = Vec::new();
-    buf.extend_from_slice(&MAGIC[..1]);
-    let error = Request::read(&mut &buf[..])
+    let resident = Arc::new(test_resident());
+    let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+    let task = tokio::spawn({
+        let this = Arc::clone(&resident);
+        async move {
+            this.serve_checked_with(
+                server,
+                super::real_peer_uid,
+                core::time::Duration::from_millis(50),
+            )
+            .await;
+        }
+    });
+    client
+        .write_all(&MAGIC[..1])
         .await
-        .expect_err("a one-byte frame never decodes");
-    assert!(
-        error.to_string().contains("ended"),
-        "a truncated frame ends loudly: {error}"
+        .expect("a partial frame writes");
+    tokio::time::timeout(core::time::Duration::from_secs(5), task)
+        .await
+        .expect("the injected timeout reaps the slow client")
+        .expect("the serve task joins");
+    assert_eq!(
+        resident.served(),
+        1,
+        "the connection was admitted, then reaped"
     );
 }
 
-/// M3: the socket `Stop` records its kind BEFORE it cancels the one token, so the resident select
-/// classifies the stop as local even when the exposer arm completes on that same cancel; a wire
-/// stop (nothing recorded) classifies as requested.
+/// A socket `Stop` is acked on the wire before it fires: the client observes the Ack, the source
+/// records the local kind (so the run never files it as a wire stop), and the shared teardown token
+/// is cancelled only after the confirm is written.
 #[tokio::test]
-async fn socket_stop_records_its_kind_before_cancelling() {
+async fn socket_stop_acks_before_it_fires() {
     use super::StopKind;
     use crate::commands::serve::{Stopped, classify_stop};
 
-    let resident = test_resident();
+    let cancel = CancellationToken::new();
+    let resident = Arc::new(test_resident_with(cancel.clone()));
+    let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+    let task = tokio::spawn({
+        let this = Arc::clone(&resident);
+        async move {
+            this.serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT)
+                .await;
+        }
+    });
+    Request::Stop.write(&mut client).await.expect("stop writes");
+    let reply = tokio::time::timeout(READ_TIMEOUT, Response::read(&mut client))
+        .await
+        .expect("the Ack arrives before any teardown")
+        .expect("the Ack reads");
+    assert!(matches!(reply, Response::Ack), "a stop is acked");
+    task.await.expect("the serve task joins");
     let source = resident.stop_source();
-    assert_eq!(source.first(), None, "nothing is recorded before any stop");
-    assert_eq!(
-        classify_stop(source.first()),
-        Stopped::Requested,
-        "a wire control.stop records nothing and renders requested"
-    );
-    let reply = resident.answer(Request::Stop);
-    assert!(matches!(reply, Response::Ack), "the socket stop acks");
     assert_eq!(
         source.first(),
         Some(StopKind::Socket),
@@ -225,6 +343,55 @@ async fn socket_stop_records_its_kind_before_cancelling() {
         classify_stop(source.first()),
         Stopped::Local,
         "the socket stop renders local, never the wire line"
+    );
+    assert!(cancel.is_cancelled(), "the stop fired after the Ack");
+}
+
+/// A writer whose writes never complete: holds the reply in flight so the test can observe whether
+/// the stop fired mid-write.
+struct PendingWriter;
+
+impl AsyncWrite for PendingWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Pending
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Pending
+    }
+}
+
+/// The Ack write precedes the stop: while the reply write is still pending, the cancel has NOT
+/// fired; it fires only after the write deadline lets the serve path past the write. Swapping the
+/// two lines in `reply_then_fire` fails the mid-write assertion.
+#[tokio::test]
+async fn stop_fires_only_after_the_ack_write_completes() {
+    let cancel = CancellationToken::new();
+    let resident = test_resident_with(cancel.clone());
+    let mut writer = PendingWriter;
+    let write_deadline = core::time::Duration::from_millis(200);
+    let reply = resident.reply_then_fire(&mut writer, &Response::Ack, true, write_deadline);
+    tokio::pin!(reply);
+    let mid_write = tokio::time::timeout(core::time::Duration::from_millis(50), &mut reply).await;
+    assert!(mid_write.is_err(), "the reply write is still pending");
+    assert!(
+        !cancel.is_cancelled(),
+        "the stop must not fire while its Ack is still being written"
+    );
+    tokio::time::timeout(core::time::Duration::from_secs(1), reply)
+        .await
+        .expect("the write deadline elapses");
+    assert!(
+        cancel.is_cancelled(),
+        "the stop fires once the write path is done"
     );
 }
 

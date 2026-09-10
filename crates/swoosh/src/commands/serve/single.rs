@@ -8,11 +8,11 @@
 //! the fd for life: a crash releases the flock by itself, and the next start recovers through the
 //! probe, no reaper.
 
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
-use crate::home::{Home, runtime_root};
+use crate::home::Home;
 
 /// Why a resident start was refused.
 #[derive(Debug, thiserror::Error)]
@@ -22,13 +22,6 @@ pub enum SingleError {
     AlreadyResident {
         /// The pid recorded in the lock file by the holder.
         pid: u32,
-    },
-    /// The per-user runtime root could not be resolved: `XDG_RUNTIME_DIR` is unset or relative on
-    /// Linux, or the macOS per-user temp dir lookup failed. The resolver's message names the fix.
-    #[error("could not resolve the runtime root: {reason}")]
-    RuntimeRootUnresolved {
-        /// The resolver's own message.
-        reason: String,
     },
     /// A runtime-chain component is not this user's 0700 dir: created AND verified, never assumed.
     #[error("refusing insecure runtime dir {path}: want uid {want} mode 700")]
@@ -60,7 +53,7 @@ pub enum SingleError {
     BindFailed(#[source] std::io::Error),
 }
 
-/// The held single-instance lock: the flock fd plus the socket it guards and that listener's
+/// The held single-instance lock: the flock fd plus the socket it guards and that socket PATH's
 /// identity. Dropping it releases the flock (the crash path); the graceful path unlinks the socket
 /// first via [`release`](InstanceLock::release). Owns the fd for process life.
 ///
@@ -72,8 +65,10 @@ pub struct InstanceLock {
     file: std::fs::File,
     /// The socket this instance bound (for the graceful unlink).
     socket: PathBuf,
-    /// The `(dev, ino)` of the bound listener, kept so `release` can prove the path still names it
-    /// (a same-uid swap must not cost another process its file).
+    /// The `(dev, ino)` of the bound socket PATH, captured at bind, kept so `release` can prove the
+    /// path still names it (a same-uid swap must not cost another process its file). A listener
+    /// fd's own `fstat` reports a different namespace (macOS `st_dev = -1`, a sockfs inode on
+    /// Linux), so the fd identity can never match a path stat and is deliberately not what is kept.
     socket_id: (u64, u64),
     /// This instance's pid, recorded in the lock file.
     pid: u32,
@@ -90,15 +85,13 @@ impl InstanceLock {
         &self.socket
     }
 
-    /// Graceful teardown: unlink the socket ONLY while the path still names the inode this instance
-    /// bound (stat without following links, compare `(dev, ino)`), release the flock, then drop the
-    /// fd. A blind by-path unlink could remove a file a same-uid process swapped in.
+    /// Graceful teardown: unlink the socket ONLY while the path still names the socket this instance
+    /// bound (stat without following links, compare `(dev, ino)` against the identity captured at
+    /// bind), release the flock, then drop the fd. A blind by-path unlink could remove a file a
+    /// same-uid process swapped in.
     pub fn release(self) {
-        use std::os::unix::fs::MetadataExt as _;
-        if let Ok(meta) = std::fs::symlink_metadata(&self.socket) {
-            if (meta.dev(), meta.ino()) == self.socket_id {
-                let _ = std::fs::remove_file(&self.socket);
-            }
+        if path_identity(&self.socket).is_ok_and(|id| id == self.socket_id) {
+            let _ = std::fs::remove_file(&self.socket);
         }
         // Explicit unlock before the fd drops: the teardown reads the held lock fd, and the flock
         // release is visible here rather than inferred from Drop.
@@ -111,20 +104,23 @@ impl InstanceLock {
 /// component, and the per-home leaf. The chain is created 0700 and verified (owner and mode) with
 /// the leaf opened `O_NOFOLLOW`; a wrong owner, a wrong mode, or a symlinked component is
 /// [`SingleError::RuntimeDirInsecure`], never silently repaired.
+///
+/// The verified leaf is held by PATH, not by an open fd: a same-uid swap between the verify and the
+/// lock/socket open is outside this threat model (the 0700 dir plus the peer-credential check carry
+/// it), so the type does not claim to hold a verification the fd would.
 pub struct RuntimeDir {
     /// The verified leaf.
     dir: PathBuf,
 }
 
 impl RuntimeDir {
-    /// Create (0700) and verify the runtime chain for `home`. An existing dir keeps its mode
-    /// (verified below, never silently repaired by the create path): only a dir WE create gets the
-    /// explicit 0700 set, so a pre-loosened dir still refuses.
-    pub fn acquire(home: &Home) -> Result<Self, SingleError> {
-        let root = runtime_root().map_err(|error| SingleError::RuntimeRootUnresolved {
-            reason: error.to_string(),
-        })?;
-        let dir = root.join(home.home_key());
+    /// Create (0700) and verify the runtime chain for `home` under the already-resolved runtime
+    /// `root`, which is threaded in as a value by the composition edge: this module never reads
+    /// `XDG_RUNTIME_DIR`/`confstr`. An existing dir keeps its mode (verified below, never silently
+    /// repaired by the create path): only a dir WE create gets the explicit 0700 set, so a
+    /// pre-loosened dir still refuses.
+    pub fn acquire(home: &Home, root: &Path) -> Result<Self, SingleError> {
+        let dir = home.runtime_leaf(root);
         let (root_fresh, leaf_fresh) = (!root.exists(), !dir.exists());
         // SAFETY: `DirBuilder::mode` only sets the mode argument for the mkdir syscall; no raw
         // pointer crosses the boundary.
@@ -138,7 +134,7 @@ impl RuntimeDir {
             // verify below on its mode alone. Repair ONLY a path we just created: a PRE-EXISTING
             // loosened dir is the attack the verifier refuses, so it must not be silently fixed.
             if root_fresh {
-                let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700));
+                let _ = std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700));
             }
             if leaf_fresh {
                 let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
@@ -148,7 +144,7 @@ impl RuntimeDir {
         {
             std::fs::create_dir_all(&dir).map_err(|_| insecure(&dir))?;
         }
-        verify_runtime_chain(&root, &dir)?;
+        verify_runtime_chain(root, &dir)?;
         Ok(Self { dir })
     }
 
@@ -168,17 +164,19 @@ impl RuntimeDir {
     }
 }
 
-/// Acquire single-instance for `home`: create and verify the runtime chain, take the exclusive
-/// nonblocking flock, connect-probe-then-unlink-bind the socket, record our pid, and return the
-/// held lock plus the bound listener. The probe/unlink/bind sequence runs UNDER the flock (a second
-/// contender loses at the flock); the chain verify precedes it because the lock lives inside the
-/// leaf it verifies. A second holder gets [`SingleError::AlreadyResident`] naming the winner's pid;
-/// a live socket under our own lock is [`SingleError::ProbeAlive`], and any probe answer that is
-/// neither live nor one of the two stale errors is [`SingleError::ProbeUnclassified`].
+/// Acquire single-instance for `home` under the already-resolved runtime `root`: create and verify
+/// the runtime chain, take the exclusive nonblocking flock, connect-probe-then-unlink-bind the
+/// socket, record our pid, and return the held lock plus the bound listener. The probe/unlink/bind
+/// sequence runs UNDER the flock (a second contender loses at the flock); the chain verify precedes
+/// it because the lock lives inside the leaf it verifies. A second holder gets
+/// [`SingleError::AlreadyResident`] naming the winner's pid; a live socket under our own lock is
+/// [`SingleError::ProbeAlive`], and any probe answer that is neither live nor one of the two stale
+/// errors is [`SingleError::ProbeUnclassified`].
 pub fn acquire(
     home: &Home,
+    root: &Path,
 ) -> Result<(InstanceLock, std::os::unix::net::UnixListener), SingleError> {
-    let runtime = RuntimeDir::acquire(home)?;
+    let runtime = RuntimeDir::acquire(home, root)?;
     let lock_path = runtime.lock_path();
     let socket_path = runtime.socket_path();
     // Open (creating) the lock file with O_NOFOLLOW and stat it as a regular file: a symlink or a
@@ -237,7 +235,7 @@ pub fn acquire(
     let _ = std::fs::remove_file(&socket_path);
     let listener =
         std::os::unix::net::UnixListener::bind(&socket_path).map_err(SingleError::BindFailed)?;
-    let socket_id = socket_identity(listener.as_raw_fd()).map_err(SingleError::BindFailed)?;
+    let socket_id = path_identity(&socket_path).map_err(SingleError::BindFailed)?;
     // Defense in depth: the dir + peer-cred carry the weight (the mode is moot on macOS), but a
     // 0600 socket costs nothing.
     {
@@ -398,24 +396,15 @@ fn read_lock_pid(path: &Path) -> Option<u32> {
     text.split_whitespace().next()?.parse().ok()
 }
 
-/// The `(dev, ino)` of an open socket fd, from `fstat`: the identity [`InstanceLock::release`]
-/// compares against the path before unlinking.
-fn socket_identity(fd: RawFd) -> std::io::Result<(u64, u64)> {
-    // SAFETY: all-zero `libc::stat` is a valid initial value for the out-param; `fstat` only
-    // writes into it.
-    let mut stat: libc::stat = unsafe { core::mem::zeroed() };
-    // SAFETY: `fd` is an open socket fd and `stat` is a live local; `fstat` writes only into it.
-    let rc = unsafe { libc::fstat(fd, &mut stat) };
-    if rc != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // `dev_t` is signed on macOS and unsigned on Linux; widen the signed one explicitly so the
-    // same expression needs no platform-specific cast.
-    #[cfg(target_os = "macos")]
-    let dev = u64::try_from(stat.st_dev).unwrap_or_default();
-    #[cfg(not(target_os = "macos"))]
-    let dev = stat.st_dev;
-    Ok((dev, stat.st_ino))
+/// The `(dev, ino)` of the socket PATH, from `symlink_metadata` (a symlink planted at the path
+/// reports its own inode, never the target's): the filesystem-namespace identity
+/// [`InstanceLock::release`] compares before unlinking. A bound listener fd lives in a DIFFERENT
+/// namespace (macOS `fstat` reports `st_dev = -1` and a sockfs inode; Linux the same shape), so an
+/// fd identity can never match a path stat and must not be what the guard captures.
+fn path_identity(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::symlink_metadata(path)?;
+    Ok((meta.dev(), meta.ino()))
 }
 
 /// Verify the runtime chain that guards the rendezvous, from the per-user base down: the base, the
