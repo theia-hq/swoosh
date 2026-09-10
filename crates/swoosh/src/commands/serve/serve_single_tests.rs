@@ -2,11 +2,32 @@
 
 use std::os::unix::io::AsRawFd as _;
 use std::os::unix::net::UnixListener;
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use super::{SingleError, acquire};
 use crate::home::Home;
 
+/// Serializes tests that mutate the process-global `XDG_RUNTIME_DIR`.
+///
+/// The test harness runs cases on parallel threads, and on Linux the resident runtime root is read
+/// from `XDG_RUNTIME_DIR`, so two `Scratch`-owning tests would race each other's roots and their
+/// restores (the race that failed CI; on macOS the root comes from `confstr`, the variable is
+/// ignored, and the race is invisible locally). Every test in this file holds this for its whole
+/// body.
+static XDG_RUNTIME_ENV: Mutex<()> = Mutex::new(());
+
+/// Take the process-wide slot for a test that mutates `XDG_RUNTIME_DIR`. A poisoned lock is
+/// recovered: the sibling panic that poisoned it is already the reported failure, and cascading
+/// poison errors would only hide it.
+fn xdg_runtime_env() -> MutexGuard<'static, ()> {
+    XDG_RUNTIME_ENV
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
 /// A scratch home with an isolated `XDG_RUNTIME_DIR` per test. Restores the ambient value on drop.
+/// The mutation is only safe under the per-test [`xdg_runtime_env`] guard, which `Scratch` does not
+/// take itself: `per_home_paths_never_collide` owns two.
 struct Scratch {
     home: Home,
     runtime: std::path::PathBuf,
@@ -55,10 +76,8 @@ impl Scratch {
             );
         }
         let prior = std::env::var_os("XDG_RUNTIME_DIR");
-        // SAFETY: tests run single-threaded per binary by default only with --test-threads=1; env
-        // mutation here races parallel siblings, so these S2 tests must run serialized. The runner
-        // below pins them behind one mutex-adjacent barrier: each test re-sets the var it needs, and
-        // cross-talk is avoided because every test rewrites it on entry and restores on exit.
+        // SAFETY: the test holding `XDG_RUNTIME_ENV` is the only one mutating this process-global
+        // variable at a time, and it restores the prior value on drop.
         unsafe { std::env::set_var("XDG_RUNTIME_DIR", &runtime) };
         let home = Home::resolve(Some(home_dir)).expect("explicit home resolves");
         Self {
@@ -88,6 +107,7 @@ impl Drop for Scratch {
 /// Two concurrent starts on one home: exactly one wins, the loser names the winner's pid.
 #[test]
 fn two_resident_starts_one_home_exactly_one_wins() {
+    let _env = xdg_runtime_env();
     let scratch = Scratch::new("duel");
     let (first, second) = (acquire(&scratch.home), acquire(&scratch.home));
     match (first, second) {
@@ -107,6 +127,7 @@ fn two_resident_starts_one_home_exactly_one_wins() {
 /// A dropped-but-not-unlinked listener leaves a stale path: the next start probes, unlinks, rebinds.
 #[test]
 fn stale_socket_is_probed_then_unlinked_and_rebound() {
+    let _env = xdg_runtime_env();
     let scratch = Scratch::new("stale");
     // Establish the runtime leaf through one clean acquire first (creating it 0700), then plant
     // the stale socket inside it: the stale-rebind path is under test, not the create path.
@@ -136,6 +157,7 @@ fn stale_socket_is_probed_then_unlinked_and_rebound() {
 /// the live plant and refuses.
 #[test]
 fn live_socket_under_lock_refuses_start() {
+    let _env = xdg_runtime_env();
     let scratch = Scratch::new("live");
     // The leaf must exist 0700 before the plant binds inside it.
     let (seed, seed_listener) = acquire(&scratch.home).expect("seed acquire creates the leaf");
@@ -174,6 +196,7 @@ fn live_socket_under_lock_refuses_start() {
 /// Dropping the lock fd without clean shutdown (the crash): the next start succeeds.
 #[test]
 fn crash_releases_flock_next_start_rebinds() {
+    let _env = xdg_runtime_env();
     let scratch = Scratch::new("crash");
     {
         let (_lock, _listener) = acquire(&scratch.home).expect("first start");
@@ -186,6 +209,7 @@ fn crash_releases_flock_next_start_rebinds() {
 /// Two homes never collide: sockets and locks differ, and the FNV key is stable per home.
 #[test]
 fn per_home_paths_never_collide() {
+    let _env = xdg_runtime_env();
     let first = Scratch::new("home-a");
     let second = Scratch::new("home-b");
     assert_ne!(
@@ -211,6 +235,7 @@ fn per_home_paths_never_collide() {
 /// A 0755 (or wrong-owner) runtime dir refuses the start AND the client must not trust it.
 #[test]
 fn runtime_dir_mode_owner_verified() {
+    let _env = xdg_runtime_env();
     let scratch = Scratch::new("insecure");
     let dir = scratch.home.runtime_dir().expect("runtime dir");
     std::fs::create_dir_all(&dir).expect("runtime dir");
