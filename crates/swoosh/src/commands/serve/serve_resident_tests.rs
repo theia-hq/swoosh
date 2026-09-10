@@ -1,5 +1,6 @@
-//! S3 tests: codec round-trips, the uid gate and flood cap through the real serve path, the
-//! injected slow-loris timeout, and the stop-Ack ordering.
+//! S3 tests: codec round-trips, hostile `StatusReply` decodes, the uid gate and flood cap through
+//! the real serve path, the injected slow-loris timeout, the oversized-frame EOF contract, and the
+//! stop-Ack ordering.
 
 use core::pin::Pin;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -11,6 +12,7 @@ use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use super::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident};
+use crate::commands::serve::control::ControlError;
 use crate::commands::serve::control_codec::{
     DisabledList, MAGIC, MAX_FRAME, MAX_STATUS_STRING, Request, Response, StatusReply,
 };
@@ -108,7 +110,7 @@ async fn responses_round_trip() {
     }
 }
 
-/// Foreign magic is a loud protocol error, never a misparse.
+/// Foreign magic is a loud protocol error typed as such, never a misparse.
 #[tokio::test]
 async fn version_skew_is_loud() {
     let mut buf = Vec::new();
@@ -119,12 +121,13 @@ async fn version_skew_is_loud() {
         .await
         .expect_err("SWC0 must fail");
     assert!(
-        error.to_string().contains("SWC1"),
-        "the skew error names the expected magic: {error}"
+        matches!(error, ControlError::Protocol(ref message) if message.contains("SWC1")),
+        "the skew error is a protocol error naming the expected magic: {error}"
     );
 }
 
-/// A declared length over the 8 KiB cap refuses the frame before a byte of it is read.
+/// A declared length over the 8 KiB cap refuses the frame before a byte of it is read, typed
+/// `TooLarge` with the declared length.
 #[tokio::test]
 async fn oversized_frame_is_rejected() {
     let mut buf = Vec::new();
@@ -135,8 +138,128 @@ async fn oversized_frame_is_rejected() {
         .await
         .expect_err("oversize must fail");
     assert!(
-        error.to_string().contains("too large"),
-        "the cap error names the overflow: {error}"
+        matches!(error, ControlError::TooLarge(len) if len == MAX_FRAME + 1),
+        "the cap error is typed `TooLarge` with the declared length: {error}"
+    );
+}
+
+/// A minimal decodable status: no address, empty catalog, empty known disabled list.
+fn minimal_status() -> StatusReply {
+    StatusReply {
+        node_id: NodeId::from_ed25519_secret(&[9u8; 32]),
+        pid: 4242,
+        addr: None,
+        uptime_secs: 3,
+        catalog: empty_catalog(),
+        disabled: DisabledList::Known(Vec::new()),
+    }
+}
+
+/// The raw status frame prefix up to and including the `has_addr` byte: key, pid, presence.
+fn status_prefix(has_addr: u8) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(NodeId::from_ed25519_secret(&[9u8; 32]).key());
+    bytes.extend_from_slice(&4242u32.to_be_bytes());
+    bytes.push(has_addr);
+    bytes
+}
+
+/// A raw status frame with no addr, zero uptime, a real empty catalog, and the given disabled
+/// section.
+fn status_frame_with_disabled(disabled: &[u8]) -> Vec<u8> {
+    let mut bytes = status_prefix(0);
+    bytes.extend_from_slice(&0u64.to_be_bytes());
+    let catalog = empty_catalog().encode();
+    bytes.extend_from_slice(&(catalog.len() as u32).to_be_bytes());
+    bytes.extend_from_slice(&catalog);
+    bytes.extend_from_slice(disabled);
+    bytes
+}
+
+/// Every proper prefix of a valid status frame is refused as a typed protocol error: the decoder
+/// bounds-checks each field instead of panicking on a truncated hostile frame.
+#[test]
+fn status_decode_refuses_every_prefix() {
+    let full = minimal_status().encode().expect("a minimal status encodes");
+    StatusReply::decode(&full).expect("the whole frame decodes");
+    for cut in 0..full.len() {
+        let error = StatusReply::decode(&full[..cut]).expect_err("a prefix must not decode");
+        assert!(
+            matches!(error, ControlError::Protocol(_)),
+            "cut at {cut} is a protocol error: {error}"
+        );
+    }
+}
+
+/// `has_addr = 2` is not a presence: only 0 and 1 are legal, so the decode refuses.
+#[test]
+fn status_decode_refuses_an_unknown_addr_presence() {
+    let error = StatusReply::decode(&status_prefix(2)).expect_err("presence 2 must refuse");
+    assert!(
+        matches!(error, ControlError::Protocol(_)),
+        "an unknown addr presence is a protocol error: {error}"
+    );
+}
+
+/// The addr string cap is checked before the bytes are read: a declared 257-byte addr refuses.
+#[test]
+fn status_decode_refuses_an_over_long_addr() {
+    let mut bytes = status_prefix(1);
+    bytes.extend_from_slice(&257u16.to_be_bytes());
+    let error = StatusReply::decode(&bytes).expect_err("addr over 256 must refuse");
+    assert!(
+        matches!(error, ControlError::Protocol(_)),
+        "an over-long addr is a protocol error: {error}"
+    );
+}
+
+/// A declared catalog over the frame cap is typed `TooLarge`, never an on-demand allocation.
+#[test]
+fn status_decode_refuses_an_over_large_catalog() {
+    let mut bytes = status_prefix(0);
+    bytes.extend_from_slice(&0u64.to_be_bytes());
+    bytes.extend_from_slice(&((MAX_FRAME + 1) as u32).to_be_bytes());
+    let error = StatusReply::decode(&bytes).expect_err("an oversized catalog must refuse");
+    assert!(
+        matches!(error, ControlError::TooLarge(len) if len == MAX_FRAME + 1),
+        "an over-cap catalog is typed `TooLarge` with its length: {error}"
+    );
+}
+
+/// One name more than the decode cap refuses: 1025 is over the 1024 cap.
+#[test]
+fn status_decode_refuses_too_many_disabled_names() {
+    let mut disabled = Vec::new();
+    disabled.push(0);
+    disabled.extend_from_slice(&1025u32.to_be_bytes());
+    let error = StatusReply::decode(&status_frame_with_disabled(&disabled))
+        .expect_err("1025 disabled names must refuse");
+    assert!(
+        matches!(error, ControlError::Protocol(_)),
+        "too many disabled names is a protocol error: {error}"
+    );
+}
+
+/// An unknown disabled presence is a protocol error: only 0 (known) and 1 (unknown) are legal.
+#[test]
+fn status_decode_refuses_an_unknown_disabled_presence() {
+    let error = StatusReply::decode(&status_frame_with_disabled(&[2]))
+        .expect_err("disabled presence 2 must refuse");
+    assert!(
+        matches!(error, ControlError::Protocol(_)),
+        "an unknown disabled presence is a protocol error: {error}"
+    );
+}
+
+/// A trailing byte after a complete status frame refuses: the whole payload is the frame, no slack.
+#[test]
+fn status_decode_refuses_trailing_bytes() {
+    let mut bytes = minimal_status().encode().expect("a minimal status encodes");
+    bytes.push(0);
+    let error = StatusReply::decode(&bytes).expect_err("trailing bytes must refuse");
+    assert!(
+        matches!(error, ControlError::Protocol(_)),
+        "trailing bytes are a protocol error: {error}"
     );
 }
 
@@ -305,6 +428,42 @@ async fn slow_loris_is_timed_out() {
         resident.served(),
         1,
         "the connection was admitted, then reaped"
+    );
+}
+
+/// EOF is the oversized-frame contract: a request that DECLARES more than the cap is never answered,
+/// only closed. This drives `Resident::serve_checked_with`, so changing the serve path to reply
+/// `Error` would fail the `read == 0` assertion.
+#[tokio::test]
+async fn oversized_declared_frame_ends_the_connection() {
+    let resident = Arc::new(test_resident());
+    let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+    let task = tokio::spawn({
+        let this = Arc::clone(&resident);
+        async move {
+            this.serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT)
+                .await;
+        }
+    });
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&MAGIC);
+    frame.push(1);
+    frame.extend_from_slice(&((MAX_FRAME + 1) as u16).to_be_bytes());
+    client
+        .write_all(&frame)
+        .await
+        .expect("the oversized header writes");
+    let mut sink = [0u8; 1];
+    let read = tokio::time::timeout(READ_TIMEOUT, client.read(&mut sink))
+        .await
+        .expect("the serve path closes an oversized declared frame")
+        .expect("the close is a clean read");
+    assert_eq!(read, 0, "EOF, never a reply");
+    task.await.expect("the serve task joins");
+    assert_eq!(
+        resident.served(),
+        1,
+        "the connection was admitted before the codec cap"
     );
 }
 
