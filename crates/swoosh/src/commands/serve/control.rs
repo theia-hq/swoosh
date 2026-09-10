@@ -254,7 +254,7 @@ impl Response {
             Self::Ack => Vec::new(),
             Self::Refused(reason) | Self::Error(reason) => {
                 let mut out = Vec::new();
-                write_str_into(&mut out, reason);
+                write_str_into(&mut out, reason)?;
                 out
             }
         };
@@ -341,10 +341,13 @@ pub enum ControlError {
 }
 
 /// Write a u16-prefixed string into a payload buffer.
-fn write_str_into(out: &mut Vec<u8>, value: &str) {
+fn write_str_into(out: &mut Vec<u8>, value: &str) -> io::Result<()> {
     let bytes = value.as_bytes();
-    out.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    let len =
+        u16::try_from(bytes.len()).map_err(|_| io::Error::other("response string too long"))?;
+    out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(bytes);
+    Ok(())
 }
 
 /// Read a u16-prefixed string from a whole payload (which must be exactly one string).

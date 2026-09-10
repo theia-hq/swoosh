@@ -1,15 +1,18 @@
 //! Single-instance for `serve --resident`: the flock truth plus the socket rendezvous.
 //!
-//! The LOCK FILE is the truth; the SOCKET is the rendezvous. Start, all under one exclusive flock:
-//! verify the 0700 runtime dir, take `LOCK_EX | LOCK_NB` on `control.lock`, connect-probe the socket
-//! (a live answer means a squatter or a live node on a borrowed lock: refuse, never unlink a live
-//! socket), else unlink the stale path, rebind, and record our pid. Hold the fd for life: a crash
-//! releases the flock by itself, and the next start recovers through the probe, no reaper.
+//! The LOCK FILE is the truth; the SOCKET is the rendezvous. Start: create and verify the 0700
+//! runtime chain, take `LOCK_EX | LOCK_NB` on `control.lock`, then connect-probe the socket. Only
+//! `ENOENT` and `ECONNREFUSED` are stale: unlink the dead path, rebind, and record our pid. A live
+//! or unclassifiable answer refuses (never unlink a socket we cannot prove dead), and the probe
+//! connect is nonblocking, so a full accept queue behind a live listener cannot park startup. Hold
+//! the fd for life: a crash releases the flock by itself, and the next start recovers through the
+//! probe, no reaper.
 
-use std::os::unix::io::AsRawFd as _;
-use std::path::PathBuf;
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt as _;
+use std::path::{Path, PathBuf};
 
-use crate::home::Home;
+use crate::home::{Home, runtime_root};
 
 /// Why a resident start was refused.
 #[derive(Debug, thiserror::Error)]
@@ -20,7 +23,14 @@ pub enum SingleError {
         /// The pid recorded in the lock file by the holder.
         pid: u32,
     },
-    /// The runtime dir is not the 0700 dir of this user: created AND verified, never assumed.
+    /// The per-user runtime root could not be resolved: `XDG_RUNTIME_DIR` is unset or relative on
+    /// Linux, or the macOS per-user temp dir lookup failed. The resolver's message names the fix.
+    #[error("could not resolve the runtime root: {reason}")]
+    RuntimeRootUnresolved {
+        /// The resolver's own message.
+        reason: String,
+    },
+    /// A runtime-chain component is not this user's 0700 dir: created AND verified, never assumed.
     #[error("refusing insecure runtime dir {path}: want uid {want} mode 700")]
     RuntimeDirInsecure {
         /// The offending dir.
@@ -28,31 +38,43 @@ pub enum SingleError {
         /// The uid that must own it.
         want: u32,
     },
+    /// Opening, stat-ing, or flocking `control.lock` failed: an fd limit, a real lock error, a
+    /// symlinked or non-regular lock path.
+    #[error("could not take the control lock at {path}")]
+    LockFailed {
+        /// The lock path the open, stat, or flock was attempted on.
+        path: PathBuf,
+        /// The underlying OS failure.
+        #[source]
+        source: std::io::Error,
+    },
     /// The socket answered while we hold the lock: a live node or a squatter, never unlink it.
     #[error("the control socket is live under our lock; refusing to steal it")]
     ProbeAlive,
+    /// The connect probe neither connected nor answered `ENOENT`/`ECONNREFUSED` (`EACCES`,
+    /// `EAGAIN`, `EINTR`, a poll timeout): the path may be live, so refuse rather than unlink it.
+    #[error("the control socket did not answer a clean probe; refusing to steal it")]
+    ProbeUnclassified,
     /// Binding the socket after a stale probe failed.
     #[error("could not bind the control socket")]
     BindFailed(#[source] std::io::Error),
 }
 
-/// The held single-instance lock: the flock fd plus the paths it guards. Dropping it releases the
-/// flock (the crash path); the graceful path unlinks the socket first via
-/// [`release`](InstanceLock::release). Owns the fd for process life.
+/// The held single-instance lock: the flock fd plus the socket it guards and that listener's
+/// identity. Dropping it releases the flock (the crash path); the graceful path unlinks the socket
+/// first via [`release`](InstanceLock::release). Owns the fd for process life.
 ///
 /// There is no `Drop` impl that unlinks: a plain drop leaves the socket path behind (the crash
 /// plant the next start recovers through its probe), and only the explicit `release` unlinks, so
-/// the two teardown shapes stay visibly distinct at the call site. The `file`/`dir` fields are the
-/// held flock fd and the runtime dir: read by the OS (the lock) and by `release` (the unlink), so
-/// no accessor is needed.
-#[allow(dead_code)]
+/// the two teardown shapes stay visibly distinct at the call site.
 pub struct InstanceLock {
     /// The lock fd: held open, flocked, for the life of the resident.
     file: std::fs::File,
-    /// The runtime dir this lock lives in (for the graceful unlink).
-    dir: PathBuf,
     /// The socket this instance bound (for the graceful unlink).
     socket: PathBuf,
+    /// The `(dev, ino)` of the bound listener, kept so `release` can prove the path still names it
+    /// (a same-uid swap must not cost another process its file).
+    socket_id: (u64, u64),
     /// This instance's pid, recorded in the lock file.
     pid: u32,
 }
@@ -64,37 +86,46 @@ impl InstanceLock {
     }
 
     /// The socket path this instance bound.
-    pub fn socket_path(&self) -> &std::path::Path {
+    pub fn socket_path(&self) -> &Path {
         &self.socket
     }
 
-    /// Graceful teardown: unlink the socket, then drop the lock fd (releasing the flock).
+    /// Graceful teardown: unlink the socket ONLY while the path still names the inode this instance
+    /// bound (stat without following links, compare `(dev, ino)`), release the flock, then drop the
+    /// fd. A blind by-path unlink could remove a file a same-uid process swapped in.
     pub fn release(self) {
-        let _ = std::fs::remove_file(&self.socket);
+        use std::os::unix::fs::MetadataExt as _;
+        if let Ok(meta) = std::fs::symlink_metadata(&self.socket) {
+            if (meta.dev(), meta.ino()) == self.socket_id {
+                let _ = std::fs::remove_file(&self.socket);
+            }
+        }
+        // Explicit unlock before the fd drops: the teardown reads the held lock fd, and the flock
+        // release is visible here rather than inferred from Drop.
+        release_flock(&self.file);
         drop(self);
     }
 }
 
-/// The verified runtime dir root for a resident: created 0700, then `stat`ed for owner and mode.
-/// Understands being pointed at an existing dir (re-verify) or nothing (create). A wrong owner or
-/// a wrong mode is [`SingleError::RuntimeDirInsecure`], never silently repaired.
+/// The verified runtime chain for a resident: the per-user base, the `swoosh`/`swoosh-<uid>`
+/// component, and the per-home leaf. The chain is created 0700 and verified (owner and mode) with
+/// the leaf opened `O_NOFOLLOW`; a wrong owner, a wrong mode, or a symlinked component is
+/// [`SingleError::RuntimeDirInsecure`], never silently repaired.
 pub struct RuntimeDir {
-    /// The verified dir.
+    /// The verified leaf.
     dir: PathBuf,
 }
 
 impl RuntimeDir {
-    /// Create (0700) and verify the per-home runtime dir for `home`. An existing dir keeps its
-    /// mode (verified below, never silently repaired by the create path): only a dir WE create
-    /// gets the explicit 0700 set, so a pre-loosened dir still refuses.
+    /// Create (0700) and verify the runtime chain for `home`. An existing dir keeps its mode
+    /// (verified below, never silently repaired by the create path): only a dir WE create gets the
+    /// explicit 0700 set, so a pre-loosened dir still refuses.
     pub fn acquire(home: &Home) -> Result<Self, SingleError> {
-        let dir = home
-            .runtime_dir()
-            .map_err(|_| SingleError::RuntimeDirInsecure {
-                path: PathBuf::from("<unresolved runtime root>"),
-                want: euid(),
-            })?;
-        let fresh = !dir.exists();
+        let root = runtime_root().map_err(|error| SingleError::RuntimeRootUnresolved {
+            reason: error.to_string(),
+        })?;
+        let dir = root.join(home.home_key());
+        let (root_fresh, leaf_fresh) = (!root.exists(), !dir.exists());
         // SAFETY: `DirBuilder::mode` only sets the mode argument for the mkdir syscall; no raw
         // pointer crosses the boundary.
         #[cfg(unix)]
@@ -102,76 +133,80 @@ impl RuntimeDir {
             use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
             let mut builder = std::fs::DirBuilder::new();
             builder.recursive(true).mode(0o700);
-            builder
-                .create(&dir)
-                .map_err(|_| SingleError::RuntimeDirInsecure {
-                    path: dir.clone(),
-                    want: euid(),
-                })?;
-            // A umask-built leaf (or a stale 0755 leaf the OS left behind) would fail the verify
-            // below on its mode alone. Repair ONLY a dir we just created: a PRE-EXISTING loosened
-            // dir is the attack the verifier refuses, so it must not be silently fixed here.
-            if fresh {
+            builder.create(&dir).map_err(|_| insecure(&dir))?;
+            // A umask-built component (or a stale 0755 one the OS left behind) would fail the
+            // verify below on its mode alone. Repair ONLY a path we just created: a PRE-EXISTING
+            // loosened dir is the attack the verifier refuses, so it must not be silently fixed.
+            if root_fresh {
+                let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700));
+            }
+            if leaf_fresh {
                 let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
             }
         }
         #[cfg(not(unix))]
         {
-            std::fs::create_dir_all(&dir).map_err(|_| SingleError::RuntimeDirInsecure {
-                path: dir.clone(),
-                want: euid(),
-            })?;
+            std::fs::create_dir_all(&dir).map_err(|_| insecure(&dir))?;
         }
-        verify_runtime_dir(&dir)?;
+        verify_runtime_chain(&root, &dir)?;
         Ok(Self { dir })
     }
 
-    /// The verified dir.
-    pub fn path(&self) -> &std::path::Path {
+    /// The verified leaf dir.
+    pub fn path(&self) -> &Path {
         &self.dir
     }
 
-    /// The lock path inside this dir.
-    pub fn lock_path(&self, home: &Home) -> Result<PathBuf, SingleError> {
-        home.control_lock()
-            .map_err(|_| SingleError::RuntimeDirInsecure {
-                path: self.dir.clone(),
-                want: euid(),
-            })
+    /// `<leaf>/control.lock`: the flock truth, inside the verified leaf.
+    pub fn lock_path(&self) -> PathBuf {
+        self.dir.join("control.lock")
     }
 
-    /// The socket path inside this dir.
-    pub fn socket_path(&self, home: &Home) -> Result<PathBuf, SingleError> {
-        home.control_socket()
-            .map_err(|_| SingleError::RuntimeDirInsecure {
-                path: self.dir.clone(),
-                want: euid(),
-            })
+    /// `<leaf>/control.sock`: the rendezvous, inside the verified leaf.
+    pub fn socket_path(&self) -> PathBuf {
+        self.dir.join("control.sock")
     }
 }
 
-/// Acquire single-instance for `home`: verify the runtime dir, take the exclusive nonblocking flock,
-/// connect-probe-then-unlink-bind the socket, record our pid, and return the held lock plus the bound
-/// listener. The whole sequence runs UNDER the flock; the lock outlives the return (held by the
-/// caller for process life). A second holder gets [`SingleError::AlreadyResident`] naming the
-/// winner's pid; a live socket under our own lock is [`SingleError::ProbeAlive`].
+/// Acquire single-instance for `home`: create and verify the runtime chain, take the exclusive
+/// nonblocking flock, connect-probe-then-unlink-bind the socket, record our pid, and return the
+/// held lock plus the bound listener. The probe/unlink/bind sequence runs UNDER the flock (a second
+/// contender loses at the flock); the chain verify precedes it because the lock lives inside the
+/// leaf it verifies. A second holder gets [`SingleError::AlreadyResident`] naming the winner's pid;
+/// a live socket under our own lock is [`SingleError::ProbeAlive`], and any probe answer that is
+/// neither live nor one of the two stale errors is [`SingleError::ProbeUnclassified`].
 pub fn acquire(
     home: &Home,
 ) -> Result<(InstanceLock, std::os::unix::net::UnixListener), SingleError> {
     let runtime = RuntimeDir::acquire(home)?;
-    let lock_path = runtime.lock_path(home)?;
-    let socket_path = runtime.socket_path(home)?;
-    // Open (creating) the lock file, then take the EXCLUSIVE NONBLOCKING flock: the truth.
+    let lock_path = runtime.lock_path();
+    let socket_path = runtime.socket_path();
+    // Open (creating) the lock file with O_NOFOLLOW and stat it as a regular file: a symlink or a
+    // special file planted inside the leaf never becomes the flock.
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
         .open(&lock_path)
-        .map_err(|_| SingleError::RuntimeDirInsecure {
+        .map_err(|source| SingleError::LockFailed {
             path: lock_path.clone(),
-            want: euid(),
+            source,
         })?;
+    if !file
+        .metadata()
+        .map_err(|source| SingleError::LockFailed {
+            path: lock_path.clone(),
+            source,
+        })?
+        .is_file()
+    {
+        return Err(SingleError::LockFailed {
+            path: lock_path,
+            source: std::io::Error::other("the control lock is not a regular file"),
+        });
+    }
     // SAFETY: `file` owns a valid fd for the duration of the call; `flock` only associates an
     // advisory lock with it. A nonzero return with `EWOULDBLOCK` means a live holder.
     let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -182,98 +217,233 @@ pub fn acquire(
                 pid: read_lock_pid(&lock_path).unwrap_or(0),
             });
         }
-        return Err(SingleError::RuntimeDirInsecure {
+        return Err(SingleError::LockFailed {
             path: lock_path,
-            want: euid(),
+            source: held,
         });
     }
     // Connect-probe UNDER the lock: a live answer means a squatter or a live node on a borrowed
-    // lock, so bail LOUD and never unlink a live socket. `ECONNREFUSED`/`ENOENT` is stale: unlink,
-    // bind, and continue. Any other probe error is treated as stale too (nothing answered).
-    if probe_live(&socket_path) {
+    // lock, so bail LOUD and never unlink a live socket. Only `ENOENT` and `ECONNREFUSED` are
+    // stale (unlink, bind, continue); every other answer refuses.
+    let probe = probe_socket(&socket_path);
+    if !matches!(probe, Probe::Stale) {
         // Release before returning so a probe refusal does not strand the flock.
-        // SAFETY: same valid-fd contract as above; `LOCK_UN` only drops this fd's advisory lock.
-        let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        return Err(SingleError::ProbeAlive);
+        release_flock(&file);
+        return Err(match probe {
+            Probe::Live => SingleError::ProbeAlive,
+            Probe::Stale | Probe::Unknown => SingleError::ProbeUnclassified,
+        });
     }
     let _ = std::fs::remove_file(&socket_path);
     let listener =
         std::os::unix::net::UnixListener::bind(&socket_path).map_err(SingleError::BindFailed)?;
+    let socket_id = socket_identity(listener.as_raw_fd()).map_err(SingleError::BindFailed)?;
     // Defense in depth: the dir + peer-cred carry the weight (the mode is moot on macOS), but a
     // 0600 socket costs nothing.
-    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
     }
-    // Record our pid in the lock file (truncate + write), so the next contender names us.
+    // Record our pid through the already-open lock fd (truncate + write), never a second by-path
+    // open a symlink planted inside the leaf could redirect.
     let pid = std::process::id();
     {
-        use std::io::Write as _;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).truncate(true);
-        if let Ok(mut handle) = options.open(&lock_path) {
-            let _ = writeln!(handle, "{pid}");
-        }
+        use std::io::{Seek as _, SeekFrom, Write as _};
+        let mut handle = &file;
+        let _ = handle.set_len(0);
+        let _ = handle.seek(SeekFrom::Start(0));
+        let _ = writeln!(handle, "{pid}");
     }
     Ok((
         InstanceLock {
             file,
-            dir: runtime.dir,
             socket: socket_path,
+            socket_id,
             pid,
         },
         listener,
     ))
 }
 
-/// Whether the socket at `path` answers a connect: `Ok` (connected) means LIVE. `ENOENT` (nothing
-/// there) and `ECONNREFUSED` (a dead listener's leftover path) both mean stale. Any other outcome
-/// (permissions, odd states) is treated as not-live: the bind step decides, loudly.
-fn probe_live(path: &std::path::Path) -> bool {
-    match std::os::unix::net::UnixStream::connect(path) {
-        Ok(_) => true,
-        // `std::io::ErrorKind` is still unstable in `core`, so the NotFound check reads from `std`.
-        #[allow(clippy::std_instead_of_core)]
-        Err(error) => {
-            !matches!(
-                error.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) && probe_connect_succeeded_despite_kind(error)
-        }
+/// The deadline for a connect left `EINPROGRESS`. A local listener admits at once; a full accept
+/// queue that never frees is exactly the park a nonblocking connect avoids, so this bounds only an
+/// in-flight connect, never startup.
+const PROBE_POLL_MS: libc::c_int = 200;
+
+/// What a connect probe of the rendezvous path found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Probe {
+    /// A connect completed: a listener (or a squatter) holds the path.
+    Live,
+    /// `ENOENT` or `ECONNREFUSED`: nothing holds the path, so it is safe to unlink and rebind.
+    Stale,
+    /// Any other answer (`EACCES`, `EAGAIN`, `EINTR`, a poll timeout): the path might be live, so
+    /// refuse rather than risk unlinking a socket we could not prove dead.
+    Unknown,
+}
+
+/// Probe the socket at `path` with a nonblocking connect. The connect MUST be nonblocking: a
+/// blocking connect to a live AF_UNIX listener with a full accept queue parks in the kernel until a
+/// slot frees, which a squatter can deny for the life of the process. An in-flight connect is
+/// polled to `SO_ERROR` within [`PROBE_POLL_MS`]; everything but `ENOENT`/`ECONNREFUSED` refuses.
+fn probe_socket(path: &Path) -> Probe {
+    let Some((addr, len)) = sockaddr_un(path) else {
+        return Probe::Unknown;
+    };
+    // SAFETY: `socket` takes no pointers and returns a fresh fd or -1.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Probe::Unknown;
+    }
+    // SAFETY: `fd` was just returned by `socket` and is owned by no other handle, so `OwnedFd`
+    // becomes its sole owner and closes it on drop.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // `SOCK_NONBLOCK`/`SOCK_CLOEXEC` are Linux `socket()` flags; set both portably after creation.
+    // SAFETY: `fd` is open and owned here; `F_SETFL`/`F_SETFD` only set status flags on that fd.
+    if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) } < 0
+        || unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0
+    {
+        return Probe::Unknown;
+    }
+    // SAFETY: `addr` is fully initialized by `sockaddr_un` and `len` names its whole extent; the
+    // cast to `*const sockaddr` is valid for a `sockaddr_un` and `connect` reads only that much.
+    let connected = unsafe { libc::connect(fd.as_raw_fd(), core::ptr::addr_of!(addr).cast(), len) };
+    if connected == 0 {
+        return Probe::Live;
+    }
+    match std::io::Error::last_os_error().raw_os_error() {
+        Some(libc::ENOENT | libc::ECONNREFUSED) => Probe::Stale,
+        Some(libc::EINPROGRESS) => await_probe(&fd),
+        _ => Probe::Unknown,
     }
 }
 
-/// A connect that failed with an unclassified kind still answered if the OS reports the socket as
-/// accepting: conservatively treat every non-NotFound/non-Refused error as NOT live (stale), so a
-/// wedged path never blocks a fresh bind. Returns false always: the name documents the policy at
-/// the call site.
-fn probe_connect_succeeded_despite_kind(_error: std::io::Error) -> bool {
-    false
+/// Wait out an in-flight connect for at most [`PROBE_POLL_MS`], then read `SO_ERROR`: 0 is a live
+/// connect, the two stale errors stay stale, and a timeout or any other answer refuses (the path
+/// might still be a live listener that has not admitted us yet).
+fn await_probe(fd: &OwnedFd) -> Probe {
+    let mut pollfd = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    // SAFETY: `pollfd` is a live one-entry array; `poll` reads `events` and writes `revents` only.
+    let ready = unsafe { libc::poll(&mut pollfd, 1, PROBE_POLL_MS) };
+    if ready <= 0 {
+        return Probe::Unknown;
+    }
+    let mut error: libc::c_int = 0;
+    let mut len = core::mem::size_of_val(&error) as libc::socklen_t;
+    // SAFETY: `error` is a live `c_int` and `len` names its size; `getsockopt` writes at most
+    // `len` bytes through the pointer.
+    let got = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_ERROR,
+            core::ptr::addr_of_mut!(error).cast(),
+            &mut len,
+        )
+    };
+    if got != 0 {
+        return Probe::Unknown;
+    }
+    match error {
+        0 => Probe::Live,
+        libc::ENOENT | libc::ECONNREFUSED => Probe::Stale,
+        _ => Probe::Unknown,
+    }
+}
+
+/// Build the `sockaddr_un` for `path`, or `None` when the path does not fit `sun_path` (an
+/// unclassifiable probe refuses rather than address a truncated path).
+fn sockaddr_un(path: &Path) -> Option<(libc::sockaddr_un, libc::socklen_t)> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: `sockaddr_un` is plain C data (integers plus a byte array); all-zero is a valid
+    // initial value and every field the kernel reads is set below.
+    let mut addr: libc::sockaddr_un = unsafe { core::mem::zeroed() };
+    if bytes.len() >= addr.sun_path.len() {
+        return None;
+    }
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    Some((addr, core::mem::size_of_val(&addr) as libc::socklen_t))
+}
+
+/// Release this fd's advisory flock, so a refusal never strands the lock for process life.
+fn release_flock(file: &std::fs::File) {
+    // SAFETY: `file` owns a valid fd for the duration of the call; `LOCK_UN` only drops this fd's
+    // advisory lock.
+    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
 }
 
 /// Read the pid recorded in the lock file, if any.
-fn read_lock_pid(path: &std::path::Path) -> Option<u32> {
+fn read_lock_pid(path: &Path) -> Option<u32> {
     let text = std::fs::read_to_string(path).ok()?;
     text.split_whitespace().next()?.parse().ok()
 }
 
-/// Verify the runtime dir is owned by this user and is mode 0700. Created AND verified, never
-/// assumed: a foreign-owned or group-readable dir refuses the start.
-fn verify_runtime_dir(dir: &std::path::Path) -> Result<(), SingleError> {
+/// The `(dev, ino)` of an open socket fd, from `fstat`: the identity [`InstanceLock::release`]
+/// compares against the path before unlinking.
+fn socket_identity(fd: RawFd) -> std::io::Result<(u64, u64)> {
+    // SAFETY: all-zero `libc::stat` is a valid initial value for the out-param; `fstat` only
+    // writes into it.
+    let mut stat: libc::stat = unsafe { core::mem::zeroed() };
+    // SAFETY: `fd` is an open socket fd and `stat` is a live local; `fstat` writes only into it.
+    let rc = unsafe { libc::fstat(fd, &mut stat) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // `dev_t` is signed on macOS and unsigned on Linux; widen the signed one explicitly so the
+    // same expression needs no platform-specific cast.
+    #[cfg(target_os = "macos")]
+    let dev = u64::try_from(stat.st_dev).unwrap_or_default();
+    #[cfg(not(target_os = "macos"))]
+    let dev = stat.st_dev;
+    Ok((dev, stat.st_ino))
+}
+
+/// Verify the runtime chain that guards the rendezvous, from the per-user base down: the base, the
+/// `swoosh`/`swoosh-<uid>` component, and the per-home leaf must each be a directory owned by this
+/// user with mode 0700. The base is followed (a caller may point `XDG_RUNTIME_DIR` through a
+/// symlink at the real per-user dir); the component is checked with `symlink_metadata` and the leaf
+/// is opened `O_NOFOLLOW | O_DIRECTORY`, so a planted symlink cannot pass by pointing at an
+/// accepted target.
+fn verify_runtime_chain(root: &Path, leaf: &Path) -> Result<(), SingleError> {
+    if let Some(base) = root.parent() {
+        verify_dir(std::fs::metadata(base), base)?;
+    }
+    verify_dir(std::fs::symlink_metadata(root), root)?;
+    let handle = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
+        .open(leaf)
+        .map_err(|_| insecure(leaf))?;
+    verify_dir(handle.metadata(), leaf)
+}
+
+/// Check one stat result against the chain invariant: a directory, owned by euid, mode 0700. A
+/// stat failure or any mismatch is insecure: what cannot be proven is refused.
+fn verify_dir(meta: std::io::Result<std::fs::Metadata>, path: &Path) -> Result<(), SingleError> {
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    let meta = std::fs::metadata(dir).map_err(|_| SingleError::RuntimeDirInsecure {
-        path: dir.to_owned(),
-        want: euid(),
-    })?;
     let want = euid();
-    if meta.uid() != want || meta.permissions().mode() & 0o777 != 0o700 {
-        return Err(SingleError::RuntimeDirInsecure {
-            path: dir.to_owned(),
-            want,
-        });
+    let meta = meta.map_err(|_| insecure(path))?;
+    if !meta.is_dir() || meta.uid() != want || meta.permissions().mode() & 0o777 != 0o700 {
+        return Err(insecure(path));
     }
     Ok(())
+}
+
+/// The refusal for a runtime-chain path that is not this user's 0700 directory.
+fn insecure(path: &Path) -> SingleError {
+    SingleError::RuntimeDirInsecure {
+        path: path.to_owned(),
+        want: euid(),
+    }
 }
 
 /// The effective uid: the owner every runtime path must verify against.

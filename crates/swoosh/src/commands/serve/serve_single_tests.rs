@@ -193,6 +193,37 @@ fn live_socket_under_lock_refuses_start() {
     drop(live);
 }
 
+/// A live listener whose probe answers neither `ENOENT` nor `ECONNREFUSED` refuses start and is
+/// never unlinked: only the two proven-stale answers permit the unlink. A mode-000 socket makes
+/// connect answer `EACCES`, an outcome the unlink policy must refuse.
+#[test]
+fn unclassified_probe_refuses_and_never_unlinks() {
+    let _env = xdg_runtime_env();
+    let scratch = Scratch::new("unclassified");
+    // The leaf must exist 0700 before the plant binds inside it.
+    let (seed, seed_listener) = acquire(&scratch.home).expect("seed acquire creates the leaf");
+    let socket = seed.socket_path().to_path_buf();
+    drop(seed);
+    drop(seed_listener);
+    let _ = std::fs::remove_file(&socket);
+    let live = UnixListener::bind(&socket).expect("plant a live listener");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Mode 000: a non-root connect answers EACCES on Linux and macOS, neither a live connect
+        // nor one of the two stale errors. A full accept queue (Linux) answers EAGAIN, the other
+        // unclassified shape; both land in the same refuse arm.
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000))
+            .expect("chmod the live socket to 000");
+    }
+    let refused = acquire(&scratch.home);
+    assert!(
+        matches!(refused, Err(SingleError::ProbeUnclassified)),
+        "an unclassified probe refuses start"
+    );
+    assert!(socket.exists(), "the refused socket is never unlinked");
+    drop(live);
+}
+
 /// Dropping the lock fd without clean shutdown (the crash): the next start succeeds.
 #[test]
 fn crash_releases_flock_next_start_rebinds() {

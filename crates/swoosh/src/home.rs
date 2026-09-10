@@ -168,8 +168,9 @@ impl Home {
 }
 
 /// The per-user runtime root resident state lives under: `$XDG_RUNTIME_DIR/swoosh` on Linux,
-/// `confstr(_CS_DARWIN_USER_TEMP_DIR)` + `swoosh-<uid>` on macOS. Created 0700 by the single-instance
-/// acquire, never assumed. Unset `XDG_RUNTIME_DIR` on Linux is a loud error, never a `/tmp` fallback.
+/// `confstr(_CS_DARWIN_USER_TEMP_DIR)` + `swoosh-<uid>` on macOS. Created and verified 0700 by the
+/// single-instance acquire, never assumed. An unset or relative `XDG_RUNTIME_DIR` on Linux is a loud
+/// error, never a `/tmp` or cwd fallback.
 pub fn runtime_root() -> eyre::Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -208,7 +209,15 @@ pub fn runtime_root() -> eyre::Result<PathBuf> {
                  Set it, e.g. XDG_RUNTIME_DIR=/run/user/$(id -u)"
             )
         })?;
-        Ok(PathBuf::from(root).join("swoosh"))
+        let root = PathBuf::from(root);
+        if !root.is_absolute() {
+            return Err(eyre!(
+                "XDG_RUNTIME_DIR must be an absolute path (got {root}); resident serve never \
+                 roots at the cwd",
+                root = root.display()
+            ));
+        }
+        Ok(root.join("swoosh"))
     }
 }
 
