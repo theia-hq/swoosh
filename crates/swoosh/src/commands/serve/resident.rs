@@ -103,18 +103,24 @@ impl Resident {
         self.served.load(Ordering::Relaxed)
     }
 
-    /// Answer one decoded request: two live reads and a stop. The ONLY state-changing op is `Stop`,
-    /// which cancels the token clone and records the socket as the stop source.
+    /// Answer one decoded request without side effects: `Stop` is answered [`Response::Ack`], and the
+    /// matching teardown is [`fire_stop`](Self::fire_stop), fired by the serve path only AFTER the
+    /// Ack is on the wire so a socket stop can never lose its confirm to the stop it triggers.
     pub fn answer(&self, request: Request) -> Response {
         match request {
             Request::Services => Response::Catalog(self.catalog.clone()),
             Request::Status => Response::Status(self.status()),
-            Request::Stop => {
-                self.stop_source.note_socket();
-                self.cancel.cancel();
-                Response::Ack
-            }
+            Request::Stop => Response::Ack,
         }
+    }
+
+    /// Fire the socket stop: record the local source (so the run classifies the stop as local, never
+    /// as a wire `control.stop`) and cancel the one teardown token. Split from
+    /// [`answer`](Self::answer) so the Ack is written first: cancelling before the confirm let the
+    /// process exit out from under the reply.
+    pub fn fire_stop(&self) {
+        self.stop_source.note_socket();
+        self.cancel.cancel();
     }
 
     /// Cut a fresh status reply: the public shape only, with the disabled list re-read live.
@@ -135,8 +141,11 @@ impl Resident {
     }
 
     /// Serve the bound std listener until the teardown token fires: the third arm of the serve
-    /// select. Each accepted connection is uid-checked BEFORE a byte is read, served one-shot
-    /// under the read timeout, then closed.
+    /// select. A slot is taken BEFORE each accept, so at the cap the loop parks on the semaphore and
+    /// connections stay queued at the listener (the `MAX_SESSIONS` backpressure pattern) rather than
+    /// being accepted and dropped: a one-shot client cannot lose the race to a same-uid flood. Each
+    /// accepted connection is uid-checked BEFORE a byte is read, served one-shot under the read
+    /// timeout, then closed.
     pub async fn serve(
         self: Arc<Self>,
         listener: std::os::unix::net::UnixListener,
@@ -144,55 +153,68 @@ impl Resident {
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
         loop {
-            tokio::select! {
+            // Acquire BEFORE accepting: the acquire future doubles as the wake-up when a slot frees
+            // (a gated `available_permits() > 0` check would need a separate wake and could park at
+            // the cap forever), and the cancel token stays a sibling arm so a stop never waits on
+            // the listener.
+            let permit = tokio::select! {
                 () = self.cancel.cancelled() => return Ok(()),
-                accepted = listener.accept() => match accepted {
-                    Ok((stream, _)) => {
-                        // Acquire BEFORE any spawn: past the cap, connections queue at the listener
-                        // instead of each pinning a task set.
-                        let Ok(permit) = self.conns.clone().try_acquire_owned() else {
-                            drop(stream);
-                            continue;
-                        };
-                        let this = Arc::clone(&self);
-                        tokio::spawn(async move {
-                            let _permit = permit;
-                            this.serve_one(stream).await;
-                        });
-                    }
-                    Err(error) if accept_error_fatal(&error) => {
-                        // A listener-level error (a bad descriptor, a non-socket) cannot clear by
-                        // retrying: stop the arm so the run fails loudly instead of backing off
-                        // forever on a control socket that can never answer.
-                        return Err(eyre::eyre!("control listener failed: {error}"));
-                    }
-                    Err(error) => {
-                        // A recoverable error (fd pressure: EMFILE/ENFILE/ENOBUFS) would re-fire
-                        // immediately and spin the same runtime the exposer serves on, so wait one
-                        // short bounded backoff before the next accept. The loop re-checks the
-                        // cancel token after it, so a stop during the backoff lands promptly.
-                        tracing::warn!(%error, "control accept failed; backing off");
-                        tokio::time::sleep(ACCEPT_BACKOFF).await;
-                    }
+                permit = self.conns.clone().acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    // The semaphore is never closed; an unexpected close is the teardown signal.
+                    Err(_) => return Ok(()),
+                },
+            };
+            let accepted = tokio::select! {
+                () = self.cancel.cancelled() => return Ok(()),
+                accepted = listener.accept() => accepted,
+            };
+            match accepted {
+                Ok((stream, _)) => {
+                    let this = Arc::clone(&self);
+                    tokio::spawn(async move {
+                        let _permit = permit;
+                        this.serve_one(stream).await;
+                    });
+                }
+                Err(error) if accept_error_fatal(&error) => {
+                    // A listener-level error (a bad descriptor, a non-socket) cannot clear by
+                    // retrying: stop the arm so the run fails loudly instead of backing off
+                    // forever on a control socket that can never answer.
+                    return Err(eyre::eyre!("control listener failed: {error}"));
+                }
+                Err(error) => {
+                    // A recoverable error (fd pressure: EMFILE/ENFILE/ENOBUFS) would re-fire
+                    // immediately and spin the same runtime the exposer serves on, so wait one
+                    // short bounded backoff before the next accept. The loop re-checks the
+                    // cancel token after it, so a stop during the backoff lands promptly.
+                    tracing::warn!(%error, "control accept failed; backing off");
+                    drop(permit);
+                    tokio::time::sleep(ACCEPT_BACKOFF).await;
                 }
             }
         }
     }
 
-    /// Serve one accepted connection: uid-check first, then one request and one response, then
-    /// close. A foreign uid is warned and closed before a byte is read; a slow peer is reaped at
-    /// the read timeout; an oversized frame is refused.
+    /// Serve one accepted connection under the production peer-credential check and read deadline.
     async fn serve_one(&self, stream: tokio::net::UnixStream) {
-        self.serve_checked(stream, real_peer_uid).await;
+        self.serve_checked_with(stream, real_peer_uid, READ_TIMEOUT)
+            .await;
     }
 
-    /// Serve one connection under the given peer-credential checker: the uid check, then one
-    /// request and one response, then close. Split from [`serve_one`](Self::serve_one) so tests
-    /// inject a fake foreign uid without root.
-    async fn serve_checked(
+    /// Serve one connection under an injectable peer-credential checker and timeout: the uid check,
+    /// then one request and one response, then close. Split from [`serve_one`](Self::serve_one) so
+    /// tests fake a foreign uid without root and drive the real read path with a short deadline
+    /// instead of pinning the constant; production passes [`READ_TIMEOUT`].
+    ///
+    /// A `Stop` is acked BEFORE [`fire_stop`](Self::fire_stop) cancels the node: the write is the
+    /// last thing between the request and the process teardown the request itself triggers, so the
+    /// confirm can never lose the race to exit.
+    async fn serve_checked_with(
         &self,
         stream: tokio::net::UnixStream,
         checker: fn(i32) -> std::io::Result<u32>,
+        timeout: Duration,
     ) {
         let fd = stream.as_raw_fd();
         match peer_uid(fd, checker) {
@@ -209,19 +231,40 @@ impl Resident {
         self.served.fetch_add(1, Ordering::Relaxed);
         let (reader, mut writer) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
-        let request = tokio::time::timeout(READ_TIMEOUT, Request::read(&mut reader)).await;
-        let response = match request {
-            Ok(Ok(request)) => self.answer(request),
+        let request = tokio::time::timeout(timeout, Request::read(&mut reader)).await;
+        let (response, stop) = match request {
+            Ok(Ok(Request::Stop)) => (Response::Ack, true),
+            Ok(Ok(request)) => (self.answer(request), false),
             Ok(Err(ControlError::TooLarge(_))) => {
                 return;
             }
-            Ok(Err(error)) => Response::Error(error.to_string()),
+            Ok(Err(error)) => (Response::Error(error.to_string()), false),
             Err(_elapsed) => {
                 return;
             }
         };
-        let _ = tokio::time::timeout(READ_TIMEOUT, response.write(&mut writer)).await;
+        self.reply_then_fire(&mut writer, &response, stop, timeout)
+            .await;
         let _ = writer.shutdown().await;
+    }
+
+    /// Write the reply, THEN fire the stop it answered: the order is the stop-Ack contract, the
+    /// last thing between a socket `Stop` and the process teardown that stop triggers. Split into
+    /// its own generic method so a test drives it with a writer that never completes and observes
+    /// that the cancel stays unfired while the Ack write is pending.
+    async fn reply_then_fire<W>(
+        &self,
+        writer: &mut W,
+        response: &Response,
+        stop: bool,
+        timeout: Duration,
+    ) where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let _ = tokio::time::timeout(timeout, response.write(writer)).await;
+        if stop {
+            self.fire_stop();
+        }
     }
 }
 

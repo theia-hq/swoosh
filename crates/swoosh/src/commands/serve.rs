@@ -436,9 +436,18 @@ impl ServeCmd {
         // Snapshot the address only when something reads it (the arm, or the banner): a plain
         // quiet serve performs no new read at all.
         let resident = if self.resident {
+            // The per-user runtime root, resolved ONCE here at the serve edge and handed to the lock
+            // module as a value: `single` never reads `XDG_RUNTIME_DIR`/`confstr`, so a test drives
+            // `acquire` with its own temp root and no process-global environment mutation. Resolution
+            // stays inside the `--resident` branch (a plain serve must not need a runtime root) and at
+            // the same point the acquire runs, so the unset/relative-XDG refusal and its timing are
+            // unchanged.
+            let runtime_root = crate::home::runtime_root()
+                .map_err(|error| eyre::eyre!("could not resolve the runtime root: {error}"))?;
             let addr = node.local_addr();
             Some(self.resident_parts(
                 &home,
+                &runtime_root,
                 tightbeam::tunnel::ServiceCatalog::clone(&catalog),
                 addr.node,
                 addr.hints.first().copied(),
@@ -648,12 +657,14 @@ impl ServeCmd {
         Some(format!("control {path} (local, this user)"))
     }
 
-    /// Start the resident arm off the threaded home: the flock truth plus the bound listener (held
-    /// for process life), the live catalog snapshot, and a clone of the node's one teardown token. A
-    /// method so the acquire reads as part of the serve run, not a free helper beside it.
+    /// Start the resident arm off the threaded home and the composition edge's resolved runtime
+    /// `root`: the flock truth plus the bound listener (held for process life), the live catalog
+    /// snapshot, and a clone of the node's one teardown token. A method so the acquire reads as part
+    /// of the serve run, not a free helper beside it.
     fn resident_parts(
         &self,
         home: &crate::home::Home,
+        runtime_root: &Path,
         catalog: tightbeam::tunnel::ServiceCatalog,
         node_id: NodeId,
         addr: Option<SocketAddr>,
@@ -663,7 +674,8 @@ impl ServeCmd {
         std::os::unix::net::UnixListener,
         InstanceLock,
     )> {
-        let (lock, listener) = acquire_single(home).map_err(|error| eyre::eyre!(error))?;
+        let (lock, listener) =
+            acquire_single(home, runtime_root).map_err(|error| eyre::eyre!(error))?;
         let disabled_path = home.disabled();
         let state = Arc::new(Resident::new(
             node_id,
