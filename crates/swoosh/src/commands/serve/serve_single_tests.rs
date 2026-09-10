@@ -1,14 +1,19 @@
-//! S2 tests: flock truth, stale rebind, live refusal, per-home split, graceful release.
+//! S2 tests: flock exclusion across processes, stale rebind, the live-probe refusal, per-home split,
+//! and graceful release.
 //!
-//! Every case threads its own per-test runtime root into `acquire`; nothing here mutates a
-//! process-global (`XDG_RUNTIME_DIR` is never touched), so the suite is parallel-safe by
-//! construction rather than by a shared environment mutex.
+//! The cross-process cases re-invoke THIS test binary as a child (`single_lock_child_holds_the_home`)
+//! that acquires the home and records its pid; the parent asserts the truth it reads and kills only
+//! the exact pid it spawned. The in-process cases thread their own per-test runtime root into
+//! `acquire`; nothing here mutates a process-global (`XDG_RUNTIME_DIR` is never touched).
 
 use core::sync::atomic::{AtomicU32, Ordering};
+use core::time::Duration;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::io::AsRawFd as _;
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::os::unix::process::ExitStatusExt as _;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::{SingleError, acquire};
 use crate::home::Home;
@@ -68,26 +73,144 @@ impl Drop for Scratch {
     }
 }
 
-/// Two starts on one home: exactly one wins, the loser names the winner's pid.
+/// The env tag carrying the child's home dir: its presence is what tells
+/// [`single_lock_child_holds_the_home`] it is the re-invoked child, not an ordinary test run.
+const CHILD_HOME_ENV: &str = "SWOOSH_TEST_SINGLE_CHILD_HOME";
+/// The env tag carrying the child's already-verified runtime root.
+const CHILD_ROOT_ENV: &str = "SWOOSH_TEST_SINGLE_CHILD_ROOT";
+/// The env tag naming the file the child writes its pid to once it holds the lock.
+const CHILD_PID_ENV: &str = "SWOOSH_TEST_SINGLE_CHILD_PIDFILE";
+
+/// The child half of the cross-process cases: re-invoked by [`LockChild::spawn`] as
+/// `test-bin single_lock_child_holds_the_home --ignored --nocapture`. It acquires the home, records
+/// this process's pid for the parent, then holds both the lock and the listener until the parent
+/// kills this exact pid. A run without the env tag (an ordinary `--ignored` pass) is a no-op.
+#[test]
+#[ignore = "re-invoked as a child by the cross-process single-instance tests"]
+fn single_lock_child_holds_the_home() {
+    let Some(home_dir) = std::env::var_os(CHILD_HOME_ENV) else {
+        return;
+    };
+    let root = PathBuf::from(std::env::var_os(CHILD_ROOT_ENV).expect("the child root env"));
+    let pid_file = PathBuf::from(std::env::var_os(CHILD_PID_ENV).expect("the child pid env"));
+    let home = Home::resolve(Some(PathBuf::from(home_dir))).expect("the child home resolves");
+    let held = acquire(&home, &root).expect("the child acquires the free home");
+    std::fs::write(&pid_file, std::process::id().to_string()).expect("record the child pid");
+    // Hold the lock and the bound listener for life; the parent kills this exact pid.
+    let _held = held;
+    loop {
+        std::thread::park();
+    }
+}
+
+/// A re-invoked test-binary child that holds a home's lock. Kills and reaps on drop, so a panicking
+/// parent never orphans it; `sigkill_and_reap` is the explicit exact-pid crash (and the kill the
+/// cross-process cases assert on).
+struct LockChild {
+    child: std::process::Child,
+}
+
+impl LockChild {
+    /// Spawn this same test binary as the lock-holding child over `scratch`'s home and root.
+    fn spawn(scratch: &Scratch, pid_file: &Path) -> Self {
+        let exe = std::env::current_exe().expect("the test binary path");
+        let child = std::process::Command::new(exe)
+            .arg("single_lock_child_holds_the_home")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env(CHILD_HOME_ENV, scratch.home.dir())
+            .env(CHILD_ROOT_ENV, &scratch.root)
+            .env(CHILD_PID_ENV, pid_file)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("re-invoke the test binary as the lock-holding child");
+        Self { child }
+    }
+
+    /// The pid this handle spawned (the only pid anything here is allowed to signal).
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Wait for the child to record its pid, bounded, and assert it matches the spawned pid.
+    fn await_pid(&mut self, pid_file: &Path) -> u32 {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(text) = std::fs::read_to_string(pid_file) {
+                if let Ok(pid) = text.trim().parse::<u32>() {
+                    assert_eq!(pid, self.pid(), "the child recorded its own spawned pid");
+                    return pid;
+                }
+            }
+            if let Some(status) = self.child.try_wait().expect("poll the child") {
+                panic!("the lock child exited before recording its pid: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the lock child never recorded its pid at {}",
+                pid_file.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Whether the spawned process is still running.
+    fn is_alive(&mut self) -> bool {
+        self.child.try_wait().expect("poll the child").is_none()
+    }
+
+    /// SIGKILL the exact pid this handle spawned, then reap it: the real crash, never a `drop` and
+    /// never a name-based kill.
+    fn sigkill_and_reap(&mut self) -> std::process::ExitStatus {
+        let pid = self.pid() as libc::pid_t;
+        // SAFETY: `kill` takes a pid and a signal number and touches no memory; the pid targeted is
+        // the one this handle spawned, never a name match.
+        let sent = unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert_eq!(sent, 0, "SIGKILL the exact spawned pid {pid}");
+        self.child.wait().expect("reap the killed child")
+    }
+}
+
+impl Drop for LockChild {
+    fn drop(&mut self) {
+        // Never orphan a spawned child, and never signal an already-reaped pid (it may be
+        // recycled): reap if it is still running, else leave the cached status alone.
+        if self.child.try_wait().ok().flatten().is_none() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// Two starts on one home in two processes: the child acquires, the parent's `acquire` loses at the
+/// flock and names the child's pid. A mechanism that never wrote a pid (or returned `process::id()`)
+/// could not pass this.
 #[test]
 fn two_resident_starts_one_home_exactly_one_wins() {
     let scratch = Scratch::new("duel");
-    let (first, second) = (
-        acquire(&scratch.home, &scratch.root),
-        acquire(&scratch.home, &scratch.root),
+    let pid_file = scratch.base.join("child.pid");
+    let mut keeper = LockChild::spawn(&scratch, &pid_file);
+    let child_pid = keeper.await_pid(&pid_file);
+
+    let refused = acquire(&scratch.home, &scratch.root);
+    let loser_pid = match refused {
+        Err(SingleError::AlreadyResident { pid }) => pid,
+        Err(other) => panic!("the second start must lose at the flock: {other}"),
+        Ok(_) => panic!("exactly one start must win, not two"),
+    };
+    assert_eq!(loser_pid, child_pid, "the loser names the child's pid");
+    assert!(
+        keeper.is_alive(),
+        "the child still holds the home after the refusal"
     );
-    match (first, second) {
-        (Ok((lock, _)), Err(SingleError::AlreadyResident { pid })) => {
-            assert_eq!(pid, lock.pid(), "the loser names the winner's pid");
-        }
-        (Err(SingleError::AlreadyResident { pid }), Ok((lock, _))) => {
-            assert_eq!(pid, lock.pid(), "the loser names the winner's pid");
-        }
-        (Ok(_), Ok(_)) => panic!("exactly one start must win, not two"),
-        (Err(a), Err(b)) => panic!("exactly one start must win: {a} vs {b}"),
-        (Err(a), Ok(_)) => panic!("exactly one start must win: loser first: {a}"),
-        (Ok(_), Err(other)) => panic!("the loser must name the winner's pid: {other}"),
-    }
+    let status = keeper.sigkill_and_reap();
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the child died by the exact-pid SIGKILL"
+    );
 }
 
 /// A dropped-but-not-unlinked listener leaves a stale path: the next start probes, unlinks, rebinds.
@@ -96,8 +219,8 @@ fn stale_socket_is_probed_then_unlinked_and_rebound() {
     let scratch = Scratch::new("stale");
     // Establish the runtime leaf through one clean acquire first (creating it 0700), then plant
     // the stale socket inside it: the stale-rebind path is under test, not the create path.
-    // `drop` the lock WITHOUT `release` (the crash shape) and `forget` the listener WITHOUT
-    // unlink (the stale plant): both teardowns leave the dead path behind.
+    // `drop` the lock WITHOUT `release` (the crash shape) and shut the listener down WITHOUT
+    // unlinking the path (the stale plant): both teardowns leave the dead path behind.
     let socket = {
         let (lock, listener) =
             acquire(&scratch.home, &scratch.root).expect("first acquire creates the leaf");
@@ -117,45 +240,27 @@ fn stale_socket_is_probed_then_unlinked_and_rebound() {
     let _ = lock;
 }
 
-/// A LIVE socket under a borrowed lock: the probe answers, so start bails `ProbeAlive` and never
-/// unlinks. The plant binds a listener OUTSIDE the acquire (no lock held), keeps it alive, then a
-/// second flock fd is held open to force the start UNDER a lock it does not own: the probe hears
-/// the live plant and refuses.
+/// A LIVE socket at the path with the flock free: the start owns the lock and reaches the real
+/// probe, which hears the live listener and bails `ProbeAlive`, never unlinking the path.
 #[test]
 fn live_socket_under_lock_refuses_start() {
     let scratch = Scratch::new("live");
-    // The leaf must exist 0700 before the plant binds inside it.
+    // One clean acquire creates and verifies the leaf, then drops both handles: the flock frees and
+    // the seed path is removed, so the plant binds a live listener inside the verified leaf.
     let (seed, seed_listener) =
         acquire(&scratch.home, &scratch.root).expect("seed acquire creates the leaf");
     let socket = seed.socket_path().to_path_buf();
     drop(seed);
     drop(seed_listener);
     let _ = std::fs::remove_file(&socket);
-    let live = UnixListener::bind(&socket).expect("plant a live listener");
-    // The borrowed lock: a second flock fd held open across the start below.
-    let lock_path = scratch.leaf().join("control.lock");
-    let squat = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(&lock_path)
-        .expect("open the lock for the squat");
-    // SAFETY: `squat` owns a valid fd; this takes the blocking exclusive flock, which succeeds
-    // (nothing holds it: the seed was dropped).
-    let locked = unsafe { libc::flock(squat.as_raw_fd(), libc::LOCK_EX) };
-    assert_eq!(locked, 0, "the squat takes the borrowed lock");
-    // The second start contends on the borrowed lock: it loses with AlreadyResident (the truth),
-    // and the live socket is never unlinked. The probe-alive refusal is proven directly below.
-    let refused = acquire(&scratch.home, &scratch.root).is_err();
-    assert!(refused, "a live socket under the lock refuses start");
+    let live = UnixListener::bind(&socket).expect("plant a live listener at the freed path");
+
+    let refused = acquire(&scratch.home, &scratch.root);
+    assert!(
+        matches!(refused, Err(SingleError::ProbeAlive)),
+        "a live socket answers the probe, so the start refuses"
+    );
     assert!(socket.exists(), "the live socket is never unlinked");
-    // Direct: the probe hears the live plant (connect succeeds), so a start UNDER this borrowed
-    // lock would bail ProbeAlive rather than unlink. Proven by a live connect here.
-    let probed = std::os::unix::net::UnixStream::connect(&socket).is_ok();
-    assert!(probed, "the plant answers the probe: it is live");
-    // SAFETY: same valid-fd contract; releases the squat.
-    let _ = unsafe { libc::flock(squat.as_raw_fd(), libc::LOCK_UN) };
     drop(live);
 }
 
@@ -190,36 +295,65 @@ fn unclassified_probe_refuses_and_never_unlinks() {
     drop(live);
 }
 
-/// Dropping the lock fd without clean shutdown (the crash): the next start succeeds.
+/// A crashing child (a real `SIGKILL`, not a `drop`) releases the flock: the parent's next start
+/// succeeds over the stale socket the crash left behind. Kills only the exact spawned pid.
 #[test]
 fn crash_releases_flock_next_start_rebinds() {
     let scratch = Scratch::new("crash");
-    {
-        let (_lock, _listener) = acquire(&scratch.home, &scratch.root).expect("first start");
-        // Drop without `release`: the crash path. The OS releases the flock; the socket stays.
-    }
-    let (lock, _) =
-        acquire(&scratch.home, &scratch.root).expect("next start rebinds after a crash");
+    let pid_file = scratch.base.join("child.pid");
+    let mut crashed = LockChild::spawn(&scratch, &pid_file);
+    let child_pid = crashed.await_pid(&pid_file);
+    assert!(
+        crashed.is_alive(),
+        "the child holds the home before the crash"
+    );
+    let status = crashed.sigkill_and_reap();
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGKILL),
+        "the child pid {child_pid} died by SIGKILL, not a clean drop"
+    );
+
+    // The OS released the flock with the pid; the socket path is still the crash plant, so the next
+    // start probes it stale, unlinks, and rebinds.
+    let (lock, _) = acquire(&scratch.home, &scratch.root).expect("a hard kill releases the flock");
+    assert!(
+        lock.socket_path().exists(),
+        "the next start rebinds the stale path"
+    );
     let _ = lock;
 }
 
-/// Two homes never collide: sockets and locks differ, and the FNV key is stable per home.
+/// Two homes never collide: sockets and locks differ, keys differ, and the key is a stable function
+/// of the canonical home path across re-resolutions and `dir/sub/..` spellings.
 #[test]
 fn per_home_paths_never_collide() {
     let first = Scratch::new("home-a");
     let second = Scratch::new("home-b");
+    // Resolving one dir twice is one home: the key is stable, not re-rolled per resolution.
+    let a = Home::resolve(Some(first.home.dir().to_path_buf())).expect("first home resolves");
+    let b = Home::resolve(Some(first.home.dir().to_path_buf())).expect("same dir resolves again");
+    assert_eq!(
+        a.home_key(),
+        b.home_key(),
+        "the key is stable across resolutions of the same dir"
+    );
+    // A `dir/sub/..` spelling canonicalizes to the same home and the same key.
+    let sub = first.home.dir().join("sub");
+    std::fs::create_dir_all(&sub).expect("scratch sub dir");
+    let odd = Home::resolve(Some(sub.join(".."))).expect("dir/sub/.. resolves");
+    assert_eq!(
+        odd.home_key(),
+        a.home_key(),
+        "a sub/.. spelling canonicalizes to one home"
+    );
     assert_ne!(
-        first.home_key(),
+        a.home_key(),
         second.home_key(),
         "two homes hash to different keys"
     );
-    assert_eq!(
-        first.home_key(),
-        first.home.home_key(),
-        "the FNV key is stable across resolutions of the same dir"
-    );
     // The widened full-width hash: 16 lowercase hex chars, never the old 32-bit 8-char key.
-    let key = first.home_key();
+    let key = a.home_key();
     assert_eq!(key.len(), 16, "the key renders the full 64 bits: {key}");
     assert!(
         key.chars().all(|c| c.is_ascii_hexdigit()),
@@ -227,7 +361,7 @@ fn per_home_paths_never_collide() {
     );
     // The widened key adds eight chars but must still fit sun_path on both platforms (104 on
     // macOS, 108 on Linux; assert the tighter one), or the bind would fail on a long temp root.
-    let socket = first.leaf().join("control.sock");
+    let socket = a.runtime_leaf(&first.root).join("control.sock");
     assert!(
         socket.as_os_str().as_bytes().len() < 104,
         "the resident socket path fits sun_path: {}",

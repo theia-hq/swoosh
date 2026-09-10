@@ -236,6 +236,11 @@ impl Resident {
             Ok(Ok(Request::Stop)) => (Response::Ack, true),
             Ok(Ok(request)) => (self.answer(request), false),
             Ok(Err(ControlError::TooLarge(_))) => {
+                // EOF is the contract for an oversized DECLARED frame: the codec refuses the length
+                // before reading a byte of it (`control.rs`), and the connection closes with no
+                // reply. Replying `Error` would answer an attacker-chosen length while the client
+                // may still be sending the payload it declared, so the close is the whole response.
+                // The serve-level test (`oversized_declared_frame_ends_the_connection`) pins this.
                 return;
             }
             Ok(Err(error)) => (Response::Error(error.to_string()), false),
@@ -429,16 +434,6 @@ fn real_peer_uid(fd: i32) -> std::io::Result<u32> {
             "peer credentials are not supported on this platform",
         ))
     }
-}
-
-/// Convert a blocking std listener into a tokio one without blocking the reactor: set
-/// nonblocking first, then wrap. Kept here (not inline in `serve`) so the why stays with the how.
-#[allow(dead_code)]
-fn tokio_listener(
-    listener: std::os::unix::net::UnixListener,
-) -> std::io::Result<tokio::net::UnixListener> {
-    listener.set_nonblocking(true)?;
-    tokio::net::UnixListener::from_std(listener)
 }
 
 #[cfg(test)]

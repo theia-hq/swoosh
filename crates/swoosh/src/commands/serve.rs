@@ -686,17 +686,6 @@ impl ServeCmd {
         ));
         Ok((state, listener, lock))
     }
-
-    /// The test seam for [`control_line`](Self::control_line): the banner takes the line as a
-    /// parameter, so tests pass `None` (plain) or `Some` (resident) directly without a home.
-    #[cfg(test)]
-    fn control_line_for_test(&self) -> Option<&str> {
-        if self.resident {
-            Some("control <socket> (local, this user)")
-        } else {
-            None
-        }
-    }
 }
 
 /// Build the `name -> target` display map from the SAME requested strings tightbeam parsed: each

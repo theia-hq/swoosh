@@ -1,20 +1,30 @@
-//! Unit tests for `serve`'s stop classification: a GRACEFUL stop is a typed [`Stopped`] the run reports and
-//! exits 0 on, and an ERRORED teardown never becomes one (it stays an `Err` the run propagates, so the
-//! process exits non-zero). The end-to-end proof that a member `control.stop` makes the exposer return `Ok`
-//! (which the run turns into [`Stopped::Requested`], exit 0) lives in `tests/gated_stop.rs`.
+//! Unit tests for `serve`'s stop classification and banner: a GRACEFUL stop is a typed [`Stopped`] the run
+//! reports and exits 0 on, and an ERRORED teardown never becomes one (it stays an `Err` the run propagates,
+//! so the process exits non-zero). The end-to-end proof that a member `control.stop` makes the exposer
+//! return `Ok` (which the run turns into [`Stopped::Requested`], exit 0) lives in `tests/gated_stop.rs`.
+//!
+//! Two properties only the real composition root can prove are driven by spawning the compiled `swoosh`
+//! binary: plain serve creates no runtime state, and `--resident` stays the foreground process.
 
 use core::net::SocketAddr;
+use core::sync::atomic::{AtomicU32, Ordering};
+use core::time::Duration;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Instant;
 
 use tightbeam::tunnel::{
     Exposer, ManifestEntry, Posture, PublicRequest, PublicUnsafeRequest, RawSource, Registry,
     Services, TargetKind,
 };
 
+use super::control::{ControlError, Request, Response};
 use super::{
     FetchScope, Group, MdnsState, ReachKind, Stopped, describe, display_targets, reach_section,
     render_ready_banner, serving_section,
 };
+use crate::home::Home;
 
 /// A gated handler/forward entry for a banner test (the common case: everything behind the family gate). A
 /// handler or a forward carries no raw source to warn about.
@@ -232,6 +242,10 @@ fn each_graceful_stop_reason_has_a_distinct_legible_message() {
         "the two graceful reasons print distinct lines, so a log tells them apart"
     );
     assert_ne!(requested, local, "the socket stop prints its own line");
+    assert_ne!(
+        interrupted, local,
+        "the interrupt and the socket stop are the pair a log reader most often must tell apart"
+    );
 }
 
 /// `Stopped` exists ONLY on the success path: it has an arm for each way an owner GRACEFULLY stops the
@@ -241,13 +255,12 @@ fn each_graceful_stop_reason_has_a_distinct_legible_message() {
 /// exits 0 while a crash exits non-zero.
 #[test]
 fn stopped_has_an_arm_only_for_graceful_reasons() {
-    // A total match over `Stopped`: every arm is a graceful (exit-0) reason, so adding a non-graceful arm
-    // would fail to compile here, forcing the author to keep failures OFF this type and on the `Err` path.
+    // A total destructuring of `Stopped`: every variant is a graceful (exit-0) reason, so adding a
+    // non-graceful variant would fail to compile here, forcing the author to keep failures OFF this
+    // type and on the `Err` path. The compile-time exhaustiveness is the whole check; there is
+    // deliberately no runtime assertion to make.
     for reason in [Stopped::Requested, Stopped::Interrupted, Stopped::Local] {
-        let graceful = match reason {
-            Stopped::Requested | Stopped::Interrupted | Stopped::Local => true,
-        };
-        assert!(graceful, "{reason:?} is a graceful, exit-0 stop");
+        let (Stopped::Requested | Stopped::Interrupted | Stopped::Local) = reason;
     }
 }
 
@@ -277,11 +290,71 @@ fn resident_stop_classifies_from_its_source() {
     );
 }
 
-/// Plain serve creates no runtime state: no dir, no lock, no socket. The flag alone never touches
-/// the filesystem (S2/S3 wire the acquire; S1 only shapes the CLI), so a plain serve in-process
-/// with a temp runtime root leaves nothing behind.
+/// Plain serve creates no runtime state: drive the REAL binary with a temp home, a temp
+/// `XDG_RUNTIME_DIR`, `--quiet`, and a one-second expiry, then assert no `control.sock`, no
+/// `control.lock`, and no runtime root or per-home leaf exists. The production composition root runs
+/// for real; nothing here parses a flag or renders a banner in-process.
 #[test]
 fn plain_serve_creates_no_runtime_state() {
+    let scratch = ProcessScratch::new("plain");
+    let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+    let leaf = runtime_leaf(&home, &scratch.xdg);
+    // The macOS per-user runtime root is a shared confstr path other processes may own, so record
+    // whether it pre-existed: the post-run assertion holds THIS run to not creating it.
+    #[cfg(target_os = "macos")]
+    let (mac_root, mac_root_existed) = {
+        let root = crate::home::runtime_root().expect("the per-user runtime root path resolves");
+        let existed = root.exists();
+        (root, existed)
+    };
+
+    let mut command = Command::new(swoosh_binary());
+    command
+        .arg("--home")
+        .arg(&scratch.home_dir)
+        .args(["serve", "--quiet", "--expires", "1s"])
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .env_remove("SWOOSH_KEY");
+    let output = run_binary_with_deadline(&mut command, Duration::from_secs(30));
+    assert!(
+        output.status.success(),
+        "plain serve exits 0 on its expiry: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !leaf.join("control.sock").exists(),
+        "plain serve binds no control socket"
+    );
+    assert!(
+        !leaf.join("control.lock").exists(),
+        "plain serve takes no control lock"
+    );
+    assert!(
+        !leaf.exists(),
+        "plain serve creates no per-home runtime leaf: {}",
+        leaf.display()
+    );
+    // On Linux the root itself is ours (under the temp XDG); on macOS the shared confstr root is
+    // asserted only against creation by this run.
+    #[cfg(not(target_os = "macos"))]
+    assert!(
+        !scratch.xdg.join("swoosh").exists(),
+        "plain serve creates no runtime root"
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        mac_root_existed || !mac_root.exists(),
+        "plain serve creates no runtime root"
+    );
+}
+
+/// The resident banner differs from the plain one ONLY by the control line, and it is the production
+/// `control_line` that renders: the path appears exactly once and a non-resident call returns `None`.
+#[test]
+fn resident_banner_differs_only_by_the_control_line() {
     use clap::Parser as _;
 
     #[derive(clap::Parser)]
@@ -289,36 +362,35 @@ fn plain_serve_creates_no_runtime_state() {
         #[command(flatten)]
         serve: super::ServeCmd,
     }
-    let wrap = Wrap::try_parse_from(["x"]).expect("plain serve parses");
-    assert!(
-        !wrap.serve.resident,
-        "plain serve carries no residency: the flag defaults off"
-    );
-    // The banner without the flag carries no control line: byte-identical to today.
-    let banner = super::render_ready_banner(
-        "bf01exampleid",
-        super::ReachKind::Internet,
-        super::MdnsState::Available,
-        &[],
-        &default_manifest(),
-        &default_targets(),
-        &HashSet::new(),
-        "ctrl-c to stop",
-        wrap.serve.control_line_for_test(),
-    );
-    assert!(
-        !banner.contains("(local, this user)"),
-        "plain serve prints no resident control line: {banner}"
-    );
-}
 
-/// The resident banner differs from the plain one ONLY by the control line.
-#[test]
-fn resident_banner_differs_only_by_the_control_line() {
-    let plain = super::render_ready_banner(
+    let socket = Path::new("/run/swoosh/x/control.sock");
+    let plain_cmd = Wrap::try_parse_from(["x"]).expect("plain serve parses");
+    assert_eq!(
+        plain_cmd.serve.control_line(Some(socket)),
+        None,
+        "a plain serve prints no control line"
+    );
+    let resident_cmd = Wrap::try_parse_from(["x", "--resident"]).expect("--resident parses");
+    let control = resident_cmd
+        .serve
+        .control_line(Some(socket))
+        .expect("a resident serve prints the control line");
+    assert_eq!(
+        control, "control /run/swoosh/x/control.sock (local, this user)",
+        "the control line names the real path and its local-only scope"
+    );
+    assert_eq!(
+        control
+            .matches(socket.to_str().expect("a utf-8 socket path"))
+            .count(),
+        1,
+        "the socket path appears exactly once in the line: {control}"
+    );
+
+    let plain = render_ready_banner(
         "bf01exampleid",
-        super::ReachKind::Internet,
-        super::MdnsState::Available,
+        ReachKind::Internet,
+        MdnsState::Available,
         &[],
         &default_manifest(),
         &default_targets(),
@@ -326,22 +398,30 @@ fn resident_banner_differs_only_by_the_control_line() {
         "ctrl-c to stop",
         None,
     );
-    let resident = super::render_ready_banner(
+    let resident = render_ready_banner(
         "bf01exampleid",
-        super::ReachKind::Internet,
-        super::MdnsState::Available,
+        ReachKind::Internet,
+        MdnsState::Available,
         &[],
         &default_manifest(),
         &default_targets(),
         &HashSet::new(),
         "ctrl-c to stop",
-        Some("control /run/swoosh/x/control.sock (local, this user)"),
+        Some(control.as_str()),
     );
-    let stripped = resident.replacen(
-        "control /run/swoosh/x/control.sock (local, this user)\n",
-        "",
+    assert_eq!(
+        resident.matches(&control).count(),
         1,
+        "the control line appears exactly once in the banner: {resident}"
     );
+    assert_eq!(
+        resident
+            .matches(socket.to_str().expect("a utf-8 socket path"))
+            .count(),
+        1,
+        "the real socket path appears exactly once in the banner: {resident}"
+    );
+    let stripped = resident.replacen(&format!("{control}\n"), "", 1);
     assert_eq!(
         stripped, plain,
         "the resident banner is the plain banner plus exactly one control line"
@@ -352,31 +432,212 @@ fn resident_banner_differs_only_by_the_control_line() {
     );
 }
 
-/// No self-daemonizing: `--resident` stays foreground (runs until cancelled, exits on a stop) and
-/// serves no supervisor semantics. Proven at the type level: `ServeCmd` carries no daemonize flag,
-/// no fork, no setsid, and the run path joins the exposer rather than re-executing itself.
+/// No self-daemonizing: `serve --resident` stays the process the caller spawned. Spawn the real
+/// binary, wait for its control socket, assert the status reply names the spawned pid (no
+/// double-fork or re-exec), assert the spawned child is still alive, stop it through the control
+/// socket, and reap a normal exit with the socket unlinked.
 #[test]
 fn no_self_daemonize() {
-    use clap::Parser as _;
+    let scratch = ProcessScratch::new("foreground");
+    let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+    let socket = runtime_leaf(&home, &scratch.xdg).join("control.sock");
 
-    #[derive(clap::Parser)]
-    struct Wrap {
-        #[command(flatten)]
-        serve: super::ServeCmd,
-    }
-    let wrap = Wrap::try_parse_from(["x", "--resident"]).expect("--resident parses");
-    assert!(
-        wrap.serve.resident,
-        "--resident opts in; plain serve stays byte-identical"
-    );
-    // The source carries no self-backgrounding: grep-level gate over this file's own vocabulary.
-    let source = include_str!("serve.rs");
-    for token in ["fork", "setsid", "daemon(", "current_exe"] {
+    let mut command = Command::new(swoosh_binary());
+    command
+        .arg("--home")
+        .arg(&scratch.home_dir)
+        .args(["serve", "--resident", "--quiet"])
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .env_remove("SWOOSH_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = KillOnDrop(command.spawn().expect("the resident serve spawns"));
+    let pid = child.0.id();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !socket.exists() {
+        if let Some(status) = child.0.try_wait().expect("poll the resident") {
+            panic!("the resident exited before binding its socket: {status}");
+        }
         assert!(
-            !source.contains(token),
-            "serve carries no self-daemonizing primitive ({token})"
+            Instant::now() < deadline,
+            "the resident never bound {}",
+            socket.display()
         );
+        std::thread::sleep(Duration::from_millis(20));
     }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a control-client runtime");
+    let reply = runtime
+        .block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                control_round_trip(&socket, Request::Status),
+            )
+            .await
+        })
+        .expect("the status round-trip is bounded")
+        .expect("the status round-trip answers");
+    let Response::Status(status) = reply else {
+        panic!("a Status request answers a Status reply");
+    };
+    assert_eq!(
+        status.pid, pid,
+        "the spawned pid IS the serving pid: no double-fork or re-exec"
+    );
+    assert!(
+        child.0.try_wait().expect("poll the resident").is_none(),
+        "the resident stays the foreground child the caller spawned"
+    );
+
+    let ack = runtime
+        .block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                control_round_trip(&socket, Request::Stop),
+            )
+            .await
+        })
+        .expect("the stop round-trip is bounded")
+        .expect("the stop round-trip answers");
+    assert!(matches!(ack, Response::Ack), "the socket stop is acked");
+    let status = child.0.wait().expect("reap the resident");
+    assert!(status.success(), "a socket stop exits 0: {status}");
+    assert!(!socket.exists(), "the released socket is unlinked");
+}
+
+/// A scratch dir for the spawned-binary tests: a home, a 0700 `XDG_RUNTIME_DIR` stand-in, and one
+/// owned base. Drop removes exactly the base it created.
+struct ProcessScratch {
+    base: PathBuf,
+    home_dir: PathBuf,
+    xdg: PathBuf,
+}
+
+/// Serializes scratch base names within this test process, like the other serve test fixtures.
+static PROCESS_SEQ: AtomicU32 = AtomicU32::new(0);
+
+impl ProcessScratch {
+    fn new(tag: &str) -> Self {
+        let short: String = tag.chars().take(8).collect();
+        let seq = PROCESS_SEQ.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("swp-{short}-{}-{seq}", std::process::id()));
+        let home_dir = base.join("home");
+        let xdg = base.join("xdg");
+        std::fs::create_dir_all(&home_dir).expect("scratch home");
+        std::fs::create_dir_all(&xdg).expect("scratch xdg");
+        use std::os::unix::fs::PermissionsExt as _;
+        // 0700 on the runtime-root stand-in: the resident chain verifier refuses a looser base.
+        std::fs::set_permissions(&xdg, std::fs::Permissions::from_mode(0o700))
+            .expect("the scratch xdg is 0700");
+        Self {
+            base,
+            home_dir,
+            xdg,
+        }
+    }
+}
+
+impl Drop for ProcessScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
+
+/// The compiled `swoosh` binary beside the test targets: `target/<profile>/swoosh` is two levels up
+/// from `target/<profile>/deps/<test-bin>` (the umbrella redirects the target dir; the relative shape
+/// is the same). `cargo test -p swoosh` builds the bin, so the real path is present.
+fn swoosh_binary() -> PathBuf {
+    let test_bin = std::env::current_exe().expect("the test binary path");
+    let bin = test_bin
+        .parent()
+        .and_then(Path::parent)
+        .expect("the target profile dir")
+        .join("swoosh");
+    assert!(
+        bin.is_file(),
+        "the product binary sits beside the test targets: {}",
+        bin.display()
+    );
+    bin
+}
+
+/// The per-home runtime leaf a spawned serve resolves for this scratch: on Linux `<xdg>/swoosh/<key>`
+/// mirrors `runtime_root()`; on macOS the root ignores `XDG_RUNTIME_DIR` and comes from confstr, so
+/// read it from the same `runtime_root()` helper the binary uses.
+fn runtime_leaf(home: &Home, xdg: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = xdg;
+        home.runtime_dir()
+            .expect("the per-user runtime root resolves")
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        home.runtime_leaf(&xdg.join("swoosh"))
+    }
+}
+
+/// A spawned child killed and reaped on drop, so a panicking test never orphans it. Skips the kill
+/// once the child is already reaped: a recycled pid must never be signaled.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+/// Run a prepared command to completion under a deadline, killing only the exact spawned pid on
+/// timeout so a hung serve can never leak. Captures stdout/stderr after exit.
+fn run_binary_with_deadline(command: &mut Command, deadline: Duration) -> std::process::Output {
+    let child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn the product binary");
+    let mut child = KillOnDrop(child);
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.0.try_wait().expect("poll the product binary") {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if let Some(mut out) = child.0.stdout.take() {
+                std::io::copy(&mut out, &mut stdout).expect("read the child stdout");
+            }
+            if let Some(mut err) = child.0.stderr.take() {
+                std::io::copy(&mut err, &mut stderr).expect("read the child stderr");
+            }
+            return std::process::Output {
+                status,
+                stdout,
+                stderr,
+            };
+        }
+        assert!(
+            started.elapsed() < deadline,
+            "the product binary did not exit within {deadline:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// One SWC1 request/response over the resident control socket, bounded by the caller's timeout.
+async fn control_round_trip(socket: &Path, request: Request) -> Result<Response, ControlError> {
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .map_err(ControlError::Io)?;
+    request.write(&mut stream).await.map_err(ControlError::Io)?;
+    Response::read(&mut stream).await
 }
 
 /// Two `name=fetch:<origin>` services de-merge into TWO separate `FetchService`s, each with its own served
