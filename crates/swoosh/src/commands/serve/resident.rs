@@ -17,8 +17,9 @@ use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
 use super::control::{
-    ControlError, DisabledList, MAX_STATUS_STRING, Request, Response, StatusReply,
+    ControlError, DisabledList, MAX_STATUS_STRING, Request, Response, ServiceMenu, StatusReply,
 };
+use crate::node_client::{NodeClient, euid, real_peer_uid};
 
 /// Seconds a control connection may sit idle before it is reaped (the slow-loris bound).
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -108,8 +109,8 @@ impl Resident {
     /// Ack is on the wire so a socket stop can never lose its confirm to the stop it triggers.
     pub fn answer(&self, request: Request) -> Response {
         match request {
-            Request::Services => Response::Catalog(self.catalog.clone()),
-            Request::Status => Response::Status(self.status()),
+            Request::Services => Response::Catalog(self.menu()),
+            Request::Status => Response::Status(self.status_reply()),
             Request::Stop => Response::Ack,
         }
     }
@@ -123,13 +124,22 @@ impl Resident {
         self.cancel.cancel();
     }
 
-    /// Cut a fresh status reply: the public shape only, with the disabled list re-read live.
-    fn status(&self) -> StatusReply {
+    /// Cut a fresh status reply: the public shape only, with the live menu re-read live and the warm
+    /// peer list empty until the cache lands.
+    fn status_reply(&self) -> StatusReply {
         StatusReply {
             node_id: self.node_id,
             pid: self.pid,
             addr: self.addr,
             uptime_secs: self.started_at.elapsed().as_secs(),
+            menu: self.menu(),
+            warm: Vec::new(),
+        }
+    }
+
+    /// The live service menu: the served catalog snapshot plus the disabled list re-read live.
+    fn menu(&self) -> ServiceMenu {
+        ServiceMenu {
             catalog: self.catalog.clone(),
             disabled: read_disabled_names(&self.disabled_path),
         }
@@ -273,6 +283,26 @@ impl Resident {
     }
 }
 
+/// The resident is the in-process server implementation of the control contract: the same
+/// [`NodeClient`] the socket client speaks, so the accept path and a local client cannot drift.
+/// `services`/`status` build the same replies the accept path sends (through the shared private
+/// helpers); `stop` is the teardown the socket `Stop` triggers (the accept path acks first, then
+/// fires it, so the confirm is never lost to the stop it triggers).
+impl NodeClient for Resident {
+    async fn services(&self) -> Result<ServiceMenu, ControlError> {
+        Ok(self.menu())
+    }
+
+    async fn status(&self) -> Result<StatusReply, ControlError> {
+        Ok(self.status_reply())
+    }
+
+    async fn stop(&self) -> Result<(), ControlError> {
+        self.fire_stop();
+        Ok(())
+    }
+}
+
 /// Read the live disabled names from `<home>/disabled`: one trimmed non-empty name per line, an
 /// absent file meaning none. Total (any name is a valid thing to disable), mirroring the oracle's
 /// decode without depending on its debounce state.
@@ -389,59 +419,10 @@ impl Default for StopSource {
     }
 }
 
-/// The effective uid: the owner every control peer must match.
-fn euid() -> u32 {
-    // SAFETY: `geteuid` takes no arguments and touches no memory.
-    unsafe { libc::geteuid() }
-}
-
 /// Read the peer uid for `fd`: macOS `getpeereid`, Linux `SO_PEERCRED`. The `checker` indirection
 /// lets tests fake a foreign uid without root.
 fn peer_uid(fd: i32, checker: fn(i32) -> std::io::Result<u32>) -> std::io::Result<u32> {
     checker(fd)
-}
-
-/// The production peer-credential read: `getpeereid` on macOS/BSD, `SO_PEERCRED` on Linux.
-fn real_peer_uid(fd: i32) -> std::io::Result<u32> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut uid: libc::uid_t = 0;
-        let mut gid: libc::gid_t = 0;
-        // SAFETY: `fd` is the live fd of the accepted stream (borrowed, still open for this
-        // call), and `uid`/`gid` are valid stack slots for the out params.
-        let ok = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
-        if ok != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(uid)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let mut cred: libc::ucred = unsafe { core::mem::zeroed() };
-        let mut len = core::mem::size_of::<libc::ucred>() as libc::socklen_t;
-        // SAFETY: `fd` is the live accepted-stream fd; `cred`/`len` are valid out-param slots
-        // sized exactly for `SO_PEERCRED`.
-        let ok = unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_PEERCRED,
-                (&mut cred as *mut libc::ucred).cast::<libc::c_void>(),
-                &mut len,
-            )
-        };
-        if ok != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(cred.uid)
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = fd;
-        Err(std::io::Error::other(
-            "peer credentials are not supported on this platform",
-        ))
-    }
 }
 
 #[cfg(test)]

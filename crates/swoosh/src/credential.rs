@@ -163,4 +163,25 @@ impl Credential {
             Self::Anonymous => crate::identity::Identity::Ephemeral,
         }
     }
+
+    /// Whether a dial with this credential may use the resident's warm reach. The default member
+    /// badge reaches as THIS home's node (the peer sees the resident key, the ratified warm-reuse
+    /// tradeoff); any personal credential must never ride the socket.
+    pub fn warm_mode(&self) -> WarmMode {
+        match self {
+            Self::Family { present: None } => WarmMode::Resident,
+            Self::Family { present: Some(_) } | Self::Anonymous => WarmMode::Personal,
+        }
+    }
+}
+
+/// Whether a dial may use the resident's warm reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarmMode {
+    /// The default member-badge dial: the resident may reach as THIS home's node. The peer sees the
+    /// resident key, the ratified warm-reuse tradeoff.
+    Resident,
+    /// A personal credential (an explicit `--present` slip, a link-as-peer, or an anonymous stranger
+    /// dial): never warm. A personal credential must not ride the socket.
+    Personal,
 }

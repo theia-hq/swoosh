@@ -14,7 +14,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use super::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident};
 use crate::commands::serve::control::ControlError;
 use crate::commands::serve::control_codec::{
-    DisabledList, MAGIC, MAX_FRAME, MAX_STATUS_STRING, Request, Response, StatusReply,
+    DisabledList, MAGIC, MAX_DISABLED_NAMES, MAX_FRAME, MAX_STATUS_STRING, Request, Response,
+    ServiceMenu, StatusReply,
 };
 
 /// Serializes scratch dir names within this test process; the pid keeps two concurrent runs of the
@@ -25,6 +26,14 @@ static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 /// An empty catalog: the codec tests exercise framing, not service content.
 fn empty_catalog() -> ServiceCatalog {
     ServiceCatalog::decode(&0u32.to_be_bytes()).expect("an empty catalog decodes")
+}
+
+/// A menu over the empty catalog and an empty known disabled list.
+fn empty_menu() -> ServiceMenu {
+    ServiceMenu {
+        catalog: empty_catalog(),
+        disabled: DisabledList::Known(Vec::new()),
+    }
 }
 
 /// A unique short scratch dir for the resident tests.
@@ -83,20 +92,27 @@ async fn requests_round_trip() {
 /// list and with an explicit unknown.
 #[tokio::test]
 async fn responses_round_trip() {
+    let menu = ServiceMenu {
+        catalog: empty_catalog(),
+        disabled: DisabledList::Known(vec!["speed".to_owned()]),
+    };
     let status = StatusReply {
         node_id: NodeId::from_ed25519_secret(&[9u8; 32]),
         pid: 1234,
         addr: None,
         uptime_secs: 7,
-        catalog: empty_catalog(),
-        disabled: DisabledList::Known(vec!["speed".to_owned()]),
+        menu,
+        warm: Vec::new(),
     };
     let unknown = StatusReply {
-        disabled: DisabledList::Unknown("the disabled file exceeds the read cap".to_owned()),
+        menu: ServiceMenu {
+            disabled: DisabledList::Unknown("the disabled file exceeds the read cap".to_owned()),
+            ..status.menu.clone()
+        },
         ..status.clone()
     };
     for response in [
-        Response::Catalog(empty_catalog()),
+        Response::Catalog(status.menu.clone()),
         Response::Status(status),
         Response::Status(unknown),
         Response::Ack,
@@ -150,8 +166,8 @@ fn minimal_status() -> StatusReply {
         pid: 4242,
         addr: None,
         uptime_secs: 3,
-        catalog: empty_catalog(),
-        disabled: DisabledList::Known(Vec::new()),
+        menu: empty_menu(),
+        warm: Vec::new(),
     }
 }
 
@@ -173,6 +189,8 @@ fn status_frame_with_disabled(disabled: &[u8]) -> Vec<u8> {
     bytes.extend_from_slice(&(catalog.len() as u32).to_be_bytes());
     bytes.extend_from_slice(&catalog);
     bytes.extend_from_slice(disabled);
+    // The warm-peer section: empty until the cache lands, but present in the layout.
+    bytes.extend_from_slice(&0u32.to_be_bytes());
     bytes
 }
 
@@ -238,6 +256,21 @@ fn status_decode_refuses_too_many_disabled_names() {
         matches!(error, ControlError::Protocol(_)),
         "too many disabled names is a protocol error: {error}"
     );
+}
+
+/// The encoder refuses the same cap its decoder enforces: a menu over the name cap never becomes a
+/// frame a conforming client would reject.
+#[test]
+fn status_encode_refuses_too_many_disabled_names() {
+    let mut status = minimal_status();
+    status.menu.disabled = DisabledList::Known(
+        (0..MAX_DISABLED_NAMES + 1)
+            .map(|i| format!("svc{i:04}"))
+            .collect(),
+    );
+    status
+        .encode()
+        .expect_err("1025 disabled names must refuse at the encoder");
 }
 
 /// An unknown disabled presence is a protocol error: only 0 (known) and 1 (unknown) are legal.

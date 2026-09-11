@@ -1,0 +1,268 @@
+//! S5 tests: the two backends agree on the control contract, and resolve refuses an untrusted path
+//! without ever connecting.
+
+use core::sync::atomic::{AtomicU32, Ordering};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use bifrost::NodeId;
+use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
+
+use super::{NodeClient as _, UidSocket};
+use crate::commands::serve::Resident;
+use crate::commands::serve::control_codec::{ControlError, DisabledList, Request, Response};
+
+/// Serializes scratch dir names within this test process; the pid keeps two concurrent runs apart.
+/// Names stay short: the control socket path must fit `sun_path` (104 bytes on macOS).
+static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
+
+/// A unique per-home runtime leaf with an explicit mode, for driving resolve and a real listener.
+fn scratch(tag: &str, mode: u32) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let short: String = tag.chars().take(8).collect();
+    let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("swc-{short}-{}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("control scratch");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode))
+        .expect("control scratch mode");
+    dir
+}
+
+/// An empty catalog: these tests exercise the control contract, not service content.
+fn empty_catalog() -> ServiceCatalog {
+    ServiceCatalog::decode(&0u32.to_be_bytes()).expect("an empty catalog decodes")
+}
+
+/// A resident over temp state holding `cancel`, with `disabled` as its live disabled path.
+fn test_resident(cancel: CancellationToken, disabled: PathBuf) -> Resident {
+    Resident::new(
+        NodeId::from_ed25519_secret(&[9u8; 32]),
+        None,
+        empty_catalog(),
+        disabled,
+        cancel,
+    )
+}
+
+/// The uid-socket backend and the resident answer the same control contract: byte-equal menus and
+/// status replies over a real temp-dir socket, and both accept a stop. A menu with one live disabled
+/// entry proves the disabled section rides both paths, not only the happy empty case.
+#[tokio::test]
+async fn backends_agree() {
+    let leaf = scratch("agree", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    let disabled = leaf.join("disabled");
+    std::fs::write(&disabled, "speed\n").expect("write the disabled file");
+
+    let cancel = CancellationToken::new();
+    let resident = Arc::new(test_resident(cancel.clone(), disabled));
+    let serving = tokio::spawn({
+        let this = Arc::clone(&resident);
+        async move { this.serve(listener).await }
+    });
+
+    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+
+    let direct = resident.services().await.expect("resident services");
+    let over = client.services().await.expect("socket services");
+    assert_eq!(direct, over, "the two backends agree on the service menu");
+    assert_eq!(
+        over.disabled,
+        DisabledList::Known(vec!["speed".to_owned()]),
+        "the live disabled list rides the socket menu"
+    );
+
+    // Both status reads call the same resident, so only the uptime second can differ at a boundary;
+    // retry until the two reads land in one second, then assert the whole reply is equal.
+    let mut agreed = false;
+    for _ in 0..8 {
+        let direct = resident.status().await.expect("resident status");
+        let over = client.status().await.expect("socket status");
+        if direct.uptime_secs == over.uptime_secs {
+            assert_eq!(direct, over, "the two backends agree on the status reply");
+            agreed = true;
+            break;
+        }
+    }
+    assert!(agreed, "the status reads never landed in one uptime second");
+
+    client.stop().await.expect("the socket stop succeeds");
+    resident.stop().await.expect("the resident stop succeeds");
+    serving
+        .await
+        .expect("the serve task joins")
+        .expect("serve ends Ok");
+
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// One socket `services()` is exactly one control connection: the resident's `served` counter
+/// advances by one per call, and the in-process implementation opens no connection at all.
+#[tokio::test]
+async fn services_is_one_round_trip() {
+    let leaf = scratch("round", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    let resident = Arc::new(test_resident(
+        CancellationToken::new(),
+        leaf.join("disabled"),
+    ));
+    let serving = tokio::spawn({
+        let this = Arc::clone(&resident);
+        async move { this.serve(listener).await }
+    });
+    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+
+    assert_eq!(
+        resident.served(),
+        0,
+        "nothing is served before the first call"
+    );
+    client.services().await.expect("socket services");
+    assert_eq!(
+        resident.served(),
+        1,
+        "one socket services() is one connection"
+    );
+    resident.services().await.expect("in-process services");
+    assert_eq!(
+        resident.served(),
+        1,
+        "the in-process backend opens no connection"
+    );
+    client.services().await.expect("second socket services");
+    assert_eq!(
+        resident.served(),
+        2,
+        "each socket call is exactly one round trip"
+    );
+
+    resident.stop().await.expect("stop the resident");
+    serving
+        .await
+        .expect("the serve task joins")
+        .expect("serve ends Ok");
+
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// A listener that accepts and then stalls must not park the verb: the client's response-read bound
+/// fires and the call returns the typed `Timeout`, never a hang. Paused time makes the five-second
+/// bound instant and deterministic.
+#[tokio::test(start_paused = true)]
+async fn client_deadlines_are_bounded() {
+    let leaf = scratch("stall", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let stalled = tokio::spawn(async move {
+        let listener = tokio::net::UnixListener::from_std(listener).expect("tokio listener");
+        let (_stream, _) = listener.accept().await.expect("accept");
+        core::future::pending::<()>().await;
+    });
+
+    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let error = client
+        .services()
+        .await
+        .expect_err("a stalled resident times out");
+    assert!(
+        matches!(
+            error,
+            ControlError::Timeout {
+                phase: "response read"
+            }
+        ),
+        "the response-read bound fires, never a hang: {error}"
+    );
+
+    stalled.abort();
+    let _ = stalled.await;
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// Resolve refuses a path that is not this user's 0700 socket, with zero connects: a loose leaf and a
+/// non-socket inode are `Untrusted`; an absent socket is the typed `NoResident` miss.
+#[test]
+fn resolve_refuses_untrusted_paths() {
+    let loose = scratch("loose", 0o755);
+    let error =
+        UidSocket::resolve_socket(loose.join("control.sock")).expect_err("a 0755 leaf must refuse");
+    assert!(
+        matches!(error, ControlError::Untrusted { ref path } if path == &loose),
+        "a loose leaf is Untrusted naming the dir: {error}"
+    );
+
+    let leaf = scratch("inode", 0o700);
+    let socket = leaf.join("control.sock");
+    std::fs::write(&socket, b"not a socket").expect("write a plain file");
+    let error =
+        UidSocket::resolve_socket(socket.clone()).expect_err("a non-socket inode must refuse");
+    assert!(
+        matches!(error, ControlError::Untrusted { ref path } if path == &socket),
+        "a non-socket inode is Untrusted naming the path: {error}"
+    );
+
+    let leaf = scratch("absent", 0o700);
+    let error =
+        UidSocket::resolve_socket(leaf.join("control.sock")).expect_err("an absent socket misses");
+    assert!(
+        matches!(error, ControlError::NoResident),
+        "an absent socket is a typed NoResident: {error}"
+    );
+}
+
+/// A leaf owned by another uid is Untrusted. Root-only: a non-root process cannot chown a dir to a
+/// foreign owner, so this stays ignored in the normal CI run.
+#[test]
+#[ignore = "requires root: the leaf is chowned to a foreign uid"]
+fn resolve_refuses_a_foreign_owner_leaf() {
+    let leaf = scratch("foreign", 0o700);
+    let foreign = if super::euid() == 0 { 1 } else { 0 };
+    std::os::unix::fs::chown(&leaf, Some(foreign), None).expect("chown the leaf");
+    let error = UidSocket::resolve_socket(leaf.join("control.sock"))
+        .expect_err("a foreign-owner leaf must refuse");
+    assert!(
+        matches!(error, ControlError::Untrusted { .. }),
+        "a foreign-owner leaf is Untrusted: {error}"
+    );
+}
+
+/// A wire `Refused` maps to the typed `ControlError::Refused`, never a stringified protocol error:
+/// a scripted server answers a refusal and the client surfaces it as the refusal it is.
+#[tokio::test]
+async fn socket_maps_a_refusal_to_the_typed_error() {
+    let leaf = scratch("refuse", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let server = tokio::spawn(async move {
+        let listener = tokio::net::UnixListener::from_std(listener).expect("tokio listener");
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let _ = Request::read(&mut stream).await;
+        Response::Refused("gated".to_owned())
+            .write(&mut stream)
+            .await
+            .expect("the refusal writes");
+    });
+
+    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let error = client.services().await.expect_err("a refusal is an error");
+    assert!(
+        matches!(error, ControlError::Refused(ref reason) if reason == "gated"),
+        "a wire refusal is the typed Refused with its reason: {error}"
+    );
+    server.await.expect("the scripted server joins");
+
+    let _ = std::fs::remove_dir_all(&leaf);
+}

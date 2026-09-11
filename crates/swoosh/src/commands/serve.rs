@@ -52,7 +52,8 @@ mod sshd;
 mod stop;
 pub mod control_codec {
     pub use super::control::{
-        DisabledList, MAGIC, MAX_FRAME, MAX_STATUS_STRING, Request, Response, StatusReply,
+        ControlError, DisabledList, MAGIC, MAX_DISABLED_NAMES, MAX_FRAME, MAX_STATUS_STRING,
+        MAX_WARM_ENTRIES, PeerEntry, Request, Response, ServiceMenu, StatusReply,
     };
 }
 pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};

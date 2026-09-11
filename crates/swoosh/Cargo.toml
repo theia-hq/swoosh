@@ -54,5 +54,9 @@ zeroize.workspace = true
 # client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
 bifrost-mem.workspace = true
 
+# `test-util` gives the control-client deadline test tokio's paused clock, so the 5 s read bound is
+# asserted without a wall-clock wait. Dev-only: the shipped binary never compiles it in.
+tokio = { workspace = true, features = ["test-util"] }
+
 [lints]
 workspace = true

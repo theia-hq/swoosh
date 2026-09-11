@@ -17,6 +17,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use crate::home::Home;
+use crate::node_client::read_lock_pid;
 
 /// Why a resident start was refused.
 #[derive(Debug, thiserror::Error)]
@@ -393,23 +394,6 @@ fn release_flock(file: &std::fs::File) {
     // SAFETY: `file` owns a valid fd for the duration of the call; `LOCK_UN` only drops this fd's
     // advisory lock.
     let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-}
-
-/// The most bytes [`read_lock_pid`] reads from the lock file: a u32 pid is at most ten digits plus
-/// a newline, so sixteen covers the record with room to spare.
-const LOCK_PID_READ_CAP: u64 = 16;
-
-/// Read the pid recorded in the lock file, if any. Only [`LOCK_PID_READ_CAP`] bytes are read, never
-/// the whole file: a same-uid process can grow the lock file, and the reader must not allocate it
-/// on demand.
-fn read_lock_pid(path: &Path) -> Option<u32> {
-    use std::io::Read as _;
-
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = file.take(LOCK_PID_READ_CAP);
-    let mut text = String::new();
-    reader.read_to_string(&mut text).ok()?;
-    text.split_whitespace().next()?.parse().ok()
 }
 
 /// The `(dev, ino)` of the socket PATH, from `symlink_metadata` (a symlink planted at the path
