@@ -11,6 +11,7 @@ _How this codebase is built. It is the contract: reviewers (human or machine) sh
 
 ## Types & domain modeling
 - **Newtype every ID and domain scalar.** `UserId(Uuid)`, `Money`, `Quantity`. Never raw `Uuid`/`i64`/`String` across a boundary. Kills primitive obsession and argument-swap bugs.
+- **A wire or domain form crosses a public API as its newtype, never as the raw form.** Parse it once at the boundary (`FromStr`), render it through `Display`, and carry the newtype from there: it is what appears in every parameter, return type, and field. A `String`/`&str` link, id, handle, or token in a public signature is the raw form leaking past the boundary, even when the function validates before delegating: the validation must produce the newtype, not pass the string through.
 - **Prefer enums to bools.** State is an `enum` with exhaustive `match`, not a `bool` or a stringly-typed field. A new variant then forces a compile error at every decision site.
 - **Positional field access reads fine when trivial, murky when dense.** A one-line accessor (`&self.0`) is perfectly clear. But in denser logic a bare `.0`/`.1` is as opaque as an unlabeled eighth function argument, so destructure with a *name* there (`let Self(value) = self`) and let the reader stop counting positions. Keep newtypes as tuple structs; reach for a named field only when the name carries real information (`Money { minor_units }`), not as reflexive wrapping (`Name(String)`). The same instinct prefers named or struct arguments over long positional parameter lists.
 - **`Money`:** integer minor units inside, **never floating point**, explicit currency, one documented rounding rule, overflow handled by explicit checked/saturating methods.
@@ -41,6 +42,19 @@ _How this codebase is built. It is the contract: reviewers (human or machine) sh
 - **Binaries: `eyre::Result`** (thiserror loses backtrace information, so it stays out of bins). Use it **path-qualified** (`eyre::Result<T>`); never `use eyre::Result`, keep it visibly distinct from `core::result::Result`.
 - **User-facing CLI errors show the message chain, never a `file:line` / backtrace / spantrace.** A handled error a user hits is a report about their input or environment, not a crash: print the eyre chain with `Display` alternate (`eprintln!("Error: {report:#}")` or an eyre hook that suppresses the location), never the `Debug` (`{:?}`) form that trails a source `Location:` and spantrace. A source path is noise to a user and reads as "go read our source". Keep the location/backtrace for `RUST_BACKTRACE`/debug diagnostics, out of the default user path. (`main` returning `eyre::Result` prints `Debug` by default, so install a minimal hook or print-and-exit rather than leaning on the `?`-from-`main` default.)
 - **The underlying error kind is contained and returned by reference** via the source chain (`std::error::Error::source`), `ParseIntError` inside your variant is the textbook shape. Don't stringify away the cause.
+- **A failure class crosses a boundary as its type: a refusal is a value, never a formatted string.**
+  A refusal has two faces. The REMOTE face is uniform and payload-free: a gate refusal says only that
+  the gate refused, so a stranger, a revoked holder, a disabled service, and an absent name are
+  indistinguishable on the wire, and the host's typed cause (missing, not-granted, revoked) is logged
+  host-side and never sent. The HOST face is that full typed cause. A post-admission refusal may add a
+  typed code and a bounded detail; the detail is the only string, its cap is declared once, and it is
+  prose a user reads, never a discriminator a program branches on. A consumer matches the variant and
+  the `source()` chain; it never `strip_prefix`es, `contains`es, or otherwise parses another crate's
+  formatted text to recover an outcome the wire already typed. Where a boundary erased the type (a
+  boxed source chain), restore the type at that boundary, giving the class one home in the lowest crate
+  both ends already depend on, instead of sniffing downstream. The CLI renders one line per case by
+  matching the typed value: formatting a typed value at the render edge is fine; parsing formatted text
+  back into a type is the bug.
 - **Error messages are lowercase and carry no trailing punctuation**, they *will* compose into larger chains, so `invalid quantity` not `Invalid quantity.`
 - **No `.unwrap()` / `.expect()` in non-test code** (clippy-denied). Panic only on a genuinely unreachable invariant, with a message saying why it's unreachable.
 - **Never panic on bad input**, return an error.
@@ -136,6 +150,7 @@ _The doc voice, proven across every repo. A README, crate description, or `--hel
 
 ## Serialization
 - **Tagged enums when using JSON:** `{ "kind": "...", "data": ... }` with the variant name in **PascalCase** under `kind`, not `{ "<variant>": <data> }`.
+- **A wire contract has one home: the crate that writes it.** A refusal, prefix, magic, tag, or framing detail is declared once, in the crate that emits it; a consumer imports that declaration or carries a typed error. Never a second declaration (a golden-byte test's frozen literal is a deliberate snapshot, not a declaration), and never `strip_prefix`/`contains` on another crate's formatted text to recover an outcome the wire already typed. If a boundary between the two crates erased the type (a boxed source chain), the fix is to restore the type at that boundary, not to sniff downstream.
 
 ## Security
 - **`zeroize` sensitive data** so secrets don't linger in freed memory.
@@ -164,7 +179,7 @@ to flag the same smell twice._
   by value. Reserve bare
   free functions for genuinely standalone pure helpers, and even then prefer a local trait for a
   cohesive family of conversions (see the wire/domain/storage section).
-- **The discriminator for a free function is who owns the type the behaviour binds, and which direction a method would force the code to move.** A free function is a smell, and the fix is a method, when it (a) constructs one of this crate's types, especially a boxed enum variant, or (b) threads the state of a type this crate owns. It is legitimate in exactly three cases: (1) a pure helper over no receiver you own; (2) a policy resolver at the correct layer, over foreign inputs, yielding a value that belongs to a lower crate (e.g. `resolve_gate`); (3) a serialization or edge adapter that marshals a wire form into a lower-crate type and then delegates to one method that already exists there (e.g. `mint_link`). The test is not pure-versus-impure: it is ownership and direction. Making a legitimate free function into a method would invert the dependency, forcing code to move the wrong way; making a smelly one into a method moves the behaviour home to the type that owns it. Builders are earned only by staged optional assembly with a build-time invariant, never by wrapping a fixed-arity one-shot.
+- **The discriminator for a free function is who owns the type the behaviour binds, and which direction a method would force the code to move.** A free function is a smell, and the fix is a method, when it (a) constructs one of this crate's types, especially a boxed enum variant, or (b) threads the state of a type this crate owns. It is legitimate in exactly three cases: (1) a pure helper over no receiver you own; (2) a policy resolver at the correct layer, over foreign inputs, yielding a value that belongs to a lower crate (e.g. `resolve_gate`); (3) a boundary adapter whose type this crate cannot implement on: the type lives in a lower crate, so the orphan rule and the dependency direction forbid the method here. It is legitimate only while the type cannot live in this crate; the moment the type is this crate's, the operation is a method on it. The adapter parses the raw form into the lower-crate type at once, delegates to one method that already exists there, and speaks the newtype on its OWN signature: it never accepts or returns the raw `String`/`&str` form. Auth operations are the canonical test: minting, narrowing, parsing, revoking, and presenting a credential are methods (or associated functions) on the type that owns the credential, never free functions over link text. The test is not pure-versus-impure: it is ownership and direction. Making a legitimate free function into a method would invert the dependency, forcing code to move the wrong way; making a smelly one into a method moves the behaviour home to the type that owns it. Builders are earned only by staged optional assembly with a build-time invariant, never by wrapping a fixed-arity one-shot.
 - **Wrap a foreign stack once, at the composition root; everything downstream speaks your own vocabulary.**
   An app names a concrete external implementation (a specific transport, driver, or backend) exactly once,
   where it builds its root object. Every subsequent operation is generic over your own traits. If a file
