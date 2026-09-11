@@ -253,17 +253,19 @@ fn stale_socket_is_probed_then_unlinked_and_rebound() {
     // plant, and an inherited fd cannot revive it (a non-listening socket refuses every connect).
     let socket = leaf.join("control.sock");
     plant_dead_socket(&socket);
-    let before = super::path_identity(&socket).expect("stat the stale plant");
-
-    // The dead path is probed stale, unlinked, and rebound: the path names a NEW socket inode.
-    let (lock, _) = acquire(&scratch.home, &scratch.root).expect("stale socket rebinds");
-    assert!(socket.exists(), "the rebound socket exists");
-    assert_ne!(
-        super::path_identity(&socket).expect("stat the rebound socket"),
-        before,
-        "the stale inode was unlinked and a new socket was bound"
+    assert!(
+        matches!(super::probe_socket(&socket), super::Probe::Stale),
+        "the dead plant reads stale before the start"
     );
-    let _ = lock;
+
+    // The dead path is probed stale, unlinked, and rebound: the path answers a connect again.
+    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("stale socket rebinds");
+    assert!(socket.exists(), "the rebound socket exists");
+    assert!(
+        matches!(super::probe_socket(&socket), super::Probe::Live),
+        "the rebound socket answers the probe"
+    );
+    let _ = (lock, listener);
 }
 
 /// A live listener at the path with the flock free: the start owns the lock and reaches the real
