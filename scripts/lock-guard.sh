@@ -4,17 +4,22 @@
 # THE RULE (notes/design/release-robustness-spec.md; decision (A) in notes/02-DECISIONS.md). A
 # committed Cargo.lock must record the SHIPPING form of every theia sibling: each sibling
 # resolved from its `github.com/theia-hq/<repo>` git source at the exact rev its Cargo.toml
-# pins, and every in-repo crate's lock version matching its own manifest. Three drifts break
+# pins, and every in-repo crate's lock version matching its own manifest. Four drifts break
 # that, and this gate FAILS on any of them:
 #
-#   (a) PATH-DRIFT   -- a sibling's lock block has NO git `source =` line (or a `path+` one).
-#       A local patched `cargo build` (the umbrella .cargo/config.toml [patch]es siblings to
+#   (a) PATH-DRIFT   -- a sibling's lock block has NO git `source =` line, a `path+` one, or any
+#       source that is not the exact `git+https://github.com/theia-hq/<repo>?rev=<40hex>#<40hex>`
+#       form. A local patched `cargo build` (the umbrella .cargo/config.toml [patch]es siblings to
 #       local paths) rewrites the lock to path sources by design; committing that leaks the dev
 #       machine's layout into the shipping lock. THIS IS THE EXACT v0.7.0 SAGA the gate stops.
 #   (b) REV DISAGREEMENT -- a sibling's lock rev != the rev its Cargo.toml git dep pins. Catches
 #       a manifest rev bump that never regenerated the lock, statically (no build needed).
 #   (c) OWN-VERSION SKEW -- an in-repo crate's lock `version` != its manifest `[package] version`.
 #       The `cargo bump the version, forget to sync the lock` footgun, made mechanical.
+#   (d) PATCH ARTIFACT -- the committed lock carries a `[[patch.unused]]` block. A shipping lock
+#       is resolved patch-free and never carries patch artifacts; their presence means it was
+#       written under the umbrella root [patch] (F12, red mains 2026-09-08..11), not a clean
+#       resolve.
 #
 # WHY IT READS THE COMMITTED/STAGED LOCK, NOT THE WORKING-TREE FILE. Under the containment model
 # a patched local build ALWAYS re-dirties the working-tree Cargo.lock to path sources (and an
@@ -80,6 +85,21 @@ fi
 
 fail=0
 
+# (d): reject patch artifacts. `[[patch.unused]]` is emitted only when a `[patch]` (the umbrella
+# root's) was consulted during resolution; a shipping lock, resolved patch-free, never has one.
+# Report every block's line + package and the fix. Here-doc loop so fail survives in POSIX sh.
+patch_hits=$(awk '
+  /^\[\[patch\.unused\]\]/ { ln = NR; want = 1; next }
+  want && /^name = "/ { sub(/^name = "/, ""); sub(/"$/, ""); print ln " " $0; want = 0 }
+' "$LOCK_TMP")
+while read -r ln pkg; do
+  [ -n "$ln" ] || continue
+  echo "PATCH Cargo.lock:$ln carries unused patch block '$pkg' (lock resolved under the umbrella [patch]); resolve patch-free outside theia-hq, then copy the lock back"
+  fail=1
+done <<EOF
+$patch_hits
+EOF
+
 # lock_block NAME -- emit NAME's [[package]] block (its source + version lines) from the lock.
 lock_block() {
   awk -v n="$1" '
@@ -90,12 +110,15 @@ lock_block() {
 }
 
 # Derive siblings as "name repo rev" (space-separated; names/revs never contain spaces) from
-# every theia-hq git dep across the manifests. sed with a real space avoids the BSD-sed `\t`
-# gotcha (BSD sed emits a literal `t` for `\t` in a replacement).
+# every theia-hq git dep across the manifests. The `|| true` on the grep is load-bearing: under
+# `set -e` a no-match (exit 1) in this pipeline kills the `list_manifests | while` subshell at
+# the first manifest that declares no theia dep, so a git dep declared outside the ROOT manifest
+# was never enumerated (bifrost/quirk/nauthy reported 0 siblings and their drift went unchecked).
+# sed with a real space avoids the BSD-sed `\t` gotcha (BSD sed emits a literal `t` for `\t`).
 siblings=$(list_manifests | while IFS= read -r m; do
   [ -n "$m" ] || continue
   read_indexed "$m" | grep -oE \
-    '^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=.*github\.com/theia-hq/[A-Za-z0-9_-]+.*rev[[:space:]]*=[[:space:]]*"[0-9a-f]{40}"'
+    '^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=.*github\.com/theia-hq/[A-Za-z0-9_-]+.*rev[[:space:]]*=[[:space:]]*"[0-9a-f]{40}"' || true
 done | sed -E 's/^[[:space:]]*([A-Za-z0-9_-]+).*theia-hq\/([A-Za-z0-9_-]+).*rev[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1 \2 \3/' \
   | sort -u)
 
@@ -106,13 +129,15 @@ while read -r name repo rev; do
   [ -n "$name" ] || continue
   src=$(lock_block "$name" | sed -n 's/^source = "\(.*\)"/\1/p' | head -n1)
   case "$src" in
-    git+https://github.com/theia-hq/"$repo"?rev=*) : ;;                          # shipping form
-    "" )      echo "DRIFT $name has NO git source in Cargo.lock (path-patched build leaked in)"; fail=1; continue ;;
-    path+* )  echo "DRIFT $name lock source is a PATH source '$src' (path-patched build leaked in)"; fail=1; continue ;;
-    * )       echo "DRIFT $name lock source is '$src' (expected theia-hq/$repo git)"; fail=1; continue ;;
+    "" )      echo "DRIFT $name has NO git source in Cargo.lock (path-patched build leaked in); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; continue ;;
+    path+* )  echo "DRIFT $name lock source is a PATH source '$src' (path-patched build leaked in); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; continue ;;
+    git+https://github.com/theia-hq/"$repo"?rev=*#*) : ;;                        # shipping form
+    * )       echo "DRIFT $name lock source is '$src' (expected the git+https://github.com/theia-hq/$repo?rev=<sha>#<sha> form in Cargo.lock); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; continue ;;
   esac
   locrev=$(printf '%s' "$src" | sed -E 's/.*rev=([0-9a-f]{40}).*/\1/')
-  [ "$locrev" = "$rev" ] || { echo "REV   $name lock rev $locrev != Cargo.toml rev $rev"; fail=1; }
+  [ "$locrev" = "$rev" ] || { echo "REV   $name lock rev $locrev != Cargo.toml rev $rev (Cargo.lock)"; fail=1; }
+  locfrag=$(printf '%s' "$src" | sed -nE 's/^.*#([0-9a-f]{40})$/\1/p')
+  [ "$locfrag" = "$rev" ] || { echo "SRC   $name lock source '$src' lacks the #<sha> git fragment (expected git+https://github.com/theia-hq/$repo?rev=$rev#$rev in Cargo.lock); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; }
 done <<EOF
 $siblings
 EOF
