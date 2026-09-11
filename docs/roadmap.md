@@ -21,18 +21,18 @@ rest is planned and lands as it is built.
 - [x] `send` push a file or directory to a peer, verified end to end
 - [x] `fetch` mint a local URL whose fetch egresses at a node you name
 - [x] `fleet` pull a signed fleet roster and fold it into your contacts
-- [x] `grant issue` / `ls` / `narrow` / `revoke` `sheer:` slips, bearer or bound to a device or fleet
+- [x] `grant issue` / `ls` / `narrow` / `revoke` `sheer:` capability links, bearer or bound to a device or fleet
 - [x] `stop` stop a peer's node over the gated `control.stop` service
 
 ## Planned
 
 - [ ] **A daemon.** A background node so `service` can read your own node, names resolve without a
-  running `serve`, and slips a node was handed are remembered instead of presented each dial.
+  running `serve`, and the grants a node was handed are remembered instead of presented each dial.
 - [ ] **A people group.** Name a set of people and grant the whole group one service at once, instead of
   granting each member.
 - [ ] `send` more sources: the same verb for piped stdin, the clipboard, or a fetched URL's result.
 - [ ] `ssh config`: emit ssh `Host` aliases for devices that advertise ssh.
-- [ ] A machine group (`cluster`): name a local set of machines and share the whole group as one slip.
+- [ ] A machine group (`cluster`): name a local set of machines and share the whole group as one capability link.
 - [ ] `run`: run code at a peer addressed by its key.
 - [ ] MagicDNS names: type `ssh desk.alice` into any app and have it resolve.
 

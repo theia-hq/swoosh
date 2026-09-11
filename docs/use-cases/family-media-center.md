@@ -5,8 +5,8 @@ belongs to no one person. One person sets it up and admits everyone else; nobody
 owner."
 
 The box is its own node with its own [signet](../keys.md#signet). One person is its **custodian**: they
-hold its key and do the admitting. Every family member reaches it by presenting a [slip](../keys.md#slip),
-and registers nothing on their end.
+hold its key and do the admitting. Every family member reaches it by presenting a
+[capability link](../keys.md#grant), and registers nothing on their end.
 
 ## On the box (the custodian runs this)
 
@@ -48,13 +48,13 @@ issued a fleet-bound grant for `tv` to fleet signet bf01o6vqymgz727g…
 sheer:bf01hcq6…
 ```
 
-The last line is the slip. Hand it to mum over any channel (chat, AirDrop, a QR code). Repeat the two
+The last line is the link. Hand it to mum over any channel (chat, AirDrop, a QR code). Repeat the two
 commands per member. (Mum reads her signet once with `swoosh identity` on her own machine and sends it
 to you.)
 
 ## On mum's end
 
-She registers nothing: no signet to record, no grant. Her device just presents the slip when it reaches
+She registers nothing: no signet to record, no grant. Her device just presents the link when it reaches
 the box:
 
 ```console
@@ -62,12 +62,12 @@ $ swoosh forward mediacenter --service tv --to 8096 --present sheer:bf01hcq6…
 ```
 
 Then she opens `http://127.0.0.1:8096` and watches. Any device her signet vouches for can present that
-one slip, so her laptop and her phone both work.
+one link, so her laptop and her phone both work.
 
 ## No allowlist
 
 The box keeps no list of who is allowed. When a device dials, the gate checks the signature on the
-presented slip, offline, against the box's own key, and admits on a valid signature. The only list it
+presented link, offline, against the box's own key, and admits on a valid signature. The only list it
 keeps is the denylist a revoke writes.
 
 Take mum's household off in one step:
@@ -83,13 +83,13 @@ revoked 1 grant(s) to bf01o6vqymgz727g… (…/revoked)
 - **No family group yet.** You grant each member one by one. A named group that holds people (grant it
   once, everyone in it is covered) is [planned](../roadmap.md).
 - **Revoke is per household.** Revoking mum's signet drops her whole fleet at once. There is no way yet
-  to drop one of her devices while keeping the rest, so keep fleet slips short-lived.
+  to drop one of her devices while keeping the rest, so keep fleet grants short-lived.
 - **A revoke lands live but does not cut an open session.** Revoking mum drops her whole fleet on the
   next dial, typically within a couple of seconds, no restart. A connection she already holds is not
   cut; it drains. See [revocation](../keys.md#revocation).
 
 ## Next
 
-- [Keys](../keys.md#slip) what a slip and a fleet are.
+- [Keys](../keys.md#grant) what a grant and a fleet are.
 - [Contractor access](contractor-access.md) the same idea, one person, timed.
-- [Commands](../reference/commands.md#grant) issue, list, and revoke slips.
+- [Commands](../reference/commands.md#grant) issue, list, and revoke capability links.

@@ -69,7 +69,7 @@ Run a one-off command without a full session:
 $ swoosh ssh me/grandma-pc -- sudo apt upgrade -y
 ```
 
-The gate admits you because your machine carries the badge that signet trusts. Nobody else gets in.
+The gate admits you because your machine carries the membership your signet issued. Nobody else gets in.
 
 ## The honest limit
 

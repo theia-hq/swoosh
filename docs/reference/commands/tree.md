@@ -2,7 +2,8 @@ Back to [Commands index](../commands.md).
 
 # <a id="tree"></a>`swoosh tree`
 
-Print the command tree with each verb's one-line summary, read straight from the parser.
+Print the command tree with each verb's one-line summary, read straight from the parser (the `--help`
+summary calls this *spec vs binary*).
 
 <!-- generated: usage from `swoosh tree -h`; option lines curated -->
 ```
