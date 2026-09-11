@@ -214,31 +214,58 @@ fn two_resident_starts_one_home_exactly_one_wins() {
     );
 }
 
-/// A dropped-but-not-unlinked listener leaves a stale path: the next start probes, unlinks, rebinds.
+/// Plant a socket inode at `path` that never listened: `socket` + `bind` + close, no `listen`. The
+/// path is dead the moment it exists, and it stays dead behind: a non-listening socket refuses every
+/// connect (`ECONNREFUSED`) even while a forked child holds an inherited fd, so a sibling test's
+/// concurrent `Command` spawn cannot turn the plant live under the probe.
+fn plant_dead_socket(path: &Path) {
+    let (addr, len) = super::sockaddr_un(path).expect("the scratch socket path fits sun_path");
+    // SAFETY: `socket` takes no pointers and returns a fresh fd or -1.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(fd >= 0, "socket() for the dead plant");
+    // SAFETY: `fd` is fresh; `addr`/`len` name a fully-initialized `sockaddr_un`.
+    let bound = unsafe { libc::bind(fd, core::ptr::addr_of!(addr).cast(), len) };
+    assert_eq!(bound, 0, "bind() the dead plant");
+    // SAFETY: `fd` is owned by no other handle; closing it leaves the bound path behind as the dead
+    // inode the next `acquire` probes.
+    let _ = unsafe { libc::close(fd) };
+}
+
+/// A dead socket left at the rendezvous path (bound, never listened, closed without unlinking): the
+/// next start probes it stale, unlinks, and rebinds.
 #[test]
 fn stale_socket_is_probed_then_unlinked_and_rebound() {
     let scratch = Scratch::new("stale");
-    // Establish the runtime leaf through one clean acquire first (creating it 0700), then plant
-    // the stale socket inside it: the stale-rebind path is under test, not the create path.
-    // `drop` the lock WITHOUT `release` (the crash shape) and shut the listener down WITHOUT
-    // unlinking the path (the stale plant): both teardowns leave the dead path behind.
-    let socket = {
-        let (lock, listener) =
-            acquire(&scratch.home, &scratch.root).expect("first acquire creates the leaf");
-        let socket = lock.socket_path().to_path_buf();
-        // Shut the listener DOWN (no more answers) but leave the path: `shutdown` stops the
-        // accept queue so the probe gets ECONNREFUSED, while the path stays behind as the stale
-        // plant. `drop` alone keeps answering until the fd closes; `forget` never closes.
-        // SAFETY: the fd is the live listener's own; `shutdown` only stops new answers.
-        let _ = unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RDWR) };
-        drop(listener);
-        drop(lock);
-        socket
-    };
-    // The listener is gone (path stale): the next start must succeed and rebind it.
-    let (lock, _) = acquire(&scratch.home, &scratch.root).expect("stale socket rebinds");
+    // Create the verified 0700 leaf directly (the create-and-verify path has its own tests) instead
+    // of seeding it through an `acquire` whose lock is then dropped. A sibling test spawning a child
+    // mid-test duplicates this process's fds into that child, and the child holds an inherited flock
+    // description until its own `exec` (CLOEXEC closes it there); a drop-then-reacquire therefore
+    // races that window and can read the inherited description as a live resident. Production never
+    // drops and re-takes: it acquires once and holds for life.
+    let leaf = scratch.leaf();
+    std::fs::create_dir_all(&leaf).expect("create the runtime leaf");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o700))
+            .expect("0700 the runtime leaf");
+    }
+    // Plant the dead socket, then close it without unlinking: the path stays behind as the stale
+    // plant, and an inherited fd cannot revive it (a non-listening socket refuses every connect).
+    let socket = leaf.join("control.sock");
+    plant_dead_socket(&socket);
+    assert!(
+        matches!(super::probe_socket(&socket), super::Probe::Stale),
+        "the dead plant reads stale before the start"
+    );
+
+    // The dead path is probed stale, unlinked, and rebound: the path answers a connect again.
+    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("stale socket rebinds");
     assert!(socket.exists(), "the rebound socket exists");
-    let _ = lock;
+    assert!(
+        matches!(super::probe_socket(&socket), super::Probe::Live),
+        "the rebound socket answers the probe"
+    );
+    let _ = (lock, listener);
 }
 
 /// A live listener at the path with the flock free: the start owns the lock and reaches the real
@@ -248,15 +275,20 @@ fn stale_socket_is_probed_then_unlinked_and_rebound() {
 #[test]
 fn live_socket_under_lock_refuses_start() {
     let scratch = Scratch::new("live");
-    // One clean acquire creates and verifies the leaf, then drops both handles: the flock frees and
-    // the seed path is removed, so the plant binds a live listener inside the verified leaf.
-    let (seed, seed_listener) =
-        acquire(&scratch.home, &scratch.root).expect("seed acquire creates the leaf");
-    let socket = seed.socket_path().to_path_buf();
-    drop(seed);
-    drop(seed_listener);
-    let _ = std::fs::remove_file(&socket);
-    let live = UnixListener::bind(&socket).expect("plant a live listener at the freed path");
+    // Create the verified 0700 leaf directly and take the flock exactly ONCE. A seed `acquire` whose
+    // lock is dropped and re-taken would race a sibling test's `Command` spawn: the spawned child
+    // inherits the fd table and holds the dropped lock's description until its own exec (CLOEXEC),
+    // so the re-take could read that window as `AlreadyResident`. Production acquires once and holds.
+    let leaf = scratch.leaf();
+    std::fs::create_dir_all(&leaf).expect("create the runtime leaf");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o700))
+            .expect("0700 the runtime leaf");
+    }
+    let socket = leaf.join("control.sock");
+    let live = UnixListener::bind(&socket).expect("plant a live listener");
+    let identity = super::path_identity(&socket).expect("stat the live socket");
 
     let refused = acquire(&scratch.home, &scratch.root);
     assert!(
@@ -264,6 +296,11 @@ fn live_socket_under_lock_refuses_start() {
         "a live socket answers the probe, so the start refuses"
     );
     assert!(socket.exists(), "the answering socket is not clobbered");
+    assert_eq!(
+        super::path_identity(&socket).expect("stat the live socket again"),
+        identity,
+        "the ProbeAlive refusal never unlinks the answering socket"
+    );
     drop(live);
 }
 
@@ -306,13 +343,16 @@ fn legitimate_resident_flock_refuses_second_start_and_keeps_its_socket() {
 #[test]
 fn unclassified_probe_refuses_and_never_unlinks() {
     let scratch = Scratch::new("unclassified");
-    // The leaf must exist 0700 before the plant binds inside it.
-    let (seed, seed_listener) =
-        acquire(&scratch.home, &scratch.root).expect("seed acquire creates the leaf");
-    let socket = seed.socket_path().to_path_buf();
-    drop(seed);
-    drop(seed_listener);
-    let _ = std::fs::remove_file(&socket);
+    // Create the verified 0700 leaf directly and take the flock exactly ONCE: see the live test for
+    // the inherited-flock window a seed `acquire` dropped and re-taken would open.
+    let leaf = scratch.leaf();
+    std::fs::create_dir_all(&leaf).expect("create the runtime leaf");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o700))
+            .expect("0700 the runtime leaf");
+    }
+    let socket = leaf.join("control.sock");
     let live = UnixListener::bind(&socket).expect("plant a live listener");
     {
         use std::os::unix::fs::PermissionsExt as _;
@@ -322,12 +362,19 @@ fn unclassified_probe_refuses_and_never_unlinks() {
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o000))
             .expect("chmod the live socket to 000");
     }
+    let identity = super::path_identity(&socket).expect("stat the mode-000 socket");
+
     let refused = acquire(&scratch.home, &scratch.root);
     assert!(
         matches!(refused, Err(SingleError::ProbeUnclassified)),
         "an unclassified probe refuses start"
     );
     assert!(socket.exists(), "the refused socket is never unlinked");
+    assert_eq!(
+        super::path_identity(&socket).expect("stat the mode-000 socket again"),
+        identity,
+        "the unclassified refusal never unlinks the socket"
+    );
     drop(live);
 }
 
