@@ -239,6 +239,14 @@ impl ControlClient {
         Ok(Self::Socket(UidSocket::resolve(home)?))
     }
 
+    /// Verify an already-derived socket path without resolving the process-global runtime root: the
+    /// path half of [`resolve`](Self::resolve), for tests that drive the local backend over a scratch
+    /// socket. Never connects; production always comes through `resolve`.
+    #[cfg(test)]
+    pub(crate) fn resolve_socket(socket: PathBuf) -> Result<Self, ControlError> {
+        Ok(Self::Socket(UidSocket::resolve_socket(socket)?))
+    }
+
     /// The resident pid read from `control.lock` at resolve, for the stop confirmation line.
     pub fn pid(&self) -> Option<u32> {
         match self {
@@ -264,6 +272,24 @@ impl NodeClient for ControlClient {
         match self {
             Self::Socket(socket) => socket.stop().await,
         }
+    }
+}
+
+/// Render a [`ControlError`] for a verb boundary, where `eyre` takes over. The typed error's own
+/// message is used as-is, except the two cases whose user-facing wording is settled: a `Refused`
+/// reason goes through [`tightbeam::tunnel::refusal_reason`] so the uniform refusal token reads
+/// descriptively and is never doubled, and a `Protocol` error names the skew fix, because every
+/// protocol error on an already-verified local socket is a client/resident version mismatch.
+pub(crate) fn control_error_report(error: ControlError) -> eyre::Report {
+    match error {
+        ControlError::Refused(reason) => eyre::eyre!(
+            "the resident refused: {}",
+            tightbeam::tunnel::refusal_reason(&reason)
+        ),
+        ControlError::Protocol(reason) => eyre::eyre!(
+            "the resident is a different swoosh version ({reason}); restart it with this binary"
+        ),
+        other => eyre::Report::new(other),
     }
 }
 

@@ -150,9 +150,7 @@ pub struct ServeCmd {
     /// serve for a bounded time, then stop (`30m`, `2h`, `1d`)
     #[arg(long, value_name = "duration")]
     pub expires: Option<Lifetime>,
-    // FLAG(CLI-Architect): the `--resident` flag name, help wording, and the `control` banner line
-    // wording are the surface owner's call; picked here to match the spec's banner contract.
-    /// stay resident: hold the home's lock and serve the local control socket (supervisors own backgrounding)
+    /// be the resident node: local control socket; stays foreground
     #[arg(long)]
     pub resident: bool,
     #[command(flatten)]
@@ -495,7 +493,7 @@ impl ServeCmd {
                 Some(lifetime) => {
                     format!(
                         "runs for {}, then stops (or ctrl-c)",
-                        humanize(lifetime.duration())
+                        humanize_secs(lifetime.duration().as_secs())
                     )
                 }
                 None => "ctrl-c to stop".to_owned(),
@@ -1082,11 +1080,11 @@ fn classify_stop(source: Option<StopKind>) -> Stopped {
     }
 }
 
-/// Render a `--expires` duration back to a short human span for the banner (`90m` -> `1h 30m`, `3600s` ->
-/// `1h`), so the readiness line reads the way the operator thinks about it rather than in raw seconds.
-/// Coarsest non-zero units only, at most two, so `1d` stays `1d` and `5400s` reads `1h 30m`.
-fn humanize(duration: core::time::Duration) -> String {
-    let mut secs = duration.as_secs();
+/// Render a count of seconds as a short human span (`5400` -> `1h 30m`, `3600` -> `1h`), so the
+/// `--expires` banner and a status uptime read the way an operator thinks rather than in raw seconds.
+/// Coarsest non-zero units only, at most two, so `1d` stays `1d` and `5400` reads `1h 30m`. The one
+/// span formatter the serve banner and bare `status` share, so the two can never drift.
+pub(crate) fn humanize_secs(mut secs: u64) -> String {
     let mut parts = Vec::new();
     for (unit, per) in [("d", 86_400), ("h", 3_600), ("m", 60), ("s", 1)] {
         let n = secs / per;
@@ -1098,8 +1096,8 @@ fn humanize(duration: core::time::Duration) -> String {
             break;
         }
     }
-    // A sub-second `--expires` cannot occur (`Lifetime` rejects zero and parses whole seconds), so `parts` is
-    // never empty; guard defensively rather than unwrap.
+    // A zero span renders `0s`: `--expires` cannot be zero (`Lifetime` rejects it), but a status uptime
+    // of zero seconds can, so keep the guard rather than indexing an empty `parts`.
     if parts.is_empty() {
         "0s".to_owned()
     } else {
