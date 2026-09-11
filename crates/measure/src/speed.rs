@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt as _;
 
 use crate::payload::Payload;
 pub use crate::payload::Progress;
-use crate::protocol::{ProtocolError, Request, Response};
+use crate::protocol::{ProtocolError, Refusal, Request, Response};
 
 /// What a speed test measures: one direction, or both at once.
 ///
@@ -130,7 +130,9 @@ where
         Response::Received { bytes } => bytes,
         // A node that does not serve speed refuses the sink frame with `Unsupported` before draining a
         // byte: a typed `Refused`, never a plausible-but-smaller throughput.
-        Response::Unsupported { reason } => return Err(ProtocolError::Refused(reason)),
+        Response::Unsupported { code, detail } => {
+            return Err(ProtocolError::Refused(Refusal::Method { code, detail }));
+        }
         _ => return Err(ProtocolError::Mismatched),
     };
     if bytes < sent {
@@ -229,7 +231,9 @@ where
 {
     match Response::read(reader).await? {
         Response::Sourcing => Ok(()),
-        Response::Unsupported { reason } => Err(ProtocolError::Refused(reason)),
+        Response::Unsupported { code, detail } => {
+            Err(ProtocolError::Refused(Refusal::Method { code, detail }))
+        }
         _ => Err(ProtocolError::Mismatched),
     }
 }

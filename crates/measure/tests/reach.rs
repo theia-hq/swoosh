@@ -6,7 +6,10 @@ use core::time::Duration;
 
 use bifrost::{Error, NoDiscovery, Node, Session as _};
 use bifrost_mem::MemTransport;
-use measure::{Limit, Mode, Ping, ProtocolError, Responder, Speedtest, answer_ping, answer_speed};
+use measure::{
+    Limit, MethodRefusal, Mode, Ping, ProtocolError, Refusal, Responder, Speedtest, answer_ping,
+    answer_speed,
+};
 
 /// A responder node serving in the background, and a live client session to it, over one mem process.
 type Paired = (tokio::task::JoinHandle<()>, bifrost_mem::MemSession);
@@ -232,8 +235,14 @@ async fn a_speed_frame_on_a_ping_only_node_carries_the_unsupported_refusal() {
         .run(&session)
         .await;
     assert!(
-        matches!(refused, Err(ProtocolError::Refused(_))),
-        "a speed frame on a ping-only node must decode a typed refusal, not source zero bytes: {refused:?}"
+        matches!(
+            refused,
+            Err(ProtocolError::Refused(Refusal::Method {
+                code: MethodRefusal::WrongMethod,
+                ..
+            }))
+        ),
+        "a speed frame on a ping-only node must decode a typed wrong-method refusal, not source zero bytes: {refused:?}"
     );
 
     drop(session);
@@ -256,8 +265,14 @@ async fn a_ping_frame_on_a_speed_only_node_carries_the_unsupported_refusal() {
     .run(&session)
     .await;
     assert!(
-        matches!(refused, Err(ProtocolError::Refused(_))),
-        "a ping frame on a speed-only node must decode a typed refusal, not report 100% loss: {refused:?}"
+        matches!(
+            refused,
+            Err(ProtocolError::Refused(Refusal::Method {
+                code: MethodRefusal::WrongMethod,
+                ..
+            }))
+        ),
+        "a ping frame on a speed-only node must decode a typed wrong-method refusal, not report 100% loss: {refused:?}"
     );
 
     drop(session);

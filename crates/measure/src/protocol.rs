@@ -5,11 +5,12 @@
 //! Ping round-trips a whole frame (request then echoed reply). Speed sends the framed request, then a
 //! counted byte stream flows in the chosen direction, then a framed reply reports the counted total.
 
+use bifrost::{RefusalDetail, RefusalDetailError};
 use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
 /// Magic plus version prefixing every request. A foreign or mismatched-version stream is rejected, so
 /// a diagnostic stream is never confused with another protocol riding the same transport.
-const MAGIC: [u8; 4] = *b"DG01";
+const MAGIC: [u8; 4] = *b"DG02";
 
 /// What a client asks a responder to do on a freshly opened stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +68,68 @@ mod resp_tag {
     pub const RECEIVED: u8 = 1;
     pub const SOURCING: u8 = 2;
     pub const UNSUPPORTED: u8 = 3;
+}
+
+/// A refused diagnostic run. One type for both layers, so a render site has exactly one refusal arm;
+/// the layer is the variant, never a string prefix.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Refusal {
+    /// Layer 1: the host's gate or its resource refused the stream itself, arriving as
+    /// [`bifrost::Error::Refused`].
+    #[error("{0}")]
+    Stream(bifrost::Refusal),
+    /// Layer 2: the host admitted the stream, then refused the method.
+    #[error("{code}: {detail}")]
+    Method {
+        /// The typed method-level code.
+        code: MethodRefusal,
+        /// The responder's bounded detail.
+        detail: RefusalDetail,
+    },
+}
+
+/// The method-level refusal code: the client's branch key, distinct from the prose. A new code forces a
+/// render decision at every match site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum MethodRefusal {
+    /// The service does not serve the requested method (a ping frame on `speed`).
+    #[error("this service does not serve that method")]
+    WrongMethod,
+    /// The service serves the method but is at its rate limit for this caller.
+    #[error("rate limited")]
+    RateLimited,
+    /// The service serves the method but is busy right now (a transfer slot).
+    #[error("busy")]
+    Busy,
+}
+
+/// Wire tags for the [`MethodRefusal`] codes, beside the frame they select. A new code forces a tag
+/// here and an arm in the reader.
+mod refusal_tag {
+    pub const WRONG_METHOD: u8 = 0;
+    pub const RATE_LIMITED: u8 = 1;
+    pub const BUSY: u8 = 2;
+}
+
+impl MethodRefusal {
+    /// The wire tag for this code.
+    fn tag(self) -> u8 {
+        match self {
+            Self::WrongMethod => refusal_tag::WRONG_METHOD,
+            Self::RateLimited => refusal_tag::RATE_LIMITED,
+            Self::Busy => refusal_tag::BUSY,
+        }
+    }
+
+    /// Decode a wire tag, rejecting an unrecognized code rather than guessing.
+    fn from_tag(tag: u8) -> Result<Self, ProtocolError> {
+        match tag {
+            refusal_tag::WRONG_METHOD => Ok(Self::WrongMethod),
+            refusal_tag::RATE_LIMITED => Ok(Self::RateLimited),
+            refusal_tag::BUSY => Ok(Self::Busy),
+            other => Err(ProtocolError::UnknownRefusalCode(other)),
+        }
+    }
 }
 
 impl Request {
@@ -136,7 +199,7 @@ impl Request {
 }
 
 /// A responder's typed reply, sent before (source, sourcing-ack) or after (ping, sink) the payload it
-/// describes. Not `Copy`: [`Unsupported`](Self::Unsupported) carries an owned reason string.
+/// describes. Not `Copy`: [`Unsupported`](Self::Unsupported) carries an owned detail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
     /// The echoed ping, carrying the request's `seq` and nonce untouched.
@@ -159,12 +222,15 @@ pub enum Response {
     /// The gate admitted this stream, but the handler does not serve the requested method: a ping frame
     /// arrived on the `speed` service, or a speed frame on `ping`. This is a TYPED refusal on the wire, so a
     /// client can tell "refused" from "measured
-    /// badly" instead of reading a silently dropped stream as loss or zero bytes. A responder writes it
-    /// instead of dropping the stream; a client decodes it to [`ProtocolError::Refused`], which no report
-    /// can be constructed from.
+    /// badly" instead of reading a silently dropped stream as loss or zero bytes. The typed
+    /// [`MethodRefusal`] code is the client's branch key; the bounded [`RefusalDetail`] is the prose it
+    /// renders. A responder writes it instead of dropping the stream; a client decodes it to
+    /// [`ProtocolError::Refused`], which no report can be constructed from.
     Unsupported {
-        /// Why the method was refused, for a loud client-side error naming the peer and the method.
-        reason: String,
+        /// The typed method-level code the client branches on.
+        code: MethodRefusal,
+        /// The responder's bounded explanation, for a loud client-side error naming the peer and method.
+        detail: RefusalDetail,
     },
 }
 
@@ -185,9 +251,10 @@ impl Response {
                 writer.write_all(&bytes.to_be_bytes()).await
             }
             Response::Sourcing => writer.write_all(&[resp_tag::SOURCING]).await,
-            Response::Unsupported { reason } => {
+            Response::Unsupported { code, detail } => {
                 writer.write_all(&[resp_tag::UNSUPPORTED]).await?;
-                write_str(writer, reason).await
+                writer.write_all(&[code.tag()]).await?;
+                write_detail(writer, detail).await
             }
         }
     }
@@ -206,11 +273,18 @@ impl Response {
             }),
             resp_tag::SOURCING => Ok(Response::Sourcing),
             resp_tag::UNSUPPORTED => Ok(Response::Unsupported {
-                reason: read_str(reader).await?,
+                code: MethodRefusal::from_tag(read_u8(reader).await?)?,
+                detail: read_detail(reader).await?,
             }),
             other => Err(ProtocolError::UnknownResponse(other)),
         }
     }
+}
+
+async fn read_u8<R: io::AsyncRead + Unpin>(reader: &mut R) -> io::Result<u8> {
+    let mut byte = [0u8; 1];
+    reader.read_exact(&mut byte).await?;
+    Ok(byte[0])
 }
 
 async fn read_u32<R: io::AsyncRead + Unpin>(reader: &mut R) -> io::Result<u32> {
@@ -225,29 +299,34 @@ async fn read_u64<R: io::AsyncRead + Unpin>(reader: &mut R) -> io::Result<u64> {
     Ok(u64::from_be_bytes(bytes))
 }
 
-/// The longest refusal reason we will write or read, so a hostile or corrupt frame cannot make a client
-/// allocate without bound. A refusal reason is a short human phrase; a kilobyte is generous headroom.
-const MAX_REASON_LEN: u32 = 1024;
-
-/// Write a length-prefixed UTF-8 string: a `u32` byte count then the bytes. The count is capped at
-/// [`MAX_REASON_LEN`] so the reader can bound its allocation.
-async fn write_str<W: io::AsyncWrite + Unpin>(writer: &mut W, value: &str) -> io::Result<()> {
-    let bytes = value.as_bytes();
-    let len = (bytes.len() as u32).min(MAX_REASON_LEN);
+/// Write a length-prefixed refusal detail: a `u32` byte count then the already-bounded UTF-8 bytes. The
+/// value is a [`RefusalDetail`], bounded by construction, so the writer never truncates and can never cut
+/// a codepoint; the checked conversion still fails the write rather than emitting a frame our reader
+/// would reject.
+async fn write_detail<W: io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    detail: &RefusalDetail,
+) -> io::Result<()> {
+    let bytes = detail.as_str().as_bytes();
+    let len =
+        u32::try_from(bytes.len()).map_err(|_| io::Error::other("refusal detail too long"))?;
     writer.write_all(&len.to_be_bytes()).await?;
-    writer.write_all(&bytes[..len as usize]).await
+    writer.write_all(bytes).await
 }
 
-/// Read a length-prefixed UTF-8 string written by [`write_str`], rejecting a length over
-/// [`MAX_REASON_LEN`] (a corrupt or hostile frame) rather than allocating whatever it claims.
-async fn read_str<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<String, ProtocolError> {
+/// Read a length-prefixed refusal detail written by [`write_detail`]. An over-cap claim is rejected
+/// BEFORE the reader allocates, and the bytes must be valid UTF-8: a corrupt or hostile frame is an
+/// error, never repaired or lossily decoded.
+async fn read_detail<R: io::AsyncRead + Unpin>(
+    reader: &mut R,
+) -> Result<RefusalDetail, ProtocolError> {
     let len = read_u32(reader).await?;
-    if len > MAX_REASON_LEN {
-        return Err(ProtocolError::ReasonTooLong(len));
+    if len > RefusalDetail::MAX_LEN as u32 {
+        return Err(ProtocolError::BadDetail(RefusalDetailError::TooLong(len)));
     }
     let mut bytes = vec![0u8; len as usize];
     reader.read_exact(&mut bytes).await?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    Ok(RefusalDetail::try_from(bytes)?)
 }
 
 /// Why a diagnostic frame could not be decoded.
@@ -273,57 +352,40 @@ pub enum ProtocolError {
     /// logs why it refused; a client decodes that frame to [`Refused`](Self::Refused).
     #[error("this service does not serve that method")]
     WrongService,
-    /// The requested method was refused: either the gate refused the whole dial (Layer 1, arriving as a
-    /// `bifrost::Error::Stream("service refused: …")`), or the handler admitted the stream but does not
-    /// serve this method (Layer 2, arriving as a [`Response::Unsupported`] frame). Distinct from [`Io`]
-    /// and [`Mismatched`] on purpose: a refusal is NOT a measurement, so a report can never be built from
-    /// it. A render site MUST surface this as a loud, distinct error, never as `0` / `100% loss` /
-    /// `0.00 MiB/s`.
+    /// The requested method was refused, at either layer: the host's gate or resource refused the whole
+    /// stream (Layer 1, arriving as [`bifrost::Error::Refused`]), or the handler admitted the stream but
+    /// does not serve this method (Layer 2, arriving as a [`Response::Unsupported`] frame). Distinct from
+    /// [`Io`] and [`Mismatched`] on purpose: a refusal is NOT a measurement, so a report can never be
+    /// built from it. A render site MUST surface this as a loud, distinct error, never as `0` /
+    /// `100% loss` / `0.00 MiB/s`.
     ///
     /// [`Io`]: Self::Io
     #[error("refused: {0}")]
-    Refused(String),
-    /// A refusal-reason frame claimed a length over [`MAX_REASON_LEN`]: a corrupt or hostile stream, not
-    /// a real refusal, so it is rejected rather than allocated.
-    #[error("refusal reason too long ({0} bytes)")]
-    ReasonTooLong(u32),
+    Refused(Refusal),
+    /// A refusal detail could not be trusted: the frame claimed a length over [`RefusalDetail::MAX_LEN`],
+    /// or its bytes were not valid UTF-8. A corrupt or hostile stream, not a real refusal, so it is
+    /// rejected rather than repaired.
+    #[error("bad refusal detail")]
+    BadDetail(#[from] RefusalDetailError),
+    /// The refusal code was not recognized: a corrupt or future stream, never guessed at.
+    #[error("unknown refusal code {0:#04x}")]
+    UnknownRefusalCode(u8),
     /// The underlying stream failed while reading a frame.
     #[error("read frame")]
     Io(#[from] io::Error),
 }
 
-/// The exact prefix the byte-tunnel layer gives a Layer-1 gate refusal when it surfaces the host's
-/// reason through a `bifrost::Error::Stream`. Matching it here is what keeps a typed gate refusal typed
-/// instead of laundering it into an anonymous [`ProtocolError::Io`]: the render path must be able to tell
-/// "the gate refused you" from "the stream had an i/o error".
-const GATE_REFUSAL_PREFIX: &str = "service refused: ";
-
-/// Map a session-level failure onto a protocol error. A gate refusal (surfaced by the byte-tunnel layer as
-/// a `bifrost::Error::Stream` whose SOURCE reads `"service refused: …"`) is a REFUSAL, not an
-/// i/o failure, so it maps to [`ProtocolError::Refused`] with the host's reason preserved; every other
-/// session failure is a genuine [`ProtocolError::Io`]. This is the seam that stops a typed refusal from
-/// arriving at the render path indistinguishable from a read error. The reason lives in the boxed source,
-/// not the top-level `Display` (`bifrost::Error::Stream` renders as just "stream"), so we read the source.
+/// Map a session-level failure onto a protocol error. A typed refusal ([`bifrost::Error::Refused`]) is a
+/// REFUSAL, not an i/o failure, so it maps to [`ProtocolError::Refused`] with the dialer-class refusal
+/// preserved; every other session failure is a genuine [`ProtocolError::Io`]. This is the seam that stops
+/// a typed refusal from arriving at the render path indistinguishable from a read error.
 impl From<bifrost::Error> for ProtocolError {
     fn from(error: bifrost::Error) -> Self {
-        if let Some(reason) = gate_refusal_reason(&error) {
-            return ProtocolError::Refused(reason);
+        match error {
+            bifrost::Error::Refused(refusal) => ProtocolError::Refused(Refusal::Stream(refusal)),
+            other => ProtocolError::Io(io::Error::other(other)),
         }
-        ProtocolError::Io(io::Error::other(error))
     }
-}
-
-/// The refusal reason if `error` is a gate refusal, else `None`. Walks the source chain because
-/// the byte-tunnel layer boxes the `"service refused: <reason>"` text as the stream error's source.
-fn gate_refusal_reason(error: &bifrost::Error) -> Option<String> {
-    let mut source: Option<&(dyn core::error::Error + 'static)> = Some(error);
-    while let Some(cause) = source {
-        if let Some(reason) = cause.to_string().strip_prefix(GATE_REFUSAL_PREFIX) {
-            return Some(reason.to_owned());
-        }
-        source = cause.source();
-    }
-    None
 }
 
 #[cfg(test)]

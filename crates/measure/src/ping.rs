@@ -13,7 +13,7 @@ use bifrost::Session;
 use tokio::io::AsyncWriteExt as _;
 use tokio::time;
 
-use crate::protocol::{ProtocolError, Request, Response};
+use crate::protocol::{ProtocolError, Refusal, Request, Response};
 
 /// One probe's outcome, handed to a live observer the instant it completes: the sequence number and its
 /// round-trip time, or `None` for a lost probe. This is what a caller watches to print a line per pong
@@ -104,7 +104,9 @@ where
         } if echoed_seq == seq && echoed_nonce == sent_unix_nanos => Ok(started.elapsed()),
         // The node admitted the stream but does not serve ping (a speed-only node): a REFUSAL, not a
         // lost probe. It must short-circuit the whole run, never fold into loss.
-        Response::Unsupported { reason } => Err(ProtocolError::Refused(reason)),
+        Response::Unsupported { code, detail } => {
+            Err(ProtocolError::Refused(Refusal::Method { code, detail }))
+        }
         _ => Err(ProtocolError::Mismatched),
     }
 }
