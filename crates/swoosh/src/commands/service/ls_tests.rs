@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser as _;
 use tightbeam::tunnel::ServiceCatalog;
 
-use super::{ServiceLsCmd, render_catalog};
+use super::{ServiceLsCmd, disabled_warning, render_catalog};
 use crate::commands::serve::control_codec::DisabledList;
 use crate::home::Home;
 
@@ -77,29 +77,38 @@ fn bare_ls_prints_the_live_table() {
     );
 }
 
-/// An explicit unknown disabled list must never render a false `on`: every state is `?` and one
-/// warning line names the reason (the gate may still refuse what the read could not list).
+/// An explicit unknown disabled list must never render a false `on`: every state is `?` on stdout,
+/// and the reason is a separate stderr diagnostic (never a table row), so the clean result and its
+/// warning cannot be confused.
 #[test]
 fn an_unknown_disabled_list_renders_fail_closed() {
     let menu = catalog(&[("ping", 0)]);
-    let table = render_catalog(
-        &menu,
-        Some(&DisabledList::Unknown(
-            "the file could not be read".to_owned(),
-        )),
-    );
+    let disabled = DisabledList::Unknown("the file could not be read".to_owned());
+    let table = render_catalog(&menu, Some(&disabled));
 
     assert!(
         row(&table, "ping").contains('?'),
         "the state is honestly unknown: {table}"
     );
     assert!(
-        table.contains("could not be read"),
-        "the warning names the reason: {table}"
+        !table.contains("could not be read"),
+        "the warning rides stderr, never the stdout table: {table}"
     );
     assert!(
         !table.contains(" on\n") && !table.contains(" off\n"),
         "neither on nor off may be claimed: {table}"
+    );
+    assert_eq!(
+        disabled_warning(&disabled).as_deref(),
+        Some(
+            "warning: the disabled list could not be read (the file could not be read); states unknown\n"
+        ),
+        "the warning names the reason on the diagnostic stream"
+    );
+    assert_eq!(
+        disabled_warning(&DisabledList::Known(vec!["ping".to_owned()])),
+        None,
+        "a known list has nothing to warn about"
     );
 }
 
@@ -141,6 +150,37 @@ async fn bare_ls_without_resident_is_teaching() {
     assert!(
         message.contains("start one with `swoosh serve --resident`"),
         "the error names the fix: {message}"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A bare `service ls` reaches no peer, so `--present` has nothing to select: it is refused with the
+/// exact teaching line, never silently dropped (I.3, MAJOR-1).
+#[tokio::test]
+async fn bare_ls_rejects_present() {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        ls: ServiceLsCmd,
+    }
+
+    let base = scratch("present");
+    let home = home_in(&base);
+    let link = crate::identity::Secret::ephemeral()
+        .member_badge()
+        .expect("mint a stand-in slip");
+    let ls = Wrap::try_parse_from(["x", "--present", &link])
+        .expect("bare service ls --present parses")
+        .ls;
+
+    let error = ls
+        .run_local(&home)
+        .await
+        .expect_err("--present without --at must refuse, never be ignored");
+    assert_eq!(
+        format!("{error:#}"),
+        "--present only applies when reaching a peer; drop it or name one"
     );
 
     let _ = std::fs::remove_dir_all(&base);

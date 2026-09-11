@@ -26,12 +26,10 @@ use crate::node_client::{ControlClient, NodeClient as _, control_error_report};
 use crate::peer::Peer;
 use crate::transport::ReachArgs;
 
-/// Read the served menu: bare reads your own node's live table (needs `serve --resident`), `--at <peer>`
-/// reaches a peer's `control.services` and prints a `SERVICE  GATE` table.
+/// List the served menu (bare: your own node; `--at <peer>`: a peer)
 #[derive(Debug, Args)]
 pub struct ServiceLsCmd {
-    /// the peer to read: a petname (`me/qat`, `alice`), a raw node id, or a `sheer:` link.
-    /// Omit it to read your own node (needs `serve --resident`).
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(long, value_name = "peer")]
     pub at: Option<Peer>,
     /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
@@ -102,8 +100,16 @@ impl ServiceLsCmd {
     /// the client resolution teaches the fix (`swoosh serve --resident`) and exits non-zero rather
     /// than printing an empty table that reads as "this node serves nothing".
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
+        // A bare `service ls` reaches no peer, so an explicit `--present` has nothing to select: refuse
+        // it rather than silently dropping it (I.3), before touching the socket.
+        crate::reaching::reject_bare_present(self.present.as_ref())?;
         let client = ControlClient::resolve(home).map_err(control_error_report)?;
         let menu = client.services().await.map_err(control_error_report)?;
+        // The disabled-list diagnostic goes to stderr, BEFORE the clean stdout table (I.5): the `?`
+        // cells stay on stdout, the reason explaining them rides the diagnostic stream.
+        if let Some(warning) = disabled_warning(&menu.disabled) {
+            eprint!("{warning}");
+        }
         print!("{}", render_catalog(&menu.catalog, Some(&menu.disabled)));
         Ok(())
     }
@@ -179,11 +185,25 @@ fn print_catalog(catalog: &tunnel::ServiceCatalog) {
     print!("{}", render_catalog(catalog, None));
 }
 
+/// The disabled-list diagnostic for the self read, emitted on stderr beside [`render_catalog`]: an
+/// explicit unknown list cannot honestly say `on` for any entry, so every state renders `?`, and this
+/// line names the reason. A service the gate may refuse must never read as enabled, and I.5 keeps the
+/// stdout table the clean result. `None` for a known list (nothing to warn about) or no list at all
+/// (the peer read).
+pub(crate) fn disabled_warning(disabled: &DisabledList) -> Option<String> {
+    match disabled {
+        DisabledList::Unknown(reason) => Some(format!(
+            "warning: the disabled list could not be read ({reason}); states unknown\n"
+        )),
+        DisabledList::Known(_) => None,
+    }
+}
+
 /// Render the menu table: `SERVICE  GATE` always, plus a `STATE` column when the caller holds the
 /// live disabled list (the self read). A listed name renders `off`, everything else `on`. An
-/// explicit unknown disabled list cannot honestly say `on` for any entry, so every state renders
-/// `?` and one warning line names the reason: a service the gate may refuse must never read as
-/// enabled. Widths each column to its widest cell (min the header width) so the columns line up.
+/// explicit unknown disabled list renders `?` for every state and names no reason here: the
+/// diagnostic rides [`disabled_warning`] on stderr, so the stdout table stays the clean result.
+/// Widths each column to its widest cell (min the header width) so the columns line up.
 pub(crate) fn render_catalog(
     catalog: &tunnel::ServiceCatalog,
     disabled: Option<&DisabledList>,
@@ -227,11 +247,6 @@ pub(crate) fn render_catalog(
             )),
             None => out.push_str(&format!("{:<service_width$}  {gate}\n", entry.name)),
         }
-    }
-    if let Some(DisabledList::Unknown(reason)) = disabled {
-        out.push_str(&format!(
-            "warning: the disabled list could not be read ({reason}); states unknown\n"
-        ));
     }
     out
 }

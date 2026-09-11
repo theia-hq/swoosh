@@ -218,12 +218,40 @@ fn bare_stop_stops_the_resident() {
         status_out.starts_with("node "),
         "the node id leads: {status_out}"
     );
+    let pid_line = format!("pid {pid}");
+    assert!(
+        status_out.lines().any(|line| line == pid_line),
+        "bare status renders the serving pid directly after the node: {status_out}"
+    );
     assert!(status_out.contains("up "), "{status_out}");
     assert!(
         status_out.contains("SERVICE") && status_out.contains("STATE"),
         "{status_out}"
     );
     assert!(status_out.contains("warm"), "{status_out}");
+
+    // A bare `--present` is refused, never silently dropped (I.3, MAJOR-1): exit non-zero with the
+    // exact teaching line, and the resident is untouched (the later real stop still finds it).
+    let link = swoosh::identity::Secret::ephemeral()
+        .member_badge()
+        .expect("mint a stand-in slip");
+    let cases: [&[&str]; 3] = [
+        &["status", "--present", link.as_str()],
+        &["service", "ls", "--present", link.as_str()],
+        &["stop", "--present", link.as_str()],
+    ];
+    for args in cases {
+        let refused = swoosh(&scratch, args);
+        assert!(
+            !refused.status.success(),
+            "bare {args:?} with --present exits non-zero"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&refused.stderr).trim_end(),
+            "Error: --present only applies when reaching a peer; drop it or name one",
+            "the refusal names the rule: {args:?}"
+        );
+    }
 
     // Bare `stop` stops it, naming the pid the resident recorded in its lock.
     let stop = swoosh(&scratch, &["stop"]);

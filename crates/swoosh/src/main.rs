@@ -104,8 +104,7 @@ enum Command {
     Ping(PingCmd),
     /// Measure throughput to a peer: iperf, but over the overlay.
     Speed(SpeedCmd),
-    /// Show your node's status, or connect to a peer: bare queries your own node (needs
-    /// `serve --resident`), `<peer>` reports the connection path to it.
+    /// Show your node's status, or a peer's connection path
     Status(StatusCmd),
     /// Mint a local URL that fetches an origin through a node you name.
     Fetch(FetchCmd),

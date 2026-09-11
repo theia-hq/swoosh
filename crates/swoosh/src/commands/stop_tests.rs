@@ -91,6 +91,37 @@ async fn bare_stop_without_resident_is_teaching() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A bare `stop` reaches no peer, so `--present` has nothing to select: it is refused with the exact
+/// teaching line, never silently dropped (I.3, MAJOR-1).
+#[tokio::test]
+async fn bare_stop_rejects_present() {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        stop: StopCmd,
+    }
+
+    let base = scratch("present");
+    let home = home_in(&base);
+    let link = crate::identity::Secret::ephemeral()
+        .member_badge()
+        .expect("mint a stand-in slip");
+    let stop = Wrap::try_parse_from(["x", "--present", &link])
+        .expect("bare stop --present parses")
+        .stop;
+
+    let error = stop
+        .run_local(&home)
+        .await
+        .expect_err("--present without --at must refuse, never be ignored");
+    assert_eq!(
+        format!("{error:#}"),
+        "--present only applies when reaching a peer; drop it or name one"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// An in-process resident serving a real temp socket: the bare stop resolves the socket backend,
 /// fires the resident's one teardown token, and records the socket stop as its own kind.
 #[tokio::test]

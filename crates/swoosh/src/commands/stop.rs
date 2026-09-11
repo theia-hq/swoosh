@@ -32,8 +32,7 @@ use crate::transport::ReachArgs;
 /// Stop a node (stop it serving): bare stops your own node, `--at <peer>` stops a peer's.
 #[derive(Debug, Args)]
 pub struct StopCmd {
-    /// the peer whose node to stop: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link.
-    /// Omit it to stop your own node (needs `serve --resident`).
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(long, value_name = "peer")]
     pub at: Option<Peer>,
     /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
@@ -103,6 +102,9 @@ impl StopCmd {
     /// client resolution teaches the fix (`swoosh serve --resident`) and exits non-zero, never a
     /// silent success.
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
+        // A bare `stop` reaches no peer, so an explicit `--present` has nothing to select: refuse it
+        // rather than silently dropping it (I.3), before touching the socket.
+        crate::reaching::reject_bare_present(self.present.as_ref())?;
         let client = ControlClient::resolve(home).map_err(control_error_report)?;
         Self::stop_resolved(&client).await
     }

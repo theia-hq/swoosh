@@ -2,7 +2,7 @@
 //! path, Tailscale `status` shaped.
 //!
 //! BARE (`status`, no peer) queries YOUR OWN resident node over the local control socket and prints the
-//! public status shape: node id, bound address, uptime, the live service table, and the warm peers.
+//! public status shape: node id, pid, bound address, uptime, the live service table, and the warm peers.
 //! With no resident it teaches (`swoosh serve --resident`) and exits non-zero.
 //!
 //! With a peer: the single most reassuring thing a p2p tool tells you: am I actually peer to peer, or
@@ -26,7 +26,8 @@ use measure::{Ping, ProtocolError};
 use tightbeam::tunnel;
 
 use crate::commands::serve::control_codec::StatusReply;
-use crate::commands::service::ls::render_catalog;
+use crate::commands::serve::humanize_secs;
+use crate::commands::service::ls::{disabled_warning, render_catalog};
 use crate::contacts::Contacts;
 use crate::home::Home;
 use crate::node_client::{ControlClient, NodeClient as _, control_error_report};
@@ -34,11 +35,10 @@ use crate::peer::Peer;
 use crate::reach;
 use crate::transport::{self, ReachArgs};
 
-/// Show your own node's status, or report the connection path to a peer.
+/// Show your node's status, or a peer's connection path
 #[derive(Debug, Args)]
 pub struct StatusCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link;
-    /// omit the peer to query your own node (needs `serve --resident`)
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
     pub peer: Option<Peer>,
     /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
@@ -165,24 +165,35 @@ impl StatusCmd {
     /// never binds an endpoint it would not use. With no addressable resident the client resolution
     /// teaches the fix (`swoosh serve --resident`) and exits non-zero.
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
+        // A bare `status` reaches no peer, so an explicit `--present` has nothing to select: refuse it
+        // rather than silently dropping it (I.3), before touching the socket.
+        crate::reaching::reject_bare_present(self.present.as_ref())?;
         let client = ControlClient::resolve(home).map_err(control_error_report)?;
         let status = client.status().await.map_err(control_error_report)?;
+        // The disabled-list diagnostic goes to stderr, BEFORE the clean stdout table (I.5): the `?`
+        // cells stay on stdout, the reason explaining them rides the diagnostic stream.
+        if let Some(warning) = disabled_warning(&status.menu.disabled) {
+            eprint!("{warning}");
+        }
         print!("{}", render_status(&status));
         Ok(())
     }
 }
 
-/// Render the bare self-query status shape: the node id, the bound address (when the transport
-/// hands one out), the uptime, the live service table with disabled markers, and the warm peers.
-/// Public shape only: the reply type carries no key material, and nothing here adds any.
+/// Render the bare self-query status shape: the node id, its pid, the bound address (when the
+/// transport hands one out), the uptime, the live service table with disabled markers, and the warm
+/// peers. Public shape only: the reply type carries no key material, and nothing here adds any.
 fn render_status(status: &StatusReply) -> String {
     let mut out = String::new();
     out.push_str(&format!("node {}\n", status.node_id.short()));
+    // The pid directly after the node: `status` is the verb that asks what is running, and the pid is
+    // the vocabulary the stop line and the already-resident refusal already name.
+    out.push_str(&format!("pid {}\n", status.pid));
     match status.addr {
         Some(addr) => out.push_str(&format!("addr {addr}\n")),
         None => out.push_str("addr none\n"),
     }
-    out.push_str(&format!("up {}\n", render_uptime(status.uptime_secs)));
+    out.push_str(&format!("up {}\n", humanize_secs(status.uptime_secs)));
     out.push_str(&render_catalog(
         &status.menu.catalog,
         Some(&status.menu.disabled),
@@ -196,34 +207,12 @@ fn render_status(status: &StatusReply) -> String {
                 out.push_str(&format!(
                     "  {} idle {}\n",
                     entry.peer.short(),
-                    render_uptime(entry.idle_secs)
+                    humanize_secs(entry.idle_secs)
                 ));
             }
         }
     }
     out
-}
-
-/// Render a second count as the coarsest two units (`2h 14m`, `3d`, `45s`), the same span shape the
-/// serve banner uses for `--expires`, so uptime and idle age read the way an operator thinks.
-fn render_uptime(secs: u64) -> String {
-    let mut left = secs;
-    let mut parts = Vec::new();
-    for (unit, per) in [("d", 86_400u64), ("h", 3_600), ("m", 60), ("s", 1)] {
-        let n = left / per;
-        if n > 0 {
-            parts.push(format!("{n}{unit}"));
-            left %= per;
-        }
-        if parts.len() == 2 {
-            break;
-        }
-    }
-    if parts.is_empty() {
-        "0s".to_owned()
-    } else {
-        parts.join(" ")
-    }
 }
 
 /// Probe one reached session for a live RTT and its path, and render its status line under `label` (the
@@ -366,10 +355,11 @@ mod tests {
     use clap::Parser as _;
     use tightbeam::tunnel::ServiceCatalog;
 
-    use super::{Line, render_status, render_uptime};
+    use super::{Line, render_status};
     use crate::commands::serve::control_codec::{
         DisabledList, PeerEntry, ServiceMenu, StatusReply,
     };
+    use crate::commands::serve::humanize_secs;
     use crate::home::Home;
 
     /// Serializes scratch names within this test process; the pid keeps two concurrent runs apart.
@@ -388,7 +378,7 @@ mod tests {
         ServiceCatalog::decode(&bytes).expect("the test catalog decodes")
     }
 
-    /// The bare self-query renders the public status shape and nothing else: node id, address,
+    /// The bare self-query renders the public status shape and nothing else: node id, pid, address,
     /// uptime, the live table, and the warm peers. The exhaustive destructure is the compile-level
     /// guard (Finding 11): a new field on the reply, key material included, fails to compile here
     /// before it can reach a renderer.
@@ -428,6 +418,11 @@ mod tests {
             text.contains(&format!("node {}", node_id.short())),
             "{text}"
         );
+        assert_eq!(
+            text.lines().nth(1),
+            Some("pid 4242"),
+            "the reply pid renders directly after the node: {text}"
+        );
         assert!(text.contains("addr 127.0.0.1:41641"), "{text}");
         assert!(text.contains("up 2h 14m"), "{text}");
         assert!(text.contains("SERVICE") && text.contains("STATE"), "{text}");
@@ -449,14 +444,15 @@ mod tests {
         }
     }
 
-    /// Uptimes and idle ages render as the coarsest two units, so a status reads at a glance.
+    /// Uptimes and idle ages render as the coarsest two units, so a status reads at a glance. The
+    /// formatter is shared with the serve banner (`humanize_secs`), so this pins the shape once.
     #[test]
     fn uptime_spans_render_coarsest_two_units() {
-        assert_eq!(render_uptime(0), "0s");
-        assert_eq!(render_uptime(45), "45s");
-        assert_eq!(render_uptime(90), "1m 30s");
-        assert_eq!(render_uptime(2 * 3600 + 14 * 60), "2h 14m");
-        assert_eq!(render_uptime(3 * 86_400 + 5 * 3600), "3d 5h");
+        assert_eq!(humanize_secs(0), "0s");
+        assert_eq!(humanize_secs(45), "45s");
+        assert_eq!(humanize_secs(90), "1m 30s");
+        assert_eq!(humanize_secs(2 * 3600 + 14 * 60), "2h 14m");
+        assert_eq!(humanize_secs(3 * 86_400 + 5 * 3600), "3d 5h");
     }
 
     /// A bare `status` with no addressable resident is the same teaching error as bare `stop`,
@@ -484,6 +480,40 @@ mod tests {
         assert!(
             format!("{error:#}").contains("start one with `swoosh serve --resident`"),
             "the error names the fix: {error:#}"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A bare `status` reaches no peer, so `--present` has nothing to select: it is refused with the
+    /// exact teaching line, never silently dropped (I.3, MAJOR-1).
+    #[tokio::test]
+    async fn bare_status_rejects_present() {
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            status: super::StatusCmd,
+        }
+
+        let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+        let base =
+            std::env::temp_dir().join(format!("sw4-status-present-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(base.join("home")).expect("scratch home");
+        let home = Home::resolve(Some(base.join("home"))).expect("the scratch home resolves");
+        let link = crate::identity::Secret::ephemeral()
+            .member_badge()
+            .expect("mint a stand-in slip");
+        let status = Wrap::try_parse_from(["x", "--present", &link])
+            .expect("bare status --present parses")
+            .status;
+
+        let error = status
+            .run_local(&home)
+            .await
+            .expect_err("--present without a peer must refuse, never be ignored");
+        assert_eq!(
+            format!("{error:#}"),
+            "--present only applies when reaching a peer; drop it or name one"
         );
 
         let _ = std::fs::remove_dir_all(&base);
