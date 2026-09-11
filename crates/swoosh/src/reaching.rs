@@ -17,7 +17,7 @@ use bifrost::{Discovery, Node, Session, Transport};
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::contacts::Contacts;
-use crate::credential::{Credential, MemberBadge};
+use crate::credential::{Credential, MemberBadge, SheerLink};
 use crate::home::Home;
 use crate::identity::{Identity, Secret};
 use crate::{config, transport};
@@ -195,10 +195,22 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
     }
 }
 
+/// Reject `--present` on a BARE (local) invocation: the flag selects the slip to present when reaching
+/// a PEER, and a bare `status`/`stop`/`service ls` reaches no peer (it queries the local resident over
+/// the control socket). The bare arms return before the composition root's
+/// [`reject_redundant_present`](Reaching::reject_redundant_present), so without this guard the flag
+/// parsed and was silently ignored (I.3 forbids a flag with no effect). One home for the exact teaching
+/// line, called by each bare arm before it resolves the local socket.
+pub(crate) fn reject_bare_present(present: Option<&SheerLink>) -> eyre::Result<()> {
+    if present.is_some() {
+        eyre::bail!("--present only applies when reaching a peer; drop it or name one");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::credential::SheerLink;
     use crate::peer::Peer;
 
     /// The default home for a resolver test: no stored badge/signet, so a `Family` dial falls back to the
