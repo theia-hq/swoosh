@@ -104,7 +104,8 @@ enum Command {
     Ping(PingCmd),
     /// Measure throughput to a peer: iperf, but over the overlay.
     Speed(SpeedCmd),
-    /// Show the connection path to a peer: direct vs relayed, remote, and live RTT.
+    /// Show your node's status, or connect to a peer: bare queries your own node (needs
+    /// `serve --resident`), `<peer>` reports the connection path to it.
     Status(StatusCmd),
     /// Mint a local URL that fetches an origin through a node you name.
     Fetch(FetchCmd),
@@ -183,16 +184,16 @@ impl Command {
             Self::Forward(cmd) => Verb::Reach(Reach::Forward(cmd)),
             Self::Send(cmd) => Verb::Reach(Reach::Send(cmd)),
             Self::Fleet(cmd) => Verb::Reach(Reach::Fleet(cmd)),
-            // `stop --at <peer>` reaches a peer's `control.stop`; a bare `stop` stops YOUR OWN node, which
-            // needs the daemon's control socket (not built yet). Split on `--at` here so the bare case reports
-            // it WITHOUT composing a transport it would never use, the same local dispatch `ssh`/`grant` take.
+            // `stop --at <peer>` reaches a peer's `control.stop`; a bare `stop` stops YOUR OWN node over
+            // the local control socket. Split on `--at` here so the bare case runs WITHOUT composing a
+            // transport it would never use, the same local dispatch `ssh`/`grant` take.
             Self::Stop(cmd) => match cmd.at {
                 Some(_) => Verb::Reach(Reach::Stop(cmd)),
                 None => Verb::Stop(cmd),
             },
             // The `service` group: `ls --at <peer>` reaches a peer's `control.services`; bare `ls` reads your
-            // own node (needs the daemon), and `enable`/`disable` are LOCAL file-writes on `<home>/disabled`.
-            // Split each here so the local arms never compose a transport they would not use.
+            // own node over the local control socket, and `enable`/`disable` are LOCAL file-writes on
+            // `<home>/disabled`. Split each here so the local arms never compose a transport they would not use.
             Self::Service(cmd) => match cmd {
                 ServiceCmd::Ls(ls) => match ls.at {
                     Some(_) => Verb::Reach(Reach::Service(ls)),
@@ -204,7 +205,13 @@ impl Command {
             Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
             Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
             Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
-            Self::Status(cmd) => Verb::Reach(Reach::Status(cmd)),
+            // A bare `status` (no peer) queries YOUR OWN node over the control socket, the same local
+            // grammar as bare `stop`/`service ls`; with a peer it reaches out and reports its path.
+            // Split here so the bare case never composes a transport it would not use.
+            Self::Status(cmd) => match cmd.peer {
+                Some(_) => Verb::Reach(Reach::Status(cmd)),
+                None => Verb::Status(cmd),
+            },
             Self::Fetch(cmd) => Verb::Reach(Reach::Fetch(cmd)),
         }
     }
@@ -226,16 +233,19 @@ enum Verb {
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
     Ssh(SshCmd),
-    /// A bare `swoosh service ls` (no `--at`): reading your OWN node's live menu needs the daemon (not built
-    /// yet), so it reports that and needs no transport or store. With `--at` it is a reaching verb instead.
+    /// A bare `swoosh service ls` (no `--at`): read YOUR OWN node's live menu over the local control
+    /// socket, no transport or store. With `--at` it is a reaching verb instead.
     ServiceLs(ServiceLsCmd),
     /// `swoosh service enable <svc>`: a LOCAL file-write on `<home>/disabled` (remove a name), no transport.
     ServiceEnable(ServiceToggleCmd),
     /// `swoosh service disable <svc>`: a LOCAL file-write on `<home>/disabled` (add a name), no transport.
     ServiceDisable(ServiceToggleCmd),
-    /// A bare `swoosh stop` (no `--at`): stopping your OWN node needs the daemon (not built yet), so it
-    /// reports that and needs no transport or store. With `--at` it is a reaching verb instead.
+    /// A bare `swoosh stop` (no `--at`): stop YOUR OWN node over the local control socket, no transport
+    /// or store. With `--at` it is a reaching verb instead.
     Stop(StopCmd),
+    /// A bare `swoosh status` (no peer): querying your OWN node over the control socket needs no
+    /// transport or store. With a peer it is a reaching verb instead.
+    Status(StatusCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(TreeCmd),
     /// Mints, narrows, or revokes a `sheer:` capability link. `share` signs with the persisted key;
@@ -512,13 +522,16 @@ async fn run() -> eyre::Result<()> {
     // book. A reaching verb falls through to bind a transport below.
     let reach = match command.split() {
         Verb::Tree(cmd) => return cmd.run(&Cli::command()),
-        // A bare `swoosh service ls` (no `--at`): reading your own node needs the daemon (not built yet).
-        // Report it here, before any transport is composed, the same local dispatch the other transport-free
-        // verbs take. With `--at` this verb fell through to the reach path above instead.
-        Verb::ServiceLs(cmd) => return cmd.run_local(),
-        // A bare `swoosh stop` (no `--at`): stopping your own node needs the daemon (not built yet). Report it
-        // here too, before any transport is composed. With `--at` it fell through to the reach path above.
-        Verb::Stop(cmd) => return cmd.run_local(),
+        // A bare `swoosh service ls` (no `--at`): read your own node's live table over the local control
+        // socket. Run it here, before any transport is composed, the same local dispatch the other
+        // transport-free verbs take. With `--at` this verb fell through to the reach path above instead.
+        Verb::ServiceLs(cmd) => return cmd.run_local(&home).await,
+        // A bare `swoosh stop` (no `--at`): stop your own node over the control socket, here too, before
+        // any transport is composed. With `--at` it fell through to the reach path above.
+        Verb::Stop(cmd) => return cmd.run_local(&home).await,
+        // A bare `swoosh status` (no peer): query your own node's live status over the control socket.
+        // Same local dispatch as the bare `stop`/`service ls` arms; with a peer it is a reach verb.
+        Verb::Status(cmd) => return cmd.run_local(&home).await,
         // `service enable`/`disable`: LOCAL file-writes on `<home>/disabled`, honored live by a running
         // `serve` via the mtime-watched oracle. Need only the home; bind no transport and touch no store.
         Verb::ServiceEnable(cmd) => return cmd.run_enable(&home),

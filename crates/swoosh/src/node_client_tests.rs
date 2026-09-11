@@ -446,3 +446,44 @@ async fn stop_treats_a_clean_eof_as_success() {
 
     let _ = std::fs::remove_dir_all(&leaf);
 }
+
+/// The verb-boundary rendering of the typed control errors: `NoResident` teaches the fix verbatim,
+/// a wire `Refused` reads descriptively through `refusal_reason` (never doubled), and a `Protocol`
+/// error names the skew fix, so a stale resident is never silently bypassed.
+#[test]
+fn control_errors_render_through_their_taxonomy() {
+    let missing = format!(
+        "{:#}",
+        super::control_error_report(ControlError::NoResident)
+    );
+    assert!(
+        missing.contains("start one with `swoosh serve --resident`"),
+        "the missing-resident error names the fix: {missing}"
+    );
+
+    let refused = format!(
+        "{:#}",
+        super::control_error_report(ControlError::Refused(
+            tightbeam::tunnel::UNIFORM_REFUSAL.to_owned()
+        ))
+    );
+    assert!(
+        refused.contains("not admitted"),
+        "the uniform refusal token is rendered descriptively: {refused}"
+    );
+    assert!(
+        !refused.contains("refused (refused)"),
+        "the token is never doubled: {refused}"
+    );
+
+    let skew = format!(
+        "{:#}",
+        super::control_error_report(ControlError::Protocol(
+            "unknown response tag 0x07".to_owned()
+        ))
+    );
+    assert!(
+        skew.contains("different swoosh version") && skew.contains("restart it with this binary"),
+        "a protocol error names the skew fix: {skew}"
+    );
+}

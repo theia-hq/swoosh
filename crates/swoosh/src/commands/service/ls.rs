@@ -1,8 +1,9 @@
 //! `swoosh service ls [--at <peer>]`: read the served menu.
 //!
-//! Bare (`service ls`) reads YOUR OWN running node's menu, which needs the resident daemon's control socket to
-//! query the live node; that socket is Phase 2, so for now bare `ls` reports it gracefully and exits non-zero
-//! rather than pretending to read a node that is not there. `service ls --at <peer>` reads a PEER's node: it
+//! Bare (`service ls`) reads YOUR OWN running node's menu over the resident daemon's control socket: the
+//! served catalog plus the LIVE disabled list, rendered as a `SERVICE  GATE  STATE` table. With no
+//! resident it teaches (`swoosh serve --resident`) and exits non-zero rather than pretending to read a
+//! node that is not there. `service ls --at <peer>` reads a PEER's node: it
 //! reaches the peer's gated `control.services` and prints a terse `SERVICE  GATE` table (each service name and
 //! whether reaching it needs a member badge, or is open to anyone). A pure READ, the client twin of the node's
 //! `control.services` handler.
@@ -18,16 +19,19 @@ use tightbeam::tunnel;
 use tokio::io::AsyncReadExt as _;
 
 use crate::commands::serve::CONTROL_SERVICES_SERVICE;
+use crate::commands::serve::control_codec::DisabledList;
 use crate::contacts::Contacts;
+use crate::home::Home;
+use crate::node_client::{ControlClient, NodeClient as _, control_error_report};
 use crate::peer::Peer;
 use crate::transport::ReachArgs;
 
-/// Read the served menu: bare reads your own node (needs the daemon), `--at <peer>` reaches a peer's
-/// `control.services` and prints a `SERVICE  GATE` table.
+/// Read the served menu: bare reads your own node's live table (needs `serve --resident`), `--at <peer>`
+/// reaches a peer's `control.services` and prints a `SERVICE  GATE` table.
 #[derive(Debug, Args)]
 pub struct ServiceLsCmd {
     /// the peer to read: a petname (`me/qat`, `alice`), a raw node id, or a `sheer:` link.
-    /// Omit it and `service ls` reports that reading your own node needs the daemon (not built yet).
+    /// Omit it to read your own node (needs `serve --resident`).
     #[arg(long, value_name = "peer")]
     pub at: Option<Peer>,
     /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
@@ -92,17 +96,16 @@ impl crate::reaching::Reaching for ServiceLsCmd {
 }
 
 impl ServiceLsCmd {
-    /// The bare (no-`--at`) path: reading YOUR OWN node's live menu needs the resident daemon's control
-    /// socket to query the running node, which is Phase 2. Report that and exit non-zero rather than printing
-    /// an empty table that reads as "this node serves nothing". Runs BEFORE any transport is composed
-    /// (dispatched locally in the root), so a bare `swoosh service ls` never binds an endpoint it would not use.
-    // FLAG(CLI-Architect): the deferred-behavior wording is the surface owner's; kept in the same voice as the
-    // sibling bare-`stop` message.
-    pub fn run_local(self) -> eyre::Result<()> {
-        eyre::bail!(
-            "reading your own node's services lands with the daemon (not built yet); \
-             read a peer's with `swoosh service ls --at <peer>`"
-        )
+    /// The bare (no-`--at`) path: read YOUR OWN node's live menu over the local control socket.
+    /// Runs BEFORE any transport is composed (dispatched locally in the root), so a bare
+    /// `swoosh service ls` never binds an endpoint it would not use. With no addressable resident
+    /// the client resolution teaches the fix (`swoosh serve --resident`) and exits non-zero rather
+    /// than printing an empty table that reads as "this node serves nothing".
+    pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
+        let client = ControlClient::resolve(home).map_err(control_error_report)?;
+        let menu = client.services().await.map_err(control_error_report)?;
+        print!("{}", render_catalog(&menu.catalog, Some(&menu.disabled)));
+        Ok(())
     }
 
     /// Reach the peer's gated `control.services` read and print its `SERVICE  GATE` table. Presents the
@@ -169,24 +172,84 @@ impl ServiceLsCmd {
     }
 }
 
-/// Print the catalog as a terse `SERVICE  GATE` table, header then one row per service (name-sorted by the
-/// catalog). An empty catalog prints just the header, so "the peer serves nothing" reads as an empty table
-/// rather than no output.
+/// Print the catalog as a terse `SERVICE  GATE` table (the remote `--at` read's shape): header then
+/// one row per service (name-sorted by the catalog). An empty catalog prints just the header, so "the
+/// peer serves nothing" reads as an empty table rather than no output.
 fn print_catalog(catalog: &tunnel::ServiceCatalog) {
-    // Width the SERVICE column to the widest name (min the header width), so the GATE column lines up.
-    let width = catalog
+    print!("{}", render_catalog(catalog, None));
+}
+
+/// Render the menu table: `SERVICE  GATE` always, plus a `STATE` column when the caller holds the
+/// live disabled list (the self read). A listed name renders `off`, everything else `on`. An
+/// explicit unknown disabled list cannot honestly say `on` for any entry, so every state renders
+/// `?` and one warning line names the reason: a service the gate may refuse must never read as
+/// enabled. Widths each column to its widest cell (min the header width) so the columns line up.
+pub(crate) fn render_catalog(
+    catalog: &tunnel::ServiceCatalog,
+    disabled: Option<&DisabledList>,
+) -> String {
+    let service_width = catalog
         .entries()
         .map(|entry| entry.name.len())
         .chain([HEADER_SERVICE.len()])
         .max()
         .unwrap_or(HEADER_SERVICE.len());
-    println!("{HEADER_SERVICE:<width$}  {HEADER_GATE}");
-    for entry in catalog.entries() {
-        println!("{:<width$}  {}", entry.name, entry.posture.label());
+    let gate_width = catalog
+        .entries()
+        .map(|entry| entry.posture.label().len())
+        .chain([HEADER_GATE.len()])
+        .max()
+        .unwrap_or(HEADER_GATE.len());
+    let mut out = String::new();
+    if disabled.is_some() {
+        out.push_str(&format!(
+            "{HEADER_SERVICE:<service_width$}  {HEADER_GATE:<gate_width$}  {HEADER_STATE}\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "{HEADER_SERVICE:<service_width$}  {HEADER_GATE}\n"
+        ));
     }
+    for entry in catalog.entries() {
+        let state = match disabled {
+            None => None,
+            Some(DisabledList::Known(names)) => {
+                let off = names.iter().any(|name| name == &entry.name);
+                Some(if off { STATE_OFF } else { STATE_ON })
+            }
+            Some(DisabledList::Unknown(_)) => Some(STATE_UNKNOWN),
+        };
+        let gate = entry.posture.label();
+        match state {
+            Some(state) => out.push_str(&format!(
+                "{:<service_width$}  {gate:<gate_width$}  {state}\n",
+                entry.name
+            )),
+            None => out.push_str(&format!("{:<service_width$}  {gate}\n", entry.name)),
+        }
+    }
+    if let Some(DisabledList::Unknown(reason)) = disabled {
+        out.push_str(&format!(
+            "warning: the disabled list could not be read ({reason}); states unknown\n"
+        ));
+    }
+    out
 }
 
 /// The `SERVICE` column header.
 const HEADER_SERVICE: &str = "SERVICE";
 /// The `GATE` column header.
 const HEADER_GATE: &str = "GATE";
+/// The `STATE` column header the self read adds.
+const HEADER_STATE: &str = "STATE";
+/// The live-state word for an enabled service.
+const STATE_ON: &str = "on";
+/// The live-state word for a disabled service.
+const STATE_OFF: &str = "off";
+/// The live-state word when the disabled list could not be read: the gate may still refuse, so the
+/// state is honestly unknown rather than a false `on`.
+const STATE_UNKNOWN: &str = "?";
+
+#[cfg(test)]
+#[path = "ls_tests.rs"]
+mod ls_tests;
