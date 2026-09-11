@@ -11,13 +11,13 @@ The `Usage` line under each command is generated from the parser, so it cannot d
 These apply to most commands and are omitted from the per-command signatures below:
 
 - `--home <dir>` (or `SWOOSH_HOME`) use a specific node home directory. The home is the whole profile: the
-  key lives at `<home>/identity.key`, and its contacts, the signet it trusts, and its badge all live
+  key lives at `<home>/identity.key`, and its contacts, the signet it trusts, and its membership all live
   beside it, so one `--home` moves the whole identity. Without it the default `~/.config/swoosh` applies.
 - `--transport <iroh|quirk>` which backend to bind. `iroh` (default) reaches peers across the internet;
   `quirk` is direct-only for diagnostics. See [transports](../transports.md).
 - `--peer <key=addr>` a direct address hint, for when discovery cannot reach a peer (mainly quirk). See
   [transports](../transports.md#quirk).
-- `--present <link>` present a `sheer:` slip when reaching a gated peer you are not a member of.
+- `--present <link>` present a `sheer:` capability link when reaching a gated peer you are not a member of.
 
 ## Commands
 
@@ -42,7 +42,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="mint"></a>[`swoosh mint`](commands/mint.md): derive a device identity and emit a one-time authkey to adopt
 - <a id="adopt"></a>[`swoosh adopt`](commands/adopt.md): adopt a minted authkey as this device identity
 - <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a peer's sshd over the overlay using the system ssh
-- <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue, list, narrow, or revoke `sheer:` slips
+- <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue, list, narrow, or revoke `sheer:` capability links
 - <a id="tree"></a>[`swoosh tree`](commands/tree.md): print the command tree read straight from the parser
 
 ## Next

@@ -9,6 +9,7 @@ middle. These docs take you from your first reach to every command.
 ## The map
 
 - [Getting started](getting-started.md) zero to your first reach, in two minutes.
+- [Capabilities](capabilities.md) hand someone one service, then let it expire or revoke it.
 - [Keys](keys.md) the whole model on one page: five nouns, one gate, one trade. Read it early;
   everything else assumes it.
 - [Use cases](use-cases/README.md) pick the real situation that matches yours, from reaching your own

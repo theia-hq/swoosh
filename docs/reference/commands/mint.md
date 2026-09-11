@@ -12,11 +12,11 @@ Usage: swoosh mint [OPTIONS] <label>
 ```
 
 **Example.** `swoosh mint laptop` prints an authkey and records `me/laptop`. Run it on the machine that
-holds your signet. `swoosh mint qat --expires 365d` mints a year-long badge for a long-lived box.
+holds your signet. `swoosh mint qat --expires 365d` mints a year-long membership for a long-lived box.
 
 **Things to know.** The authkey is a device secret. Hand it to the new machine over something private;
-`adopt` reads it without putting it on the command line. The badge expiry is the leak window: a leaked
-authkey stays adoptable until the badge expires, and the gate checks expiry on dial, so mint immediately
-before the machine adopts.
+`adopt` reads it without putting it on the command line. The membership expiry is the leak window: a
+leaked authkey stays adoptable until the membership expires, and the gate checks expiry on dial, so mint
+immediately before the machine adopts.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
