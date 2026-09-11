@@ -8,6 +8,7 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
+use std::os::fd::{FromRawFd as _, OwnedFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::io::AsRawFd as _;
 use std::os::unix::net::UnixListener;
@@ -240,8 +241,10 @@ fn stale_socket_is_probed_then_unlinked_and_rebound() {
     let _ = lock;
 }
 
-/// A LIVE socket at the path with the flock free: the start owns the lock and reaches the real
-/// probe, which hears the live listener and bails `ProbeAlive`, never unlinking the path.
+/// A live listener at the path with the flock free: the start owns the lock and reaches the real
+/// probe, which hears the listener answer and bails `ProbeAlive` rather than clobbering a responding
+/// socket. The flock, not this probe, is what protects a legitimate resident; this is the courtesy
+/// refusal for a squatter that answers.
 #[test]
 fn live_socket_under_lock_refuses_start() {
     let scratch = Scratch::new("live");
@@ -260,13 +263,46 @@ fn live_socket_under_lock_refuses_start() {
         matches!(refused, Err(SingleError::ProbeAlive)),
         "a live socket answers the probe, so the start refuses"
     );
-    assert!(socket.exists(), "the live socket is never unlinked");
+    assert!(socket.exists(), "the answering socket is not clobbered");
     drop(live);
 }
 
+/// The legitimate case the reclaim policy must never break: a resident holds the flock AND keeps its
+/// bound listener. A second start loses at the flock before it ever probes, so it never touches the
+/// path. This is the real invariant (`never take the path from a legitimate resident`), enforced by
+/// the flock; the probe cannot enforce it (on macOS a full-queue live listener reads stale).
+#[test]
+fn legitimate_resident_flock_refuses_second_start_and_keeps_its_socket() {
+    let scratch = Scratch::new("legit");
+    let (held, listener) = acquire(&scratch.home, &scratch.root).expect("the first resident holds");
+    let socket = held.socket_path().to_path_buf();
+    let identity = super::path_identity(&socket).expect("stat the held socket");
+    assert!(listener.as_raw_fd() >= 0, "the resident keeps its listener");
+
+    let refused = acquire(&scratch.home, &scratch.root);
+    match refused {
+        Err(SingleError::AlreadyResident { pid }) => {
+            assert_eq!(pid, held.pid(), "the loser names the holding pid");
+        }
+        Err(other) => panic!("the second start must lose at the flock: {other}"),
+        Ok(_) => panic!("exactly one resident may hold the home"),
+    }
+    assert!(
+        socket.exists(),
+        "the second start never unlinks the legitimate resident's socket"
+    );
+    assert_eq!(
+        super::path_identity(&socket).expect("stat the socket again"),
+        identity,
+        "the resident's own socket inode is untouched"
+    );
+    drop(listener);
+    drop(held);
+}
+
 /// A live listener whose probe answers neither `ENOENT` nor `ECONNREFUSED` refuses start and is
-/// never unlinked: only the two proven-stale answers permit the unlink. A mode-000 socket makes
-/// connect answer `EACCES`, an outcome the unlink policy must refuse.
+/// never unlinked: only the two answers treated as stale (the crash/squatter reclaim) permit the
+/// unlink. A mode-000 socket makes connect answer `EACCES`, an outcome the unlink policy must refuse.
 #[test]
 fn unclassified_probe_refuses_and_never_unlinks() {
     let scratch = Scratch::new("unclassified");
@@ -293,6 +329,173 @@ fn unclassified_probe_refuses_and_never_unlinks() {
     );
     assert!(socket.exists(), "the refused socket is never unlinked");
     drop(live);
+}
+
+/// Bind a listener at `path` with an explicit backlog, so a test can fill its accept queue cheaply.
+/// `UnixListener::bind` hardcodes the backlog, so this reaches libc directly and wraps the fd.
+fn bind_with_backlog(path: &Path, backlog: libc::c_int) -> UnixListener {
+    let (addr, len) = super::sockaddr_un(path).expect("the scratch socket path fits sun_path");
+    // SAFETY: `socket` takes no pointers and returns a fresh fd or -1.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(fd >= 0, "socket() for the backlog listener");
+    // SAFETY: `fd` is fresh; `addr`/`len` name a fully-initialized `sockaddr_un`.
+    let bound = unsafe { libc::bind(fd, core::ptr::addr_of!(addr).cast(), len) };
+    assert_eq!(bound, 0, "bind() the backlog listener");
+    // SAFETY: `fd` is a bound AF_UNIX stream socket; `listen` sets its queue length.
+    let listening = unsafe { libc::listen(fd, backlog) };
+    assert_eq!(listening, 0, "listen() the backlog listener");
+    // SAFETY: `fd` is owned by no other handle; the `UnixListener` becomes its sole owner.
+    UnixListener::from(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// Fill `path`'s accept queue with nonblocking clients, keeping them alive, until the kernel refuses
+/// the next connect: `EAGAIN` on Linux, `ECONNREFUSED` on macOS, the platform asymmetry the caller
+/// pins. The accepted connections are returned held open so the queue stays full.
+fn fill_accept_queue(path: &Path) -> Vec<std::os::unix::net::UnixStream> {
+    let (addr, len) = super::sockaddr_un(path).expect("the scratch socket path fits sun_path");
+    let mut held = Vec::new();
+    for _ in 0..1024 {
+        // SAFETY: `socket` takes no pointers and returns a fresh fd or -1.
+        let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(fd >= 0, "socket() for a queue filler");
+        // SAFETY: `fd` is open and owned here; `F_SETFL` only sets a status flag on it.
+        let nonblocking = unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) };
+        assert!(nonblocking >= 0, "set O_NONBLOCK on a queue filler");
+        // SAFETY: `fd` is fresh and `addr`/`len` name a fully-initialized `sockaddr_un`.
+        let connected = unsafe { libc::connect(fd, core::ptr::addr_of!(addr).cast(), len) };
+        if connected == 0 {
+            // SAFETY: `fd` is owned by no other handle; the stream becomes its sole owner.
+            held.push(std::os::unix::net::UnixStream::from(unsafe {
+                OwnedFd::from_raw_fd(fd)
+            }));
+            continue;
+        }
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        // SAFETY: `fd` is still open and owned here (the failed connect took no handle).
+        let _ = unsafe { libc::close(fd) };
+        assert!(
+            matches!(errno, Some(libc::EAGAIN | libc::ECONNREFUSED)),
+            "the accept queue must fill with EAGAIN (Linux) or ECONNREFUSED (macOS), got {errno:?}"
+        );
+        return held;
+    }
+    panic!("the accept queue never filled within 1024 clients");
+}
+
+/// The platform asymmetry the B1 re-gate reproduced: a live listener with a FULL accept queue
+/// answers the nonblocking probe differently per kernel. Linux answers `EAGAIN`, not a stale answer,
+/// so the probe refuses `ProbeUnclassified` and never unlinks. macOS answers `ECONNREFUSED`, the
+/// same errno a dead path returns, so `acquire` reclaims it (unlink + rebind) exactly as crash
+/// recovery requires; the listener does not hold the lock, so it is the squatter the reclaim is for.
+/// The flock, not this probe, is what keeps a legitimate resident's path safe. `acquire` runs on a
+/// bounded worker so deleting the probe's `O_NONBLOCK` (a blocking connect parks on Linux) fails the
+/// bounded wait instead of hanging the suite.
+#[test]
+fn full_accept_queue_is_classified_per_platform() {
+    let scratch = Scratch::new("backlog");
+    // Create the verified leaf directly (0700, as `acquire` would) instead of seeding it through a
+    // first `acquire`: the test needs a leaf for the planted listener, not a lock holder.
+    let leaf = scratch.leaf();
+    std::fs::create_dir_all(&leaf).expect("create the runtime leaf");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o700))
+            .expect("0700 the runtime leaf");
+    }
+    let socket = leaf.join("control.sock");
+    let _listener = bind_with_backlog(&socket, 1);
+    let before = super::path_identity(&socket).expect("stat the planted socket");
+    let _clients = fill_accept_queue(&socket);
+
+    let home = Home::resolve(Some(scratch.home.dir().to_path_buf())).expect("re-resolve the home");
+    let root = scratch.root.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _ = tx.send(acquire(&home, &root));
+    });
+    let result = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the probe must not park on a full accept queue");
+
+    #[cfg(target_os = "linux")]
+    {
+        assert!(
+            matches!(result, Err(SingleError::ProbeUnclassified)),
+            "a full queue answers EAGAIN on Linux, so the probe refuses rather than reclaim"
+        );
+        assert_eq!(
+            super::path_identity(&socket).expect("stat the socket"),
+            before,
+            "the unclassified live socket is never unlinked"
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let acquired =
+            result.expect("a full queue answers ECONNREFUSED on macOS, so it reads stale");
+        assert_ne!(
+            super::path_identity(&socket).expect("stat the rebound socket"),
+            before,
+            "the macOS stale answer unlinks and rebinds the path"
+        );
+        drop(acquired);
+    }
+    drop(_listener);
+    worker.join().expect("the acquire worker joins");
+}
+
+/// `await_probe` polls the in-flight connect and reads `SO_ERROR`: a connected socket is writable
+/// and reports no error, so it classifies `Live`. This drives the helper directly (an AF_UNIX
+/// connect never actually takes the `EINPROGRESS` arm on Linux/macOS), so deleting the `poll` call,
+/// which leaves `revents` at 0 and returns `Unknown`, fails this test.
+#[test]
+fn await_probe_reads_so_error_from_a_connected_socket() {
+    let (stream, _peer) = std::os::unix::net::UnixStream::pair().expect("a socketpair");
+    // SAFETY: `dup` returns a fresh fd or -1; the dup is owned by no other handle.
+    let dup = unsafe { libc::dup(stream.as_raw_fd()) };
+    assert!(dup >= 0, "dup the connected fd");
+    // SAFETY: `dup` is a fresh fd owned by no other handle.
+    let owned = unsafe { OwnedFd::from_raw_fd(dup) };
+    assert_eq!(
+        super::await_probe(&owned),
+        super::Probe::Live,
+        "a connected socket is poll-ready and error-free, so the in-flight probe reads Live"
+    );
+}
+
+/// The poll is a bounded WAIT, not a grab at `SO_ERROR`: a socket whose send buffer is full is not
+/// writable, so `poll` does not fire within [`super::PROBE_POLL_MS`] and `await_probe` reads
+/// `Unknown` (it never falls through to a stale `Live`). A poll replaced by a hardcoded ready, or
+/// one whose deadline is ignored, would read `SO_ERROR` = 0 and return `Live`, failing this.
+#[test]
+fn await_probe_times_out_on_a_write_blocked_socket() {
+    use std::io::Write as _;
+
+    let (mut writer, _reader) = std::os::unix::net::UnixStream::pair().expect("a socketpair");
+    writer
+        .set_nonblocking(true)
+        .expect("the filler is nonblocking");
+    // Fill the send buffer until a write would block: now the socket is not writable, so POLLOUT
+    // does not fire. The peer stays open and unread, so the buffer never drains.
+    let chunk = [0u8; 4096];
+    loop {
+        match writer.write(&chunk) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(error) if error.raw_os_error() == Some(libc::EAGAIN) => break,
+            Err(error) => panic!("fill the send buffer: {error}"),
+        }
+    }
+    // SAFETY: `dup` returns a fresh fd or -1; the dup is owned by no other handle.
+    let dup = unsafe { libc::dup(writer.as_raw_fd()) };
+    assert!(dup >= 0, "dup the write-blocked fd");
+    // SAFETY: `dup` is a fresh fd owned by no other handle.
+    let owned = unsafe { OwnedFd::from_raw_fd(dup) };
+    assert_eq!(
+        super::await_probe(&owned),
+        super::Probe::Unknown,
+        "a socket that never polls ready within the deadline must refuse, never read as live"
+    );
 }
 
 /// A crashing child (a real `SIGKILL`, not a `drop`) releases the flock: the parent's next start
