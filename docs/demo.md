@@ -4,8 +4,8 @@ Admit a second machine to a node you run. Reach it by its public key. Then swap 
 stack under the identical command, for one we wrote ourselves, and watch the address stay the same. A
 stranger who was never admitted is refused at the door, over either transport.
 
-You address *who* (an ed25519 public key), never *where*, so the transport under the reach is a seam you
-can pull out and replace. swoosh runs `ping` and `speed` over iroh (real QUIC, NAT traversal, relays)
+You address *who* (an ed25519 public key), never *where*, so the transport under the reach can be pulled
+out and replaced. swoosh runs `ping` and `speed` over iroh (real QUIC, NAT traversal, relays)
 and over **quirk**, our own QUIC written from scratch over UDP, at the same peer, from the same member
 identity. Same key, same NodeId, different transport. And the gate holds across both.
 
@@ -168,7 +168,7 @@ is real, not decorative, and it holds no matter which transport carried the dial
 
 ## Why this matters
 
-Reach is a seam, and membership is real. Because you address a public key and the verbs are generic over
+Reach is replaceable, and membership is real. Because you address a public key and the verbs are generic over
 the transport, the whole transport stack is a swappable component under an unchanged command with an
 unchanged identity, and the same signet gate admits your devices and refuses everyone else across every
 transport. No incumbent (ssh, cloudflared, tailscale, plain iroh tooling) can pull its transport out
