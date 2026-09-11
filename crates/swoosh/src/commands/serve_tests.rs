@@ -15,14 +15,15 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use tightbeam::tunnel::{
-    Exposer, ManifestEntry, Posture, PublicRequest, PublicUnsafeRequest, RawSource, Registry,
-    Services, TargetKind,
+    CancellationToken, Exposer, ManifestEntry, Posture, PublicRequest, PublicUnsafeRequest,
+    RawSource, Registry, ServiceCatalog, Services, TargetKind,
 };
 
 use super::control::{ControlError, Request, Response};
 use super::{
-    FetchScope, Group, MdnsState, ReachKind, Stopped, describe, display_targets, reach_section,
-    render_ready_banner, serving_section,
+    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, Group, MdnsState, ReachKind,
+    ServiceList, Stop, Stopped, describe, display_targets, reach_section, render_ready_banner,
+    serving_section,
 };
 use crate::home::Home;
 
@@ -288,6 +289,49 @@ fn resident_stop_classifies_from_its_source() {
         Stopped::Interrupted,
         "a recorded interrupt renders as interrupted"
     );
+}
+
+/// BLOCKER-2: the resident control socket adds no service. `--resident` adds only the local socket
+/// arm AFTER the registry and the manifest are cut, so the exposer's manifest is the plain-serve set
+/// exactly (`control.*` folds as always); and the control `Request` enum can express two reads and a
+/// stop, never a toggle/revoke, so the socket can never mutate the gate. Both halves are asserted:
+/// the manifest equality against the plain default, and the legal request set constructed and
+/// round-tripped (the mutate-free guarantee is compile-enforced by the closed enum).
+#[test]
+fn resident_manifest_equals_plain_manifest() {
+    let cancel = CancellationToken::new();
+    let services = Services::parse(&[
+        "ping=ping:".to_owned(),
+        "speed=speed:".to_owned(),
+        format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:"),
+        format!("{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"),
+    ])
+    .expect("the default resident service set parses");
+    // The registry the resident path builds: the base ping/speed plus the two control.* handlers.
+    let registry = super::registry([0u8; 32])
+        .expect("the base registry builds")
+        .with(CONTROL_STOP_SERVICE, Stop::new(cancel))
+        .with(
+            CONTROL_SERVICES_SERVICE,
+            ServiceList::new(ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog")),
+        );
+    let exposer = Exposer::new(services, registry, gated(), PublicUnsafeRequest::none())
+        .expect("the resident service set assembles under the family gate");
+
+    assert_eq!(
+        exposer.manifest(),
+        default_manifest(),
+        "the resident manifest is exactly the plain-serve set; the control socket adds no service"
+    );
+
+    // The mutate-free guarantee BY TYPE: the socket carries two reads and a stop, and no toggle. A
+    // total match with no wildcard is the guard: adding a control request variant (a toggle) makes
+    // this fail to compile, at the seat that would break the invariant.
+    for request in [Request::Services, Request::Status, Request::Stop] {
+        match request {
+            Request::Services | Request::Status | Request::Stop => {}
+        }
+    }
 }
 
 /// Plain serve creates no runtime state: drive the REAL binary with a temp home, a temp

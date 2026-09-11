@@ -584,6 +584,29 @@ fn accept_errors_split_fatal_from_backoff() {
     );
 }
 
+/// M4 at the call, not the predicate: a recoverable accept error must WAIT one bounded backoff
+/// before re-accepting, or the loop spins the serving runtime. The helper is what the accept loop
+/// calls on a recoverable error; deleting its `sleep` makes the future complete at once, so the
+/// bounded poll here fails. Inducing a real EMFILE/ENOBUFS is process-global and flaky, which is
+/// why the wait is split out and driven directly.
+#[tokio::test]
+async fn recoverable_accept_error_waits_one_bounded_backoff() {
+    use super::{ACCEPT_BACKOFF, accept_backoff_wait};
+
+    let early =
+        tokio::time::timeout(core::time::Duration::from_millis(10), accept_backoff_wait()).await;
+    assert!(
+        early.is_err(),
+        "a recoverable accept error must wait its backoff, not fall straight through"
+    );
+    tokio::time::timeout(
+        ACCEPT_BACKOFF + core::time::Duration::from_secs(1),
+        accept_backoff_wait(),
+    )
+    .await
+    .expect("the backoff is bounded and completes");
+}
+
 /// m1/m2: the disabled read is bounded and honest. An absent file means an empty `Known` list; a
 /// read failure or an oversized file is an explicit `Unknown` (never a false "nothing disabled");
 /// and past the count cap the list truncates rather than write a reply the client refuses.

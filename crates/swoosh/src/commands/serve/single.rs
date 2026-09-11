@@ -1,12 +1,16 @@
 //! Single-instance for `serve --resident`: the flock truth plus the socket rendezvous.
 //!
 //! The LOCK FILE is the truth; the SOCKET is the rendezvous. Start: create and verify the 0700
-//! runtime chain, take `LOCK_EX | LOCK_NB` on `control.lock`, then connect-probe the socket. Only
-//! `ENOENT` and `ECONNREFUSED` are stale: unlink the dead path, rebind, and record our pid. A live
-//! or unclassifiable answer refuses (never unlink a socket we cannot prove dead), and the probe
-//! connect is nonblocking, so a full accept queue behind a live listener cannot park startup. Hold
-//! the fd for life: a crash releases the flock by itself, and the next start recovers through the
-//! probe, no reaper.
+//! runtime chain, take `LOCK_EX | LOCK_NB` on `control.lock`, then connect-probe the socket. The
+//! flock is what protects a legitimate resident: a resident holds it for life, so a second start
+//! loses at the flock and never reaches the probe, and that resident's path is never touched. Under
+//! OUR lock, the socket at the path is a crash plant or a same-uid squatter, so `ENOENT` and
+//! `ECONNREFUSED` reclaim it (unlink, rebind, record our pid) and a connect that completes (a
+//! listener that answers) refuses [`SingleError::ProbeAlive`]. The probe cannot prove death, and on
+//! macOS a live listener with a full accept queue answers `ECONNREFUSED`; that listener does not
+//! hold the lock, so it is the squatter this reclaim is for. The probe connect is nonblocking, so
+//! that same full queue cannot park startup. Hold the fd for life: a crash releases the flock by
+//! itself, and the next start recovers through the probe, no reaper.
 
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -41,11 +45,14 @@ pub enum SingleError {
         #[source]
         source: std::io::Error,
     },
-    /// The socket answered while we hold the lock: a live node or a squatter, never unlink it.
+    /// The socket answered a connect while we hold the lock: a squatter that is listening. A live
+    /// node would hold the lock, so we would have lost at the flock and never probed; refuse loudly
+    /// rather than clobber a socket that answers.
     #[error("the control socket is live under our lock; refusing to steal it")]
     ProbeAlive,
-    /// The connect probe neither connected nor answered `ENOENT`/`ECONNREFUSED` (`EACCES`,
-    /// `EAGAIN`, `EINTR`, a poll timeout): the path may be live, so refuse rather than unlink it.
+    /// The connect probe neither completed nor answered `ENOENT`/`ECONNREFUSED` (`EACCES`,
+    /// `EAGAIN`, `EINTR`, a poll timeout): not one of the two answers treated as stale, so refuse
+    /// rather than guess at reclaiming a path we cannot classify.
     #[error("the control socket did not answer a clean probe; refusing to steal it")]
     ProbeUnclassified,
     /// Binding the socket after a stale probe failed.
@@ -167,11 +174,12 @@ impl RuntimeDir {
 /// Acquire single-instance for `home` under the already-resolved runtime `root`: create and verify
 /// the runtime chain, take the exclusive nonblocking flock, connect-probe-then-unlink-bind the
 /// socket, record our pid, and return the held lock plus the bound listener. The probe/unlink/bind
-/// sequence runs UNDER the flock (a second contender loses at the flock); the chain verify precedes
-/// it because the lock lives inside the leaf it verifies. A second holder gets
-/// [`SingleError::AlreadyResident`] naming the winner's pid; a live socket under our own lock is
-/// [`SingleError::ProbeAlive`], and any probe answer that is neither live nor one of the two stale
-/// errors is [`SingleError::ProbeUnclassified`].
+/// sequence runs UNDER the flock; the chain verify precedes it because the lock lives inside the
+/// leaf it verifies. A second holder gets [`SingleError::AlreadyResident`] naming the winner's pid
+/// and never touches the winner's socket: the flock, not the probe, is what keeps a legitimate
+/// resident's path safe. Under our own lock a socket that answers a connect is
+/// [`SingleError::ProbeAlive`], and any answer that is neither live nor one of the two stale
+/// answers is [`SingleError::ProbeUnclassified`].
 pub fn acquire(
     home: &Home,
     root: &Path,
@@ -220,9 +228,13 @@ pub fn acquire(
             source: held,
         });
     }
-    // Connect-probe UNDER the lock: a live answer means a squatter or a live node on a borrowed
-    // lock, so bail LOUD and never unlink a live socket. Only `ENOENT` and `ECONNREFUSED` are
-    // stale (unlink, bind, continue); every other answer refuses.
+    // Connect-probe UNDER the lock: the flock already proved no legitimate resident holds this
+    // home (a real resident would have won the flock and we would have returned AlreadyResident),
+    // so the socket here is a crash plant or a same-uid squatter. `ENOENT`/`ECONNREFUSED` reclaim
+    // it (unlink, bind, continue); a connect that completes (a socket that answers) refuses
+    // `ProbeAlive`; every other answer refuses `ProbeUnclassified`. The probe is a courtesy that
+    // avoids clobbering a responding socket, never the guarantee: the flock is what protects a
+    // legitimate resident.
     let probe = probe_socket(&socket_path);
     if !matches!(probe, Probe::Stale) {
         // Release before returning so a probe refusal does not strand the flock.
@@ -271,12 +283,16 @@ const PROBE_POLL_MS: libc::c_int = 200;
 /// What a connect probe of the rendezvous path found.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Probe {
-    /// A connect completed: a listener (or a squatter) holds the path.
+    /// A connect completed: a listener is answering at the path. A legitimate resident would hold
+    /// the flock, so we would have lost at the flock and never probed: this is a same-uid squatter.
     Live,
-    /// `ENOENT` or `ECONNREFUSED`: nothing holds the path, so it is safe to unlink and rebind.
+    /// `ENOENT` or `ECONNREFUSED`: the two answers treated as stale, so unlink and rebind. On macOS
+    /// a live listener with a full accept queue also answers `ECONNREFUSED`, and it is reclaimed
+    /// like a crash: under our lock it is the squatter (or crash) the reclaim is for, never a
+    /// legitimate resident.
     Stale,
-    /// Any other answer (`EACCES`, `EAGAIN`, `EINTR`, a poll timeout): the path might be live, so
-    /// refuse rather than risk unlinking a socket we could not prove dead.
+    /// Any other answer (`EACCES`, `EAGAIN`, `EINTR`, a poll timeout): not classifiable as stale,
+    /// so refuse rather than guess at reclaiming it.
     Unknown,
 }
 

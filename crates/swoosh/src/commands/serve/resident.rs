@@ -190,7 +190,7 @@ impl Resident {
                     // cancel token after it, so a stop during the backoff lands promptly.
                     tracing::warn!(%error, "control accept failed; backing off");
                     drop(permit);
-                    tokio::time::sleep(ACCEPT_BACKOFF).await;
+                    accept_backoff_wait().await;
                 }
             }
         }
@@ -314,6 +314,14 @@ fn read_disabled_names(path: &std::path::Path) -> DisabledList {
     names.sort();
     names.truncate(DISABLED_NAMES_CAP);
     DisabledList::Known(names)
+}
+
+/// Wait one bounded [`ACCEPT_BACKOFF`] before retrying a recoverable accept error. A named helper so
+/// the wait is itself a unit under test: the predicate test (`accept_errors_split_fatal_from_backoff`)
+/// can prove the classification but never whether the loop actually sleeps, and inducing a real
+/// EMFILE/ENOBUFS in a test is process-global and flaky.
+async fn accept_backoff_wait() {
+    tokio::time::sleep(ACCEPT_BACKOFF).await;
 }
 
 /// Whether an accept error is fatal for the listener: a bad descriptor or a non-socket cannot
