@@ -74,6 +74,17 @@ impl UidSocket {
     /// so tests can drive the ownership/mode/socket checks without resolving a process-global runtime
     /// root. Never connects.
     fn resolve_socket(socket: PathBuf) -> Result<Self, ControlError> {
+        Self::resolve_socket_as(socket, euid(), euid())
+    }
+
+    /// [`resolve_socket`](Self::resolve_socket) with the expected owners injected: production passes
+    /// [`euid`] for both halves, tests pass a foreign uid for one half to pin each comparison without
+    /// root. The refused half names itself in the error, so a test can prove which check refused.
+    fn resolve_socket_as(
+        socket: PathBuf,
+        dir_uid: u32,
+        socket_uid: u32,
+    ) -> Result<Self, ControlError> {
         let dir = match socket.parent() {
             Some(dir) => dir.to_owned(),
             None => return Err(ControlError::Untrusted { path: socket }),
@@ -86,7 +97,7 @@ impl UidSocket {
                 _ => ControlError::Untrusted { path: dir.clone() },
             })?;
         if !dir_meta.is_dir()
-            || dir_meta.uid() != euid()
+            || dir_meta.uid() != dir_uid
             || dir_meta.permissions().mode() & 0o777 != 0o700
         {
             return Err(ControlError::Untrusted { path: dir });
@@ -94,7 +105,7 @@ impl UidSocket {
         // Step 2: the socket must be a socket owned by this user. ENOENT is NoResident; a non-socket
         // inode, a foreign owner, or a stat failure is Untrusted.
         match std::fs::symlink_metadata(&socket) {
-            Ok(meta) if meta.file_type().is_socket() && meta.uid() == euid() => {}
+            Ok(meta) if meta.file_type().is_socket() && meta.uid() == socket_uid => {}
             Ok(_) => return Err(ControlError::Untrusted { path: socket }),
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
                 return Err(ControlError::NoResident);
@@ -109,7 +120,22 @@ impl UidSocket {
     /// [`resolve`](Self::resolve) can race a same-uid swap; a connected fd cannot, so this is the
     /// client-side twin of the server's accepted-fd check.
     async fn connect(&self) -> Result<UnixStream, ControlError> {
-        let stream = timeout(CONNECT_TIMEOUT, UnixStream::connect(&self.socket))
+        self.connect_checked_with(UnixStream::connect(&self.socket), real_peer_uid)
+            .await
+    }
+
+    /// The testable core of [`connect`](Self::connect): bound `dial` by [`CONNECT_TIMEOUT`], map its
+    /// OS errors, then prove the connected peer's uid with `checker`. Split from `connect` so tests
+    /// can drive a wedged dial, a refused dial, and a foreign-uid checker without root.
+    async fn connect_checked_with<C>(
+        &self,
+        dial: C,
+        checker: fn(i32) -> std::io::Result<u32>,
+    ) -> Result<UnixStream, ControlError>
+    where
+        C: Future<Output = std::io::Result<UnixStream>>,
+    {
+        let stream = timeout(CONNECT_TIMEOUT, dial)
             .await
             .map_err(|_| ControlError::Timeout { phase: "connect" })?
             .map_err(|error| match error.raw_os_error() {
@@ -117,7 +143,7 @@ impl UidSocket {
                 Some(libc::ENOENT | libc::ECONNREFUSED) => ControlError::NoResident,
                 _ => ControlError::Io(error),
             })?;
-        let uid = real_peer_uid(stream.as_raw_fd()).map_err(|_| ControlError::Untrusted {
+        let uid = checker(stream.as_raw_fd()).map_err(|_| ControlError::Untrusted {
             path: self.socket.clone(),
         })?;
         if uid != euid() {
@@ -131,7 +157,17 @@ impl UidSocket {
     /// One request, one response, one connection. Maps a wire `Refused`/`Error` to the typed error at
     /// the boundary so a caller can match it, never a stringified cause.
     async fn exchange(&self, request: &Request) -> Result<Response, ControlError> {
-        let mut stream = self.connect().await?;
+        let stream = self.connect().await?;
+        Self::exchange_on(stream, request).await
+    }
+
+    /// One request/response exchange on an established stream under the phase bounds. Split from
+    /// [`exchange`](Self::exchange) so tests can drive the write and read deadlines over an
+    /// in-memory duplex a real request frame is too small to wedge.
+    async fn exchange_on<S>(mut stream: S, request: &Request) -> Result<Response, ControlError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         timeout(IO_TIMEOUT, request.write(&mut stream))
             .await
             .map_err(|_| ControlError::Timeout {

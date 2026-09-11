@@ -154,7 +154,7 @@ async fn services_is_one_round_trip() {
 /// fires and the call returns the typed `Timeout`, never a hang. Paused time makes the five-second
 /// bound instant and deterministic.
 #[tokio::test(start_paused = true)]
-async fn client_deadlines_are_bounded() {
+async fn stalled_response_read_times_out() {
     let leaf = scratch("stall", 0o700);
     let socket = leaf.join("control.sock");
     let listener =
@@ -185,6 +185,126 @@ async fn client_deadlines_are_bounded() {
 
     stalled.abort();
     let _ = stalled.await;
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// A dial that never completes must not park the verb: the connect bound fires and the call returns
+/// the typed `Timeout`, never a hang. The injected dial resolves only through the production bound;
+/// the outer guard fails the test cleanly (instead of hanging CI) if that bound is deleted.
+#[tokio::test(start_paused = true)]
+async fn connect_deadline_is_bounded() {
+    let leaf = scratch("dial", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let error = tokio::time::timeout(
+        super::CONNECT_TIMEOUT * 2,
+        client.connect_checked_with(
+            core::future::pending::<std::io::Result<tokio::net::UnixStream>>(),
+            super::real_peer_uid,
+        ),
+    )
+    .await
+    .expect("the connect bound fires before the guard")
+    .expect_err("a wedged dial times out");
+    assert!(
+        matches!(error, ControlError::Timeout { phase: "connect" }),
+        "the connect bound is the typed connect-phase timeout: {error}"
+    );
+
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// A request write that cannot drain must not park the verb: a one-byte duplex the peer never reads
+/// fills at the first byte, so the write bound fires and the call returns the typed `Timeout`. The
+/// outer guard fails the test cleanly if that bound is deleted.
+#[tokio::test(start_paused = true)]
+async fn request_write_deadline_is_bounded() {
+    let (stream, _peer) = tokio::io::duplex(1);
+    let error = tokio::time::timeout(
+        super::IO_TIMEOUT * 2,
+        UidSocket::exchange_on(stream, &Request::Services),
+    )
+    .await
+    .expect("the write bound fires before the guard")
+    .expect_err("a wedged write times out");
+    assert!(
+        matches!(
+            error,
+            ControlError::Timeout {
+                phase: "request write"
+            }
+        ),
+        "the write bound is the typed request-write timeout: {error}"
+    );
+}
+
+/// A fake peer-credential checker reporting a uid that is never ours: pins the connected-fd uid
+/// proof without root. Shaped as a plain `fn` so it coerces to the checker seam.
+fn foreign_uid(_: i32) -> std::io::Result<u32> {
+    Ok(if super::euid() == 0 { 1 } else { 0 })
+}
+
+/// The connected-fd peer-uid proof refuses a peer the checker reports as foreign: the client twin of
+/// the server's uid gate, driven through the same kind of injected checker. Deleting the comparison
+/// in `connect_checked_with` lets the live stream through and fails this test.
+#[tokio::test]
+async fn connect_refuses_a_foreign_uid_peer() {
+    let leaf = scratch("peer", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+
+    let error = client
+        .connect_checked_with(tokio::net::UnixStream::connect(&client.socket), foreign_uid)
+        .await
+        .expect_err("a foreign-uid peer must refuse");
+    assert!(
+        matches!(error, ControlError::Untrusted { ref path } if path == &client.socket),
+        "a forged peer is Untrusted naming the socket: {error}"
+    );
+
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// The production `connect` admits our own uid through the real `getpeereid`/`SO_PEERCRED` checker:
+/// a live listener in this process is trusted, so the proof is not a blanket refusal.
+#[tokio::test]
+async fn connect_admits_our_own_uid() {
+    let leaf = scratch("admit", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+
+    let stream = client.connect().await.expect("our own uid is admitted");
+    drop(stream);
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// A live socket inode whose listener is gone maps `ECONNREFUSED` to the typed `NoResident` miss,
+/// never a bare I/O error: the stale-resident shape, on the production connect path. Deleting the
+/// errno arm turns this into `Io`.
+#[tokio::test]
+async fn connect_maps_a_dead_listener_to_no_resident() {
+    let leaf = scratch("stale", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    drop(listener);
+    let client = UidSocket::resolve_socket(socket).expect("the stale socket inode still resolves");
+
+    let error = client.connect().await.expect_err("a dead listener refuses");
+    assert!(
+        matches!(error, ControlError::NoResident),
+        "a refused connect is a typed NoResident: {error}"
+    );
+
     let _ = std::fs::remove_dir_all(&leaf);
 }
 
@@ -235,6 +355,37 @@ fn resolve_refuses_a_foreign_owner_leaf() {
     );
 }
 
+/// The owner comparisons refuse a foreign owner on either half without root: the dir first, then the
+/// socket after the dir passes. Each refusal names its half, so deleting either comparison is caught
+/// by the named path, and the same tree resolves with our own uid.
+#[test]
+fn resolve_refuses_a_foreign_owner() {
+    let leaf = scratch("owner", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    let foreign = if super::euid() == 0 { 1 } else { 0 };
+
+    let error = UidSocket::resolve_socket_as(socket.clone(), foreign, super::euid())
+        .expect_err("a foreign-owner leaf must refuse");
+    assert!(
+        matches!(error, ControlError::Untrusted { ref path } if path == &leaf),
+        "a foreign-owner leaf is Untrusted naming the dir: {error}"
+    );
+
+    let error = UidSocket::resolve_socket_as(socket.clone(), super::euid(), foreign)
+        .expect_err("a foreign-owner socket must refuse");
+    assert!(
+        matches!(error, ControlError::Untrusted { ref path } if path == &socket),
+        "a foreign-owner socket is Untrusted naming the socket: {error}"
+    );
+
+    UidSocket::resolve_socket(socket).expect("our own tree resolves");
+
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
 /// A wire `Refused` maps to the typed `ControlError::Refused`, never a stringified protocol error:
 /// a scripted server answers a refusal and the client surfaces it as the refusal it is.
 #[tokio::test]
@@ -262,6 +413,35 @@ async fn socket_maps_a_refusal_to_the_typed_error() {
         matches!(error, ControlError::Refused(ref reason) if reason == "gated"),
         "a wire refusal is the typed Refused with its reason: {error}"
     );
+    server.await.expect("the scripted server joins");
+
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// `stop` treats a clean EOF after the written request as success: a server that reads the stop and
+/// closes without an Ack still confirms the stop. Deleting the `UnexpectedEof` arm makes this `Io`.
+#[tokio::test]
+async fn stop_treats_a_clean_eof_as_success() {
+    let leaf = scratch("eof", 0o700);
+    let socket = leaf.join("control.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking listener");
+    let server = tokio::spawn(async move {
+        let listener = tokio::net::UnixListener::from_std(listener).expect("tokio listener");
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let request = Request::read(&mut stream).await.expect("the stop reads");
+        assert_eq!(request, Request::Stop, "the client asked to stop");
+        // Drop the stream with no Ack: the client must read the clean EOF as the confirmation.
+    });
+
+    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    client
+        .stop()
+        .await
+        .expect("a clean EOF after the stop is success");
     server.await.expect("the scripted server joins");
 
     let _ = std::fs::remove_dir_all(&leaf);
