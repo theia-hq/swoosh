@@ -146,24 +146,17 @@ impl ServiceLsCmd {
         let dial = connector.dial();
 
         // A service-scoped session whose one `open_bi` speaks the `control.services` request and presents the
-        // badge. On admission the peer writes the self-delimiting catalog blob and closes; a refusal maps to a
-        // loud stream error here (a refusal is a typed loud error, never a silent empty read).
+        // badge. On admission the peer writes the self-delimiting catalog blob and closes; a refusal surfaces
+        // as the typed `bifrost::Error::Refused` here, rendered as the SAME teaching line the ping/status
+        // ladder gives rather than the bare transport word. A refusal is not "the peer serves nothing"; a
+        // genuine i/o failure keeps its own message.
         let session = connector.open_service(node).await?;
         let (writer, mut reader) = match session.open_bi().await {
             Ok(halves) => halves,
-            // The family-gated `control.services` read refuses a non-member: surface it as the SAME teaching
-            // refusal the ping/status ladder gives, not the bare transport word. The reason lives in the
-            // error's SOURCE (a `bifrost::Error::Stream` renders as just "stream"), recovered by
-            // `gate_refusal_reason` and rendered through `refusal_reason` so the uniform token reads
-            // descriptively and is never doubled (`refused (refused)`). A genuine i/o failure keeps its own
-            // message; a refusal is not "the peer serves nothing".
-            Err(error) => match tunnel::gate_refusal_reason(&error) {
-                Some(reason) => eyre::bail!(
-                    "{dial}: reached, but refused ({})",
-                    tunnel::refusal_reason(&reason)
-                ),
-                None => eyre::bail!("could not read services from {dial}: {error}"),
-            },
+            Err(bifrost::Error::Refused(refusal)) => {
+                eyre::bail!("{dial}: reached, but refused ({refusal})")
+            }
+            Err(error) => eyre::bail!("could not read services from {dial}: {error}"),
         };
         // The read sends nothing; drop the write half so the peer's handler write completes (the same shape
         // the roster read uses).

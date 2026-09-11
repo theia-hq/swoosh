@@ -18,7 +18,7 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use measure::{Limit, Mode, Ping, Speedtest};
+use measure::{Limit, Mode, Ping, ProtocolError, Refusal, Speedtest};
 use nauthy::FileDenylist;
 use swoosh::commands::serve::{CONTROL_STOP_SERVICE, Stop};
 use tightbeam::tunnel::{
@@ -108,7 +108,12 @@ async fn proof() {
     .run(&ping)
     .await;
     assert!(
-        refused.is_err(),
+        matches!(
+            refused,
+            Err(ProtocolError::Refused(Refusal::Stream(
+                bifrost::Refusal::NotAdmitted
+            )))
+        ),
         "a stranger must still be refused at the gated ping service: {refused:?}"
     );
 
@@ -119,7 +124,10 @@ async fn proof() {
         .await
         .expect("the base connect lands; the gate refuses per-stream");
     assert!(
-        control.open_bi().await.is_err(),
+        matches!(
+            control.open_bi().await,
+            Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
+        ),
         "a stranger must be refused at the always-on control.stop, even on a --public node"
     );
 }

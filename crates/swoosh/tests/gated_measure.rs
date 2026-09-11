@@ -40,7 +40,7 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_mem::MemTransport;
-use measure::{Limit, Mode, Ping, ProtocolError, Speedtest};
+use measure::{Limit, MethodRefusal, Mode, Ping, ProtocolError, Refusal, Speedtest};
 use nauthy::{FileDenylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{
@@ -165,7 +165,13 @@ async fn proof() {
             .run(&ping_only)
             .await;
         assert!(
-            matches!(refused, Err(ProtocolError::Refused(_))),
+            matches!(
+                refused,
+                Err(ProtocolError::Refused(Refusal::Method {
+                    code: MethodRefusal::WrongMethod,
+                    ..
+                }))
+            ),
             "a speed frame on ping must REFUSE loudly, not source zero bytes: {refused:?}"
         );
 
@@ -183,7 +189,13 @@ async fn proof() {
         .run(&speed_only)
         .await;
         assert!(
-            matches!(refused, Err(ProtocolError::Refused(_))),
+            matches!(
+                refused,
+                Err(ProtocolError::Refused(Refusal::Method {
+                    code: MethodRefusal::WrongMethod,
+                    ..
+                }))
+            ),
             "a ping frame on speed must REFUSE loudly, not report 100% loss: {refused:?}"
         );
 
@@ -206,8 +218,13 @@ async fn proof() {
         .run(&measure)
         .await;
         assert!(
-            refused.is_err(),
-            "a stranger's ping must be refused at the gated ping service, not answered"
+            matches!(
+                refused,
+                Err(ProtocolError::Refused(Refusal::Stream(
+                    bifrost::Refusal::NotAdmitted
+                )))
+            ),
+            "a stranger's ping must be refused at the gated ping service, not answered: {refused:?}"
         );
 
         // Refused at speed too: a stranger cannot speedtest a gated node. The gate walls each service
@@ -220,8 +237,13 @@ async fn proof() {
             .run(&measure)
             .await;
         assert!(
-            refused.is_err(),
-            "a stranger's speedtest must be refused at the gated speed service"
+            matches!(
+                refused,
+                Err(ProtocolError::Refused(Refusal::Stream(
+                    bifrost::Refusal::NotAdmitted
+                )))
+            ),
+            "a stranger's speedtest must be refused at the gated speed service: {refused:?}"
         );
     }
 }
