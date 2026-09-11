@@ -11,13 +11,13 @@
 //! though both speak the same frame. [`answer`] is the union of both, for a responder that serves
 //! both over one session.
 
-use bifrost::Session;
+use bifrost::{RefusalDetail, Session};
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use tokio::io;
 
 use crate::payload::Payload;
-use crate::protocol::{ProtocolError, Request, Response};
+use crate::protocol::{MethodRefusal, ProtocolError, Request, Response};
 
 /// Answers the diagnostic services on one session's streams.
 pub struct Responder;
@@ -147,16 +147,18 @@ where
     }
 }
 
-/// Refuse a wrong-method frame LOUDLY: write a typed [`Response::Unsupported`] frame carrying `reason`
-/// so the client decodes a refusal (not a silently dropped stream it would read as loss or zero bytes),
-/// then return [`ProtocolError::WrongService`] so the stream task logs why it refused. This is the fix for
-/// the false-success class: a wrong method is a frame on the wire, never a silent close.
+/// Refuse a wrong-method frame LOUDLY: write a typed [`Response::Unsupported`] frame carrying the typed
+/// [`MethodRefusal::WrongMethod`] code and a bounded detail off `reason`, so the client decodes a refusal
+/// (not a silently dropped stream it would read as loss or zero bytes), then return
+/// [`ProtocolError::WrongService`] so the stream task logs why it refused. This is the fix for the
+/// false-success class: a wrong method is a frame on the wire, never a silent close.
 async fn refuse<W: io::AsyncWrite + Unpin>(
     writer: &mut W,
     reason: &str,
 ) -> Result<(), ProtocolError> {
     Response::Unsupported {
-        reason: reason.to_owned(),
+        code: MethodRefusal::WrongMethod,
+        detail: RefusalDetail::bounded(reason),
     }
     .write(writer)
     .await?;
