@@ -29,7 +29,7 @@ serving
 ctrl-c to stop
 ```
 
-Anyone with the key reaches the two public services and nothing else. There is no slip to hand out and
+Anyone with the key reaches the two public services and nothing else. There is no link to hand out and
 nothing to present:
 
 <!-- live-run: real iroh RTT over the internet, non-deterministic; re-capture before release -->
@@ -42,8 +42,8 @@ bf01hcq6balrlxwa via iroh: mixed (direct to 135.129.124.149:56141 and relayed)
 
 ## The rules on `--public`
 
-- **You must name the services.** Bare `--public` is an error, and there is no `all` or `*`. You open
-  exactly what you list.
+- **You must name the services.** Bare `--public` fails with clap's missing-value error: `a value is
+  required for '--public <svc>'`. There is no `all` or `*`. You open exactly what you list.
 - **Some services can never be public.** A keyless shell (`sshd:`) is refused by name, and
   `control.stop` / `control.services` are always gated. The gate will not let you open a service that
   has no safe public form.

@@ -6,12 +6,12 @@ and says why, rather than reporting a healthy-looking result.
 ## "reached, but refused (not admitted)"
 
 ```
-via quirk: reached, but refused (not admitted: not a member of this node's family,
-and no capability for this service)
+bf01hcq6balrlxwa via quirk: reached, but refused (not admitted: not a member of this node's family, and no capability for this service)
+Error: bf01hcq6balrlxwa: reached, but refused
 ```
 
 You reached the peer, but its gate turned you away. You are not one of its devices and you presented no
-slip that grants this service. This is the gate working as designed.
+grant that covers this service. This is the gate working as designed.
 
 The same message also covers an unserved service: a node that admits you but does not serve the name you
 asked for refuses with the same words, because the reply cannot tell "not admitted" from "admitted, not
@@ -22,8 +22,8 @@ Fix one of:
 
 - If it is your own node, enroll this machine: `swoosh mint <label>` on the machine that holds your
   signet, then `swoosh adopt` here.
-- If someone else runs it, ask them for a [slip](keys.md#slip) and add `--present sheer:…` to your
-  command.
+- If someone else runs it, ask them for a [capability link](keys.md#grant) and add `--present sheer:…` to
+  your command.
 - If the service is meant to be public, the owner opens it with `swoosh serve --public <service>`.
 - If the menu from `swoosh service ls --at <peer>` is missing the service, the node is not serving it:
   serve that name on the node, or reach one it does serve.
@@ -53,8 +53,8 @@ couple of seconds, no restart. It does not cut a session already in progress; th
 drains. See [revocation](keys.md#revocation).
 
 - It applies to the node you ran it on. If you serve from more than one node, revoke on each.
-- A fleet slip stays usable from any device that person still holds until it expires or you revoke it.
-  Keep fleet slips short-lived.
+- A fleet-bound grant stays usable from any device that person still holds until it expires or you
+  revoke it. Keep fleet grants short-lived.
 
 ## A public ping or speed is being hammered
 
