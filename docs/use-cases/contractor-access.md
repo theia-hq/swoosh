@@ -64,10 +64,11 @@ ssh
 
 ## The honest limit
 
-A revoke is node-local and takes effect on the box's next `serve`: the gate loads the denylist at startup,
-so a revoke made while the box is serving applies when you restart it (live revocation lands with the
-daemon). If you serve the box from more than one node, revoke on each. A fleet slip also stays usable from
-any device the contractor still holds until it expires or you revoke it, so keep the expiry short.
+A revoke is node-local and lands live: it takes effect on the box's next dial, typically within a couple
+of seconds, no restart. It does not cut a session already in progress. If you serve the box from more
+than one node, revoke on each. A fleet slip also stays usable from any device the contractor still holds
+until it expires or you revoke it, so keep the expiry short. See
+[revocation](../keys.md#revocation).
 
 ## Next
 

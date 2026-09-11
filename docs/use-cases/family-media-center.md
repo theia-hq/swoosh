@@ -84,9 +84,9 @@ revoked 1 grant(s) to bf01o6vqymgz727g… (…/revoked)
   once, everyone in it is covered) is [planned](../roadmap.md).
 - **Revoke is per household.** Revoking mum's signet drops her whole fleet at once. There is no way yet
   to drop one of her devices while keeping the rest, so keep fleet slips short-lived.
-- **A revoke needs a `serve` restart.** The gate loads the denylist when `serve` starts, so revoking mum
-  drops her on the box's next `serve`, not mid-session. Restart `serve` on the box to apply it now; live
-  revocation lands with the daemon.
+- **A revoke lands live but does not cut an open session.** Revoking mum drops her whole fleet on the
+  next dial, typically within a couple of seconds, no restart. A connection she already holds is not
+  cut; it drains. See [revocation](../keys.md#revocation).
 
 ## Next
 

@@ -29,7 +29,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 
 - <a id="serve"></a>[`swoosh serve`](commands/serve.md): be a node, publish named services behind your signet gate
 - <a id="stop"></a>[`swoosh stop`](commands/stop.md): stop a peer's node by its key or a `sheer:` link
-- <a id="service"></a>[`swoosh service`](commands/service.md): read a peer's served services as a `SERVICE GATE` table
+- <a id="service"></a>[`swoosh service`](commands/service.md): list a peer's menu, or enable/disable a service on your node
 - <a id="ping"></a>[`swoosh ping`](commands/ping.md): measure round-trip time to a peer, addressed by key
 - <a id="speed"></a>[`swoosh speed`](commands/speed.md): measure throughput to a peer, addressed by key
 - <a id="status"></a>[`swoosh status`](commands/status.md): show the connection path to a peer (direct or relayed)
