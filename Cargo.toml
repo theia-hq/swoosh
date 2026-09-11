@@ -15,14 +15,14 @@ license = "MIT OR Apache-2.0"
 # locally regardless of the rev; CI (no parent config) resolves the rev from GitHub. All bifrost-* crates
 # live in one repo, so they share one rev. Bump these deliberately each release (see the reproducible-build
 # gate in .github/workflows/release.yml and the lock-regen step in notes/02-DECISIONS.md).
-bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "26e8272d890b0b424bc6960b9d38e09b40cc428d" }
-bifrost-core = { git = "https://github.com/theia-hq/bifrost", rev = "26e8272d890b0b424bc6960b9d38e09b40cc428d" }
-bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "26e8272d890b0b424bc6960b9d38e09b40cc428d" }
-bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "26e8272d890b0b424bc6960b9d38e09b40cc428d" }
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "26e8272d890b0b424bc6960b9d38e09b40cc428d" }
-bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "26e8272d890b0b424bc6960b9d38e09b40cc428d" }
-nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "7a4c9d4850f84db9acf5288c324bf3808a1b089f" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "a3cb1c8a8ac2589d69e74323084290ea76c3c439" }
+bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "a464d18a11ff8e4de1ba5d63d33c1cf9111c5b04" }
+bifrost-core = { git = "https://github.com/theia-hq/bifrost", rev = "a464d18a11ff8e4de1ba5d63d33c1cf9111c5b04" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "a464d18a11ff8e4de1ba5d63d33c1cf9111c5b04" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "a464d18a11ff8e4de1ba5d63d33c1cf9111c5b04" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "a464d18a11ff8e4de1ba5d63d33c1cf9111c5b04" }
+bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "a464d18a11ff8e4de1ba5d63d33c1cf9111c5b04" }
+nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "b872d16bf37a4beddc39c19123a300ee44f26d06" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "16b154aa8f4ebaca64fda5552e2b9b01478acc9e" }
 fetch = { path = "crates/fetch" }
 measure = { path = "crates/measure" }
 sshh = { path = "crates/sshh" }
