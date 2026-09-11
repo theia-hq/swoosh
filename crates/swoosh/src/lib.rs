@@ -13,6 +13,7 @@ pub mod credential;
 pub mod grants;
 pub mod home;
 pub mod identity;
+pub mod node_client;
 pub mod peer;
 pub mod reach;
 pub mod reaching;
