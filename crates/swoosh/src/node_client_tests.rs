@@ -287,17 +287,52 @@ async fn connect_admits_our_own_uid() {
     let _ = std::fs::remove_dir_all(&leaf);
 }
 
-/// A live socket inode whose listener is gone maps `ECONNREFUSED` to the typed `NoResident` miss,
-/// never a bare I/O error: the stale-resident shape, on the production connect path. Deleting the
-/// errno arm turns this into `Io`.
+/// Plant a socket inode at `path` that never listened: `socket` + `bind` + close, no `listen`. The
+/// path refuses every connect (`ECONNREFUSED`) and cannot be revived: a non-listening socket stays
+/// refusing even while a forked child holds an inherited fd. A `UnixListener` bound and dropped
+/// would leave the same path but could still answer through a listening fd a sibling test's
+/// concurrent `Command` spawn inherited before its own exec closed it.
+fn plant_dead_socket(path: &std::path::Path) {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let bytes = path.as_os_str().as_bytes();
+    // SAFETY: `sockaddr_un` is plain C data (integers plus a byte array); all-zero is a valid
+    // initial value and every field the kernel reads is set below.
+    let mut addr: libc::sockaddr_un = unsafe { core::mem::zeroed() };
+    assert!(
+        bytes.len() < addr.sun_path.len(),
+        "the scratch socket path fits sun_path"
+    );
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (slot, byte) in addr.sun_path.iter_mut().zip(bytes) {
+        *slot = *byte as libc::c_char;
+    }
+    // SAFETY: `socket` takes no pointers and returns a fresh fd or -1.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    assert!(fd >= 0, "socket() for the dead plant");
+    // SAFETY: `fd` is fresh; `addr` names a fully-initialized `sockaddr_un`.
+    let bound = unsafe {
+        libc::bind(
+            fd,
+            core::ptr::addr_of!(addr).cast(),
+            core::mem::size_of_val(&addr) as libc::socklen_t,
+        )
+    };
+    assert_eq!(bound, 0, "bind() the dead plant");
+    // SAFETY: `fd` is owned by no other handle; closing it leaves the bound path behind as the dead
+    // inode the production connect must classify.
+    let _ = unsafe { libc::close(fd) };
+}
+
+/// A dead socket inode maps `ECONNREFUSED` to the typed `NoResident` miss, never a bare I/O error:
+/// the stale-resident shape, on the production connect path. Deleting the errno arm turns this into
+/// `Io`.
 #[tokio::test]
 async fn connect_maps_a_dead_listener_to_no_resident() {
     let leaf = scratch("stale", 0o700);
     let socket = leaf.join("control.sock");
-    let listener =
-        std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
-    drop(listener);
-    let client = UidSocket::resolve_socket(socket).expect("the stale socket inode still resolves");
+    plant_dead_socket(&socket);
+    let client = UidSocket::resolve_socket(socket).expect("the dead socket inode still resolves");
 
     let error = client.connect().await.expect_err("a dead listener refuses");
     assert!(
