@@ -1,7 +1,8 @@
 # Transports
 
-swoosh carries a connection two ways, chosen with `--transport`. The key is the same either way, so
-switching transports reaches the same peer.
+swoosh carries most connections two ways, chosen with `--transport`. The key is the same either way, so
+switching transports reaches the same peer. `swoosh ssh` is the one exception: it is iroh-only today
+and takes no `--transport`.
 
 ## iroh (the default)
 

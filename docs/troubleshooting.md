@@ -13,6 +13,11 @@ and no capability for this service)
 You reached the peer, but its gate turned you away. You are not one of its devices and you presented no
 slip that grants this service. This is the gate working as designed.
 
+The same message also covers an unserved service: a node that admits you but does not serve the name you
+asked for refuses with the same words, because the reply cannot tell "not admitted" from "admitted, not
+served". Check the menu with `swoosh service ls --at <peer>`: if it lists the menu without your service,
+the node is not serving it.
+
 Fix one of:
 
 - If it is your own node, enroll this machine: `swoosh mint <label>` on the machine that holds your
@@ -20,6 +25,8 @@ Fix one of:
 - If someone else runs it, ask them for a [slip](keys.md#slip) and add `--present sheer:…` to your
   command.
 - If the service is meant to be public, the owner opens it with `swoosh serve --public <service>`.
+- If the menu from `swoosh service ls --at <peer>` is missing the service, the node is not serving it:
+  serve that name on the node, or reach one it does serve.
 
 ## "quirk is direct-only: pass --peer"
 
@@ -40,11 +47,11 @@ sides can reach the internet. `swoosh status <peer>` reports the path once a lin
 
 ## A revoke did not take effect
 
-A revoke is **node-local** and takes effect on the node's **next `serve`**, not on a running one:
+A revoke is **node-local** and lands live: the gate re-reads the denylist when its file changes
+(mtime-watched), so a revoke written while a node runs takes effect on the next dial, typically within a
+couple of seconds, no restart. It does not cut a session already in progress; the held connection
+drains. See [revocation](keys.md#revocation).
 
-- The gate loads the denylist once, when `swoosh serve` starts. A revoke you make while the node is serving
-  does not bite until you restart it, so restart `serve` on the node to apply it. (Live revocation, cutting
-  a held slip without a restart, lands with the daemon.)
 - It applies to the node you ran it on. If you serve from more than one node, revoke on each.
 - A fleet slip stays usable from any device that person still holds until it expires or you revoke it.
   Keep fleet slips short-lived.
@@ -52,8 +59,9 @@ A revoke is **node-local** and takes effect on the node's **next `serve`**, not 
 ## A public ping or speed is being hammered
 
 `ping` and `speed` have no responder-side rate limit yet, so an open one lets an anonymous caller drain
-your uplink. Only `--public` the services you are willing to let a stranger use, and take them back by
-restarting `serve` without them.
+your uplink. Only `--public` the services you are willing to let a stranger use. `swoosh service disable
+<name>` stops serving it to anyone, live, no restart; to keep it for your own devices while taking it off
+the public menu, restart `serve` without the flag.
 
 ## Next
 
