@@ -21,8 +21,9 @@ recorded me/laptop -> bf01imv3ljql6kjn  [derived]
 hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
-The authkey is a secret. Move it to the new machine over something private, save it to a file, and
-adopt it there (reading from a file keeps it out of the process list):
+The authkey is a secret. Move it to the new machine over something private and save the whole printed
+line to a file, the `authkey:` prefix included. The file must be `0600` (`chmod 600 authkey.txt`), or
+`adopt` refuses it. Reading from a file keeps the secret out of the process list:
 
 <!-- capture: swoosh adopt @authkey.txt -->
 ```console
@@ -89,9 +90,10 @@ or points at an existing sshd with `swoosh serve ssh=127.0.0.1:22`.
 ## The honest limit
 
 A device carrying your badge reaches every gated service on any node you run. If a device is lost or
-stolen, revoke it (`swoosh grant revoke me/laptop`) on each node you run, then restart `serve` there. A
-revoke is node-local and takes effect on the node's next `serve` (the gate loads the denylist at startup),
-not instantly and not everywhere at once; live revocation lands with the daemon.
+stolen, revoke it (`swoosh grant revoke me/laptop`) on each node you run. A revoke is node-local and
+lands live: it takes effect on the next dial, typically within a couple of seconds, no restart. It does
+not cut a session already in progress; the held connection drains. See
+[revocation](../keys.md#revocation).
 
 ## Next
 

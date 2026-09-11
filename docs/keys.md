@@ -44,7 +44,9 @@ hand this authkey to the machine (a SECRET: adopting it becomes this identity an
 
 A minted badge lasts 90 days unless you pass `--expires`; see [`swoosh mint`](reference/commands.md#mint).
 
-The new machine adopts that one-time authkey and becomes a device your signet trusts:
+The new machine adopts that one-time authkey and becomes a device your signet trusts. Save the whole
+printed line to a file, the `authkey:` prefix included, and make the file private
+(`chmod 600 authkey.txt`); `adopt` refuses a file missing the prefix or readable by anyone else:
 
 <!-- capture: swoosh adopt @authkey.txt -->
 ```console
@@ -76,8 +78,9 @@ a valid signature gets in, so a new device you enroll or a new person you grant 
 to sync.
 
 A <a id="revocation"></a>revoke lands live: the gate re-reads the denylist when its file changes
-(mtime-watched), so a revoke written while a node runs takes effect on the next dial, no restart. It does
-not cut a session already in progress; that held connection drains, and cutting it live is not built yet.
+(mtime-watched), so a revoke written while a node runs takes effect on the next dial, typically within a
+couple of seconds, no restart. It does not cut a session already in progress; that held connection
+drains, and cutting it live is not built yet.
 
 ## Sharing access: fleets and slips
 
