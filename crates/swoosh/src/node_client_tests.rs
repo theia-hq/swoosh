@@ -483,7 +483,7 @@ async fn stop_treats_a_clean_eof_as_success() {
 }
 
 /// The verb-boundary rendering of the typed control errors: `NoResident` teaches the fix verbatim,
-/// a wire `Refused` reads descriptively through `refusal_reason` (never doubled), and a `Protocol`
+/// a wire `Refused` renders the resident's reason verbatim (never doubled), and a `Protocol`
 /// error names the skew fix, so a stale resident is never silently bypassed.
 #[test]
 fn control_errors_render_through_their_taxonomy() {
@@ -499,12 +499,12 @@ fn control_errors_render_through_their_taxonomy() {
     let refused = format!(
         "{:#}",
         super::control_error_report(ControlError::Refused(
-            tightbeam::tunnel::UNIFORM_REFUSAL.to_owned()
+            "not admitted: no member badge or capability for this service was accepted".to_owned()
         ))
     );
     assert!(
         refused.contains("not admitted"),
-        "the uniform refusal token is rendered descriptively: {refused}"
+        "the resident's refusal reason rides through: {refused}"
     );
     assert!(
         !refused.contains("refused (refused)"),

@@ -162,7 +162,7 @@ impl FetchCmd {
             if !responded {
                 // A failure before any response (an open, a parse, a stream drop) is a bad-gateway
                 // condition, not an authorization one, so `502`. The refusal path inside `relay` serves
-                // its own `403` before returning, so a refusal never reaches this fallback.
+                // its own `403`/`502` before returning, so a refusal never reaches this fallback.
                 let _ = respond_error(
                     &mut tcp,
                     Status::BadGateway,
@@ -201,18 +201,20 @@ impl FetchCmd {
         }
         .write(&mut writer)
         .await?;
-        if let Response::Error(message) = Response::read(&mut reader).await? {
+        if let Response::Refused(refusal) = Response::read(&mut reader).await? {
             *responded = true;
-            // A gate refusal is an AUTHORIZATION failure (the exit node refused YOU), not a bad gateway,
-            // so serve `403` and keep `502` for a genuine origin error below. A downloader can then tell
-            // "you are not allowed through this node" from "the origin is having a bad day" by status
-            // alone, instead of reading two different failures as an indistinguishable `502`.
-            return respond_error(
-                tcp,
-                Status::Forbidden,
-                &format!("fetch service refused: {message}"),
-            )
-            .await;
+            // `NotAdmitted` is an AUTHORIZATION failure (the exit node refused YOU): serve `403`. The
+            // post-admission refusals (`BadRequest` / `Unavailable`) are the node's own failure to serve
+            // the request, so they keep `502`, like a genuine origin error below. A downloader can then
+            // tell "you are not allowed through this node" from "the node or origin is having a bad day"
+            // by status alone, instead of reading two different failures as an indistinguishable `502`.
+            let status = match refusal {
+                bifrost::Refusal::NotAdmitted => Status::Forbidden,
+                bifrost::Refusal::BadRequest { .. } | bifrost::Refusal::Unavailable { .. } => {
+                    Status::BadGateway
+                }
+            };
+            return respond_error(tcp, status, &format!("fetch service refused: {refusal}")).await;
         }
 
         FetchRequest {
@@ -340,12 +342,13 @@ async fn write_response_head(
 }
 
 /// An error status a `fetch` proxy serves, chosen so a downloader can tell the failure apart by status
-/// alone: a gate refusal is authorization (`403`), a bad upstream is a gateway failure (`502`).
+/// alone: a dial the exit node did not admit is authorization (`403`), a node that could not serve the
+/// request or a bad upstream is a gateway failure (`502`).
 #[derive(Debug, Clone, Copy)]
 enum Status {
-    /// The exit node refused YOU (a gate refusal): an authorization failure, not a bad gateway.
+    /// The exit node did not admit YOU: an authorization failure, not a bad gateway.
     Forbidden,
-    /// The origin, the stream, or the node itself failed: a genuine gateway error.
+    /// The node admitted the dial but could not serve the request, or the origin failed: a gateway error.
     BadGateway,
 }
 
@@ -360,7 +363,8 @@ impl Status {
 }
 
 /// Serve an error status with a short reason, so a downloader sees a real HTTP error (distinguishable by
-/// status), not a hang. A gate refusal serves `403`; a genuine origin or gateway failure serves `502`.
+/// status), not a hang. An unadmitted dial serves `403`; a node that could not serve the request, or a
+/// genuine origin failure, serves `502`.
 async fn respond_error(tcp: &mut TcpStream, status: Status, message: &str) -> eyre::Result<()> {
     let (code, reason) = status.parts();
     let body = message.as_bytes();

@@ -22,7 +22,7 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_mem::MemTransport;
-use measure::{Limit, Mode, Ping, ProtocolError, Speedtest};
+use measure::{Limit, MethodRefusal, Mode, Ping, ProtocolError, Refusal, Speedtest};
 use nauthy::{FileDenylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{
@@ -108,7 +108,13 @@ async fn proof_ping_only() {
         .run(&speed)
         .await;
     assert!(
-        matches!(refused, Err(ProtocolError::Refused(_))),
+        matches!(
+            refused,
+            Err(ProtocolError::Refused(Refusal::Method {
+                code: MethodRefusal::WrongMethod,
+                ..
+            }))
+        ),
         "a node offering only ping must REFUSE speed loudly, not source zero bytes: {refused:?}"
     );
 
@@ -153,7 +159,13 @@ async fn proof_speed_only() {
     .run(&ping)
     .await;
     assert!(
-        matches!(refused, Err(ProtocolError::Refused(_))),
+        matches!(
+            refused,
+            Err(ProtocolError::Refused(Refusal::Method {
+                code: MethodRefusal::WrongMethod,
+                ..
+            }))
+        ),
         "a node offering only speed must REFUSE ping loudly, not report 100% loss: {refused:?}"
     );
 
@@ -197,7 +209,15 @@ async fn assert_stranger_refused(host: NodeId) {
     }
     .run(&ping)
     .await;
-    assert!(refused.is_err(), "a stranger cannot ping the node");
+    assert!(
+        matches!(
+            refused,
+            Err(ProtocolError::Refused(Refusal::Stream(
+                bifrost::Refusal::NotAdmitted
+            )))
+        ),
+        "a stranger cannot ping the node: {refused:?}"
+    );
 
     let speed = Connector::to_node(host, "speed".to_owned(), Some(stranger_badge))
         .open_service(&stranger)
@@ -206,7 +226,15 @@ async fn assert_stranger_refused(host: NodeId) {
     let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
         .run(&speed)
         .await;
-    assert!(refused.is_err(), "a stranger cannot speedtest the node");
+    assert!(
+        matches!(
+            refused,
+            Err(ProtocolError::Refused(Refusal::Stream(
+                bifrost::Refusal::NotAdmitted
+            )))
+        ),
+        "a stranger cannot speedtest the node: {refused:?}"
+    );
 }
 
 /// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven mem node id): a

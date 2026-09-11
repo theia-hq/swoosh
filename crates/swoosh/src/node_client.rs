@@ -275,17 +275,11 @@ impl NodeClient for ControlClient {
     }
 }
 
-/// Render a [`ControlError`] for a verb boundary, where `eyre` takes over. The typed error's own
-/// message is used as-is, except the two cases whose user-facing wording is settled: a `Refused`
-/// reason goes through [`tightbeam::tunnel::refusal_reason`] so the uniform refusal token reads
-/// descriptively and is never doubled, and a `Protocol` error names the skew fix, because every
-/// protocol error on an already-verified local socket is a client/resident version mismatch.
+/// Render a [`ControlError`] for a verb boundary, where `eyre` takes over. Every typed error's own
+/// message is used as-is, except `Protocol`, which names the skew fix because every protocol error on
+/// an already-verified local socket is a client/resident version mismatch.
 pub(crate) fn control_error_report(error: ControlError) -> eyre::Report {
     match error {
-        ControlError::Refused(reason) => eyre::eyre!(
-            "the resident refused: {}",
-            tightbeam::tunnel::refusal_reason(&reason)
-        ),
         ControlError::Protocol(reason) => eyre::eyre!(
             "the resident is a different swoosh version ({reason}); restart it with this binary"
         ),

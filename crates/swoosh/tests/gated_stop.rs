@@ -146,7 +146,10 @@ async fn a_stranger_is_refused_at_control_stop_and_the_node_keeps_running() {
                 .expect("the base connect lands; the gate refuses per-stream");
             let refused = session.open_bi().await;
             assert!(
-                refused.is_err(),
+                matches!(
+                    refused,
+                    Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
+                ),
                 "a stranger's control.stop must be refused at the gate, not admitted: {refused:?}"
             );
 

@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::{ArgGroup, Args};
-use measure::{Limit, Mode, Progress, ProtocolError, SpeedReport, Speedtest, Throughput};
+use measure::{Limit, Mode, Progress, ProtocolError, Refusal, SpeedReport, Speedtest, Throughput};
 
 use crate::contacts::Contacts;
 use crate::peer::Peer;
@@ -160,11 +160,17 @@ impl SpeedCmd {
         };
         // A refusal is a LOUD, distinct error, never `0.00 MiB/s`: the node reached us but does not serve
         // speed, so name that plainly rather than reporting a zero-byte transfer over the elapsed window.
+        // A Layer-2 method refusal means the stream was admitted but not the method; anything else (a
+        // Layer-1 gate refusal) means the dial itself was refused.
         let report = match outcome {
             Ok(report) => report,
-            Err(ProtocolError::Refused(reason)) => {
+            Err(ProtocolError::Refused(Refusal::Method { detail, .. })) => {
                 node.close().await;
-                eyre::bail!("{label} does not serve `speed`: {reason}");
+                eyre::bail!("{label} does not serve `speed`: {detail}");
+            }
+            Err(ProtocolError::Refused(refusal)) => {
+                node.close().await;
+                eyre::bail!("{label}: reached, but refused: {refusal}");
             }
             Err(error) => {
                 node.close().await;
