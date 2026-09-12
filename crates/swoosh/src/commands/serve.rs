@@ -106,8 +106,8 @@ const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 /// Be a node: publish these services behind your signet gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// publish local services as `name=svc` (empty = `ping=ping: speed=speed:`, reach diagnostics)
-    #[arg(value_name = "name=svc")]
+    /// publish local services as `name=target` (empty = `ping=ping: speed=speed:`, reach diagnostics)
+    #[arg(value_name = "name=target")]
     pub services: Vec<String>,
     /// open named services to anyone, unauthenticated (comma-list, repeatable)
     #[arg(
@@ -333,7 +333,7 @@ impl ServeCmd {
         // whole-node member BEFORE any `Response::Ok`, so a delegate holding a `control.stop` slip cannot
         // stop the node.
         //
-        // They are bound by VALUE, not named in the `name=addr` set: the scheme namespace left tightbeam's
+        // They are bound by VALUE, not named in the `name=target` set: the scheme namespace left tightbeam's
         // public API, so a handler route is a `.service(name, value)` call, never a spellable addr.
         //
         // Pull each fetch service out of the requested set BEFORE the router binds it, and de-merge: every
@@ -365,7 +365,7 @@ impl ServeCmd {
         let gate = tunnel::resolve_gate(signet, denylist)?;
         // One `Router`: each route binds a handler VALUE (ping/speed/roster/sshd, the fetch and recv
         // instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector) through
-        // the `name=addr` grammar. The public overlays prove at `.expose()` below, so prove-before-announce
+        // the `name=target` grammar. The public overlays prove at `.expose()` below, so prove-before-announce
         // holds.
         let mut router = Router::new(gate);
         for entry in &requested {
@@ -680,16 +680,16 @@ impl ServeCmd {
 }
 
 /// Build the `name -> target` display map from the SAME requested strings the router bound: each
-/// `name=addr`. This is swoosh's own render vocabulary; tightbeam's manifest supplies the load-bearing
+/// `name=target`. This is swoosh's own render vocabulary; tightbeam's manifest supplies the load-bearing
 /// facts (posture, kind, the unmetered caveat). Fetch entries are already de-merged out of `requested`,
 /// so they never appear here (the banner glosses them by name instead, their addr being an origin scope).
-/// A bare entry (no `=`) is a teaching error, mirroring tightbeam's `name=addr` grammar.
+/// A bare entry (no `=`) is a teaching error, mirroring tightbeam's `name=target` grammar.
 fn display_targets(requested: &[String]) -> eyre::Result<HashMap<String, String>> {
     let mut map = HashMap::with_capacity(requested.len());
     for entry in requested {
         let Some((name, addr)) = entry.split_once('=') else {
             eyre::bail!(
-                "`{entry}` names no service. Every serve entry must be `name=addr`, e.g. \
+                "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
                  `ping=ping:`, `web=127.0.0.1:8080`"
             );
         };
@@ -1116,7 +1116,7 @@ pub(crate) fn humanize_secs(mut secs: u64) -> String {
     }
 }
 
-/// Bind one operator `name=addr` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
+/// Bind one operator `name=target` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
 /// left tightbeam's public API, so a handler route is never a spellable addr): the diagnostic names here,
 /// and tightbeam's own primitives (a `host:port`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the
 /// `echo:` reflector) through [`Router::parse`], which owns the grammar and its teaching errors.
@@ -1132,7 +1132,7 @@ pub fn bind_entry(
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
     let Some((name, addr)) = entry.split_once('=') else {
-        // No `=`: tightbeam's grammar owns the `name=addr` teaching error.
+        // No `=`: tightbeam's grammar owns the `name=target` teaching error.
         return router.parse(&[entry.to_owned()]);
     };
     let name: Service = name.parse()?;
@@ -1237,7 +1237,7 @@ impl RecvService {
 }
 
 /// De-merges the receive services out of the requested set: a `name=recv:<dir>` entry hands the router a
-/// sink directory its addr grammar cannot carry, so swoosh separates each into its OWN [`RecvService`]
+/// sink directory its target grammar cannot carry, so swoosh separates each into its OWN [`RecvService`]
 /// (name + its own sink dir) here, then binds one `Recv` instance per name by value. A `name=recv:` (no dir)
 /// saves into `.`. An entry without `=` is a teaching error, mirroring tightbeam's grammar. Non-recv entries
 /// are left in place, in order.
@@ -1245,10 +1245,10 @@ fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<RecvSe
     let mut services: Vec<RecvService> = Vec::new();
     let mut remaining: Vec<String> = Vec::new();
     for entry in requested.drain(..) {
-        // Split off the `name=` prefix; only the ADDR side names a scheme, so the dir is read from there.
+        // Split off the `name=` prefix; only the TARGET side names a scheme, so the dir is read from there.
         let Some((name, addr)) = entry.split_once('=') else {
             eyre::bail!(
-                "`{entry}` names no service. Every serve entry must be `name=addr`, e.g. \
+                "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
                  `inbox=recv:/tmp/x`"
             );
         };
@@ -1303,7 +1303,7 @@ impl FetchService {
 }
 
 /// De-merges the fetch services out of the requested set: a `name=fetch:<origin>` entry hands the router an
-/// origin its addr grammar cannot carry, so swoosh separates each into its OWN [`FetchService`] (name + its
+/// origin its target grammar cannot carry, so swoosh separates each into its OWN [`FetchService`] (name + its
 /// own origin scope) here, then binds one `Fetch` instance per name by value.
 ///
 /// A pure edge adapter over the raw request strings. A `name=fetch:` (no origin) is an unconstrained fetch
@@ -1320,11 +1320,11 @@ impl FetchScope {
         let mut services: Vec<FetchService> = Vec::new();
         let mut remaining: Vec<String> = Vec::new();
         for entry in requested.drain(..) {
-            // Split off the `name=` prefix; only the ADDR side names a scheme, so the origin is read
+            // Split off the `name=` prefix; only the TARGET side names a scheme, so the origin is read
             // from there.
             let Some((name, addr)) = entry.split_once('=') else {
                 eyre::bail!(
-                    "`{entry}` names no service. Every serve entry must be `name=addr`, e.g. \
+                    "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
                      `news=fetch:https://news.example`"
                 );
             };
