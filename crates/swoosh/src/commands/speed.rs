@@ -16,6 +16,7 @@ use std::time::Instant;
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::{ArgGroup, Args};
 use measure::{Limit, Mode, Progress, ProtocolError, Refusal, SpeedReport, Speedtest, Throughput};
+use nauthy::{Link, Service};
 
 use crate::contacts::Contacts;
 use crate::peer::Peer;
@@ -114,8 +115,8 @@ impl SpeedCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
-        present: Option<String>,
-        membership: Option<String>,
+        present: Option<Link>,
+        membership: Option<Link>,
     ) -> eyre::Result<()> {
         // The redundant-present conflict is rejected ONCE in the composition root via
         // `Reaching::reject_redundant_present`, before this runs.
@@ -124,14 +125,9 @@ impl SpeedCmd {
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
         // link-as-peer through that same resolver, so the verb never threads `--present` itself.
+        let service: Service = reach::SPEED_SERVICE.parse()?;
         let Resolved { session, label } = reach::dial_service(
-            node,
-            contacts,
-            &self.peer,
-            reach::SPEED_SERVICE,
-            present,
-            membership,
-            transport,
+            node, contacts, &self.peer, &service, present, membership, transport,
         )
         .await?;
         // Path at connect. The transfer below is the window where iroh's hole-punch lands, so the

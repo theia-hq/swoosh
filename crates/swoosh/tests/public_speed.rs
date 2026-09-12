@@ -74,7 +74,7 @@ async fn proof() {
         // set non-membership, so `with_public` does not refuse the node. This is the build that used to die.
         let exposer = Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
             .unwrap()
-            .with_public(PublicRequest::new(["speed".to_owned()]))
+            .with_public(PublicRequest::new(["speed".parse().unwrap()]))
             .expect("`--public speed` builds: speed is openable, control.stop stays gated");
         exposer.run(&host, CancellationToken::new()).await.unwrap();
     });
@@ -82,7 +82,7 @@ async fn proof() {
     // A STRANGER: a fresh node presenting NO capability. Over the opened `speed` service the gate admits it,
     // and a real speedtest moves bytes both ways: the flagship scenario now works.
     let stranger = Node::new(MemTransport::bind(), NoDiscovery);
-    let speed = Connector::to_node(host_id, "speed".to_owned(), None)
+    let speed = Connector::to_node(host_id, "speed".parse().unwrap(), None)
         .open_service(&stranger)
         .await
         .expect("a stranger reaches the opened speed service");
@@ -97,7 +97,7 @@ async fn proof() {
     );
 
     // The same stranger is REFUSED at the still-gated `ping`: opening `speed` opened nothing else.
-    let ping = Connector::to_node(host_id, "ping".to_owned(), None)
+    let ping = Connector::to_node(host_id, "ping".parse().unwrap(), None)
         .open_service(&stranger)
         .await
         .expect("the base connect lands; the gate refuses per-stream");
@@ -119,7 +119,7 @@ async fn proof() {
 
     // And REFUSED at the always-on `control.stop`: the control surface can never be opened, so a stranger
     // cannot stop this node. The refusal surfaces as the ServiceSession's own stream error.
-    let control = Connector::to_node(host_id, CONTROL_STOP_SERVICE.to_owned(), None)
+    let control = Connector::to_node(host_id, CONTROL_STOP_SERVICE.parse().unwrap(), None)
         .open_service(&stranger)
         .await
         .expect("the base connect lands; the gate refuses per-stream");

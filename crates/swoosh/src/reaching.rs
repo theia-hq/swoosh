@@ -14,6 +14,7 @@
 use core::future::Future;
 
 use bifrost::{Discovery, Node, Session, Transport};
+use nauthy::Link;
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::contacts::Contacts;
@@ -40,11 +41,11 @@ pub struct ReachCtx<'a> {
     /// Slot 1, the grant to present, resolved ONCE in the composition root via [`resolve`]: a `--present`
     /// slip if given, else the stored/self-signed member badge (the plain member dial). `None` for an
     /// `Anonymous` dial.
-    pub present: Option<String>,
+    pub present: Option<Link>,
     /// Slot 2, the membership badge under the dialing key, for a signet-bound slip's AND: the badge the
     /// far gate verifies under the FOREIGN fleet a slip in slot 1 names. Always the stored/self-signed
     /// badge on a `Family` dial (mirrored into slot 1 when no slip overrides), `None` for `Anonymous`.
-    pub membership: Option<String>,
+    pub membership: Option<Link>,
     /// The node home, for a verb that opens its OWN store (`fleet` writes contacts; a write, unlike the
     /// read-only `contacts` the reach verbs share) or reads a trust file (its signet).
     pub home: &'a Home,
@@ -105,8 +106,11 @@ pub trait Reaching {
 /// The two concrete slots a resolved [`Credential`] presents on the wire: slot 1 the grant, slot 2 a
 /// membership badge for a signet-bound slip's AND.
 ///
-/// A named result rather than a bare pair so a caller reads intent, not two nullable strings:
+/// A named result rather than a bare pair so a caller reads intent, not two nullable links:
 /// [`None`](Self::None) is a deliberate stranger dial, [`Family`](Self::Family) a proven membership dial.
+/// The link payloads are boxed: this value is a run-once carrier (the resolver builds it and the caller
+/// immediately consumes it via [`into_slots`](Self::into_slots)), where a `Family` carrying two parsed
+/// links inline would dwarf the `None` arm for no benefit.
 pub enum Resolved {
     /// Present nothing: an [`Anonymous`](Credential::Anonymous) dial (ungated service, or the verb presents
     /// its own link).
@@ -118,22 +122,20 @@ pub enum Resolved {
     /// this device's signet linkage to the peer.
     Family {
         /// Slot 1: the grant (a `--present` slip, or the member badge when none was given).
-        grant: String,
+        grant: Box<Link>,
         /// Slot 2: the member badge, present only for a signet-bound slip's AND, `None` otherwise.
-        membership: Option<MemberBadge>,
+        membership: Option<Box<Link>>,
     },
 }
 
 impl Resolved {
     /// The two links to hand a [`Connector`](tightbeam::tunnel::Connector): slot 1 (the grant) and slot 2
     /// (the membership badge, only for a signet-bound slip). The one place the resolved credential becomes
-    /// the wire's nullable links.
-    pub fn into_slots(self) -> (Option<String>, Option<String>) {
+    /// the connector's typed slots.
+    pub fn into_slots(self) -> (Option<Link>, Option<Link>) {
         match self {
             Self::None => (None, None),
-            Self::Family { grant, membership } => {
-                (Some(grant), membership.map(MemberBadge::into_link))
-            }
+            Self::Family { grant, membership } => (Some(*grant), membership.map(|badge| *badge)),
         }
     }
 }
@@ -180,14 +182,17 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
                         .ok()
                         .and_then(|cap| cap.authority_bound_root().ok().flatten())
                         .is_some_and(|pinned| pinned == own_fleet.verify_key());
-                    Ok(Resolved::Family {
-                        grant: slip.into_link(),
-                        membership: pins_own_fleet.then_some(badge),
-                    })
+                    let grant = Box::new(slip.into_link().parse::<Link>()?);
+                    let membership = if pins_own_fleet {
+                        Some(Box::new(badge.into_link().parse::<Link>()?))
+                    } else {
+                        None
+                    };
+                    Ok(Resolved::Family { grant, membership })
                 }
                 // A plain member dial: the badge is slot 1, slot 2 empty (byte-parity, no over-share).
                 None => Ok(Resolved::Family {
-                    grant: badge.link().to_owned(),
+                    grant: Box::new(badge.into_link().parse::<Link>()?),
                     membership: None,
                 }),
             }
@@ -210,6 +215,8 @@ pub(crate) fn reject_bare_present(present: Option<&SheerLink>) -> eyre::Result<(
 
 #[cfg(test)]
 mod tests {
+    use nauthy::Link;
+
     use super::*;
     use crate::peer::Peer;
 
@@ -227,9 +234,9 @@ mod tests {
         let resolved = resolve(Credential::Anonymous, &secret, &test_home())
             .await
             .expect("anonymous resolves");
-        assert_eq!(
-            resolved.into_slots(),
-            (None, None),
+        let (grant, membership) = resolved.into_slots();
+        assert!(
+            grant.is_none() && membership.is_none(),
             "an Anonymous dial presents nothing in either slot"
         );
     }
@@ -249,11 +256,11 @@ mod tests {
         let (grant, membership) = resolved.into_slots();
         let grant = grant.expect("a family dial always presents a grant (self-sign fallback)");
         assert!(
-            grant.starts_with("sheer:"),
+            grant.as_str().starts_with("sheer:"),
             "the presented grant is a sheer: capability link, got {grant}"
         );
-        assert_eq!(
-            membership, None,
+        assert!(
+            membership.is_none(),
             "a plain member dial attaches NO slot 2 (no signet linkage over-share)"
         );
     }
@@ -280,12 +287,12 @@ mod tests {
         .expect("family-with-plain-slip resolves");
         let (grant, membership) = resolved.into_slots();
         assert_eq!(
-            grant.as_deref(),
+            grant.as_ref().map(Link::as_str),
             Some(slip_text.as_str()),
             "the plain slip is slot 1 (the grant)"
         );
-        assert_eq!(
-            membership, None,
+        assert!(
+            membership.is_none(),
             "a non-signet-bound slip attaches NO slot 2 badge (privacy regression fixed)"
         );
     }
@@ -301,13 +308,14 @@ mod tests {
         // roots at `secret.node_id()`, so that is the fleet slot 2 can help admit at). Work issues it.
         let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
         let fleet = secret.node_id().verify_key();
-        let slip_text = tightbeam::tunnel::mint_signet_link(
+        let slip_text = Link::mint_signet(
             &work,
             &"ssh".parse().expect("valid service"),
             fleet,
             core::time::Duration::from_secs(3600),
         )
-        .expect("mint a signet-bound slip");
+        .expect("mint a signet-bound slip")
+        .to_string();
         let slip: SheerLink = slip_text.parse().expect("a valid SheerLink");
         let resolved = resolve(
             Credential::Family {
@@ -320,13 +328,13 @@ mod tests {
         .expect("family-with-signet-slip resolves");
         let (grant, membership) = resolved.into_slots();
         assert_eq!(
-            grant.as_deref(),
+            grant.as_ref().map(Link::as_str),
             Some(slip_text.as_str()),
             "the signet-bound slip is slot 1 (the grant)"
         );
         let membership = membership.expect("a signet-bound slip attaches slot 2 (the fleet badge)");
         assert!(
-            membership.starts_with("sheer:") && membership != slip_text,
+            membership.as_str().starts_with("sheer:") && membership.as_str() != slip_text,
             "slot 2 is the self-signed member badge, not the slip: {membership}"
         );
     }
@@ -343,13 +351,14 @@ mod tests {
         let foreign_fleet = nauthy::Identity::from_secret(&[2u8; 32])
             .expect("valid fleet secret")
             .verifying_key();
-        let slip_text = tightbeam::tunnel::mint_signet_link(
+        let slip_text = Link::mint_signet(
             &work,
             &"ssh".parse().expect("valid service"),
             foreign_fleet,
             core::time::Duration::from_secs(3600),
         )
-        .expect("mint a signet-bound slip");
+        .expect("mint a signet-bound slip")
+        .to_string();
         let slip: SheerLink = slip_text.parse().expect("a valid SheerLink");
         let (grant, membership) = resolve(
             Credential::Family {
@@ -362,12 +371,12 @@ mod tests {
         .expect("family-with-foreign-fleet-slip resolves")
         .into_slots();
         assert_eq!(
-            grant.as_deref(),
+            grant.as_ref().map(Link::as_str),
             Some(slip_text.as_str()),
             "the slip is still slot 1 (the grant)"
         );
-        assert_eq!(
-            membership, None,
+        assert!(
+            membership.is_none(),
             "a slip pinning a fleet the dialer is not in attaches NO slot 2 (no fleet-signet over-share)"
         );
     }
@@ -383,13 +392,14 @@ mod tests {
         let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
         // Pin the DIALER'S OWN fleet, so the fleet-match slot-2 rule (ADV1) attaches the badge.
         let fleet = secret.node_id().verify_key();
-        let link_text = tightbeam::tunnel::mint_signet_link(
+        let link_text = Link::mint_signet(
             &work,
             &"ssh".parse().expect("valid service"),
             fleet,
             core::time::Duration::from_secs(3600),
         )
-        .expect("mint a signet-bound slip");
+        .expect("mint a signet-bound slip")
+        .to_string();
 
         // The slip arrives AS THE PEER: a `Capability` peer self-presents its own link, which the verb's
         // `credential()` folds into `present` exactly as an explicit `--present` slip would be.
@@ -402,14 +412,14 @@ mod tests {
             .expect("family-with-link-peer resolves")
             .into_slots();
         assert_eq!(
-            grant.as_deref(),
+            grant.as_ref().map(Link::as_str),
             Some(link_text.as_str()),
             "slot 1 is the link, whether it came via --present or as the peer"
         );
         let membership = membership
             .expect("a signet-bound link-as-peer attaches slot 2 (defect #1: it used to drop it)");
         assert!(
-            membership.starts_with("sheer:") && membership != link_text,
+            membership.as_str().starts_with("sheer:") && membership.as_str() != link_text,
             "slot 2 is the self-signed member badge, not the slip: {membership}"
         );
     }
@@ -432,12 +442,12 @@ mod tests {
             .expect("family-with-plain-link-peer resolves")
             .into_slots();
         assert_eq!(
-            grant.as_deref(),
+            grant.as_ref().map(Link::as_str),
             Some(link_text.as_str()),
             "the plain link-as-peer is slot 1 (the grant)"
         );
-        assert_eq!(
-            membership, None,
+        assert!(
+            membership.is_none(),
             "a non-signet link-as-peer attaches NO slot 2 (no signet-linkage over-share)"
         );
     }

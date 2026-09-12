@@ -10,6 +10,7 @@
 
 use bifrost::{Discovery, Node, Transport};
 use clap::Args;
+use nauthy::{Link, Service};
 
 use crate::commands::tunnel_connect::{self, To};
 use crate::credential::SheerLink;
@@ -84,12 +85,13 @@ impl crate::reaching::Reaching for ForwardCmd {
             .peer
             .self_present()
             .or_else(|| self.present.clone())
-            .map(SheerLink::into_link);
+            .map(|slip| slip.into_link().parse::<Link>())
+            .transpose()?;
         tunnel_connect::connect(
             node,
             ctx.contacts,
             &self.peer,
-            self.service,
+            self.service.parse::<Service>()?,
             slot1,
             None,
             self.to,

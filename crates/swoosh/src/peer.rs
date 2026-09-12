@@ -11,7 +11,7 @@
 use core::str::FromStr;
 
 use bifrost::NodeId;
-use nauthy::SCHEME;
+use nauthy::{Link, SCHEME, Service};
 use tightbeam::tunnel::Connector;
 
 use crate::contacts::{Candidate, ContactRef, ContactRefParseError, Contacts};
@@ -104,9 +104,9 @@ impl Peer {
     pub fn connector(
         &self,
         contacts: &Contacts,
-        service: String,
-        slot1: Option<String>,
-        slot2: Option<String>,
+        service: Service,
+        slot1: Option<Link>,
+        slot2: Option<Link>,
     ) -> eyre::Result<Connector> {
         let dial = match self {
             Self::Raw(id) => *id,
@@ -171,6 +171,7 @@ impl core::fmt::Display for Peer {
 #[cfg(test)]
 mod tests {
     use bifrost::NodeId;
+    use nauthy::Link;
 
     use super::Peer;
     use crate::contacts::{Contacts, Petname};
@@ -187,13 +188,14 @@ mod tests {
         let fleet = nauthy::Identity::from_secret(&[2u8; 32])
             .expect("valid fleet secret")
             .verifying_key();
-        tightbeam::tunnel::mint_signet_link(
+        Link::mint_signet(
             &work,
             &"ssh".parse().expect("valid service"),
             fleet,
             core::time::Duration::from_secs(3600),
         )
         .expect("mint a signet-bound slip")
+        .to_string()
     }
 
     /// `me/qat` parses as a `Named` peer (not a raw key, not a link), then `connector` resolves it through
@@ -217,7 +219,7 @@ mod tests {
             "a saved-contact address parses as a petname to resolve, not a raw key"
         );
         let connector = peer
-            .connector(&contacts, "control.stop".to_owned(), None, None)
+            .connector(&contacts, "control.stop".parse().unwrap(), None, None)
             .expect("a known petname resolves to a connector");
         assert_eq!(
             connector.dial(),
@@ -232,7 +234,7 @@ mod tests {
             "a raw base32 key is a Raw peer"
         );
         assert_eq!(
-            peer.connector(&contacts, "control.stop".to_owned(), None, None)
+            peer.connector(&contacts, "control.stop".parse().unwrap(), None, None)
                 .expect("a raw key needs no store")
                 .dial(),
             raw,
@@ -241,7 +243,7 @@ mod tests {
         let ghost = "ghost".parse::<Peer>().expect("a name parses as a Peer");
         assert!(
             ghost
-                .connector(&contacts, "control.stop".to_owned(), None, None)
+                .connector(&contacts, "control.stop".parse().unwrap(), None, None)
                 .is_err(),
             "an unknown petname is a loud resolve error, not a silent nothing"
         );
@@ -286,7 +288,7 @@ mod tests {
         );
 
         let connector = peer
-            .connector(&contacts, "ssh".to_owned(), None, None)
+            .connector(&contacts, "ssh".parse().unwrap(), None, None)
             .expect("a link needs no store to build a connector");
         assert_eq!(connector.dial(), root, "the connector dials the cap root");
     }
@@ -339,12 +341,16 @@ mod tests {
             Peer::Capability(link) => link.dial_node().expect("the link self-addresses"),
             _ => panic!("a sheer: link parses as a Capability peer"),
         };
+        // The two slots come from the resolver, not from the peer link: distinct valid links prove the
+        // connector took them rather than deriving slot 1 from the link itself.
+        let slot1: Link = signet_link().parse().expect("a valid slot-1 link");
+        let slot2: Link = signet_link().parse().expect("a valid slot-2 link");
         let connector = peer
             .connector(
                 &Contacts::default(),
-                "ssh".to_owned(),
-                Some("sheer:resolver-slot-one".to_owned()),
-                Some("sheer:resolver-slot-two".to_owned()),
+                "ssh".parse().unwrap(),
+                Some(slot1),
+                Some(slot2),
             )
             .expect("a link builds a connector from explicit resolver slots");
         assert_eq!(

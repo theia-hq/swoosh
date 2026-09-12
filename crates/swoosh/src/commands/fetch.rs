@@ -12,6 +12,7 @@ use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
+use nauthy::Link;
 use tightbeam::protocol::{Request, Response};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -103,8 +104,8 @@ impl FetchCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
-        present: Option<String>,
-        membership: Option<String>,
+        present: Option<Link>,
+        membership: Option<Link>,
     ) -> eyre::Result<()> {
         // The redundant-present conflict is rejected ONCE in the composition root via
         // `Reaching::reject_redundant_present`, before this runs.
@@ -133,7 +134,7 @@ impl FetchCmd {
                             continue;
                         }
                     };
-                    pipes.push(self.serve(tcp, &session, present.as_deref(), membership.as_deref()));
+                    pipes.push(self.serve(tcp, &session, present.as_ref(), membership.as_ref()));
                 }
                 Some(result) = pipes.next(), if !pipes.is_empty() => {
                     if let Err(error) = result {
@@ -151,8 +152,8 @@ impl FetchCmd {
         &self,
         mut tcp: TcpStream,
         session: &S,
-        present: Option<&str>,
-        membership: Option<&str>,
+        present: Option<&Link>,
+        membership: Option<&Link>,
     ) -> eyre::Result<()> {
         let mut responded = false;
         if let Err(error) = self
@@ -181,8 +182,8 @@ impl FetchCmd {
         &self,
         tcp: &mut TcpStream,
         session: &S,
-        present: Option<&str>,
-        membership: Option<&str>,
+        present: Option<&Link>,
+        membership: Option<&Link>,
         responded: &mut bool,
     ) -> eyre::Result<()> {
         let head = read_head(tcp).await?;
@@ -196,8 +197,8 @@ impl FetchCmd {
         let (mut writer, mut reader) = session.open_bi().await?;
         Request {
             service: self.service.clone(),
-            capability: present.map(str::to_owned),
-            membership: membership.map(str::to_owned),
+            capability: present.map(ToString::to_string),
+            membership: membership.map(ToString::to_string),
         }
         .write(&mut writer)
         .await?;

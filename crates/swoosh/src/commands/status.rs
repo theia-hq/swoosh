@@ -23,6 +23,7 @@ use core::time::Duration;
 use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
 use clap::Args;
 use measure::{Ping, ProtocolError, Refusal};
+use nauthy::{Link, Service};
 
 use crate::commands::serve::control_codec::StatusReply;
 use crate::commands::serve::humanize_secs;
@@ -113,8 +114,8 @@ impl StatusCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
-        present: Option<String>,
-        membership: Option<String>,
+        present: Option<Link>,
+        membership: Option<Link>,
     ) -> eyre::Result<()> {
         // The redundant-present conflict is rejected ONCE in the composition root via
         // `Reaching::reject_redundant_present`, before this runs.
@@ -137,13 +138,14 @@ impl StatusCmd {
         // is not healthy: it must not hold the exit code green the way a real status line does.
         let mut any_healthy = false;
         let mut any_refused = false;
+        let service: Service = reach::PING_SERVICE.parse()?;
         for candidate in &candidates {
             let line = match reach::connect_service(
                 node,
                 candidate,
-                reach::PING_SERVICE,
-                present.clone(),
-                membership.clone(),
+                &service,
+                Option::clone(&present),
+                Option::clone(&membership),
             )
             .await
             {

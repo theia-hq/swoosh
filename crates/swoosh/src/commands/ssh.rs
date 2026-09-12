@@ -364,13 +364,14 @@ mod tests {
         let fleet = nauthy::Identity::from_secret(&[2u8; 32])
             .expect("valid fleet secret")
             .verifying_key();
-        tightbeam::tunnel::mint_signet_link(
+        nauthy::Link::mint_signet(
             &work,
             &"ssh".parse().expect("valid service"),
             fleet,
             core::time::Duration::from_secs(3600),
         )
         .expect("mint a signet-bound slip")
+        .to_string()
     }
 
     /// A direct-address hint parsed through the real boundary, keyed on `KEY` and an IP:port (no DNS).
