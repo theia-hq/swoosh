@@ -327,12 +327,15 @@ impl ServeCmd {
             self.services.clone()
         };
         // Every node answers its own `control.stop`, always, whatever else it serves: the node-lifecycle
-        // control surface is part of being a node, not a service the operator opts into. It is GATED by the
-        // same family gate as everything else, so only an admitted caller (a member of this node's family)
-        // can reach it (see `stop_handler`). Pointed at the `control.stop:` handler injected below.
+        // control surface is part of being a node, not a service the operator opts into. It is MEMBER-only
+        // (declared below, where the routes are assembled): the gate admits a family badge or a service
+        // slip, and the route's access floor then refuses anything that is not a whole-node member BEFORE
+        // any `Response::Ok`, so a delegate holding a `control.stop` slip cannot stop the node. Pointed at
+        // the `control.stop:` handler injected below.
         requested.push(format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:"));
-        // Every node also answers its own gated `control.services` read: the node-lifecycle READ twin of
-        // `control.stop`, part of being a node. Pointed at the `control.services:` handler injected below.
+        // Every node also answers its own member-only `control.services` read: the node-lifecycle READ twin
+        // of `control.stop`, part of being a node, with the same floor. Pointed at the
+        // `control.services:` handler injected below.
         requested.push(format!(
             "{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"
         ));
@@ -364,6 +367,15 @@ impl ServeCmd {
             // the synthetic `_`-bearing scheme bypassing the addr grammar just as fetch's does.
             services = services.with_handler(service.name(), service.scheme())?;
         }
+        // The two node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the
+        // route's access class after the gate admits and before any `Response::Ok`, so a delegated slip
+        // that grants `control.stop`/`control.services` is refused with the same uniform refusal a gate
+        // miss gives, pre-Ok. The declaration lives HERE, where the routes are assembled, because access
+        // is a property of the route, and tightbeam's door refuses a member-only route no dial could
+        // reach (under an open gate, or named public/unsafe).
+        let services = services
+            .member_only(CONTROL_STOP_SERVICE)?
+            .member_only(CONTROL_SERVICES_SERVICE)?;
         // The operator's raw `--public` request: the UNPROVEN set of names to open. `Exposer::with_public`
         // below is the wall that proves each one exposed and open-safe (per-service), turning it into the
         // gate's proven overlay; a `Never` service or an unknown name bails there.

@@ -8,12 +8,14 @@
 //! service and, once admitted, trigger a graceful teardown, the same stop a Ctrl-C or a `serve --expires`
 //! deadline gives. It stops the NODE (the node stops serving), it does NOT power off the machine.
 //!
-//! `control.stop` is family-gated like `ping`/`speed`/`send`, so `stop --at` presents the same self-signed
-//! membership badge (or an explicit `--present` link) to prove membership before the node admits the stream.
-//! For a single-owner node this means only your own devices can stop it, which is correct for the qat
-//! CI-teardown consumer. Hardening the lifecycle further (an arm->confirm nonce + a single-use device-bound
-//! destroy-cap, ideally owner-only) is a flagged follow that needs an Adversary review before `control.stop`
-//! is trusted on a multi-delegate node.
+//! `control.stop` is MEMBER-only, not merely family-gated: the node admits a whole-node membership badge
+//! (your own devices), and refuses a delegated slip at the route's member floor with the same uniform
+//! refusal a gate miss gives, before any `Response::Ok`. So `stop --at` presents the self-signed membership
+//! badge under your identity; a `--present` slip reaches the gate but cannot stop the node. For a fleet
+//! this means any of your own devices can stop it, which is correct for the qat CI-teardown consumer.
+//! Hardening the lifecycle further (an arm->confirm nonce + a single-use device-bound destroy-cap, ideally
+//! owner-only so another fleet device cannot stop the node) is a flagged follow that needs an Adversary
+//! review before `control.stop` is trusted across a multi-device fleet.
 //!
 //! A refusal is a LOUD typed error, never a silent success: if the node's gate does not admit this caller,
 //! opening the control stream fails and `stop` reports the refusal and exits non-zero.
@@ -119,11 +121,12 @@ impl StopCmd {
         Ok(())
     }
 
-    /// Reach the peer's gated `control.stop` service and trigger a graceful stop. Presents the resolved
-    /// `present` (the self-signed membership badge, or an explicit `--present` link) so the node's family
-    /// gate admits the stream; a node that does not admit this caller refuses LOUDLY here, never a silent
-    /// no-op. `--at` is required to reach this path (a bare `stop` split to [`run_local`](Self::run_local)),
-    /// so a missing target is a root-dispatch bug, surfaced as an internal error rather than a user one.
+    /// Reach the peer's member-only `control.stop` service and trigger a graceful stop. Presents the
+    /// resolved `present` (the self-signed membership badge, or an explicit `--present` link) so the gate
+    /// rules on the stream; only a whole-node member passes the route's member floor, and a node that does
+    /// not admit this caller refuses LOUDLY here, never a silent no-op. `--at` is required to reach this
+    /// path (a bare `stop` split to [`run_local`](Self::run_local)), so a missing target is a root-dispatch
+    /// bug, surfaced as an internal error rather than a user one.
     async fn run_stop<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,

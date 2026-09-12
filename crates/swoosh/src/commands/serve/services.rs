@@ -10,10 +10,12 @@ use tokio::io::AsyncWriteExt as _;
 /// [`CancellationToken`](tightbeam::tunnel::CancellationToken), no authority granted, so a popped courier
 /// leaks only a member-known service menu, never a lever on the node.
 ///
-/// GATED (`type Public = Never`): the service menu is member-only (delib-18 containment), so a stranger is
-/// refused at the gate and never learns what the node serves. The blob is self-delimiting (a count then
-/// length-prefixed entries), so the handler just writes it and closes the write half, the same shape the
-/// `roster:` handler uses for its signed membership snapshot.
+/// MEMBER-only (`type Public = Never`, and the route is declared member-only where `serve` assembles it):
+/// the service menu is member-only (delib-18 containment), so a stranger is refused at the gate and a
+/// delegate the gate admitted by slip is refused at the route floor, both before any `Response::Ok` and
+/// neither ever learning what the node serves. The blob is self-delimiting (a count then length-prefixed
+/// entries), so the handler just writes it and closes the write half, the same shape the `roster:` handler
+/// uses for its signed membership snapshot.
 ///
 /// Public so the `control.services` integration proof drives the SAME handler `serve` injects, not a
 /// hand-rolled near-copy (as `gated_stop` reuses `Stop`).
@@ -29,8 +31,8 @@ impl ServiceList {
 }
 
 impl Handler for ServiceList {
-    // GATED: the served-service menu is member-only (delib-18: existence and shape revealed only after
-    // admission), so no legitimate public use.
+    // The route is member-only (declared in `serve`): the served-service menu is revealed only to a
+    // whole-node member (delib-18 containment), and the marker keeps an open-gate pairing unbuildable.
     type Public = Never;
 
     async fn serve(

@@ -5,14 +5,16 @@
 //! The node-lifecycle READ, end to end over the in-process transport: the proof that `control.services`
 //! rides the family gate, so a MEMBER can read a gated node's served list but a STRANGER cannot.
 //!
-//! `control.services` is one more family-gated service, assembled through the SAME `ServiceList` handler the
+//! `control.services` is one more member-only service, assembled through the SAME `ServiceList` handler the
 //! `swoosh serve` product path injects (not a hand-rolled near-copy), over the SAME `Services::catalog`
-//! snapshot `serve` cuts. Two things are proven:
+//! snapshot `serve` cuts, and declared member-only exactly as `serve` declares it. Three things are proven:
 //!
-//! 1. `control.services`: a MEMBER reaching the gated service reads the self-delimiting catalog blob, decodes
-//!    it, and sees exactly the served names with their gate posture (every service gated on this gated node).
+//! 1. `control.services`: a MEMBER reaching the member-only service reads the self-delimiting catalog blob,
+//!    decodes it, and sees exactly the served names with their gate posture (every service gated here).
 //! 2. A STRANGER's `control.services` is refused LOUDLY at the gate (a typed error, never a silent empty
 //!    read), so the service menu never leaks to a non-member.
+//! 3. A DELEGATE's `control.services` slip is refused LOUDLY at the route's member floor BEFORE
+//!    `Response::Ok` (the gate grants the slip, the floor refuses it), so the menu does not leak either.
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a membership badge binds to whatever
 //! id the mem transport proves for the dialer (the same accommodation `gated_stop` documents): the badge is
@@ -136,16 +138,62 @@ async fn a_stranger_is_refused_at_control_services() {
         .await;
 }
 
+/// A DELEGATE (a slip the signet signed for `control.services`, bound to the delegate's proven mem id) is
+/// refused at the member floor BEFORE `Response::Ok`: the gate grants the slip and the route's member-only
+/// floor turns that admission into the same uniform typed refusal a gate miss gives, so the menu never
+/// leaks to a delegate.
+#[tokio::test]
+async fn a_control_services_slip_is_refused_before_ok() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let host = Node::new(MemTransport::bind(), NoDiscovery);
+            let host_id = host.node_id();
+            let cancel = CancellationToken::new();
+            let exposer = build_exposer().await;
+            let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
+
+            let delegate = Node::new(MemTransport::bind(), NoDiscovery);
+            let slip = tunnel::mint_bound_link(
+                &Identity::from_secret(&SIGNET_SECRET).unwrap(),
+                &CONTROL_SERVICES_SERVICE.parse().unwrap(),
+                delegate.node_id().verify_key(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+            let session =
+                Connector::to_node(host_id, CONTROL_SERVICES_SERVICE.to_owned(), Some(slip))
+                    .open_service(&delegate)
+                    .await
+                    .expect("the base connect lands; the gate decides per-stream");
+            let refused = session.open_bi().await;
+            assert!(
+                matches!(
+                    refused,
+                    Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
+                ),
+                "a control.services slip must be refused pre-Ok as not admitted: {refused:?}"
+            );
+
+            run.abort();
+        })
+        .await;
+}
+
 /// Assemble a gated exposer serving `control.services` (over the served menu) rooted at the signet, through
-/// the SAME `ServiceList` handler + `Services::catalog` snapshot the product `serve` path builds. The
-/// catalog is cut from the parsed services and the resolved gate, exactly as `run_serve` does.
+/// the SAME `ServiceList` handler + `Services::catalog` snapshot the product `serve` path builds, and with
+/// the SAME member-only declaration `serve` makes. The catalog is cut from the parsed services and the
+/// resolved gate, exactly as `run_serve` does.
 async fn build_exposer() -> Exposer {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
     let mut requested: Vec<String> = SERVED.iter().map(|s| (*s).to_owned()).collect();
     requested.push(format!(
         "{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"
     ));
-    let services = Services::parse(&requested).unwrap();
+    let services = Services::parse(&requested)
+        .unwrap()
+        .member_only(CONTROL_SERVICES_SERVICE)
+        .unwrap();
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
     let catalog = services.catalog(&gate, &PublicRequest::none(), &PublicUnsafeRequest::none());
     // The served menu is raw socket forwards (no injected handler), so the registry holds just the
