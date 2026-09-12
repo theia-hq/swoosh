@@ -15,6 +15,7 @@ middle. These docs take you from your first reach to every command.
 - [Use cases](use-cases/README.md) pick the real situation that matches yours, from reaching your own
   laptop to admitting a whole household.
 - [Commands](reference/commands.md) every verb, with an example and the one thing to know.
+- [Services](reference/services.md) what a node can serve today, each with its gate and limits.
 - [Transports](transports.md) iroh (the default, automatic) and quirk (the diagnostic transport).
 - [Troubleshooting](troubleshooting.md) what a refusal or a failed dial means, and the fix.
 - [Demo](demo.md) the same command over two transports, same key, with a stranger refused.

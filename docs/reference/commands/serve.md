@@ -29,4 +29,5 @@ points at `--public-unsafe`; that flag prints the resolved absolute path in the 
 only a file you mean to hand out. `--resident` holds the home's lock and serves the local control socket
 a bare `swoosh service ls` reads; backgrounding is the supervisor's job.
 
-See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
+See also [Services](../services.md) for every service form and its gate, [Commands index](../commands.md),
+and [Common options](../commands.md#common-options).
