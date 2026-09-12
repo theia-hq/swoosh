@@ -19,8 +19,16 @@
 //!
 //! A refusal is a LOUD typed error, never a silent success: if the node's gate does not admit this caller,
 //! opening the control stream fails and `stop` reports the refusal and exits non-zero.
+//!
+//! The one tolerant case is the teardown RACE: the stream open can fail because the node is already tearing
+//! itself down in response to the request (the goal state), not because the dial was refused. On a
+//! non-refusal stream-open failure the verb probes the peer for a bounded window: a peer that stays
+//! unreachable is gone or stopping, so the stop is reported as completed; a peer that still accepts a
+//! connection is live, so the original failure stands loudly (never masked).
 
-use bifrost::{Discovery, Node, Session as _, Transport};
+use core::time::Duration;
+
+use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use tokio::io::AsyncReadExt as _;
@@ -31,6 +39,14 @@ use crate::home::Home;
 use crate::node_client::{ControlClient, NodeClient as _, control_error_report};
 use crate::peer::Peer;
 use crate::transport::ReachArgs;
+
+/// How long a failed control-stream open is probed before it reads as a completed stop. The node closes its
+/// endpoint right after a graceful teardown, so an unreachable peer over this window is gone or stopping; a
+/// live peer answers a probe connect at once. Bounded so a peer that is merely slow still fails loudly.
+const STOP_PROBE_WINDOW: Duration = Duration::from_secs(3);
+
+/// The delay between probe dials inside [`STOP_PROBE_WINDOW`].
+const STOP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Stop a node (stop it serving): bare stops your own node, `--at <peer>` stops a peer's.
 #[derive(Debug, Args)]
@@ -158,10 +174,23 @@ impl StopCmd {
         // badge. On admission the node cancels its teardown token and writes one ack byte; a refusal maps to
         // a loud stream error here (the false-success fix: a refusal is a typed loud error, never silent).
         let session = connector.open_service(node).await?;
-        let (writer, mut reader) = session
-            .open_bi()
-            .await
-            .map_err(|error| eyre::eyre!("could not stop {dial}: {error}"))?;
+        let (writer, mut reader) = match session.open_bi().await {
+            Ok(stream) => stream,
+            // The stream-open can lose the race with the very teardown the request triggered: the node
+            // cancels its token, closes its endpoint, and this side sees a transport failure instead of the
+            // torn ack tolerated below. A refusal is a LIVE peer saying no, so it is never raced away; any
+            // other failure probes for the peer going down, and the original error stands if it stays live.
+            Err(error) => {
+                if matches!(error, bifrost::Error::Refused(_))
+                    || !peer_gone(node, dial, STOP_PROBE_WINDOW).await
+                {
+                    return Err(eyre::eyre!("could not stop {dial}: {error}"));
+                }
+                println!("stopped {dial}.");
+                node.close().await;
+                return Ok(());
+            }
+        };
 
         // Read the node's ack byte: proof the stop was actioned, not merely that the dial was admitted. The
         // node closes right after, so an unexpected EOF before the ack is itself the confirmation the node
@@ -179,6 +208,29 @@ impl StopCmd {
         node.close().await;
         Ok(())
     }
+}
+
+/// Whether `dial` is unreachable (gone, or mid-teardown) over `window`: the liveness probe that tells a
+/// lost teardown race from a live peer. A successful connect at ANY point means the peer is still live, so
+/// it returns `false` immediately (the caller must not report a false success); a window with no successful
+/// connect means the peer is gone, so it returns `true`. The probe session is dropped at once: this is a
+/// liveness read, never a second stop attempt.
+async fn peer_gone<T: Transport, D: Discovery>(
+    node: &Node<T, D>,
+    dial: NodeId,
+    window: Duration,
+) -> bool {
+    let probing = async {
+        loop {
+            if node.connect(dial).await.is_ok() {
+                return false;
+            }
+            tokio::time::sleep(STOP_PROBE_INTERVAL).await;
+        }
+    };
+    // The window bounds the probe: a peer that never accepts a connect (a hung dial included) counts as
+    // gone, which is the state the caller asked for.
+    tokio::time::timeout(window, probing).await.unwrap_or(true)
 }
 
 /// The one line a completed self-stop prints. The pid comes from the resident's `control.lock` read
