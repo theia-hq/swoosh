@@ -809,9 +809,9 @@ dependencies = [
 
 [[package]]
 name = "crc32fast"
-version = "1.5.1"
+version = "1.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8498c871161e1742aaa9d52551b2d6ebdd4c3d45a3be423e3728f33b955be550"
+checksum = "01a7799fd6b852db0e61728dde9a204c423b44d689dbd432522543614b490e78"
 dependencies = [
  "cfg-if",
 ]
@@ -2623,7 +2623,7 @@ dependencies = [
 [[package]]
 name = "nauthy"
 version = "0.1.0"
-source = "git+https://github.com/theia-hq/nauthy?rev=b872d16bf37a4beddc39c19123a300ee44f26d06#b872d16bf37a4beddc39c19123a300ee44f26d06"
+source = "git+https://github.com/theia-hq/nauthy?rev=040e7ce78a7fc9b53df70cd6ef8b35116fc0a9df#040e7ce78a7fc9b53df70cd6ef8b35116fc0a9df"
 dependencies = [
  "biscuit-auth",
  "data-encoding",
@@ -4865,7 +4865,7 @@ dependencies = [
 [[package]]
 name = "tightbeam"
 version = "0.4.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=53b6ed32cc8facb9e7a70e0f7207237938076e38#53b6ed32cc8facb9e7a70e0f7207237938076e38"
+source = "git+https://github.com/theia-hq/tightbeam?rev=cae5b1e74d63e3511da183353b2fcf0a59d44699#cae5b1e74d63e3511da183353b2fcf0a59d44699"
 dependencies = [
  "bifrost",
  "bifrost-iroh",
