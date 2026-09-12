@@ -6,16 +6,20 @@ use tokio::io::AsyncWriteExt as _;
 /// The `control.stop` handler swoosh injects: the remote node-lifecycle stop. It holds a CLONE of the
 /// node's teardown token as the node-control CAPABILITY (never a node handle), so when an admitted caller
 /// reaches it, it REQUESTS the graceful teardown by cancelling that token; the exposer (the one owner of
-/// teardown) sees the cancel and stops the node. GATED, because stopping the node is a mutation with no
-/// safe public form: the family gate is its authentication, so only an admitted member (this node's own
-/// devices, for a single-owner node) can stop it. An open gate over it is refused at
+/// teardown) sees the cancel and stops the node.
+///
+/// MEMBER-only: the `control.stop` route is declared member-only where `serve` assembles it, and
+/// tightbeam's dispatch checks that floor after the gate admits and before any `Response::Ok`, so only a
+/// caller the gate admitted as a whole-node member (this node's own devices, the fleet) can stop it. A
+/// delegate holding a `control.stop` slip is refused with the same uniform refusal a gate miss gives, and
+/// this handler never runs; an open gate over the route is refused at
 /// [`Exposer::new`](tightbeam::tunnel::Exposer::new).
 ///
-/// SAFE FIRST SLICE (delib-18): this ships the FAMILY-GATED stop, correct for a single-owner qat node.
+/// The handler does not re-check the witness: the floor is enforced once in tightbeam's dispatch path.
 /// The HARDENED lifecycle (an arm->confirm nonce + a single-use device-bound DESTROY-CAP, ideally
-/// OWNER-only so a delegate cannot casually shut the node down) is the FOLLOW, and needs an Adversary
-/// gating-review before `control.stop` is trusted on a multi-delegate node; the open question there is
-/// whether the `Admitted` witness can distinguish an owner device from a delegate.
+/// OWNER-only so another fleet device cannot casually shut the node down) is the FOLLOW, and needs an
+/// Adversary gating-review before `control.stop` is trusted on a multi-device fleet; the open question
+/// there is whether the `Admitted` witness can distinguish an owner device from another fleet device.
 ///
 /// On admission the handler cancels the token, then writes ONE ack byte so the client can confirm the stop
 /// was actioned (not merely that the dial was admitted): a positive, explicit confirmation, the honest
@@ -36,7 +40,8 @@ impl Stop {
 }
 
 impl Handler for Stop {
-    // GATED: stopping the node is a mutation with no safe public form; the family gate is its authentication.
+    // The route is member-only (declared in `serve`) and has no safe public form: the marker keeps an
+    // open-gate pairing from ever being built, and the member floor refuses every non-member pre-Ok.
     type Public = Never;
 
     async fn serve(

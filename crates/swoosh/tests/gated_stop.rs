@@ -6,14 +6,17 @@
 //! the family gate, so a MEMBER can stop a gated node but a STRANGER cannot, and that a local `serve --for`
 //! deadline stops the node by itself.
 //!
-//! `control.stop` is one more family-gated service, assembled through the SAME `stop_handler` the `swoosh
-//! serve` product path injects (not a hand-rolled near-copy). Three things are proven:
+//! `control.stop` is one more member-only service, assembled through the SAME `Stop` handler the `swoosh
+//! serve` product path injects (not a hand-rolled near-copy) and declared member-only exactly as `serve`
+//! declares it. Four things are proven:
 //!
 //! 1. `serve --for` shape: a local timer cancelling the token stops the exposer's `run`, gracefully.
-//! 2. `control.stop`: a MEMBER reaching the gated service cancels the SAME token the exposer owns, so the
-//!    run returns -- the node stops -- and the member reads the ack byte confirming the stop was actioned.
+//! 2. `control.stop`: a MEMBER reaching the member-only service cancels the SAME token the exposer owns, so
+//!    the run returns -- the node stops -- and the member reads the ack byte confirming the stop was actioned.
 //! 3. A STRANGER's `control.stop` is refused LOUDLY at the gate (a typed error, never a silent no-op), and
 //!    the node keeps running.
+//! 4. A DELEGATE's `control.stop` slip is refused LOUDLY at the route's member floor BEFORE `Response::Ok`
+//!    (the gate grants the slip, the floor refuses it), and the node keeps running.
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a membership badge binds to whatever
 //! id the mem transport proves for the dialer (the same accommodation `gated_measure` documents at length):
@@ -170,13 +173,77 @@ async fn a_stranger_is_refused_at_control_stop_and_the_node_keeps_running() {
         .await;
 }
 
+/// A DELEGATED slip for `control.stop` is refused at the member floor BEFORE `Response::Ok`: the gate
+/// admits the slip (it grants the service to this device), and the route's member-only floor turns that
+/// admission into the SAME uniform typed refusal a gate miss gives. The node keeps running: a delegate
+/// cannot stop it.
+#[tokio::test]
+async fn a_control_stop_slip_is_refused_before_ok_and_the_node_keeps_running() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let host = Node::new(MemTransport::bind(), NoDiscovery);
+            let host_id = host.node_id();
+            let cancel = CancellationToken::new();
+            let exposer = build_exposer(cancel.clone()).await;
+            let run = tokio::task::spawn_local({
+                let cancel = cancel.clone();
+                async move { exposer.run(&host, cancel).await }
+            });
+
+            // A delegate: a slip the signet signed for `control.stop`, bound to the delegate's proven mem
+            // id, so the GATE grants it. (A wrong-service or unbound slip would need no floor to refuse.)
+            let delegate = Node::new(MemTransport::bind(), NoDiscovery);
+            let slip = tunnel::mint_bound_link(
+                &Identity::from_secret(&SIGNET_SECRET).unwrap(),
+                &CONTROL_STOP_SERVICE.parse().unwrap(),
+                delegate.node_id().verify_key(),
+                Duration::from_secs(300),
+            )
+            .unwrap();
+            let session = Connector::to_node(host_id, CONTROL_STOP_SERVICE.to_owned(), Some(slip))
+                .open_service(&delegate)
+                .await
+                .expect("the base connect lands; the gate decides per-stream");
+
+            // The refusal is the uniform gate-class one, delivered BEFORE any Ok: `open_bi` errors, so the
+            // stop client's post-Ok "EOF is success" arm never sees a false stop.
+            let refused = session.open_bi().await;
+            assert!(
+                matches!(
+                    refused,
+                    Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
+                ),
+                "a control.stop slip must be refused pre-Ok as not admitted: {refused:?}"
+            );
+
+            // The refusal did NOT stop the node: its run is still going. Give it a beat, then confirm the run
+            // has not returned, and stop it ourselves so the test ends.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(
+                !run.is_finished(),
+                "a refused delegate must not have stopped the node"
+            );
+            cancel.cancel();
+            tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .expect("the node stops on our own cancel")
+                .expect("the run task joins")
+                .expect("graceful stop");
+        })
+        .await;
+}
+
 /// Assemble a gated exposer serving `control.stop` (and the default reach diagnostics), rooted at the
-/// signet, through the SAME `stop_handler` the product `serve` path injects. The exposer owns `cancel`; the
-/// injected handler holds a clone as the node-control capability.
+/// signet, through the SAME `Stop` handler the product `serve` path injects and with the SAME member-only
+/// declaration `serve` makes. The exposer owns `cancel`; the injected handler holds a clone as the
+/// node-control capability.
 async fn build_exposer(cancel: CancellationToken) -> Exposer {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
-    let services =
-        Services::parse(&[format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:")]).unwrap();
+    let services = Services::parse(&[format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:")])
+        .unwrap()
+        .member_only(CONTROL_STOP_SERVICE)
+        .unwrap();
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
     let registry = Registry::new().with(CONTROL_STOP_SERVICE, Stop::new(cancel));
     Exposer::new(services, registry, gate, PublicUnsafeRequest::none()).unwrap()
