@@ -20,6 +20,7 @@ use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, NodeId, Transport};
 use clap::Args;
+use nauthy::{Link, Service};
 
 use crate::contacts::Contacts;
 use crate::peer::Peer;
@@ -80,9 +81,9 @@ pub async fn connect<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     contacts: &Contacts,
     peer: &Peer,
-    service: String,
-    slot1: Option<String>,
-    slot2: Option<String>,
+    service: Service,
+    slot1: Option<Link>,
+    slot2: Option<Link>,
     to: To,
 ) -> eyre::Result<()> {
     let connector = peer.connector(contacts, service, slot1, slot2)?;
@@ -92,7 +93,7 @@ pub async fn connect<T: Transport, D: Discovery>(
             // admission on one stream, and binds the port, returning the host's refusal reason on an
             // Err. So an unauthorized forward fails loudly here (a clear one-line reason, non-zero exit),
             // never a hopeful banner followed by a silent reset.
-            let (dial, service) = (connector.dial(), connector.service().to_owned());
+            let (dial, service) = (connector.dial(), Service::clone(connector.service()));
             let forward = connector.preflight(node, port).await?;
             println!("forwarding 127.0.0.1:{port} to {dial} ({service})");
             forward.run().await
@@ -189,16 +190,17 @@ impl TunnelConnectCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        present: Option<String>,
-        membership: Option<String>,
+        present: Option<Link>,
+        membership: Option<Link>,
     ) -> eyre::Result<()> {
         // The bridge's peer is a raw key (`swoosh ssh` resolved any petname before re-invoking), so it wraps
         // as `Peer::Raw` and rides the same `connector` path as every other single-target verb.
+        let service = self.service.parse::<Service>()?;
         connect(
             node,
             contacts,
             &Peer::Raw(self.node),
-            self.service,
+            service,
             present,
             membership,
             self.to,

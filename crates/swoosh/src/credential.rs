@@ -28,16 +28,14 @@ use tightbeam::identity::AsNodeId as _;
 /// flag hands a verb an already-valid link, never a raw `String` the reach path carries unverified to
 /// the peer.
 ///
-/// It holds the original link text, validated once at construction: the exact bytes it presents to
-/// [`Connector::to_node`](tightbeam::tunnel::Connector::to_node) for the far gate to re-parse, with no
-/// decode/re-encode round-trip. `Cap` is not `Clone`, so the parsed form is not stored (the validated
-/// text is the invariant carrier); [`cap`](Self::cap) re-parses on demand for a local check.
+/// It holds the original link text, validated once at construction: the exact bytes it presents for the
+/// far gate to re-parse, with no decode/re-encode round-trip. The parsed cap is re-derived on demand
+/// ([`cap`](Self::cap)) for a local check, so the type carries no crypto state of its own.
 #[derive(Clone)]
 pub struct SheerLink(String);
 
 impl SheerLink {
-    /// The original `sheer:` link text, the exact bytes the far gate re-parses. This is what a
-    /// [`Connector`](tightbeam::tunnel::Connector) presents on the wire.
+    /// The original `sheer:` link text, the exact bytes presented to the far gate.
     pub fn link(&self) -> &str {
         &self.0
     }
@@ -49,16 +47,17 @@ impl SheerLink {
         Cap::parse(&self.0)
     }
 
-    /// Consume into the owned link text, for a wire API that takes `Option<String>` (the connector).
+    /// Consume into the owned link text: the form the resolver parses into the connector's typed link.
     pub fn into_link(self) -> String {
         let Self(link) = self;
         link
     }
 
     /// The node this link self-addresses: the cap's ROOT key as a bifrost [`NodeId`], the node a connector
-    /// dials when the link is the peer. The same target [`Connector::from_link`](tightbeam::tunnel::Connector::from_link)
-    /// computes (`Cap::parse(link)?.root().node_id()`), exposed so a link-as-peer can dial it without
-    /// re-implementing the cap->node conversion in a caller that should not reach into nauthy directly.
+    /// dials when the link is the peer. The same target
+    /// [`Connector::from_link`](tightbeam::tunnel::Connector::from_link) computes (`link.root().node_id()`),
+    /// exposed so a link-as-peer can dial it without re-implementing the cap->node conversion in a caller
+    /// that should not reach into nauthy directly.
     pub fn dial_node(&self) -> Result<NodeId, nauthy::CapError> {
         Ok(self.cap()?.root().node_id())
     }
@@ -113,7 +112,7 @@ impl MemberBadge {
         &self.0
     }
 
-    /// Consume into the owned link text, for the connector's `Option<String>` wire API.
+    /// Consume into the owned link text: the form the resolver parses into the connector's typed link.
     pub fn into_link(self) -> String {
         let Self(link) = self;
         link

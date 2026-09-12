@@ -94,10 +94,14 @@ async fn proof() {
     // signet it trusts. The blob is self-delimiting + signature-checked, so a valid pull yields the doc.
     let member = Node::new(MemTransport::bind(), NoDiscovery);
     let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
-    let session = Connector::to_node(host_id, "roster".to_owned(), Some(member_badge))
-        .open_service(&member)
-        .await
-        .expect("member reaches the roster service");
+    let session = Connector::to_node(
+        host_id,
+        "roster".parse().unwrap(),
+        Some(member_badge.parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("member reaches the roster service");
     let (send, mut recv) = session
         .open_bi()
         .await
@@ -127,10 +131,14 @@ async fn proof() {
     // it never reads the member set (delib-28 containment).
     let stranger = Node::new(MemTransport::bind(), NoDiscovery);
     let stranger_badge = signet_badge(&[3u8; 32], stranger.node_id());
-    let refused = Connector::to_node(host_id, "roster".to_owned(), Some(stranger_badge))
-        .open_service(&stranger)
-        .await
-        .expect("the base connect lands; the gate refuses per-stream");
+    let refused = Connector::to_node(
+        host_id,
+        "roster".parse().unwrap(),
+        Some(stranger_badge.parse().unwrap()),
+    )
+    .open_service(&stranger)
+    .await
+    .expect("the base connect lands; the gate refuses per-stream");
     assert!(
         refused.open_bi().await.is_err(),
         "a stranger must be refused at the gated roster service"
@@ -159,6 +167,7 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
         .unwrap()
         .link()
         .unwrap()
+        .to_string()
 }
 
 async fn empty_denylist(tag: &str) -> FileDenylist {

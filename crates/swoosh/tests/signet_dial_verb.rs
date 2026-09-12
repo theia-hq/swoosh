@@ -16,7 +16,7 @@ use core::time::Duration;
 
 use bifrost::NodeId;
 use clap::Parser;
-use nauthy::{Identity, Service};
+use nauthy::{Identity, Link, Service};
 use swoosh::commands::ping::PingCmd;
 use swoosh::home::Home;
 use swoosh::identity::Secret;
@@ -48,7 +48,7 @@ fn ping_with_peer(peer: &str) -> PingCmd {
 /// Drive the verb's declared credential through the ONE resolver under a caller-supplied `secret` (so the
 /// test controls the dialer's own fleet, which the fleet-match slot-2 rule compares against) and read the
 /// two wire slots, the exact path the composition root runs before dialing.
-async fn slots_for(cmd: &PingCmd, secret: &Secret) -> (Option<String>, Option<String>) {
+async fn slots_for(cmd: &PingCmd, secret: &Secret) -> (Option<Link>, Option<Link>) {
     // The default home (no stored badge), so a `Family` dial falls back to the self-sign, exactly as an
     // unprovisioned dialer does.
     let home = Home::resolve(None).expect("resolve the default home");
@@ -67,23 +67,21 @@ async fn a_verb_with_a_signet_bound_present_slip_fills_slot_two() {
     let work = Identity::from_secret(&[1u8; 32]).unwrap();
     let fleet = secret.node_id().verify_key();
     let service: Service = "ping".parse().unwrap();
-    let slip =
-        tightbeam::tunnel::mint_signet_link(&work, &service, fleet, Duration::from_secs(3600))
-            .unwrap();
+    let slip = Link::mint_signet(&work, &service, fleet, Duration::from_secs(3600)).unwrap();
 
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-    let cmd = ping_with_present(&peer, &slip);
+    let cmd = ping_with_present(&peer, slip.as_str());
     let (slot1, slot2) = slots_for(&cmd, &secret).await;
 
     assert_eq!(
-        slot1.as_deref(),
+        slot1.as_ref().map(Link::as_str),
         Some(slip.as_str()),
         "the signet-bound slip is slot 1 (the grant)"
     );
     let badge = slot2
         .expect("REGRESSION: a signet-bound --present dial must fill slot 2 with the fleet badge");
     assert!(
-        badge.starts_with("sheer:") && badge != slip,
+        badge.as_str().starts_with("sheer:") && badge.as_str() != slip.as_str(),
         "slot 2 is the dialer's own member badge, not the slip: {badge}"
     );
 }
@@ -95,20 +93,22 @@ async fn a_verb_with_a_bearer_present_slip_leaves_slot_two_empty() {
     let secret = Secret::ephemeral();
     let work = Identity::from_secret(&[1u8; 32]).unwrap();
     let service: Service = "ping".parse().unwrap();
-    let bearer =
-        tightbeam::tunnel::mint_link(&work, &service, Duration::from_secs(3600), false).unwrap();
+    let bearer = Link::mint(&work, &service, Duration::from_secs(3600))
+        .unwrap()
+        .seal()
+        .unwrap();
 
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-    let cmd = ping_with_present(&peer, &bearer);
+    let cmd = ping_with_present(&peer, bearer.as_str());
     let (slot1, slot2) = slots_for(&cmd, &secret).await;
 
     assert_eq!(
-        slot1.as_deref(),
+        slot1.as_ref().map(Link::as_str),
         Some(bearer.as_str()),
         "the bearer slip is slot 1 (the grant)"
     );
-    assert_eq!(
-        slot2, None,
+    assert!(
+        slot2.is_none(),
         "a non-signet-bound slip attaches NO slot 2 badge (privacy preserved through the verb path)"
     );
 }
@@ -123,15 +123,13 @@ async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
     let work = Identity::from_secret(&[1u8; 32]).unwrap();
     let fleet = secret.node_id().verify_key();
     let service: Service = "ping".parse().unwrap();
-    let link =
-        tightbeam::tunnel::mint_signet_link(&work, &service, fleet, Duration::from_secs(3600))
-            .unwrap();
+    let link = Link::mint_signet(&work, &service, fleet, Duration::from_secs(3600)).unwrap();
 
-    let cmd = ping_with_peer(&link);
+    let cmd = ping_with_peer(link.as_str());
     let (slot1, slot2) = slots_for(&cmd, &secret).await;
 
     assert_eq!(
-        slot1.as_deref(),
+        slot1.as_ref().map(Link::as_str),
         Some(link.as_str()),
         "a link-as-peer folds to slot 1 (the grant), the same slot a --present link fills"
     );
@@ -139,7 +137,7 @@ async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
         "REGRESSION (defect #1): a signet-bound link-as-peer must fill slot 2, not drop it as before",
     );
     assert!(
-        badge.starts_with("sheer:") && badge != link,
+        badge.as_str().starts_with("sheer:") && badge.as_str() != link.as_str(),
         "slot 2 is the dialer's own member badge, not the link: {badge}"
     );
 }
@@ -152,24 +150,19 @@ async fn a_verb_with_a_foreign_fleet_link_as_peer_leaves_slot_two_empty() {
     let work = Identity::from_secret(&[1u8; 32]).unwrap();
     let foreign_fleet = Identity::from_secret(&[2u8; 32]).unwrap().verifying_key();
     let service: Service = "ping".parse().unwrap();
-    let link = tightbeam::tunnel::mint_signet_link(
-        &work,
-        &service,
-        foreign_fleet,
-        Duration::from_secs(3600),
-    )
-    .unwrap();
+    let link =
+        Link::mint_signet(&work, &service, foreign_fleet, Duration::from_secs(3600)).unwrap();
 
-    let cmd = ping_with_peer(&link);
+    let cmd = ping_with_peer(link.as_str());
     let (slot1, slot2) = slots_for(&cmd, &secret).await;
 
     assert_eq!(
-        slot1.as_deref(),
+        slot1.as_ref().map(Link::as_str),
         Some(link.as_str()),
         "the link-as-peer is still slot 1 (the grant)"
     );
-    assert_eq!(
-        slot2, None,
+    assert!(
+        slot2.is_none(),
         "a link-as-peer pinning a foreign fleet attaches NO slot 2 (no fleet-signet over-share)"
     );
 }

@@ -1,7 +1,7 @@
 //! `swoosh grant revoke <peer|link>`: revoke a grant so this node refuses it, offline and at once.
 //!
 //! One verb, two objects. Given a `sheer:` LINK, it revokes exactly that link and everything attenuated from
-//! it, the way pasting the link back always has (tightbeam's [`revoke_into`](tightbeam::tunnel::revoke_into),
+//! it, the way pasting the link back always has (nauthy's [`Link::revoke`](nauthy::Link::revoke),
 //! unchanged). Given a PEER instead (a node id or a `petname/device` you granted), it looks that holder up in
 //! swoosh's own mint-log ledger, takes the ROOT revocation id recorded when the grant was issued, and revokes
 //! at the root, cutting off the grant AND everything the holder delegated from it. Either way it writes
@@ -9,7 +9,7 @@
 //! the same denylist, so the grant is refused at once rather than waiting for expiry.
 
 use clap::Args;
-use nauthy::{FileDenylist, RevocationId};
+use nauthy::{FileDenylist, Link, RevocationId};
 
 use crate::contacts::{ContactRef, Contacts, ContactsStore};
 use crate::grants::{self, Grants};
@@ -43,7 +43,8 @@ impl RevokeCmd {
         // A `sheer:` prefix is the one unambiguous mark of a link: parse-don't-validate on the object's shape.
         // A malformed link still routes here (and fails as a bad link), rather than being misread as a peer.
         if self.target.starts_with(nauthy::SCHEME) {
-            tightbeam::tunnel::revoke_into(&mut denylist, &self.target).await?;
+            let link: Link = self.target.parse()?;
+            link.revoke(&mut denylist).await?;
             println!("revoked link ({})", denylist.path().display());
             return Ok(());
         }

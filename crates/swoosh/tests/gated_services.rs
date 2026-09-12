@@ -25,7 +25,7 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{FileDenylist, Identity};
+use nauthy::{FileDenylist, Identity, Link};
 use swoosh::commands::serve::{CONTROL_SERVICES_SERVICE, ServiceList};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{
@@ -64,11 +64,14 @@ async fn a_member_reads_a_gated_nodes_services_over_control_services() {
             // proven mem id, so the gate admits it (the shape `mint` mints for a device).
             let member = Node::new(MemTransport::bind(), NoDiscovery);
             let badge = signet_badge(&SIGNET_SECRET, member.node_id());
-            let session =
-                Connector::to_node(host_id, CONTROL_SERVICES_SERVICE.to_owned(), Some(badge))
-                    .open_service(&member)
-                    .await
-                    .expect("member reaches control.services");
+            let session = Connector::to_node(
+                host_id,
+                CONTROL_SERVICES_SERVICE.parse().unwrap(),
+                Some(badge.parse().unwrap()),
+            )
+            .open_service(&member)
+            .await
+            .expect("member reaches control.services");
             let (send, mut recv) = session
                 .open_bi()
                 .await
@@ -120,7 +123,7 @@ async fn a_stranger_is_refused_at_control_services() {
             let stranger = Node::new(MemTransport::bind(), NoDiscovery);
             let badge = signet_badge(&[3u8; 32], stranger.node_id());
             let session =
-                Connector::to_node(host_id, CONTROL_SERVICES_SERVICE.to_owned(), Some(badge))
+                Connector::to_node(host_id, CONTROL_SERVICES_SERVICE.parse().unwrap(), Some(badge.parse().unwrap()))
                     .open_service(&stranger)
                     .await
                     .expect("the base connect lands; the gate refuses per-stream");
@@ -154,18 +157,21 @@ async fn a_control_services_slip_is_refused_before_ok() {
             let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
 
             let delegate = Node::new(MemTransport::bind(), NoDiscovery);
-            let slip = tunnel::mint_bound_link(
+            let slip = Link::mint_bound(
                 &Identity::from_secret(&SIGNET_SECRET).unwrap(),
                 &CONTROL_SERVICES_SERVICE.parse().unwrap(),
                 delegate.node_id().verify_key(),
                 Duration::from_secs(300),
             )
             .unwrap();
-            let session =
-                Connector::to_node(host_id, CONTROL_SERVICES_SERVICE.to_owned(), Some(slip))
-                    .open_service(&delegate)
-                    .await
-                    .expect("the base connect lands; the gate decides per-stream");
+            let session = Connector::to_node(
+                host_id,
+                CONTROL_SERVICES_SERVICE.parse().unwrap(),
+                Some(slip),
+            )
+            .open_service(&delegate)
+            .await
+            .expect("the base connect lands; the gate decides per-stream");
             let refused = session.open_bi().await;
             assert!(
                 matches!(
@@ -219,6 +225,7 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
         .unwrap()
         .link()
         .unwrap()
+        .to_string()
 }
 
 /// An empty revocation denylist: this proof exercises membership admission, not revocation, so the gate

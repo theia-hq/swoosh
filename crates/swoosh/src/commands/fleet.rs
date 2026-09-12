@@ -13,6 +13,7 @@
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use eyre::WrapErr as _;
+use nauthy::{Link, Service};
 use tightbeam::identity::AsVerifyKey as _;
 use tokio::io::AsyncReadExt as _;
 
@@ -91,8 +92,8 @@ impl FleetCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        self_badge: Option<String>,
-        membership: Option<String>,
+        self_badge: Option<Link>,
+        membership: Option<Link>,
         home: &Home,
     ) -> eyre::Result<()>
     where
@@ -108,9 +109,12 @@ impl FleetCmd {
         // node resolves like every other verb), presenting our membership badge so the family gate admits us.
         // Slot 2 (membership) rides along for a signet-bound coordination node; a no-op on the plain member
         // dial. The redundant-present conflict was rejected in the composition root before this runs.
-        let connector =
-            self.pull
-                .connector(contacts, "roster".to_owned(), self_badge, membership)?;
+        let connector = self.pull.connector(
+            contacts,
+            "roster".parse::<Service>()?,
+            self_badge,
+            membership,
+        )?;
         let session = connector.open_service(node).await?;
         let (send, recv) = session
             .open_bi()

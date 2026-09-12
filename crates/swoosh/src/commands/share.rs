@@ -15,7 +15,7 @@ use core::str::FromStr;
 
 use bifrost::NodeId;
 use clap::Args;
-use nauthy::{Cap, Service};
+use nauthy::{Cap, Link, Service};
 use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -91,12 +91,8 @@ impl ShareCmd {
         let (link, kind, delegation, holder) = match &self.bind {
             Some(GrantFor::Device(target)) => {
                 let node = resolve_one_device(target, store.contacts())?;
-                let link = tightbeam::tunnel::mint_bound_link(
-                    &cap_identity,
-                    &self.service,
-                    node.verify_key(),
-                    lifetime,
-                )?;
+                let link =
+                    Link::mint_bound(&cap_identity, &self.service, node.verify_key(), lifetime)?;
                 // Record the RESOLVED device node id (canonical), so revoke-by-holder matches whether the
                 // issuer named a petname or the raw key.
                 (
@@ -108,12 +104,7 @@ impl ShareCmd {
             }
             Some(GrantFor::Fleet(target)) => {
                 let fleet = resolve_fleet_root(target, store.contacts())?;
-                let link = tightbeam::tunnel::mint_signet_link(
-                    &cap_identity,
-                    &self.service,
-                    fleet,
-                    lifetime,
-                )?;
+                let link = Link::mint_signet(&cap_identity, &self.service, fleet, lifetime)?;
                 // Record the RESOLVED signet key (canonical), so `grant revoke <holder>` matches a pasted
                 // signet key. Revoking the slip cuts the WHOLE fleet's access at once.
                 (
@@ -124,12 +115,10 @@ impl ShareCmd {
                 )
             }
             None => {
-                let link = tightbeam::tunnel::mint_link(
-                    &cap_identity,
-                    &self.service,
-                    lifetime,
-                    self.delegable,
-                )?;
+                let link = Link::mint(&cap_identity, &self.service, lifetime)?;
+                // A non-delegable link is sealed so no holder can append a narrower block; a delegable one
+                // is left open.
+                let link = if self.delegable { link } else { link.seal()? };
                 let delegation = if self.delegable {
                     Delegation::Delegable
                 } else {
@@ -148,9 +137,11 @@ impl ShareCmd {
         // what is durable the instant the link exists. The ROOT revocation id is a pure function of the
         // minted token's bytes, recovered by re-parsing the link we just produced (the ledger stores this
         // opaque id, never the presentable link), so revoke-by-holder can later cut this grant at its root.
-        let root_id = Cap::parse(&link)?.root_revocation_id().ok_or_else(|| {
-            eyre::eyre!("minted capability has no authority block to key revocation on")
-        })?;
+        let root_id = Cap::parse(link.as_str())?
+            .root_revocation_id()
+            .ok_or_else(|| {
+                eyre::eyre!("minted capability has no authority block to key revocation on")
+            })?;
         let record = GrantRecord {
             target: GrantTarget::Service(Service::clone(&self.service)),
             kind,

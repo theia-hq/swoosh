@@ -84,10 +84,14 @@ async fn proof() {
     // Send a file exactly as `swoosh send` does: open the gated `recv` service, then drive `bifrost-wire`'s
     // verified `Transfer` over one admitted stream, naming the file so the receiver saves it under that name.
     let payload = b"the quick brown fox jumps over the lazy dog".repeat(1000);
-    let session = Connector::to_node(host_id, "recv".to_owned(), Some(member_badge.clone()))
-        .open_service(&member)
-        .await
-        .expect("member reaches the recv service");
+    let session = Connector::to_node(
+        host_id,
+        "recv".parse().unwrap(),
+        Some(member_badge.clone().parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("member reaches the recv service");
     let (send, recv) = session.open_bi().await.expect("member is admitted at recv");
     let blob = Blob::hash(&mut payload.as_slice()).await.unwrap();
     Transfer::new(send, recv)
@@ -103,10 +107,14 @@ async fn proof() {
     // the gate, so opening the recv stream fails; no file is written.
     let stranger = Node::new(MemTransport::bind(), NoDiscovery);
     let stranger_badge = signet_badge(&[3u8; 32], stranger.node_id());
-    let refused = Connector::to_node(host_id, "recv".to_owned(), Some(stranger_badge))
-        .open_service(&stranger)
-        .await
-        .expect("the base connect lands; the gate refuses per-stream");
+    let refused = Connector::to_node(
+        host_id,
+        "recv".parse().unwrap(),
+        Some(stranger_badge.parse().unwrap()),
+    )
+    .open_service(&stranger)
+    .await
+    .expect("the base connect lands; the gate refuses per-stream");
     assert!(
         refused.open_bi().await.is_err(),
         "a stranger must be refused at the gated recv service"
@@ -114,10 +122,14 @@ async fn proof() {
 
     // A TAMPERED blob: a member advertises one root but sends different bytes. The receiver's BLAKE3 check
     // fails, so the send is NAKed (an error to the sender) and no file with that name is written.
-    let session = Connector::to_node(host_id, "recv".to_owned(), Some(member_badge))
-        .open_service(&member)
-        .await
-        .expect("member reaches the recv service");
+    let session = Connector::to_node(
+        host_id,
+        "recv".parse().unwrap(),
+        Some(member_badge.parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("member reaches the recv service");
     let (send, recv) = session.open_bi().await.expect("member is admitted at recv");
     let honest = b"the bytes I hashed".to_vec();
     let blob = Blob::hash(&mut honest.as_slice()).await.unwrap();
@@ -235,10 +247,14 @@ async fn push_file(
     name: &[u8],
     payload: &[u8],
 ) {
-    let session = Connector::to_node(host_id, service.to_owned(), Some(badge.to_owned()))
-        .open_service(member)
-        .await
-        .expect("member reaches the receive service");
+    let session = Connector::to_node(
+        host_id,
+        service.parse().unwrap(),
+        Some(badge.parse().unwrap()),
+    )
+    .open_service(member)
+    .await
+    .expect("member reaches the receive service");
     let (send, recv) = session.open_bi().await.expect("member is admitted at recv");
     // Two independent slice cursors over the same bytes: hashing advances one to EOF, so the send reads from
     // a fresh cursor at the start.
@@ -291,6 +307,7 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
         .unwrap()
         .link()
         .unwrap()
+        .to_string()
 }
 
 /// An empty revocation denylist (an absent file is an empty set). `tag` keeps parallel tests' paths apart.

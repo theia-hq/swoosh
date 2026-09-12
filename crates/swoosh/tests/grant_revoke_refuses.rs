@@ -14,7 +14,7 @@
 use core::time::Duration;
 
 use bifrost::NodeId;
-use nauthy::{Cap, FileDenylist, Request, Service};
+use nauthy::{Cap, FileDenylist, Link, Request, Service};
 use swoosh::commands::revoke::RevokeCmd;
 use swoosh::contacts::ContactsStore;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
@@ -39,14 +39,14 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     let holder = device.to_string();
 
     // Mint the device-bound link the issuer hands off, then recover the cap and its root revocation id.
-    let link = tightbeam::tunnel::mint_bound_link(
+    let link = Link::mint_bound(
         &cap_identity,
         &service,
         device.verify_key(),
         Duration::from_secs(3600),
     )
     .unwrap();
-    let cap = Cap::parse(&link).unwrap();
+    let cap = Cap::parse(link.as_str()).unwrap();
     let root_id = cap.root_revocation_id().unwrap();
 
     // Record the grant in the mint-log ledger, as `grant issue --for` does.
@@ -116,14 +116,14 @@ async fn revoking_a_holder_with_a_badge_plus_a_service_grant_cuts_both() {
     let badge = Cap::parse(&badge_link).unwrap();
     let badge_root = badge.root_revocation_id().unwrap();
     // A service grant, minted the way `grant issue --for` does.
-    let link = tightbeam::tunnel::mint_bound_link(
+    let link = Link::mint_bound(
         &cap_identity,
         &service,
         device.verify_key(),
         Duration::from_secs(3600),
     )
     .unwrap();
-    let cap = Cap::parse(&link).unwrap();
+    let cap = Cap::parse(link.as_str()).unwrap();
     let root_id = cap.root_revocation_id().unwrap();
 
     // One holder, two ledger lines: a badge plus a service grant.

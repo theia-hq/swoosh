@@ -15,6 +15,7 @@
 
 use bifrost::{Discovery, Node, Session as _, Transport};
 use clap::Args;
+use nauthy::{Link, Service};
 use tightbeam::tunnel;
 use tokio::io::AsyncReadExt as _;
 
@@ -124,8 +125,8 @@ impl ServiceLsCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        present: Option<String>,
-        membership: Option<String>,
+        present: Option<Link>,
+        membership: Option<Link>,
     ) -> eyre::Result<()> {
         let Some(peer) = self.at else {
             eyre::bail!(
@@ -139,7 +140,7 @@ impl ServiceLsCmd {
         // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
         let connector = peer.connector(
             contacts,
-            CONTROL_SERVICES_SERVICE.to_owned(),
+            CONTROL_SERVICES_SERVICE.parse::<Service>()?,
             present,
             membership,
         )?;

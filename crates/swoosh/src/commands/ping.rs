@@ -15,6 +15,7 @@ use core::time::Duration;
 use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
 use clap::Args;
 use measure::{Ping, PingReport, Probe, ProtocolError};
+use nauthy::{Link, Service};
 
 use crate::contacts::Contacts;
 use crate::peer::Peer;
@@ -105,8 +106,8 @@ impl PingCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
-        present: Option<String>,
-        membership: Option<String>,
+        present: Option<Link>,
+        membership: Option<Link>,
     ) -> eyre::Result<()> {
         // The redundant-present conflict (a `sheer:` link peer plus an explicit `--present`) is rejected
         // ONCE in the composition root via `Reaching::reject_redundant_present`, before this runs.
@@ -125,13 +126,14 @@ impl PingCmd {
         // rendered as `100% loss`.
         let mut any_healthy = false;
         let mut any_refused = false;
+        let service: Service = reach::PING_SERVICE.parse()?;
         for candidate in &candidates {
             match reach::connect_service(
                 node,
                 candidate,
-                reach::PING_SERVICE,
-                present.clone(),
-                membership.clone(),
+                &service,
+                Option::clone(&present),
+                Option::clone(&membership),
             )
             .await
             {

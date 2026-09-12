@@ -10,6 +10,7 @@
 use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, Path, Transport};
+use nauthy::{Link, Service};
 use tightbeam::tunnel::{Connector, ServiceSession};
 
 use crate::contacts::{Candidate, Contacts};
@@ -135,9 +136,9 @@ pub async fn dial_service<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     contacts: &Contacts,
     target: &Peer,
-    service: &str,
-    present: Option<String>,
-    membership: Option<String>,
+    service: &Service,
+    present: Option<Link>,
+    membership: Option<Link>,
     transport: transport::Transport,
 ) -> eyre::Result<Resolved<T::Session>> {
     let candidates = target.candidates(contacts)?;
@@ -148,8 +149,8 @@ pub async fn dial_service<T: Transport, D: Discovery>(
             node,
             &candidate,
             service,
-            present.clone(),
-            membership.clone(),
+            Option::clone(&present),
+            Option::clone(&membership),
         )
         .await
         {
@@ -177,11 +178,11 @@ pub async fn dial_service<T: Transport, D: Discovery>(
 pub async fn connect_service<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     candidate: &Candidate,
-    service: &str,
-    present: Option<String>,
-    membership: Option<String>,
+    service: &Service,
+    present: Option<Link>,
+    membership: Option<Link>,
 ) -> eyre::Result<ServiceSession<T::Session>> {
-    let mut connector = Connector::to_node(candidate.node, service.to_owned(), present);
+    let mut connector = Connector::to_node(candidate.node, Service::clone(service), present);
     // Slot 2: a badge under the foreign fleet a signet-bound slip in slot 1 names. A no-op for a plain dial.
     if let Some(badge) = membership {
         connector = connector.with_membership(badge);

@@ -19,6 +19,7 @@ use clap::Args;
 use eyre::WrapErr as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
+use nauthy::{Link, Service};
 
 use crate::contacts::Contacts;
 use crate::peer::Peer;
@@ -105,16 +106,17 @@ impl SendCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        present: Option<String>,
-        membership: Option<String>,
+        present: Option<Link>,
+        membership: Option<Link>,
     ) -> eyre::Result<()> {
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
         // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
         // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
+        let service = self.service.parse::<Service>()?;
         let connector = self
             .peer
-            .connector(contacts, self.service.clone(), present, membership)?;
+            .connector(contacts, service, present, membership)?;
         let dial = connector.dial();
         println!("sending to {dial}...");
         // A service-scoped session: each `open_bi` speaks the `recv:` request and presents the badge, so

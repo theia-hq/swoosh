@@ -98,10 +98,14 @@ async fn proof() {
         let member_badge = self_badge(&SELF_SECRET, member.node_id());
 
         // Ping over the gated `ping` service: the round trip proves the self-gate admits a member.
-        let measure = Connector::to_node(host_id, "ping".to_owned(), Some(member_badge.clone()))
-            .open_service(&member)
-            .await
-            .expect("a member reaches the person-zero node's gated ping");
+        let measure = Connector::to_node(
+            host_id,
+            "ping".parse().unwrap(),
+            Some(member_badge.clone().parse().unwrap()),
+        )
+        .open_service(&member)
+        .await
+        .expect("a member reaches the person-zero node's gated ping");
         let report = Ping {
             count: 3,
             interval: Duration::ZERO,
@@ -118,10 +122,14 @@ async fn proof() {
 
         // Speedtest over the gated `speed` service: bytes move both ways, so the self-gate admits the
         // transfer stream too, not just a ping.
-        let measure = Connector::to_node(host_id, "speed".to_owned(), Some(member_badge))
-            .open_service(&member)
-            .await
-            .expect("a member reaches the self-gated speed service");
+        let measure = Connector::to_node(
+            host_id,
+            "speed".parse().unwrap(),
+            Some(member_badge.parse().unwrap()),
+        )
+        .open_service(&member)
+        .await
+        .expect("a member reaches the self-gated speed service");
         let speed = Speedtest::new(Mode::Bidir, Limit::ByBytes(1 << 16))
             .run(&measure)
             .await
@@ -143,10 +151,14 @@ async fn proof() {
         let stranger_badge = self_badge(&[3u8; 32], stranger.node_id());
 
         // Refused at ping: the ping ERRORS (the gate refuses the stream), it does not hang or succeed.
-        let measure = Connector::to_node(host_id, "ping".to_owned(), Some(stranger_badge.clone()))
-            .open_service(&stranger)
-            .await
-            .expect("the base connect lands; the gate refuses per-stream");
+        let measure = Connector::to_node(
+            host_id,
+            "ping".parse().unwrap(),
+            Some(stranger_badge.clone().parse().unwrap()),
+        )
+        .open_service(&stranger)
+        .await
+        .expect("the base connect lands; the gate refuses per-stream");
         let refused = Ping {
             count: 1,
             interval: Duration::ZERO,
@@ -159,10 +171,14 @@ async fn proof() {
         );
 
         // Refused at speed too: a stranger cannot speedtest a self-gating node.
-        let measure = Connector::to_node(host_id, "speed".to_owned(), Some(stranger_badge))
-            .open_service(&stranger)
-            .await
-            .expect("the base connect lands; the gate refuses per-stream");
+        let measure = Connector::to_node(
+            host_id,
+            "speed".parse().unwrap(),
+            Some(stranger_badge.parse().unwrap()),
+        )
+        .open_service(&stranger)
+        .await
+        .expect("the base connect lands; the gate refuses per-stream");
         let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
             .run(&measure)
             .await;
@@ -190,6 +206,7 @@ fn self_badge(secret: &[u8; 32], bound: NodeId) -> String {
         .unwrap()
         .link()
         .unwrap()
+        .to_string()
 }
 
 /// An empty revocation denylist: this test exercises membership admission, not revocation, so the gate loads

@@ -100,7 +100,7 @@ impl Secret {
             )?
             .seal()?
             .link()?;
-        Ok(badge)
+        Ok(badge.to_string())
     }
 
     /// A stable seed for this node's ssh host key, so a swoosh node exposing `ssh=sshd:` under its persisted
@@ -138,7 +138,7 @@ impl Secret {
             .mint_member(device.verify_key(), nauthy::Request::expires_in(ttl))?
             .seal()?
             .link()?;
-        Ok(badge)
+        Ok(badge.to_string())
     }
 
     /// The seed for a device identity derived from this key (the signet) under `label`: the secret a

@@ -22,6 +22,7 @@
 
 use bifrost::{Discovery, Node, Session as _, Transport};
 use clap::Args;
+use nauthy::{Link, Service};
 use tokio::io::AsyncReadExt as _;
 
 use crate::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK};
@@ -131,8 +132,8 @@ impl StopCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        present: Option<String>,
-        membership: Option<String>,
+        present: Option<Link>,
+        membership: Option<Link>,
     ) -> eyre::Result<()> {
         let Some(peer) = self.at else {
             eyre::bail!(
@@ -146,7 +147,7 @@ impl StopCmd {
         // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
         let connector = peer.connector(
             contacts,
-            CONTROL_STOP_SERVICE.to_owned(),
+            CONTROL_STOP_SERVICE.parse::<Service>()?,
             present,
             membership,
         )?;

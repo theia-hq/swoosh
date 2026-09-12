@@ -24,6 +24,7 @@ use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Transport};
 use clap::{CommandFactory, Parser, Subcommand};
+use nauthy::Link;
 // The verb modules live in the swoosh LIBRARY (`lib.rs`), so an integration test can drive the same pieces
 // this binary composes. The binary owns only the CLI surface below (the clap tree and composition root).
 use swoosh::commands::adopt::AdoptCmd;
@@ -393,7 +394,7 @@ impl Reach {
         &self,
         secret: &identity::Secret,
         home: &Home,
-    ) -> eyre::Result<(Option<String>, Option<String>)> {
+    ) -> eyre::Result<(Option<Link>, Option<Link>)> {
         Ok(reaching::resolve(self.credential(), secret, home)
             .await?
             .into_slots())
@@ -803,13 +804,14 @@ mod tests {
         let fleet = nauthy::Identity::from_secret(&[4u8; 32])
             .expect("valid fleet secret")
             .verifying_key();
-        tightbeam::tunnel::mint_signet_link(
+        nauthy::Link::mint_signet(
             &work,
             &"ssh".parse().expect("valid service"),
             fleet,
             core::time::Duration::from_secs(3600),
         )
         .expect("mint a sheer: link")
+        .to_string()
     }
 
     /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `sheer:` link all

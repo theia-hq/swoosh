@@ -27,7 +27,7 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{FileDenylist, Identity};
+use nauthy::{FileDenylist, Identity, Link};
 use swoosh::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop, Stopped};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{
@@ -86,10 +86,14 @@ async fn a_member_stops_a_gated_node_over_control_stop() {
             // for why it is signed here rather than run through mint/adopt over mem).
             let member = Node::new(MemTransport::bind(), NoDiscovery);
             let badge = signet_badge(&SIGNET_SECRET, member.node_id());
-            let session = Connector::to_node(host_id, CONTROL_STOP_SERVICE.to_owned(), Some(badge))
-                .open_service(&member)
-                .await
-                .expect("member reaches control.stop");
+            let session = Connector::to_node(
+                host_id,
+                CONTROL_STOP_SERVICE.parse().unwrap(),
+                Some(badge.parse().unwrap()),
+            )
+            .open_service(&member)
+            .await
+            .expect("member reaches control.stop");
             let (writer, mut reader) = session
                 .open_bi()
                 .await
@@ -143,10 +147,14 @@ async fn a_stranger_is_refused_at_control_stop_and_the_node_keeps_running() {
             // A stranger: a self-signed badge rooted at a RANDOM key the gate never trusts.
             let stranger = Node::new(MemTransport::bind(), NoDiscovery);
             let badge = signet_badge(&[3u8; 32], stranger.node_id());
-            let session = Connector::to_node(host_id, CONTROL_STOP_SERVICE.to_owned(), Some(badge))
-                .open_service(&stranger)
-                .await
-                .expect("the base connect lands; the gate refuses per-stream");
+            let session = Connector::to_node(
+                host_id,
+                CONTROL_STOP_SERVICE.parse().unwrap(),
+                Some(badge.parse().unwrap()),
+            )
+            .open_service(&stranger)
+            .await
+            .expect("the base connect lands; the gate refuses per-stream");
             let refused = session.open_bi().await;
             assert!(
                 matches!(
@@ -194,17 +202,18 @@ async fn a_control_stop_slip_is_refused_before_ok_and_the_node_keeps_running() {
             // A delegate: a slip the signet signed for `control.stop`, bound to the delegate's proven mem
             // id, so the GATE grants it. (A wrong-service or unbound slip would need no floor to refuse.)
             let delegate = Node::new(MemTransport::bind(), NoDiscovery);
-            let slip = tunnel::mint_bound_link(
+            let slip = Link::mint_bound(
                 &Identity::from_secret(&SIGNET_SECRET).unwrap(),
                 &CONTROL_STOP_SERVICE.parse().unwrap(),
                 delegate.node_id().verify_key(),
                 Duration::from_secs(300),
             )
             .unwrap();
-            let session = Connector::to_node(host_id, CONTROL_STOP_SERVICE.to_owned(), Some(slip))
-                .open_service(&delegate)
-                .await
-                .expect("the base connect lands; the gate decides per-stream");
+            let session =
+                Connector::to_node(host_id, CONTROL_STOP_SERVICE.parse().unwrap(), Some(slip))
+                    .open_service(&delegate)
+                    .await
+                    .expect("the base connect lands; the gate decides per-stream");
 
             // The refusal is the uniform gate-class one, delivered BEFORE any Ok: `open_bi` errors, so the
             // stop client's post-Ok "EOF is success" arm never sees a false stop.
@@ -264,6 +273,7 @@ fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
         .unwrap()
         .link()
         .unwrap()
+        .to_string()
 }
 
 /// An empty revocation denylist: this proof exercises membership admission, not revocation, so the gate

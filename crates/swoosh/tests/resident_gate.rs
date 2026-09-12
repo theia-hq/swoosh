@@ -88,14 +88,15 @@ fn signet_badge(bound: NodeId) -> String {
         .expect("seal the badge")
         .link()
         .expect("render the badge link")
+        .to_string()
 }
 
 /// Whether a member reaches the gated read over mem: admitted iff the per-stream handshake succeeds.
 async fn reach(host: NodeId, member: &Node<MemTransport, NoDiscovery>, badge: &str) -> bool {
     let connector = Connector::to_node(
         host,
-        CONTROL_SERVICES_SERVICE.to_owned(),
-        Some(badge.to_owned()),
+        CONTROL_SERVICES_SERVICE.parse().unwrap(),
+        Some(badge.parse().unwrap()),
     );
     match connector.open_service(member).await {
         Ok(session) => session.open_bi().await.is_ok(),

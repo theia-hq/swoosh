@@ -78,10 +78,14 @@ async fn proof_ping_only() {
     // A member reaches the OFFERED ping service and measures it.
     let member = Node::new(MemTransport::bind(), NoDiscovery);
     let member_badge = self_badge(&SELF_SECRET, member.node_id());
-    let ping = Connector::to_node(host, "ping".to_owned(), Some(member_badge.clone()))
-        .open_service(&member)
-        .await
-        .expect("a member reaches the offered ping");
+    let ping = Connector::to_node(
+        host,
+        "ping".parse().unwrap(),
+        Some(member_badge.clone().parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("a member reaches the offered ping");
     let report = Ping {
         count: 3,
         interval: Duration::ZERO,
@@ -100,10 +104,14 @@ async fn proof_ping_only() {
     // frame at the wire with a typed `Response::Unsupported` BEFORE sourcing a byte. The client decodes
     // that to `ProtocolError::Refused` and short-circuits: a refusal is a LOUD error, NEVER a `0.00 MiB/s`
     // report over the elapsed window. (This test used to enshrine the bug by asserting `Some(0)` bytes.)
-    let speed = Connector::to_node(host, "speed".to_owned(), Some(member_badge))
-        .open_service(&member)
-        .await
-        .expect("the base connect lands; the offered service is resolved per-stream");
+    let speed = Connector::to_node(
+        host,
+        "speed".parse().unwrap(),
+        Some(member_badge.parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("the base connect lands; the offered service is resolved per-stream");
     let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
         .run(&speed)
         .await;
@@ -130,10 +138,14 @@ async fn proof_speed_only() {
     // A member reaches the OFFERED speed service and moves bytes.
     let member = Node::new(MemTransport::bind(), NoDiscovery);
     let member_badge = self_badge(&SELF_SECRET, member.node_id());
-    let speed = Connector::to_node(host, "speed".to_owned(), Some(member_badge.clone()))
-        .open_service(&member)
-        .await
-        .expect("a member reaches the offered speed");
+    let speed = Connector::to_node(
+        host,
+        "speed".parse().unwrap(),
+        Some(member_badge.clone().parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("a member reaches the offered speed");
     let report = Speedtest::new(Mode::Bidir, Limit::ByBytes(1 << 16))
         .run(&speed)
         .await
@@ -148,10 +160,14 @@ async fn proof_speed_only() {
     // before echoing. The client decodes that to `ProtocolError::Refused` and short-circuits: a refusal
     // is a LOUD error, NEVER a `100% loss` report. (This test used to enshrine the bug by asserting
     // `received() == 0`.)
-    let ping = Connector::to_node(host, "ping".to_owned(), Some(member_badge))
-        .open_service(&member)
-        .await
-        .expect("the base connect lands; the offered service is resolved per-stream");
+    let ping = Connector::to_node(
+        host,
+        "ping".parse().unwrap(),
+        Some(member_badge.parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("the base connect lands; the offered service is resolved per-stream");
     let refused = Ping {
         count: 3,
         interval: Duration::ZERO,
@@ -199,10 +215,14 @@ async fn assert_stranger_refused(host: NodeId) {
     let stranger = Node::new(MemTransport::bind(), NoDiscovery);
     let stranger_badge = self_badge(&[3u8; 32], stranger.node_id());
 
-    let ping = Connector::to_node(host, "ping".to_owned(), Some(stranger_badge.clone()))
-        .open_service(&stranger)
-        .await
-        .expect("the base connect lands; the gate refuses per-stream");
+    let ping = Connector::to_node(
+        host,
+        "ping".parse().unwrap(),
+        Some(stranger_badge.clone().parse().unwrap()),
+    )
+    .open_service(&stranger)
+    .await
+    .expect("the base connect lands; the gate refuses per-stream");
     let refused = Ping {
         count: 1,
         interval: Duration::ZERO,
@@ -219,10 +239,14 @@ async fn assert_stranger_refused(host: NodeId) {
         "a stranger cannot ping the node: {refused:?}"
     );
 
-    let speed = Connector::to_node(host, "speed".to_owned(), Some(stranger_badge))
-        .open_service(&stranger)
-        .await
-        .expect("the base connect lands; the gate refuses per-stream");
+    let speed = Connector::to_node(
+        host,
+        "speed".parse().unwrap(),
+        Some(stranger_badge.parse().unwrap()),
+    )
+    .open_service(&stranger)
+    .await
+    .expect("the base connect lands; the gate refuses per-stream");
     let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
         .run(&speed)
         .await;
@@ -253,6 +277,7 @@ fn self_badge(secret: &[u8; 32], bound: NodeId) -> String {
         .unwrap()
         .link()
         .unwrap()
+        .to_string()
 }
 
 /// An empty revocation denylist: these tests exercise membership admission, not revocation, so the gate
