@@ -13,6 +13,9 @@ configure, no addresses to pass.
 This is the transport for everyday use. Every [use case](use-cases/README.md) and the
 [getting-started](getting-started.md) walkthrough use it.
 
+`iroh` falls back to public relays when a direct path fails; the relays forward encrypted bytes and
+cannot read them. Self-hosting the relays is not wired through swoosh today.
+
 ## <a id="quirk"></a>quirk (the diagnostic transport)
 
 `quirk` is our own QUIC, written from scratch over UDP. It is direct-only: it does no internet discovery
