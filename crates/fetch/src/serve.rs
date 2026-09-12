@@ -19,7 +19,7 @@ const FETCH_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Read one [`FetchRequest`], fetch the origin, write the [`FetchResponse`] + body, then close the write
 /// half so the requester sees the body's end. The handler the composing consumer injects into the tunnel's
-/// handler registry calls this with the admitted stream's halves.
+/// route table calls this with the admitted stream's halves.
 ///
 /// `allow` is the operator's origin scope for this service, set at expose time: if it
 /// is non-empty and the request's origin is not in it, the fetch is refused with a typed

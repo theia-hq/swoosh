@@ -2623,7 +2623,7 @@ dependencies = [
 [[package]]
 name = "nauthy"
 version = "0.1.0"
-source = "git+https://github.com/theia-hq/nauthy?rev=040e7ce78a7fc9b53df70cd6ef8b35116fc0a9df#040e7ce78a7fc9b53df70cd6ef8b35116fc0a9df"
+source = "git+https://github.com/theia-hq/nauthy?rev=c714e1bcd189e08c937254b4dc858f8b0f41d7f4#c714e1bcd189e08c937254b4dc858f8b0f41d7f4"
 dependencies = [
  "biscuit-auth",
  "data-encoding",
@@ -4865,7 +4865,7 @@ dependencies = [
 [[package]]
 name = "tightbeam"
 version = "0.4.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=cae5b1e74d63e3511da183353b2fcf0a59d44699#cae5b1e74d63e3511da183353b2fcf0a59d44699"
+source = "git+https://github.com/theia-hq/tightbeam?rev=db3966a5deb415b3a7d51db07dde40e78d38092c#db3966a5deb415b3a7d51db07dde40e78d38092c"
 dependencies = [
  "bifrost",
  "bifrost-iroh",

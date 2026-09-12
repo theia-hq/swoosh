@@ -22,18 +22,12 @@ use nauthy::{FileDenylist, Identity, VerifyKey};
 use swoosh::contacts::{Contacts, DeviceLabel};
 use swoosh::roster::{self, Epoch, Member, RosterDoc};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Services,
-};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 use tokio::io::AsyncReadExt as _;
 
 /// The signet's fixed secret: its ed25519 public half is the signet the gate trusts and the key that signs
 /// the roster, so a puller that trusts this signet accepts the served roster and refuses any other.
 const SIGNET_SECRET: [u8; 32] = [7u8; 32];
-
-/// The ssh host-key seed the shared `registry()` derives `sshd` from. Unused here (this exercises
-/// `roster`), but a fixed value keeps the assembled registry stable.
-const HOST_SEED: [u8; 32] = [9u8; 32];
 
 #[test]
 fn a_member_pulls_and_verifies_the_roster_a_stranger_is_refused() {
@@ -78,12 +72,17 @@ async fn proof() {
     let host_id = host.node_id();
     let signet_id = NodeId::from_ed25519_secret(&SIGNET_SECRET);
     tokio::task::spawn_local(async move {
-        let services = Services::parse(&["roster=roster:".to_owned()]).unwrap();
+        // The gate plus the `roster` route, bound by value through the same per-entry edge the product
+        // `serve` path uses for `roster=roster:`.
         let gate = tunnel::resolve_gate(Some(signet_id), empty_denylist("host").await).unwrap();
-        let registry = swoosh::commands::serve::registry(HOST_SEED)
-            .unwrap()
-            .with("roster", swoosh::commands::serve::Roster::new(blob));
-        Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
+        let router = Router::new(gate)
+            .service(
+                "roster".parse().unwrap(),
+                swoosh::commands::serve::Roster::new(blob),
+            )
+            .unwrap();
+        router
+            .expose()
             .unwrap()
             .run(&host, CancellationToken::new())
             .await

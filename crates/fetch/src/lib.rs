@@ -13,8 +13,8 @@
 //! allowlist, which is unconstrained: it fetches any origin that passes the SSRF guard.
 //!
 //! It is a service crate: it knows what to DO with an admitted stream, never how the peer was reached or
-//! gated. The composing consumer wraps [`serve_fetch`] in a handler and injects it into the tunnel's handler
-//! registry; the [`http`] framing is public so the same caller's client side speaks the wire.
+//! gated. The composing consumer wraps [`serve_fetch`] in a handler and injects it into the tunnel's
+//! route table; the [`http`] framing is public so the same caller's client side speaks the wire.
 
 pub mod http;
 mod origin;

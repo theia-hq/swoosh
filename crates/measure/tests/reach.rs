@@ -41,7 +41,7 @@ enum Serves {
 }
 
 /// Bring up a responder that serves exactly ONE method (via [`answer_ping`] / [`answer_speed`], the split
-/// handlers the gated registry wires), and a client session to it. The wrong method is then refused at the
+/// handlers the gated route table wires), and a client session to it. The wrong method is then refused at the
 /// wire with a `Response::Unsupported` frame, exactly as a node offering only that one service would.
 async fn serving_one(serves: Serves) -> Result<Paired, Error> {
     let responder = Node::new(MemTransport::bind(), NoDiscovery);

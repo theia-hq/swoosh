@@ -30,9 +30,7 @@ use bifrost_mem::MemTransport;
 use nauthy::{FileDenylist, Identity, Link};
 use swoosh::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop, Stopped};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Registry, Services,
-};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router};
 use tokio::io::AsyncReadExt as _;
 
 /// The signet's fixed secret; its ed25519 public half is the signet the family gate trusts.
@@ -249,13 +247,12 @@ async fn a_control_stop_slip_is_refused_before_ok_and_the_node_keeps_running() {
 /// node-control capability.
 async fn build_exposer(cancel: CancellationToken) -> Exposer {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
-    let services = Services::parse(&[format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:")])
-        .unwrap()
-        .member_only(CONTROL_STOP_SERVICE)
-        .unwrap();
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
-    let registry = Registry::new().with(CONTROL_STOP_SERVICE, Stop::new(cancel));
-    Exposer::new(services, registry, gate, PublicUnsafeRequest::none()).unwrap()
+    Router::new(gate)
+        .member_service(CONTROL_STOP_SERVICE.parse().unwrap(), Stop::new(cancel))
+        .unwrap()
+        .expose()
+        .unwrap()
 }
 
 /// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven node id): the shape a

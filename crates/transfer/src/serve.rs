@@ -12,7 +12,7 @@ use tokio::io::{self, AsyncWriteExt as _};
 /// the safe relative path the sender named. On any failure the temp file is removed, so a rejected or
 /// truncated transfer never leaves a partial file behind.
 ///
-/// The handler the composing consumer injects into the tunnel's handler registry calls this with one
+/// The handler the composing consumer injects into the tunnel's route table calls this with one
 /// admitted stream's halves and the node's configured output directory; the exposer hands each of the sender's per-file
 /// streams here concurrently, so a directory's files are received in parallel.
 ///

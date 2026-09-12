@@ -7,8 +7,8 @@
 //!
 //! `ping` and `speed` are TWO independent services (cheap RTT vs throughput), so a node may offer one
 //! without the other. One node here exposes `ssh`/`ping`/`speed` under a family gate
-//! rooted at a signet, assembled through the SAME `registry()` the `swoosh serve` product path builds, so
-//! this test exercises the identical registry swoosh serves rather than a hand-rolled near-copy. A client
+//! rooted at a signet, assembled through the SAME `diagnostics` helper the `swoosh serve` product path
+//! binds, so this test exercises the identical handlers swoosh serves rather than a hand-rolled near-copy. A client
 //! that dials under the signet's own key self-signs a membership badge the gate admits: it pings the node
 //! (a round trip) at `ping` and speed-tests it (bytes move both ways) at `speed`. A client under a RANDOM
 //! key self-signs a badge that roots at that stranger key, which the gate has never seen, so it is REFUSED
@@ -16,7 +16,7 @@
 //! load-bearing proof: a stranger cannot ping or speedtest a gated node.
 //!
 //! (Fetch is not exercised here: each fetch service is now its own instance under a synthetic scheme,
-//! registered by the product `serve` path, not by the shared `registry()`; its per-service scoping and
+//! bound by the product `serve` path, not by the shared `diagnostics` helper; its per-service scoping and
 //! isolation are proven in `commands/serve_tests.rs`.)
 //!
 //! The two-service split adds a wire-level invariant proven here too: a member admitted at `ping` who
@@ -43,16 +43,14 @@ use bifrost_mem::MemTransport;
 use measure::{Limit, MethodRefusal, Mode, Ping, ProtocolError, Refusal, Speedtest};
 use nauthy::{FileDenylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Services,
-};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
 /// The signet's fixed secret. Its ed25519 public half is the signet the family gate trusts, and it roots
 /// every membership badge minted here.
 const SIGNET_SECRET: [u8; 32] = [7u8; 32];
 
-/// The ssh host-key seed the exposer's registry carries. Unused by this test (it exercises `measure`, not
-/// `sshd`), but the shared `registry()` derives `sshd` from it, so a fixed value keeps the build stable.
+/// The ssh host-key seed the exposer's route table carries. Unused by this test (it exercises `measure`, not
+/// `sshd`), but the shared `diagnostics` helper derives `sshd` from it, so a fixed value keeps the build stable.
 const HOST_SEED: [u8; 32] = [9u8; 32];
 
 /// Run the proof on a worker thread with a generous stack. measure's transfer engine holds a 64 KiB chunk
@@ -81,24 +79,18 @@ fn a_member_pings_and_speeds_a_gated_node_a_stranger_is_refused() {
 async fn proof() {
     {
         // The exposer node, serving ssh/ping/speed behind a family gate rooted at the signet, through
-        // the SAME registry the product `serve` path assembles.
+        // the SAME `diagnostics` assembly the product `serve` path binds for these names.
         let host = Node::new(MemTransport::bind(), NoDiscovery);
         let host_id = host.node_id();
         let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
         tokio::task::spawn_local(async move {
-            // `sshd:` is only in the registry under the `ssh` feature, so declare it only when that
-            // feature builds it; without it, `Exposer::new` would refuse an unregistered handler. The
-            // proof exercises the ping + speed services, so gating this keeps it green WITH and WITHOUT the
-            // feature.
-            // `mut` is only exercised under the `ssh` feature (the push below); without it the vec is final.
-            #[cfg_attr(not(feature = "ssh"), allow(unused_mut))]
-            let mut requested = vec!["ping=ping:".to_owned(), "speed=speed:".to_owned()];
-            #[cfg(feature = "ssh")]
-            requested.push("ssh=sshd:".to_owned());
-            let services = Services::parse(&requested).unwrap();
+            // `sshd` is bound only under the `ssh` feature, so the shared `diagnostics` helper carries it
+            // only there; the proof exercises the ping + speed services, so gating this keeps it green WITH
+            // and WITHOUT the feature.
             let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-            let registry = swoosh::commands::serve::registry(HOST_SEED).unwrap();
-            Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
+            swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED)
+                .unwrap()
+                .expose()
                 .unwrap()
                 .run(&host, CancellationToken::new())
                 .await

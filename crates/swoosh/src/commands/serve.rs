@@ -9,8 +9,8 @@
 //! (`Exposer`) directly under swoosh's OWN persisted identity:
 //! the node binds the same key `swoosh ssh` and a minted `swoosh grant issue` link root at, gates on the
 //! signet read from swoosh's own store, and derives the ssh host seed from swoosh's secret, so an
-//! `ssh=sshd:` service presents the host key a client pins. swoosh assembles the whole handler registry
-//! itself (`fetch:`, `ping:`/`speed:`, and `sshd:` under the `ssh` feature), builds the gate through the shared
+//! `ssh=sshd:` service presents the host key a client pins. swoosh assembles the whole route table
+//! itself (`fetch`/`recv` instances, `ping`/`speed`, and `sshd` under the `ssh` feature), builds the gate through the shared
 //! [`resolve_gate`](tightbeam::tunnel::resolve_gate) policy, and prints its OWN readiness banner. `--public`
 //! and `--quiet` live on THIS verb (not root), and reach comes via the shared
 //! [`ReachArgs`](crate::transport::ReachArgs), flattened like every other reaching verb. `--expires` is a
@@ -25,12 +25,12 @@ use std::sync::Arc;
 use ::fetch::OriginAllowlist;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
-use nauthy::{FileDenylist, VerifyKey};
+use nauthy::{FileDenylist, Service, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::enabled::FileDisabledList;
 use tightbeam::tunnel::{
-    self, CancellationToken, Exposer, ManifestEntry, Posture, PublicRequest, PublicUnsafeRequest,
-    RawSource, Registry, Services, TargetKind,
+    self, CancellationToken, Exposer, ManifestEntry, Metering, Posture, RawSource, Router,
+    ServeError, TargetKind,
 };
 
 use crate::contacts::{Contacts, Petname};
@@ -66,7 +66,7 @@ pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_singl
 use self::fetch::Fetch;
 use self::ping::Ping;
 // `pub use`: the gated send/recv proof (`tests/gated_send.rs`) builds the receive handler directly now that
-// recv is de-merged OUT of the shared `registry()` (like `fetch:`), so it exercises the identical `Recv`.
+// recv is bound per service like `fetch:`, so it exercises the identical `Recv`.
 pub use self::recv::Recv;
 pub use self::roster::Roster;
 pub use self::services::ServiceList;
@@ -79,7 +79,7 @@ pub use self::stop::{STOP_ACK, Stop};
 /// teardown (the remote twin of a local Ctrl-C or a `--expires` deadline). The client verb is `swoosh stop`.
 ///
 /// SETTLED name (delib-23, Principal-ruled): one unified `control.*` family over both the reads
-/// (`control.status`) and the mutations (`control.stop`); the dotted scheme is the verbatim registry key,
+/// (`control.status`) and the mutations (`control.stop`); the dotted name is the verbatim wire name,
 /// gated exact-name, so a grant for one method can never open another. Public so the `swoosh stop` client
 /// verb requests the SAME name the served handler is keyed under, one source of truth for the wire string.
 pub const CONTROL_STOP_SERVICE: &str = "control.stop";
@@ -89,10 +89,10 @@ pub const CONTROL_STOP_SERVICE: &str = "control.stop";
 /// anyone). A pure READ of what the exposer was built with, no mutable state and no authority granted. The
 /// client verb is `swoosh service --at <peer>`.
 ///
-/// GATED (`type Public = Never`, like `control.stop`): the service menu is member-only, so a stranger never
+/// GATED (`type Exposure = Never`, like `control.stop`): the service menu is member-only, so a stranger never
 /// learns what a node serves (delib-18: existence and shape are revealed only AFTER admission; this is the
 /// teaching read the wrong-name path deliberately withholds). One unified `control.*` family, the dotted
-/// scheme is the verbatim registry key. Public so the `swoosh service` client requests the SAME name the
+/// name is the verbatim wire name. Public so the `swoosh service` client requests the SAME name the
 /// served handler is keyed under, one source of truth for the wire string.
 pub const CONTROL_SERVICES_SERVICE: &str = "control.services";
 
@@ -120,7 +120,7 @@ pub struct ServeCmd {
                      (`sshd:`, remote code execution) is refused with a teaching error, and \
                      `control.stop`/`control.services` can never be opened. `ping`/`speed` MAY be opened, \
                      but they have no responder-side rate limit yet, so an open one lets an anonymous \
-                     caller drain this node's uplink (an amplifier); the readiness banner says so.\n\nA \
+                     caller drain this node's uplink (unmetered); the readiness banner says so.\n\nA \
                      raw-stream service (file:/fifo:/stdin:) has no auth of its own, so --public refuses it \
                      and points you at --public-unsafe, the distinct, louder opt-in."
     )]
@@ -297,7 +297,7 @@ impl ServeCmd {
     /// Serve the named services (default `ping:` + `speed:`) under swoosh's identity by driving the
     /// tunnel core directly: parse the services, resolve the gate from swoosh's own signet + denylist (through
     /// the shared `resolve_gate` policy, so `--public` opens, else a family gate on the signet), assemble the
-    /// handler registry (`fetch:`, `ping:`/`speed:`, and `sshd:` under the `ssh` feature), print
+    /// route table (`fetch`/`recv` instances, `ping`/`speed`, and `sshd` under the `ssh` feature), print
     /// swoosh's banner, and run the exposer. A `sshd:`/`ping:`/`speed:` service stays gated regardless. The `signet` here is already
     /// resolved by the composition root: a provisioned signet if one was adopted, else this node's OWN key
     /// (person-zero self-trusts), so a plain node gates on itself rather than failing "no signet".
@@ -326,117 +326,97 @@ impl ServeCmd {
         } else {
             self.services.clone()
         };
-        // Every node answers its own `control.stop`, always, whatever else it serves: the node-lifecycle
-        // control surface is part of being a node, not a service the operator opts into. It is MEMBER-only
-        // (declared below, where the routes are assembled): the gate admits a family badge or a service
-        // slip, and the route's access floor then refuses anything that is not a whole-node member BEFORE
-        // any `Response::Ok`, so a delegate holding a `control.stop` slip cannot stop the node. Pointed at
-        // the `control.stop:` handler injected below.
-        requested.push(format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:"));
-        // Every node also answers its own member-only `control.services` read: the node-lifecycle READ twin
-        // of `control.stop`, part of being a node, with the same floor. Pointed at the
-        // `control.services:` handler injected below.
-        requested.push(format!(
-            "{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"
-        ));
-        // Pull each fetch service out of the requested set BEFORE tightbeam parses them, and de-merge them:
-        // every `name=fetch:<origin>` becomes its OWN handler instance holding ONLY its own origin scope,
-        // registered under a distinct UNSPELLABLE synthetic scheme (`fetch_0`, `fetch_1`, ...). A public
+        // Every node answers its own `control.stop` and member-only `control.services`, always, whatever
+        // else it serves: the node-lifecycle control surface is part of being a node, not a service the
+        // operator opts into. Both are MEMBER-only (`.member_service` below): the gate admits a family
+        // badge or a service slip, and the route's access floor then refuses anything that is not a
+        // whole-node member BEFORE any `Response::Ok`, so a delegate holding a `control.stop` slip cannot
+        // stop the node.
+        //
+        // They are bound by VALUE, not named in the `name=addr` set: the scheme namespace left tightbeam's
+        // public API, so a handler route is a `.service(name, value)` call, never a spellable addr.
+        //
+        // Pull each fetch service out of the requested set BEFORE the router binds it, and de-merge: every
+        // `name=fetch:<origin>` becomes its OWN handler instance holding ONLY its own origin scope. A public
         // fetch handler therefore physically holds only its own origins and cannot reach a gated fetch's
-        // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention (delib-39 BLOCKER-3). The
-        // synthetic scheme carries a `_`, which the addr grammar rejects, so no operator entry (`x=fetch_0:`)
-        // can ever resolve onto a synthetic instance.
+        // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention (delib-39 BLOCKER-3).
         let fetch = FetchScope::extract(&mut requested)?;
         // De-merge the receive services the SAME way (delib-39): every `name=recv:<dir>` becomes its OWN
-        // `Recv` instance bound to ONLY its own sink directory, registered under a distinct UNSPELLABLE
-        // synthetic scheme (`recv_0`, `recv_1`, ...). A node-wide sink cannot say which of two receive
-        // services saves where, so the dir rides the per-service instance: `a=recv:/x b=recv:/y` writes
-        // alice's pushes into /x and bob's into /y, each scoped to its own service and grant. A public
-        // fetch's SSRF-pivot argument does not apply (recv is always gated, `Recv::Public = Never`), so this
-        // is the plain per-instance de-merge without an open-relay wall. Extracted BEFORE `Services::parse`,
-        // exactly like fetch, because `recv:`'s `Target::Handler` cannot itself carry the dir. A `name=recv:`
-        // (no dir) saves into `.`.
+        // `Recv` instance bound to ONLY its own sink directory, so `a=recv:/x b=recv:/y` writes alice's
+        // pushes into /x and bob's into /y, each scoped to its own service and grant. A public fetch's
+        // SSRF-pivot argument does not apply (recv is always gated), so this is the plain per-instance
+        // de-merge without an open-relay wall. A `name=recv:` (no dir) saves into `.`.
         let recv = extract_recv_services(&mut requested)?;
-        let mut services = Services::parse(&requested)?;
-        for scoped in fetch.services() {
-            // Inserted DIRECTLY (bypassing the addr grammar) so the synthetic `_`-bearing scheme is usable.
-            services = services.with_handler(scoped.name(), scoped.scheme())?;
-        }
-        for service in &recv {
-            // Same direct insert: each receive service maps its served name to its own `recv_<i>` instance,
-            // the synthetic `_`-bearing scheme bypassing the addr grammar just as fetch's does.
-            services = services.with_handler(service.name(), service.scheme())?;
-        }
-        // The two node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the
-        // route's access class after the gate admits and before any `Response::Ok`, so a delegated slip
-        // that grants `control.stop`/`control.services` is refused with the same uniform refusal a gate
-        // miss gives, pre-Ok. The declaration lives HERE, where the routes are assembled, because access
-        // is a property of the route, and tightbeam's door refuses a member-only route no dial could
-        // reach (under an open gate, or named public/unsafe).
-        let services = services
-            .member_only(CONTROL_STOP_SERVICE)?
-            .member_only(CONTROL_SERVICES_SERVICE)?;
-        // The operator's raw `--public` request: the UNPROVEN set of names to open. `Exposer::with_public`
-        // below is the wall that proves each one exposed and open-safe (per-service), turning it into the
-        // gate's proven overlay; a `Never` service or an unknown name bails there.
-        let public = PublicRequest::new(self.public.clone());
-        // The operator's raw UNSAFE raw-stream request: the UNPROVEN set of raw-stream names to serve to
-        // strangers. `Exposer::new` below is the wall that proves each one an exposed raw stream (a handler or
-        // a forward named here is redirected to `--public`, an unknown name bails). Kept DISJOINT from
-        // `public` so the louder opt-in stays a distinct, deliberate thing.
-        let public_unsafe = PublicUnsafeRequest::new(self.public_unsafe.clone());
-        // Resolve the node BASE gate before announcing readiness: an unprovisioned node fails HERE, through
-        // the ONE shared policy point, rather than ever serving on a permissive default. Opening individual
-        // services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
-        let gate = tunnel::resolve_gate(signet, denylist)?;
-        // Refuse an unconstrained PUBLIC fetch per-service: for each fetch service NAMED in `--public` whose
-        // allowlist is unconstrained, bail at build time (an open egress relay). With per-service scopes in
-        // hand this reasons about "is THIS public fetch unconstrained", so a second origin-scoped fetch can no
-        // longer mask a named public one. Stays swoosh-side; tightbeam's `with_public` handles the sshd/raw wall.
-        fetch.refuse_open_relay(&public)?;
-        // Snapshot the served catalog (names + effective PER-SERVICE posture: open iff opened by `--public`,
-        // else gated) ONCE, here, for the `control.services` read handler AND the resident socket read to
-        // serve. Both serve the same snapshot: the handler takes one clone, the resident state below takes
-        // the other. Built from the same raw request `with_public` proves below, so a name reads `open`
-        // only when the proof would also pass.
-        let catalog = services.catalog(&gate, &public, &public_unsafe);
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
         // `--expires` timer, the gated `control.stop` handler, and (under `--resident`) the local socket
         // `Stop` each hold a CLONE as the node-control capability: they may REQUEST the stop, never tear
         // the node down themselves. So this one token is the join point for every way the node can stop:
         // a Ctrl-C, a `--expires` deadline, a remote `swoosh stop`, or the local socket stop.
         let cancel = CancellationToken::new();
-        // Assemble the registry: the base handlers, then one `Fetch` instance per fetch service under its own
-        // synthetic scheme, then roster + the two `control.*` handlers. `Exposer::new` enforces every named
-        // handler is registered and guards a node-wide-open base; `with_public` then proves the per-service
-        // overlay (sshd/raw/unknown bail here, before any banner advertises a service it will not serve).
-        let mut registry = registry(host_seed)?;
+        // Resolve the node BASE gate before announcing readiness: an unprovisioned node fails HERE, through
+        // the ONE shared policy point, rather than ever serving on a permissive default. Opening individual
+        // services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
+        //
+        // `Router::catalog` renders the `control.services` read and reads only whether the base gate is
+        // whole-node open; `Router` owns its gate with no accessor, so the display render gets a second
+        // rooted gate through the same policy on the same authority (the catalog never reads the
+        // revocation store). A `Router::base_gate()` accessor would delete this second value.
+        let catalog_gate = tunnel::resolve_gate(signet, FileDenylist::empty(PathBuf::new()))?;
+        let gate = tunnel::resolve_gate(signet, denylist)?;
+        // One `Router`: each route binds a handler VALUE (ping/speed/roster/sshd, the fetch and recv
+        // instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector) through
+        // the `name=addr` grammar. The public overlays prove at `.expose()` below, so prove-before-announce
+        // holds.
+        let mut router = Router::new(gate);
+        for entry in &requested {
+            router = bind_entry(router, entry, host_seed, &roster_blob)?;
+        }
         for scoped in fetch.services() {
-            registry = registry.with(
-                scoped.scheme(),
+            // One `Fetch` instance per fetch service, holding ONLY its own origin scope: the SSRF pivot is
+            // unrepresentable, not merely refused.
+            router = router.service(
+                scoped.name().parse()?,
                 Fetch {
                     allow: scoped.allow().clone(),
                 },
-            );
+            )?;
         }
         for service in &recv {
-            // One `Recv` instance per receive service, keyed under its own synthetic scheme and holding ONLY
-            // its own sink dir, so a push to one receive service can never land in another's directory.
-            registry = registry.with(service.scheme(), Recv::new(service.out().to_owned()));
+            // One `Recv` instance per receive service, holding ONLY its own sink dir, so a push to one
+            // receive service can never land in another's directory.
+            router =
+                router.service(service.name().parse()?, Recv::new(service.out().to_owned()))?;
         }
-        let registry = registry
-            .with("roster", Roster::new(roster_blob))
-            .with(CONTROL_STOP_SERVICE, Stop::new(cancel.clone()))
-            .with(
-                CONTROL_SERVICES_SERVICE,
-                ServiceList::new(tightbeam::tunnel::ServiceCatalog::clone(&catalog)),
-            );
+        // The two node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the
+        // route's access class after the gate admits and before any `Response::Ok`, so a delegated slip
+        // that grants `control.stop`/`control.services` is refused with the same uniform refusal a gate
+        // miss gives, pre-Ok. Access is a property of the route, declared at the bind.
+        router = router.member_service(CONTROL_STOP_SERVICE.parse()?, Stop::new(cancel.clone()))?;
+        // Refuse an unconstrained PUBLIC fetch per-service: for each fetch service NAMED in `--public`
+        // whose allowlist is unconstrained, bail at build time (an open egress relay). With per-service
+        // scopes in hand this reasons about "is THIS public fetch unconstrained", so a second origin-scoped
+        // fetch can no longer mask a named public one.
+        fetch.refuse_open_relay(&self.public)?;
+        // Declare both open overlays from the operator's raw names: the safe `--public` set and the
+        // distinct, louder `--public-unsafe` raw-stream set. The proof (an unknown name, a `Never` handler,
+        // a raw stream in the safe set, a handler in the unsafe set) runs at `.expose()` below, before any
+        // banner advertises a service it will not serve.
+        let public = parse_services(&self.public)?;
+        let public_unsafe = parse_services(&self.public_unsafe)?;
+        router = router.public(public).public_unsafe(public_unsafe);
+        // Snapshot the served catalog (names + effective PER-SERVICE posture: open iff opened by an
+        // overlay, else gated) ONCE, here, for the `control.services` read handler AND the resident socket
+        // read to serve. Both serve the same snapshot. `self_listing` renders the one row being built:
+        // `control.services` itself, always gated (a `Never` route can never be open).
+        let catalog = router.catalog(&catalog_gate, Some(CONTROL_SERVICES_SERVICE.parse()?));
+        let router = router.member_service(
+            CONTROL_SERVICES_SERVICE.parse()?,
+            ServiceList::new(catalog.clone()),
+        )?;
         // Wire the live enable/disable oracle (delib-47) alongside the proven public overlay: a stream for a
         // service named in `<home>/disabled` is refused at the gate seam, live, and a re-enable restores it
         // with no restart. `with_enabled` cannot fail (it only stores the oracle), so it tails the chain.
-        let exposer = Exposer::new(services.clone(), registry, gate, public_unsafe)?
-            .with_public(public)?
-            .with_enabled(enabled);
+        let exposer = router.expose()?.with_enabled(enabled);
 
         // The resident listener arm (S4), after the proven overlay so a refused serve never binds
         // a socket. Order: (1) plain serve acquires nothing (byte-identical, no dir, no lock, no
@@ -473,14 +453,14 @@ impl ServeCmd {
             // carried: a plain serve (resident `None`) reads exactly once here, as today, and the
             // resident arm carries the status `addr` from the same bound node.
             let addr = node.local_addr();
-            // A display map of served name -> target address, read off the SAME requested strings tightbeam
-            // parsed (fetch already de-merged out), so the banner renders `name -> target` from what the
+            // A display map of served name -> target address, read off the SAME requested strings the router
+            // bound (fetch already de-merged out), so the banner renders `name -> target` from what the
             // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
-            // amplifier caveat). Fetch names are handled by gloss (their synthetic scheme is unspellable).
+            // unmetered caveat). Fetch names are handled by gloss (their addr carries the origin scope).
             let mut addr_by_name = display_targets(&requested)?;
             for service in &recv {
-                // Receive services are de-merged out of `requested` (their `recv_<i>` scheme is unspellable),
-                // so re-add each under its served name pointing at the `recv:` scheme. The banner then
+                // Receive services are de-merged out of `requested` (their dir is not an addr the router can
+                // read), so re-add each under its served name pointing at the `recv:` scheme. The banner then
                 // renders it through the SAME handler-scheme path as any other handler (`in -> recv`,
                 // "receives pushed files"), never leaking the synthetic scheme.
                 addr_by_name.insert(service.name().to_owned(), format!("{RECV_SCHEME}:"));
@@ -699,11 +679,11 @@ impl ServeCmd {
     }
 }
 
-/// Build the `name -> target` display map from the SAME requested strings tightbeam parsed: each
+/// Build the `name -> target` display map from the SAME requested strings the router bound: each
 /// `name=addr`. This is swoosh's own render vocabulary; tightbeam's manifest supplies the load-bearing
-/// facts (posture, kind, the amplifier caveat). Fetch entries are already de-merged out of `requested`,
-/// so they never appear here (the banner glosses them by name instead, their synthetic scheme being
-/// unspellable). A bare entry (no `=`) is a teaching error, mirroring [`Services::parse`](tunnel::Services).
+/// facts (posture, kind, the unmetered caveat). Fetch entries are already de-merged out of `requested`,
+/// so they never appear here (the banner glosses them by name instead, their addr being an origin scope).
+/// A bare entry (no `=`) is a teaching error, mirroring tightbeam's `name=addr` grammar.
 fn display_targets(requested: &[String]) -> eyre::Result<HashMap<String, String>> {
     let mut map = HashMap::with_capacity(requested.len());
     for entry in requested {
@@ -770,8 +750,8 @@ enum MdnsState {
 }
 
 /// The posture group a served service sits under in the banner, safest-first. The security weight lives on the
-/// GROUP and escalates monotonically DOWN the list (delib-41 Newcomer fix): `FamilyGated` (no marker) <
-/// `Public` (a marker) < `PublicUnsafe` (the loudest). A per-service caveat (an amplifier) is quiet inline
+/// GROUP and escalates monotonically DOWN the list (delib-41 Newcomer fix): `FamilyGated` (no overlay) <
+/// `Public` (an open overlay) < `PublicUnsafe` (the loudest). A per-service caveat (an unmetered one) is quiet inline
 /// prose, never a marker louder than the group above it, so a reader can never conclude a `public` service is
 /// scarier than a `public-UNSAFE` one. Ordered so the derived `Ord` IS the safest-first render order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -820,8 +800,10 @@ fn handler_gloss(scheme: &str) -> String {
 
 /// The rendered `<label>` and `<gloss>` for one service row: `name -> target` when the name points elsewhere
 /// (`ssh -> sshd`, `logs -> file:...`), or just `name` when the name IS the target scheme (`speed`). Fetch
-/// services gloss by name (their synthetic scheme is unspellable). The kind is tightbeam's declared
-/// [`TargetKind`], so a raw stream vs a forward vs a handler is not re-derived from the address string.
+/// services gloss by name (their synthetic scheme is unspellable). The KIND is tightbeam's declared
+/// [`TargetKind`] (handler vs raw stream); within the handler kind the operator's typed target distinguishes
+/// the built-in forward and the `echo:` reflector from a named handler scheme, because both built-ins are
+/// first-party handlers now and carry no addr tail of their own.
 fn describe(
     entry: &ManifestEntry,
     addr_by_name: &HashMap<String, String>,
@@ -840,6 +822,18 @@ fn describe(
         .unwrap_or_default();
     match entry.kind {
         TargetKind::Handler => {
+            // tightbeam's built-in loopback reflector: it opens no host resource and reflects only the
+            // caller's own bytes, so it carries no danger gloss (an open echo sits in the plain `public`
+            // group, never `public-UNSAFE`). The name reads alone (like `speed`), the target being the
+            // built-in itself.
+            if addr == "echo:" {
+                return (name.to_owned(), "echoes your bytes back to you".to_owned());
+            }
+            // tightbeam's built-in local forward (`host:port` / `unix:<path>`): a socket the operator
+            // deliberately stood up, glossed as such.
+            if is_forward(addr) {
+                return (format!("{name} -> {addr}"), "local TCP service".to_owned());
+            }
             let scheme = addr.strip_suffix(':').unwrap_or(addr);
             let label = if name == scheme {
                 name.to_owned()
@@ -848,7 +842,6 @@ fn describe(
             };
             (label, handler_gloss(scheme))
         }
-        TargetKind::Forward => (format!("{name} -> {addr}"), "local TCP service".to_owned()),
         // The label keeps the operator's typed target (`logs -> file:~/...`); the GLOSS is where the danger
         // is loud. An OPEN raw stream names the RESOLVED ABSOLUTE source (from tightbeam's declared
         // `raw_source`, not the un-resolved typed string) so the warning shows the exact bytes at risk; the
@@ -870,13 +863,18 @@ fn describe(
             };
             (format!("{name} -> {addr}"), gloss)
         }
-        // tightbeam's built-in loopback reflector: it opens no host resource and reflects only the caller's
-        // own bytes, so it carries no danger gloss (an open echo sits in the plain `public` group, never
-        // `public-UNSAFE`). The name reads alone (like `speed`), the target being the built-in itself.
-        // FLAG(CLI-Architect/Scribe): the echo row label/gloss wording is a reversible default kept minimal to
-        // render the new kind; open to the owner's final call.
-        TargetKind::Echo => (name.to_owned(), "echoes your bytes back to you".to_owned()),
     }
+}
+
+/// Whether the operator's typed target is tightbeam's built-in local forward (`host:port` / `unix:<path>`)
+/// rather than a named handler scheme. Both forwards and the `echo:` reflector are first-party [`Handler`]s,
+/// so the manifest's [`TargetKind`] names only handler-vs-raw-stream; the display map carries the finer
+/// render distinction. Mirrors tightbeam's own forward grammar so the two never disagree.
+fn is_forward(addr: &str) -> bool {
+    addr.starts_with("unix:")
+        || addr
+            .rsplit_once(':')
+            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
 }
 
 /// Render the full readiness banner as ONE string (pure, so it is unit-testable and printed once): the
@@ -992,7 +990,7 @@ fn reach_line(width: usize, gutter: usize, label: &str, gloss: &str) -> String {
 /// to one line, glossed `never public` (it can never be opened with `--public`, unlike the other gated
 /// services). Within a group the gloss column aligns (per group, so a long raw-stream
 /// row never widens the tight family block). The danger weight is monotonic on the GROUP headers; a
-/// per-service amplifier caveat is quiet inline prose, never a marker louder than the group above it.
+/// per-service unmetered caveat is quiet inline prose, never a marker louder than the group above it.
 fn serving_section(
     manifest: &[ManifestEntry],
     addr_by_name: &HashMap<String, String>,
@@ -1004,14 +1002,15 @@ fn serving_section(
     let mut has_control = false;
     for entry in manifest {
         // `control.stop` / `control.services` fold into one row: node plumbing an operator never opts into,
-        // never a hidden service. Detected by the `control.` prefix, the verbatim registry family.
+        // never a hidden service. Detected by the `control.` prefix, the verbatim wire family.
         if entry.name.starts_with("control.") {
             has_control = true;
             continue;
         }
         let (label, gloss) = describe(entry, addr_by_name, fetch_names);
-        let caveat = (entry.amplifier && entry.posture == Posture::Open)
-            .then(|| "unmetered: a stranger can drain your uplink".to_owned());
+        let caveat = (entry.posture == Posture::Open
+            && matches!(entry.metering, Some(Metering::Unmetered)))
+        .then(|| "unmetered: a stranger can drain your uplink".to_owned());
         rows.entry(Group::of(entry))
             .or_default()
             .push((label, gloss, caveat));
@@ -1117,31 +1116,70 @@ pub(crate) fn humanize_secs(mut secs: u64) -> String {
     }
 }
 
-/// Assemble the BASE handler registry swoosh serves: the two gated diagnostic services `ping:` and `speed:`,
-/// and (under the `ssh` feature) the keyless shell `sshd:`. swoosh is the one crate that depends on every
-/// service crate, so it is the one place these are wired: tightbeam names no service crate and ships no
-/// built-in, and this function injects them all with `.with(...)`.
+/// Bind one operator `name=addr` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
+/// left tightbeam's public API, so a handler route is never a spellable addr): the diagnostic names here,
+/// and tightbeam's own primitives (a `host:port`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the
+/// `echo:` reflector) through [`Router::parse`], which owns the grammar and its teaching errors.
 ///
-/// Fetch is NOT here, and neither is recv: each is de-merged into its OWN handler instance holding only its
-/// own scope, registered by `run_serve` under a distinct synthetic scheme (delib-39). A fetch instance holds
-/// only its own origin allowlist (so there is no single shared `fetch:` handler to over-permit, BLOCKER-3); a
-/// `Recv` instance holds only its own sink directory (so `a=recv:/x b=recv:/y` writes each peer's pushes into
-/// its OWN dir, not the first-named one). `roster:` and the two `control.*` handlers are likewise added by
-/// `run_serve` (they hold per-run state: the signed roster blob, the teardown token, the catalog snapshot).
+/// `roster:` binds the signed membership snapshot the run cut; a node that never names it never serves it.
+/// Public as the per-entry edge the split-service proof drives to offer a SUBSET of the diagnostics.
+pub fn bind_entry(
+    router: Router,
+    entry: &str,
+    host_seed: [u8; 32],
+    roster_blob: &Arc<Vec<u8>>,
+) -> eyre::Result<Router> {
+    #[cfg(not(feature = "ssh"))]
+    let _ = host_seed;
+    let Some((name, addr)) = entry.split_once('=') else {
+        // No `=`: tightbeam's grammar owns the `name=addr` teaching error.
+        return router.parse(&[entry.to_owned()]);
+    };
+    let name: Service = name.parse()?;
+    match addr {
+        "ping:" => router.service(name, Ping),
+        "speed:" => router.service(name, Speed),
+        "roster:" => router.service(name, Roster::new(Arc::clone(roster_blob))),
+        #[cfg(feature = "ssh")]
+        "sshd:" => router.service(name, Sshd { host_seed }),
+        // A forward, a raw stream, the `echo:` reflector, or an unknown scheme: tightbeam's grammar.
+        _ => router.parse(&[entry.to_owned()]),
+    }
+}
+
+/// Bind the conventional diagnostic routes (`ping`, `speed`, and `sshd` under the `ssh` feature) onto
+/// `router`, one handler instance per name. This is the assembly the `swoosh serve` path binds for
+/// operator-named diagnostics, and the one the integration proofs drive, so a test exercises the identical
+/// handler types the product serves rather than a hand-rolled near-copy.
 ///
 /// ping and speed are TWO independent services so a node may offer ping without speed (or the reverse),
 /// and each carries its own gate: `ping` answers only ping frames, `speed` only speed frames, refusing the
 /// other method at the wire (`ProtocolError::WrongService`), so a grant for one can never open the other.
-///
-/// The ONE assembly the product verb and the `gated_measure` proof test both build, so the test exercises the
-/// identical handlers swoosh serves rather than a hand-rolled near-copy.
-pub fn registry(host_seed: [u8; 32]) -> eyre::Result<Registry> {
-    let registry = Registry::new().with("ping", Ping).with("speed", Speed);
+pub fn diagnostics(router: Router, host_seed: [u8; 32]) -> eyre::Result<Router> {
+    let router = router.service("ping".parse()?, Ping)?;
+    let router = router.service("speed".parse()?, Speed)?;
     #[cfg(feature = "ssh")]
-    let registry = registry.with("sshd", Sshd { host_seed });
+    let router = router.service("sshd".parse()?, Sshd { host_seed })?;
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
-    Ok(registry)
+    Ok(router)
+}
+
+/// Parse the operator's raw `--public`/`--public-unsafe` names into typed [`Service`]s: the Router's overlays
+/// take the domain type, so a malformed name fails at the serve edge with its own parse error.
+fn parse_services(names: &[String]) -> eyre::Result<Vec<Service>> {
+    names
+        .iter()
+        .map(|name| name.parse::<Service>().map_err(Into::into))
+        .collect()
+}
+
+/// Map an engine failure into the handler contract's typed [`ServeError`]. The contract's error has no
+/// engine arm yet (the `ServeError` decision lands with the `tightbeam-handler` extraction), so an engine
+/// body's failure travels as `ServeError::Io` carrying the typed cause; the CLI renders it at the verb
+/// edge. An engine that already returns `io::Error` maps through `From` directly.
+pub(super) fn engine_failure(error: impl core::error::Error + Send + Sync + 'static) -> ServeError {
+    ServeError::Io(std::io::Error::other(error))
 }
 
 /// Cut the current roster from the operator's own contacts (the `me/<label>` partition, where `mint`
@@ -1173,18 +1211,16 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
 }
 
 /// The scheme a receive service names, so the sink-dir extraction matches `recv:<dir>` on the ONE literal
-/// (the same literal the registry keys the handler under), not a re-typed string that could drift from it.
+/// (the same literal the extraction and the banner gloss match), not a re-typed string that could drift.
 const RECV_SCHEME: &str = "recv";
 
 /// One de-merged receive service: its served NAME (the wire name `swoosh send --service` requests, e.g. the
-/// default `recv`), the UNSPELLABLE synthetic registry scheme its own `Recv` instance is keyed under
-/// (`recv_0`, `recv_1`, ...), and ONLY its own sink directory. Because each receive service holds its own
-/// instance under its own scheme, `a=recv:/x b=recv:/y` writes alice's pushes into /x and bob's into /y: a
-/// node-wide sink cannot say which of two receive services saves where, so the dir rides the per-service
-/// instance (delib-39 de-merge, mirroring `fetch:`).
+/// default `recv`) and ONLY its own sink directory. Because each receive service holds its own [`Recv`]
+/// instance, `a=recv:/x b=recv:/y` writes alice's pushes into /x and bob's into /y: a node-wide sink cannot
+/// say which of two receive services saves where, so the dir rides the per-service instance (delib-39
+/// de-merge, mirroring `fetch:`).
 struct RecvService {
     name: String,
-    scheme: String,
     out: PathBuf,
 }
 
@@ -1194,23 +1230,17 @@ impl RecvService {
         &self.name
     }
 
-    /// The synthetic, unspellable registry scheme this service's own `Recv` instance is keyed under.
-    fn scheme(&self) -> &str {
-        &self.scheme
-    }
-
     /// This service's own sink directory (only its own; never shared with another receive service).
     fn out(&self) -> &Path {
         &self.out
     }
 }
 
-/// De-merges the receive services out of the requested set: a `name=recv:<dir>` entry hands tightbeam a sink
-/// directory its bare-scheme `Target::Handler` cannot hold, so swoosh separates each into its OWN
-/// [`RecvService`] (name + a distinct synthetic scheme + its own sink dir) here, before `Services::parse`,
-/// the same shape as the `fetch:` de-merge. A `name=recv:` (no dir) saves into `.`. An entry without `=`
-/// is a teaching error, mirroring [`Services::parse`](tunnel::Services::parse).
-/// Non-recv entries are left in place, in order.
+/// De-merges the receive services out of the requested set: a `name=recv:<dir>` entry hands the router a
+/// sink directory its addr grammar cannot carry, so swoosh separates each into its OWN [`RecvService`]
+/// (name + its own sink dir) here, then binds one `Recv` instance per name by value. A `name=recv:` (no dir)
+/// saves into `.`. An entry without `=` is a teaching error, mirroring tightbeam's grammar. Non-recv entries
+/// are left in place, in order.
 fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<RecvService>> {
     let mut services: Vec<RecvService> = Vec::new();
     let mut remaining: Vec<String> = Vec::new();
@@ -1223,7 +1253,7 @@ fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<RecvSe
             );
         };
         // A receive service is `recv:` optionally followed by a dir. A non-recv entry passes through
-        // unchanged, in order, for `Services::parse`.
+        // unchanged, in order, for the router's own grammar.
         let Some(dir) = addr
             .strip_prefix(RECV_SCHEME)
             .and_then(|rest| rest.strip_prefix(':'))
@@ -1231,20 +1261,15 @@ fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<RecvSe
             remaining.push(entry);
             continue;
         };
-        // A `name=recv:` (no dir) saves into `.`; `name=recv:<dir>` into <dir>. The dir is this service's OWN, on its OWN
-        // instance, so two receive services never share one sink.
+        // A `name=recv:` (no dir) saves into `.`; `name=recv:<dir>` into <dir>. The dir is this service's
+        // OWN, on its OWN instance, so two receive services never share one sink.
         let out = if dir.is_empty() {
             PathBuf::from(".")
         } else {
             PathBuf::from(dir)
         };
-        // Each receive service gets its OWN unspellable synthetic scheme, indexed so two never collide; the
-        // `_` it carries is a byte `parse_target` rejects, so no operator entry (`x=recv_0:`) can resolve
-        // onto a synthetic instance.
-        let scheme = format!("{RECV_SCHEME}_{}", services.len());
         services.push(RecvService {
             name: name.to_owned(),
-            scheme,
             out,
         });
     }
@@ -1256,14 +1281,12 @@ fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<RecvSe
 /// literal, not a re-typed string that could drift from it.
 const FETCH_SCHEME: &str = "fetch";
 
-/// One de-merged fetch service: its served NAME (the wire name a dialer requests, e.g. `news`), the
-/// UNSPELLABLE synthetic registry scheme its own `Fetch` instance is keyed under (`fetch_0`, `fetch_1`, ...),
-/// and ONLY its own origin scope. Because each fetch service holds its own instance under its own scheme, a
-/// public fetch physically cannot reach a gated fetch's origins: the SSRF pivot is unrepresentable, not
-/// fail-closed-by-convention (delib-39 BLOCKER-3).
+/// One de-merged fetch service: its served NAME (the wire name a dialer requests, e.g. `news`) and ONLY its
+/// own origin scope. Because each fetch service holds its own [`Fetch`] instance, a public fetch physically
+/// cannot reach a gated fetch's origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention
+/// (delib-39 BLOCKER-3).
 struct FetchService {
     name: String,
-    scheme: String,
     allow: OriginAllowlist,
 }
 
@@ -1273,32 +1296,26 @@ impl FetchService {
         &self.name
     }
 
-    /// The synthetic, unspellable registry scheme this service's own `Fetch` instance is keyed under.
-    fn scheme(&self) -> &str {
-        &self.scheme
-    }
-
     /// This service's own origin scope (only its own; never merged with another's).
     fn allow(&self) -> &OriginAllowlist {
         &self.allow
     }
 }
 
-/// De-merges the fetch services out of the requested set: a `name=fetch:<origin>` entry hands tightbeam an
-/// origin its bare-scheme `Target::Handler` cannot hold, so swoosh separates each into its OWN
-/// [`FetchService`] (name + a distinct synthetic scheme + its own origin scope) here, before `Services::parse`.
+/// De-merges the fetch services out of the requested set: a `name=fetch:<origin>` entry hands the router an
+/// origin its addr grammar cannot carry, so swoosh separates each into its OWN [`FetchService`] (name + its
+/// own origin scope) here, then binds one `Fetch` instance per name by value.
 ///
 /// A pure edge adapter over the raw request strings. A `name=fetch:` (no origin) is an unconstrained fetch
-/// under its own name; a `name=fetch:<origin>` is a named, origin-scoped fetch. An entry without `=`
-/// names no service and is a teaching error, mirroring [`Services::parse`](tunnel::Services::parse).
-/// A malformed origin fails HERE, at expose time, not at dial time.
+/// under its own name; a `name=fetch:<origin>` is a named, origin-scoped fetch. An entry without `=` names
+/// no service and is a teaching error, mirroring tightbeam's grammar. A malformed origin fails HERE, at
+/// expose time, not at dial time.
 struct FetchScope;
 
 impl FetchScope {
-    /// Remove every fetch entry from `requested` (leaving the non-fetch services for `Services::parse`) and
-    /// return them as one [`FetchService`] each: its served name, a distinct synthetic `fetch_<i>` scheme, and
-    /// only its own [`OriginAllowlist`]. Non-fetch entries are left in place, in order. A malformed origin
-    /// fails HERE with a teaching message.
+    /// Remove every fetch entry from `requested` (leaving the non-fetch services for the router's grammar)
+    /// and return them as one [`FetchService`] each: its served name and only its own [`OriginAllowlist`].
+    /// Non-fetch entries are left in place, in order. A malformed origin fails HERE with a teaching message.
     fn extract(requested: &mut Vec<String>) -> eyre::Result<FetchExposure> {
         let mut services: Vec<FetchService> = Vec::new();
         let mut remaining: Vec<String> = Vec::new();
@@ -1312,7 +1329,7 @@ impl FetchScope {
                 );
             };
             // A fetch service is `fetch:` optionally followed by an origin. A non-fetch entry passes through
-            // unchanged, in order, for `Services::parse`.
+            // unchanged, in order, for the router's own grammar.
             let Some(origin) = addr
                 .strip_prefix(FETCH_SCHEME)
                 .and_then(|rest| rest.strip_prefix(':'))
@@ -1320,17 +1337,15 @@ impl FetchScope {
                 remaining.push(entry);
                 continue;
             };
-            // Each fetch service gets its OWN allowlist (only its own origin; empty = unconstrained) and its
-            // OWN unspellable synthetic scheme, indexed so two fetch services never collide.
+            // Each fetch service gets its OWN allowlist (only its own origin; empty = unconstrained): the
+            // per-instance isolation that makes the SSRF pivot unrepresentable.
             let allow = if origin.is_empty() {
                 OriginAllowlist::default()
             } else {
                 OriginAllowlist::parse([origin]).map_err(|error| eyre::eyre!(error))?
             };
-            let scheme = format!("{FETCH_SCHEME}_{}", services.len());
             services.push(FetchService {
                 name: name.to_owned(),
-                scheme,
                 allow,
             });
         }
@@ -1347,7 +1362,7 @@ struct FetchExposure {
 }
 
 impl FetchExposure {
-    /// The de-merged fetch services, each to be registered under its own synthetic scheme.
+    /// The de-merged fetch services, each to be bound as its own `Fetch` instance.
     fn services(&self) -> &[FetchService] {
         &self.services
     }
@@ -1358,9 +1373,9 @@ impl FetchExposure {
     /// fetch, so a second origin-scoped fetch can no longer mask a bare public one. Refused at build time,
     /// before any banner or accepted stream, mirroring the sshd-cannot-be-public wall. A GATED fetch (not in
     /// `--public`) stays legal unconstrained: the family gate is the terminator there.
-    fn refuse_open_relay(&self, public: &PublicRequest) -> eyre::Result<()> {
+    fn refuse_open_relay(&self, public: &[String]) -> eyre::Result<()> {
         for service in &self.services {
-            if public.contains(&service.name) && service.allow.is_unconstrained() {
+            if public.iter().any(|name| name == &service.name) && service.allow.is_unconstrained() {
                 eyre::bail!(
                     "a public fetch service must be origin-scoped \
                      (`serve {name}=fetch:https://origin --public {name}`); an unconstrained public fetch \

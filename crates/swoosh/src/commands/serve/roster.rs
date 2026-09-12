@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
-use nauthy::Admitted;
 use tightbeam::open_policy::Never;
-use tightbeam::tunnel::{BoxRead, BoxWrite, Handler};
+use tightbeam::tunnel::{BoxRead, BoxWrite, Handler, ServeError, Served};
 use tokio::io::AsyncWriteExt as _;
 
 /// The `roster:` handler: serve the signet-signed membership snapshot to an admitted member, then close.
@@ -23,14 +22,14 @@ impl Roster {
 
 impl Handler for Roster {
     // GATED (a stranger must never read the member set: delib-28 containment): no legitimate public use.
-    type Public = Never;
+    type Exposure = Never;
 
     async fn serve(
         &self,
-        _admitted: Admitted,
+        _served: Served<Self>,
         mut writer: BoxWrite,
         _reader: BoxRead,
-    ) -> eyre::Result<()> {
+    ) -> Result<(), ServeError> {
         writer.write_all(&self.blob).await?;
         writer.shutdown().await?;
         Ok(())

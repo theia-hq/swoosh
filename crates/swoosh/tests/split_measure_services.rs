@@ -7,8 +7,7 @@
 //! be a public ping responder, or a speedtest server, but not both" holds at the service boundary.
 //!
 //! A node exposes exactly ONE of the two services, gated on its own self-signet, through the SAME
-//! `registry()` the product `serve` path builds (the registry always holds both; the `Services` map
-//! is what selects which one this node OFFERS). A member reaches the offered method and MEASURES it; the
+//! per-entry `bind_entry` edge the product `serve` path binds. A member reaches the offered method and MEASURES it; the
 //! member's OTHER method does not succeed against that node, because the served method must match the
 //! service the gate admitted and the handler refuses the wrong frame at the wire. The member-admitted /
 //! stranger-refused invariant still holds per service: a stranger reaches neither.
@@ -25,15 +24,13 @@ use bifrost_mem::MemTransport;
 use measure::{Limit, MethodRefusal, Mode, Ping, ProtocolError, Refusal, Speedtest};
 use nauthy::{FileDenylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Services,
-};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
 /// The node's OWN secret: its ed25519 public half is both its identity key and the self-signet its gate
 /// roots at (a person-zero node is its own signet root), so a member badge rooted here is admitted.
 const SELF_SECRET: [u8; 32] = [21u8; 32];
 
-/// The ssh host-key seed the shared `registry()` carries. Unused here (this exercises the measure halves), but
+/// The ssh host-key seed the `diagnostics` assembly carries. Unused here (this exercises the measure halves), but
 /// a fixed value keeps the build stable with and without the `ssh` feature.
 const HOST_SEED: [u8; 32] = [9u8; 32];
 
@@ -189,18 +186,28 @@ async fn proof_speed_only() {
     assert_stranger_refused(host).await;
 }
 
-/// Spawn a person-zero node exposing exactly `services`, gated on its own self-signet through the shared
-/// `registry()` and `resolve_gate` policy, and return its node id. The registry always holds both the ping
-/// and speed handlers; `services` is what this node OFFERS.
-async fn expose(services: &[String]) -> NodeId {
+/// Spawn a person-zero node exposing exactly `entries`, gated on its own self-signet through the product
+/// path's per-entry `bind_entry` edge and `resolve_gate` policy, and return its node id. The node OFFERS
+/// exactly the entries it is handed, so one test offers `ping` and the other `speed`.
+async fn expose(entries: &[String]) -> NodeId {
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
     let self_signet = NodeId::from_ed25519_secret(&SELF_SECRET);
-    let services = Services::parse(services).unwrap();
+    let entries = entries.to_vec();
     tokio::task::spawn_local(async move {
         let gate = tunnel::resolve_gate(Some(self_signet), empty_denylist("offer").await).unwrap();
-        let registry = swoosh::commands::serve::registry(HOST_SEED).unwrap();
-        Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
+        let mut router = Router::new(gate);
+        for entry in &entries {
+            router = swoosh::commands::serve::bind_entry(
+                router,
+                entry,
+                HOST_SEED,
+                &std::sync::Arc::new(Vec::new()),
+            )
+            .unwrap();
+        }
+        router
+            .expose()
             .unwrap()
             .run(&host, CancellationToken::new())
             .await

@@ -1,9 +1,8 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::path::PathBuf;
 
-use nauthy::Admitted;
 use tightbeam::open_policy::Never;
-use tightbeam::tunnel::{BoxRead, BoxWrite, Handler};
+use tightbeam::tunnel::{BoxRead, BoxWrite, Handler, ServeError, Served};
 
 /// The `recv:` handler swoosh injects: the receive half of PUSH file transfer. It takes one admitted stream
 /// carrying one pushed file, drives `bifrost-wire`'s verified receive into a temp file under `out`, and
@@ -30,18 +29,22 @@ impl Recv {
 impl Handler for Recv {
     // GATED: a receive service with no auth of its own would let anyone write files into the node's output
     // directory; the gate IS its authentication.
-    type Public = Never;
+    type Exposure = Never;
 
     async fn serve(
         &self,
-        _admitted: Admitted,
+        _served: Served<Self>,
         writer: BoxWrite,
         reader: BoxRead,
-    ) -> eyre::Result<()> {
+    ) -> Result<(), ServeError> {
         // Each stream gets a unique tag from the shared counter, so concurrent pushes never contend for the
         // same temp file.
         let tag = self.next_tag.fetch_add(1, Ordering::Relaxed);
-        let received = transfer::receive_file(writer, reader, &self.out, tag).await?;
+        // `transfer` still returns `eyre`, which the typed contract does not carry (the engine arm lands
+        // with the `tightbeam-handler` extraction); render the cause into the `Io` arm rather than drop it.
+        let received = transfer::receive_file(writer, reader, &self.out, tag)
+            .await
+            .map_err(|error| ServeError::Io(std::io::Error::other(format!("{error:#}"))))?;
         println!(
             "received {} ({} bytes)",
             received.path.display(),

@@ -15,8 +15,8 @@ use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use tightbeam::tunnel::{
-    CancellationToken, Exposer, ManifestEntry, Posture, PublicRequest, PublicUnsafeRequest,
-    RawSource, Registry, ServiceCatalog, Services, TargetKind,
+    CancellationToken, ManifestEntry, Metering, Posture, RawSource, Router, ServiceCatalog,
+    TargetKind,
 };
 
 use super::control::{ControlError, Request, Response};
@@ -27,25 +27,30 @@ use super::{
 };
 use crate::home::Home;
 
+/// A service name for a test-built router overlay.
+fn svc(name: &str) -> nauthy::Service {
+    name.parse().expect("a valid service name")
+}
+
 /// A gated handler/forward entry for a banner test (the common case: everything behind the family gate). A
 /// handler or a forward carries no raw source to warn about.
-fn entry_gated(name: &str, kind: TargetKind, amplifier: bool) -> ManifestEntry {
+fn entry_gated(name: &str, kind: TargetKind, metering: Option<Metering>) -> ManifestEntry {
     ManifestEntry {
         name: name.to_owned(),
         posture: Posture::Gated,
         kind,
-        amplifier,
+        metering,
         raw_source: None,
     }
 }
 
 /// An opened (public) handler/forward entry for a banner test.
-fn entry_open(name: &str, kind: TargetKind, amplifier: bool) -> ManifestEntry {
+fn entry_open(name: &str, kind: TargetKind, metering: Option<Metering>) -> ManifestEntry {
     ManifestEntry {
         name: name.to_owned(),
         posture: Posture::Open,
         kind,
-        amplifier,
+        metering,
         raw_source: None,
     }
 }
@@ -54,10 +59,18 @@ fn entry_open(name: &str, kind: TargetKind, amplifier: bool) -> ManifestEntry {
 /// exposer returns it, so a banner test exercises the same shape the product path builds.
 fn default_manifest() -> Vec<ManifestEntry> {
     vec![
-        entry_gated("control.services", TargetKind::Handler, false),
-        entry_gated("control.stop", TargetKind::Handler, false),
-        entry_gated("ping", TargetKind::Handler, true),
-        entry_gated("speed", TargetKind::Handler, true),
+        entry_gated(
+            "control.services",
+            TargetKind::Handler,
+            Some(Metering::Unmetered),
+        ),
+        entry_gated(
+            "control.stop",
+            TargetKind::Handler,
+            Some(Metering::Unmetered),
+        ),
+        entry_gated("ping", TargetKind::Handler, Some(Metering::Unmetered)),
+        entry_gated("speed", TargetKind::Handler, Some(Metering::Unmetered)),
     ]
 }
 
@@ -122,16 +135,16 @@ fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
     assert!(banner.trim_end().ends_with("ctrl-c to stop"), "{banner}");
 }
 
-/// The mix banner: a public amplifier carries a QUIET inline caveat (no loud glyph), the public-UNSAFE group
+/// The mix banner: an open unmetered service carries a QUIET inline caveat (no loud glyph), the public-UNSAFE group
 /// sits last carrying the loudest marker, `name -> target` renders only when they differ, and the danger
 /// vocabulary is monotonic (the `public` marker is strictly shorter/quieter than `public-UNSAFE`).
 #[test]
 fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
     let manifest = vec![
-        entry_open("logs", TargetKind::RawStream, false),
-        entry_gated("ping", TargetKind::Handler, true),
-        entry_open("speed", TargetKind::Handler, true),
-        entry_gated("ssh", TargetKind::Handler, false),
+        entry_open("logs", TargetKind::RawStream, None),
+        entry_gated("ping", TargetKind::Handler, Some(Metering::Unmetered)),
+        entry_open("speed", TargetKind::Handler, Some(Metering::Unmetered)),
+        entry_gated("ssh", TargetKind::Handler, None),
     ];
     let targets = display_targets(&[
         "ping=ping:".to_owned(),
@@ -152,14 +165,14 @@ fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
         section.contains("\n    speed ") || section.contains("\n    speed\n"),
         "a name that equals its scheme renders without an arrow: {section}"
     );
-    // The public amplifier caveat is quiet prose, NOT a competing loud glyph.
+    // The open-unmetered caveat is quiet prose, NOT a competing loud glyph.
     assert!(
         section.contains("unmetered: a stranger can drain your uplink"),
         "{section}"
     );
     assert!(
         !section.contains("[!]"),
-        "the amplifier caveat is not a loud glyph: {section}"
+        "the unmetered caveat is not a loud glyph: {section}"
     );
 
     // Groups are safest-first and the danger marker is monotonic down the list.
@@ -205,8 +218,8 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
 /// A de-merged fetch service glosses by name (its synthetic scheme is unspellable, so it never leaks into the
 /// `name -> target` arrow), while a plain forward shows its address.
 #[test]
-fn a_fetch_service_glosses_by_name_and_never_leaks_the_synthetic_scheme() {
-    let entry = entry_gated("news", TargetKind::Handler, false);
+fn a_fetch_service_glosses_by_name_and_never_leaks_its_scope() {
+    let entry = entry_gated("news", TargetKind::Handler, None);
     let mut fetch_names = HashSet::new();
     fetch_names.insert("news".to_owned());
     let (label, gloss) = describe(&entry, &HashMap::new(), &fetch_names);
@@ -292,7 +305,7 @@ fn resident_stop_classifies_from_its_source() {
 }
 
 /// BLOCKER-2: the resident control socket adds no service. `--resident` adds only the local socket
-/// arm AFTER the registry and the manifest are cut, so the exposer's manifest is the plain-serve set
+/// arm AFTER the route table and the manifest are cut, so the exposer's manifest is the plain-serve set
 /// exactly (`control.*` folds as always); and the control `Request` enum can express two reads and a
 /// stop, never a toggle/revoke, so the socket can never mutate the gate. Both halves are asserted:
 /// the manifest equality against the plain default, and the legal request set constructed and
@@ -300,22 +313,27 @@ fn resident_stop_classifies_from_its_source() {
 #[test]
 fn resident_manifest_equals_plain_manifest() {
     let cancel = CancellationToken::new();
-    let services = Services::parse(&[
-        "ping=ping:".to_owned(),
-        "speed=speed:".to_owned(),
-        format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:"),
-        format!("{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"),
-    ])
-    .expect("the default resident service set parses");
-    // The registry the resident path builds: the base ping/speed plus the two control.* handlers.
-    let registry = super::registry([0u8; 32])
-        .expect("the base registry builds")
-        .with(CONTROL_STOP_SERVICE, Stop::new(cancel))
-        .with(
-            CONTROL_SERVICES_SERVICE,
+    // The route table the resident path builds: the base ping/speed plus the two member-only control.*
+    // handlers, one handler value per route (the Router's bind-by-value shape). `bind_entry` binds only the
+    // named routes, so `sshd` is absent here exactly as it is from the plain default set.
+    let empty_roster = std::sync::Arc::new(Vec::new());
+    let router = super::bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], &empty_roster)
+        .expect("ping binds");
+    let router =
+        super::bind_entry(router, "speed=speed:", [0u8; 32], &empty_roster).expect("speed binds");
+    let router = router
+        .member_service(
+            CONTROL_STOP_SERVICE.parse().expect("a name"),
+            Stop::new(cancel),
+        )
+        .expect("control.stop binds")
+        .member_service(
+            CONTROL_SERVICES_SERVICE.parse().expect("a name"),
             ServiceList::new(ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog")),
-        );
-    let exposer = Exposer::new(services, registry, gated(), PublicUnsafeRequest::none())
+        )
+        .expect("control.services binds");
+    let exposer = router
+        .expose()
         .expect("the resident service set assembles under the family gate");
 
     assert_eq!(
@@ -686,7 +704,7 @@ async fn control_round_trip(socket: &Path, request: Request) -> Result<Response,
 
 /// Two `name=fetch:<origin>` services de-merge into TWO separate `FetchService`s, each with its own served
 /// name, its OWN unspellable synthetic scheme, and ONLY its own origin scope. `extract` removes them from the
-/// requested set (leaving the non-fetch entries for `Services::parse`).
+/// requested set (leaving the non-fetch entries for the router's grammar).
 #[test]
 fn named_fetch_origins_de_merge_into_per_service_instances() {
     let mut requested = vec![
@@ -697,7 +715,7 @@ fn named_fetch_origins_de_merge_into_per_service_instances() {
 
     assert!(
         requested.is_empty(),
-        "fetch entries are removed from the set `Services::parse` then sees"
+        "fetch entries are removed from the set the router then binds"
     );
     let services = fetch.services();
     assert_eq!(
@@ -709,11 +727,6 @@ fn named_fetch_origins_de_merge_into_per_service_instances() {
     assert!(
         names.contains(&"news") && names.contains(&"apple"),
         "each keeps its served name"
-    );
-    assert_ne!(
-        services[0].scheme(),
-        services[1].scheme(),
-        "each fetch service gets its OWN synthetic scheme, never a shared one"
     );
     assert!(
         services.iter().all(|s| !s.allow().is_unconstrained()),
@@ -768,28 +781,9 @@ fn a_malformed_fetch_origin_is_refused_at_expose_time() {
     );
 }
 
-/// The synthetic per-service scheme is UNSPELLABLE (delib-39 B1): it carries a `_`, which the tunnel's
-/// handler-scheme grammar rejects, so an operator entry `x=fetch_0:` is a parse error and can never resolve
-/// onto a synthetic fetch instance. The de-merge builds it directly, bypassing that grammar.
-#[test]
-fn the_synthetic_fetch_scheme_is_unspellable_by_an_operator_entry() {
-    let mut requested = vec!["news=fetch:https://news.example".to_owned()];
-    let fetch = FetchScope::extract(&mut requested).expect("parse");
-    let scheme = fetch.services()[0].scheme().to_owned();
-    assert!(
-        scheme.contains('_'),
-        "the synthetic scheme carries the byte the grammar rejects: {scheme}"
-    );
-    // Spelled as an operator service entry, that same scheme is not a handler; it is a parse error.
-    assert!(
-        Services::parse(&[format!("x={scheme}:")]).is_err(),
-        "`x={scheme}:` must be rejected by the handler-scheme grammar (the pivot cannot be spelled)"
-    );
-}
-
 /// BLOCKER-3: a PUBLIC fetch instance holds ONLY its own origin scope, so it cannot reach a GATED fetch
-/// instance's origins. De-merged, the public `pub` and the gated `internal` are separate instances under
-/// separate schemes, each scoped to its OWN origin; there is no shared allowlist to over-permit.
+/// instance's origins. The public `pub` and the gated `internal` are separate instances, each scoped to its
+/// OWN origin; there is no shared allowlist to over-permit.
 #[test]
 fn a_public_fetch_instance_cannot_reach_a_gated_fetch_s_origins() {
     let mut requested = vec![
@@ -808,11 +802,6 @@ fn a_public_fetch_instance_cannot_reach_a_gated_fetch_s_origins() {
         .find(|s| s.name() == "internal")
         .expect("internal");
 
-    assert_ne!(
-        public.scheme(),
-        internal.scheme(),
-        "the public and gated fetches are distinct instances under distinct schemes"
-    );
     // The public instance is scoped to its OWN origin (not unconstrained), and it is a SEPARATE allowlist
     // from the gated instance's: there is no shared list holding the internal origin for it to reach. (That
     // an allowlist admits ONLY its listed origin, exact-match, is proven in `fetch`'s own origin tests.)
@@ -836,7 +825,7 @@ fn a_scoped_gated_fetch_does_not_mask_a_bare_public_open_relay() {
         "pub=fetch:".to_owned(),                     // unconstrained, public
     ];
     let fetch = FetchScope::extract(&mut requested).expect("parse");
-    let public = PublicRequest::new(["pub".to_owned()]);
+    let public = vec!["pub".to_owned()];
     assert!(
         fetch.refuse_open_relay(&public).is_err(),
         "an unconstrained public fetch is an open relay even beside a scoped gated fetch (no masking)"
@@ -849,7 +838,7 @@ fn a_scoped_gated_fetch_does_not_mask_a_bare_public_open_relay() {
 fn an_unconstrained_public_fetch_is_refused_as_an_open_relay() {
     let mut requested = vec!["api=fetch:".to_owned()];
     let fetch = FetchScope::extract(&mut requested).expect("unconstrained fetch parses");
-    let public = PublicRequest::new(["api".to_owned()]);
+    let public = vec!["api".to_owned()];
     let error = fetch
         .refuse_open_relay(&public)
         .expect_err("a public unconstrained fetch is an open relay and must be refused");
@@ -866,7 +855,7 @@ fn an_unconstrained_public_fetch_is_refused_as_an_open_relay() {
 fn a_scoped_public_fetch_is_allowed() {
     let mut requested = vec!["api=fetch:https://origin.example".to_owned()];
     let fetch = FetchScope::extract(&mut requested).expect("origin parses");
-    let public = PublicRequest::new(["api".to_owned()]);
+    let public = vec!["api".to_owned()];
     assert!(
         fetch.refuse_open_relay(&public).is_ok(),
         "a public fetch scoped to an origin is armed, not an open relay"
@@ -881,15 +870,15 @@ fn a_gated_bare_fetch_is_allowed() {
     let fetch = FetchScope::extract(&mut requested).expect("unconstrained fetch parses");
     // `api` is served but NOT public.
     assert!(
-        fetch.refuse_open_relay(&PublicRequest::none()).is_ok(),
+        fetch.refuse_open_relay(&[]).is_ok(),
         "a gated (member-only) fetch is unchanged; the family gate terminates it"
     );
 }
 
-/// Two `name=recv:<dir>` services de-merge into TWO separate `RecvService`s, each with its own served name,
-/// its OWN unspellable synthetic scheme, and ONLY its own sink dir. `extract` removes them from the requested
-/// set (leaving the non-recv entries for `Services::parse`), so `a=recv:/x b=recv:/y` writes each peer's
-/// pushes into its OWN directory rather than the first-named one (the single-sink bug this fix removes).
+/// Two `name=recv:<dir>` services de-merge into TWO separate `RecvService`s, each with its own served name
+/// and ONLY its own sink dir. `extract` removes them from the requested set (leaving the non-recv entries
+/// for the router's grammar), so `a=recv:/x b=recv:/y` writes each peer's pushes into its OWN directory
+/// rather than the first-named one (the single-sink bug this fix removes).
 #[test]
 fn named_recv_dirs_de_merge_into_per_service_instances() {
     let mut requested = vec!["a=recv:/tmp/x".to_owned(), "b=recv:/tmp/y".to_owned()];
@@ -897,7 +886,7 @@ fn named_recv_dirs_de_merge_into_per_service_instances() {
 
     assert!(
         requested.is_empty(),
-        "recv entries are removed from the set `Services::parse` then sees"
+        "recv entries are removed from the set the router then binds"
     );
     assert_eq!(
         recv.len(),
@@ -915,11 +904,6 @@ fn named_recv_dirs_de_merge_into_per_service_instances() {
         b.out(),
         std::path::Path::new("/tmp/y"),
         "service b's dir is NOT masked by the first-named one"
-    );
-    assert_ne!(
-        a.scheme(),
-        b.scheme(),
-        "each receive service gets its OWN synthetic scheme, never a shared one"
     );
 }
 
@@ -960,27 +944,8 @@ fn non_recv_services_pass_through_and_only_recv_is_removed() {
     );
 }
 
-/// The synthetic per-service recv scheme is UNSPELLABLE: it carries a `_`, which the handler-scheme grammar
-/// rejects, so an operator entry `x=recv_0:` is a parse error and can never resolve onto a synthetic recv
-/// instance. The de-merge builds it directly, bypassing that grammar.
-#[test]
-fn the_synthetic_recv_scheme_is_unspellable_by_an_operator_entry() {
-    let mut requested = vec!["a=recv:/tmp/x".to_owned()];
-    let recv = super::extract_recv_services(&mut requested).expect("entries parse");
-    let scheme = recv[0].scheme().to_owned();
-    assert!(
-        scheme.contains('_'),
-        "the synthetic scheme carries the byte the grammar rejects: {scheme}"
-    );
-    // Spelled as an operator service entry, that same scheme is not a handler; it is a parse error.
-    assert!(
-        Services::parse(&[format!("x={scheme}:")]).is_err(),
-        "`x={scheme}:` must be rejected by the handler-scheme grammar (the sink cannot be spelled onto)"
-    );
-}
-
-/// A minimal family gate for a construction test: an empty, non-persisting family gate, so `with_public`'s
-/// per-service proof runs without standing up a signet.
+/// A minimal family gate for a construction test: an empty, non-persisting family gate, so the public
+/// proof's per-service check runs without standing up a signet.
 fn gated() -> nauthy::Gate {
     nauthy::Gate::rooted(
         nauthy::VerifyKey::new([1u8; 32]),
@@ -988,35 +953,25 @@ fn gated() -> nauthy::Gate {
     )
 }
 
+/// The base diagnostic route table the product `serve` path assembles, on a fresh family gate.
+fn diagnostics() -> Router {
+    super::diagnostics(Router::new(gated()), [0u8; 32]).expect("the base diagnostics bind")
+}
+
 /// `serve speed --public speed` BUILDS (speed is OptIn, openable), and `--public <unknown>` is refused with a
 /// message that names the served set. Proves the CLI's per-service overlay wires onto the real swoosh
-/// handlers through `Exposer::with_public`.
+/// handlers through the Router's public proof.
 #[test]
 fn public_speed_builds_and_public_unknown_is_refused() {
-    let services = || Services::parse(&["speed=speed:".to_owned()]).unwrap();
     // `--public speed` builds: `speed` is an OptIn handler, so the overlay proves it open-safe.
-    let built = Exposer::new(
-        services(),
-        super::registry([0u8; 32]).unwrap(),
-        gated(),
-        PublicUnsafeRequest::none(),
-    )
-    .unwrap()
-    .with_public(PublicRequest::new(["speed".to_owned()]));
+    let built = diagnostics().public([svc("speed")]).expose();
     assert!(
         built.is_ok(),
         "`--public speed` must build (speed is openable)"
     );
 
     // `--public <unknown>` is refused, naming what the node DOES serve.
-    let assembled = Exposer::new(
-        services(),
-        super::registry([0u8; 32]).unwrap(),
-        gated(),
-        PublicUnsafeRequest::none(),
-    )
-    .unwrap();
-    let Err(error) = assembled.with_public(PublicRequest::new(["nope".to_owned()])) else {
+    let Err(error) = diagnostics().public([svc("nope")]).expose() else {
         panic!("an unknown public name must be refused");
     };
     assert!(
@@ -1029,22 +984,21 @@ fn public_speed_builds_and_public_unknown_is_refused() {
 /// stream the operator KNOWINGLY named reaches `Posture::Open`, so `Group::of` sorts it into `PublicUnsafe`,
 /// and the banner carries BOTH the loud `public-UNSAFE !!` marker and the RESOLVED ABSOLUTE path of the
 /// source (the delib-11 exfil tell: the operator sees the exact bytes a stranger can read). Built through the
-/// real `Exposer::new` + `manifest` path so the posture-union and `raw_source` resolution are exercised, not
+/// real router `expose` + `manifest` path so the posture-union and `raw_source` resolution are exercised, not
 /// a hand-built manifest.
 #[test]
 fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
     let path = std::env::temp_dir().join("swoosh-public-unsafe-banner");
-    let services = Services::parse(&[format!("logs=file:{}", path.display())]).unwrap();
-    // A family BASE gate (not `Gate::Open`), so `new`'s whole-node raw-stream door never fires; the unsafe
-    // OVERLAY alone opens `logs` (swoosh's per-service model). An empty registry suffices: a `file:` source is
-    // a raw stream, not a handler, so it needs nothing registered.
-    let exposer = Exposer::new(
-        services,
-        Registry::new(),
-        gated(),
-        PublicUnsafeRequest::new(["logs".to_owned()]),
-    )
-    .expect("a raw stream named in the unsafe overlay builds under a family gate");
+    let entry = format!("logs=file:{}", path.display());
+    // A family BASE gate (not `Gate::Open`), so the whole-node raw-stream door never fires; the unsafe
+    // OVERLAY alone opens `logs` (swoosh's per-service model). No handlers are bound: a `file:` source is a
+    // raw stream, not a handler, so it needs nothing registered.
+    let exposer = Router::new(gated())
+        .parse(&[entry])
+        .expect("the raw-stream route binds")
+        .public_unsafe([svc("logs")])
+        .expose()
+        .expect("a raw stream named in the unsafe overlay builds under a family gate");
     let manifest = exposer.manifest();
     let logs = manifest
         .iter()
@@ -1097,15 +1051,13 @@ fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
 #[test]
 fn plain_public_refuses_a_raw_stream_and_points_at_public_unsafe() {
     let path = std::env::temp_dir().join("swoosh-plain-public-raw");
-    let services = Services::parse(&[format!("logs=file:{}", path.display())]).unwrap();
-    let assembled = Exposer::new(
-        services,
-        Registry::new(),
-        gated(),
-        PublicUnsafeRequest::none(),
-    )
-    .expect("assembles under a family gate with no unsafe opt-in");
-    let Err(error) = assembled.with_public(PublicRequest::new(["logs".to_owned()])) else {
+    let entry = format!("logs=file:{}", path.display());
+    let Err(error) = Router::new(gated())
+        .parse(&[entry])
+        .expect("the raw-stream route binds")
+        .public([svc("logs")])
+        .expose()
+    else {
         panic!("`--public` naming a raw stream must be refused, not silently opened");
     };
     let message = error.to_string();
@@ -1121,16 +1073,9 @@ fn plain_public_refuses_a_raw_stream_and_points_at_public_unsafe() {
 /// class.
 #[test]
 fn public_unsafe_naming_a_non_raw_service_is_refused() {
-    let services = Services::parse(&["ping=ping:".to_owned()]).unwrap();
-    // `ping` must be a registered handler so `Exposer::new`'s handler check passes and control reaches the
-    // `prove_unsafe` wall, where naming a handler in the unsafe overlay is the redirect under test.
-    let registry = super::registry([0u8; 32]).unwrap();
-    let Err(error) = Exposer::new(
-        services,
-        registry,
-        gated(),
-        PublicUnsafeRequest::new(["ping".to_owned()]),
-    ) else {
+    // `ping` must be a bound handler so the unsafe proof reaches the raw-target check, where naming a handler
+    // in the unsafe overlay is the redirect under test.
+    let Err(error) = diagnostics().public_unsafe([svc("ping")]).expose() else {
         panic!("a handler named in the unsafe overlay must be redirected, not opened");
     };
     assert!(
@@ -1144,12 +1089,17 @@ fn public_unsafe_naming_a_non_raw_service_is_refused() {
 #[cfg(feature = "ssh")]
 #[test]
 fn public_sshd_is_refused_with_a_teaching_error() {
-    let services = Services::parse(&["ssh=sshd:".to_owned()]).unwrap();
-    // The `ssh` feature registers the `sshd` handler; without it, `Exposer::new` would refuse it as
-    // unregistered before `with_public` ever runs, which is why this test is feature-gated.
-    let registry = super::registry([0u8; 32]).unwrap();
-    let assembled = Exposer::new(services, registry, gated(), PublicUnsafeRequest::none()).unwrap();
-    let Err(error) = assembled.with_public(PublicRequest::new(["ssh".to_owned()])) else {
+    // The `ssh` feature binds the shell handler; without it a `ssh=sshd:` entry is a teaching parse error
+    // before the public proof ever runs, which is why this test is feature-gated.
+    let router = Router::new(gated())
+        .service(
+            svc("ssh"),
+            super::Sshd {
+                host_seed: [0u8; 32],
+            },
+        )
+        .expect("the shell route binds");
+    let Err(error) = router.public([svc("ssh")]).expose() else {
         panic!("`--public ssh` (a keyless shell) must be refused");
     };
     let message = error.to_string();

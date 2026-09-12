@@ -6,7 +6,7 @@
 //! rides the family gate, so a MEMBER can read a gated node's served list but a STRANGER cannot.
 //!
 //! `control.services` is one more member-only service, assembled through the SAME `ServiceList` handler the
-//! `swoosh serve` product path injects (not a hand-rolled near-copy), over the SAME `Services::catalog`
+//! `swoosh serve` product path injects (not a hand-rolled near-copy), over the SAME `Router::catalog`
 //! snapshot `serve` cuts, and declared member-only exactly as `serve` declares it. Three things are proven:
 //!
 //! 1. `control.services`: a MEMBER reaching the member-only service reads the self-delimiting catalog blob,
@@ -29,8 +29,7 @@ use nauthy::{FileDenylist, Identity, Link};
 use swoosh::commands::serve::{CONTROL_SERVICES_SERVICE, ServiceList};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, Posture, PublicRequest, PublicUnsafeRequest,
-    Registry, ServiceCatalog, Services,
+    self, CancellationToken, Connector, Exposer, Posture, Router, ServiceCatalog,
 };
 use tokio::io::AsyncReadExt as _;
 
@@ -187,27 +186,36 @@ async fn a_control_services_slip_is_refused_before_ok() {
 }
 
 /// Assemble a gated exposer serving `control.services` (over the served menu) rooted at the signet, through
-/// the SAME `ServiceList` handler + `Services::catalog` snapshot the product `serve` path builds, and with
-/// the SAME member-only declaration `serve` makes. The catalog is cut from the parsed services and the
-/// resolved gate, exactly as `run_serve` does.
+/// the SAME `ServiceList` handler + `Router::catalog` snapshot the product `serve` path builds, and with
+/// the SAME member-only declaration `serve` makes. The catalog is cut from the route table, exactly as
+/// `run_serve` does.
 async fn build_exposer() -> Exposer {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
-    let mut requested: Vec<String> = SERVED.iter().map(|s| (*s).to_owned()).collect();
-    requested.push(format!(
-        "{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"
-    ));
-    let services = Services::parse(&requested)
-        .unwrap()
-        .member_only(CONTROL_SERVICES_SERVICE)
-        .unwrap();
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
-    let catalog = services.catalog(&gate, &PublicRequest::none(), &PublicUnsafeRequest::none());
-    // The served menu is raw socket forwards (no injected handler), so the registry holds just the
-    // `control.services` read handler over the catalog snapshot. `Exposer::new` only requires a registered
-    // handler for HANDLER-scheme services; a forward needs none, and the only stream this proof dials is the
-    // read itself.
-    let registry = Registry::new().with(CONTROL_SERVICES_SERVICE, ServiceList::new(catalog));
-    Exposer::new(services, registry, gate, PublicUnsafeRequest::none()).unwrap()
+    // The served menu is raw socket forwards (no injected handler), so the route table holds them plus the
+    // `control.services` read handler over the catalog snapshot. `Router::catalog` reads only whether the
+    // base gate is whole-node open, and this gate is rooted, so a rooted display gate on the same authority
+    // renders the same posture (the catalog never reads the revocation store).
+    let catalog_gate = nauthy::Gate::rooted(
+        signet.verify_key(),
+        FileDenylist::empty(std::path::PathBuf::new()),
+    );
+    let mut router = Router::new(gate);
+    for entry in SERVED {
+        router = router.parse(&[entry.to_owned()]).unwrap();
+    }
+    let catalog = router.catalog(
+        &catalog_gate,
+        Some(CONTROL_SERVICES_SERVICE.parse().unwrap()),
+    );
+    router
+        .member_service(
+            CONTROL_SERVICES_SERVICE.parse().unwrap(),
+            ServiceList::new(catalog),
+        )
+        .unwrap()
+        .expose()
+        .unwrap()
 }
 
 /// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven node id): the shape a
