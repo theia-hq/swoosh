@@ -1,16 +1,21 @@
 //! S4 tests: bare `stop` resolves the local control client, stops the resident over the socket,
-//! and teaches when no resident is addressable under the home.
+//! and teaches when no resident is addressable under the home. The remote half's teardown race is proven
+//! over the in-process transport: a peer that admits the session then vanishes before answering the
+//! control stream is reported as a completed stop, while a live peer behind the same failure stays loud.
 
 use core::sync::atomic::{AtomicU32, Ordering};
+use core::time::Duration;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use bifrost::NodeId;
+use bifrost::{NoDiscovery, Node, NodeId, Session as _, Transport as _};
+use bifrost_mem::MemTransport;
 use clap::Parser as _;
 use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 
 use super::{StopCmd, stop_line};
 use crate::commands::serve::{Resident, StopKind};
+use crate::contacts::Contacts;
 use crate::home::Home;
 use crate::node_client::ControlClient;
 
@@ -170,4 +175,85 @@ async fn bare_stop_through_the_socket_cancels_the_resident() {
         .expect("serve ends Ok");
 
     let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// A `stop --at <raw node id>` command, as the root would hand the verb (no transport flags).
+fn stop_at(peer: NodeId) -> StopCmd {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        stop: StopCmd,
+    }
+
+    Wrap::try_parse_from(["x", "--at", &peer.to_string()])
+        .expect("stop --at parses")
+        .stop
+}
+
+/// The teardown-race fixture over the in-process transport: the peer admits the client's connect and its
+/// first control stream, then drops both WITHOUT answering (the v0.8.0 failure). `vanish` additionally
+/// unregisters the endpoint, so the client's probe finds the listener gone; without it the endpoint stays
+/// live behind the failed stream open.
+async fn answer_with_a_vanishing_peer(peer: &MemTransport, vanish: bool) {
+    let session = peer.accept().await.expect("the client connects");
+    let stream = session
+        .accept_bi()
+        .await
+        .expect("the client opens the control stream");
+    if vanish {
+        // The listener goes away between the stream open and its answer: the deterministic form of the
+        // observed race, where the node tears itself down right after the stop request lands.
+        peer.close().await;
+    }
+    drop(stream);
+    drop(session);
+}
+
+/// The teardown race is a SUCCESS: the peer admits the session, then vanishes before answering the control
+/// stream, so the client's stream open fails ("stream") while the stop itself landed. The bounded probe
+/// sees the listener gone and reports the completed stop instead of `could not stop ...: stream`.
+#[tokio::test(start_paused = true)]
+async fn a_teardown_race_reports_the_stop_as_completed() {
+    let dialer = Node::new(MemTransport::bind(), NoDiscovery);
+    let peer = MemTransport::bind();
+    let peer_id = peer.node_id();
+    let contacts = Contacts::default();
+
+    let (result, ()) = tokio::join!(
+        StopCmd::run_stop(stop_at(peer_id), &dialer, &contacts, None, None),
+        answer_with_a_vanishing_peer(&peer, true),
+    );
+    assert!(
+        result.is_ok(),
+        "a peer gone behind the failed stream open is a completed stop: {result:?}"
+    );
+}
+
+/// A LIVE peer behind the same failed stream open is never masked: the endpoint stays registered, so the
+/// probe reaches it and the original stream error stands.
+#[tokio::test(start_paused = true)]
+async fn a_live_peer_behind_a_failed_stream_open_is_not_masked() {
+    let dialer = Node::new(MemTransport::bind(), NoDiscovery);
+    let peer = MemTransport::bind();
+    let peer_id = peer.node_id();
+    let contacts = Contacts::default();
+
+    let (result, ()) = tokio::join!(
+        StopCmd::run_stop(stop_at(peer_id), &dialer, &contacts, None, None),
+        answer_with_a_vanishing_peer(&peer, false),
+    );
+    let error = result.expect_err("a live peer behind the failed stream must stay an error");
+    assert!(
+        format!("{error:#}").contains("could not stop"),
+        "the live-peer failure keeps its loud message: {error:#}"
+    );
+    // The probe dialled the still-live peer after the failure: the fixture consumed the client's first
+    // inbound session, so the one now pending is the probe's own connect. Its presence proves the verb
+    // probed before deciding, and the live endpoint proves success would have masked a live node.
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), peer.accept())
+            .await
+            .is_ok(),
+        "the failed stream open was probed against the still-live peer"
+    );
 }
