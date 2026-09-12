@@ -4,7 +4,7 @@ You are bringing in a contractor for a few weeks. They need one service on one m
 build box, and nothing else. When the engagement ends, access ends. No shared password to rotate, no VPN
 account to remember to delete.
 
-Give them a [slip](../keys.md#slip) bound to their [fleet](../keys.md#fleet) with a short life. It is
+Give them a [grant](../keys.md#grant) bound to their [fleet](../keys.md#fleet) with a short life. It is
 theft-resistant (only their machines can use it), it covers whatever laptop they work from, and it goes
 away on its own.
 
@@ -25,7 +25,7 @@ issued a fleet-bound grant for `ssh` to fleet signet bf01o6vqymgz727g…
 sheer:bf01hcq6…
 ```
 
-Hand them the `sheer:` slip. On the build box, serve the shell gated:
+Hand them the `sheer:` link. On the build box, serve the shell gated:
 
 ```console
 $ swoosh serve ssh=sshd:
@@ -33,27 +33,17 @@ $ swoosh serve ssh=sshd:
 
 ## What the contractor does
 
-They present the slip when they ssh in. Any machine their signet vouches for can use it, so their work
-laptop and their spare both reach the box, with the same slip:
+They present the link when they ssh in. Any machine their signet vouches for can use it, so their work
+laptop and their spare both reach the box, with the same link:
 
 ```console
 $ swoosh ssh buildbox --present sheer:bf01hcq6…
 ```
 
-They reach `ssh` and nothing else. The slip names one service; the gate refuses everything it does not
+They reach `ssh` and nothing else. The link names one service; the gate refuses everything it does not
 name.
 
-## Cut them off
-
-The slip expires on its own at the end of the engagement. To cut access early, revoke their fleet:
-
-<!-- capture: swoosh grant revoke bf01o6vqymgz727g -->
-```console
-$ swoosh grant revoke bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
-revoked 1 grant(s) to bf01o6vqymgz727g… (…/revoked)
-```
-
-Check what is outstanding any time:
+## What you have issued
 
 <!-- capture: swoosh grant ls -->
 ```console
@@ -62,12 +52,22 @@ ssh
   fleet   bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq  13d  fleet-bound
 ```
 
+## Cut them off
+
+The link expires on its own at the end of the engagement. To cut access early, revoke their fleet:
+
+<!-- capture: swoosh grant revoke bf01o6vqymgz727g -->
+```console
+$ swoosh grant revoke bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
+revoked 1 grant(s) to bf01o6vqymgz727g… (…/revoked)
+```
+
 ## The honest limit
 
 A revoke is node-local and lands live: it takes effect on the box's next dial, typically within a couple
 of seconds, no restart. It does not cut a session already in progress. If you serve the box from more
-than one node, revoke on each. A fleet slip also stays usable from any device the contractor still holds
-until it expires or you revoke it, so keep the expiry short. See
+than one node, revoke on each. A fleet-bound grant also stays usable from any device the contractor still
+holds until it expires or you revoke it, so keep the expiry short. See
 [revocation](../keys.md#revocation).
 
 ## Next

@@ -4,7 +4,7 @@ You have a laptop, a desktop, and maybe a home server. You want to reach any of 
 others, wherever you are, without a public IP, a VPN, or a port forward. Enroll each machine under your
 one identity once; after that they all reach each other by name.
 
-This uses your [signet, devices, and badges](../keys.md#identity-your-signet-and-your-devices). Nothing
+This uses your [signet, devices, and membership](../keys.md#identity-your-signet-and-your-devices). Nothing
 here is per-service: a device you enroll gets into everything you run.
 
 ## Enroll a second device
@@ -60,7 +60,7 @@ ctrl-c to stop
 ```
 
 Save its key under a name once, then reach it by name from any of your devices. Because both machines
-carry your badge, the gate admits you with nothing to present:
+carry your membership, the gate admits you with nothing to present:
 
 ```console
 $ swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
@@ -70,10 +70,13 @@ added desk -> bf01hcq6balrlxwa
 <!-- live-run: real iroh RTT over the internet, non-deterministic; re-capture before release -->
 ```console
 $ swoosh ping desk -c 4
-desk via iroh: mixed (direct to 135.129.124.149:56141 and relayed)
+desk/default via iroh: mixed (direct to 135.129.124.149:56141 and relayed)
   4 sent, 4 received, 0% loss
   rtt min/avg/max/mdev = 41.843/113.534/299.872/93.169 ms
 ```
+
+Reach output names the contact and the device (`desk/default`); a key saved without a device name is
+filed as `default`.
 
 ## ssh in, keyless setup
 
@@ -89,7 +92,7 @@ or points at an existing sshd with `swoosh serve ssh=127.0.0.1:22`.
 
 ## The honest limit
 
-A device carrying your badge reaches every gated service on any node you run. If a device is lost or
+A device carrying your membership reaches every gated service on any node you run. If a device is lost or
 stolen, revoke it (`swoosh grant revoke me/laptop`) on each node you run. A revoke is node-local and
 lands live: it takes effect on the next dial, typically within a couple of seconds, no restart. It does
 not cut a session already in progress; the held connection drains. See
@@ -97,6 +100,6 @@ not cut a session already in progress; the held connection drains. See
 
 ## Next
 
-- [Keys](../keys.md#device) what a device and a badge are.
+- [Keys](../keys.md#device) what a device and membership are.
 - [Family media center](family-media-center.md) a box the whole household reaches, owned by no one.
 - [Commands](../reference/commands.md#ssh) ssh, forward, and send over the overlay.

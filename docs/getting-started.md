@@ -89,8 +89,8 @@ You just did the zero-auth version. Each step from here adds exactly one thing:
 - **Enroll your own machines.** `swoosh mint` / `swoosh adopt` bring a laptop or server under your one
   identity, so they all reach each other with no per-service step. See
   [Reach your own devices](use-cases/reach-your-own-devices.md).
-- **Let other people in.** Issue a [slip](keys.md#slip) to one service, for one person or their whole
-  fleet, revocable. See [use cases](use-cases/README.md).
+- **Let other people in.** Issue a `sheer:` capability link to one service, for one person or their
+  whole fleet, revocable. [Capabilities](capabilities.md) walks the whole loop in a minute.
 
 ## Next
 

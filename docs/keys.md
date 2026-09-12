@@ -42,7 +42,7 @@ recorded me/laptop -> bf01imv3ljql6kjn  [derived]
 hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
-A minted badge lasts 90 days unless you pass `--expires`; see [`swoosh mint`](reference/commands.md#mint).
+A minted membership lasts 90 days unless you pass `--expires`; see [`swoosh mint`](reference/commands.md#mint).
 
 The new machine adopts that one-time authkey and becomes a device your signet trusts. Save the whole
 printed line to a file, the `authkey:` prefix included, and make the file private
@@ -56,12 +56,12 @@ trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates
 stored your membership badge: this device now reaches your gated services.
 ```
 
-### Badge
+### Membership
 
-The proof a device gets in adoption is a **badge**: a signature, made by your signet and locked to that
-device's key, that says "this machine is mine." A device carrying your badge reaches every gated
-service on any node you run, with no per-service step. That is how your laptop, your desktop, and a
-server all get in at once.
+The proof a device gets in adoption is its **membership**: a signature, made by your signet and locked
+to that device's key, that says "this machine is mine." A device carrying your membership reaches every
+gated service on any node you run, with no per-service step. That is how your laptop, your desktop, and
+a server all get in at once.
 
 ## The gate
 
@@ -69,7 +69,7 @@ server all get in at once.
 answers one question: *are you allowed?* It phones no server to decide. The answer is a signature it
 checks on the spot, against your key.
 
-By default the gate admits your own devices (they carry your badge) and turns everyone else away. A
+By default the gate admits your own devices (they carry your membership) and turns everyone else away. A
 plain node is its own root of trust: it trusts itself and whom you delegate, and refuses strangers.
 Opening a service to the public is a deliberate, named opt-out (see [public services](use-cases/public-service.md)).
 
@@ -82,7 +82,7 @@ A <a id="revocation"></a>revoke lands live: the gate re-reads the denylist when 
 couple of seconds, no restart. It does not cut a session already in progress; that held connection
 drains, and cutting it live is not built yet.
 
-## Sharing access: fleets and slips
+## Sharing access: fleets and grants
 
 Two more nouns cover letting other people in.
 
@@ -92,22 +92,22 @@ A **fleet** is one person's devices: everything their signet vouches for. Grant 
 machine that person owns, now or later, is covered. To grant someone's fleet you first record their
 signet, which they read with `swoosh identity` on their own machine and send you.
 
-### Slip
+### Grant
 
-A **slip** is a grant to one of your services. Its shareable form is a `sheer:` link: a signed token,
-rooted at your key, that a gate checks offline with no server and no allowlist to sync. You issue a slip
-with `swoosh grant issue`, hand it over any channel (chat, a QR code), and the holder presents it when
-they dial.
+A **grant** is access to one of your services. Its shareable form is a **capability link** (a `sheer:`
+link): a signed token, rooted at your key, that a gate checks offline with no server and no allowlist
+to sync. You issue a grant with `swoosh grant issue`, hand the link over any channel (chat, a QR code),
+and the holder presents it when they dial.
 
 There are five ways in, tightest first:
 
 1. **Your own devices.** They adopt your signet once (above). Whole-node, standing, nothing per service.
-2. **One device, one service:** `swoosh grant issue ssh --for alice/laptop`. A slip locked to one
+2. **One device, one service:** `swoosh grant issue ssh --for alice/laptop`. A grant locked to one
    machine's key. A stolen copy is useless to anyone else; it cannot be passed on.
-3. **A whole person, one service:** `swoosh grant issue ssh --for fleet:alice`. A slip locked to a
+3. **A whole person, one service:** `swoosh grant issue ssh --for fleet:alice`. A grant locked to a
    person's signet, so every machine they own can use it. Revoke it once and their whole fleet loses
    access.
-4. **Whoever holds the link:** `swoosh grant issue ssh`. A bearer slip: anyone with a copy may use it.
+4. **Whoever holds the link:** `swoosh grant issue ssh`. A bearer grant: anyone with a copy may use it.
    Short-lived by default; expiry is how it goes away. Add `--delegable` to let the holder narrow it and
    pass it on.
 5. **Anyone:** `swoosh serve --public ping,speed`. The named services answer everyone, no credential.
@@ -116,19 +116,19 @@ There are five ways in, tightest first:
 
 There is one rule the crypto forces, and it is the whole security model in a sentence:
 
-> A slip is **bound** (theft-proof, cannot be passed on) OR **delegable** (can be narrowed and handed
+> A grant is **bound** (theft-proof, cannot be passed on) OR **delegable** (can be narrowed and handed
 > on, so kept short-lived). Never both.
 
-A slip locked to a device or a fleet is theft-resistant: a stolen copy is worthless because it only
-works from the key it is bound to. A bearer slip can be freely handed on, which is exactly why it should
-expire soon. You pick binding or delegation per slip; the math will not give you both at once.
+A grant locked to a device or a fleet is theft-resistant: a stolen copy is worthless because it only
+works from the key it is bound to. A bearer grant can be freely handed on, which is exactly why it
+should expire soon. You pick binding or delegation per grant; the math will not give you both at once.
 
-**The honest limit.** A bearer slip is a bearer token: whoever holds an unexpired, un-revoked one gets
-that one service until it expires or you revoke it. Keep bearer slips short-lived.
+**The honest limit.** A bearer grant is a bearer token: whoever holds an unexpired, un-revoked one gets
+that one service until it expires or you revoke it. Keep bearer grants short-lived.
 
 ## Using a grant you were given
 
-Everything above is how you hand access OUT. Using a slip someone handed YOU is the mirror image. A
+Everything above is how you hand access OUT. Using a grant someone handed YOU is the mirror image. A
 `sheer:` link carries both the node to reach and the grant to present, so you pass it in place of a peer on
 any reach verb:
 
@@ -141,16 +141,16 @@ $ swoosh forward sheer:bf01hcq6….<token> --to 2222
 Nothing else is needed: the link names the node, names the one service it grants, and proves you may reach
 it. It works only for that service, and stops the moment it expires or the issuer revokes it.
 
-When you already reach a node another way (a petname you recorded, say) but hold a separate slip, present it
-with `--present`:
+When you already reach a node another way (a petname you recorded, say) but hold a separate grant,
+present it with `--present`:
 
 <!-- capture: swoosh forward alice/box --present sheer:… --to 2222 -->
 ```console
 $ swoosh forward alice/box --present sheer:… --to 2222
 ```
 
-Your own devices never need a slip: their badge gets them in. Reach for `--present` only to reach as a
-delegate holding someone's grant.
+Your own devices never need a link: their membership gets them in. Reach for `--present` only to reach
+as a delegate holding someone's grant.
 
 ## Glossary
 
@@ -158,9 +158,9 @@ delegate holding someone's grant.
 | --- | --- |
 | [signet](#signet) | your root identity; one key that means "me" |
 | [device](#device) | one machine you own; its own key, vouched for by your signet |
-| [badge](#badge) | the signature that proves a device is yours; admits it to your gated services |
+| [membership](#membership) | the signature that proves a device is yours; admits it to your gated services |
 | [fleet](#fleet) | one person's devices; everything their signet vouches for |
-| [slip](#slip) | a signed grant to one service (`sheer:` link); checked offline, no server |
+| [grant](#grant) | access to one service; its shareable form is a `sheer:` capability link, checked offline |
 
 ## Next
 

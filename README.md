@@ -42,6 +42,7 @@ The [getting-started guide](docs/getting-started.md) walks this end to end in tw
 ## Docs
 
 - [Getting started](docs/getting-started.md) zero to your first reach.
+- [Capabilities](docs/capabilities.md) hand someone one service with a link you can expire and revoke.
 - [Keys](docs/keys.md) the whole model: five nouns, one gate, one trade. Read it early.
 - [Use cases](docs/use-cases/README.md) reach your own devices, admit a household, grant a contractor,
   and more.

@@ -16,9 +16,9 @@ bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
 key: ~/.config/swoosh/identity.key
 ```
 
-**Things to know.** On an adopted device this prints that *device's* key, not your signet. A fleet grant
-needs the person's signet, read on their signet-holding machine. Use `identity` to provision a key ahead
-of time: mint it here, save its NodeId as a contact, then hand the key file to the machine that adopts
-it.
+**Things to know.** `id` is an alias of `identity`. On an adopted device this prints that *device's* key,
+not your signet. A fleet grant needs the person's signet, read on their signet-holding machine. Use
+`identity` to provision a key ahead of time: mint it here, save its NodeId as a contact, then hand the key
+file to the machine that adopts it.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

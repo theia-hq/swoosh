@@ -14,6 +14,8 @@ Usage: swoosh adopt [OPTIONS] [authkey]
 `SWOOSH_AUTHKEY` from the environment.
 
 **Things to know.** Passing the authkey as a bare argument warns you, because `ps` and `/proc` can read
-argv. Prefer `-` (stdin), `@<path>` (a file), or the env var.
+argv. Prefer `-` (stdin), `@<path>` (a file), or the env var. Adopting over a home that already holds an
+identity replaces that identity, with no prompt: `identity` provisions a key in an empty home, and a
+later `adopt` overwrites it.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

@@ -20,7 +20,7 @@ recorded me/ci-runner -> bf01imv3ljql6kjn  [derived]
 hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
-A minted badge lasts 90 days unless you pass `--expires`; see [`swoosh mint`](../reference/commands.md#mint).
+A minted membership lasts 90 days unless you pass `--expires`; see [`swoosh mint`](../reference/commands.md#mint).
 
 Store that authkey as a CI secret named `SWOOSH_AUTHKEY`. On GitHub Actions, use the flagship action: it
 installs swoosh, adopts the authkey, and serves the runner's default services (a keyless shell plus
@@ -74,7 +74,7 @@ $ swoosh serve recv=recv:/srv/releases
 
 Omit `minutes` on the runner's step so the job advances straight to the next step instead of holding
 open; the node keeps serving in the background until the job ends. Push the artifact to the deploy box by
-name, the runner's badge admits it:
+name, the runner's membership admits it:
 
 <!-- capture: swoosh send app.tar deploybox -->
 ```console
@@ -106,6 +106,6 @@ denylist, so revoke on every machine the runner reaches. See [revocation](../key
 
 ## Next
 
-- [Keys](../keys.md#device) what a device and a badge are.
-- [Contractor access](contractor-access.md) a timed slip for a person, not a machine.
+- [Keys](../keys.md#device) what a device and membership are.
+- [Contractor access](contractor-access.md) a timed grant for a person, not a machine.
 - [Commands](../reference/commands.md#send) send, ssh, and the mint/adopt handshake.

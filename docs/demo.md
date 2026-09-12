@@ -94,7 +94,7 @@ serving
 ctrl-c to stop
 ```
 
-The member dials, presenting the badge the server's signet minted for it, so the gate admits it:
+The member dials, presenting the membership the server's signet minted for it, so the gate admits it:
 
 <!-- capture: scripts/demo.sh (quirk ping + speed) -->
 ```console
@@ -154,13 +154,14 @@ watch a relayed link hole-punch to direct in real time.
 
 ## Part 4: the stranger is refused
 
-A third identity, never adopted, dials the same server. Its self-signed badge roots at its own key,
+A third identity, never adopted, dials the same server. Its self-signed membership roots at its own key,
 which the server's signet has never trusted, so the gate turns it away:
 
 <!-- capture: scripts/demo.sh (stranger refused) -->
 ```console
 $ swoosh ping $SERVER --transport quirk --peer $SERVER=127.0.0.1:52364 -c 3 -i 0.2
 bf01hwttmgsklixr via quirk: reached, but refused (not admitted: not a member of this node's family, and no capability for this service)
+Error: bf01hwttmgsklixr: reached, but refused
 ```
 
 Exit status 1. The member is in; the stranger is out. That refusal is the most important line: the gate
@@ -184,5 +185,5 @@ from under the same address and command while proving the same membership gate h
 ## Next
 
 - [Transports](transports.md) iroh versus quirk, in depth.
-- [Contractor access](use-cases/contractor-access.md) admit an outsider by a slip, then revoke.
+- [Contractor access](use-cases/contractor-access.md) admit an outsider by a capability link, then revoke.
 - [Keys](keys.md) the model the gate enforces.
