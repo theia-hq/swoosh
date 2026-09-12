@@ -14,13 +14,19 @@
 //!
 //! The persisted default lives at `~/.config/swoosh/identity.key`, mode 0600.
 
-use std::path::Path;
+use core::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
+use eyre::WrapErr as _;
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::{Zeroize as _, ZeroizeOnDrop};
 
 use crate::home::Home;
+
+/// The exact byte length of a persisted ed25519 seed. An `identity.key` of any other length is corrupt or
+/// foreign: reading it fails closed and [`write`] never mints a fresh key over it.
+const KEY_LEN: usize = 32;
 
 /// The DEFAULT lifetime a signet-signed, STORED device membership badge stands before it must be
 /// re-minted, applied by `swoosh mint` only when the operator passes no `--expires`. A default, not a
@@ -198,40 +204,91 @@ pub async fn resolve(intent: Identity, home: &Home) -> eyre::Result<Secret> {
 
 /// Load the secret at `path` if the file exists and holds a 32-byte key, else `None`. Unlike
 /// [`load_or_create`], never writes: an outward dial reads a provisioned identity but does not mint one.
+/// A file that exists but is the wrong size fails closed (a corrupt or foreign key file is a loud error,
+/// never a silent fall-through to a fresh ephemeral identity).
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 async fn load_existing(path: &Path) -> eyre::Result<Option<Secret>> {
-    match tokio::fs::read(path).await {
-        Ok(mut bytes) => {
-            let secret = <[u8; 32]>::try_from(bytes.as_slice()).ok().map(Secret);
-            bytes.zeroize();
-            Ok(secret)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+    read_key(path).await
 }
 
 /// Load the secret at `path`, creating and saving a fresh one on first use.
 async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
-    if let Ok(mut bytes) = tokio::fs::read(path).await {
-        if let Ok(secret) = <[u8; 32]>::try_from(bytes.as_slice()) {
-            bytes.zeroize();
-            return Ok(Secret(secret));
-        }
-        bytes.zeroize();
+    if let Some(secret) = read_key(path).await? {
+        return Ok(secret);
     }
 
     let secret = Secret::ephemeral();
-    if let Some(parent) = path.parent() {
-        // Owner-only (`0700`): this store holds the secret key beside the signet and denylist, so its dir
-        // must never be group/world-traversable (see [`config::create_store_dir`](crate::config)). The key
-        // file itself is tightened to `0600` by `restrict` just below.
-        crate::config::create_store_dir(parent)?;
-    }
-    tokio::fs::write(path, secret.0).await?;
-    restrict(path).await?;
+    write_atomic(path, &secret.0).await?;
     Ok(secret)
+}
+
+/// Read the persisted key at `path`: `Ok(None)` only when the file is absent, the key otherwise. A file
+/// that exists but holds anything other than exactly [`KEY_LEN`] bytes is refused with the size named, so
+/// a corrupt key file is never silently discarded and [`load_or_create`] never mints over it.
+///
+/// The mode is read from the OPEN handle and the bytes are read from that SAME handle, so a symlink swap
+/// between the check and the read cannot slip a different file past the guard (TOCTOU-safe), mirroring the
+/// `@<path>` secret reader in [`crate::secret`].
+// `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+async fn read_key(path: &Path) -> eyre::Result<Option<Secret>> {
+    use tokio::io::AsyncReadExt as _;
+
+    let file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    guard_mode(&file, path).await?;
+    // Read one byte past the key so an oversized file is DETECTED rather than silently truncated to its
+    // first 32 bytes: any other length is corrupt or foreign, and fail-closed keeps a fresh key from
+    // silently replacing it. The buffer zeroizes on drop, so a partial read leaves no key material behind.
+    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    file.take((KEY_LEN + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .wrap_err_with(|| format!("failed to read the identity key {}", path.display()))?;
+    let secret = <[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| {
+        eyre::eyre!(
+            "identity key {} is {} bytes; an ed25519 key is exactly {KEY_LEN}. refusing to \
+             overwrite it: restore a valid key or move the file aside",
+            path.display(),
+            bytes.len(),
+        )
+    })?;
+    Ok(Some(Secret(secret)))
+}
+
+/// Refuse a group- or world-accessible identity key, mirroring the `@<path>` secret reader: the key IS a
+/// full node identity, so silently reading a file others can read defeats the point. Owner-only means no
+/// group/other bits (`mode & 0o077 == 0`); the error names the file and hints `chmod 600`.
+///
+/// The mode is read from the OPEN handle the caller also reads from, so this is TOCTOU-safe.
+#[cfg(unix)]
+async fn guard_mode(file: &tokio::fs::File, path: &Path) -> eyre::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+    let mode = file
+        .metadata()
+        .await
+        .wrap_err_with(|| format!("failed to stat the identity key {}", path.display()))?
+        .mode();
+    if mode & 0o077 != 0 {
+        return Err(eyre::eyre!(
+            "permissions {:04o} for the identity key {} are too open: group or other can read it. \
+             run `chmod 600 {}`",
+            mode & 0o7777,
+            path.display(),
+            path.display(),
+        ));
+    }
+    Ok(())
+}
+
+/// Non-unix has no portable file-mode equivalent, so the guarantee is unix-only: read the file as given.
+#[cfg(not(unix))]
+async fn guard_mode(_file: &tokio::fs::File, _path: &Path) -> eyre::Result<()> {
+    Ok(())
 }
 
 /// Write `seed` as the persisted identity at `<home>/identity.key`, mode 0600, creating the store dir.
@@ -239,27 +296,57 @@ async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
 /// MUST land in the same store [`resolve`] reads, so the node comes up AS the adopted device. (Writing
 /// tightbeam's separate store instead was the qat identity-mismatch bug: `serve` bound swoosh's own key,
 /// never the adopted one, so the exposed node had a different id than the contact pointed at.)
+///
+/// The write is ATOMIC (a unique temp sibling in the same directory, then one rename over the target), so
+/// a crash or a failed write can never truncate the key: the old file stays intact until the rename lands.
 pub async fn write(seed: &[u8; 32], home: &Home) -> eyre::Result<()> {
-    let path = home.identity_key();
+    write_atomic(&home.identity_key(), seed).await
+}
+
+/// The atomic write behind [`write`]: create the store dir 0700, write the seed to a temp sibling opened
+/// 0600 (so the rename carries owner-only onto the target), then rename it over `path`. A failed write or
+/// rename removes the temp best-effort, leaving the previous key untouched and no litter behind.
+async fn write_atomic(path: &Path, seed: &[u8; 32]) -> eyre::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
     if let Some(parent) = path.parent() {
-        // Owner-only (`0700`) store dir, as in `load_or_create`; the seed file is tightened to `0600` by
-        // `restrict` just below (see [`config::create_store_dir`](crate::config)).
         crate::config::create_store_dir(parent)?;
     }
-    tokio::fs::write(&path, seed).await?;
-    restrict(&path).await?;
+    let tmp = temp_path(path);
+    // A fresh temp sibling: the pid separates processes and an atomic sequence separates writes within
+    // one, so two writers can never share one temp path and truncate each other's in-flight seed.
+    let written = async {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&tmp).await?;
+        file.write_all(seed).await?;
+        file.flush().await?;
+        file.sync_all().await
+    }
+    .await;
+    if let Err(error) = written {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(error.into());
+    }
+    if let Err(error) = tokio::fs::rename(&tmp, path).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(error.into());
+    }
     Ok(())
 }
 
-#[cfg(unix)]
-async fn restrict(path: &Path) -> eyre::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
-    Ok(())
+/// A temp sibling unique to ONE write: the key path plus `.tmp.<pid>.<seq>`. The pid separates processes
+/// and an atomic sequence separates writes within one, so two writers can never share one temp path.
+fn temp_path(path: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp.{}.{seq}", std::process::id()));
+    path.with_file_name(name)
 }
 
-#[cfg(not(unix))]
-async fn restrict(_path: &Path) -> eyre::Result<()> {
-    Ok(())
-}
+#[cfg(test)]
+#[path = "identity_tests.rs"]
+mod identity_tests;
