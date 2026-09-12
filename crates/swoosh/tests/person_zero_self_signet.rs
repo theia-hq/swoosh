@@ -31,17 +31,15 @@ use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, Speedtest};
 use nauthy::{FileDenylist, Identity};
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Services,
-};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
 /// The person-zero node's OWN secret. Its ed25519 public half is BOTH the node's identity key AND the signet
 /// root its self-gate trusts, because a person-zero node IS its own signet root. This is the value the
 /// composition root derives from `secret.node_id()` when no signet file was ever written.
 const SELF_SECRET: [u8; 32] = [11u8; 32];
 
-/// The ssh host-key seed the exposer's registry carries. Unused by this test (it exercises `measure`, not
-/// `sshd`), but the shared `registry()` derives `sshd` from it, so a fixed value keeps the build stable.
+/// The ssh host-key seed the exposer's route table carries. Unused by this test (it exercises `measure`, not
+/// `sshd`), but the shared `diagnostics` helper derives `sshd` from it, so a fixed value keeps the build stable.
 const HOST_SEED: [u8; 32] = [9u8; 32];
 
 /// Run the proof on a worker thread with a generous stack, for the same reason as `gated_measure.rs`: measure's
@@ -70,20 +68,19 @@ async fn proof() {
     {
         // The person-zero exposer node: it serves `ping`/`speed` behind a family gate rooted at its OWN key (no
         // provisioned signet, no `--public`), assembled through the SAME `resolve_gate` policy and
-        // `registry()` the product `serve` path uses. `self_signet` is the id the composition root supplies
-        // from `secret.node_id()` when `load_signet` returns `None`.
+        // `diagnostics` helper the product `serve` path uses. `self_signet` is the id the composition root
+        // supplies from `secret.node_id()` when `load_signet` returns `None`.
         let host = Node::new(MemTransport::bind(), NoDiscovery);
         let host_id = host.node_id();
         let self_signet = NodeId::from_ed25519_secret(&SELF_SECRET);
         tokio::task::spawn_local(async move {
-            let services =
-                Services::parse(&["ping=ping:".to_owned(), "speed=speed:".to_owned()]).unwrap();
             // Person-zero self-signet: the gate roots at the node's OWN key, exactly as
             // `resolve_gate(Some(secret.node_id()), ...)` builds it when nothing was adopted.
             let gate =
                 tunnel::resolve_gate(Some(self_signet), empty_denylist("self").await).unwrap();
-            let registry = swoosh::commands::serve::registry(HOST_SEED).unwrap();
-            Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
+            swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED)
+                .unwrap()
+                .expose()
                 .unwrap()
                 .run(&host, CancellationToken::new())
                 .await

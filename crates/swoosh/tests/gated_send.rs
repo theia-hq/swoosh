@@ -7,8 +7,8 @@
 //! are verified end to end, and that a tampered blob is REJECTED, never written.
 //!
 //! One node exposes `recv=recv:` behind a family gate rooted at a signet, built with the SAME `Recv` handler
-//! the `swoosh serve` product path instances per receive service (recv is de-merged OUT of the shared
-//! `registry()`, like `fetch:`, so this proof constructs the one receiver directly, into a real temp output
+//! the `swoosh serve` product path instances per receive service (recv is bound per service by value,
+//! like `fetch:`, so this proof constructs the one receiver directly, into a real temp output
 //! directory). A member drives `bifrost-wire`'s verified `Transfer` over the gated `recv` service exactly as
 //! `swoosh send` does: it opens one stream per file, sends the blob, and the receiver saves it under the safe
 //! relative name. A stranger's push is refused at the gate. And a blob whose bytes do not match its advertised
@@ -30,9 +30,7 @@ use bifrost_mem::MemTransport;
 use nauthy::{FileDenylist, Identity};
 use swoosh::commands::serve::Recv;
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Registry, Services,
-};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
 /// The signet's fixed secret. Its ed25519 public half is the signet the family gate trusts, and it roots
 /// every membership badge minted here.
@@ -64,12 +62,13 @@ async fn proof() {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
     let out_for_host = out.clone();
     tokio::task::spawn_local(async move {
-        let services = Services::parse(&["recv=recv:".to_owned()]).unwrap();
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-        // recv is de-merged out of the shared `registry()` (like `fetch:`), so this proof builds the ONE
-        // receive handler directly, the identical `Recv` the product path instances per receive service.
-        let registry = Registry::new().with("recv", Recv::new(out_for_host));
-        Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
+        // recv is bound per service by value, so this proof builds the ONE receive handler directly, the
+        // identical `Recv` the product path instances per receive service.
+        Router::new(gate)
+            .service("recv".parse().unwrap(), Recv::new(out_for_host))
+            .unwrap()
+            .expose()
             .unwrap()
             .run(&host, CancellationToken::new())
             .await
@@ -182,20 +181,16 @@ async fn two_dirs_proof() {
     let (a, b) = (dir_a.clone(), dir_b.clone());
     tokio::task::spawn_local(async move {
         // Two receive services, each its OWN `Recv` instance bound to ONLY its own dir, wired the way the
-        // product `serve` path de-merges `a=recv:/x b=recv:/y`: each served name maps to its own synthetic
-        // handler scheme, and each scheme holds a `Recv` scoped to a single sink. This is the shape that
-        // makes the per-service dir load-bearing rather than a shared node-wide value.
-        let services = Services::parse(&[])
-            .unwrap()
-            .with_handler("a", "recv_a")
-            .unwrap()
-            .with_handler("b", "recv_b")
-            .unwrap();
-        let registry = Registry::new()
-            .with("recv_a", Recv::new(a))
-            .with("recv_b", Recv::new(b));
+        // product `serve` path de-merges `a=recv:/x b=recv:/y`: each served name binds its own `Recv`
+        // scoped to a single sink. This is the shape that makes the per-service dir load-bearing rather
+        // than a shared node-wide value.
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("two-dirs").await).unwrap();
-        Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
+        Router::new(gate)
+            .service("a".parse().unwrap(), Recv::new(a))
+            .unwrap()
+            .service("b".parse().unwrap(), Recv::new(b))
+            .unwrap()
+            .expose()
             .unwrap()
             .run(&host, CancellationToken::new())
             .await

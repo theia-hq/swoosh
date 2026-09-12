@@ -1,6 +1,5 @@
-use nauthy::Admitted;
 use tightbeam::open_policy::Never;
-use tightbeam::tunnel::{BoxRead, BoxWrite, CancellationToken, Handler};
+use tightbeam::tunnel::{BoxRead, BoxWrite, CancellationToken, Handler, ServeError, Served};
 use tokio::io::AsyncWriteExt as _;
 
 /// The `control.stop` handler swoosh injects: the remote node-lifecycle stop. It holds a CLONE of the
@@ -13,7 +12,7 @@ use tokio::io::AsyncWriteExt as _;
 /// caller the gate admitted as a whole-node member (this node's own devices, the fleet) can stop it. A
 /// delegate holding a `control.stop` slip is refused with the same uniform refusal a gate miss gives, and
 /// this handler never runs; an open gate over the route is refused at
-/// [`Exposer::new`](tightbeam::tunnel::Exposer::new).
+/// [`Router::expose`](tightbeam::tunnel::Router::expose).
 ///
 /// The handler does not re-check the witness: the floor is enforced once in tightbeam's dispatch path.
 /// The HARDENED lifecycle (an arm->confirm nonce + a single-use device-bound DESTROY-CAP, ideally
@@ -26,7 +25,7 @@ use tokio::io::AsyncWriteExt as _;
 /// counterpart to the loud typed refusal a non-admitted caller gets at the gate.
 ///
 /// Public so the `gated_stop` proof drives the SAME handler `serve` injects, not a hand-rolled near-copy,
-/// exactly as the `gated_measure` proof reuses `registry`.
+/// exactly as the `gated_measure` proof reuses `diagnostics`.
 pub struct Stop {
     cancel: CancellationToken,
 }
@@ -42,14 +41,14 @@ impl Stop {
 impl Handler for Stop {
     // The route is member-only (declared in `serve`) and has no safe public form: the marker keeps an
     // open-gate pairing from ever being built, and the member floor refuses every non-member pre-Ok.
-    type Public = Never;
+    type Exposure = Never;
 
     async fn serve(
         &self,
-        _admitted: Admitted,
+        _served: Served<Self>,
         mut writer: BoxWrite,
         _reader: BoxRead,
-    ) -> eyre::Result<()> {
+    ) -> Result<(), ServeError> {
         self.cancel.cancel();
         // The ack byte: proof to the client that the stop landed. Written after the cancel so a client
         // reading it knows the teardown was requested, then flushed since the node is about to close.

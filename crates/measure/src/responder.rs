@@ -6,9 +6,9 @@
 //! ping and speed are TWO independent services, not one: `ping` (cheap RTT) and `speed` (bandwidth-eating
 //! throughput). A node may offer one without the other, and each carries its own gate, so the served
 //! method MUST match the service that admitted the stream. [`answer_ping`] and [`answer_speed`] are the
-//! two narrow entry points the composing consumer wires into the handler registry: each refuses the other's method at the wire
-//! ([`ProtocolError::WrongService`]), so a `ping` grant can never open a speed drain even
-//! though both speak the same frame. [`answer`] is the union of both, for a responder that serves
+//! two narrow entry points the composing consumer wires into the route table: each refuses the other's
+//! method at the wire ([`ProtocolError::WrongService`]), so a `ping` grant can never open a speed drain
+//! even though both speak the same frame. [`answer`] is the union of both, for a responder that serves
 //! both over one session.
 
 use bifrost::{RefusalDetail, Session};
@@ -80,7 +80,7 @@ where
 
 /// Answer one inbound stream on the union of both methods, dispatching on its opening
 /// request. Used by [`Responder`], which serves ping and speed over one session; the split
-/// [`answer_ping`]/[`answer_speed`] are what the gated registry wires when the two are distinct services.
+/// [`answer_ping`]/[`answer_speed`] are what the gated route table wires when the two are distinct services.
 pub async fn answer<W, R>(mut writer: W, mut reader: R) -> Result<(), ProtocolError>
 where
     W: io::AsyncWrite + Unpin,

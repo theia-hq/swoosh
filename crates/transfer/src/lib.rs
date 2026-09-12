@@ -8,7 +8,7 @@
 //!
 //! It is a service crate: it knows what to DO with an admitted stream, never how the peer was reached or
 //! gated. The composing consumer wraps [`receive_file`] in a gated handler and injects it
-//! into the tunnel's handler registry, so every pushed file rides the same family gate as every other
+//! into the tunnel's route table, so every pushed file rides the same family gate as every other
 //! service; the sender side (dial, expand directories, pipeline concurrent streams) is a client verb driving
 //! `bifrost-wire` directly.
 //!

@@ -19,10 +19,7 @@ use swoosh::commands::serve::{CONTROL_SERVICES_SERVICE, Resident, ServiceList};
 use swoosh::home::Home;
 use tightbeam::enabled::FileDisabledList;
 use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, PublicUnsafeRequest, Registry, ServiceCatalog,
-    Services,
-};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router, ServiceCatalog};
 
 /// The signet's fixed secret; its ed25519 public half is the signet the family gate trusts.
 const SIGNET_SECRET: [u8; 32] = [7u8; 32];
@@ -54,22 +51,20 @@ impl Drop for Scratch {
 /// `resolve_gate` + handler the product path injects.
 async fn build_exposer(home: &Home) -> Exposer {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
-    let services = Services::parse(&[format!(
-        "{CONTROL_SERVICES_SERVICE}={CONTROL_SERVICES_SERVICE}:"
-    )])
-    .expect("the control.services service parses");
     let denylist = FileDenylist::load(home.revoked())
         .await
         .expect("the revocation denylist loads");
     let gate = tunnel::resolve_gate(Some(signet), denylist).expect("the family gate resolves");
-    let registry = Registry::new().with(
-        CONTROL_SERVICES_SERVICE,
-        ServiceList::new(ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog")),
-    );
     let enabled = FileDisabledList::load(home.disabled())
         .await
         .expect("the disabled list loads");
-    Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
+    Router::new(gate)
+        .service(
+            CONTROL_SERVICES_SERVICE.parse().expect("a name"),
+            ServiceList::new(ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog")),
+        )
+        .expect("the control.services route binds")
+        .expose()
         .expect("the resident exposer assembles")
         .with_enabled(enabled)
 }

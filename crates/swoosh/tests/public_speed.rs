@@ -8,8 +8,8 @@
 //! `control.stop`); per-service exposure is the fix, and a live run certifies it, not a code read.
 //!
 //! One node serves `ping` (gated), `speed` (opened via `--public speed`), and the always-on `control.stop`
-//! (never openable), assembled through the SAME `registry()` the product `serve` path builds and opened
-//! through the SAME `Exposer::with_public` wall. A STRANGER presenting no capability at all is ADMITTED to
+//! (never openable), assembled through the SAME `diagnostics` helper the product `serve` path binds and
+//! opened through the SAME Router public proof. A STRANGER presenting no capability at all is ADMITTED to
 //! `speed` (a real speedtest moves bytes) but REFUSED at `ping` and at `control.stop`, byte-uniformly. The
 //! refusals are the load-bearing half: opening `speed` leaks nothing about the gated services, and the
 //! control surface can never be opened.
@@ -21,15 +21,13 @@ use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, ProtocolError, Refusal, Speedtest};
 use nauthy::FileDenylist;
 use swoosh::commands::serve::{CONTROL_STOP_SERVICE, Stop};
-use tightbeam::tunnel::{
-    self, CancellationToken, Connector, Exposer, PublicRequest, PublicUnsafeRequest, Services,
-};
+use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
 /// The signet's fixed secret: its public half is the family the gate trusts. No badge here is rooted at it,
 /// because the whole point is that a STRANGER (rooted nowhere the gate trusts) still reaches the OPEN service.
 const SIGNET_SECRET: [u8; 32] = [7u8; 32];
 
-/// The ssh host-key seed the shared `registry()` derives `sshd` from. Unused by this test (it exercises the
+/// The ssh host-key seed the shared `diagnostics` helper derives `sshd` from. Unused by this test (it exercises the
 /// measure services + control.stop), but a fixed value keeps the build stable with and without the feature.
 const HOST_SEED: [u8; 32] = [9u8; 32];
 
@@ -58,23 +56,20 @@ async fn proof() {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
 
     tokio::task::spawn_local(async move {
-        // The services a `swoosh serve speed --public speed` node carries: the gated `ping`, the opened
-        // `speed`, and the always-on gated `control.stop` every node answers.
-        let requested = vec![
-            "ping=ping:".to_owned(),
-            "speed=speed:".to_owned(),
-            format!("{CONTROL_STOP_SERVICE}={CONTROL_STOP_SERVICE}:"),
-        ];
-        let services = Services::parse(&requested).unwrap();
+        // The routes a `swoosh serve speed --public speed` node carries: the gated `ping`, the opened
+        // `speed`, and the always-on member-only `control.stop` every node answers. `--public speed` builds:
+        // `speed` is OptIn (openable), and `control.stop` (Never) is not named, so the proof does not refuse
+        // the node. This is the build that used to die.
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-        let registry = swoosh::commands::serve::registry(HOST_SEED)
+        let exposer = swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED)
             .unwrap()
-            .with(CONTROL_STOP_SERVICE, Stop::new(CancellationToken::new()));
-        // `--public speed` SUCCEEDS: `speed` is OptIn (openable), and `control.stop` (Never) is left gated by
-        // set non-membership, so `with_public` does not refuse the node. This is the build that used to die.
-        let exposer = Exposer::new(services, registry, gate, PublicUnsafeRequest::none())
+            .member_service(
+                CONTROL_STOP_SERVICE.parse().unwrap(),
+                Stop::new(CancellationToken::new()),
+            )
             .unwrap()
-            .with_public(PublicRequest::new(["speed".parse().unwrap()]))
+            .public(["speed".parse().unwrap()])
+            .expose()
             .expect("`--public speed` builds: speed is openable, control.stop stays gated");
         exposer.run(&host, CancellationToken::new()).await.unwrap();
     });
