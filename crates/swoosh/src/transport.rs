@@ -2,12 +2,13 @@
 //!
 //! swoosh is transport-blind everywhere above this module; every verb is generic over `Node<T, D>`.
 //! Here, at the composition root, a `--transport` choice binds one concrete backend under the shared
-//! persisted identity and pairs it with a single composed discovery, the same for either backend:
+//! persisted identity and pairs it with a single composed discovery, the same for every backend:
 //! the explicit `--peer` hints layered over LAN mDNS. So a peer is reached whether it was named on the
 //! command line or simply heard on the network, and iroh honors an explicit hint just as quirk does.
-//! Because both backends derive the [`NodeId`] from the same ed25519 secret, the node keeps ONE
-//! address whichever transport is bound: swap the transport, keep the key, reach the same peer. That
-//! is the whole point of the seam.
+//! `quirk+noise` composes the sealed wrapper over quirk, still under that same persisted key. Because
+//! every choice derives the [`NodeId`] from the same ed25519 secret, the node keeps ONE address
+//! whichever transport is bound: swap the transport, keep the key, reach the same peer. That is the
+//! whole point of the seam.
 
 use core::net::SocketAddr;
 use core::str::FromStr;
@@ -26,7 +27,12 @@ use eyre::WrapErr as _;
 #[derive(Debug, Args)]
 pub struct ReachArgs {
     /// Backend to bind under this identity
-    #[arg(long, value_enum, default_value_t, value_name = "iroh|quirk")]
+    #[arg(
+        long,
+        value_enum,
+        default_value_t,
+        value_name = "iroh|quirk|quirk+noise"
+    )]
     pub transport: Transport,
     /// Direct address hint for a peer, `<key>=<addr>` (repeatable)
     // The clap id is `peer-hint`, not `peer`: this frees the id `peer` for the positional `<peer>` slot
@@ -37,13 +43,21 @@ pub struct ReachArgs {
 }
 
 /// Which concrete transport to bind under the shared identity. Default [`iroh`](Self::Iroh).
+///
+/// [`QuirkNoise`](Self::QuirkNoise) is quirk behind the sealed wrapper: the same direct-only backend
+/// with a Noise handshake over it, so the reached key is proven rather than announced. Bare
+/// [`Quirk`](Self::Quirk) stays the announced, diagnostics-only spelling; a signet-rooted gate refuses
+/// to arm over it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Transport {
     /// across the internet, NAT-traversing
     #[default]
     Iroh,
-    /// our own QUIC; LAN / direct-only
+    /// our own QUIC; LAN / direct-only, key announced (diagnostics only)
     Quirk,
+    /// our own QUIC behind the sealed wrapper; LAN / direct-only, key proven
+    #[value(name = "quirk+noise")]
+    QuirkNoise,
 }
 
 impl Transport {
@@ -54,6 +68,7 @@ impl Transport {
         match self {
             Self::Iroh => "iroh",
             Self::Quirk => "quirk",
+            Self::QuirkNoise => "quirk+noise",
         }
     }
 }
