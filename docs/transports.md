@@ -23,8 +23,9 @@ and no NAT traversal, so it reaches a peer only on the same LAN or at an address
 
 Two spellings share that backend:
 
-- `quirk` announces the reached key in plaintext. It is for public services and diagnostics: a
-  signet-rooted gate refuses to arm over it.
+- `quirk` announces the reached key in plaintext. A signet-rooted gate refuses to arm over it, and a
+  credential is never written to it. It is the base `quirk+noise` composes over; `swoosh serve
+  --transport quirk` shows the enforcement.
 - `quirk+noise` wraps quirk in a Noise handshake that proves the reached key before any byte flows, and
   encrypts the session. Gated services work over it. It is still direct-only, so it is for a LAN or a
   known address.
@@ -58,10 +59,9 @@ ctrl-c to stop
 On a shared LAN, peers still find each other automatically over either spelling. Off-LAN, you feed the
 address back with `--peer` (below).
 
-**The honest limit.** Bare `quirk` identity is self-announced, so it is for diagnostics and closed
-networks, not for anything gated or for reaching a peer across the untrusted internet. `quirk+noise`
-proves the peer's key and encrypts the session, but it is direct-only: use iroh when you need NAT
-traversal.
+**The honest limit.** Bare `quirk` announces the reached key, so a signet-rooted gate refuses to arm over
+it and a credential is never written to it. `quirk+noise` proves the peer's key and encrypts the session,
+but it is direct-only: use iroh when you need NAT traversal.
 
 ## <a id="peer"></a>Advanced: `--peer`, when discovery cannot reach them
 
@@ -73,7 +73,7 @@ blocked. Take the `direct` line a peer's `serve` printed and pass it back:
 $ swoosh ping bf01hcq6… --transport quirk+noise --peer bf01hcq6…=127.0.0.1:50902 -c 4
 ```
 
-Bare `quirk` takes the same hint; use `quirk+noise` when the peer gates its services.
+`quirk+noise` is the quirk dial; use it when the peer gates its services.
 
 Over iroh you almost never need this: iroh discovers the peer from its key. If an iroh dial cannot
 reach a peer, the peer is likely offline or discovery is down, not missing an address.

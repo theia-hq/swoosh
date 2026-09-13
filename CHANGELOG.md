@@ -5,6 +5,10 @@ All notable changes to swoosh, newest first.
 ## Unreleased
 
 ### Changed
+- **BREAKING: bare `--transport quirk` refuses every serve and every credential-bearing dial.** quirk
+  announces its key in plaintext, so a signet-rooted gate no longer arms over it and a credential is
+  never written to it. Use `--transport quirk+noise` for gated or credential-bearing quirk traffic; bare
+  `quirk` stays the announced base spelling, and `iroh` stays the default.
 - **BREAKING: `swoosh beam` is now `swoosh send`.** The file-push verb was renamed for clarity; the `beam`
   crate and internals are unchanged, and there is no back-compat alias.
 - **BREAKING: the file-receive scheme `beam:` is now `recv:`, and its output dir rides the scheme.**
@@ -23,6 +27,9 @@ All notable changes to swoosh, newest first.
   mtime-watched, fail-closed mechanism as revocation.
 - **`mint --expires <duration>`.** Choose a device badge's lifetime (default 90 days, previously a hardcoded
   year); a controlled reused-secret case can opt into `--expires 365d`.
+- **`--transport quirk+noise`.** quirk behind the sealed Noise wrapper: the same direct-only backend
+  with the reached key proven instead of announced. It is the only quirk spelling that serves gated
+  traffic, and the only one that carries a credential.
 
 ### Fixed
 - **Store files were world-readable.** The signet, membership badge, contacts book, and revocation denylist

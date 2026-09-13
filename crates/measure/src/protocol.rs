@@ -329,7 +329,7 @@ async fn read_detail<R: io::AsyncRead + Unpin>(
     Ok(RefusalDetail::try_from(bytes)?)
 }
 
-/// Why a diagnostic frame could not be decoded.
+/// Why a diagnostic stream could not be opened, or a frame decoded.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
     /// The stream did not open with the measure magic (foreign or wrong-version stream).
@@ -370,6 +370,12 @@ pub enum ProtocolError {
     /// The refusal code was not recognized: a corrupt or future stream, never guessed at.
     #[error("unknown refusal code {0:#04x}")]
     UnknownRefusalCode(u8),
+    /// The session's stream could not be opened: the transport-layer open, or the checked credential
+    /// write on it, refused or failed before any of this protocol's frames moved. Distinct from
+    /// [`Io`](Self::Io), which reports a frame that did not land; the cause is displayed directly, so a
+    /// credential refused over a transport that does not prove the peer reads as exactly that.
+    #[error(transparent)]
+    Open(Box<dyn core::error::Error + Send + Sync + 'static>),
     /// The underlying stream failed while reading a frame.
     #[error("read frame")]
     Io(#[from] io::Error),
@@ -377,13 +383,15 @@ pub enum ProtocolError {
 
 /// Map a session-level failure onto a protocol error. A typed refusal ([`bifrost::Error::Refused`]) is a
 /// REFUSAL, not an i/o failure, so it maps to [`ProtocolError::Refused`] with the dialer-class refusal
-/// preserved; every other session failure is a genuine [`ProtocolError::Io`]. This is the seam that stops
-/// a typed refusal from arriving at the render path indistinguishable from a read error.
+/// preserved; every other session failure is an [`ProtocolError::Open`]: the stream never opened, so it
+/// is never rendered as a frame read. This is the seam that stops a typed refusal from arriving at the
+/// render path indistinguishable from a read error.
 impl From<bifrost::Error> for ProtocolError {
     fn from(error: bifrost::Error) -> Self {
         match error {
             bifrost::Error::Refused(refusal) => ProtocolError::Refused(Refusal::Stream(refusal)),
-            other => ProtocolError::Io(io::Error::other(other)),
+            bifrost::Error::Stream(source) => ProtocolError::Open(source),
+            other => ProtocolError::Open(Box::new(other)),
         }
     }
 }

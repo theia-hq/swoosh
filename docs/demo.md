@@ -6,8 +6,12 @@ stranger who was never admitted is refused at the door, over either transport.
 
 You address *who* (an ed25519 public key), never *where*, so the transport under the reach can be pulled
 out and replaced. swoosh runs `ping` and `speed` over iroh (real QUIC, NAT traversal, relays)
-and over **quirk**, our own QUIC written from scratch over UDP, at the same peer, from the same member
-identity. Same key, same NodeId, different transport. And the gate holds across both.
+and over **quirk+noise**, our own QUIC written from scratch over UDP behind a Noise wrapper, at the same
+peer, from the same member identity. Same key, same NodeId, different transport. And the gate holds
+across both.
+
+Bare `quirk`, the announced base of that backend, is refused: it sends peer keys in plaintext, so a
+signet-rooted gate refuses to arm over it. Part 2 stages that refusal.
 
 Reproduce the whole thing:
 
@@ -23,9 +27,9 @@ Everything below is captured from that script.
 > - **quirk's throughput is not a speed claim.** quirk is young; its loopback throughput varies run to
 >   run and is nowhere near a mature stack. The point is that the SAME command runs over a transport we
 >   wrote, not that it is fast.
-> - **quirk's identity is plaintext-nominal until Noise.** Over iroh the reached identity is
->   cryptographically proven; over quirk it is a self-announced key. Do not read the quirk half as proven
->   crypto.
+> - **the announced base is refused, not used.** Bare `quirk` announces the reached key, so a
+>   signet-rooted gate never arms over it; `quirk+noise` proves the key before any byte flows. Do not
+>   read the announced base as a crypto mode.
 > - **The wow is the swap and the gate, not the number.** iroh's numbers and quirk's numbers are apples
 >   to oranges (one is a mature stack over the internet, one is a phase-0 loopback). They sit side by
 >   side only to prove the same verb rides both and the same gate admits or refuses across both.
@@ -50,7 +54,7 @@ The server derives a device identity for the member and prints an authkey to han
 <!-- capture: scripts/demo.sh (mint) -->
 ```console
 $ swoosh mint laptop
-authkey:zb5p7c2fda6fg2znhsjxqm7ywumwyrl6sdlwspdercdglm43dsgq.bf01hwtt…
+authkey:kxc3drkfdbpq24kaqas7uopt33lprpfutrdqfdfgtx73xqubuuda.bf01jsmb…
 ```
 
 The member adopts it. On its own machine (a distinct key dir), `adopt` writes the derived seed as the
@@ -59,8 +63,8 @@ member's identity AND records the server's signet as trusted:
 <!-- capture: scripts/demo.sh (adopt) -->
 ```console
 $ swoosh adopt @authkey.txt
-adopted this machine as bf01n7xynfd7dsms  [mine]
-trusting signet bf01hwttmgsklixr: `swoosh serve` now admits its members and delegates.
+adopted this machine as bf01ntwii5ojl5fk  [mine]
+trusting signet bf01jsmbbj7p3sjv: `swoosh serve` now admits its members and delegates.
 stored your membership badge: this device now reaches your gated services.
 ```
 
@@ -68,22 +72,36 @@ The member is a distinct identity (its own key, its own NodeId) that the server 
 distinctness is what lets the iroh leg below work: a node cannot connect to its own NodeId, so a
 one-key demo could never run over iroh.
 
-## Part 2: reach the server over quirk (our own QUIC)
+## Part 2: bare quirk refuses the gate
 
-quirk is direct-only, so `serve` prints the address it is reachable at. The client feeds it back with
-`--peer`:
+Bare `quirk` announces the reached key in plaintext, so the server's signet-rooted gate refuses to arm
+over it. The serve exits before printing a banner:
 
-<!-- capture: scripts/demo.sh (quirk serve) -->
+<!-- capture: scripts/demo.sh (quirk refusal) -->
 ```console
 $ swoosh serve --transport quirk
+Error: use `--transport quirk+noise` to serve gated quirk traffic: this node gates on a signet, but the bound transport declares announced peer proof, so a gated dial could never be admitted; bind a transport that proves the peer (the default iroh transport does), or serve with an open gate (`Gate::Open`), which needs no peer proof
+```
+
+Exit status 1. That is the enforcement, live: an announced transport cannot root-admit, so a credential
+is never written to it. The sealed spelling, below, is the opt-in that proves the key.
+
+## Part 3: quirk+noise admits the gate
+
+`quirk+noise` runs a Noise handshake over the same backend and proves the reached key, so the SAME
+rooted gate arms here. It is still direct-only, so `serve` prints the address it is reachable at:
+
+<!-- capture: scripts/demo.sh (quirk+noise serve) -->
+```console
+$ swoosh serve --transport quirk+noise
 swoosh ready
 
-    bf01hwttmgsklixrdr6f6nrsuefz6es77cebjvamv3jzlip7eiixbkma
+    bf01jsmbbj7p3sjvcflap6bgmpbf64pf3bjsijk7fv7x44sjkcbtcnvq
 
 how peers reach you
   LAN      automatic; your devices just need the key (mDNS)
   direct   reachable on this machine only:
-           127.0.0.1:52364
+           127.0.0.1:63254
 
 serving
   family-gated   your devices + peers you've granted
@@ -94,27 +112,20 @@ serving
 ctrl-c to stop
 ```
 
-The member dials, presenting the membership the server's signet minted for it, so the gate admits it:
+The member dials, presenting the membership the server's signet minted for it, and passes the address
+back with `--peer`:
 
-<!-- capture: scripts/demo.sh (quirk ping + speed) -->
+<!-- capture: scripts/demo.sh (quirk+noise ping) -->
 ```console
-$ swoosh ping  $SERVER --transport quirk --peer $SERVER=127.0.0.1:52364 -c 5 -i 0.2
-bf01hwttmgsklixr via quirk: direct to 127.0.0.1:52364
+$ swoosh ping $SERVER --transport quirk+noise --peer $SERVER=127.0.0.1:63254 -c 5 -i 0.2
+bf01jsmbbj7p3sjv via quirk+noise: direct to 127.0.0.1:63254
   5 sent, 5 received, 0% loss
-  rtt min/avg/max/mdev = 0.107/0.273/0.353/0.068 ms
-
-$ swoosh speed $SERVER --transport quirk --peer $SERVER=127.0.0.1:52364 --down -t 3
-speed test to bf01hwttmgsklixr via quirk (down)
-    1.0s  24.15 MiB/s
-    2.0s  23.58 MiB/s
-    3.0s  24.58 MiB/s
-path: direct to 127.0.0.1:52364
-down  72.33 MiB in 3.00s = 24.11 MiB/s
+  rtt min/avg/max/mdev = 0.545/0.725/0.839/0.074 ms
 ```
 
-Real RTTs at 0% loss and real bytes moved, from an admitted member, over a QUIC we wrote ourselves.
+Real RTTs at 0% loss, from an admitted member, over a QUIC we wrote ourselves and sealed.
 
-## Part 3: swap the transport, keep the identity
+## Part 4: swap the transport, keep the identity
 
 Now start `serve` again from the SAME server key, over iroh. iroh self-discovers over the internet, so
 no `--peer` is needed. The NodeId is byte-for-byte identical:
@@ -124,7 +135,7 @@ no `--peer` is needed. The NodeId is byte-for-byte identical:
 $ swoosh serve --transport iroh
 swoosh ready
 
-    bf01hwttmgsklixrdr6f6nrsuefz6es77cebjvamv3jzlip7eiixbkma
+    bf01jsmbbj7p3sjvcflap6bgmpbf64pf3bjsijk7fv7x44sjkcbtcnvq
 
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
@@ -152,20 +163,21 @@ $ swoosh speed $SERVER --transport iroh --down -t 3
 Same member, same server key, same verbs, real reach over the internet path. Add `-v` to `ping` to
 watch a relayed link hole-punch to direct in real time.
 
-## Part 4: the stranger is refused
+## Part 5: the stranger is refused
 
 A third identity, never adopted, dials the same server. Its self-signed membership roots at its own key,
 which the server's signet has never trusted, so the gate turns it away:
 
 <!-- capture: scripts/demo.sh (stranger refused) -->
 ```console
-$ swoosh ping $SERVER --transport quirk --peer $SERVER=127.0.0.1:52364 -c 3 -i 0.2
-bf01hwttmgsklixr via quirk: reached, but refused (not admitted: not a member of this node's family, and no capability for this service)
-Error: bf01hwttmgsklixr: reached, but refused
+$ swoosh ping $SERVER --transport quirk+noise --peer $SERVER=127.0.0.1:63254 -c 3 -i 0.2
+bf01jsmbbj7p3sjv via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)
+Error: bf01jsmbbj7p3sjv: reached, but refused
 ```
 
-Exit status 1. The member is in; the stranger is out. That refusal is the most important line: the gate
-is real, not decorative, and it holds no matter which transport carried the dial.
+Exit status 1. The member is in; the stranger is out. The script runs the same check over iroh when n0
+discovery is reachable. That refusal is the most important line: the gate is real, not decorative, and it
+holds no matter which transport carried the dial.
 
 ## Why this matters
 
@@ -177,13 +189,14 @@ from under the same address and command while proving the same membership gate h
 
 ## The honest limitations
 
-- quirk has no Noise handshake yet, so the quirk identity is nominal, not proven crypto.
+- Bare quirk announces its key, so swoosh refuses to serve gated traffic over it; `quirk+noise` wraps the
+  same direct-only backend and proves the key.
 - quirk is direct-only (no NAT traversal), which is exactly enough for this host-to-host demo.
 - The iroh leg needs n0 discovery reachable. When it is down, an iroh dial reports "unreachable" and the
-  quirk leg plus the membership gate carry the show.
+  bare-quirk refusal plus the sealed leg carry the show.
 
 ## Next
 
-- [Transports](transports.md) iroh versus quirk, in depth.
+- [Transports](transports.md) iroh versus quirk+noise, in depth.
 - [Contractor access](use-cases/contractor-access.md) admit an outsider by a capability link, then revoke.
 - [Keys](keys.md) the model the gate enforces.
