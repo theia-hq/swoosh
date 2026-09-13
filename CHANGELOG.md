@@ -14,6 +14,11 @@ All notable changes to swoosh, newest first.
 - **BREAKING: the file-receive scheme `beam:` is now `recv:`, and its output dir rides the scheme.**
   `swoosh serve inbox=recv:<dir>` sets where arrivals land (a bare `recv:` writes to `.`); the node-wide
   `--out` flag is gone, since the output dir is a per-service fact. `send --service` defaults to `recv`.
+- **BREAKING: `mint` is now `invite add`, and `authkey:` is now `invite:`.** One create verb: `invite add
+  <label>` derives a device identity (the old `mint`), and `invite add <label> --for <key>` signs a
+  membership badge for a key the device made (no secret in the token). `invite ls` and `invite rm <label>`
+  list and cancel by the same ledger; legacy `authkey:` tokens still adopt, the old `--to` is `--for`, and
+  a stale `mint` invocation errors forward.
 - **`send` and `fetch` take `--service <name>`** to reach a receiver or exit published under a non-default
   name, matching `ssh` and `forward`.
 - **BREAKING: `--key <file>` is now `--home <dir>` (env `SWOOSH_HOME`).** A node is selected by its home
@@ -33,7 +38,7 @@ All notable changes to swoosh, newest first.
 - **`service enable <svc>` / `disable <svc>`.** Turn a served service off or on live, no restart: the change
   is written to `<home>/disabled` and the running node honors it on the next connection, the same
   mtime-watched, fail-closed mechanism as revocation.
-- **`mint --expires <duration>`.** Choose a device badge's lifetime (default 90 days, previously a hardcoded
+- **`invite add --expires <duration>`.** Choose a device badge's lifetime (default 90 days, previously a hardcoded
   year); a controlled reused-secret case can opt into `--expires 365d`.
 - **`--transport quirk+noise`.** quirk behind the sealed Noise wrapper: the same direct-only backend
   with the reached key proven instead of announced. It is the only quirk spelling that serves gated
@@ -43,8 +48,8 @@ All notable changes to swoosh, newest first.
 - **Store files were world-readable.** The signet, membership badge, contacts book, and revocation denylist
   landed `0644` in a `0755` store dir; they are now written `0600` inside a `0700` store dir, so the trust
   graph and revocation metadata are not exposed to other local users.
-- **Minted device badges are now revocable.** `mint` records the badge in the grant ledger, so
-  `swoosh grant revoke me/<label>` cuts a lost or leaked device (it previously found no record and bailed).
+- **Minted device badges are now revocable.** `invite add` records the badge in the grant ledger, so
+  `swoosh invite rm <label>` cuts a lost or leaked device (it previously found no record and bailed).
   The default badge lifetime also dropped from 365 to 90 days.
 - **Each `recv:<dir>` receives into its own dir.** Two receive services on one node no longer both write to
   the first-named directory.

@@ -9,31 +9,33 @@ here is per-service: a device you enroll gets into everything you run.
 
 ## Enroll a second device
 
-Your **signet** lives on the first machine you ran swoosh on. From it, mint a one-time authkey for the
-new machine:
+Your **signet** lives on the first machine you ran swoosh on. From it, create an invite for the new
+machine:
 
-<!-- capture: swoosh mint laptop -->
+<!-- capture: swoosh invite add laptop -->
 ```console
-$ swoosh mint laptop
-authkey:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
+$ swoosh invite add laptop
+invite:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
 
 recorded me/laptop -> bf01imv3ljql6kjn  [derived]
-hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
+hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
-The authkey is a secret. Move it to the new machine over something private and save the whole printed
-line to a file, the `authkey:` prefix included. The file must be `0600` (`chmod 600 authkey.txt`), or
+A derived invite is a secret. Move it to the new machine over something private and save the whole printed
+line to a file, the `invite:` prefix included. The file must be `0600` (`chmod 600 invite.txt`), or
 `adopt` refuses it. Reading from a file keeps the secret out of the process list:
 
-<!-- capture: swoosh adopt @authkey.txt -->
+<!-- capture: swoosh adopt @invite.txt -->
 ```console
-$ swoosh adopt @authkey.txt
+$ swoosh adopt @invite.txt
 adopted this machine as bf01imv3ljql6kjn  [mine]
 trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates.
 stored your membership badge: this device now reaches your gated services.
 ```
 
-The laptop is now a device your signet vouches for. Repeat once per machine.
+The laptop is now a device your signet vouches for. Repeat once per machine. To keep the secret from
+travelling at all, make the key ON the new machine first (`swoosh identity` prints it) and sign for that
+key with `swoosh invite add laptop --for <key>` instead.
 
 ## Reach any of them
 

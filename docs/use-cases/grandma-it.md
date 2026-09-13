@@ -10,23 +10,23 @@ so it trusts you and you can reach its shell any time.
 
 ## Set it up once (on their machine)
 
-From your own machine, mint a device authkey:
+From your own machine, create a device invite:
 
-<!-- capture: swoosh mint grandma-pc -->
+<!-- capture: swoosh invite add grandma-pc -->
 ```console
-$ swoosh mint grandma-pc
-authkey:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
+$ swoosh invite add grandma-pc
+invite:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
 
 recorded me/grandma-pc -> bf01imv3ljql6kjn  [derived]
-hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
+hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
-On their machine (during your visit, or one screen-share), install swoosh, adopt that authkey, and
+On their machine (during your visit, or one screen-share), install swoosh, adopt that invite, and
 start a gated shell that comes back on reboot:
 
-<!-- capture: swoosh adopt @authkey.txt -->
+<!-- capture: swoosh adopt @invite.txt -->
 ```console
-$ swoosh adopt @authkey.txt
+$ swoosh adopt @invite.txt
 adopted this machine as bf01imv3ljql6kjn  [mine]
 trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates.
 stored your membership badge: this device now reaches your gated services.

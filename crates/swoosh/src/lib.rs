@@ -6,7 +6,6 @@
 //! (`main.rs`) owns only the CLI surface (the clap tree and the composition root); everything a verb needs
 //! lives here, in these modules.
 
-pub mod authkey;
 pub mod commands;
 pub mod config;
 pub mod contacts;
@@ -14,6 +13,7 @@ pub mod credential;
 pub mod grants;
 pub mod home;
 pub mod identity;
+pub mod invite;
 pub mod node_client;
 pub mod peer;
 pub mod reach;

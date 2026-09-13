@@ -211,7 +211,7 @@ impl GrantRecord {
 /// `grant issue`), not in the [`Service`] type itself: `Service` is owned by the `nauthy` crate, a separate
 /// repo pinned by rev in shipping form, so a swoosh-side parse reservation is the whole of what this task
 /// can ship. A `Service` carrying either word can still exist as a value; it can never enter the ledger
-/// through either write path (`grant issue`, `mint`), and any stray line carrying one fails this parse.
+/// through either write path (`grant issue`, `invite add`), and any stray line carrying one fails this parse.
 /// Flagged to the Systems-Architect as a possible nauthy-side follow-up.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantTarget {
