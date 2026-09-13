@@ -187,6 +187,122 @@ fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
     );
 }
 
+/// The G4 wiring: a diagnostic route the operator opens binds metered limits, and a member-only one binds
+/// unmetered. The manifest is tightbeam's own read of the bound handler, so this asserts the same fact the
+/// banner renders.
+#[test]
+fn an_open_diagnostic_binds_metered_and_a_member_only_one_binds_unmetered() {
+    let speed: nauthy::Service = "speed".parse().expect("a valid service name");
+    let empty_roster = std::sync::Arc::new(Vec::new());
+
+    let open = super::bind_entry(
+        Router::new(gated()),
+        "speed=speed:",
+        [0u8; 32],
+        &empty_roster,
+        core::slice::from_ref(&speed),
+    )
+    .expect("speed binds")
+    .public([speed])
+    .expose()
+    .expect("an open speed route assembles");
+    let entry = open
+        .manifest()
+        .into_iter()
+        .find(|entry| entry.name == "speed")
+        .expect("speed is served");
+    assert_eq!(
+        entry.metering,
+        Some(Metering::Metered),
+        "an open diagnostic route is metered"
+    );
+    assert_eq!(entry.posture, Posture::Open);
+
+    let gated = super::bind_entry(
+        Router::new(gated()),
+        "speed=speed:",
+        [0u8; 32],
+        &empty_roster,
+        &[],
+    )
+    .expect("speed binds")
+    .expose()
+    .expect("a member-only speed route assembles");
+    let entry = gated
+        .manifest()
+        .into_iter()
+        .find(|entry| entry.name == "speed")
+        .expect("speed is served");
+    assert_eq!(
+        entry.metering,
+        Some(Metering::Unmetered),
+        "a member-only diagnostic route may run unmetered"
+    );
+    assert_eq!(entry.posture, Posture::Gated);
+}
+
+/// The banner warning is DERIVED from what the handler bound, not from a name list: an OPEN route that
+/// reports unmetered carries the quiet caveat, the same route reporting metered carries none, and an
+/// unmetered member-only route carries none (the family gate is the terminator).
+#[test]
+fn the_unmetered_caveat_derives_from_the_bound_metering() {
+    let speed = svc("speed");
+    let targets = display_targets(&["speed=speed:".to_owned()]).expect("explicit entries display");
+
+    let open_unmetered = Router::new(gated())
+        .service(
+            speed.clone(),
+            super::Speed::new(&measure::Limits::unmetered()),
+        )
+        .expect("speed binds")
+        .public([speed.clone()])
+        .expose()
+        .expect("an open unmetered speed route assembles");
+    let section = serving_section(
+        open_unmetered.manifest().as_slice(),
+        &targets,
+        &HashSet::new(),
+    );
+    assert!(
+        section.contains("unmetered: a stranger can drain your uplink"),
+        "an open unmetered route narrates the caveat: {section}"
+    );
+
+    let open_metered = Router::new(gated())
+        .service(
+            speed.clone(),
+            super::Speed::new(&measure::Limits::metered()),
+        )
+        .expect("speed binds")
+        .public([speed.clone()])
+        .expose()
+        .expect("an open metered speed route assembles");
+    let section = serving_section(
+        open_metered.manifest().as_slice(),
+        &targets,
+        &HashSet::new(),
+    );
+    assert!(
+        !section.contains("unmetered"),
+        "an open metered route carries no caveat: {section}"
+    );
+
+    let gated_unmetered = Router::new(gated())
+        .service(speed, super::Speed::new(&measure::Limits::unmetered()))
+        .expect("speed binds")
+        .expose()
+        .expect("a member-only unmetered speed route assembles");
+    let section = serving_section(
+        gated_unmetered.manifest().as_slice(),
+        &targets,
+        &HashSet::new(),
+    );
+    assert!(
+        !section.contains("unmetered"),
+        "a member-only route carries no caveat even unmetered: {section}"
+    );
+}
+
 /// The reach section flips the LAN line to a next-step down-state when mDNS is blocked, and a quirk node with
 /// a routable hint prints a `direct` channel with the address on its own copy-clean line.
 #[test]
@@ -317,10 +433,16 @@ fn resident_manifest_equals_plain_manifest() {
     // handlers, one handler value per route (the Router's bind-by-value shape). `bind_entry` binds only the
     // named routes, so `sshd` is absent here exactly as it is from the plain default set.
     let empty_roster = std::sync::Arc::new(Vec::new());
-    let router = super::bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], &empty_roster)
-        .expect("ping binds");
-    let router =
-        super::bind_entry(router, "speed=speed:", [0u8; 32], &empty_roster).expect("speed binds");
+    let router = super::bind_entry(
+        Router::new(gated()),
+        "ping=ping:",
+        [0u8; 32],
+        &empty_roster,
+        &[],
+    )
+    .expect("ping binds");
+    let router = super::bind_entry(router, "speed=speed:", [0u8; 32], &empty_roster, &[])
+        .expect("speed binds");
     let router = router
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
@@ -953,9 +1075,10 @@ fn gated() -> nauthy::Gate {
     )
 }
 
-/// The base diagnostic route table the product `serve` path assembles, on a fresh family gate.
-fn diagnostics() -> Router {
-    super::diagnostics(Router::new(gated()), [0u8; 32]).expect("the base diagnostics bind")
+/// The base diagnostic route table the product `serve` path assembles, on a fresh family gate, with the
+/// same open set the caller names: a diagnostic in `public` binds metered limits, as the product binds it.
+fn diagnostics(public: &[nauthy::Service]) -> Router {
+    super::diagnostics(Router::new(gated()), [0u8; 32], public).expect("the base diagnostics bind")
 }
 
 /// `serve speed --public speed` BUILDS (speed is OptIn, openable), and `--public <unknown>` is refused with a
@@ -963,15 +1086,16 @@ fn diagnostics() -> Router {
 /// handlers through the Router's public proof.
 #[test]
 fn public_speed_builds_and_public_unknown_is_refused() {
-    // `--public speed` builds: `speed` is an OptIn handler, so the overlay proves it open-safe.
-    let built = diagnostics().public([svc("speed")]).expose();
+    // `--public speed` builds: `speed` is an OptIn handler, so the overlay proves it open-safe. The same
+    // open set is what binds it metered, so the overlay and the bound limit are one input.
+    let built = diagnostics(&[svc("speed")]).expose();
     assert!(
         built.is_ok(),
         "`--public speed` must build (speed is openable)"
     );
 
     // `--public <unknown>` is refused, naming what the node DOES serve.
-    let Err(error) = diagnostics().public([svc("nope")]).expose() else {
+    let Err(error) = diagnostics(&[]).public([svc("nope")]).expose() else {
         panic!("an unknown public name must be refused");
     };
     assert!(
@@ -1075,7 +1199,7 @@ fn plain_public_refuses_a_raw_stream_and_points_at_public_unsafe() {
 fn public_unsafe_naming_a_non_raw_service_is_refused() {
     // `ping` must be a bound handler so the unsafe proof reaches the raw-target check, where naming a handler
     // in the unsafe overlay is the redirect under test.
-    let Err(error) = diagnostics().public_unsafe([svc("ping")]).expose() else {
+    let Err(error) = diagnostics(&[]).public_unsafe([svc("ping")]).expose() else {
         panic!("a handler named in the unsafe overlay must be redirected, not opened");
     };
     assert!(

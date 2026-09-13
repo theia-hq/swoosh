@@ -59,16 +59,17 @@ async fn proof() {
         // The routes a `swoosh serve speed --public speed` node carries: the gated `ping`, the opened
         // `speed`, and the always-on member-only `control.stop` every node answers. `--public speed` builds:
         // `speed` is OptIn (openable), and `control.stop` (Never) is not named, so the proof does not refuse
-        // the node. This is the build that used to die.
+        // the node. This is the build that used to die. The SAME open set is what binds `speed` metered, so
+        // the opened route the stranger reaches is the bounded one.
+        let public: Vec<nauthy::Service> = vec!["speed".parse().unwrap()];
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-        let exposer = swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED)
+        let exposer = swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED, &public)
             .unwrap()
             .member_service(
                 CONTROL_STOP_SERVICE.parse().unwrap(),
                 Stop::new(CancellationToken::new()),
             )
             .unwrap()
-            .public(["speed".parse().unwrap()])
             .expose()
             .expect("`--public speed` builds: speed is openable, control.stop stays gated");
         exposer.run(&host, CancellationToken::new()).await.unwrap();
