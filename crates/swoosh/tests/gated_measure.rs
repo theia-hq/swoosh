@@ -88,7 +88,7 @@ async fn proof() {
             // only there; the proof exercises the ping + speed services, so gating this keeps it green WITH
             // and WITHOUT the feature.
             let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-            swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED)
+            swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
                 .unwrap()
                 .expose()
                 .unwrap()

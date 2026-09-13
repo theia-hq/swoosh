@@ -78,7 +78,7 @@ async fn proof() {
             // `resolve_gate(Some(secret.node_id()), ...)` builds it when nothing was adopted.
             let gate =
                 tunnel::resolve_gate(Some(self_signet), empty_denylist("self").await).unwrap();
-            swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED)
+            swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
                 .unwrap()
                 .expose()
                 .unwrap()

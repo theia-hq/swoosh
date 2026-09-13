@@ -2,12 +2,19 @@
 //! the HTTP GET/HEAD at the origin with a real HTTPS client (TLS terminates HERE, not at the requester),
 //! and stream the response back (status + headers, then the body to stream close). This is the smallest
 //! honest instance of "run this at a keyed node": a fetch, not a general proxy.
+//!
+//! Every origin operation runs under the bounds [`Limits`] carries: the fetch and the body share one
+//! deadline, and the body stops at the byte cap, so a hanging or endless origin cannot park the stream
+//! open. The composing consumer chooses the bounds per route: a SCOPED fetch (a non-empty origin
+//! allowlist) is metered at construction, and an unconstrained one is member-only and streams unbounded.
 
+use core::future::Future;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use core::time::Duration;
 
 use futures::StreamExt as _;
 use tokio::io::{self, AsyncWriteExt as _};
+use tokio::time;
 
 use crate::http::{FetchRequest, FetchResponse, MAX_HEADERS};
 use crate::origin::OriginAllowlist;
@@ -17,6 +24,57 @@ use crate::origin::OriginAllowlist;
 /// could otherwise open a stream and dribble length prefixes forever. Same bound as the pre-gate one.
 const FETCH_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The largest origin body a metered fetch streams back before it stops and closes truncated.
+pub(crate) const FETCH_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The longest a metered origin fetch may run, from the origin request through the body's end. One clock
+/// covers a hanging connect and an endless body, so a stranger's fetch cannot park a stream open.
+const FETCH_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The error a metered fetch reports when the origin misses [`FETCH_TOTAL_TIMEOUT`] before any header.
+const FETCH_TIMEOUT_MESSAGE: &str = "origin fetch timed out";
+
+/// The responder-side bounds one origin fetch enforces: the largest body it streams back and the longest
+/// the whole origin operation may run.
+///
+/// [`metered`](Self::metered) is the bound a SCOPED fetch applies by construction (a non-empty origin
+/// allowlist is a deliberate, bounded public use), and [`unmetered`](Self::unmetered) is the member-only
+/// unscoped path with no bounds. The composing consumer derives the choice from the allowlist it built
+/// the route with, so an open route can never be unbounded and silent.
+#[derive(Debug, Clone, Copy)]
+pub struct Limits {
+    /// The largest body to stream back, or `None` for unbounded.
+    max_bytes: Option<u64>,
+    /// The longest the origin operation may run, or `None` for unbounded.
+    max_duration: Option<Duration>,
+}
+
+impl Limits {
+    /// The bounds a scoped fetch enforces unconditionally: a 16 MiB body cap and a 30-second total
+    /// timeout. A public scoped fetch cannot be constructed without them.
+    pub fn metered() -> Self {
+        Self {
+            max_bytes: Some(FETCH_MAX_BYTES),
+            max_duration: Some(FETCH_TOTAL_TIMEOUT),
+        }
+    }
+
+    /// No responder-side bounds: stream the origin to its own end, with no deadline. The member-only
+    /// unscoped path; the scoped path applies [`metered`](Self::metered).
+    pub fn unmetered() -> Self {
+        Self {
+            max_bytes: None,
+            max_duration: None,
+        }
+    }
+
+    /// Whether this configuration bounds what an origin fetch may move. False when nothing is bounded,
+    /// which is the fail-loud direction: an open service reporting it gets the banner caveat.
+    pub fn is_metered(&self) -> bool {
+        self.max_bytes.is_some() || self.max_duration.is_some()
+    }
+}
+
 /// Read one [`FetchRequest`], fetch the origin, write the [`FetchResponse`] + body, then close the write
 /// half so the requester sees the body's end. The handler the composing consumer injects into the tunnel's
 /// route table calls this with the admitted stream's halves.
@@ -25,10 +83,14 @@ const FETCH_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// is non-empty and the request's origin is not in it, the fetch is refused with a typed
 /// [`FetchResponse::Error`] BEFORE any connection, IN FRONT of the SSRF guard, not instead of it. An empty
 /// allowlist is unconstrained (an unscoped service), so today's any-public-origin behavior is unchanged.
+///
+/// `limits` bounds the origin operation: the fetch and the body share one deadline, the body stops at the
+/// byte cap, and an unbounded configuration streams the origin to its own end.
 pub async fn serve_fetch<W, R>(
     writer: &mut W,
     reader: &mut R,
     allow: &OriginAllowlist,
+    limits: Limits,
 ) -> io::Result<()>
 where
     W: io::AsyncWrite + Unpin,
@@ -36,18 +98,64 @@ where
 {
     // Bound the frame read: an admitted peer must send its request promptly, not hold a stream open by
     // stalling mid-frame. A timeout maps to a clean drop of this one stream.
-    let request = match tokio::time::timeout(FETCH_READ_TIMEOUT, FetchRequest::read(reader)).await {
+    let request = match time::timeout(FETCH_READ_TIMEOUT, FetchRequest::read(reader)).await {
         Ok(result) => result?,
         Err(_) => return Err(io::Error::other("fetch request read timed out")),
     };
-    let served = match fetch_origin(&request, allow).await {
-        Ok(response) => stream_response(writer, response).await,
-        Err(message) => FetchResponse::Error(message).write(writer).await,
-    };
+    let served = fetch_and_stream(writer, &request, allow, limits).await;
     // Always close the write half, even if the body errored mid-stream, so the requester sees a clean
     // EOF and can distinguish a complete response from a truncated one.
     let closed = writer.shutdown().await;
     served.and(closed)
+}
+
+/// Perform the origin request and stream its response back, all under `limits`: the fetch and the body
+/// share one deadline, and the body stops at the byte cap. An elapsed deadline answers with the typed
+/// timeout error, but only BEFORE the response header; after it, the body can only close early, because
+/// an error frame following a valid `Ok` frame would be read as payload by the requester.
+async fn fetch_and_stream<W: io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    request: &FetchRequest,
+    allow: &OriginAllowlist,
+    limits: Limits,
+) -> io::Result<()> {
+    // One deadline for the whole origin operation: connect, response head, and body share it, so a
+    // hanging or endless origin cannot park this stream open.
+    let deadline = limits.max_duration.map(|cap| time::Instant::now() + cap);
+    let response = match bounded(deadline, fetch_origin(request, allow)).await {
+        Ok(response) => response,
+        Err(message) => return FetchResponse::Error(message).write(writer).await,
+    };
+    let Some(deadline) = deadline else {
+        // Unmetered: no deadline, so the origin's own end is the only terminator.
+        return stream_response(writer, response, limits.max_bytes).await;
+    };
+    // The header is on the wire now: a deadline that fires while streaming closes the body truncated,
+    // never appending a second frame the requester would read as body bytes.
+    match time::timeout_at(
+        deadline,
+        stream_response(writer, response, limits.max_bytes),
+    )
+    .await
+    {
+        Ok(streamed) => streamed,
+        Err(_elapsed) => Ok(()),
+    }
+}
+
+/// Await `operation` under `deadline`, mapping an elapsed deadline to the typed timeout message. `None`
+/// runs the operation to completion (an unmetered fetch).
+async fn bounded<T>(
+    deadline: Option<time::Instant>,
+    operation: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    match deadline {
+        Some(deadline) => match time::timeout_at(deadline, operation).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(FETCH_TIMEOUT_MESSAGE.to_owned()),
+        },
+        None => operation.await,
+    }
 }
 
 /// Perform the origin request. Redirects are forwarded to the requester verbatim (not followed here), so
@@ -109,10 +217,13 @@ async fn fetch_origin(
 }
 
 /// Write the response frame (origin status + headers verbatim) then stream the body to the writer until
-/// the origin body ends. Never buffers the whole body, so a large download does not grow the node's memory.
-async fn stream_response<W: io::AsyncWrite + Unpin>(
+/// the origin body ends or the byte cap is reached. Never buffers the whole body, so a large download
+/// does not grow the node's memory. A body the origin keeps extending past the cap is closed truncated,
+/// AFTER a valid `Ok` header, so the requester sees a short body, never a second frame.
+pub(crate) async fn stream_response<W: io::AsyncWrite + Unpin>(
     writer: &mut W,
     response: reqwest::Response,
+    max_bytes: Option<u64>,
 ) -> io::Result<()> {
     let status = response.status().as_u16();
     // Cap the forwarded headers at the same bound the reader enforces, so a hostile origin cannot return a
@@ -130,11 +241,35 @@ async fn stream_response<W: io::AsyncWrite + Unpin>(
         .collect();
     FetchResponse::Ok { status, headers }.write(writer).await?;
     let mut body = response.bytes_stream();
+    let Some(max_bytes) = max_bytes else {
+        // Unmetered: the origin's own end is the only terminator.
+        while let Some(chunk) = body.next().await {
+            writer.write_all(&chunk.map_err(body_error)?).await?;
+        }
+        return Ok(());
+    };
+    let mut written: u64 = 0;
     while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(|error| io::Error::other(format!("origin body: {error}")))?;
+        let chunk = chunk.map_err(body_error)?;
+        let room = (max_bytes - written) as usize;
+        if chunk.len() > room {
+            // The cap lands inside this chunk: forward only what fits, then close. A body that reaches
+            // the cap exactly stays in the loop for one more poll, so an origin that ends there is not
+            // treated as truncated while one that continues is. The requester sees a short body after a
+            // valid `Ok` header; the truncation is visible on the wire, and this crate carries no logging
+            // dependency (the composed node logs its own stream outcomes).
+            writer.write_all(&chunk[..room]).await?;
+            return Ok(());
+        }
         writer.write_all(&chunk).await?;
+        written += chunk.len() as u64;
     }
     Ok(())
+}
+
+/// Map a body-stream failure into the stream error the requester's close reports.
+fn body_error(error: reqwest::Error) -> io::Error {
+    io::Error::other(format!("origin body: {error}"))
 }
 
 /// The origin method for a request method: GET and HEAD only (a fetch, not a general HTTP proxy).

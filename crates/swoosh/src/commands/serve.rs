@@ -26,6 +26,7 @@ use ::fetch::OriginAllowlist;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use eyre::WrapErr as _;
+use measure::Limits;
 use nauthy::{FileDenylist, Service, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::enabled::FileDisabledList;
@@ -119,9 +120,11 @@ pub struct ServeCmd {
                      `--public speed,fetch` or `--public speed --public fetch`): the per-service opt-out \
                      from the signet gate. Each name must be a service you serve.\n\nA keyless shell \
                      (`sshd:`, remote code execution) is refused with a teaching error, and \
-                     `control.stop`/`control.services` can never be opened. `ping`/`speed` MAY be opened, \
-                     but they have no responder-side rate limit yet, so an open one lets an anonymous \
-                     caller drain this node's uplink (unmetered); the readiness banner says so.\n\nA \
+                     `control.stop`/`control.services` can never be opened. `ping`/`speed` MAY be opened; \
+                     an open one is METERED (a per-caller probe interval, one transfer at a time, byte \
+                     and wall-clock caps), so it is a bounded unit rather than an unmetered drain. A \
+                     member-only route may run unmetered, and the readiness banner warns whenever an open \
+                     service is unmetered.\n\nA \
                      raw-stream service (file:/fifo:/stdin:) has no auth of its own, so --public refuses it \
                      and points you at --public-unsafe, the distinct, louder opt-in."
     )]
@@ -367,10 +370,13 @@ impl ServeCmd {
         // One `Router`: each route binds a handler VALUE (ping/speed/roster/sshd, the fetch and recv
         // instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector) through
         // the `name=addr` grammar. The public overlays prove at `.expose()` below, so prove-before-announce
-        // holds.
+        // holds. The operator's `--public` set is parsed ONCE here, before the bind: a diagnostic route
+        // named open binds metered limits, so an open route is never the unbounded handler, and the same
+        // typed set drives the overlay below (one source of truth).
+        let public = parse_services(&self.public)?;
         let mut router = Router::new(gate);
         for entry in &requested {
-            router = bind_entry(router, entry, host_seed, &roster_blob)?;
+            router = bind_entry(router, entry, host_seed, &roster_blob, &public)?;
         }
         for scoped in fetch.services() {
             // One `Fetch` instance per fetch service, holding ONLY its own origin scope: the SSRF pivot is
@@ -402,7 +408,6 @@ impl ServeCmd {
         // distinct, louder `--public-unsafe` raw-stream set. The proof (an unknown name, a `Never` handler,
         // a raw stream in the safe set, a handler in the unsafe set) runs at `.expose()` below, before any
         // banner advertises a service it will not serve.
-        let public = parse_services(&self.public)?;
         let public_unsafe = parse_services(&self.public_unsafe)?;
         router = router.public(public).public_unsafe(public_unsafe);
         // Snapshot the served catalog (names + effective PER-SERVICE posture: open iff opened by an
@@ -1132,12 +1137,15 @@ pub(crate) fn humanize_secs(mut secs: u64) -> String {
 /// `echo:` reflector) through [`Router::parse`], which owns the grammar and its teaching errors.
 ///
 /// `roster:` binds the signed membership snapshot the run cut; a node that never names it never serves it.
+/// `public` is the operator's open set: a diagnostic name in it binds metered limits (an open route is
+/// never the unbounded handler), a member-only one binds unmetered limits (the family gate terminates it).
 /// Public as the per-entry edge the split-service proof drives to offer a SUBSET of the diagnostics.
 pub fn bind_entry(
     router: Router,
     entry: &str,
     host_seed: [u8; 32],
     roster_blob: &Arc<Vec<u8>>,
+    public: &[Service],
 ) -> eyre::Result<Router> {
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
@@ -1147,8 +1155,14 @@ pub fn bind_entry(
     };
     let name: Service = name.parse()?;
     match addr {
-        "ping:" => router.service(name, Ping),
-        "speed:" => router.service(name, Speed),
+        "ping:" => {
+            let limits = diagnostic_limits(&name, public);
+            router.service(name, Ping::new(&limits))
+        }
+        "speed:" => {
+            let limits = diagnostic_limits(&name, public);
+            router.service(name, Speed::new(&limits))
+        }
         "roster:" => router.service(name, Roster::new(Arc::clone(roster_blob))),
         #[cfg(feature = "ssh")]
         "sshd:" => router.service(name, Sshd { host_seed }),
@@ -1157,22 +1171,50 @@ pub fn bind_entry(
     }
 }
 
+/// The responder bounds one diagnostic route binds. A route the operator opens to strangers is METERED
+/// (the G4 guard: probes spaced per caller, one transfer at a time, byte and wall-clock caps), so an open
+/// diagnostic is a bounded, priced unit and its banner carries no caveat. A member-only route's family
+/// gate is the terminator, so it binds unmetered and its members keep the uncapped diagnostic, which the
+/// banner does not narrate (the warning fires on open plus unmetered only).
+///
+/// Metered is the safe default; only a route known to stay member-only justifies skipping it. Every
+/// construction site that cannot prove a route stays closed passes it as open (see `diagnostics`).
+fn diagnostic_limits(name: &Service, public: &[Service]) -> Limits {
+    if public.contains(name) {
+        Limits::metered()
+    } else {
+        Limits::unmetered()
+    }
+}
+
 /// Bind the conventional diagnostic routes (`ping`, `speed`, and `sshd` under the `ssh` feature) onto
-/// `router`, one handler instance per name. This is the assembly the `swoosh serve` path binds for
-/// operator-named diagnostics, and the one the integration proofs drive, so a test exercises the identical
-/// handler types the product serves rather than a hand-rolled near-copy.
+/// `router`, one handler instance per name, with the same per-route limits the product `serve` path binds:
+/// a name in `public` is metered, a member-only one unmetered.
+///
+/// `public` is the SAME open overlay the caller wants, so the helper applies it here and the limits choice
+/// and the open decision stay one input: a caller cannot bind an open-safe route unmetered or open a name
+/// it forgot to meter. The caller adds any extra member-only routes (e.g. `control.stop`) after.
 ///
 /// ping and speed are TWO independent services so a node may offer ping without speed (or the reverse),
 /// and each carries its own gate: `ping` answers only ping frames, `speed` only speed frames, refusing the
 /// other method at the wire (`ProtocolError::WrongService`), so a grant for one can never open the other.
-pub fn diagnostics(router: Router, host_seed: [u8; 32]) -> eyre::Result<Router> {
-    let router = router.service("ping".parse()?, Ping)?;
-    let router = router.service("speed".parse()?, Speed)?;
+pub fn diagnostics(
+    router: Router,
+    host_seed: [u8; 32],
+    public: &[Service],
+) -> eyre::Result<Router> {
+    let ping: Service = "ping".parse()?;
+    let speed: Service = "speed".parse()?;
+    let router = router.service(ping.clone(), Ping::new(&diagnostic_limits(&ping, public)))?;
+    let router = router.service(
+        speed.clone(),
+        Speed::new(&diagnostic_limits(&speed, public)),
+    )?;
     #[cfg(feature = "ssh")]
     let router = router.service("sshd".parse()?, Sshd { host_seed })?;
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
-    Ok(router)
+    Ok(router.public(public.iter().cloned()))
 }
 
 /// Parse the operator's raw `--public`/`--public-unsafe` names into typed [`Service`]s: the Router's overlays

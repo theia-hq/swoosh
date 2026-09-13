@@ -7,8 +7,8 @@ use core::time::Duration;
 use bifrost::{Error, NoDiscovery, Node, Session as _};
 use bifrost_mem::MemTransport;
 use measure::{
-    Limit, MethodRefusal, Mode, Ping, ProtocolError, Refusal, Responder, Speedtest, answer_ping,
-    answer_speed,
+    Limit, Limits, MethodRefusal, Mode, Ping, ProtocolError, Refusal, Responder, Speedtest,
+    answer_ping, answer_speed,
 };
 
 /// A responder node serving in the background, and a live client session to it, over one mem process.
@@ -57,7 +57,7 @@ async fn serving_one(serves: Serves) -> Result<Paired, Error> {
         while let Ok((writer, reader)) = session.accept_bi().await {
             let _ = match serves {
                 Serves::Ping => answer_ping(writer, reader).await,
-                Serves::Speed => answer_speed(writer, reader).await,
+                Serves::Speed => answer_speed(writer, reader, Limits::unmetered()).await,
             };
         }
     });

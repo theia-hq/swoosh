@@ -12,6 +12,11 @@
 //! origin-fetch service safe and narrows an admitted delegate's egress. An unscoped service builds an EMPTY
 //! allowlist, which is unconstrained: it fetches any origin that passes the SSRF guard.
 //!
+//! **Responder-side bounds.** [`Limits`] bounds the origin operation: a SCOPED fetch (a non-empty
+//! allowlist) is metered at construction (a 16 MiB body cap and a 30-second total timeout), and an
+//! unconstrained fetch is member-only and streams unbounded. A public scoped fetch therefore cannot be
+//! bound unbounded, and the handler reports the same choice it passes here.
+//!
 //! It is a service crate: it knows what to DO with an admitted stream, never how the peer was reached or
 //! gated. The composing consumer wraps [`serve_fetch`] in a handler and injects it into the tunnel's
 //! route table; the [`http`] framing is public so the same caller's client side speaks the wire.
@@ -27,4 +32,4 @@ mod serve_tests;
 
 pub use crate::http::{FetchRequest, FetchResponse};
 pub use crate::origin::{Origin, OriginAllowlist, compose_url};
-pub use crate::serve::serve_fetch;
+pub use crate::serve::{Limits, serve_fetch};

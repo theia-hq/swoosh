@@ -9,15 +9,19 @@
 //! ping and speed are TWO independent services, so a node may advertise one without the other: `ping`
 //! (cheap RTT) and `speed` (bandwidth-eating throughput). A node answers them with [`answer_ping`]/[`answer_speed`]
 //! (each refuses the other's method at the wire), or serves both over one session with a [`Responder`].
-//! A client constructs a [`Ping`] or [`Speedtest`], runs it against a session, and reads back a report.
+//! The speed body applies the responder-side byte and wall-clock caps a metered route carries
+//! ([`Limits`]); an unmetered one mirrors the client, as does the union [`Responder`]. A client
+//! constructs a [`Ping`] or [`Speedtest`], runs it against a session, and reads back a report.
 
 pub mod ping;
 pub mod protocol;
 pub mod responder;
 pub mod speed;
 
+mod limits;
 mod payload;
 
+pub use limits::Limits;
 pub use ping::{Ping, PingReport, Probe};
 pub use protocol::{MethodRefusal, ProtocolError, Refusal};
 pub use responder::{Responder, answer, answer_ping, answer_speed};

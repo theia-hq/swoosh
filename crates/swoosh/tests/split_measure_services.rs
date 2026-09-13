@@ -203,6 +203,7 @@ async fn expose(entries: &[String]) -> NodeId {
                 entry,
                 HOST_SEED,
                 &std::sync::Arc::new(Vec::new()),
+                &[],
             )
             .unwrap();
         }
