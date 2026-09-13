@@ -56,8 +56,8 @@ fn entry_open(name: &str, kind: TargetKind, metering: Option<Metering>) -> Manif
 }
 
 /// The default `swoosh serve` manifest (gated ping + speed + the two control.* reads), name-sorted as the
-/// exposer returns it, so a banner test exercises the same shape the product path builds. The diagnostic
-/// engines report metered by construction, so ping/speed read metered even behind the family gate.
+/// exposer returns it, so a banner test exercises the same shape the product path builds. The default
+/// diagnostic routes are family-gated, so they bind the OWNER engines and report unmetered.
 fn default_manifest() -> Vec<ManifestEntry> {
     vec![
         entry_gated(
@@ -70,8 +70,8 @@ fn default_manifest() -> Vec<ManifestEntry> {
             TargetKind::Handler,
             Some(Metering::Unmetered),
         ),
-        entry_gated("ping", TargetKind::Handler, Some(Metering::Metered)),
-        entry_gated("speed", TargetKind::Handler, Some(Metering::Metered)),
+        entry_gated("ping", TargetKind::Handler, Some(Metering::Unmetered)),
+        entry_gated("speed", TargetKind::Handler, Some(Metering::Unmetered)),
     ]
 }
 
@@ -188,11 +188,12 @@ fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
     );
 }
 
-/// The G4 wiring is engine-owned: a diagnostic route binds the metered engine whether the operator opens
-/// it or leaves it member-only, because the services engines have no unmetered configuration. The manifest
-/// is tightbeam's own read of the bound handler, so this asserts the same fact the banner renders.
+/// The exposure coupling on the product path: a diagnostic route binds the METERED engine when the operator
+/// opens it (the safety caps by construction), and the OWNER engine when it stays family-gated (owner
+/// limits, unbounded). The manifest is tightbeam's own read of the bound handler, so this asserts the same
+/// fact the banner renders.
 #[test]
-fn a_diagnostic_binds_the_metered_engine_open_or_member_only() {
+fn an_open_diagnostic_binds_the_metered_engine_and_a_gated_one_the_owner_engine() {
     let speed: nauthy::Service = "speed".parse().expect("a valid service name");
     let empty_roster = std::sync::Arc::new(Vec::new());
 
@@ -201,6 +202,7 @@ fn a_diagnostic_binds_the_metered_engine_open_or_member_only() {
         "speed=speed:",
         [0u8; 32],
         &empty_roster,
+        core::slice::from_ref(&speed),
     )
     .expect("speed binds")
     .public([speed])
@@ -223,6 +225,7 @@ fn a_diagnostic_binds_the_metered_engine_open_or_member_only() {
         "speed=speed:",
         [0u8; 32],
         &empty_roster,
+        &[],
     )
     .expect("speed binds")
     .expose()
@@ -234,13 +237,44 @@ fn a_diagnostic_binds_the_metered_engine_open_or_member_only() {
         .expect("speed is served");
     assert_eq!(
         entry.metering,
-        Some(Metering::Metered),
-        "a member-only diagnostic route binds the same metered engine (no unmetered configuration exists)"
+        Some(Metering::Unmetered),
+        "a family diagnostic route binds the owner engine (owner limits, unbounded)"
     );
     assert_eq!(entry.posture, Posture::Gated);
 }
 
-/// The banner caveat is DERIVED from what the handler bound, not from a name list: the service engines
+/// The M3 wall, pinned: a public route cannot be armed with an uncapped engine. The owner engine declares
+/// `Never`, so the public proof refuses it even when the name is exactly right, while the metered engine
+/// (capped by construction) assembles the same route.
+#[test]
+fn a_public_route_cannot_arm_an_uncapped_diagnostic() {
+    let ping: nauthy::Service = "ping".parse().expect("a valid service name");
+
+    let Err(error) = Router::new(gated())
+        .service(
+            ping.clone(),
+            measure::server::Ping::new(&measure::server::Limits::owner()),
+        )
+        .expect("the owner engine binds")
+        .public([ping.clone()])
+        .expose()
+    else {
+        panic!("an uncapped engine must not be openable, whatever profile an assembly hands it");
+    };
+    assert!(
+        error.to_string().contains("no legitimate public use"),
+        "the public proof refuses the owner engine: {error}"
+    );
+
+    Router::new(gated())
+        .service(ping.clone(), measure::server::MeteredPing::new())
+        .expect("the metered engine binds")
+        .public([ping])
+        .expose()
+        .expect("the capped engine is openable");
+}
+
+/// The banner caveat is DERIVED from what the handler bound, not from a name list: the metered engines
 /// report `Metered` by construction, so even an OPEN diagnostic carries no caveat, while a handler that
 /// reports `Unmetered` on an open route still narrates the quiet caveat.
 #[test]
@@ -249,10 +283,7 @@ fn the_unmetered_caveat_derives_from_the_bound_metering() {
     let targets = display_targets(&["speed=speed:".to_owned()]).expect("explicit entries display");
 
     let open_metered = Router::new(gated())
-        .service(
-            speed.clone(),
-            measure::server::Speed::new(&measure::server::Limits::metered()),
-        )
+        .service(speed.clone(), measure::server::MeteredSpeed::new())
         .expect("speed binds")
         .public([speed])
         .expose()
@@ -411,10 +442,16 @@ fn resident_manifest_equals_plain_manifest() {
     // handlers, one handler value per route (the Router's bind-by-value shape). `bind_entry` binds only the
     // named routes, so `sshd` is absent here exactly as it is from the plain default set.
     let empty_roster = std::sync::Arc::new(Vec::new());
-    let router = super::bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], &empty_roster)
-        .expect("ping binds");
-    let router =
-        super::bind_entry(router, "speed=speed:", [0u8; 32], &empty_roster).expect("speed binds");
+    let router = super::bind_entry(
+        Router::new(gated()),
+        "ping=ping:",
+        [0u8; 32],
+        &empty_roster,
+        &[],
+    )
+    .expect("ping binds");
+    let router = super::bind_entry(router, "speed=speed:", [0u8; 32], &empty_roster, &[])
+        .expect("speed binds");
     let router = router
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
@@ -1048,19 +1085,19 @@ fn gated() -> nauthy::Gate {
 }
 
 /// The base diagnostic route table the product `serve` path assembles, on a fresh family gate, with the
-/// same open set the caller names: the diagnostic engines own their metered bounds by construction, as the
-/// product binds them.
+/// same open set the caller names: an open name binds the metered engine, a gated one the owner engine,
+/// through the same edges the product binds them.
 fn diagnostics(public: &[nauthy::Service]) -> Router {
     super::diagnostics(Router::new(gated()), [0u8; 32], public).expect("the base diagnostics bind")
 }
 
-/// `serve speed --public speed` BUILDS (speed is OptIn, openable), and `--public <unknown>` is refused with a
-/// message that names the served set. Proves the CLI's per-service overlay wires onto the real swoosh
-/// handlers through the Router's public proof.
+/// `serve speed --public speed` BUILDS (the metered speed engine is OptIn, openable), and `--public
+/// <unknown>` is refused with a message that names the served set. Proves the CLI's per-service overlay
+/// wires onto the real swoosh handlers through the Router's public proof.
 #[test]
 fn public_speed_builds_and_public_unknown_is_refused() {
-    // `--public speed` builds: `speed` is an OptIn handler, so the overlay proves it open-safe. The same
-    // open set is what binds it metered, so the overlay and the bound limit are one input.
+    // `--public speed` builds: the open set binds the metered (OptIn, capped) engine and opens it, so the
+    // overlay and the bound engine are one input.
     let built = diagnostics(&[svc("speed")]).expose();
     assert!(
         built.is_ok(),

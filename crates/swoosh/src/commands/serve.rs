@@ -105,7 +105,7 @@ pub struct ServeCmd {
                      from the signet gate. Each name must be a service you serve.\n\nA keyless shell \
                      (`sshd:`, remote code execution) is refused with a teaching error, and \
                      `control.stop`/`control.services` can never be opened. `ping`/`speed` MAY be opened; \
-                     an open one is METERED (a per-caller probe interval, one transfer at a time, byte \
+                     an open one is METERED (a per-caller run interval, one transfer at a time, byte \
                      and wall-clock caps), so it is a bounded unit rather than an unmetered drain. A \
                      member-only route may run unmetered, and the readiness banner warns whenever an open \
                      service is unmetered.\n\nA \
@@ -355,11 +355,12 @@ impl ServeCmd {
         // recv instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector)
         // through the `name=addr` grammar. The public overlays prove at `.expose()` below, so
         // prove-before-announce holds. The operator's `--public` set is parsed ONCE here, before the bind,
-        // and drives both the overlay and the per-service fetch posture (one source of truth).
+        // and drives the overlay, the per-route diagnostic engine (the metered engine for an open name,
+        // the owner engine otherwise), and the per-service fetch posture (one source of truth).
         let public = parse_services(&self.public)?;
         let mut router = Router::new(gate);
         for entry in &requested {
-            router = bind_entry(router, entry, host_seed, &roster_blob)?;
+            router = bind_entry(router, entry, host_seed, &roster_blob, &public)?;
         }
         for scoped in fetch.services() {
             // One engine handler per fetch service, holding ONLY its own origin scope: the SSRF pivot is
@@ -1123,6 +1124,11 @@ pub(crate) fn humanize_secs(mut secs: u64) -> String {
 /// and tightbeam's own primitives (a `host:port`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the
 /// `echo:` reflector) through [`Router::parse`], which owns the grammar and its teaching errors.
 ///
+/// `public` is the operator's parsed open set: a diagnostic name in it binds the METERED engine (the safety
+/// caps by construction, the only one the public proof opens), a name outside it binds the OWNER engine
+/// (owner limits, effectively unbounded, at a family gate). One input decides both the engine and the
+/// overlay, so an open diagnostic cannot be armed uncapped.
+///
 /// `roster:` binds the signed membership snapshot the run cut; a node that never names it never serves it.
 /// Public as the per-entry edge the split-service proof drives to offer a SUBSET of the diagnostics.
 pub fn bind_entry(
@@ -1130,6 +1136,7 @@ pub fn bind_entry(
     entry: &str,
     host_seed: [u8; 32],
     roster_blob: &Arc<Vec<u8>>,
+    public: &[Service],
 ) -> eyre::Result<Router> {
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
@@ -1139,16 +1146,8 @@ pub fn bind_entry(
     };
     let name: Service = name.parse()?;
     match addr {
-        // The engines own their responder bounds (G4) by construction: there is no unmetered ping or
-        // speed configuration to bind, so an open diagnostic is bounded and a member-only one is too.
-        "ping:" => router.service(
-            name,
-            measure::server::Ping::new(&measure::server::Limits::metered()),
-        ),
-        "speed:" => router.service(
-            name,
-            measure::server::Speed::new(&measure::server::Limits::metered()),
-        ),
+        "ping:" => bind_ping(router, name, public),
+        "speed:" => bind_speed(router, name, public),
         "roster:" => router.service(name, Roster::new(Arc::clone(roster_blob))),
         #[cfg(feature = "ssh")]
         "sshd:" => router.service(name, sshh::Sshd::new(host_seed)),
@@ -1157,11 +1156,39 @@ pub fn bind_entry(
     }
 }
 
+/// Bind the `ping:` engine a route's exposure requires: the METERED engine when `name` is in the open set,
+/// else the OWNER engine. The metered engine is capped by construction and the owner engine declares
+/// `Never`, so this choice cannot arm a public route uncapped: even if the wrong arm were taken, the public
+/// proof would refuse the owner engine before the node serves.
+fn bind_ping(router: Router, name: Service, public: &[Service]) -> eyre::Result<Router> {
+    if public.contains(&name) {
+        router.service(name, measure::server::MeteredPing::new())
+    } else {
+        router.service(
+            name,
+            measure::server::Ping::new(&measure::server::Limits::owner()),
+        )
+    }
+}
+
+/// Bind the `speed:` engine a route's exposure requires, exactly as [`bind_ping`] does for ping.
+fn bind_speed(router: Router, name: Service, public: &[Service]) -> eyre::Result<Router> {
+    if public.contains(&name) {
+        router.service(name, measure::server::MeteredSpeed::new())
+    } else {
+        router.service(
+            name,
+            measure::server::Speed::new(&measure::server::Limits::owner()),
+        )
+    }
+}
+
 /// Bind the conventional diagnostic routes (`ping`, `speed`, and `sshd` under the `ssh` feature) onto
 /// `router`, one engine handler instance per name.
 ///
-/// `public` is the SAME open overlay the caller wants, so the helper applies it here: the engine's declared
-/// exposure and this open decision stay on one path, and the caller adds any extra member-only routes
+/// `public` is the SAME open overlay the caller wants, so the helper applies it here and the engine choice
+/// runs on the same input, through the same [`bind_ping`]/[`bind_speed`] edges the product `serve` path
+/// uses: the open decision and the bound profile cannot drift. The caller adds any extra member-only routes
 /// (e.g. `control.stop`) after.
 ///
 /// ping and speed are TWO independent services so a node may offer ping without speed (or the reverse),
@@ -1174,9 +1201,8 @@ pub fn diagnostics(
 ) -> eyre::Result<Router> {
     let ping: Service = "ping".parse()?;
     let speed: Service = "speed".parse()?;
-    let limits = measure::server::Limits::metered();
-    let router = router.service(ping.clone(), measure::server::Ping::new(&limits))?;
-    let router = router.service(speed.clone(), measure::server::Speed::new(&limits))?;
+    let router = bind_ping(router, ping, public)?;
+    let router = bind_speed(router, speed, public)?;
     #[cfg(feature = "ssh")]
     let router = router.service("sshd".parse()?, sshh::Sshd::new(host_seed))?;
     #[cfg(not(feature = "ssh"))]

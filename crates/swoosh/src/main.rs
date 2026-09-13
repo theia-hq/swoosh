@@ -478,11 +478,38 @@ fn reject_retired_key_env(present: bool) -> eyre::Result<()> {
     Ok(())
 }
 
+/// The default `RUST_LOG` directives: ERROR everywhere, INFO for the receive engine, so a stock
+/// `swoosh serve` surfaces the structured event a pushed file emits when it lands (the 0.9 workaround
+/// for the receiver line the engine consumption dropped; delib-63 arm A keeps the line default-on for
+/// 0.9, and quiet gating the activity class lands with the post-0.9 reporting contract).
+///
+/// The ERROR baseline is SPELLED OUT, not left to the builder's default directive: once any directive
+/// parses, `with_default_directive` is not applied, so a bare `transfer=info` would drop every error on
+/// every other target (verified against tracing-subscriber 0.3.23). Deliberately a narrow per-target
+/// directive, not a global INFO default: a global bump would put every dependency's info events on
+/// default stderr, including a serving node's log.
+const DEFAULT_LOG: &str = "error,transfer=info";
+
+/// The subscriber filter: `RUST_LOG` when set, else the default directives. The ERROR default
+/// directive still covers an empty or all-invalid `RUST_LOG`, where no directive parses. `parse_lossy`
+/// never fails, so a malformed directive is ignored rather than aborting the binary.
+fn log_filter(directives: Option<String>) -> tracing_subscriber::EnvFilter {
+    tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::ERROR.into())
+        .parse_lossy(directives.unwrap_or_else(|| DEFAULT_LOG.to_owned()))
+}
+
 /// The real entry point, split from `main` so a failure prints its clean message chain rather than
 /// eyre's `Debug` form (see the note in `main`).
 async fn run() -> eyre::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(log_filter(
+            std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok(),
+        ))
+        // Diagnostics ride stderr, never stdout: stdout is a verb's product (`swoosh fetch` writes the
+        // body there) and the action's public log, so a log line must not interleave. The action holds
+        // serve's stderr in a file and echoes it only on failure, redacted.
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse();
@@ -1011,5 +1038,94 @@ mod tests {
         );
         // An unset env is the ordinary path: no error.
         assert!(reject_retired_key_env(false).is_ok());
+    }
+
+    /// A synthetic callsite backing the probe metadata below. The filter's static target directives
+    /// read only an event's target and level, so this callsite is never consulted; it exists because
+    /// `FieldSet`'s only constructor takes one.
+    struct ProbeCallsite;
+
+    impl tracing::Callsite for ProbeCallsite {
+        fn set_interest(&self, _interest: tracing::subscriber::Interest) {}
+        fn metadata(&self) -> &tracing::Metadata<'_> {
+            &PROBE_TRANSFER_INFO
+        }
+    }
+
+    static PROBE_CALLSITE: ProbeCallsite = ProbeCallsite;
+
+    /// Synthetic event metadata for the filter probes: the receive engine's target at the INFO level it
+    /// raises to, plus a NON-transfer target at INFO and at ERROR for the scoping proof. `Metadata::new`
+    /// is const, so each probe is a static.
+    static PROBE_TRANSFER_INFO: tracing::Metadata<'static> =
+        probe_meta("transfer", tracing::Level::INFO);
+    static PROBE_OTHER_INFO: tracing::Metadata<'static> =
+        probe_meta("swoosh", tracing::Level::INFO);
+    static PROBE_OTHER_ERROR: tracing::Metadata<'static> =
+        probe_meta("swoosh", tracing::Level::ERROR);
+
+    const fn probe_meta(target: &'static str, level: tracing::Level) -> tracing::Metadata<'static> {
+        tracing::Metadata::new(
+            "swoosh-log-filter-probe",
+            target,
+            level,
+            None,
+            None,
+            None,
+            tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&PROBE_CALLSITE)),
+            tracing::metadata::Kind::EVENT,
+        )
+    }
+
+    /// Whether `filter` would surface a synthetic event carrying `meta`, with no subscriber installed
+    /// and nothing emitted. The register-side verdict is `Interest::never` for a target the static
+    /// directives do not enable, and `always` for one they do.
+    fn filter_enables(
+        filter: &tracing_subscriber::EnvFilter,
+        meta: &'static tracing::Metadata<'static>,
+    ) -> bool {
+        use tracing_subscriber::Layer;
+
+        !Layer::<tracing_subscriber::Registry>::register_callsite(filter, meta).is_never()
+    }
+
+    /// The default filter SCOPES per target, not just by level: `transfer=info` surfaces the receive
+    /// engine's arrival INFO while a NON-transfer INFO stays filtered and a non-transfer ERROR still
+    /// passes (the scoping a level hint alone cannot prove). An explicit `RUST_LOG` replaces the
+    /// default. Quiet gating the activity class is the post-0.9 reporting contract, not wired here.
+    #[test]
+    fn the_log_filter_scopes_by_target() {
+        use tracing_subscriber::filter::LevelFilter;
+
+        // The stock posture (arm A): the arrival line is on, and the ERROR baseline still admits a
+        // non-transfer ERROR while a non-transfer INFO never rides in on the raised ceiling.
+        let default = log_filter(None);
+        assert!(filter_enables(&default, &PROBE_TRANSFER_INFO));
+        assert!(!filter_enables(&default, &PROBE_OTHER_INFO));
+        assert!(filter_enables(&default, &PROBE_OTHER_ERROR));
+
+        // The rendered default still SPELLS the ERROR baseline beside the transfer directive:
+        // `with_default_directive` is not applied once the parse yields a directive, so `transfer=info`
+        // alone would drop every other target's ERROR events.
+        let rendered = default.to_string();
+        assert!(
+            rendered.contains("error") && rendered.contains("transfer=info"),
+            "the default keeps the ERROR baseline beside the transfer directive: {rendered}"
+        );
+        assert_eq!(
+            default.max_level_hint(),
+            Some(LevelFilter::INFO),
+            "the transfer directive raises the ceiling so the receive event is shown"
+        );
+
+        // `RUST_LOG` wins: `warn` silences the arrival line; an explicit transfer directive restores it.
+        let warn = log_filter(Some("warn".to_owned()));
+        assert_eq!(warn.max_level_hint(), Some(LevelFilter::WARN));
+        assert!(!filter_enables(&warn, &PROBE_TRANSFER_INFO));
+        assert!(filter_enables(&warn, &PROBE_OTHER_ERROR));
+        assert!(filter_enables(
+            &log_filter(Some(DEFAULT_LOG.to_owned())),
+            &PROBE_TRANSFER_INFO
+        ));
     }
 }
