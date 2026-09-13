@@ -212,8 +212,9 @@ pub fn hint(error: eyre::Report, transport: transport::Transport) -> eyre::Repor
     match transport {
         // quirk is direct-only with no discovery, so an unreachable peer is almost always a missing or
         // wrong address hint. Name the exact flag (mirroring the exemplary unknown-contact error) and the
-        // one-flag escape to a self-discovering transport.
-        transport::Transport::Quirk => error.wrap_err(
+        // one-flag escape to a self-discovering transport. The sealed spelling reaches the same way, so it
+        // carries the same remedy.
+        transport::Transport::Quirk | transport::Transport::QuirkNoise => error.wrap_err(
             "quirk is direct-only: pass --peer <key>=<addr> (the line the peer's `swoosh serve` printed), or use --transport iroh",
         ),
         transport::Transport::Iroh => error,

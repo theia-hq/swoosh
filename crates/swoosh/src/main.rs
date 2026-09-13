@@ -14,9 +14,9 @@
 //! a saved petname, interchangeably.
 //!
 //! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
-//! key and keeps a stable address across runs (and across transports: `--transport iroh|quirk` swaps the
-//! backend without changing the key). The outward verbs only dial out, so they mint a throwaway key each
-//! run unless you pin a home with `--home`/`SWOOSH_HOME` (the key then lives at `<home>/identity.key`).
+//! key and keeps a stable address across runs (and across transports: `--transport iroh|quirk|quirk+noise`
+//! swaps the backend without changing the key). The outward verbs only dial out, so they mint a throwaway
+//! key each run unless you pin a home with `--home`/`SWOOSH_HOME` (the key then lives at `<home>/identity.key`).
 //! The full verb arc (send, tunnel, share, fetch, run, cluster, MagicDNS names) is tracked in the README's
 //! Roadmap; it ticks as it ships.
 
@@ -642,6 +642,20 @@ async fn run() -> eyre::Result<()> {
             let node = Node::new(endpoint, discovery);
             run_and_close(reach, &node, ctx).await
         }
+        // The sealed spelling: quirk under the wrapper, still one node under one key. The wrapper runs
+        // its own Noise handshake over quirk's one stream and proves the peer's `NodeId`, so a
+        // signet-rooted gate arms (where bare quirk refuses); both ends must spell `quirk+noise`, and a
+        // bare quirk peer fails the wrapper tag with no fallback. One seed binds both layers, and
+        // `Noise::new` refuses an inner bound under any other identity, so the two can never disagree.
+        // The seed stays in a zeroizing wrapper until the constructor has taken its copy.
+        transport::Transport::QuirkNoise => {
+            let seed = zeroize::Zeroizing::new(secret.into_bytes());
+            let endpoint = bifrost_quirk::Endpoint::bind_with_secret(*seed).await?;
+            let endpoint = bifrost_noise::Noise::new(endpoint, *seed)?;
+            let discovery = PeerHint::discovery(&endpoint, peers);
+            let node = Node::new(endpoint, discovery);
+            run_and_close(reach, &node, ctx).await
+        }
     }
 }
 
@@ -858,6 +872,60 @@ mod tests {
         ])
         .expect("the --peer hint parses under its new id peer-hint");
         assert!(matches!(cli.command, Some(Command::Ping(_))));
+    }
+
+    /// The sealed quirk spelling resolves: `--transport quirk+noise` selects the wrapped composition
+    /// under the same identity, while bare `quirk` stays its own choice (the profile enforcement, not
+    /// the parser, refuses it a rooted gate). The label is what `ping`/`status` print and a failed dial
+    /// names.
+    #[test]
+    fn the_sealed_quirk_transport_spelling_resolves() {
+        let sealed = Cli::try_parse_from(["swoosh", "ping", "alice", "--transport", "quirk+noise"])
+            .expect("the sealed quirk spelling parses");
+        assert!(matches!(
+            sealed.command,
+            Some(Command::Ping(PingCmd {
+                reach: transport::ReachArgs {
+                    transport: transport::Transport::QuirkNoise,
+                    ..
+                },
+                ..
+            }))
+        ));
+        assert_eq!(transport::Transport::QuirkNoise.name(), "quirk+noise");
+
+        // The bare spelling is unchanged and a DIFFERENT choice: the enforcement refuses it a rooted
+        // gate, it never silently resolves to the wrapper.
+        let bare = Cli::try_parse_from(["swoosh", "ping", "alice", "--transport", "quirk"])
+            .expect("the bare quirk spelling parses");
+        assert!(matches!(
+            bare.command,
+            Some(Command::Ping(PingCmd {
+                reach: transport::ReachArgs {
+                    transport: transport::Transport::Quirk,
+                    ..
+                },
+                ..
+            }))
+        ));
+        assert_ne!(
+            transport::Transport::Quirk,
+            transport::Transport::QuirkNoise
+        );
+
+        // The default remains iroh.
+        let defaulted = Cli::try_parse_from(["swoosh", "ping", "alice"])
+            .expect("a bare ping parses on the default transport");
+        assert!(matches!(
+            defaulted.command,
+            Some(Command::Ping(PingCmd {
+                reach: transport::ReachArgs {
+                    transport: transport::Transport::Iroh,
+                    ..
+                },
+                ..
+            }))
+        ));
     }
 
     /// The one control grammar (delib-47): BARE `stop` splits to the local (own-node) path, `stop --at <peer>`

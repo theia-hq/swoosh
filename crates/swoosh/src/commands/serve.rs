@@ -712,8 +712,8 @@ fn display_targets(requested: &[String]) -> eyre::Result<HashMap<String, String>
 enum ReachKind {
     /// The transport routes across the internet and NATs (iroh): a peer reaches this node by the key alone.
     Internet,
-    /// The transport is LAN/direct-only (quirk): a peer reaches this node on the LAN via mDNS, or by a
-    /// handed-over address.
+    /// The transport is LAN/direct-only (quirk, bare or sealed): a peer reaches this node on the LAN via
+    /// mDNS, or by a handed-over address.
     DirectOnly,
 }
 
@@ -723,7 +723,9 @@ impl ReachKind {
     fn of(transport: crate::transport::Transport) -> Self {
         match transport {
             crate::transport::Transport::Iroh => Self::Internet,
-            crate::transport::Transport::Quirk => Self::DirectOnly,
+            crate::transport::Transport::Quirk | crate::transport::Transport::QuirkNoise => {
+                Self::DirectOnly
+            }
         }
     }
 }

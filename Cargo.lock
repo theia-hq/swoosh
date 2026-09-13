@@ -322,7 +322,7 @@ dependencies = [
 [[package]]
 name = "bifrost"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=c28e7c0e5dedbdc2002c33553a70b9121d25782d#c28e7c0e5dedbdc2002c33553a70b9121d25782d"
+source = "git+https://github.com/theia-hq/bifrost?rev=06127fe9be716fe2a2fc4d7f10b744f30da8be20#06127fe9be716fe2a2fc4d7f10b744f30da8be20"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
@@ -332,7 +332,7 @@ dependencies = [
 [[package]]
 name = "bifrost-core"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=c28e7c0e5dedbdc2002c33553a70b9121d25782d#c28e7c0e5dedbdc2002c33553a70b9121d25782d"
+source = "git+https://github.com/theia-hq/bifrost?rev=06127fe9be716fe2a2fc4d7f10b744f30da8be20#06127fe9be716fe2a2fc4d7f10b744f30da8be20"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -343,7 +343,7 @@ dependencies = [
 [[package]]
 name = "bifrost-iroh"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=c28e7c0e5dedbdc2002c33553a70b9121d25782d#c28e7c0e5dedbdc2002c33553a70b9121d25782d"
+source = "git+https://github.com/theia-hq/bifrost?rev=06127fe9be716fe2a2fc4d7f10b744f30da8be20#06127fe9be716fe2a2fc4d7f10b744f30da8be20"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
@@ -354,7 +354,7 @@ dependencies = [
 [[package]]
 name = "bifrost-mdns"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=c28e7c0e5dedbdc2002c33553a70b9121d25782d#c28e7c0e5dedbdc2002c33553a70b9121d25782d"
+source = "git+https://github.com/theia-hq/bifrost?rev=06127fe9be716fe2a2fc4d7f10b744f30da8be20#06127fe9be716fe2a2fc4d7f10b744f30da8be20"
 dependencies = [
  "bifrost-core",
  "swarm-discovery",
@@ -366,7 +366,7 @@ dependencies = [
 [[package]]
 name = "bifrost-mem"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=c28e7c0e5dedbdc2002c33553a70b9121d25782d#c28e7c0e5dedbdc2002c33553a70b9121d25782d"
+source = "git+https://github.com/theia-hq/bifrost?rev=06127fe9be716fe2a2fc4d7f10b744f30da8be20#06127fe9be716fe2a2fc4d7f10b744f30da8be20"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
@@ -375,9 +375,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bifrost-noise"
+version = "0.0.0"
+source = "git+https://github.com/theia-hq/bifrost?rev=06127fe9be716fe2a2fc4d7f10b744f30da8be20#06127fe9be716fe2a2fc4d7f10b744f30da8be20"
+dependencies = [
+ "bifrost-core",
+ "bifrost-transport",
+ "ed25519-dalek 2.2.0",
+ "snow",
+ "thiserror 2.0.20",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
 name = "bifrost-quirk"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=c28e7c0e5dedbdc2002c33553a70b9121d25782d#c28e7c0e5dedbdc2002c33553a70b9121d25782d"
+source = "git+https://github.com/theia-hq/bifrost?rev=06127fe9be716fe2a2fc4d7f10b744f30da8be20#06127fe9be716fe2a2fc4d7f10b744f30da8be20"
 dependencies = [
  "bifrost-core",
  "bifrost-transport",
@@ -388,7 +402,7 @@ dependencies = [
 [[package]]
 name = "bifrost-transport"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=c28e7c0e5dedbdc2002c33553a70b9121d25782d#c28e7c0e5dedbdc2002c33553a70b9121d25782d"
+source = "git+https://github.com/theia-hq/bifrost?rev=06127fe9be716fe2a2fc4d7f10b744f30da8be20#06127fe9be716fe2a2fc4d7f10b744f30da8be20"
 dependencies = [
  "bifrost-core",
  "tokio",
@@ -397,7 +411,7 @@ dependencies = [
 [[package]]
 name = "bifrost-wire"
 version = "0.0.0"
-source = "git+https://github.com/theia-hq/bifrost?rev=c28e7c0e5dedbdc2002c33553a70b9121d25782d#c28e7c0e5dedbdc2002c33553a70b9121d25782d"
+source = "git+https://github.com/theia-hq/bifrost?rev=06127fe9be716fe2a2fc4d7f10b744f30da8be20#06127fe9be716fe2a2fc4d7f10b744f30da8be20"
 dependencies = [
  "blake3",
  "thiserror 2.0.20",
@@ -603,6 +617,17 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chacha20"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3613f74bd2eac03dad61bd53dbe620703d4371614fe0bc3b9f04dd36fe4e818"
+dependencies = [
+ "cfg-if",
+ "cipher 0.4.4",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
+name = "chacha20"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
@@ -611,6 +636,19 @@ dependencies = [
  "cipher 0.5.2",
  "cpufeatures 0.3.1",
  "rand_core 0.10.1",
+ "zeroize",
+]
+
+[[package]]
+name = "chacha20poly1305"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
+dependencies = [
+ "aead 0.5.2",
+ "chacha20 0.9.1",
+ "cipher 0.4.4",
+ "poly1305 0.8.0",
  "zeroize",
 ]
 
@@ -636,6 +674,7 @@ checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
 dependencies = [
  "crypto-common 0.1.6",
  "inout 0.1.4",
+ "zeroize",
 ]
 
 [[package]]
@@ -1590,6 +1629,18 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi 5.3.0",
+ "wasip2",
+]
+
+[[package]]
+name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
@@ -1597,7 +1648,7 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "r-efi",
+ "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
 ]
@@ -3363,6 +3414,17 @@ dependencies = [
 
 [[package]]
 name = "poly1305"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8159bd90725d2df49889a078b54f4f79e87f1f8a8444194cdca81d38f5393abf"
+dependencies = [
+ "cpufeatures 0.2.17",
+ "opaque-debug",
+ "universal-hash 0.5.1",
+]
+
+[[package]]
+name = "poly1305"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6e2d0073b297041425c7c3df6eb4792d598a15323fe63346852b092eca02904c"
@@ -3689,6 +3751,12 @@ dependencies = [
 
 [[package]]
 name = "r-efi"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
+name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
@@ -3710,7 +3778,7 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
- "chacha20",
+ "chacha20 0.10.2",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
 ]
@@ -4513,6 +4581,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fad6c857cbab2627dcf01ec85a623ca4e7dcb5691cbaa3d7fb7653671f0d09c9"
 
 [[package]]
+name = "snow"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "599b506ccc4aff8cf7844bc42cf783009a434c1e26c964432560fb6d6ad02d82"
+dependencies = [
+ "chacha20poly1305",
+ "curve25519-dalek 4.1.3",
+ "getrandom 0.3.4",
+ "rustc_version",
+ "sha2 0.10.9",
+ "subtle",
+]
+
+[[package]]
 name = "socket2"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4589,11 +4671,11 @@ dependencies = [
  "aead 0.6.1",
  "aes 0.9.2",
  "aes-gcm 0.11.1",
- "chacha20",
+ "chacha20 0.10.2",
  "cipher 0.5.2",
  "ctutils",
  "des",
- "poly1305",
+ "poly1305 0.9.1",
  "ssh-encoding",
  "zeroize",
 ]
@@ -4717,6 +4799,7 @@ dependencies = [
  "bifrost-iroh",
  "bifrost-mdns",
  "bifrost-mem",
+ "bifrost-noise",
  "bifrost-quirk",
  "clap",
  "data-encoding",
@@ -4865,7 +4948,7 @@ dependencies = [
 [[package]]
 name = "tightbeam"
 version = "0.4.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=8f037afde3e835fd6278e68967fab3a62eaedb0d#8f037afde3e835fd6278e68967fab3a62eaedb0d"
+source = "git+https://github.com/theia-hq/tightbeam?rev=56e41ddf3867d1bb45fec959b80d6533ca2cab38#56e41ddf3867d1bb45fec959b80d6533ca2cab38"
 dependencies = [
  "bifrost",
  "bifrost-iroh",
@@ -4888,7 +4971,7 @@ dependencies = [
 [[package]]
 name = "tightbeam-handler"
 version = "0.4.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=8f037afde3e835fd6278e68967fab3a62eaedb0d#8f037afde3e835fd6278e68967fab3a62eaedb0d"
+source = "git+https://github.com/theia-hq/tightbeam?rev=56e41ddf3867d1bb45fec959b80d6533ca2cab38#56e41ddf3867d1bb45fec959b80d6533ca2cab38"
 dependencies = [
  "bifrost-core",
  "nauthy",
@@ -5351,6 +5434,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
+name = "wasip2"
+version = "1.0.1+wasi-0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0562428422c63773dad2c345a1882263bbf4d65cf3f42e90921f787ef5ad58e7"
+dependencies = [
+ "wit-bindgen",
+]
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.128"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5792,6 +5884,12 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "wit-bindgen"
+version = "0.46.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 
 [[package]]
 name = "wmi"
