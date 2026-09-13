@@ -26,13 +26,12 @@ use ::fetch::OriginAllowlist;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use eyre::WrapErr as _;
-use measure::Limits;
 use nauthy::{FileDenylist, Service, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::enabled::FileDisabledList;
 use tightbeam::tunnel::{
     self, CancellationToken, Exposer, ManifestEntry, Metering, Posture, RawSource, Router,
-    ServeError, TargetKind,
+    TargetKind,
 };
 
 use crate::contacts::{Contacts, Petname};
@@ -41,16 +40,10 @@ use crate::roster::{Epoch, Member, RosterDoc};
 use crate::transport::ReachArgs;
 
 mod control;
-mod fetch;
-mod ping;
-mod recv;
 mod resident;
 mod roster;
 mod services;
 mod single;
-mod speed;
-#[cfg(feature = "ssh")]
-mod sshd;
 mod stop;
 pub mod control_codec {
     pub use super::control::{
@@ -60,21 +53,12 @@ pub mod control_codec {
 }
 pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};
 pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_single};
+// `roster` shadows `crate::roster`, reached in full above. The general engines (`fetch`, `measure`,
+// `sshh`, `transfer`) are consumed from the services repo, so the names resolve to those crates.
+pub use transfer::Recv;
 
-// These are all `self::` submodules: `fetch` shares a name with the extern crate it shadows, so the handler
-// type comes through `self::` and the crate is reached as `::fetch` (the `::fetch::OriginAllowlist` import
-// above); `roster` likewise shadows `crate::roster`, reached in full above. The rest take `self::` too, so
-// the whole set reads as one local-submodule import group.
-use self::fetch::Fetch;
-use self::ping::Ping;
-// `pub use`: the gated send/recv proof (`tests/gated_send.rs`) builds the receive handler directly now that
-// recv is bound per service like `fetch:`, so it exercises the identical `Recv`.
-pub use self::recv::Recv;
 pub use self::roster::Roster;
 pub use self::services::ServiceList;
-use self::speed::Speed;
-#[cfg(feature = "ssh")]
-use self::sshd::Sshd;
 pub use self::stop::{STOP_ACK, Stop};
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
@@ -98,8 +82,8 @@ pub const CONTROL_STOP_SERVICE: &str = "control.stop";
 /// served handler is keyed under, one source of truth for the wire string.
 pub const CONTROL_SERVICES_SERVICE: &str = "control.services";
 
-/// The default services `serve` publishes when none is named: swoosh's own gated `ping` and
-/// `speed` handlers, under the names a client requests. ping and speed are TWO independent services (cheap
+/// The default services `serve` publishes when none is named: the gated `ping` and `speed` engine
+/// handlers, under the names a client requests. ping and speed are TWO independent services (cheap
 /// RTT vs bandwidth-eating throughput), so a bare `swoosh serve` answers BOTH behind the signet gate, and a
 /// node that wants to offer only one names just that one (`swoosh serve ping=ping:`). Each may be
 /// made `--public` independently.
@@ -367,26 +351,29 @@ impl ServeCmd {
         // revocation store). A `Router::base_gate()` accessor would delete this second value.
         let catalog_gate = tunnel::resolve_gate(signet, FileDenylist::empty(PathBuf::new()))?;
         let gate = tunnel::resolve_gate(signet, denylist)?;
-        // One `Router`: each route binds a handler VALUE (ping/speed/roster/sshd, the fetch and recv
-        // instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector) through
-        // the `name=addr` grammar. The public overlays prove at `.expose()` below, so prove-before-announce
-        // holds. The operator's `--public` set is parsed ONCE here, before the bind: a diagnostic route
-        // named open binds metered limits, so an open route is never the unbounded handler, and the same
-        // typed set drives the overlay below (one source of truth).
+        // One `Router`: each route binds a handler VALUE (the engine handlers, roster, stop, the fetch and
+        // recv instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector)
+        // through the `name=addr` grammar. The public overlays prove at `.expose()` below, so
+        // prove-before-announce holds. The operator's `--public` set is parsed ONCE here, before the bind,
+        // and drives both the overlay and the per-service fetch posture (one source of truth).
         let public = parse_services(&self.public)?;
         let mut router = Router::new(gate);
         for entry in &requested {
-            router = bind_entry(router, entry, host_seed, &roster_blob, &public)?;
+            router = bind_entry(router, entry, host_seed, &roster_blob)?;
         }
         for scoped in fetch.services() {
-            // One `Fetch` instance per fetch service, holding ONLY its own origin scope: the SSRF pivot is
-            // unrepresentable, not merely refused.
-            router = router.service(
-                scoped.name().parse()?,
-                Fetch {
-                    allow: scoped.allow().clone(),
-                },
-            )?;
+            // One engine handler per fetch service, holding ONLY its own origin scope: the SSRF pivot is
+            // unrepresentable, not merely refused. An unconstrained scope is the NEVER engine (the open
+            // proof refuses to expose it); a non-empty scope is the OPT-IN engine, which applies the
+            // 16 MiB/30s responder bounds by construction.
+            let name = scoped.name().parse()?;
+            router = if scoped.allow().is_unconstrained() {
+                router.service(name, ::fetch::Fetch)?
+            } else {
+                let scoped_fetch = ::fetch::ScopedFetch::new(scoped.allow().clone())
+                    .map_err(|error| eyre::eyre!(error))?;
+                router.service(name, scoped_fetch)?
+            };
         }
         for service in &recv {
             // One `Recv` instance per receive service, holding ONLY its own sink dir, so a push to one
@@ -1132,20 +1119,17 @@ pub(crate) fn humanize_secs(mut secs: u64) -> String {
 }
 
 /// Bind one operator `name=addr` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
-/// left tightbeam's public API, so a handler route is never a spellable addr): the diagnostic names here,
+/// left tightbeam's public API, so a handler route is never a spellable addr): the diagnostic engines here,
 /// and tightbeam's own primitives (a `host:port`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the
 /// `echo:` reflector) through [`Router::parse`], which owns the grammar and its teaching errors.
 ///
 /// `roster:` binds the signed membership snapshot the run cut; a node that never names it never serves it.
-/// `public` is the operator's open set: a diagnostic name in it binds metered limits (an open route is
-/// never the unbounded handler), a member-only one binds unmetered limits (the family gate terminates it).
 /// Public as the per-entry edge the split-service proof drives to offer a SUBSET of the diagnostics.
 pub fn bind_entry(
     router: Router,
     entry: &str,
     host_seed: [u8; 32],
     roster_blob: &Arc<Vec<u8>>,
-    public: &[Service],
 ) -> eyre::Result<Router> {
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
@@ -1155,45 +1139,30 @@ pub fn bind_entry(
     };
     let name: Service = name.parse()?;
     match addr {
-        "ping:" => {
-            let limits = diagnostic_limits(&name, public);
-            router.service(name, Ping::new(&limits))
-        }
-        "speed:" => {
-            let limits = diagnostic_limits(&name, public);
-            router.service(name, Speed::new(&limits))
-        }
+        // The engines own their responder bounds (G4) by construction: there is no unmetered ping or
+        // speed configuration to bind, so an open diagnostic is bounded and a member-only one is too.
+        "ping:" => router.service(
+            name,
+            measure::server::Ping::new(&measure::server::Limits::metered()),
+        ),
+        "speed:" => router.service(
+            name,
+            measure::server::Speed::new(&measure::server::Limits::metered()),
+        ),
         "roster:" => router.service(name, Roster::new(Arc::clone(roster_blob))),
         #[cfg(feature = "ssh")]
-        "sshd:" => router.service(name, Sshd { host_seed }),
+        "sshd:" => router.service(name, sshh::Sshd::new(host_seed)),
         // A forward, a raw stream, the `echo:` reflector, or an unknown scheme: tightbeam's grammar.
         _ => router.parse(&[entry.to_owned()]),
     }
 }
 
-/// The responder bounds one diagnostic route binds. A route the operator opens to strangers is METERED
-/// (the G4 guard: probes spaced per caller, one transfer at a time, byte and wall-clock caps), so an open
-/// diagnostic is a bounded, priced unit and its banner carries no caveat. A member-only route's family
-/// gate is the terminator, so it binds unmetered and its members keep the uncapped diagnostic, which the
-/// banner does not narrate (the warning fires on open plus unmetered only).
-///
-/// Metered is the safe default; only a route known to stay member-only justifies skipping it. Every
-/// construction site that cannot prove a route stays closed passes it as open (see `diagnostics`).
-fn diagnostic_limits(name: &Service, public: &[Service]) -> Limits {
-    if public.contains(name) {
-        Limits::metered()
-    } else {
-        Limits::unmetered()
-    }
-}
-
 /// Bind the conventional diagnostic routes (`ping`, `speed`, and `sshd` under the `ssh` feature) onto
-/// `router`, one handler instance per name, with the same per-route limits the product `serve` path binds:
-/// a name in `public` is metered, a member-only one unmetered.
+/// `router`, one engine handler instance per name.
 ///
-/// `public` is the SAME open overlay the caller wants, so the helper applies it here and the limits choice
-/// and the open decision stay one input: a caller cannot bind an open-safe route unmetered or open a name
-/// it forgot to meter. The caller adds any extra member-only routes (e.g. `control.stop`) after.
+/// `public` is the SAME open overlay the caller wants, so the helper applies it here: the engine's declared
+/// exposure and this open decision stay on one path, and the caller adds any extra member-only routes
+/// (e.g. `control.stop`) after.
 ///
 /// ping and speed are TWO independent services so a node may offer ping without speed (or the reverse),
 /// and each carries its own gate: `ping` answers only ping frames, `speed` only speed frames, refusing the
@@ -1205,13 +1174,11 @@ pub fn diagnostics(
 ) -> eyre::Result<Router> {
     let ping: Service = "ping".parse()?;
     let speed: Service = "speed".parse()?;
-    let router = router.service(ping.clone(), Ping::new(&diagnostic_limits(&ping, public)))?;
-    let router = router.service(
-        speed.clone(),
-        Speed::new(&diagnostic_limits(&speed, public)),
-    )?;
+    let limits = measure::server::Limits::metered();
+    let router = router.service(ping.clone(), measure::server::Ping::new(&limits))?;
+    let router = router.service(speed.clone(), measure::server::Speed::new(&limits))?;
     #[cfg(feature = "ssh")]
-    let router = router.service("sshd".parse()?, Sshd { host_seed })?;
+    let router = router.service("sshd".parse()?, sshh::Sshd::new(host_seed))?;
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
     Ok(router.public(public.iter().cloned()))
@@ -1224,14 +1191,6 @@ fn parse_services(names: &[String]) -> eyre::Result<Vec<Service>> {
         .iter()
         .map(|name| name.parse::<Service>().map_err(Into::into))
         .collect()
-}
-
-/// Map an engine failure into the handler contract's typed [`ServeError`]. The contract's error has no
-/// engine arm yet (the `ServeError` decision lands with the `tightbeam-handler` extraction), so an engine
-/// body's failure travels as `ServeError::Io` carrying the typed cause; the CLI renders it at the verb
-/// edge. An engine that already returns `io::Error` maps through `From` directly.
-pub(super) fn engine_failure(error: impl core::error::Error + Send + Sync + 'static) -> ServeError {
-    ServeError::Io(std::io::Error::other(error))
 }
 
 /// Cut the current roster from the operator's own contacts (the `me/<label>` partition, where `mint`

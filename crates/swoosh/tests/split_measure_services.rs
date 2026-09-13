@@ -101,12 +101,17 @@ async fn proof_ping_only() {
     // frame at the wire with a typed `Response::Unsupported` BEFORE sourcing a byte. The client decodes
     // that to `ProtocolError::Refused` and short-circuits: a refusal is a LOUD error, NEVER a `0.00 MiB/s`
     // report over the elapsed window. (This test used to enshrine the bug by asserting `Some(0)` bytes.)
+    //
+    // A FRESH member probes the split: the ping engine meters one caller's probes by construction now, and
+    // the member above just pinged, so it would hit the per-caller interval before the served-method check.
+    let probe_member = Node::new(MemTransport::bind(), NoDiscovery);
+    let probe_badge = self_badge(&SELF_SECRET, probe_member.node_id());
     let speed = Connector::to_node(
         host,
         "speed".parse().unwrap(),
-        Some(member_badge.parse().unwrap()),
+        Some(probe_badge.parse().unwrap()),
     )
-    .open_service(&member)
+    .open_service(&probe_member)
     .await
     .expect("the base connect lands; the offered service is resolved per-stream");
     let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))
@@ -203,7 +208,6 @@ async fn expose(entries: &[String]) -> NodeId {
                 entry,
                 HOST_SEED,
                 &std::sync::Arc::new(Vec::new()),
-                &[],
             )
             .unwrap();
         }

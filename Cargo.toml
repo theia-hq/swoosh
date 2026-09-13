@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/fetch", "crates/measure", "crates/sshh", "crates/swoosh", "crates/transfer"]
+members = ["crates/swoosh"]
 
 [workspace.package]
 edition = "2024"
@@ -24,10 +24,13 @@ bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "06127fe9be
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "06127fe9be716fe2a2fc4d7f10b744f30da8be20" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "c714e1bcd189e08c937254b4dc858f8b0f41d7f4" }
 tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "3c219ea164f658f3eecae0e8163896dfd9c60e51" }
-fetch = { path = "crates/fetch" }
-measure = { path = "crates/measure" }
-sshh = { path = "crates/sshh" }
-transfer = { path = "crates/transfer" }
+# theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
+# exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
+# cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
+fetch = { git = "https://github.com/theia-hq/services", rev = "198c81237bf6e60d81fb47e2bd79674453f77cac" }
+measure = { git = "https://github.com/theia-hq/services", rev = "198c81237bf6e60d81fb47e2bd79674453f77cac" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "198c81237bf6e60d81fb47e2bd79674453f77cac" }
+transfer = { git = "https://github.com/theia-hq/services", rev = "198c81237bf6e60d81fb47e2bd79674453f77cac" }
 
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"

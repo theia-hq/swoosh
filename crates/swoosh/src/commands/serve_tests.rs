@@ -56,7 +56,8 @@ fn entry_open(name: &str, kind: TargetKind, metering: Option<Metering>) -> Manif
 }
 
 /// The default `swoosh serve` manifest (gated ping + speed + the two control.* reads), name-sorted as the
-/// exposer returns it, so a banner test exercises the same shape the product path builds.
+/// exposer returns it, so a banner test exercises the same shape the product path builds. The diagnostic
+/// engines report metered by construction, so ping/speed read metered even behind the family gate.
 fn default_manifest() -> Vec<ManifestEntry> {
     vec![
         entry_gated(
@@ -69,8 +70,8 @@ fn default_manifest() -> Vec<ManifestEntry> {
             TargetKind::Handler,
             Some(Metering::Unmetered),
         ),
-        entry_gated("ping", TargetKind::Handler, Some(Metering::Unmetered)),
-        entry_gated("speed", TargetKind::Handler, Some(Metering::Unmetered)),
+        entry_gated("ping", TargetKind::Handler, Some(Metering::Metered)),
+        entry_gated("speed", TargetKind::Handler, Some(Metering::Metered)),
     ]
 }
 
@@ -187,11 +188,11 @@ fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
     );
 }
 
-/// The G4 wiring: a diagnostic route the operator opens binds metered limits, and a member-only one binds
-/// unmetered. The manifest is tightbeam's own read of the bound handler, so this asserts the same fact the
-/// banner renders.
+/// The G4 wiring is engine-owned: a diagnostic route binds the metered engine whether the operator opens
+/// it or leaves it member-only, because the services engines have no unmetered configuration. The manifest
+/// is tightbeam's own read of the bound handler, so this asserts the same fact the banner renders.
 #[test]
-fn an_open_diagnostic_binds_metered_and_a_member_only_one_binds_unmetered() {
+fn a_diagnostic_binds_the_metered_engine_open_or_member_only() {
     let speed: nauthy::Service = "speed".parse().expect("a valid service name");
     let empty_roster = std::sync::Arc::new(Vec::new());
 
@@ -200,7 +201,6 @@ fn an_open_diagnostic_binds_metered_and_a_member_only_one_binds_unmetered() {
         "speed=speed:",
         [0u8; 32],
         &empty_roster,
-        core::slice::from_ref(&speed),
     )
     .expect("speed binds")
     .public([speed])
@@ -214,7 +214,7 @@ fn an_open_diagnostic_binds_metered_and_a_member_only_one_binds_unmetered() {
     assert_eq!(
         entry.metering,
         Some(Metering::Metered),
-        "an open diagnostic route is metered"
+        "an open diagnostic route binds the metered engine"
     );
     assert_eq!(entry.posture, Posture::Open);
 
@@ -223,7 +223,6 @@ fn an_open_diagnostic_binds_metered_and_a_member_only_one_binds_unmetered() {
         "speed=speed:",
         [0u8; 32],
         &empty_roster,
-        &[],
     )
     .expect("speed binds")
     .expose()
@@ -235,46 +234,27 @@ fn an_open_diagnostic_binds_metered_and_a_member_only_one_binds_unmetered() {
         .expect("speed is served");
     assert_eq!(
         entry.metering,
-        Some(Metering::Unmetered),
-        "a member-only diagnostic route may run unmetered"
+        Some(Metering::Metered),
+        "a member-only diagnostic route binds the same metered engine (no unmetered configuration exists)"
     );
     assert_eq!(entry.posture, Posture::Gated);
 }
 
-/// The banner warning is DERIVED from what the handler bound, not from a name list: an OPEN route that
-/// reports unmetered carries the quiet caveat, the same route reporting metered carries none, and an
-/// unmetered member-only route carries none (the family gate is the terminator).
+/// The banner caveat is DERIVED from what the handler bound, not from a name list: the service engines
+/// report `Metered` by construction, so even an OPEN diagnostic carries no caveat, while a handler that
+/// reports `Unmetered` on an open route still narrates the quiet caveat.
 #[test]
 fn the_unmetered_caveat_derives_from_the_bound_metering() {
     let speed = svc("speed");
     let targets = display_targets(&["speed=speed:".to_owned()]).expect("explicit entries display");
 
-    let open_unmetered = Router::new(gated())
-        .service(
-            speed.clone(),
-            super::Speed::new(&measure::Limits::unmetered()),
-        )
-        .expect("speed binds")
-        .public([speed.clone()])
-        .expose()
-        .expect("an open unmetered speed route assembles");
-    let section = serving_section(
-        open_unmetered.manifest().as_slice(),
-        &targets,
-        &HashSet::new(),
-    );
-    assert!(
-        section.contains("unmetered: a stranger can drain your uplink"),
-        "an open unmetered route narrates the caveat: {section}"
-    );
-
     let open_metered = Router::new(gated())
         .service(
             speed.clone(),
-            super::Speed::new(&measure::Limits::metered()),
+            measure::server::Speed::new(&measure::server::Limits::metered()),
         )
         .expect("speed binds")
-        .public([speed.clone()])
+        .public([speed])
         .expose()
         .expect("an open metered speed route assembles");
     let section = serving_section(
@@ -284,22 +264,20 @@ fn the_unmetered_caveat_derives_from_the_bound_metering() {
     );
     assert!(
         !section.contains("unmetered"),
-        "an open metered route carries no caveat: {section}"
+        "the engine is metered by construction, so an open route carries no caveat: {section}"
     );
 
-    let gated_unmetered = Router::new(gated())
-        .service(speed, super::Speed::new(&measure::Limits::unmetered()))
-        .expect("speed binds")
-        .expose()
-        .expect("a member-only unmetered speed route assembles");
-    let section = serving_section(
-        gated_unmetered.manifest().as_slice(),
-        &targets,
-        &HashSet::new(),
-    );
+    // The caveat render path is independent of which engine is bound: an open handler that reports
+    // Unmetered still narrates it (the synthetic entry stands in for a future open-unmetered handler).
+    let unmetered = vec![entry_open(
+        "speed",
+        TargetKind::Handler,
+        Some(Metering::Unmetered),
+    )];
+    let section = serving_section(&unmetered, &targets, &HashSet::new());
     assert!(
-        !section.contains("unmetered"),
-        "a member-only route carries no caveat even unmetered: {section}"
+        section.contains("unmetered: a stranger can drain your uplink"),
+        "an open unmetered route narrates the caveat: {section}"
     );
 }
 
@@ -433,16 +411,10 @@ fn resident_manifest_equals_plain_manifest() {
     // handlers, one handler value per route (the Router's bind-by-value shape). `bind_entry` binds only the
     // named routes, so `sshd` is absent here exactly as it is from the plain default set.
     let empty_roster = std::sync::Arc::new(Vec::new());
-    let router = super::bind_entry(
-        Router::new(gated()),
-        "ping=ping:",
-        [0u8; 32],
-        &empty_roster,
-        &[],
-    )
-    .expect("ping binds");
-    let router = super::bind_entry(router, "speed=speed:", [0u8; 32], &empty_roster, &[])
-        .expect("speed binds");
+    let router = super::bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], &empty_roster)
+        .expect("ping binds");
+    let router =
+        super::bind_entry(router, "speed=speed:", [0u8; 32], &empty_roster).expect("speed binds");
     let router = router
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
@@ -1076,7 +1048,8 @@ fn gated() -> nauthy::Gate {
 }
 
 /// The base diagnostic route table the product `serve` path assembles, on a fresh family gate, with the
-/// same open set the caller names: a diagnostic in `public` binds metered limits, as the product binds it.
+/// same open set the caller names: the diagnostic engines own their metered bounds by construction, as the
+/// product binds them.
 fn diagnostics(public: &[nauthy::Service]) -> Router {
     super::diagnostics(Router::new(gated()), [0u8; 32], public).expect("the base diagnostics bind")
 }
@@ -1216,12 +1189,7 @@ fn public_sshd_is_refused_with_a_teaching_error() {
     // The `ssh` feature binds the shell handler; without it a `ssh=sshd:` entry is a teaching parse error
     // before the public proof ever runs, which is why this test is feature-gated.
     let router = Router::new(gated())
-        .service(
-            svc("ssh"),
-            super::Sshd {
-                host_seed: [0u8; 32],
-            },
-        )
+        .service(svc("ssh"), sshh::Sshd::new([0u8; 32]))
         .expect("the shell route binds");
     let Err(error) = router.public([svc("ssh")]).expose() else {
         panic!("`--public ssh` (a keyless shell) must be refused");
