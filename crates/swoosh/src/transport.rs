@@ -46,14 +46,14 @@ pub struct ReachArgs {
 ///
 /// [`QuirkNoise`](Self::QuirkNoise) is quirk behind the sealed wrapper: the same direct-only backend
 /// with a Noise handshake over it, so the reached key is proven rather than announced. Bare
-/// [`Quirk`](Self::Quirk) stays the announced, diagnostics-only spelling; a signet-rooted gate refuses
-/// to arm over it.
+/// [`Quirk`](Self::Quirk) is the announced base of the composition; a signet-rooted gate refuses to
+/// arm over it and a credential is never written to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Transport {
     /// across the internet, NAT-traversing
     #[default]
     Iroh,
-    /// our own QUIC; LAN / direct-only, key announced (diagnostics only)
+    /// our own QUIC; announced key; all serves refused
     Quirk,
     /// our own QUIC behind the sealed wrapper; LAN / direct-only, key proven
     #[value(name = "quirk+noise")]

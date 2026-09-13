@@ -16,7 +16,7 @@ Usage: swoosh speed [OPTIONS] <peer>
 
 **Example.** `swoosh speed desk --bidir -t 5` measures upload and download at once.
 
-**Things to know.** `--bidir` works over quirk too. Numbers over iroh depend on the live path (direct
-vs relayed) and are not comparable to a local quirk run.
+**Things to know.** `--bidir` works over `quirk+noise` too. Numbers over iroh depend on the live path
+(direct vs relayed) and are not comparable to a local `quirk+noise` run.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

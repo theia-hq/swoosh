@@ -19,4 +19,4 @@ assumes that model.
 
 - [Keys](../keys.md) the model every page here leans on.
 - [Commands](../reference/commands.md) every verb and flag.
-- [Transports](../transports.md) iroh (default) and quirk (diagnostic).
+- [Transports](../transports.md) iroh (default) and quirk+noise (sealed, direct-only).

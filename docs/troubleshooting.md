@@ -3,10 +3,20 @@
 What the common failures mean and how to fix them. Every command that cannot do its job exits non-zero
 and says why, rather than reporting a healthy-looking result.
 
+## "the transport does not prove the peer"
+
+```
+Error: the transport does not prove the peer (declared: announced); presenting a credential would send it to whoever answers
+```
+
+Bare `quirk` announces the reached key, so swoosh refuses to write a credential over it: the dial never
+reaches the gate. Use `--transport quirk+noise`, the sealed spelling that proves the key before any byte
+flows. See [transports](transports.md#quirk).
+
 ## "reached, but refused (not admitted)"
 
 ```
-bf01hcq6balrlxwa via quirk: reached, but refused (not admitted: not a member of this node's family, and no capability for this service)
+bf01hcq6balrlxwa via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)
 Error: bf01hcq6balrlxwa: reached, but refused
 ```
 
@@ -35,9 +45,9 @@ Error: quirk is direct-only: pass --peer <key>=<addr> (the line the peer's `swoo
 printed), or use --transport iroh: could not reach <key>
 ```
 
-Over quirk there is no discovery, so swoosh needs the peer's address. Either pass it with
-`--peer <key>=<addr>` (the `direct` line the peer's `serve` printed), or drop `--transport quirk` to use
-iroh, which discovers the peer from its key. See [transports](transports.md#quirk).
+Over quirk, either spelling, there is no discovery, so swoosh needs the peer's address. Either pass it
+with `--peer <key>=<addr>` (the `direct` line the peer's `serve` printed), or use `--transport iroh`,
+which discovers the peer from its key. See [transports](transports.md#quirk).
 
 ## An iroh dial cannot reach the peer
 

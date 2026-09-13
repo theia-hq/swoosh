@@ -25,6 +25,7 @@ use std::sync::Arc;
 use ::fetch::OriginAllowlist;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
+use eyre::WrapErr as _;
 use nauthy::{FileDenylist, Service, VerifyKey};
 use tightbeam::duration::Lifetime;
 use tightbeam::enabled::FileDisabledList;
@@ -421,7 +422,9 @@ impl ServeCmd {
         // socket: a rooted gate over a transport that does not prove the peer refuses here with the
         // teaching error, never after a "ready" banner the node cannot honor (and never with a lock or
         // socket taken for a serve that cannot arm).
-        exposer.prove_security::<T>()?;
+        exposer
+            .prove_security::<T>()
+            .wrap_err("use `--transport quirk+noise` to serve gated quirk traffic")?;
 
         // The resident listener arm (S4), after the proven overlay so a refused serve never binds
         // a socket. Order: (1) plain serve acquires nothing (byte-identical, no dir, no lock, no
