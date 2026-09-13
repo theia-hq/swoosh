@@ -149,6 +149,30 @@ fn device_label_rejects_length_and_control_bytes() {
     assert!("ci-runner".parse::<DeviceLabel>().is_ok());
 }
 
+/// The `--for` widening prefixes are reserved out of the device-label namespace: a label that looked
+/// like `fleet:<person>` (or `cluster:`) would collide with a bind, so the parse refuses it and names
+/// the flag it belongs on. A bare `fleet` (no colon) and a PETNAME carrying a colon are unaffected.
+#[test]
+fn device_label_rejects_the_for_widening_prefixes() {
+    for text in ["fleet:alice", "cluster:home"] {
+        assert_eq!(
+            text.parse::<DeviceLabel>(),
+            Err(DeviceLabelParseError::Widening),
+            "{text} must not parse as a device label"
+        );
+    }
+    // The prefix must be exact: a plain name containing the word is still a label.
+    assert!("fleet".parse::<DeviceLabel>().is_ok());
+    // A petname is a different slot (no device position), so the reservation does not apply there.
+    assert!("fleet:alice".parse::<Petname>().is_ok());
+    // The teaching error names `--for` and an example that uses it.
+    let message = DeviceLabelParseError::Widening.to_string();
+    assert!(
+        message.contains("--for") && message.contains("fleet:"),
+        "the refusal teaches where a widening token goes: {message}"
+    );
+}
+
 #[test]
 fn remove_drops_a_device_then_the_now_empty_person() {
     let mut contacts = Contacts::default();

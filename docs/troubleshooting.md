@@ -30,7 +30,7 @@ the node is not serving it.
 
 Fix one of:
 
-- If it is your own node, enroll this machine: `swoosh mint <label>` on the machine that holds your
+- If it is your own node, enroll this machine: `swoosh invite add <label>` on the machine that holds your
   signet, then `swoosh adopt` here.
 - If someone else runs it, ask them for a [capability link](keys.md#grant) and add `--present sheer:…` to
   your command.

@@ -42,19 +42,19 @@ talking to itself:
 - **the server** the node you run. It stays reachable and answers `ping`/`speed` behind its signet gate.
   A node with no provisioned signet is its own root, so it admits itself and any device it vouches for,
   and refuses everyone else.
-- **the member** a second machine the server admits. The server `mint`s an authkey for it; the member
-  `adopt`s that authkey to become a device the server's signet trusts.
+- **the member** a second machine the server admits. The server signs an invite for it; the member
+  `adopt`s that invite to become a device the server's signet trusts.
 - **the stranger** a third identity that is never admitted. It dials and is refused. Membership is real
   only if a non-member is actually turned away.
 
 ## Part 1: admit the member
 
-The server derives a device identity for the member and prints an authkey to hand off:
+The server derives a device identity for the member and prints an invite to hand off:
 
-<!-- capture: scripts/demo.sh (mint) -->
+<!-- capture: scripts/demo.sh (invite add) -->
 ```console
-$ swoosh mint laptop
-authkey:kxc3drkfdbpq24kaqas7uopt33lprpfutrdqfdfgtx73xqubuuda.bf01jsmb…
+$ swoosh invite add laptop
+invite:kxc3drkfdbpq24kaqas7uopt33lprpfutrdqfdfgtx73xqubuuda.bf01jsmb…
 ```
 
 The member adopts it. On its own machine (a distinct key dir), `adopt` writes the derived seed as the
@@ -62,7 +62,7 @@ member's identity AND records the server's signet as trusted:
 
 <!-- capture: scripts/demo.sh (adopt) -->
 ```console
-$ swoosh adopt @authkey.txt
+$ swoosh adopt @invite.txt
 adopted this machine as bf01ntwii5ojl5fk  [mine]
 trusting signet bf01jsmbbj7p3sjv: `swoosh serve` now admits its members and delegates.
 stored your membership badge: this device now reaches your gated services.
@@ -112,7 +112,7 @@ serving
 ctrl-c to stop
 ```
 
-The member dials, presenting the membership the server's signet minted for it, and passes the address
+The member dials, presenting the membership the server's signet signed for it, and passes the address
 back with `--peer`:
 
 <!-- capture: scripts/demo.sh (quirk+noise ping) -->

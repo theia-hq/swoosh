@@ -29,7 +29,7 @@ use crate::home::Home;
 const KEY_LEN: usize = 32;
 
 /// The DEFAULT lifetime a signet-signed, STORED device membership badge stands before it must be
-/// re-minted, applied by `swoosh mint` only when the operator passes no `--expires`. A default, not a
+/// re-minted, applied by `swoosh invite add` only when the operator passes no `--expires`. A default, not a
 /// hardcoded law: the CLI threads an explicit window straight into [`sign_device_badge`], and falls back
 /// to this value when none is given.
 ///
@@ -39,7 +39,7 @@ const KEY_LEN: usize = 32;
 /// leak-window from the badge lifetime, so this value IS the worst-case leak window for a mint that is
 /// never revoked. 90 days is the chosen default: a real re-mint cadence (about quarterly) a homelab owner
 /// can absorb, and a 90-day backstop instead of a year, matching the auth-key default operators expect. A
-/// longer window (up to a year via `swoosh mint --expires 365d`, for a controlled reused-secret case such
+/// longer window (up to a year via `swoosh invite add --expires 365d`, for a controlled reused-secret case such
 /// as qat) stays reachable, but is now a conscious opt-in rather than the silent, only value. Revocation
 /// stays the primary, immediate control (the `FileDenylist`, offline + live); the TTL is the backstop for
 /// a leak never noticed.
@@ -79,7 +79,7 @@ impl Secret {
     /// can mint and verify capabilities. Borrows, so the secret stays owned here and zeroizes on drop.
     ///
     /// This is what lets the signet holder SELF-SIGN a membership badge when it dials a family-gated node
-    /// (`mint` signs a device's badge; `swoosh ssh` self-signs its own): the badge roots at this key, the
+    /// (`invite add` signs a device's badge; `swoosh ssh` self-signs its own): the badge roots at this key, the
     /// same key the dial binds under, so the gate's device-binding matches. Mirrors tightbeam's
     /// `Secret::cap_identity`, the exposer side of the same seam.
     pub fn cap_identity(&self) -> eyre::Result<nauthy::Identity> {
@@ -131,7 +131,7 @@ impl Secret {
     /// FINITE lifetime: unlike the 5-minute self-sign (re-minted per dial), this badge is STORED on the
     /// device and stands until it expires or is denylisted, so it carries a generous-but-finite `ttl`
     /// rather than "forever" -- a lost, un-denylisted device eventually ages out. The caller owns the
-    /// window: `swoosh mint` passes an explicit `--expires`, or falls back to [`DEVICE_BADGE_TTL`], so
+    /// window: `swoosh invite add` passes an explicit `--expires`, or falls back to [`DEVICE_BADGE_TTL`], so
     /// the lifetime is a default the CLI applies, not a constant buried in this signer. The signet secret
     /// stays in this wrapper: only the signed public badge (a `sheer:` link) leaves.
     pub fn sign_device_badge(
@@ -148,7 +148,7 @@ impl Secret {
     }
 
     /// The seed for a device identity derived from this key (the signet) under `label`: the secret a
-    /// machine ADOPTS to become that device, and the payload of a `mint`ed authkey. Borrows, so this root
+    /// machine ADOPTS to become that device, and the payload of a derived invite. Borrows, so this root
     /// stays owned here and zeroizes on drop; the raw root never leaves the wrapper, only the derived
     /// child does. Hardened (only the holder of this root can compute a child), so a leaked device seed
     /// cannot recover the root or a sibling.
@@ -200,6 +200,14 @@ pub async fn resolve(intent: Identity, home: &Home) -> eyre::Result<Secret> {
             None => Ok(Secret::ephemeral()),
         },
     }
+}
+
+/// Load the persisted secret at `<home>/identity.key` if the file exists and holds a key, else `None`,
+/// WITHOUT creating one. A bound invite carries no seed, so `adopt` uses this to require the key the
+/// badge was signed for; a home with no identity gets a teaching error, never a fresh key minted over
+/// the invite's binding.
+pub async fn load(home: &Home) -> eyre::Result<Option<Secret>> {
+    load_existing(&home.identity_key()).await
 }
 
 /// Load the secret at `path` if the file exists and holds a 32-byte key, else `None`. Unlike

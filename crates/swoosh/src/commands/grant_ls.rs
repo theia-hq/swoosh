@@ -7,8 +7,8 @@
 //!
 //! The gate NEVER reads the ledger: this view is issuer-side audit only (see [`Grants`]). The import list
 //! below is the mechanical proof a reviewer can rerun: `serve` and the `nauthy`/`tightbeam` admit paths
-//! hold no `Grants` import, and the ledger is reached only from these grant verbs (`ls`, `issue`,
-//! `revoke`) and `mint`.
+//! hold no `Grants` import, and the ledger is reached only from these verbs: the grant group (`ls`,
+//! `issue`, `revoke`) and the `invite` group (`add` appends, `ls` reads, `rm` reads to revoke).
 
 use std::time::SystemTime;
 
@@ -70,8 +70,9 @@ impl LsCmd {
 }
 
 /// A grant's remaining lifetime as a compact span (`2d`, `1h`, `30m`, `45s`), or `expired` once its expiry
-/// has passed. Reads what a holder cares about: how long the grant still opens the door.
-fn remaining(record: &GrantRecord, now: SystemTime) -> String {
+/// has passed. Reads what a holder cares about: how long the grant still opens the door. Shared with
+/// `invite ls`, which shows the same span for the badge an invite carries.
+pub(crate) fn remaining(record: &GrantRecord, now: SystemTime) -> String {
     match record.expiry.duration_since(now) {
         Ok(left) => grants::humanize(left),
         Err(_past) => "expired".to_owned(),

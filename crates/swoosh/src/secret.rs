@@ -69,6 +69,21 @@ impl SecretSource {
         Self::resolve_to(arg, env, what, env_var, &mut std::io::stderr())
     }
 
+    /// Resolve WITHOUT the argv-leak warning. For a slot whose value is a secret only for SOME shapes
+    /// (the invite token: a bound invite carries nothing, a derived one carries a device seed), where the
+    /// caller can only judge after reading and parsing. The caller emits [`warn_argv_leak`] itself once
+    /// the value is known to be secret.
+    // `core::io`'s sink is still unstable, so the std one is the correct import here.
+    #[allow(clippy::std_instead_of_core)]
+    pub fn resolve_quiet(
+        arg: Option<Self>,
+        env: Option<String>,
+        what: &str,
+        env_var: &str,
+    ) -> eyre::Result<Self> {
+        Self::resolve_to(arg, env, what, env_var, &mut std::io::sink())
+    }
+
     /// The body of [`resolve`](Self::resolve), with the argv-leak warning routed to an injected `warn` sink
     /// so a test can drive it with its own writer and assert precisely when the warning is (and is not)
     /// emitted, rather than trying to capture the process stderr.
@@ -88,12 +103,7 @@ impl SecretSource {
             // documented, so a warning there would cry wolf.
             (Some(arg), _) => {
                 if matches!(arg, Self::Literal(_)) {
-                    // A broken stderr must not fail the command, so a failed write to the advisory warning
-                    // sink is ignored: the secret still resolves.
-                    let _ = writeln!(
-                        warn,
-                        "warning: passing the {what} as a bare argument leaks it to other processes (`ps`, `/proc/<pid>/cmdline`); prefer `-` to read stdin or `@<path>` to read a file"
-                    );
+                    warn_argv_leak(warn, what);
                 }
                 Ok(arg)
             }
@@ -150,6 +160,16 @@ impl SecretSource {
             }
         }
     }
+}
+
+/// The one-line argv-leak warning for a SECRET value named `what`, written best-effort to `warn`: a
+/// broken stderr must not fail the command. Shared by [`SecretSource::resolve`] (the value is always a
+/// secret there) and a caller that classifies the value itself after [`SecretSource::resolve_quiet`].
+pub(crate) fn warn_argv_leak<W: std::io::Write>(warn: &mut W, what: &str) {
+    let _ = writeln!(
+        warn,
+        "warning: passing the {what} as a bare argument leaks it to other processes (`ps`, `/proc/<pid>/cmdline`); prefer `-` to read stdin or `@<path>` to read a file"
+    );
 }
 
 /// Refuse a group- or world-accessible secret file. `@<path>` exists FOR privacy (keeping the seed off argv

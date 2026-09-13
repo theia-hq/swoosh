@@ -1219,7 +1219,7 @@ fn parse_services(names: &[String]) -> eyre::Result<Vec<Service>> {
         .collect()
 }
 
-/// Cut the current roster from the operator's own contacts (the `me/<label>` partition, where `mint`
+/// Cut the current roster from the operator's own contacts (the `me/<label>` partition, where `invite add`
 /// records each member) and sign it with the signet, returning the encoded blob the `roster:` handler
 /// serves. The SIGNET signs it (via [`Secret::cap_identity`]), so any member node can serve it and none can
 /// forge it. Cut ONCE at serve start (a snapshot); a member added later is picked up on the next `serve`.
