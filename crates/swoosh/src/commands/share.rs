@@ -316,7 +316,13 @@ fn resolve_fleet_root(
 /// already names one device. A `petname/device` resolves against the address book. A bare person can never
 /// reach here: `GrantFor::from_str` refused it at parse, so a `DeviceTarget::Named` always carries a device
 /// by construction.
-fn resolve_one_device(target: &DeviceTarget, contacts: &Contacts) -> eyre::Result<NodeId> {
+///
+/// Shared with `invite add --for` (one grammar, one resolution, one set of teaching errors), so a
+/// petname bind means the same thing on both verbs.
+pub(crate) fn resolve_one_device(
+    target: &DeviceTarget,
+    contacts: &Contacts,
+) -> eyre::Result<NodeId> {
     match target {
         DeviceTarget::Raw(node) => Ok(*node),
         DeviceTarget::Named(reference) => {

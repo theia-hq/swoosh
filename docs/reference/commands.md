@@ -41,8 +41,8 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="fleet"></a>[`swoosh fleet`](commands/fleet.md): pull the signed roster from a coordination node into your contacts
 - <a id="contact"></a>[`swoosh contact`](commands/contact.md): manage local petnames for peers (yours alone, plain TOML)
 - <a id="identity"></a>[`swoosh identity`](commands/identity.md): print this machine's key, minting one if there is none
-- <a id="mint"></a>[`swoosh mint`](commands/mint.md): derive a device identity and emit a one-time authkey to adopt
-- <a id="adopt"></a>[`swoosh adopt`](commands/adopt.md): adopt a minted authkey as this device identity
+- <a id="invite"></a>[`swoosh invite`](commands/invite.md): create, list, and cancel device invites; one device per invite
+- <a id="adopt"></a>[`swoosh adopt`](commands/adopt.md): adopt an invite, joining a signet's family as this machine
 - <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a peer's sshd over the overlay using the system ssh
 - <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue, list, narrow, or revoke `sheer:` capability links
 - <a id="tree"></a>[`swoosh tree`](commands/tree.md): print the command tree read straight from the parser

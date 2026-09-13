@@ -2,29 +2,26 @@
 // test-attributed functions); panicking on failed test setup is exactly the intent.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! The device-badge WIRING proof: `mint` -> `adopt` -> present, end to end through the REAL `swoosh`
+//! The invite WIRING proof: `invite add` -> `adopt` -> present, end to end through the REAL `swoosh`
 //! binary, so an adopted DEVICE carries the signet-signed badge it needs to reach a family-gated service.
 //!
 //! This is the coverage whose absence let the release blocker hide (deliberation 10): the shipped
-//! `mint`/`adopt` handed a device only its child seed + the signet's public id, and the device self-signed
-//! a badge rooted at its OWN child key -- which a signet-rooted family gate correctly refuses. This test
-//! drives the actual `swoosh mint` and `swoosh adopt` verbs (the product path, not a hand-rolled near-copy)
-//! and proves the whole chain:
+//! `mint`/`adopt` pair handed a device only its child seed + the signet's public id, and the device
+//! self-signed a badge rooted at its OWN child key -- which a signet-rooted family gate correctly refuses.
+//! The test drives the actual `swoosh invite add` and `swoosh adopt` verbs (the product path, not a
+//! hand-rolled near-copy) and proves both tier-1 cells:
 //!
-//! - `mint` emits a THREE-field authkey `authkey:<seed>.<signet>.<badge>` (the badge field is new);
-//! - the badge is signet-ROOTED (root == the signet, never the device's own key) and BOUND to the device's
-//!   derived node id, so it is the exact credential `verify_member_at_root_without_revocation` admits at the signet root;
-//! - `adopt` STORES that badge beside the seed (the `badge` file in the device's home), which is
-//!   what `self_badge` presents on connect instead of self-signing;
-//! - the stored badge is NOT the device's self-sign: a device self-sign roots at the device key, which the
-//!   gate refuses, so proving root == signet (and root != device) is the whole point of the fix;
-//! - the signet SECRET never appears in the authkey (only the child seed, the signet PUBLIC id, and the
-//!   already-signed public badge travel).
+//! - the DERIVED cell (`invite add <label>`) emits a three-field `invite:<seed>.<signet>.<badge>` whose
+//!   badge is signet-ROOTED and bound to the derived node id, which the device stores on `adopt`;
+//! - the BOUND cell (`invite add <label> --for <key>`) emits a two-field `invite:<signet>.<badge>` for a
+//!   key the device made: no secret travels, `adopt` keeps that identity, and the badge still verifies at
+//!   the signet root bound to the device;
+//! - `invite rm <label>` revokes the recorded badge at its root, so the gate's revocation seam refuses it;
+//! - `invite ls` lists the row under its label, and `rm` leaves the ledger row for audit.
 //!
-//! The device-adopt-then-DIAL end-to-end reach (a second device actually reaching a gated service over a
-//! live transport) stays the Operator's quirk-run gate, because the badge binds to the device's PROVEN
-//! transport id, which over `mem` is synthetic (see `gated_measure.rs`). This wiring test is the real,
-//! in-tree coverage that the mint/adopt/present path produces and stores the correct credential.
+//! The device-adopt-then-DIAL end-to-end reach over a live transport lives in `tier1_invites.rs`; this
+//! file is the real, in-tree coverage that the invite/adopt/present path produces and stores the correct
+//! credential in both shapes.
 
 use std::path::Path;
 use std::process::Command;
@@ -34,11 +31,11 @@ use nauthy::{Cap, FileDenylist, VerifyKey};
 use swoosh::home::Home;
 use tightbeam::identity::AsVerifyKey as _;
 
-/// The `authkey:` scheme prefix `mint` prints.
-const AUTHKEY_SCHEME: &str = "authkey:";
+/// The `invite:` scheme prefix the create verb prints.
+const INVITE_SCHEME: &str = "invite:";
 
 #[test]
-fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet_root() {
+fn invite_add_derives_signs_adopt_stores_and_it_verifies_at_the_signet_root() {
     // A private scratch dir for this test's key stores, kept apart from other tests by the process id.
     let base =
         std::env::temp_dir().join(format!("swoosh-device-badge-wiring-{}", std::process::id()));
@@ -48,29 +45,39 @@ fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet
     std::fs::create_dir_all(&signet_dir).unwrap();
     std::fs::create_dir_all(&device_dir).unwrap();
 
-    // `--home <dir>` names the identity+trust unit; the key lives inside it at `identity.key`. `mint`
-    // reads/creates the signet in the signet holder's home; `adopt` writes the device identity + signet +
-    // badge in the device's home. The key file paths are kept for the on-disk assertions below.
+    // `--home <dir>` names the identity+trust unit; the key lives inside it at `identity.key`. `invite
+    // add` reads/creates the signet in the signet holder's home; `adopt` writes the device identity +
+    // signet + badge in the device's home. The key file paths are kept for the on-disk assertions below.
     let signet_key = signet_dir.join("identity.key");
     let device_key = device_dir.join("identity.key");
 
-    // 1. MINT: run the real `swoosh mint ci-runner` in the signet holder's home. It derives the child,
-    //    signs the device badge, and prints the three-field authkey.
-    let mint = swoosh(&["mint", "ci-runner", "--home", path_str(&signet_dir)]);
-    assert!(mint.status.success(), "mint failed: {}", stderr(&mint));
-    let authkey = first_authkey(&String::from_utf8(mint.stdout).unwrap())
-        .expect("mint prints an authkey: token");
+    // 1. CREATE: run the real `swoosh invite add ci-runner` in the signet holder's home. It derives the
+    //    child, signs the device badge, and prints the three-field invite.
+    let create = swoosh(&[
+        "invite",
+        "add",
+        "ci-runner",
+        "--home",
+        path_str(&signet_dir),
+    ]);
+    assert!(
+        create.status.success(),
+        "invite add failed: {}",
+        stderr(&create)
+    );
+    let token = first_invite(&String::from_utf8(create.stdout).unwrap())
+        .expect("invite add prints an invite: token");
 
-    // The authkey MUST be three fields now (seed . signet . badge), where the badge is a `sheer:` link.
-    let fields: Vec<&str> = authkey
-        .strip_prefix(AUTHKEY_SCHEME)
+    // The invite MUST be three fields (seed . signet . badge), where the badge is a `sheer:` link.
+    let fields: Vec<&str> = token
+        .strip_prefix(INVITE_SCHEME)
         .unwrap()
         .splitn(3, '.')
         .collect();
     assert_eq!(
         fields.len(),
         3,
-        "authkey must carry three fields (seed.signet.badge), got {}: {authkey}",
+        "a derived invite carries three fields (seed.signet.badge), got {}: {token}",
         fields.len()
     );
     let signet: NodeId = fields[1].parse().expect("the signet field is a node id");
@@ -80,9 +87,9 @@ fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet
         "the third field is a signed badge (a sheer: link), got: {badge_field}"
     );
 
-    // The signet SECRET must NEVER be in the authkey: only the child seed, the signet PUBLIC id, and the
+    // The signet SECRET must NEVER be in the invite: only the child seed, the signet PUBLIC id, and the
     // public badge travel. Read the signet secret off disk and prove its base32 form is absent from the
-    // token (belt-and-braces alongside the structural argument that mint only ever encodes the child seed).
+    // token (belt-and-braces alongside the structural argument that add only ever encodes the child seed).
     let signet_secret = std::fs::read(&signet_key).unwrap();
     assert_eq!(
         signet_secret.len(),
@@ -93,13 +100,13 @@ fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet
         .encode(&signet_secret)
         .to_lowercase();
     assert!(
-        !authkey.contains(&secret_b32),
-        "the signet secret must never appear in the authkey"
+        !token.contains(&secret_b32),
+        "the signet secret must never appear in the invite"
     );
 
-    // 2. ADOPT: run the real `swoosh adopt <authkey>` under the DEVICE's key. It writes the child seed as
+    // 2. ADOPT: run the real `swoosh adopt <invite>` under the DEVICE's key. It writes the child seed as
     //    the device identity, records the trusted signet, and STORES the badge beside them.
-    let adopt = swoosh(&["adopt", &authkey, "--home", path_str(&device_dir)]);
+    let adopt = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
     assert!(adopt.status.success(), "adopt failed: {}", stderr(&adopt));
 
     // adopt STORED the badge (this is what `self_badge` presents on connect, in place of a self-sign).
@@ -109,7 +116,7 @@ fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet
         .to_owned();
     assert_eq!(
         stored_badge, badge_field,
-        "the stored badge is exactly the signet-signed badge the authkey carried"
+        "the stored badge is exactly the signet-signed badge the invite carried"
     );
 
     // The device identity adopt wrote is the child seed; its node id is what the badge must bind to.
@@ -149,67 +156,194 @@ fn mint_signs_a_device_bound_badge_adopt_stores_it_and_it_verifies_at_the_signet
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// The mint-then-revoke proof (the ship-blocker, deliberation 2026-09-07): `swoosh mint` now records the
-/// device badge in the mint-log ledger, so `swoosh grant revoke me/<label>` cuts the minted device off at
-/// the gate. Before the fix `mint` recorded ONLY the `me/<label>` contact, never the badge's root id, so
-/// revoke-by-holder found nothing in the ledger and bailed; the badge then stood until its TTL, unrevocable.
-/// This drives both real verbs (`mint` then `grant revoke me/ci-runner`) and proves the gate's revocation
-/// seam refuses the exact badge `mint` produced.
+/// The bound cell: the DEVICE makes its key and prints it; the owner signs `--for` that key; the token
+/// carries no secret; the device adopts it and keeps its identity; the stored badge still verifies at the
+/// signet root bound to that device.
 #[tokio::test]
-async fn mint_then_revoke_refuses_the_minted_device_at_the_gate() {
-    let base = std::env::temp_dir().join(format!("swoosh-mint-revoke-{}", std::process::id()));
+async fn invite_add_for_binds_a_device_made_key_and_adopt_keeps_that_identity() {
+    let base = std::env::temp_dir().join(format!("swoosh-bound-invite-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let signet_dir = base.join("signet-holder");
+    let device_dir = base.join("device");
     std::fs::create_dir_all(&signet_dir).unwrap();
-    // `mint` and `grant revoke` both read/write the identity+trust unit in this one home: the signet, the
-    // `me/ci-runner` contact, the mint-log ledger, and the denylist all live inside it.
-    let signet_home = Home::resolve(Some(signet_dir.clone())).unwrap();
+    std::fs::create_dir_all(&device_dir).unwrap();
 
-    // MINT in the signet holder's home: derives the device, signs its badge, records the contact
-    // `me/ci-runner` AND (the fix under test) appends the badge to the mint-log ledger.
-    let mint = swoosh(&["mint", "ci-runner", "--home", path_str(&signet_dir)]);
-    assert!(mint.status.success(), "mint failed: {}", stderr(&mint));
-    let authkey = first_authkey(&String::from_utf8(mint.stdout).unwrap())
-        .expect("mint prints an authkey: token");
-    // The badge is field three of the authkey; recover its cap so we can assert the gate refuses it.
-    let badge = authkey
-        .strip_prefix(AUTHKEY_SCHEME)
-        .unwrap()
-        .splitn(3, '.')
-        .nth(2)
-        .expect("the authkey carries the badge field");
-    let cap = Cap::parse(badge).expect("the badge parses as a cap");
-
-    // Before revoke: nothing denylists the badge (the gate would admit the device).
-    let denylist = FileDenylist::load(signet_home.revoked()).await.unwrap();
+    // 1. The DEVICE makes its key and prints the public half (public: any channel will carry it back).
+    let identity = swoosh(&["identity", "--home", path_str(&device_dir)]);
     assert!(
-        !denylist.is_revoked(&cap),
-        "the minted badge is not revoked before `grant revoke`"
+        identity.status.success(),
+        "identity failed: {}",
+        stderr(&identity)
     );
+    let device_key_text = String::from_utf8(identity.stdout).unwrap();
+    let device_line = device_key_text.lines().next().unwrap().to_owned();
+    let device: NodeId = device_line
+        .parse()
+        .expect("identity prints the node id first");
+    let device_secret_before = std::fs::read(device_dir.join("identity.key")).unwrap();
 
-    // REVOKE BY NAME through the real command: `me/ci-runner` resolves through the contact `mint` recorded,
-    // matches the ledger record `mint` appended, and denylists the badge's root. This is the flagship command
-    // on the flagship credential; it must succeed, where before the fix it bailed "no grant issued ... recorded".
-    let revoke = swoosh(&[
-        "grant",
-        "revoke",
-        "me/ci-runner",
+    // 2. The OWNER signs for that key. The token is two fields (signet . badge): no seed, no secret.
+    let create = swoosh(&[
+        "invite",
+        "add",
+        "laptop",
+        "--for",
+        &device.to_string(),
         "--home",
         path_str(&signet_dir),
     ]);
     assert!(
-        revoke.status.success(),
-        "grant revoke me/ci-runner failed: {}\n{}",
-        stderr(&revoke),
-        String::from_utf8_lossy(&revoke.stdout)
+        create.status.success(),
+        "invite add --for failed: {}",
+        stderr(&create)
+    );
+    let token = first_invite(&String::from_utf8(create.stdout).unwrap())
+        .expect("invite add --for prints an invite: token");
+    // A bound invite is `<signet>.<badge>`; the badge itself is a `sheer:` link that contains a `.`, so
+    // split off the signet field only, exactly as the parser does.
+    let (signet_field, badge_field) = token
+        .strip_prefix(INVITE_SCHEME)
+        .unwrap()
+        .split_once('.')
+        .expect("a bound invite carries a signet field and a badge");
+    let signet: NodeId = signet_field
+        .parse()
+        .expect("the first field is the signet node id");
+    assert!(
+        badge_field.starts_with("sheer:"),
+        "the second field is the badge"
     );
 
-    // After revoke: the gate's revocation check (the seam a live exposer consults on every dial) now refuses
-    // the very badge `mint` produced, so the minted device is cut off.
+    // The device secret must never travel: the device's identity key bytes, base32-encoded, are absent.
+    let secret_b32 = data_encoding::BASE32_NOPAD
+        .encode(&device_secret_before)
+        .to_lowercase();
+    assert!(
+        !token.contains(&secret_b32),
+        "the bound invite must never carry the device secret"
+    );
+
+    // The issuer's own ledger view names the row by its label, with no token column.
+    let ls = swoosh(&["invite", "ls", "--home", path_str(&signet_dir)]);
+    assert!(ls.status.success(), "invite ls failed: {}", stderr(&ls));
+    let listing = String::from_utf8(ls.stdout).unwrap();
+    assert!(
+        listing.contains("laptop") && listing.contains(&device.short()),
+        "invite ls names the label and the admitted key: {listing}"
+    );
+
+    // 3. The DEVICE adopts: its identity stays exactly as it was; the signet and badge land beside it.
+    let adopt = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
+    assert!(
+        adopt.status.success(),
+        "bound adopt failed: {}",
+        stderr(&adopt)
+    );
+    assert_eq!(
+        std::fs::read(device_dir.join("identity.key")).unwrap(),
+        device_secret_before,
+        "adopting a bound invite keeps the device's identity"
+    );
+    assert_eq!(
+        std::fs::read_to_string(device_dir.join("signet"))
+            .unwrap()
+            .trim(),
+        signet.to_string(),
+        "the bound invite's signet is written"
+    );
+    let stored_badge = std::fs::read_to_string(device_dir.join("badge"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(stored_badge, badge_field, "the bound badge is stored");
+
+    // 4. VERIFY: the stored badge roots at the signet and admits exactly this device.
+    let cap = Cap::parse(&stored_badge).expect("the stored badge parses");
+    let signet_vk: VerifyKey = signet.verify_key();
+    cap.verify_member_at_root_without_revocation(
+        std::time::SystemTime::now(),
+        device.verify_key(),
+        signet_vk,
+    )
+    .expect("the bound badge admits the device at the signet root");
+
+    // 5. CANCEL: `invite rm <label>` revokes the badge at its root; the ledger row stays for audit.
+    let rm = swoosh(&["invite", "rm", "laptop", "--home", path_str(&signet_dir)]);
+    assert!(rm.status.success(), "invite rm failed: {}", stderr(&rm));
+    let denylist = FileDenylist::load(Home::resolve(Some(signet_dir.clone())).unwrap().revoked())
+        .await
+        .unwrap();
+    assert!(
+        denylist.is_revoked(&cap),
+        "after `invite rm`, the gate's revocation seam refuses the badge"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The derived create-then-cancel proof (the ship-blocker, deliberation 2026-09-07, carried onto the
+/// invite surface): `invite add` records the badge in the mint-log ledger, so `invite rm <label>` cuts
+/// the device off at the gate. Before the mint-log fix the row was missing and the badge then stood until
+/// its TTL, unrevocable.
+#[tokio::test]
+async fn invite_add_then_invite_rm_refuses_the_device_at_the_gate() {
+    let base = std::env::temp_dir().join(format!("swoosh-invite-rm-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let signet_dir = base.join("signet-holder");
+    std::fs::create_dir_all(&signet_dir).unwrap();
+    // `invite add` and `invite rm` both read/write the identity+trust unit in this one home: the signet,
+    // the `me/ci-runner` contact, the mint-log ledger, and the denylist all live inside it.
+    let signet_home = Home::resolve(Some(signet_dir.clone())).unwrap();
+
+    let create = swoosh(&[
+        "invite",
+        "add",
+        "ci-runner",
+        "--home",
+        path_str(&signet_dir),
+    ]);
+    assert!(
+        create.status.success(),
+        "invite add failed: {}",
+        stderr(&create)
+    );
+    let token = first_invite(&String::from_utf8(create.stdout).unwrap())
+        .expect("invite add prints an invite: token");
+    // The badge is field three of the derived invite; recover its cap so we can assert the gate refuses it.
+    let badge = token
+        .strip_prefix(INVITE_SCHEME)
+        .unwrap()
+        .splitn(3, '.')
+        .nth(2)
+        .expect("the invite carries the badge field");
+    let cap = Cap::parse(badge).expect("the badge parses as a cap");
+
+    // Before cancel: nothing denylists the badge (the gate would admit the device).
+    let denylist = FileDenylist::load(signet_home.revoked()).await.unwrap();
+    assert!(
+        !denylist.is_revoked(&cap),
+        "the badge is not revoked before `invite rm`"
+    );
+
+    // CANCEL BY LABEL through the real command: `me/ci-runner` resolves through the contact `invite add`
+    // recorded, matches the ledger row, and denylists the badge's root.
+    let rm = swoosh(&["invite", "rm", "ci-runner", "--home", path_str(&signet_dir)]);
+    assert!(rm.status.success(), "invite rm failed: {}", stderr(&rm));
+
+    // After cancel: the gate's revocation check (the seam a live exposer consults on every dial) refuses
+    // the very badge `invite add` produced.
     let denylist = FileDenylist::load(signet_home.revoked()).await.unwrap();
     assert!(
         denylist.is_revoked(&cap),
-        "once the minted device is revoked by name, the gate refuses its badge"
+        "once the invite is cancelled, the gate refuses its badge"
+    );
+
+    // The ledger row STAYS for audit: cancel is not deletion.
+    let ls = swoosh(&["invite", "ls", "--home", path_str(&signet_dir)]);
+    assert!(ls.status.success(), "invite ls failed: {}", stderr(&ls));
+    assert!(
+        String::from_utf8(ls.stdout).unwrap().contains("ci-runner"),
+        "the cancelled invite stays in the ledger for audit"
     );
 
     let _ = std::fs::remove_dir_all(&base);
@@ -227,10 +361,10 @@ fn swoosh(args: &[&str]) -> std::process::Output {
         .expect("the swoosh binary runs")
 }
 
-/// The first `authkey:` token in `text` (mint frames it on its own line).
-fn first_authkey(text: &str) -> Option<String> {
+/// The first `invite:` token in `text` (the create verb frames it on its own line).
+fn first_invite(text: &str) -> Option<String> {
     text.split_whitespace()
-        .find(|word| word.starts_with(AUTHKEY_SCHEME))
+        .find(|word| word.starts_with(INVITE_SCHEME))
         .map(str::to_owned)
 }
 

@@ -15,7 +15,7 @@ rest is planned and lands as it is built.
 - [x] `service` read a peer's served services and their gates
 - [x] `contact` a local address book (`add` / `signet` / `ls` / `rm`), petname resolution everywhere
 - [x] `identity` print this machine's key, minting one if absent, to provision a node ahead of time
-- [x] `mint` / `adopt` enroll a second machine under your signet via a one-time authkey
+- [x] `invite add` / `adopt` enroll a second machine under your signet via a signed invite
 - [x] `ssh` open an ssh session to a peer over the overlay
 - [x] `forward` put a peer's served service on a local port, stdout, or a unix socket
 - [x] `send` push a file or directory to a peer, verified end to end

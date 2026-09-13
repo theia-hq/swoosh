@@ -70,8 +70,9 @@ impl LsCmd {
 }
 
 /// A grant's remaining lifetime as a compact span (`2d`, `1h`, `30m`, `45s`), or `expired` once its expiry
-/// has passed. Reads what a holder cares about: how long the grant still opens the door.
-fn remaining(record: &GrantRecord, now: SystemTime) -> String {
+/// has passed. Reads what a holder cares about: how long the grant still opens the door. Shared with
+/// `invite ls`, which shows the same span for the badge an invite carries.
+pub(crate) fn remaining(record: &GrantRecord, now: SystemTime) -> String {
     match record.expiry.duration_since(now) {
         Ok(left) => grants::humanize(left),
         Err(_past) => "expired".to_owned(),

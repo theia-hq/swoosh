@@ -109,6 +109,12 @@ impl DeviceLabel {
     /// can never drift apart.
     pub(crate) const SIGNET_RESERVED: &'static str = "signet";
 
+    /// The `--for` WIDENING prefixes reserved out of the device-label namespace: a label that looked
+    /// like a widening token (`fleet:alice`) would collide with `invite rm fleet:<person>` and read as a
+    /// bind, so the parse refuses it and names the flag it belongs on. A [`Petname`] does not reserve
+    /// these (a person named `fleet:home` is still a person; only the device-label slot is ambiguous).
+    pub(crate) const WIDENING_PREFIXES: [&'static str; 2] = ["fleet:", "cluster:"];
+
     /// The maximum label length in bytes. Small: a device label (`desk`, `macbook`) is never long, and a
     /// bound keeps the `u16` length prefix in the roster's canonical encoding total.
     pub const MAX_LEN: usize = 255;
@@ -152,6 +158,15 @@ impl FromStr for DeviceLabel {
         if text == Self::SIGNET_RESERVED {
             return Err(DeviceLabelParseError::Reserved);
         }
+        // `fleet:`/`cluster:` are the `--for` widening prefixes: a device label must never look like a
+        // widening token, or `invite rm fleet:alice` would be ambiguous between a row label and a bind.
+        // Refused here so the collision is unrepresentable; the message names the flag it belongs on.
+        if Self::WIDENING_PREFIXES
+            .iter()
+            .any(|prefix| text.starts_with(prefix))
+        {
+            return Err(DeviceLabelParseError::Widening);
+        }
         Ok(Self(text.to_owned()))
     }
 }
@@ -180,6 +195,12 @@ pub enum DeviceLabelParseError {
     /// The label was `signet`, reserved for a person's signet root (record it with `contact signet`).
     #[error("device label 'signet' is reserved for a person's signet root")]
     Reserved,
+    /// The label started with a `--for` widening prefix (`fleet:`/`cluster:`), which belongs on `--for`.
+    #[error(
+        "device label cannot start with `fleet:` or `cluster:`; a widening token goes in `--for`, e.g. \
+         `invite add desk --for fleet:alice`"
+    )]
+    Widening,
 }
 
 /// A `<petname>` or `<petname>/<device>` address, as typed on the command line.

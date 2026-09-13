@@ -9,21 +9,22 @@ machines like any of your own, and you cut it off by revoking that one device.
 
 ## Enroll the runner
 
-From your own machine, mint a device authkey for the runner:
+From your own machine, create a device invite for the runner:
 
-<!-- capture: swoosh mint ci-runner -->
+<!-- capture: swoosh invite add ci-runner -->
 ```console
-$ swoosh mint ci-runner
-authkey:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
+$ swoosh invite add ci-runner
+invite:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
 
 recorded me/ci-runner -> bf01imv3ljql6kjn  [derived]
-hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
+hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
-A minted membership lasts 90 days unless you pass `--expires`; see [`swoosh mint`](../reference/commands.md#mint).
+A derived invite's membership badge lasts 90 days unless you pass `--expires`; see
+[`swoosh invite`](../reference/commands.md#invite).
 
-Store that authkey as a CI secret named `SWOOSH_AUTHKEY`. On GitHub Actions, use the flagship action: it
-installs swoosh, adopts the authkey, and serves the runner's default services (a keyless shell plus
+Store that invite as a CI secret named `SWOOSH_AUTHKEY`. On GitHub Actions, use the flagship action: it
+installs swoosh, adopts the invite, and serves the runner's default services (a keyless shell plus
 `ping`/`speed` diagnostics), all gated to your signet:
 
 ```yaml
@@ -96,7 +97,7 @@ dial, no restart:
 $ swoosh grant revoke me/ci-runner
 ```
 
-To rotate instead of revoke, mint a fresh authkey, update the CI secret, and revoke the old device.
+To rotate instead of revoke, create a fresh invite, update the CI secret, and revoke the old device.
 
 ## The honest limit
 
@@ -108,4 +109,4 @@ denylist, so revoke on every machine the runner reaches. See [revocation](../key
 
 - [Keys](../keys.md#device) what a device and membership are.
 - [Contractor access](contractor-access.md) a timed grant for a person, not a machine.
-- [Commands](../reference/commands.md#send) send, ssh, and the mint/adopt handshake.
+- [Commands](../reference/commands.md#send) send, ssh, and the invite/adopt handshake.

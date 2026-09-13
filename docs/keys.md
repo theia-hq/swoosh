@@ -30,31 +30,47 @@ first ran swoosh. Everything else you own is signed by it. You keep it; you do n
 Each machine you own is a **device**, with its own key. Your laptop, your desktop, a server: each is a
 separate device with a separate key, all vouched for by your one signet.
 
-You do not copy your signet onto every machine. Instead you enroll each new device from a machine that
-already holds your signet:
+You do not copy your signet onto every machine. Instead you create an invite for each new device from a
+machine that already holds your signet:
 
-<!-- capture: swoosh mint laptop -->
+<!-- capture: swoosh invite add laptop -->
 ```console
-$ swoosh mint laptop
-authkey:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
+$ swoosh invite add laptop
+invite:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
 
 recorded me/laptop -> bf01imv3ljql6kjn  [derived]
-hand this authkey to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
+hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
-A minted membership lasts 90 days unless you pass `--expires`; see [`swoosh mint`](reference/commands.md#mint).
+An invite's membership badge lasts 90 days unless you pass `--expires`; see
+[`swoosh invite`](reference/commands.md#invite).
 
-The new machine adopts that one-time authkey and becomes a device your signet trusts. Save the whole
-printed line to a file, the `authkey:` prefix included, and make the file private
-(`chmod 600 authkey.txt`); `adopt` refuses a file missing the prefix or readable by anyone else:
+The new machine adopts that invite and becomes a device your signet trusts. A derived invite carries the
+device seed, so save the whole printed line to a file, the `invite:` prefix included, and make the file
+private (`chmod 600 invite.txt`); `adopt` refuses a file readable by anyone else:
 
-<!-- capture: swoosh adopt @authkey.txt -->
+<!-- capture: swoosh adopt @invite.txt -->
 ```console
-$ swoosh adopt @authkey.txt
+$ swoosh adopt @invite.txt
 adopted this machine as bf01imv3ljql6kjn  [mine]
 trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates.
 stored your membership badge: this device now reaches your gated services.
 ```
+
+To keep the secret from travelling at all, make the key ON the new machine first and have your signet
+sign only its public half (`--for`):
+
+<!-- capture: swoosh invite add laptop --for <key> -->
+```console
+$ swoosh invite add laptop --for bf01imv3ljql6kjn
+invite:bf01hcq6….sheer:…
+
+recorded me/laptop -> bf01imv3ljql6kjn
+hand this invite back to that key: it admits bf01imv3ljql6kjn only.
+```
+
+An invite is **membership**: it admits one device at your whole gate. To open one service instead, to one
+device or a whole fleet, use [`swoosh grant issue`](reference/commands.md#grant).
 
 ### Membership
 

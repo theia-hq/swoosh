@@ -8,7 +8,7 @@
 #
 # Three identities, each in its own home dir, so this is a real membership story:
 #   - the SERVER runs the node and gates diagnostics behind its signet.
-#   - the MEMBER is minted + adopted, so the server's signet trusts it; it
+#   - the MEMBER is invited + adopted, so the server's signet trusts it; it
 #     reaches the server's gated ping/speed service over iroh and quirk+noise.
 #   - the STRANGER is never adopted, so the gate refuses it.
 #
@@ -85,15 +85,15 @@ stop_server() {
 }
 
 # ---------------------------------------------------------------------------
-# Part 1: admit the member. The server mints an authkey; the member adopts it,
+# Part 1: admit the member. The server signs an invite; the member adopts it,
 # becoming a device identity the server's signet trusts.
 # ---------------------------------------------------------------------------
-banner "server mints an authkey for the member"
-AUTHKEY="$(SWOOSH_HOME="$SERVER" "$BIN" mint laptop | head -1)"
-echo "$AUTHKEY"
+banner "server creates an invite for the member"
+INVITE="$(SWOOSH_HOME="$SERVER" "$BIN" invite add laptop | head -1)"
+echo "$INVITE"
 
 banner "member adopts it (distinct home: its own identity + the trusted signet)"
-SWOOSH_HOME="$MEMBER" "$BIN" adopt "$AUTHKEY"
+SWOOSH_HOME="$MEMBER" "$BIN" adopt "$INVITE"
 
 # ---------------------------------------------------------------------------
 # Part 2: bare quirk refuses the gate. quirk phase 0 announces peer keys in

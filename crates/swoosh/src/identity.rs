@@ -202,6 +202,14 @@ pub async fn resolve(intent: Identity, home: &Home) -> eyre::Result<Secret> {
     }
 }
 
+/// Load the persisted secret at `<home>/identity.key` if the file exists and holds a key, else `None`,
+/// WITHOUT creating one. A bound invite carries no seed, so `adopt` uses this to require the key the
+/// badge was signed for; a home with no identity gets a teaching error, never a fresh key minted over
+/// the invite's binding.
+pub async fn load(home: &Home) -> eyre::Result<Option<Secret>> {
+    load_existing(&home.identity_key()).await
+}
+
 /// Load the secret at `path` if the file exists and holds a 32-byte key, else `None`. Unlike
 /// [`load_or_create`], never writes: an outward dial reads a provisioned identity but does not mint one.
 /// A file that exists but is the wrong size fails closed (a corrupt or foreign key file is a loud error,
