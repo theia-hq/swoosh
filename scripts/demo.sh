@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
 # The membership + transport-swap demo: admit a second machine to a node you
-# run, reach it by its public key over BOTH transports (iroh and our own QUIC,
-# quirk), and watch a stranger who was never admitted get refused at the gate.
+# run, reach it by its public key over iroh, and watch a stranger who was never
+# admitted get refused at the gate. The quirk leg shows the enforcement: quirk
+# phase 0 announces peer keys in plaintext, so a signet-rooted gate refuses to
+# arm over it until Noise (phase 1) lands.
 #
 # Three identities, each in its own home dir, so this is a real membership story:
 #   - the SERVER runs the node and gates diagnostics behind its signet.
 #   - the MEMBER is minted + adopted, so the server's signet trusts it; it
-#     reaches the server's gated ping/speed service over quirk AND over iroh.
+#     reaches the server's gated ping/speed service over iroh.
 #   - the STRANGER is never adopted, so the gate refuses it.
 #
 # Because the member is a DISTINCT identity (its own key, its own NodeId), the
@@ -16,13 +18,15 @@
 #
 # Honest captions (see DEMO.md):
 #   - quirk phase 0 is stop-and-wait (~14 MiB/s). That is not a speed claim; the
-#     point is the swap and the gate, not the number.
-#   - quirk identity is plaintext-nominal until Noise (phase 1). Not proven crypto.
+#     point of the swap is the key, not the number.
+#   - quirk identity is plaintext-nominal until Noise (phase 1). A signet-rooted
+#     gate refuses to arm over it, and the demo shows that refusal.
 #   - the iroh leg needs n0 discovery reachable; if it is down the script says so
-#     and the quirk leg plus the membership gate still stand.
+#     and the membership gate above still refuses the stranger locally.
 #
 # Usage: scripts/demo.sh
-# Requires: a built `swoosh` binary. The quirk leg needs no network.
+# Requires: a built `swoosh` binary. No network for the refusal check; the iroh
+# leg needs n0 discovery.
 
 set -euo pipefail
 
@@ -51,7 +55,7 @@ mkdir -p "$SERVER" "$MEMBER" "$STRANGER"
 banner() { printf '\n=== %s ===\n' "$1"; }
 
 # Start `serve` under the server key over the given transport, wait for its
-# banner, and set SERVE_PID + SERVER_KEY + SERVER_ADDR. $1 is the transport.
+# banner, and set SERVE_PID + SERVER_KEY. $1 is the transport.
 start_server() {
   local transport="$1" out="$WORK/serve-$1.out"
   SWOOSH_HOME="$SERVER" "$BIN" serve --transport "$transport" >"$out" 2>&1 &
@@ -63,7 +67,6 @@ start_server() {
   done
   cat "$out"
   SERVER_KEY="$(grep -m1 -oE 'bf01[a-z0-9]+' "$out" | head -1)"
-  SERVER_ADDR="$(grep -m1 -oE '127\.0\.0\.1:[0-9]+' "$out" | head -1)"
 }
 
 # Stop the running server (by its exact PID) and clear SERVE_PID.
@@ -87,46 +90,39 @@ banner "member adopts it (distinct home: its own identity + the trusted signet)"
 SWOOSH_HOME="$MEMBER" "$BIN" adopt "$AUTHKEY"
 
 # ---------------------------------------------------------------------------
-# Part 2: the member reaches the server over quirk (our own from-scratch QUIC).
+# Part 2: quirk refuses the gate. quirk phase 0 announces peer keys in
+# plaintext, so a signet-rooted gate refuses to arm over it: the serve below
+# must refuse with the teaching error, before any dial. Noise (phase 1) flips
+# one declaration and the same command starts.
 # ---------------------------------------------------------------------------
-banner "quirk serve (our own QUIC, direct-only over loopback)"
-start_server quirk
-QUIRK_KEY="$SERVER_KEY"
-
-banner "member ping over quirk (admitted: its badge roots at the server's signet)"
-SWOOSH_HOME="$MEMBER" "$BIN" ping "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" -c 5 -i 0.2
-
-banner "member speed --down over quirk"
-SWOOSH_HOME="$MEMBER" "$BIN" speed "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" --down -t 3
-
-banner "member speed --up over quirk"
-SWOOSH_HOME="$MEMBER" "$BIN" speed "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" --up -t 3
-
-# The stranger, never adopted, is refused at the gate. A refusal is SUCCESS
-# here, so invert the exit and assert it failed.
-banner "stranger ping over quirk (never adopted: expect REFUSED)"
-if SWOOSH_HOME="$STRANGER" "$BIN" ping "$SERVER_KEY" --transport quirk --peer "$SERVER_KEY=$SERVER_ADDR" -c 3 -i 0.2; then
-  echo "UNEXPECTED: the stranger was admitted; the gate did not hold." >&2
+banner "quirk serve (expect REFUSED: announced peers cannot root-admit)"
+if SWOOSH_HOME="$SERVER" "$BIN" serve --transport quirk >"$WORK/serve-quirk.out" 2>&1; then
+  echo "UNEXPECTED: a rooted gate armed over an announced transport." >&2
   exit 1
 else
-  echo "refused, as it must be: the gate holds over quirk."
+  cat "$WORK/serve-quirk.out"
+  echo "refused, as it must be: a credential needs a proven peer."
 fi
 
-stop_server
+# The server key is a key, not a transport property: read it offline, so Part 3
+# can show the iroh serve binds the same NodeId.
+banner "the server's NodeId, read offline"
+SERVER_ID="$(SWOOSH_HOME="$SERVER" "$BIN" identity | head -1)"
+echo "$SERVER_ID"
 
 # ---------------------------------------------------------------------------
-# Part 3: swap the transport. The SAME server key over iroh. The printed NodeId
-# is byte-for-byte identical to the quirk one: same key, different transport.
+# Part 3: the gate over iroh. The SAME server key that quirk refused to arm
+# under: the key is the identity, the transport is the choice.
 # ---------------------------------------------------------------------------
 banner "iroh serve (SAME server key, self-discovering)"
 start_server iroh
 
-if [ "$QUIRK_KEY" = "$SERVER_KEY" ]; then
+if [ "$SERVER_ID" = "$SERVER_KEY" ]; then
   echo
-  echo "SAME NodeId over both transports: $SERVER_KEY"
+  echo "SAME NodeId: $SERVER_KEY (the key is the identity; transport is a choice)"
 else
   echo
-  echo "WARNING: NodeId differs: quirk=$QUIRK_KEY iroh=$SERVER_KEY" >&2
+  echo "WARNING: NodeId differs: identity=$SERVER_ID iroh=$SERVER_KEY" >&2
 fi
 
 # The iroh leg depends on n0 discovery being reachable. Treat an unreachable
@@ -147,10 +143,10 @@ if SWOOSH_HOME="$MEMBER" "$BIN" ping "$SERVER_KEY" --transport iroh -c 5 -i 0.2;
 else
   echo
   echo "iroh unreachable (n0 discovery down). Documented caveat, not a defect:" >&2
-  echo "the quirk leg and the membership gate above still stand." >&2
+  echo "the quirk refusal and the membership gate above still stand." >&2
 fi
 
 stop_server
 
 echo
-echo "done. Member admitted over both transports, stranger refused, one server key throughout."
+echo "done. Member admitted over iroh, stranger refused, quirk refused the gate until Noise, one server key throughout."

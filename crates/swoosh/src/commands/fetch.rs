@@ -195,12 +195,16 @@ impl FetchCmd {
         let origin = origin_url(&self.url, &target)?;
 
         let (mut writer, mut reader) = session.open_bi().await?;
+        // The checked writer (the same rule the library's `Connector` applies): a credential-bearing
+        // request refuses, before any byte, when the selected transport's declared profile does not
+        // prove the peer. This fetch path dials a raw session and bypasses `Connector`, so it carries
+        // the check itself; the refusal surfaces here as the local 502 cause.
         Request {
             service: self.service.clone(),
             capability: present.map(ToString::to_string),
             membership: membership.map(ToString::to_string),
         }
-        .write(&mut writer)
+        .write_checked::<S, _>(&mut writer)
         .await?;
         if let Response::Refused(refusal) = Response::read(&mut reader).await? {
             *responded = true;
@@ -396,7 +400,13 @@ fn reason(status: u16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use core::time::Duration;
+
+    use bifrost::{Announced, Session};
     use clap::Parser as _;
+    use nauthy::Identity;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::{TcpListener, TcpStream};
 
     use super::{FetchCmd, origin_url};
     use crate::credential::Credential;
@@ -455,5 +465,73 @@ mod tests {
             crate::identity::Identity::PersistedIfPresent,
             "a Family credential fuses the identity to PersistedIfPresent so the self-badge roots"
         );
+    }
+
+    /// A session declaring the announced profile: enough for `relay` to reach the request write, which
+    /// must refuse before any byte reaches the far half.
+    struct AnnouncedSession;
+
+    impl Session for AnnouncedSession {
+        type Security = Announced;
+        type Write = tokio::io::WriteHalf<tokio::io::DuplexStream>;
+        type Read = tokio::io::ReadHalf<tokio::io::DuplexStream>;
+
+        fn peer(&self) -> bifrost::NodeId {
+            bifrost::NodeId::from_ed25519_secret(&[0u8; 32])
+        }
+
+        async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+            let (near, _far) = tokio::io::duplex(1024);
+            let (read, write) = tokio::io::split(near);
+            Ok((write, read))
+        }
+
+        async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+            Err(bifrost::Error::Closed)
+        }
+
+        async fn wait_closed(&self) {}
+    }
+
+    /// The fetch path bypasses `Connector`, so it carries the checked writer itself: presenting a
+    /// credential over an announced session refuses before any byte, and the local URL serves its 502
+    /// with the teaching cause instead of quietly shipping the credential to whoever answered.
+    #[tokio::test]
+    async fn fetch_refuses_to_present_a_credential_over_an_announced_session() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .await
+            .unwrap();
+
+        let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
+        let cmd = Wrap::try_parse_from(["swoosh", "http://example.com/x", "--via", &key])
+            .expect("fetch parses")
+            .fetch;
+        let identity = Identity::from_secret(&[7u8; 32]).unwrap();
+        let link = identity
+            .mint_member(
+                identity.verifying_key(),
+                nauthy::Request::expires_in(Duration::from_secs(3600)),
+            )
+            .unwrap()
+            .link()
+            .unwrap();
+
+        assert!(
+            cmd.serve(server, &AnnouncedSession, Some(&link), None)
+                .await
+                .is_err(),
+            "the relay refuses the credential write"
+        );
+
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        let text = String::from_utf8_lossy(&response);
+        assert!(text.starts_with("HTTP/1.1 502 Bad Gateway"), "{text}");
+        assert!(text.contains("does not prove the peer"), "{text}");
     }
 }
