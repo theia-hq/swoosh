@@ -417,6 +417,11 @@ impl ServeCmd {
         // service named in `<home>/disabled` is refused at the gate seam, live, and a re-enable restores it
         // with no restart. `with_enabled` cannot fail (it only stores the oracle), so it tails the chain.
         let exposer = router.expose()?.with_enabled(enabled);
+        // Prove the transport can carry this gate BEFORE announcing readiness or binding the resident
+        // socket: a rooted gate over a transport that does not prove the peer refuses here with the
+        // teaching error, never after a "ready" banner the node cannot honor (and never with a lock or
+        // socket taken for a serve that cannot arm).
+        exposer.prove_security::<T>()?;
 
         // The resident listener arm (S4), after the proven overlay so a refused serve never binds
         // a socket. Order: (1) plain serve acquires nothing (byte-identical, no dir, no lock, no
