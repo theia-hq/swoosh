@@ -58,9 +58,10 @@ async fn proof() {
     tokio::task::spawn_local(async move {
         // The routes a `swoosh serve speed --public speed` node carries: the gated `ping`, the opened
         // `speed`, and the always-on member-only `control.stop` every node answers. `--public speed` builds:
-        // `speed` is OptIn (openable), and `control.stop` (Never) is not named, so the proof does not refuse
-        // the node. This is the build that used to die. The SAME open set is what binds `speed` metered, so
-        // the opened route the stranger reaches is the bounded one.
+        // the open set binds the metered `speed` engine (capped by construction, the only one the proof
+        // opens) and `control.stop` (Never) is not named, so the proof does not refuse the node. This is
+        // the build that used to die: the opened route the stranger reaches is the capped one, while the
+        // gated `ping` binds the owner engine.
         let public: Vec<nauthy::Service> = vec!["speed".parse().unwrap()];
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
         let exposer = swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED, &public)
