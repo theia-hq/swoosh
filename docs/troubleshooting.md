@@ -68,8 +68,9 @@ drains. See [revocation](keys.md#revocation).
 
 ## A public ping or speed is being hammered
 
-`ping` and `speed` have no responder-side rate limit yet, so an open one lets an anonymous caller drain
-your uplink. Only `--public` the services you are willing to let a stranger use. `swoosh service disable
+The `ping` and `speed` engines are metered by construction: a per-caller probe interval, one transfer at
+a time, and byte plus wall-clock stream caps. An anonymous caller hits those caps rather than draining the
+uplink. Only `--public` the services you are willing to let a stranger use. `swoosh service disable
 <name>` stops serving it to anyone, live, no restart; to keep it for your own devices while taking it off
 the public menu, restart `serve` without the flag.
 

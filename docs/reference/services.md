@@ -16,7 +16,8 @@ Bare `swoosh serve` publishes `ping=ping: speed=speed:`, gated. Every entry afte
 
 Round-trip time probe. A peer runs `swoosh ping <peer>` against it.
 
-- Posture: family-gated. `--public ping` opens it; the banner marks it unmetered.
+- Posture: family-gated. `--public ping` opens it; the engine meters it by construction (one probe per
+  caller per second, a 60-second/1 GiB per-stream cap).
 - Example: `swoosh serve ping=ping:`
 - Limits: [measure](https://github.com/theia-hq/services/blob/main/crates/measure/README.md).
 
@@ -24,7 +25,8 @@ Round-trip time probe. A peer runs `swoosh ping <peer>` against it.
 
 Throughput test. A peer runs `swoosh speed <peer>` against it.
 
-- Posture: family-gated. `--public speed` opens it; the banner marks it unmetered.
+- Posture: family-gated. `--public speed` opens it; the engine meters it by construction (one transfer at
+  a time, a 64 MiB per-direction and 15-second per-stream cap).
 - Example: `swoosh serve speed=speed:`
 - Limits: [measure](https://github.com/theia-hq/services/blob/main/crates/measure/README.md).
 
@@ -134,7 +136,7 @@ Every service row links the doc that owns its sharp edges. The engine limits liv
 [serve](commands/serve.md) for the flags, and [send](commands/send.md), [fetch](commands/fetch.md),
 [ssh](commands/ssh.md), [forward](commands/forward.md), [service](commands/service.md),
 [stop](commands/stop.md), and [fleet](commands/fleet.md) for the client verbs. The gate itself is
-[Keys](../keys.md#the-gate). An open `ping` or `speed` is unmetered, per
+[Keys](../keys.md#the-gate). An open `ping` or `speed` is metered by the engine, per
 [Public service](../use-cases/public-service.md#the-honest-limit).
 
 ## Not built

@@ -23,8 +23,8 @@ serving
   family-gated   your devices + peers you've granted
     control.*   node control (never public)
   public !   anyone, unauthenticated
-    ping    round-trip probe   unmetered: a stranger can drain your uplink
-    speed   throughput test   unmetered: a stranger can drain your uplink
+    ping    round-trip probe
+    speed   throughput test
 
 ctrl-c to stop
 ```
@@ -52,9 +52,10 @@ bf01hcq6balrlxwa via iroh: mixed (direct to 135.129.124.149:56141 and relayed)
 
 ## The honest limit
 
-`ping` and `speed` have no responder-side rate limit yet, so an open one lets an anonymous caller drain
-this node's uplink (an amplifier). The banner says so. Only open services you are willing to let a
-stranger hammer.
+The `ping` and `speed` engines are metered by construction: one probe per caller per second and a
+60-second/1 GiB stream cap for ping, one transfer at a time with a 64 MiB/15-second per-stream cap for
+speed. An open diagnostic is a bounded unit, not an unbounded drain; the limits travel with the engine
+and no route can bind an unbounded one. Only open services you are willing to let a stranger use.
 
 ## Next
 

@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           fail=0
-          for repo in nauthy tightbeam bifrost; do
+          for repo in nauthy tightbeam bifrost services; do
             rev=$(sed -n "s|.*\"https://github.com/theia-hq/${repo}\", rev = \"\([0-9a-f]\{40\}\)\".*|\1|p" Cargo.toml | head -n1)
             if [ -z "$rev" ]; then
               echo "FAIL: no pinned rev for '$repo' in Cargo.toml (expected a 40-char sha)"; fail=1

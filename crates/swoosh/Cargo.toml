@@ -11,10 +11,11 @@ name = "swoosh"
 path = "src/main.rs"
 
 [features]
-# `ssh` pulls in swoosh's own `sshh` dependency and injects the `sshd:` handler, so a default swoosh serves
-# `tunnel expose ssh=sshd:` and `swoosh ssh` reaches it. DEFAULT-ON: the keyless shell is a headline
-# capability, not an opt-in. A lean client that only reaches out (`ping`/`speed`/`fetch`) can drop the
-# russh/pty tree with `--no-default-features`, keeping swoosh the one binary either way.
+# `ssh` pulls in the `sshh` engine from the services repo and binds the `sshd:` handler at the serve
+# root, so a default swoosh serves `tunnel expose ssh=sshd:` and `swoosh ssh` reaches it. DEFAULT-ON: the
+# keyless shell is a headline capability, not an opt-in. A lean client that only reaches out
+# (`ping`/`speed`/`fetch`) can drop the russh/pty tree with `--no-default-features`, keeping swoosh the
+# one binary either way.
 default = ["ssh"]
 ssh = ["dep:sshh"]
 

@@ -42,8 +42,8 @@ serving
   family-gated   your devices + peers you've granted
     control.*   node control (never public)
   public !   anyone, unauthenticated
-    ping    round-trip probe   unmetered: a stranger can drain your uplink
-    speed   throughput test   unmetered: a stranger can drain your uplink
+    ping    round-trip probe
+    speed   throughput test
 
 ctrl-c to stop
 ```
