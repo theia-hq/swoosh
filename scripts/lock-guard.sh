@@ -4,7 +4,7 @@
 # THE RULE (notes/design/release-robustness-spec.md; decision (A) in notes/02-DECISIONS.md). A
 # committed Cargo.lock must record the SHIPPING form of every theia sibling: each sibling
 # resolved from its `github.com/theia-hq/<repo>` git source at the exact rev its Cargo.toml
-# pins, and every in-repo crate's lock version matching its own manifest. Four drifts break
+# pins, and every in-repo crate's lock version matching its own manifest. Five drifts break
 # that, and this gate FAILS on any of them:
 #
 #   (a) PATH-DRIFT   -- a sibling's lock block has NO git `source =` line, a `path+` one, or any
@@ -12,14 +12,23 @@
 #       form. A local patched `cargo build` (the umbrella .cargo/config.toml [patch]es siblings to
 #       local paths) rewrites the lock to path sources by design; committing that leaks the dev
 #       machine's layout into the shipping lock. THIS IS THE EXACT v0.7.0 SAGA the gate stops.
-#   (b) REV DISAGREEMENT -- a sibling's lock rev != the rev its Cargo.toml git dep pins. Catches
-#       a manifest rev bump that never regenerated the lock, statically (no build needed).
+#   (b) REV DISAGREEMENT -- ANY lock block named for a sibling carries a rev != the rev its
+#       Cargo.toml git dep pins. Catches a manifest rev bump that never regenerated the lock, and
+#       a stale nested pin that resolved a second copy at a different rev, statically (no build).
 #   (c) OWN-VERSION SKEW -- an in-repo crate's lock `version` != its manifest `[package] version`.
 #       The `cargo bump the version, forget to sync the lock` footgun, made mechanical.
 #   (d) PATCH ARTIFACT -- the committed lock carries a `[[patch.unused]]` block. A shipping lock
 #       is resolved patch-free and never carries patch artifacts; their presence means it was
 #       written under the umbrella root [patch] (F12, red mains 2026-09-08..11), not a clean
 #       resolve.
+#   (e) DUPLICATE SIBLING -- more than one `[[package]]` block for the same sibling package name.
+#       A lagging nested pin (a sibling at rev R whose OWN manifest depends on sibling S at an
+#       older rev, while this repo pins S at the new rev) makes cargo resolve TWO copies of S from
+#       different git sources; the umbrella [patch] hides it locally (every copy maps to one path),
+#       and CI then fails at build (`package S is specified twice`, or a cross-rev type mismatch).
+#       Checked against every name derived from the manifest git deps UNION every theia-hq git
+#       source in the lock, so transitive-only crates (bifrost-core, tightbeam-handler, ...) are
+#       covered without hardcoding a name list.
 #
 # WHY IT READS THE COMMITTED/STAGED LOCK, NOT THE WORKING-TREE FILE. Under the containment model
 # a patched local build ALWAYS re-dirties the working-tree Cargo.lock to path sources (and an
@@ -100,17 +109,19 @@ done <<EOF
 $patch_hits
 EOF
 
-# lock_block NAME -- emit NAME's [[package]] block (its source + version lines) from the lock.
-lock_block() {
+# lock_blocks NAME -- emit EVERY [[package]] block named NAME (a lagging nested pin can leave
+# more than one in the lock), with each block's source + version lines. `head -n1` recovers the
+# old first-block-only read for the own-version check, which needs one version per in-repo crate.
+lock_blocks() {
   awk -v n="$1" '
-    $0 == "name = \"" n "\"" { inb = 1; print; next }
-    inb && /^\[\[package\]\]/ { exit }
+    /^\[\[package\]\]/ { inb = 0 }
+    $0 == "name = \"" n "\"" { inb = 1 }
     inb { print }
   ' "$LOCK_TMP"
 }
 
 # Derive siblings as "name repo rev" (space-separated; names/revs never contain spaces) from
-# every theia-hq git dep across the manifests. The `|| true` on the grep is load-bearing: under
+# every theia-hq git dep across the manifests. The `|| true` on the grep is necessary: under
 # `set -e` a no-match (exit 1) in this pipeline kills the `list_manifests | while` subshell at
 # the first manifest that declares no theia dep, so a git dep declared outside the ROOT manifest
 # was never enumerated (bifrost/quirk/nauthy reported 0 siblings and their drift went unchecked).
@@ -122,24 +133,62 @@ siblings=$(list_manifests | while IFS= read -r m; do
 done | sed -E 's/^[[:space:]]*([A-Za-z0-9_-]+).*theia-hq\/([A-Za-z0-9_-]+).*rev[[:space:]]*=[[:space:]]*"([0-9a-f]{40})".*/\1 \2 \3/' \
   | sort -u)
 
-# (a) + (b): each sibling must resolve from its theia-hq git source at the pinned rev. A here-doc
-# feeds the loop so it runs in THIS shell (a `... | while` runs in a subshell whose fail=1 is
-# lost in POSIX sh); the same reason scripts/layering-gate.sh avoids the pipe-into-while.
+# (a) + (b): EVERY lock block named for a sibling must resolve from its theia-hq git source at the
+# rev the manifest pins. Checking all blocks, not just the first, is what makes (b) catch the stale
+# half of a duplicated pair when the matching copy happens to sort first. A here-doc feeds the loop
+# so it runs in THIS shell (a `... | while` runs in a subshell whose fail=1 is lost in POSIX sh);
+# the same reason scripts/layering-gate.sh avoids the pipe-into-while.
 while read -r name repo rev; do
   [ -n "$name" ] || continue
-  src=$(lock_block "$name" | sed -n 's/^source = "\(.*\)"/\1/p' | head -n1)
-  case "$src" in
-    "" )      echo "DRIFT $name has NO git source in Cargo.lock (path-patched build leaked in); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; continue ;;
-    path+* )  echo "DRIFT $name lock source is a PATH source '$src' (path-patched build leaked in); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; continue ;;
-    git+https://github.com/theia-hq/"$repo"?rev=*#*) : ;;                        # shipping form
-    * )       echo "DRIFT $name lock source is '$src' (expected the git+https://github.com/theia-hq/$repo?rev=<sha>#<sha> form in Cargo.lock); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; continue ;;
-  esac
-  locrev=$(printf '%s' "$src" | sed -E 's/.*rev=([0-9a-f]{40}).*/\1/')
-  [ "$locrev" = "$rev" ] || { echo "REV   $name lock rev $locrev != Cargo.toml rev $rev (Cargo.lock)"; fail=1; }
-  locfrag=$(printf '%s' "$src" | sed -nE 's/^.*#([0-9a-f]{40})$/\1/p')
-  [ "$locfrag" = "$rev" ] || { echo "SRC   $name lock source '$src' lacks the #<sha> git fragment (expected git+https://github.com/theia-hq/$repo?rev=$rev#$rev in Cargo.lock); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; }
+  srcs=$(lock_blocks "$name" | sed -n 's/^source = "\(.*\)"/\1/p')
+  if [ -z "$srcs" ]; then
+    echo "DRIFT $name has NO git source in Cargo.lock (path-patched build leaked in); resolve patch-free outside theia-hq, then copy the lock back"
+    fail=1
+    continue
+  fi
+  while IFS= read -r src; do
+    case "$src" in
+      path+* )  echo "DRIFT $name lock source is a PATH source '$src' (path-patched build leaked in); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; continue ;;
+      git+https://github.com/theia-hq/"$repo"?rev=*#*) : ;;                        # shipping form
+      * )       echo "DRIFT $name lock source is '$src' (expected the git+https://github.com/theia-hq/$repo?rev=<sha>#<sha> form in Cargo.lock); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; continue ;;
+    esac
+    locrev=$(printf '%s' "$src" | sed -E 's/.*rev=([0-9a-f]{40}).*/\1/')
+    [ "$locrev" = "$rev" ] || { echo "REV   $name lock rev $locrev != Cargo.toml rev $rev (Cargo.lock)"; fail=1; }
+    locfrag=$(printf '%s' "$src" | sed -nE 's/^.*#([0-9a-f]{40})$/\1/p')
+    [ "$locfrag" = "$rev" ] || { echo "SRC   $name lock source '$src' lacks the #<sha> git fragment (expected git+https://github.com/theia-hq/$repo?rev=$rev#$rev in Cargo.lock); resolve patch-free outside theia-hq, then copy the lock back"; fail=1; }
+  done <<EOF2
+$srcs
+EOF2
 done <<EOF
 $siblings
+EOF
+
+# (e): no sibling package may carry more than one [[package]] block. A lagging nested pin (a
+# sibling at rev R whose OWN manifest depends on sibling S at an older rev, while this repo pins S
+# at the new rev) makes cargo resolve TWO copies of S from different git sources; the umbrella
+# [patch] hides it locally (every copy maps to one path) and CI fails at build. Names checked:
+# every manifest git-dep key UNION every theia-hq git source in the lock, so transitive-only
+# crates (bifrost-core, tightbeam-handler, ...) are covered without a hardcoded name list.
+lock_siblings=$(awk '
+  /^name = "/ { name = $0; sub(/^name = "/, "", name); sub(/"$/, "", name) }
+  index($0, "source = \"git+https://github.com/theia-hq/") == 1 { if (name != "") { print name; name = "" } }
+' "$LOCK_TMP" | sort -u)
+dup_names=$( { printf '%s\n' "$siblings" | awk 'NF { print $1 }'; printf '%s\n' "$lock_siblings"; } | sort -u )
+while IFS= read -r nm; do
+  [ -n "$nm" ] || continue
+  cnt=$(awk -v n="$nm" '$0 == "name = \"" n "\"" { c++ } END { print c + 0 }' "$LOCK_TMP")
+  [ "$cnt" -le 1 ] || {
+    echo "DUP   $nm has $cnt [[package]] blocks in Cargo.lock (a lagging nested sibling pin resolved more than one copy; the umbrella [patch] hides this locally):"
+    awk -v n="$nm" '
+      /^\[\[package\]\]/ { if (hit) { printf "        Cargo.lock:%d %s\n", ln, (src == "" ? "(no source)" : src); hit = 0 } src = "" }
+      $0 == "name = \"" n "\"" { hit = 1; ln = NR }
+      hit && /^source = / { src = $0; sub(/^source = "/, "", src); sub(/"$/, "", src) }
+      END { if (hit) printf "        Cargo.lock:%d %s\n", ln, (src == "" ? "(no source)" : src) }
+    ' "$LOCK_TMP"
+    fail=1
+  }
+done <<EOF
+$dup_names
 EOF
 
 # (c): every in-repo [package] version must match its own lock block version. Here-doc again so
@@ -152,7 +201,7 @@ while IFS= read -r m; do
   nm=$(printf '%s\n' "$content" | sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
   mv=$(printf '%s\n' "$content" | sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)
   [ -n "$nm" ] && [ -n "$mv" ] || continue
-  lv=$(lock_block "$nm" | sed -n 's/^version = "\(.*\)"/\1/p' | head -n1)
+  lv=$(lock_blocks "$nm" | sed -n 's/^version = "\(.*\)"/\1/p' | head -n1)
   [ -n "$lv" ] || continue
   [ "$lv" = "$mv" ] || { echo "VER   $nm lock version $lv != Cargo.toml version $mv"; fail=1; }
 done <<EOF
