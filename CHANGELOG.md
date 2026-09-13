@@ -20,6 +20,14 @@ All notable changes to swoosh, newest first.
   directory; the key lives at `<home>/identity.key` (the GNUPGHOME model). `--key` errors forward.
 - **BREAKING: `stop` and `service` reshaped for local-vs-peer.** A peer is now `--at <peer>` (a bare command
   targets your own node, which lands with the daemon); `service` is a group: `ls` / `enable` / `disable`.
+- **Diagnostic metering is exposure-coupled.** A family-gated `ping`/`speed` route binds the owner engine
+  (no run interval, no transfer slot, no byte or wall-clock cap: a member speed run can saturate the
+  link), while `--public ping`/`--public speed` binds the metered engine (ping: one run per caller per
+  second, a 60-second/1 GiB stream cap; speed: one transfer at a time, a 64 MiB/15-second stream cap).
+  The uncapped engine cannot be opened at all, so a public diagnostic is always capped by construction.
+- **The serve engines now come from `theia-hq/services`.** The in-repo `fetch`, `measure`, `sshh`, and
+  `transfer` copies are gone; the node consumes the services repo at a pinned rev. The `sshd` route keeps
+  the same host key and ceilings, and the public diagnostics now carry their caps in shipped builds.
 
 ### Added
 - **`service enable <svc>` / `disable <svc>`.** Turn a served service off or on live, no restart: the change
@@ -40,6 +48,11 @@ All notable changes to swoosh, newest first.
   The default badge lifetime also dropped from 365 to 90 days.
 - **Each `recv:<dir>` receives into its own dir.** Two receive services on one node no longer both write to
   the first-named directory.
+- **A received file prints again, on stderr.** The `recv:` engine emits a structured info event (`path`,
+  `bytes`) when a pushed file lands, and the default filter surfaces it (`error,transfer=info`), so
+  `swoosh serve` no longer goes silent on a successful receive. The event rides stderr, so stdout keeps
+  carrying only the verb's own output, and the peer-supplied path is escaped and capped before it reaches
+  the line. `RUST_LOG=error` silences the event. The final activity shape is delib-63's call.
 - **A stale `SWOOSH_KEY` env errors forward** instead of silently selecting the default identity.
 
 ## v0.8.0
