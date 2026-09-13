@@ -156,19 +156,15 @@ async fn proof() {
         // typed `Response::Unsupported` before sourcing a single byte, so a `ping`-only grant cannot open
         // the unbounded egress drain. The client decodes the refusal to `ProtocolError::Refused` and
         // short-circuits: it is a distinct error, NEVER a `0.00 MiB/s` report. (This test used to enshrine
-        // the false-success by asserting `Some(0)` bytes.)
-        //
-        // A FRESH member probes the split: the ping engine meters one caller's probes by construction now,
-        // and the shared member above just pinged, so it would hit the per-caller interval before the
-        // served-method check. A fresh caller clears the interval and reaches the wire split under test.
-        let split_member = Node::new(MemTransport::bind(), NoDiscovery);
-        let split_badge = signet_badge(&SIGNET_SECRET, split_member.node_id());
+        // the false-success by asserting `Some(0)` bytes.) The family route binds the OWNER engine (owner
+        // limits: no run interval, no caps), so the shared member above may open a second run immediately
+        // and reach the served-method check under test.
         let ping_only = Connector::to_node(
             host_id,
             "ping".parse().unwrap(),
-            Some(split_badge.parse().unwrap()),
+            Some(member_badge.clone().parse().unwrap()),
         )
-        .open_service(&split_member)
+        .open_service(&member)
         .await
         .expect("member reaches ping");
         let refused = Speedtest::new(Mode::Down, Limit::ByBytes(1 << 16))

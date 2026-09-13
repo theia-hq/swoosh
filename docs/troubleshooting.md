@@ -68,11 +68,11 @@ drains. See [revocation](keys.md#revocation).
 
 ## A public ping or speed is being hammered
 
-The `ping` and `speed` engines are metered by construction: a per-caller probe interval, one transfer at
-a time, and byte plus wall-clock stream caps. An anonymous caller hits those caps rather than draining the
-uplink. Only `--public` the services you are willing to let a stranger use. `swoosh service disable
-<name>` stops serving it to anyone, live, no restart; to keep it for your own devices while taking it off
-the public menu, restart `serve` without the flag.
+The open `ping` and `speed` routes bind the metered engine: one ping run per caller per second, one
+transfer at a time, and byte plus wall-clock stream caps. An anonymous caller hits those caps rather than
+draining the uplink. Only `--public` the services you are willing to let a stranger use. `swoosh service
+disable <name>` stops serving it to anyone, live, no restart; to keep it for your own devices while
+taking it off the public menu, restart `serve` without the flag.
 
 ## Next
 
