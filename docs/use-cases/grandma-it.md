@@ -15,7 +15,7 @@ From your own machine, create a device invite:
 <!-- capture: swoosh invite add grandma-pc -->
 ```console
 $ swoosh invite add grandma-pc
-invite:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
+invite:….bf01hcq6…
 
 recorded me/grandma-pc -> bf01imv3ljql6kjn  [derived]
 hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
@@ -59,12 +59,14 @@ machine is reachable whenever it is on. That is the last thing they ever have to
 Their machine is now `me/grandma-pc` in your contacts. ssh straight in over the overlay, using your own
 ssh keys, no public IP:
 
+<!-- manual: interactive ssh -->
 ```console
 $ swoosh ssh me/grandma-pc
 ```
 
 Run a one-off command without a full session:
 
+<!-- manual: runs on a second machine -->
 ```console
 $ swoosh ssh me/grandma-pc -- sudo apt upgrade -y
 ```

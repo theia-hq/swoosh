@@ -57,6 +57,7 @@ to you.)
 She registers nothing: no signet to record, no grant. Her device just presents the link when it reaches
 the box:
 
+<!-- manual: long-running forward -->
 ```console
 $ swoosh forward mediacenter --service tv --to 8096 --present sheer:bf01hcq6…
 ```

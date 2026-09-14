@@ -20,6 +20,7 @@ Usage: swoosh grant <issue | ls | narrow | revoke>
 ```
 
 **Example.**
+<!-- capture: swoosh grant issue ssh --for fleet:alice -->
 ```console
 $ swoosh grant issue ssh --for fleet:alice
 issued a fleet-bound grant for `ssh` to fleet signet bf01o6vqymgz727g…

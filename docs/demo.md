@@ -15,6 +15,7 @@ signet-rooted gate refuses to arm over it. Part 2 stages that refusal.
 
 Reproduce the whole thing:
 
+<!-- manual: runs the full demo including the network leg -->
 ```console
 $ cargo build
 $ scripts/demo.sh
@@ -51,16 +52,16 @@ talking to itself:
 
 The server derives a device identity for the member and prints an invite to hand off:
 
-<!-- capture: scripts/demo.sh (invite add) -->
+<!-- capture: scripts/demo.sh invite-add -->
 ```console
 $ swoosh invite add laptop
-invite:kxc3drkfdbpq24kaqas7uopt33lprpfutrdqfdfgtx73xqubuuda.bf01jsmb…
+invite:….bf01jsmb…
 ```
 
 The member adopts it. On its own machine (a distinct key dir), `adopt` writes the derived seed as the
 member's identity AND records the server's signet as trusted:
 
-<!-- capture: scripts/demo.sh (adopt) -->
+<!-- capture: scripts/demo.sh adopt -->
 ```console
 $ swoosh adopt @invite.txt
 adopted this machine as bf01ntwii5ojl5fk  [mine]
@@ -77,7 +78,7 @@ one-key demo could never run over iroh.
 Bare `quirk` announces the reached key in plaintext, so the server's signet-rooted gate refuses to arm
 over it. The serve exits before printing a banner:
 
-<!-- capture: scripts/demo.sh (quirk refusal) -->
+<!-- capture: scripts/demo.sh quirk-refusal -->
 ```console
 $ swoosh serve --transport quirk
 Error: use `--transport quirk+noise` to serve gated quirk traffic: this node gates on a signet, but the bound transport declares announced peer proof, so a gated dial could never be admitted; bind a transport that proves the peer (the default iroh transport does), or serve with an open gate (`Gate::Open`), which needs no peer proof
@@ -91,7 +92,7 @@ is never written to it. The sealed spelling, below, is the opt-in that proves th
 `quirk+noise` runs a Noise handshake over the same backend and proves the reached key, so the SAME
 rooted gate arms here. It is still direct-only, so `serve` prints the address it is reachable at:
 
-<!-- capture: scripts/demo.sh (quirk+noise serve) -->
+<!-- capture: scripts/demo.sh serve-quirk-noise -->
 ```console
 $ swoosh serve --transport quirk+noise
 swoosh ready
@@ -115,7 +116,7 @@ ctrl-c to stop
 The member dials, presenting the membership the server's signet signed for it, and passes the address
 back with `--peer`:
 
-<!-- capture: scripts/demo.sh (quirk+noise ping) -->
+<!-- capture: scripts/demo.sh ping-quirk-noise -->
 ```console
 $ swoosh ping $SERVER --transport quirk+noise --peer $SERVER=127.0.0.1:63254 -c 5 -i 0.2
 bf01jsmbbj7p3sjv via quirk+noise: direct to 127.0.0.1:63254
@@ -130,7 +131,7 @@ Real RTTs at 0% loss, from an admitted member, over a QUIC we wrote ourselves an
 Now start `serve` again from the SAME server key, over iroh. iroh self-discovers over the internet, so
 no `--peer` is needed. The NodeId is byte-for-byte identical:
 
-<!-- capture: scripts/demo.sh (iroh serve) -->
+<!-- capture: scripts/demo.sh serve-iroh -->
 ```console
 $ swoosh serve --transport iroh
 swoosh ready
@@ -168,7 +169,7 @@ watch a relayed link hole-punch to direct in real time.
 A third identity, never adopted, dials the same server. Its self-signed membership roots at its own key,
 which the server's signet has never trusted, so the gate turns it away:
 
-<!-- capture: scripts/demo.sh (stranger refused) -->
+<!-- capture: scripts/demo.sh stranger-refused -->
 ```console
 $ swoosh ping $SERVER --transport quirk+noise --peer $SERVER=127.0.0.1:63254 -c 3 -i 0.2
 bf01jsmbbj7p3sjv via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)

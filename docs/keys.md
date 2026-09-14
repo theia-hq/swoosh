@@ -36,7 +36,7 @@ machine that already holds your signet:
 <!-- capture: swoosh invite add laptop -->
 ```console
 $ swoosh invite add laptop
-invite:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
+invite:….bf01hcq6…
 
 recorded me/laptop -> bf01imv3ljql6kjn  [derived]
 hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
@@ -61,7 +61,7 @@ stored your membership badge: this device now reaches your gated services.
 To keep the secret from travelling at all, make the key ON the new machine first and have your signet
 sign only its public half (`--for`):
 
-<!-- capture: swoosh invite add laptop --for <key> -->
+<!-- capture: swoosh invite add laptop --for bf01imv3ljql6kjn -->
 ```console
 $ swoosh invite add laptop --for bf01imv3ljql6kjn
 invite:bf01hcq6….sheer:…
@@ -156,7 +156,7 @@ Everything above is how you hand access OUT. Using a grant someone handed YOU is
 `sheer:` link carries both the node to reach and the grant to present, so you pass it in place of a peer on
 any reach verb:
 
-<!-- capture: swoosh ssh sheer:… -->
+<!-- manual: interactive ssh and forward with a link you hold -->
 ```console
 $ swoosh ssh sheer:bf01hcq6….<token>
 $ swoosh forward sheer:bf01hcq6….<token> --to 2222
@@ -168,7 +168,7 @@ it. It works only for that service, and stops the moment it expires or the issue
 When you already reach a node another way (a petname you recorded, say) but hold a separate grant,
 present it with `--present`:
 
-<!-- capture: swoosh forward alice/box --present sheer:… --to 2222 -->
+<!-- manual: long-running forward with a link you were given -->
 ```console
 $ swoosh forward alice/box --present sheer:… --to 2222
 ```

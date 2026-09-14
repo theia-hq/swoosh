@@ -15,6 +15,7 @@ You will need two machines (your laptop and a desktop, a home box, or a cheap VP
 
 ## 1. Install
 
+<!-- manual: installs a released binary over the network -->
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/install.sh | sh
 ```
