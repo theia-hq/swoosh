@@ -1,0 +1,18 @@
+# The docs freshness gate. The lint and the self-test need no toolchain; the build steps land
+# with the renderer and the tier-1 runner (slices 2-3), so this job grows in place and the
+# check name `docs` never changes. Shaped like layering-gate.yml.
+name: docs
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: self-test
+        run: sh scripts/docs-check.sh --self-test
+      - name: lint (no toolchain)
+        run: sh scripts/docs-check.sh --lint .
