@@ -102,6 +102,32 @@ pub struct PeerHint {
 /// which is how iroh keeps self-discovering when nothing is known locally.
 pub type Discovery = Layered<StaticDiscovery, MdnsDiscovery>;
 
+/// Whether the composed discovery's mDNS half is live: [`Available`](Self::Available) when this node
+/// advertised, [`Blocked`](Self::Blocked) when [`MdnsDiscovery::advertise`] failed and the layer fell
+/// back to [`MdnsDiscovery::disabled`]. A first-class reachability tell: the banner's `local` line
+/// flips to the off-state when unavailable, so a surface never claims a discovery that did not start.
+/// An enum, not a bool, so the down-state is a named case a reader must handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MdnsState {
+    /// mDNS is advertising this node locally: devices find it by the key alone.
+    Available,
+    /// mDNS could not start here (multicast unavailable, no advertisable address), so local
+    /// auto-discovery is off; reach falls to the internet or a handed address.
+    Blocked,
+}
+
+/// The composed discovery for a freshly bound transport, plus the live state of its mDNS half.
+///
+/// The two travel together because the ONE `advertise` call that starts mDNS is also the one source
+/// of the availability tell: a caller either composes discovery here and receives the truth about it,
+/// or it would have to predict the outcome a second time.
+pub struct ComposedDiscovery {
+    /// The static hints layered over mDNS, to hand [`Node::new`](bifrost::Node::new).
+    pub discovery: Discovery,
+    /// Whether the mDNS layer advertised or fell back to disabled.
+    pub mdns: MdnsState,
+}
+
 impl PeerHint {
     /// The original `<key>=<addr>` token, for `ssh` to forward verbatim into the ProxyCommand so the
     /// address resolves at the actual dial site (`tunnel-connect`), not at the launcher.
@@ -110,28 +136,33 @@ impl PeerHint {
     }
 
     /// Compose the discovery for a freshly bound `transport`: the `--peer` hints layered over an mDNS
-    /// resolver that advertises this node at its bound local addresses and browses the LAN for peers.
+    /// resolver that advertises this node at its bound local addresses and browses the LAN for peers,
+    /// plus the live state of that mDNS half.
     ///
     /// Called once per run, at the seam, after the transport binds (so its local address is known).
-    /// If mDNS cannot start (multicast blocked, no addresses), discovery degrades to the static hints
-    /// alone rather than failing the whole command, since a hinted or self-discovering dial still works.
+    /// If mDNS cannot start (multicast blocked, no advertisable address), discovery degrades to the
+    /// static hints alone rather than failing the whole command, since a hinted or self-discovering
+    /// dial still works; the returned [`MdnsState`] reports that degradation so a surface can say so.
     pub fn discovery<T: bifrost::Transport>(
         transport: &T,
         peers: impl IntoIterator<Item = Self>,
-    ) -> Discovery {
+    ) -> ComposedDiscovery {
         let mut hints = StaticDiscovery::new();
         for Self { node, addrs, .. } in peers {
             hints.insert(node, addrs);
         }
         let local = transport.local_addr();
-        let mdns = match MdnsDiscovery::advertise(local.node, local.hints) {
-            Ok(mdns) => mdns,
+        let (mdns, state) = match MdnsDiscovery::advertise(local.node, local.hints) {
+            Ok(mdns) => (mdns, MdnsState::Available),
             Err(err) => {
                 tracing::warn!(error = %err, "mDNS discovery unavailable; using --peer hints only");
-                MdnsDiscovery::disabled()
+                (MdnsDiscovery::disabled(), MdnsState::Blocked)
             }
         };
-        Layered::new(hints, mdns)
+        ComposedDiscovery {
+            discovery: Layered::new(hints, mdns),
+            mdns: state,
+        }
     }
 }
 
@@ -161,3 +192,7 @@ impl FromStr for PeerHint {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod transport_tests;

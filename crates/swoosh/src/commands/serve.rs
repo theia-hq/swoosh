@@ -37,7 +37,7 @@ use tightbeam::tunnel::{
 use crate::contacts::{Contacts, Petname};
 use crate::identity::Secret;
 use crate::roster::{Epoch, Member, RosterDoc};
-use crate::transport::ReachArgs;
+use crate::transport::{MdnsState, ReachArgs};
 
 mod control;
 mod resident;
@@ -156,6 +156,14 @@ pub struct ServeCmd {
     // root-attached, run-once value, so the one allocation is free of any hot path.
     #[arg(skip)]
     pub expose: Option<Box<ExposeContext>>,
+    /// Whether the composed discovery's mDNS half came up, attached by the composition root AFTER the
+    /// transport binds (the bit is known only then, from the same `advertise` call that composed
+    /// discovery). Not a flag: clap skips it, and the root fills it in via
+    /// [`with_mdns`](Self::with_mdns) before dispatch, exactly like [`expose`](Self::expose). `serve`
+    /// is the one verb that reports discovery, so the tell lives HERE and the reach context stays
+    /// uniform; the banner reports what started rather than assuming it.
+    #[arg(skip)]
+    pub mdns: Option<MdnsState>,
 }
 
 /// What `serve` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, the revocation
@@ -277,6 +285,15 @@ impl ServeCmd {
     /// user hits.
     pub fn with_expose(mut self, expose: ExposeContext) -> Self {
         self.expose = Some(Box::new(expose));
+        self
+    }
+
+    /// Attach the live [`MdnsState`] the composition root read off the composed discovery, so the
+    /// banner reports the discovery that started rather than one it assumed. The root calls this after
+    /// `PeerHint::discovery` and before dispatch; a `serve` that reached its banner without one is a
+    /// root bug, surfaced there rather than defaulted.
+    pub fn with_mdns(mut self, mdns: MdnsState) -> Self {
+        self.mdns = Some(mdns);
         self
     }
 }
@@ -473,15 +490,15 @@ impl ServeCmd {
                 .collect();
             // Reach-kind is the selected transport, not an inference from whether hints are present (which
             // conflates the channel with the hint state): iroh routes across the internet, quirk is
-            // direct-only. mDNS availability is a SEPARATE reachability fact (see `MdnsState`).
+            // direct-only. The live mDNS state is a SEPARATE reachability fact, attached by the
+            // composition root from the SAME `advertise` call that composed discovery, so the banner
+            // reports what started rather than assuming it.
             let reach = ReachKind::of(self.reach.transport, self.reach.local);
-            // FLAG(Systems-Architect): the live mDNS-available bit is computed at the composition seam
-            // (`PeerHint::discovery`, transport.rs) and is NOT reachable from this generic `run` today. Sourcing
-            // it needs a crate seam (return it from `PeerHint::discovery` into `ReachCtx`, or an accessor on the
-            // composed `Discovery`) that is outside this serve-surface blast radius. Defaulted to the common
-            // `Available` case so the banner is complete; the `Blocked` render path is built and ready to
-            // wire (see `reach_section`).
-            let mdns = MdnsState::Available;
+            let Some(mdns) = self.mdns else {
+                eyre::bail!(
+                    "internal: serve reached its banner without the mDNS state (composition-root bug)"
+                );
+            };
             let stop_line = match self.expires {
                 Some(lifetime) => {
                     format!(
@@ -730,33 +747,6 @@ impl ReachKind {
     }
 }
 
-/// Whether local mDNS discovery is advertising or blocked (multicast unavailable). A first-class
-/// reachability tell: when blocked, the `local` line flips and states what to do instead (delib-41
-/// Newcomer fix). An enum, not a bool, so the down-state is a named case a reader must handle, never a
-/// bare `false`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum MdnsState {
-    /// mDNS is advertising this node locally: devices find it by the key alone.
-    Available,
-    /// Multicast is blocked here, so local auto-discovery is off; reach falls to the internet or a handed
-    /// address.
-    // FLAG(Systems-Architect): the render path for this down-state is built and unit-tested, but the live
-    // mDNS-available bit is not yet threaded from the composition seam (`PeerHint::discovery`) to this generic
-    // `run`, so `Blocked` is never constructed today. `#[expect]` keeps the ready path without silencing a
-    // real dead-code signal: it will error the day the bit is wired and the attribute is no longer needed.
-    // `not(test)` because the render tests DO construct `Blocked` (the down-state path is exercised there);
-    // only the non-test build sees it unconstructed, pending the flagged seam.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the mDNS-blocked render path is ready and tested; sourcing the live bit is a \
-                      flagged transport seam"
-        )
-    )]
-    Blocked,
-}
-
 /// The posture group a served service sits under in the banner, safest-first. The security weight lives on the
 /// GROUP and escalates monotonically DOWN the list (delib-41 Newcomer fix): `FamilyGated` (no overlay) <
 /// `Public` (an open overlay) < `PublicUnsafe` (the loudest). A per-service caveat (an unmetered one) is quiet inline
@@ -929,12 +919,16 @@ fn render_ready_banner(
 /// The `how peers reach you` section: one channel per line with a short label column that scans at a glance.
 /// The `internet` channel appears only when the transport routes across the internet; `direct` only when the
 /// bind is direct-only AND hands out address hints. "automatic" leads both auto channels, and the local mDNS
-/// lane is a first-class tell that flips to an off-state naming what to do instead when multicast is blocked.
+/// lane is a first-class tell that flips to an off-state naming what to do instead when discovery did not
+/// start.
 // FLAG(CLI-Architect): the channel glosses (wording, "even across NATs", the off-state next-step) are a
 // banner-format detail; picked here to satisfy the Newcomer fixes (no backend name, "automatic" on both, a
 // down-state next-step), open to the owner's final call.
 fn reach_section(reach: ReachKind, mdns: MdnsState, hints: &[SocketAddr]) -> String {
     let direct = matches!(reach, ReachKind::DirectOnly) && !hints.is_empty();
+    // Whether the direct channel below would hold an address a peer could actually dial: a loopback
+    // hint resolves to the peer's own machine, so a loopback-only bind has nothing to hand over.
+    let handable = hints.iter().any(|addr| !addr.ip().is_loopback());
     // Width the label column to the widest channel label actually shown.
     let mut labels: Vec<&str> = Vec::new();
     if reach == ReachKind::Internet {
@@ -968,10 +962,17 @@ fn reach_section(reach: ReachKind, mdns: MdnsState, hints: &[SocketAddr]) -> Str
             "automatic; your devices just need the key (mDNS)".to_owned()
         }
         (MdnsState::Blocked, ReachKind::Internet) => {
-            "off; multicast blocked here, so reach by the key over the internet".to_owned()
+            "off; mDNS unavailable here, so reach by the key over the internet".to_owned()
         }
         (MdnsState::Blocked, ReachKind::DirectOnly) => {
-            "off; multicast blocked here, so hand a peer the address below".to_owned()
+            // The down-state is what the operator reads when discovery did not start, so it points at
+            // a direct address only when one is actually handable; a loopback-only bind has none, and
+            // saying otherwise would promise an address the section below contradicts.
+            if handable {
+                "off; mDNS unavailable here, so hand a peer the address below".to_owned()
+            } else {
+                "off; mDNS unavailable here, so no address can be handed to a peer".to_owned()
+            }
         }
     };
     out.push_str(&reach_line(width, gutter, "local", &local));

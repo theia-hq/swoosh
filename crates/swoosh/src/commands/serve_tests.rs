@@ -316,12 +316,13 @@ fn the_unmetered_caveat_derives_from_the_bound_metering() {
     );
 }
 
-/// The reach section flips the local line to a next-step down-state when mDNS is blocked, and a quirk node
-/// with a routable hint prints a `direct` channel with the address on its own copy-clean line.
+/// The reach section flips the local line to a next-step down-state when mDNS is unavailable, and a
+/// quirk node with a routable hint prints a `direct` channel with the address on its own copy-clean
+/// line.
 #[test]
 fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     let blocked = reach_section(ReachKind::Internet, MdnsState::Blocked, &[]);
-    assert!(blocked.contains("off; multicast blocked here"), "{blocked}");
+    assert!(blocked.contains("off; mDNS unavailable here"), "{blocked}");
     assert!(
         blocked.contains("over the internet"),
         "the down-state says what to do instead: {blocked}"
@@ -342,6 +343,59 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     let local = reach_section(ReachKind::DirectOnly, MdnsState::Available, &[loop_addr]);
     assert!(local.contains("reachable on this machine only:"), "{local}");
     assert!(!local.contains("hand a peer"), "{local}");
+}
+
+/// A disabled discovery says so plainly: the readiness banner reports mDNS unavailable in both the
+/// local and the default (internet) glosses, never the `automatic; ... mDNS` lines it prints when the
+/// layer is live. The local down-state points at the direct address only when one is handable;
+/// a loopback-only bind has none, so it must not promise one.
+#[test]
+fn a_disabled_discovery_says_so_plainly() {
+    let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
+    let loop_addr: SocketAddr = "127.0.0.1:58131".parse().expect("valid addr");
+
+    for reach in [ReachKind::Internet, ReachKind::DirectOnly] {
+        let banner = render_ready_banner(
+            "bf01exampleid",
+            reach,
+            MdnsState::Blocked,
+            &[routable],
+            &default_manifest(),
+            &default_targets(),
+            &HashSet::new(),
+            "ctrl-c to stop",
+            None,
+        );
+        assert!(
+            banner.contains("off; mDNS unavailable here"),
+            "a disabled discovery renders the off-state for {reach:?}: {banner}"
+        );
+        assert!(
+            !banner.contains("automatic; local mDNS")
+                && !banner.contains("automatic; your devices just need the key (mDNS)"),
+            "a disabled discovery never claims the live mDNS glosses: {banner}"
+        );
+    }
+
+    let handable = reach_section(ReachKind::DirectOnly, MdnsState::Blocked, &[routable]);
+    assert!(
+        handable.contains("hand a peer the address below"),
+        "a routable hint is the handable next-step: {handable}"
+    );
+
+    let loopback = reach_section(ReachKind::DirectOnly, MdnsState::Blocked, &[loop_addr]);
+    assert!(
+        !loopback.contains("hand a peer"),
+        "a loopback-only bind has no address to hand over: {loopback}"
+    );
+    assert!(
+        loopback.contains("no address can be handed to a peer"),
+        "the down-state says why it cannot point below: {loopback}"
+    );
+    assert!(
+        loopback.contains("reachable on this machine only:"),
+        "the direct section below still names the truth: {loopback}"
+    );
 }
 
 /// A local/direct-only node never promises the internet, and no surface says LAN until the same-host
@@ -590,7 +644,9 @@ fn plain_serve_creates_no_runtime_state() {
 
 /// `serve --local` must keep the node's address: the bind takes the PERSISTED key, so two runs report
 /// the same NodeId the `identity` verb prints, never a fresh key per run. The banner also hands out only
-/// dialable hints: the wildcard sockets rewrite to loopback, so no `[::]` reaches a peer.
+/// dialable hints: the wildcard sockets rewrite to loopback, so no `[::]` reaches a peer. Its local
+/// gloss reports the discovery that actually started: the held mDNS gloss when the advertise call
+/// succeeded, the off-state when the run warned it could not (read off the same run's stderr).
 #[test]
 fn serve_local_keeps_the_persisted_key_across_two_runs() {
     let scratch = ProcessScratch::new("local-key");
@@ -626,6 +682,9 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
             .arg(&scratch.home_dir)
             .args(["serve", "--local", "--expires", "1s"])
             .env("XDG_RUNTIME_DIR", &scratch.xdg)
+            // Surface the composition seam's own warning, so the test can hold the banner to the
+            // discovery state the SAME run reported instead of assuming which way the box went.
+            .env("RUST_LOG", "warn")
             .env_remove("SWOOSH_HOME")
             .env_remove("SWOOSH_KEY");
         let output = run_binary_with_deadline(&mut command, Duration::from_secs(30));
@@ -636,6 +695,7 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
             String::from_utf8_lossy(&output.stderr)
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
         // The banner's id line: `swoosh ready`, a blank line, then the blank-framed full key.
         let reported = stdout
             .lines()
@@ -653,10 +713,17 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
             !stdout.contains("[::]"),
             "the banner never hands out an unspecified wildcard hint: {stdout}"
         );
-        assert!(
-            stdout.contains("automatic; local mDNS, or direct, no NAT traversal"),
-            "serve --local run {run} renders the held local gloss: {stdout}"
-        );
+        if stderr.contains("mDNS discovery unavailable") {
+            assert!(
+                stdout.contains("off; mDNS unavailable here"),
+                "serve --local run {run} warned mDNS was unavailable, so the banner says so: {stdout}"
+            );
+        } else {
+            assert!(
+                stdout.contains("automatic; local mDNS, or direct, no NAT traversal"),
+                "serve --local run {run} started mDNS, so the banner renders the held local gloss: {stdout}"
+            );
+        }
         assert!(
             !stdout.contains("internet"),
             "serve --local run {run} has no internet channel: {stdout}"

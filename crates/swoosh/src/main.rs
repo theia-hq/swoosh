@@ -49,7 +49,7 @@ use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::reaching::Reaching;
-use swoosh::transport::PeerHint;
+use swoosh::transport::{MdnsState, PeerHint};
 use swoosh::{config, credential, identity, reaching, transport};
 
 #[derive(Debug, Parser)]
@@ -334,6 +334,18 @@ impl Reach {
             // A non-serve verb resolves `expose` to `None` (see `expose_context`), so there is nothing to
             // attach; a `serve` with no context is a root bug caught at its own `run`, not here.
             (reach, _) => reach,
+        }
+    }
+
+    /// Attach the composed discovery's live [`MdnsState`] to the `serve` verb (a no-op for every other
+    /// verb), so `serve`'s banner reports the discovery that started instead of assuming one. Called
+    /// once per bind, at the seam that composed discovery, beside
+    /// [`attach_expose`](Self::attach_expose); a `serve` that reaches its banner without one is a root
+    /// bug caught there, not here.
+    fn attach_mdns(self, mdns: MdnsState) -> Self {
+        match self {
+            Self::Serve(cmd) => Self::Serve(cmd.with_mdns(mdns)),
+            reach => reach,
         }
     }
 
@@ -709,17 +721,17 @@ async fn run() -> eyre::Result<()> {
                     bifrost_iroh::Endpoint::bind_local_with_secret(secret.into_bytes()).await?
                 }
             };
-            let discovery = PeerHint::discovery(&endpoint, peers);
-            let node = Node::new(endpoint, discovery);
-            run_and_close(reach, &node, ctx).await
+            let composed = PeerHint::discovery(&endpoint, peers);
+            let node = Node::new(endpoint, composed.discovery);
+            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
         }
         // quirk is direct-only with no internal discovery, so the composed discovery is its only way
         // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
         transport::Transport::Quirk => {
             let endpoint = bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?;
-            let discovery = PeerHint::discovery(&endpoint, peers);
-            let node = Node::new(endpoint, discovery);
-            run_and_close(reach, &node, ctx).await
+            let composed = PeerHint::discovery(&endpoint, peers);
+            let node = Node::new(endpoint, composed.discovery);
+            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
         }
         // The sealed spelling: quirk under the wrapper, still one node under one key. The wrapper runs
         // its own Noise handshake over quirk's one stream and proves the peer's `NodeId`, so a
@@ -731,9 +743,9 @@ async fn run() -> eyre::Result<()> {
             let seed = zeroize::Zeroizing::new(secret.into_bytes());
             let endpoint = bifrost_quirk::Endpoint::bind_with_secret(*seed).await?;
             let endpoint = bifrost_noise::Noise::new(endpoint, *seed)?;
-            let discovery = PeerHint::discovery(&endpoint, peers);
-            let node = Node::new(endpoint, discovery);
-            run_and_close(reach, &node, ctx).await
+            let composed = PeerHint::discovery(&endpoint, peers);
+            let node = Node::new(endpoint, composed.discovery);
+            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
         }
     }
 }

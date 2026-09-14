@@ -141,7 +141,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     let hint: PeerHint = format!("{host_id}={}", addr.hints[0])
         .parse()
         .expect("the direct hint parses");
-    let discovery = PeerHint::discovery(&member_transport, [hint.clone()]);
+    let discovery = PeerHint::discovery(&member_transport, [hint.clone()]).discovery;
     let member = Node::new(member_transport, discovery);
 
     let cancel = CancellationToken::new();
@@ -166,7 +166,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
 
         // A STRANGER: a different key, no badge at all. The gate refuses the stream.
         let stranger_transport = sealed([0x5a; 32]).await;
-        let stranger_discovery = PeerHint::discovery(&stranger_transport, [hint.clone()]);
+        let stranger_discovery = PeerHint::discovery(&stranger_transport, [hint.clone()]).discovery;
         let stranger = Node::new(stranger_transport, stranger_discovery);
         let refused = Connector::to_node(host_id, "ping".parse().unwrap(), None)
             .open_service(&stranger)
@@ -203,7 +203,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     let owner_hint: PeerHint = format!("{device_id_bound}={}", device_addr.hints[0])
         .parse()
         .expect("the direct hint parses");
-    let owner_discovery = PeerHint::discovery(&owner_transport, [owner_hint]);
+    let owner_discovery = PeerHint::discovery(&owner_transport, [owner_hint]).discovery;
     let owner = Node::new(owner_transport, owner_discovery);
     let owner_badge = nauthy::Identity::from_secret(&owner_seed)
         .unwrap()

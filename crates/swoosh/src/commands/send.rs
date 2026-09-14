@@ -135,10 +135,7 @@ impl SendCmd {
             match collect_files(path).await {
                 Ok(collected) => files.extend(collected),
                 Err(error) => {
-                    eprintln!(
-                        "skip {}: {error:#}",
-                        render_name(&path.display().to_string())
-                    );
+                    eprintln!("skip {}: {error:#}", render_path(path));
                     failures += 1;
                 }
             }
@@ -176,14 +173,14 @@ async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre:
     let blob = {
         let mut file = tokio::fs::File::open(&path)
             .await
-            .wrap_err_with(|| format!("open {}", render_name(&path.display().to_string())))?;
+            .wrap_err_with(|| format!("open {}", render_path(&path)))?;
         Blob::hash(&mut file).await?
     };
 
     let (send, recv) = session.open_bi().await?;
     let mut source = tokio::fs::File::open(&path)
         .await
-        .wrap_err_with(|| format!("open {}", render_name(&path.display().to_string())))?;
+        .wrap_err_with(|| format!("open {}", render_path(&path)))?;
     Transfer::new(send, recv)
         .send(name.as_bytes(), &blob, &mut source)
         .await?;
@@ -214,13 +211,21 @@ fn render_name(name: &str) -> String {
     rendered
 }
 
+/// Render a PATH for a line or an error context through the SAME escape discipline as a file name.
+/// Every path this verb prints or wraps must come through here, including the paths inside an error
+/// context: the skip line renders its own prefix escaped and then prints the whole error chain, so a
+/// context built with a raw `Path::display` leaks the newline or ESC the prefix just escaped.
+fn render_path(path: &Path) -> String {
+    render_name(&path.display().to_string())
+}
+
 /// Collect `(relative name, path)` pairs to send: a file yields itself; a directory yields every file
 /// under it, named by its path relative to the directory's parent (so the directory name is kept). Ported
 /// from iris.
 async fn collect_files(root: &Path) -> eyre::Result<Vec<(String, PathBuf)>> {
     let meta = tokio::fs::metadata(root)
         .await
-        .wrap_err_with(|| format!("stat {}", root.display()))?;
+        .wrap_err_with(|| format!("stat {}", render_path(root)))?;
 
     if meta.is_file() {
         let name = file_name(root)?;
@@ -233,7 +238,7 @@ async fn collect_files(root: &Path) -> eyre::Result<Vec<(String, PathBuf)>> {
     while let Some(dir) = stack.pop() {
         let mut entries = tokio::fs::read_dir(&dir)
             .await
-            .wrap_err_with(|| format!("read {}", dir.display()))?;
+            .wrap_err_with(|| format!("read {}", render_path(&dir)))?;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             let file_type = entry.file_type().await?;
@@ -258,7 +263,7 @@ fn file_name(path: &Path) -> eyre::Result<String> {
     path.file_name()
         .and_then(|component| component.to_str())
         .map(str::to_owned)
-        .ok_or_else(|| eyre::eyre!("path has no file name: {}", path.display()))
+        .ok_or_else(|| eyre::eyre!("path has no file name: {}", render_path(path)))
 }
 
 #[cfg(test)]
