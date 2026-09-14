@@ -59,7 +59,7 @@ All notable changes to swoosh, newest first.
   `bytes`) when a pushed file lands, and the default filter surfaces it (`error,transfer=info`), so
   `swoosh serve` no longer goes silent on a successful receive. The event rides stderr, so stdout keeps
   carrying only the verb's own output, and the peer-supplied path is escaped and capped before it reaches
-  the line. `RUST_LOG=error` silences the event. The final activity shape is delib-63's call.
+  the line. `RUST_LOG=error` silences the event. The final activity shape is not settled yet.
 - **A stale `SWOOSH_KEY` env errors forward** instead of silently selecting the default identity.
 
 ## v0.8.0
