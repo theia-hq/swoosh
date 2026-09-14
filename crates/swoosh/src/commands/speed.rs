@@ -100,6 +100,7 @@ impl crate::reaching::Reaching for SpeedCmd {
             node,
             ctx.contacts,
             ctx.transport,
+            ctx.local,
             ctx.present,
             ctx.membership,
         )
@@ -115,6 +116,7 @@ impl SpeedCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
+        local: bool,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
@@ -127,7 +129,7 @@ impl SpeedCmd {
         // link-as-peer through that same resolver, so the verb never threads `--present` itself.
         let service: Service = reach::SPEED_SERVICE.parse()?;
         let Resolved { session, label } = reach::dial_service(
-            node, contacts, &self.peer, &service, present, membership, transport,
+            node, contacts, &self.peer, &service, present, membership, transport, local,
         )
         .await?;
         // Path at connect. The transfer below is the window where iroh's hole-punch lands, so the

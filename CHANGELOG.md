@@ -35,6 +35,8 @@ All notable changes to swoosh, newest first.
   the same host key and ceilings, and the public diagnostics now carry their caps in shipped builds.
 
 ### Added
+- **`--local` (reach family).** No internet discovery or relays: dials and advertisements resolve over
+  local mDNS or a `--peer` hint only. A no-op on `quirk`/`quirk+noise`, which are already direct-only.
 - **`service enable <svc>` / `disable <svc>`.** Turn a served service off or on live, no restart: the change
   is written to `<home>/disabled` and the running node honors it on the next connection, the same
   mtime-watched, fail-closed mechanism as revocation.

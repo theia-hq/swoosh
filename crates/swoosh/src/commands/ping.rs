@@ -90,6 +90,7 @@ impl crate::reaching::Reaching for PingCmd {
             node,
             ctx.contacts,
             ctx.transport,
+            ctx.local,
             ctx.present,
             ctx.membership,
         )
@@ -106,6 +107,7 @@ impl PingCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
+        local: bool,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
@@ -186,7 +188,7 @@ impl PingCmd {
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;
-        reach::fanout_outcome(any_healthy, any_refused, &self.peer, transport)
+        reach::fanout_outcome(any_healthy, any_refused, &self.peer, transport, local)
     }
 }
 

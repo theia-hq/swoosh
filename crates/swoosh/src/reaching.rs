@@ -38,6 +38,9 @@ pub struct ReachCtx<'a> {
     /// The bound transport label: a verb reports which backend carried the session, and a failed dial
     /// names the fix that backend needs.
     pub transport: transport::Transport,
+    /// Whether the bind is the `--local` shape (no n0 discovery, no relays): a failed reach names the
+    /// flag as the cause, since the internet fallback is what it removed.
+    pub local: bool,
     /// Slot 1, the grant to present, resolved ONCE in the composition root via [`resolve`]: a `--present`
     /// slip if given, else the stored/self-signed member badge (the plain member dial). `None` for an
     /// `Anonymous` dial.
@@ -58,7 +61,8 @@ pub struct ReachCtx<'a> {
 /// [`Credential`], an enum with no "unset" arm, so "forgot to say" is unrepresentable. The identity mode
 /// derives from the credential ([`Credential::identity`]), so identity and badge can never disagree.
 pub trait Reaching {
-    /// The reach-family flags this verb carries (`--transport`, `--peer`). One accessor, not a match arm.
+    /// The reach-family flags this verb carries (`--transport`, `--local`, `--peer`). One accessor,
+    /// not a match arm.
     fn reach_args(&self) -> &transport::ReachArgs;
 
     /// How this verb authenticates to the service it dials. Required and self-contained: a new verb

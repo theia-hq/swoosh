@@ -474,7 +474,7 @@ impl ServeCmd {
             // Reach-kind is the selected transport, not an inference from whether hints are present (which
             // conflates the channel with the hint state): iroh routes across the internet, quirk is
             // direct-only. mDNS availability is a SEPARATE reachability fact (see `MdnsState`).
-            let reach = ReachKind::of(self.reach.transport);
+            let reach = ReachKind::of(self.reach.transport, self.reach.local);
             // FLAG(Systems-Architect): the live mDNS-available bit is computed at the composition seam
             // (`PeerHint::discovery`, transport.rs) and is NOT reachable from this generic `run` today. Sourcing
             // it needs a crate seam (return it from `PeerHint::discovery` into `ReachCtx`, or an accessor on the
@@ -700,24 +700,28 @@ fn display_targets(requested: &[String]) -> eyre::Result<HashMap<String, String>
 }
 
 /// How peers reach this node, for the banner's `how peers reach you` section: whether the bound transport
-/// routes across the internet (an `internet` channel) or is LAN/direct-only. Read off the SELECTED transport
-/// at the composition seam, never inferred from whether hints are present (that would conflate the channel
-/// with the hint state, delib-41 CLI-Architect note). An enum, not a bool, so a third reach kind forces a
-/// decision here rather than defaulting.
+/// routes across the internet (an `internet` channel) or is local/direct-only. Read off the SELECTED
+/// transport and bind mode at the composition seam, never inferred from whether hints are present (that
+/// would conflate the channel with the hint state, delib-41 CLI-Architect note). An enum, not a bool, so a
+/// third reach kind forces a decision here rather than defaulting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReachKind {
-    /// The transport routes across the internet and NATs (iroh): a peer reaches this node by the key alone.
+    /// The transport routes across the internet and NATs (iroh, not `--local`): a peer reaches this node
+    /// by the key alone.
     Internet,
-    /// The transport is LAN/direct-only (quirk, bare or sealed): a peer reaches this node on the LAN via
-    /// mDNS, or by a handed-over address.
+    /// The bind is local/direct-only (quirk, bare or sealed, or an iroh `--local` bind): a peer reaches
+    /// this node over local mDNS, or by a handed-over address.
     DirectOnly,
 }
 
 impl ReachKind {
-    /// Map the selected transport to its reach kind. The one place the transport identity becomes a reach
-    /// tell for the banner; every other surface stays transport-blind.
-    fn of(transport: crate::transport::Transport) -> Self {
+    /// Map the selected transport and bind mode to its reach kind. The one place the transport identity
+    /// becomes a reach tell for the banner; every other surface stays transport-blind. `--local` drops the
+    /// internet channel: the minimal bind has no n0 lookup and no relays, so its story is the same as
+    /// quirk's.
+    fn of(transport: crate::transport::Transport, local: bool) -> Self {
         match transport {
+            crate::transport::Transport::Iroh if local => Self::DirectOnly,
             crate::transport::Transport::Iroh => Self::Internet,
             crate::transport::Transport::Quirk | crate::transport::Transport::QuirkNoise => {
                 Self::DirectOnly
@@ -726,14 +730,15 @@ impl ReachKind {
     }
 }
 
-/// Whether LAN mDNS discovery is advertising or blocked (multicast unavailable). A first-class reachability
-/// tell: when blocked, the `LAN` line flips and states what to do instead (delib-41 Newcomer fix). An enum,
-/// not a bool, so the down-state is a named case a reader must handle, never a bare `false`.
+/// Whether local mDNS discovery is advertising or blocked (multicast unavailable). A first-class
+/// reachability tell: when blocked, the `local` line flips and states what to do instead (delib-41
+/// Newcomer fix). An enum, not a bool, so the down-state is a named case a reader must handle, never a
+/// bare `false`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MdnsState {
-    /// mDNS is advertising this node on the LAN: devices find it by the key alone.
+    /// mDNS is advertising this node locally: devices find it by the key alone.
     Available,
-    /// Multicast is blocked here, so LAN auto-discovery is off; reach falls to the internet or a handed
+    /// Multicast is blocked here, so local auto-discovery is off; reach falls to the internet or a handed
     /// address.
     // FLAG(Systems-Architect): the render path for this down-state is built and unit-tested, but the live
     // mDNS-available bit is not yet threaded from the composition seam (`PeerHint::discovery`) to this generic
@@ -923,8 +928,8 @@ fn render_ready_banner(
 
 /// The `how peers reach you` section: one channel per line with a short label column that scans at a glance.
 /// The `internet` channel appears only when the transport routes across the internet; `direct` only when the
-/// transport is direct-only AND hands out address hints. "automatic" leads both auto channels, and mDNS is a
-/// first-class tell that flips to an off-state naming what to do instead when multicast is blocked.
+/// bind is direct-only AND hands out address hints. "automatic" leads both auto channels, and the local mDNS
+/// lane is a first-class tell that flips to an off-state naming what to do instead when multicast is blocked.
 // FLAG(CLI-Architect): the channel glosses (wording, "even across NATs", the off-state next-step) are a
 // banner-format detail; picked here to satisfy the Newcomer fixes (no backend name, "automatic" on both, a
 // down-state next-step), open to the owner's final call.
@@ -935,7 +940,7 @@ fn reach_section(reach: ReachKind, mdns: MdnsState, hints: &[SocketAddr]) -> Str
     if reach == ReachKind::Internet {
         labels.push("internet");
     }
-    labels.push("LAN");
+    labels.push("local");
     if direct {
         labels.push("direct");
     }
@@ -952,8 +957,16 @@ fn reach_section(reach: ReachKind, mdns: MdnsState, hints: &[SocketAddr]) -> Str
             "automatic; peers reach you by the key above, even across NATs",
         ));
     }
-    let lan = match (mdns, reach) {
-        (MdnsState::Available, _) => "automatic; your devices just need the key (mDNS)".to_owned(),
+    let local = match (mdns, reach) {
+        // A direct-only bind resolves on local mDNS or a hand-fed address, and its advertised hints are
+        // loopback today (the same-host mDNS defect), so the gloss promises local discovery only. The
+        // founder's LAN sentence returns with the advertisement fix (LOOSE-ENDS, two-host Operator gate).
+        (MdnsState::Available, ReachKind::DirectOnly) => {
+            "automatic; local mDNS, or direct, no NAT traversal".to_owned()
+        }
+        (MdnsState::Available, ReachKind::Internet) => {
+            "automatic; your devices just need the key (mDNS)".to_owned()
+        }
         (MdnsState::Blocked, ReachKind::Internet) => {
             "off; multicast blocked here, so reach by the key over the internet".to_owned()
         }
@@ -961,7 +974,7 @@ fn reach_section(reach: ReachKind, mdns: MdnsState, hints: &[SocketAddr]) -> Str
             "off; multicast blocked here, so hand a peer the address below".to_owned()
         }
     };
-    out.push_str(&reach_line(width, gutter, "LAN", &lan));
+    out.push_str(&reach_line(width, gutter, "local", &local));
     if direct {
         // Loopback hints cannot be handed to a peer (they resolve to the peer's own machine), so a
         // loopback-only bind reads "reachable on this machine only" rather than "hand a peer this address".
