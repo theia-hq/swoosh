@@ -15,7 +15,10 @@ use std::time::Instant;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::{ArgGroup, Args};
-use measure::{Limit, Mode, Progress, ProtocolError, Refusal, SpeedReport, Speedtest, Throughput};
+use measure::{
+    Limit, MethodRefusal, Mode, Progress, ProtocolError, Refusal, SpeedReport, Speedtest,
+    Throughput,
+};
 use nauthy::{Link, Service};
 
 use crate::contacts::Contacts;
@@ -156,15 +159,17 @@ impl SpeedCmd {
                 never = ticker => match never {},
             }
         };
-        // A refusal is a LOUD, distinct error, never `0.00 MiB/s`: the node reached us but does not serve
-        // speed, so name that plainly rather than reporting a zero-byte transfer over the elapsed window.
-        // A Layer-2 method refusal means the stream was admitted but not the method; anything else (a
-        // Layer-1 gate refusal) means the dial itself was refused.
+        // A refusal is a LOUD, distinct error, never `0.00 MiB/s`: the node reached us but refused the
+        // run, so name what refused it (a missing method, a rate limit, a busy service) rather than
+        // reporting a zero-byte transfer over the elapsed window. A Layer-2 method refusal means the
+        // stream was admitted but not the method; anything else (a Layer-1 gate refusal) means the dial
+        // itself was refused.
         let report = match outcome {
             Ok(report) => report,
-            Err(ProtocolError::Refused(Refusal::Method { detail, .. })) => {
+            Err(ProtocolError::Refused(Refusal::Method { code, detail })) => {
                 node.close().await;
-                eyre::bail!("{label} does not serve `speed`: {detail}");
+                let line = refusal_line(&label, code, &detail);
+                eyre::bail!("{line}");
             }
             Err(ProtocolError::Refused(refusal)) => {
                 node.close().await;
@@ -271,3 +276,19 @@ fn rate(bytes: u64, secs: f64) -> String {
 fn mib(bytes: u64) -> String {
     format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
+
+/// The one line a post-admission `speed` refusal renders: the typed code chooses the phrase, never the
+/// detail prose. `WrongMethod` names the method the peer does not serve; `RateLimited` and `Busy` name
+/// the bound that stopped the run, so a capped run never reads as a missing service (the render table
+/// in `notes/design/typed-refusal-and-errors.md`). A new code breaks this match at compile time.
+fn refusal_line(label: &str, code: MethodRefusal, detail: impl core::fmt::Display) -> String {
+    match code {
+        MethodRefusal::WrongMethod => format!("{label} does not serve `speed`: {detail}"),
+        MethodRefusal::RateLimited => format!("{label} is rate limited: {detail}"),
+        MethodRefusal::Busy => format!("{label} is busy: {detail}"),
+    }
+}
+
+#[cfg(test)]
+#[path = "speed_tests.rs"]
+mod speed_tests;
