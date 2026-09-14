@@ -135,7 +135,10 @@ impl SendCmd {
             match collect_files(path).await {
                 Ok(collected) => files.extend(collected),
                 Err(error) => {
-                    eprintln!("skip {}: {error:#}", render_name(&path.display().to_string()));
+                    eprintln!(
+                        "skip {}: {error:#}",
+                        render_name(&path.display().to_string())
+                    );
                     failures += 1;
                 }
             }
