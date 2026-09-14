@@ -762,6 +762,126 @@ fn adopt_requires_force_to_switch_the_trusted_signet() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A same-signet re-adopt must not silently replace the stored badge: an old token (a rotated device, a
+/// revoked badge saved in a chat log) replayed under the live signet would otherwise downgrade the
+/// credential, and the signet compare cannot catch it because the signet is unchanged. A differing badge
+/// takes the same explicit `--force` as a differing signet; re-adopting the same bytes stays silent. The
+/// test also proves the replay cannot downgrade a device that already carries the newer badge.
+#[test]
+fn adopt_requires_force_to_replace_a_differing_badge() {
+    let base = std::env::temp_dir().join(format!("swoosh-badge-swap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let owner_dir = base.join("owner");
+    let device_dir = base.join("device");
+    std::fs::create_dir_all(&owner_dir).unwrap();
+    std::fs::create_dir_all(&device_dir).unwrap();
+
+    let identity = swoosh(&["identity", "--home", path_str(&device_dir)]);
+    assert!(identity.status.success(), "{}", stderr(&identity));
+    let device: NodeId = String::from_utf8(identity.stdout)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .parse()
+        .expect("identity prints the node id first");
+
+    // The owner signs the first badge for this device. Adopting it is first provisioning (no stored
+    // badge), so it lands without an acknowledgement.
+    let first = swoosh(&[
+        "invite",
+        "add",
+        "laptop",
+        "--for",
+        &device.to_string(),
+        "--home",
+        path_str(&owner_dir),
+    ]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    let old_token = first_invite(&String::from_utf8(first.stdout).unwrap()).expect("token");
+    let old_badge = bound_badge(&old_token);
+    let adopt = swoosh(&["adopt", &old_token, "--home", path_str(&device_dir)]);
+    assert!(adopt.status.success(), "{}", stderr(&adopt));
+    assert_eq!(
+        stored_badge(&device_dir),
+        old_badge,
+        "the first badge lands"
+    );
+
+    // Re-adopting the exact bytes already stored is a replay of what is there, not a swap.
+    let same = swoosh(&["adopt", &old_token, "--home", path_str(&device_dir)]);
+    assert!(same.status.success(), "{}", stderr(&same));
+
+    // The owner rotates the device: a second badge for the SAME device, with a shorter expiry, so the
+    // cap bytes differ and the two tokens are distinguishable.
+    let second = swoosh(&[
+        "invite",
+        "add",
+        "laptop",
+        "--for",
+        &device.to_string(),
+        "--expires",
+        "30d",
+        "--home",
+        path_str(&owner_dir),
+    ]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    let new_token = first_invite(&String::from_utf8(second.stdout).unwrap()).expect("token");
+    let new_badge = bound_badge(&new_token);
+    assert_ne!(
+        old_badge, new_badge,
+        "two invites for one device carry distinct badges"
+    );
+
+    // Adopting the new badge without `--force` refuses: the stored credential would be replaced.
+    let refused = swoosh(&["adopt", &new_token, "--home", path_str(&device_dir)]);
+    assert!(
+        !refused.status.success(),
+        "replacing a stored badge without --force must refuse: {}",
+        stderr(&refused)
+    );
+    assert!(
+        stderr(&refused).contains("--force"),
+        "the refusal names the acknowledgement: {}",
+        stderr(&refused)
+    );
+    assert_eq!(
+        stored_badge(&device_dir),
+        old_badge,
+        "the refused swap leaves the stored badge untouched"
+    );
+
+    // With `--force`, the rotation lands.
+    let forced = swoosh(&[
+        "adopt",
+        &new_token,
+        "--force",
+        "--home",
+        path_str(&device_dir),
+    ]);
+    assert!(
+        forced.status.success(),
+        "--force performs the swap: {}",
+        stderr(&forced)
+    );
+    assert_eq!(stored_badge(&device_dir), new_badge);
+
+    // Replaying the OLD token is refused too: the unchanged signet no longer hides a downgrade.
+    let replay = swoosh(&["adopt", &old_token, "--home", path_str(&device_dir)]);
+    assert!(
+        !replay.status.success(),
+        "replaying the old badge without --force must refuse: {}",
+        stderr(&replay)
+    );
+    assert_eq!(
+        stored_badge(&device_dir),
+        new_badge,
+        "the live badge survives the replay"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Run the compiled `swoosh` binary with `args`, capturing its output. `CARGO_BIN_EXE_swoosh` is set by
 /// cargo for an integration test of a crate that builds a binary, so this drives the REAL product path.
 fn swoosh(args: &[&str]) -> std::process::Output {
@@ -779,6 +899,26 @@ fn first_invite(text: &str) -> Option<String> {
     text.split_whitespace()
         .find(|word| word.starts_with(INVITE_SCHEME))
         .map(str::to_owned)
+}
+
+/// The badge field of a bound (two-field) `invite:<signet>.<badge>` token. The badge is itself a
+/// `sheer:` link with dots, so split off the signet field only.
+fn bound_badge(token: &str) -> String {
+    token
+        .strip_prefix(INVITE_SCHEME)
+        .expect("a bound invite carries the invite: scheme")
+        .split_once('.')
+        .expect("a bound invite carries a signet field and a badge")
+        .1
+        .to_owned()
+}
+
+/// The badge adopt stored in `home`, trimmed of the trailing newline `write_badge` appends.
+fn stored_badge(home: &Path) -> String {
+    std::fs::read_to_string(home.join("badge"))
+        .expect("adopt stores the badge beside the seed")
+        .trim()
+        .to_owned()
 }
 
 fn path_str(path: &Path) -> &str {

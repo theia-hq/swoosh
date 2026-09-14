@@ -33,6 +33,11 @@ pub const RECV_SERVICE: &str = "recv";
 /// pipeline depth; a receiver's exposer accepts these streams concurrently too, so both sides fan out.
 const MAX_INFLIGHT: usize = 16;
 
+/// The longest a pushed file's name may render on the sender's own `sent` line, in characters. Mirrors
+/// the receiver's cap for a peer-supplied path (`services/crates/transfer/src/handler.rs`,
+/// `MAX_RENDERED_PATH`), so both ends of one transfer render a hostile name in the same bounded shape.
+const MAX_RENDERED_NAME: usize = 256;
+
 /// Push a file or directory to a peer, addressed by their public key, verified end to end.
 #[derive(Debug, Args)]
 pub struct SendCmd {
@@ -130,7 +135,7 @@ impl SendCmd {
             match collect_files(path).await {
                 Ok(collected) => files.extend(collected),
                 Err(error) => {
-                    eprintln!("skip {}: {error:#}", path.display());
+                    eprintln!("skip {}: {error:#}", render_name(&path.display().to_string()));
                     failures += 1;
                 }
             }
@@ -168,20 +173,42 @@ async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre:
     let blob = {
         let mut file = tokio::fs::File::open(&path)
             .await
-            .wrap_err_with(|| format!("open {}", path.display()))?;
+            .wrap_err_with(|| format!("open {}", render_name(&path.display().to_string())))?;
         Blob::hash(&mut file).await?
     };
 
     let (send, recv) = session.open_bi().await?;
     let mut source = tokio::fs::File::open(&path)
         .await
-        .wrap_err_with(|| format!("open {}", path.display()))?;
+        .wrap_err_with(|| format!("open {}", render_name(&path.display().to_string())))?;
     Transfer::new(send, recv)
         .send(name.as_bytes(), &blob, &mut source)
         .await?;
 
-    println!("sent {name} ({} bytes)", blob.len());
+    println!("sent {} ({} bytes)", render_name(&name), blob.len());
     Ok(())
+}
+
+/// Render a pushed file's name for the sender's own `sent` line: escape control characters and cap the
+/// rendered length, the same rule the receive engine applies to a peer-supplied path
+/// (`services/crates/transfer/src/handler.rs`, `render_path`). A raw newline forges a line, a carriage
+/// return rewrites one, and ESC drives a terminal, so a directory holding a hostile name must not echo
+/// it raw. That helper is crate-private to the services repo's transfer engine, so the rule is stated
+/// here in the same shape and the two ends of one transfer render a name alike.
+fn render_name(name: &str) -> String {
+    // The cap plus the `...` cut marker: allocation is bounded whatever the file is named.
+    let mut rendered = String::with_capacity(MAX_RENDERED_NAME + 3);
+    let mut written = 0usize;
+    for ch in name.chars() {
+        let width = ch.escape_debug().count();
+        if written + width > MAX_RENDERED_NAME {
+            rendered.push_str("...");
+            break;
+        }
+        rendered.extend(ch.escape_debug());
+        written += width;
+    }
+    rendered
 }
 
 /// Collect `(relative name, path)` pairs to send: a file yields itself; a directory yields every file
@@ -230,3 +257,7 @@ fn file_name(path: &Path) -> eyre::Result<String> {
         .map(str::to_owned)
         .ok_or_else(|| eyre::eyre!("path has no file name: {}", path.display()))
 }
+
+#[cfg(test)]
+#[path = "send_tests.rs"]
+mod send_tests;

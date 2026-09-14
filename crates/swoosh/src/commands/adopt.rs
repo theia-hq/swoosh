@@ -55,7 +55,7 @@ pub struct AdoptCmd {
                      meaning there, so it must be the invite itself, never a redirection."
     )]
     pub invite: Option<SecretSource>,
-    /// re-root this machine when the invite names a different signet than the one it already trusts
+    /// re-root this machine when the invite names a different signet, or replace a differing stored badge
     #[arg(long)]
     pub force: bool,
 }
@@ -97,6 +97,9 @@ impl AdoptCmd {
                 // actually roots at the named signet AND binds THIS machine, unexpired, before any write.
                 verify_badge(&badge, node, signet)?;
                 admit_signet(home, signet, self.force).await?;
+                // The credential half of the same rule: a token is not authenticated, so an old or
+                // revoked badge replayed under the live signet must not silently overwrite this one.
+                admit_badge(home, &badge, self.force).await?;
                 // Trust the signet: the default gate admits its members and delegates. The signet lands
                 // beside the identity, in the SAME home, which `swoosh serve` reads via `load_signet`.
                 config::write_signet(home, signet).await?;
@@ -123,6 +126,11 @@ impl AdoptCmd {
                     verify_badge(badge, node, signet)?;
                 }
                 admit_signet(home, signet, self.force).await?;
+                // Same badge guard as the bound arm, before the seed write: a differing stored badge
+                // cannot be displaced by a replayed token without `--force`.
+                if let Some(badge) = &badge {
+                    admit_badge(home, badge, self.force).await?;
+                }
                 // Become the derived device: write the child seed as SWOOSH's persisted identity -- the
                 // SAME store `swoosh serve` binds under -- so this node comes up AS the adopted device.
                 identity::write(&seed, home).await?;
@@ -188,6 +196,26 @@ async fn admit_signet(home: &Home, signet: NodeId, force: bool) -> eyre::Result<
             eyre::bail!(
                 "this machine already trusts signet {trusted}; adopting this invite would re-root it at \
                  {signet}. Re-run with --force if that is intended"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Refuse to silently replace this machine's stored badge. A bound invite's token is not authenticated,
+/// and the carried badge passes verification without a revocation check, so a replayed old or revoked
+/// token under the SAME signet would otherwise overwrite the live credential (the signet compare cannot
+/// catch it). A differing stored badge takes the same explicit `--force` as a differing signet: an absent
+/// badge is first provisioning, and re-adopting the exact bytes already stored is a no-op.
+async fn admit_badge(home: &Home, badge: &str, force: bool) -> eyre::Result<()> {
+    if force {
+        return Ok(());
+    }
+    if let Some(stored) = config::load_badge(home).await? {
+        if stored.as_str() != badge {
+            eyre::bail!(
+                "this machine already stores a different membership badge than this invite carries; \
+                 adopting it would replace the stored badge. Re-run with --force if that is intended"
             );
         }
     }
