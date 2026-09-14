@@ -53,12 +53,13 @@ pub struct Reached<S> {
 /// [`connect`](Node::connect) wins and its error, if all fail, is the last one seen. An unknown petname
 /// surfaces the resolver's clean error before any dial. A raw key resolves to a single candidate, so this
 /// is a plain dial for the common case and only fans out for a multi-device person. `transport` names the
-/// bound backend so the final error can point the user at the fix its transport needs.
+/// bound backend and `local` the bind mode so the final error can point the user at the fix its bind needs.
 pub async fn dial<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     contacts: &Contacts,
     target: &Peer,
     transport: transport::Transport,
+    local: bool,
 ) -> eyre::Result<Reached<T::Session>> {
     let candidates = target.candidates(contacts)?;
 
@@ -82,7 +83,7 @@ pub async fn dial<T: Transport, D: Discovery>(
         Some(error) => error.wrap_err(format!("could not reach {target}")),
         None => eyre::eyre!("could not reach {target}: no known device"),
     };
-    Err(hint(reached, transport))
+    Err(hint(reached, transport, local))
 }
 
 /// Connect to one named candidate under the [`DIAL_TIMEOUT`], mapping a timeout to a plain unreachable
@@ -132,6 +133,12 @@ pub struct Resolved<S> {
 /// Candidates are tried in resolution order under the per-candidate [`DIAL_TIMEOUT`]; the first whose
 /// base session connects wins. The service handshake itself rides each `open_bi` later (the gate is
 /// per-stream), so "reachable" here is the underlying connect landing, exactly as the raw [`dial`] meant.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the dial inputs are independent values (the node, the address book, the target, the \
+              service, two credential slots, and the two bind facts); bundling them into a struct \
+              would only move the list, not remove it"
+)]
 pub async fn dial_service<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     contacts: &Contacts,
@@ -140,6 +147,7 @@ pub async fn dial_service<T: Transport, D: Discovery>(
     present: Option<Link>,
     membership: Option<Link>,
     transport: transport::Transport,
+    local: bool,
 ) -> eyre::Result<Resolved<T::Session>> {
     let candidates = target.candidates(contacts)?;
 
@@ -168,7 +176,7 @@ pub async fn dial_service<T: Transport, D: Discovery>(
         Some(error) => error.wrap_err(format!("could not reach {target}")),
         None => eyre::eyre!("could not reach {target}: no known device"),
     };
-    Err(hint(reached, transport))
+    Err(hint(reached, transport, local))
 }
 
 /// Open one named candidate's gated `service` (one of [`PING_SERVICE`] / [`SPEED_SERVICE`]) under the
@@ -204,20 +212,30 @@ pub async fn connect_service<T: Transport, D: Discovery>(
     }
 }
 
-/// Append the fix the bound transport needs to a reach failure, so the error names what to do next.
+/// Append the fix the bound transport and bind mode need to a reach failure, so the error names what to
+/// do next.
 ///
 /// Shared by [`dial`] and the fan-out verbs so a `could not reach` over quirk always carries the same
-/// remedy, whether a single dial failed or every device in a fan-out did.
-pub fn hint(error: eyre::Report, transport: transport::Transport) -> eyre::Report {
-    match transport {
+/// remedy, whether a single dial failed or every device in a fan-out did. `local` is the `--local` bit:
+/// under it the n0/relay fallback is gone, so the remedy names the flag as the cause instead of advising
+/// a transport switch the flag has already made moot.
+pub fn hint(error: eyre::Report, transport: transport::Transport, local: bool) -> eyre::Report {
+    match (transport, local) {
+        // `--local` removes internet discovery and relays, so "use --transport iroh" would be false
+        // advice (iroh under the flag is still local). Name the flag as the cause, the hand-fed route
+        // that remains, and the way back to the default bind.
+        (_, true) => error.wrap_err(
+            "bound local-only (--local): reach is local mDNS or a direct hint; pass --peer <key>=<addr> \
+             (the line the peer's `swoosh serve` printed), or drop --local",
+        ),
         // quirk is direct-only with no discovery, so an unreachable peer is almost always a missing or
         // wrong address hint. Name the exact flag (mirroring the exemplary unknown-contact error) and the
         // one-flag escape to a self-discovering transport. The sealed spelling reaches the same way, so it
         // carries the same remedy.
-        transport::Transport::Quirk | transport::Transport::QuirkNoise => error.wrap_err(
+        (transport::Transport::Quirk | transport::Transport::QuirkNoise, false) => error.wrap_err(
             "quirk is direct-only: pass --peer <key>=<addr> (the line the peer's `swoosh serve` printed), or use --transport iroh",
         ),
-        transport::Transport::Iroh => error,
+        (transport::Transport::Iroh, false) => error,
     }
 }
 
@@ -226,21 +244,27 @@ pub fn hint(error: eyre::Report, transport: transport::Transport) -> eyre::Repor
 /// A fan-out ends non-zero unless at least one device answered the probe, but the two failing shapes carry
 /// DIFFERENT errors so a refusal is never dressed as an addressing problem. If every device was
 /// unreachable, the error carries the transport's reach [`hint`] (over quirk, the `--peer`/discovery
-/// remedy). But if any device was REACHED and only refused the probe, reach was NOT the problem: the error
-/// says so plainly and carries no reach hint, so a refused stranger over quirk never sees the misleading
-/// "quirk is direct-only: pass --peer ..." line after it already reached the node.
+/// remedy; under `--local`, the flag named as the cause). But if any device was REACHED and only refused
+/// the probe, reach was NOT the problem: the error says so plainly and carries no reach hint, so a refused
+/// stranger over quirk never sees the misleading "quirk is direct-only: pass --peer ..." line after it
+/// already reached the node.
 pub fn fanout_outcome(
     any_healthy: bool,
     any_refused: bool,
     target: &impl core::fmt::Display,
     transport: transport::Transport,
+    local: bool,
 ) -> eyre::Result<()> {
     if any_healthy {
         Ok(())
     } else if any_refused {
         Err(eyre::eyre!("{target}: reached, but refused"))
     } else {
-        Err(hint(eyre::eyre!("could not reach {target}"), transport))
+        Err(hint(
+            eyre::eyre!("could not reach {target}"),
+            transport,
+            local,
+        ))
     }
 }
 
@@ -288,7 +312,7 @@ mod tests {
     // used to print `reached, but refused` and THEN `could not reach ... quirk is direct-only ...`).
     #[test]
     fn a_reached_but_refused_fanout_is_a_refusal_without_the_reach_hint() {
-        let err = fanout_outcome(false, true, &"alice", transport::Transport::Quirk)
+        let err = fanout_outcome(false, true, &"alice", transport::Transport::Quirk, false)
             .expect_err("a refusal is non-zero");
         let msg = format!("{err:#}");
         assert!(msg.contains("reached, but refused"), "{msg}");
@@ -299,16 +323,36 @@ mod tests {
     // An all-unreachable fan-out DOES carry the transport's reach hint: over quirk, the `--peer` remedy.
     #[test]
     fn an_all_unreachable_fanout_carries_the_quirk_reach_hint() {
-        let err = fanout_outcome(false, false, &"alice", transport::Transport::Quirk)
+        let err = fanout_outcome(false, false, &"alice", transport::Transport::Quirk, false)
             .expect_err("all-unreachable is non-zero");
         let msg = format!("{err:#}");
         assert!(msg.contains("could not reach alice"), "{msg}");
         assert!(msg.contains("quirk is direct-only"), "{msg}");
     }
 
+    // Under `--local` the remedy names the flag as the cause: the internet fallback is what the flag
+    // removed, so the quirk text's "use --transport iroh" escape would be false advice there.
+    #[test]
+    fn an_all_unreachable_local_fanout_names_the_flag_as_the_cause() {
+        for bound in [transport::Transport::Iroh, transport::Transport::QuirkNoise] {
+            let err = fanout_outcome(false, false, &"alice", bound, true)
+                .expect_err("all-unreachable is non-zero");
+            let msg = format!("{err:#}");
+            assert!(msg.contains("could not reach alice"), "{msg}");
+            assert!(
+                msg.contains("--local"),
+                "the flag is named as the cause: {msg}"
+            );
+            assert!(
+                !msg.contains("use --transport iroh"),
+                "under --local, iroh is still local: {msg}"
+            );
+        }
+    }
+
     // Any healthy device keeps the fan-out green, whatever the others did.
     #[test]
     fn any_healthy_device_makes_the_fanout_succeed() {
-        assert!(fanout_outcome(true, true, &"alice", transport::Transport::Quirk).is_ok());
+        assert!(fanout_outcome(true, true, &"alice", transport::Transport::Quirk, false).is_ok());
     }
 }

@@ -19,11 +19,12 @@ use bifrost_mdns::MdnsDiscovery;
 use clap::{Args, ValueEnum};
 use eyre::WrapErr as _;
 
-/// The flags every reaching verb shares and no local verb has: which backend to bind and any direct
-/// address hints. Flattened into each reach command (`serve`/`ping`/`speed`/`status`) rather than made
-/// a root global, so `contact add/ls/rm` (which bind no transport and dial nobody) are never offered a
-/// `--transport` or `--peer` that would do nothing there. `--home` stays a root global, since it names
-/// the node home the address book AND the bound key both live in, meaningful to both families.
+/// The flags every reaching verb shares and no local verb has: which backend to bind, whether the
+/// bind stays off n0, and any direct address hints. Flattened into each reach command
+/// (`serve`/`ping`/`speed`/`status`) rather than made a root global, so `contact add/ls/rm` (which
+/// bind no transport and dial nobody) are never offered a `--transport`/`--local`/`--peer` that would
+/// do nothing there. `--home` stays a root global, since it names the node home the address book AND
+/// the bound key both live in, meaningful to both families.
 #[derive(Debug, Args)]
 pub struct ReachArgs {
     /// Backend to bind under this identity
@@ -34,6 +35,9 @@ pub struct ReachArgs {
         value_name = "iroh|quirk|quirk+noise"
     )]
     pub transport: Transport,
+    /// No internet discovery or relays: local mDNS or a direct hint
+    #[arg(long)]
+    pub local: bool,
     /// Direct address hint for a peer, `<key>=<addr>` (repeatable)
     // The clap id is `peer-hint`, not `peer`: this frees the id `peer` for the positional `<peer>` slot
     // every dialing verb now names, so a verb hosts both this `--peer` HINT and a positional peer without a
@@ -55,7 +59,7 @@ pub enum Transport {
     Iroh,
     /// our own QUIC; announced key; all serves refused
     Quirk,
-    /// our own QUIC behind the sealed wrapper; LAN / direct-only, key proven
+    /// our own QUIC behind the sealed wrapper; direct-only, key proven
     #[value(name = "quirk+noise")]
     QuirkNoise,
 }

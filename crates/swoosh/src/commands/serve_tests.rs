@@ -87,7 +87,7 @@ fn default_targets() -> HashMap<String, String> {
 }
 
 /// The default iroh + mDNS-on banner: a copy-clean full id, an `internet` channel that says "automatic" and
-/// never names the backend, an mDNS LAN line, one family-gated group with the `control.*` fold, no public
+/// never names the backend, an mDNS local line, one family-gated group with the `control.*` fold, no public
 /// group, and the plain stop line.
 #[test]
 fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
@@ -116,11 +116,15 @@ fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
         !banner.contains("iroh"),
         "the backend is never named: {banner}"
     );
-    // "automatic" leads BOTH auto channels (the Newcomer fix), not just LAN.
+    // "automatic" leads BOTH auto channels (the Newcomer fix), not just the local one.
     assert_eq!(banner.matches("automatic").count(), 2, "{banner}");
     assert!(
         banner.contains("(mDNS)"),
-        "the LAN line is an mDNS tell: {banner}"
+        "the local line is an mDNS tell: {banner}"
+    );
+    assert!(
+        !banner.contains("LAN"),
+        "no surface says LAN until the same-host advertise fix lands: {banner}"
     );
     assert!(banner.contains("family-gated"), "{banner}");
     assert!(
@@ -312,8 +316,8 @@ fn the_unmetered_caveat_derives_from_the_bound_metering() {
     );
 }
 
-/// The reach section flips the LAN line to a next-step down-state when mDNS is blocked, and a quirk node with
-/// a routable hint prints a `direct` channel with the address on its own copy-clean line.
+/// The reach section flips the local line to a next-step down-state when mDNS is blocked, and a quirk node
+/// with a routable hint prints a `direct` channel with the address on its own copy-clean line.
 #[test]
 fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     let blocked = reach_section(ReachKind::Internet, MdnsState::Blocked, &[]);
@@ -338,6 +342,46 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     let local = reach_section(ReachKind::DirectOnly, MdnsState::Available, &[loop_addr]);
     assert!(local.contains("reachable on this machine only:"), "{local}");
     assert!(!local.contains("hand a peer"), "{local}");
+}
+
+/// A local/direct-only node never promises the internet, and no surface says LAN until the same-host
+/// mDNS advertisement defect lands: the mDNS lane is labelled `local` and glossed `local mDNS`. The
+/// mapping takes the bind mode too, so an iroh `--local` node renders as direct-only.
+#[test]
+fn a_local_bind_is_direct_only_and_never_says_lan() {
+    use crate::transport::Transport;
+
+    assert_eq!(
+        ReachKind::of(Transport::Iroh, true),
+        ReachKind::DirectOnly,
+        "an iroh --local node has no internet channel"
+    );
+    assert_eq!(ReachKind::of(Transport::Iroh, false), ReachKind::Internet);
+    assert_eq!(
+        ReachKind::of(Transport::Quirk, false),
+        ReachKind::DirectOnly
+    );
+    assert_eq!(
+        ReachKind::of(Transport::QuirkNoise, false),
+        ReachKind::DirectOnly
+    );
+    assert_eq!(
+        ReachKind::of(Transport::QuirkNoise, true),
+        ReachKind::DirectOnly
+    );
+
+    let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
+    let section = reach_section(ReachKind::DirectOnly, MdnsState::Available, &[routable]);
+    assert!(
+        section.contains("automatic; local mDNS, or direct, no NAT traversal"),
+        "a direct-only bind glosses the local mDNS lane and the no-NAT limit: {section}"
+    );
+    assert!(section.contains("local"), "{section}");
+    assert!(!section.contains("internet"), "{section}");
+    assert!(
+        !section.contains("LAN"),
+        "no surface says LAN until the same-host advertise fix lands: {section}"
+    );
 }
 
 /// A de-merged fetch service glosses by name (its synthetic scheme is unspellable, so it never leaks into the
@@ -542,6 +586,90 @@ fn plain_serve_creates_no_runtime_state() {
         mac_root_existed || !mac_root.exists(),
         "plain serve creates no runtime root"
     );
+}
+
+/// `serve --local` must keep the node's address: the bind takes the PERSISTED key, so two runs report
+/// the same NodeId the `identity` verb prints, never a fresh key per run. The banner also hands out only
+/// dialable hints: the wildcard sockets rewrite to loopback, so no `[::]` reaches a peer.
+#[test]
+fn serve_local_keeps_the_persisted_key_across_two_runs() {
+    let scratch = ProcessScratch::new("local-key");
+
+    // Observe the persisted key once, through the verb a user would compare against.
+    let mut identity = Command::new(swoosh_binary());
+    identity
+        .arg("--home")
+        .arg(&scratch.home_dir)
+        .arg("identity")
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .env_remove("SWOOSH_KEY");
+    let output = run_binary_with_deadline(&mut identity, Duration::from_secs(30));
+    assert!(
+        output.status.success(),
+        "identity exits 0: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let key = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .expect("identity prints the NodeId on its first line")
+        .to_owned();
+
+    for run in 0..2 {
+        let mut command = Command::new(swoosh_binary());
+        command
+            .arg("--home")
+            .arg(&scratch.home_dir)
+            .args(["serve", "--local", "--expires", "1s"])
+            .env("XDG_RUNTIME_DIR", &scratch.xdg)
+            .env_remove("SWOOSH_HOME")
+            .env_remove("SWOOSH_KEY");
+        let output = run_binary_with_deadline(&mut command, Duration::from_secs(30));
+        assert!(
+            output.status.success(),
+            "serve --local run {run} exits 0 on its expiry: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // The banner's id line: `swoosh ready`, a blank line, then the blank-framed full key.
+        let reported = stdout
+            .lines()
+            .nth(2)
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .unwrap_or_else(|| {
+                panic!("serve --local run {run} prints the banner id line: {stdout}")
+            });
+        assert_eq!(
+            reported, key,
+            "serve --local run {run} reports the persisted key, not a fresh one: {stdout}"
+        );
+        assert!(
+            !stdout.contains("[::]"),
+            "the banner never hands out an unspecified wildcard hint: {stdout}"
+        );
+        assert!(
+            stdout.contains("automatic; local mDNS, or direct, no NAT traversal"),
+            "serve --local run {run} renders the held local gloss: {stdout}"
+        );
+        assert!(
+            !stdout.contains("internet"),
+            "serve --local run {run} has no internet channel: {stdout}"
+        );
+        assert!(
+            !stdout.contains("LAN"),
+            "serve --local run {run} says no LAN until the two-host proof lands: {stdout}"
+        );
+        assert!(
+            stdout.contains("reachable on this machine only:"),
+            "the wildcard bind renders as loopback-only, not as a handable LAN address: {stdout}"
+        );
+    }
 }
 
 /// The resident banner differs from the plain one ONLY by the control line, and it is the production

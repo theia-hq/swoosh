@@ -303,9 +303,10 @@ impl Reach {
         }
     }
 
-    /// The reach-family flags this verb carries (`--transport`, `--peer`). Shared by every reaching verb
-    /// and no local one, so they are flattened into each reach command rather than made a root global;
-    /// the composition root reads them here to pick the backend and seed discovery.
+    /// The reach-family flags this verb carries (`--transport`, `--local`, `--peer`). Shared by every
+    /// reaching verb and no local one, so they are flattened into each reach command rather than made a
+    /// root global; the composition root reads them here to pick the backend, the bind mode, and the
+    /// discovery seed.
     fn args(&self) -> &transport::ReachArgs {
         match self {
             Self::Serve(cmd) => &cmd.reach,
@@ -665,6 +666,7 @@ async fn run() -> eyre::Result<()> {
     // transport swap a swap and not a new node. The reach-family flags travel on the verb itself now, so
     // the backend and the dial hints are read off the chosen reaching verb, not a root global.
     let transport = reach.args().transport;
+    let local = reach.args().local;
     let peers = reach.args().peer.clone();
     // Reject a redundant `--present` alongside a self-addressing `sheer:` link peer ONCE here, before any
     // dial, so the conflict is loud and compiler-forced for every verb (each states its own check via
@@ -687,6 +689,7 @@ async fn run() -> eyre::Result<()> {
     let ctx = reaching::ReachCtx {
         contacts: &contacts,
         transport,
+        local,
         present,
         membership,
         home: &home,
@@ -695,9 +698,17 @@ async fn run() -> eyre::Result<()> {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
         // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
         // addresses, so a same-network dial goes straight there instead of relaying. With nothing
-        // known locally the resolve is empty and iroh self-discovers exactly as before.
+        // known locally the resolve is empty and iroh self-discovers exactly as before. `--local`
+        // keeps the same arm and swaps the constructor: the persisted key, no n0, no relays.
         transport::Transport::Iroh => {
-            let endpoint = bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?;
+            let endpoint = match IrohBind::of(local) {
+                IrohBind::N0 => {
+                    bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?
+                }
+                IrohBind::Local => {
+                    bifrost_iroh::Endpoint::bind_local_with_secret(secret.into_bytes()).await?
+                }
+            };
             let discovery = PeerHint::discovery(&endpoint, peers);
             let node = Node::new(endpoint, discovery);
             run_and_close(reach, &node, ctx).await
@@ -724,6 +735,24 @@ async fn run() -> eyre::Result<()> {
             let node = Node::new(endpoint, discovery);
             run_and_close(reach, &node, ctx).await
         }
+    }
+}
+
+/// Which iroh constructor the bind selects, the flag's one mechanism. A named choice instead of an
+/// inline `if local`, so the composition root's match has an arm per mode with no wildcard to fall
+/// through, and the mapping is a pure value a unit test can pin without binding a socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IrohBind {
+    /// The n0 default: discovery (pkarr/DNS) plus relays.
+    N0,
+    /// `--local`: the persisted key with no n0 discovery, no relays, and no NAT traversal.
+    Local,
+}
+
+impl IrohBind {
+    /// Map the `--local` bit to the constructor it selects.
+    fn of(local: bool) -> Self {
+        if local { Self::Local } else { Self::N0 }
     }
 }
 
@@ -994,6 +1023,86 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    /// The `--local` flag is a reach-family bind knob: it parses on the reaching verbs (the dial half
+    /// rides the same bind), nowhere else, and is accepted idempotently on the already-direct-only quirk
+    /// spellings. Placement is the reach group's, not a root global's.
+    #[test]
+    fn the_local_flag_lives_on_the_reach_family_only() {
+        let parsed = Cli::try_parse_from(["swoosh", "ping", "alice", "--local"])
+            .expect("ping --local parses");
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Ping(PingCmd {
+                reach: transport::ReachArgs { local: true, .. },
+                ..
+            }))
+        ));
+
+        // Accepted idempotently on the direct-only quirk spellings: the flag states a bind property
+        // quirk already has, so it is a no-op, never a conflict refusal.
+        for quirk in ["quirk", "quirk+noise"] {
+            let cli = Cli::try_parse_from(["swoosh", "serve", "--local", "--transport", quirk])
+                .unwrap_or_else(|err| panic!("serve --local --transport {quirk} parses: {err}"));
+            assert!(matches!(
+                cli.command,
+                Some(Command::Serve(ServeCmd {
+                    reach: transport::ReachArgs { local: true, .. },
+                    ..
+                }))
+            ));
+        }
+
+        // Placement: the flag rides `ReachArgs`, so a root or a transport-free verb never takes it.
+        assert!(
+            Cli::try_parse_from(["swoosh", "--local", "serve"]).is_err(),
+            "`--local` is not a root global"
+        );
+        assert!(
+            Cli::try_parse_from(["swoosh", "identity", "--local"]).is_err(),
+            "`identity` binds no transport"
+        );
+        assert!(
+            Cli::try_parse_from(["swoosh", "contact", "ls", "--local"]).is_err(),
+            "`contact ls` binds no transport"
+        );
+    }
+
+    /// The flag's one mechanism is constructor selection: `--local` picks the persisted-minimal iroh
+    /// bind, the unset bit the n0 default. A pure mapping, so the branch is covered without a socket,
+    /// and the composition root's match has an arm per mode with no wildcard.
+    #[test]
+    fn the_local_flag_selects_the_local_iroh_constructor() {
+        assert_eq!(IrohBind::of(false), IrohBind::N0);
+        assert_eq!(IrohBind::of(true), IrohBind::Local);
+    }
+
+    /// `--local` is a bind knob, not an auth knob: it must not change what `serve` gates or what
+    /// `--public` opens. The parsed shape carries the same opened set and the same credential/identity
+    /// declaration as the unflagged serve; the flag never enters the gate path.
+    #[test]
+    fn the_local_flag_leaves_the_gate_and_public_shape_alone() {
+        let cli = Cli::try_parse_from(["swoosh", "serve", "--local", "--public", "speed"])
+            .expect("serve --local --public parses");
+        let Some(Command::Serve(cmd)) = cli.command else {
+            panic!("serve parses to the serve verb");
+        };
+        assert!(cmd.reach.local, "the flag is set");
+        assert_eq!(
+            cmd.public,
+            vec!["speed".to_owned()],
+            "--public names the same opened set"
+        );
+        assert!(
+            matches!(cmd.credential(), credential::Credential::Anonymous),
+            "serve still dials as no one"
+        );
+        assert_eq!(
+            cmd.identity(),
+            identity::Identity::Persisted,
+            "serve still binds the persisted key"
+        );
     }
 
     /// The one control grammar (delib-47): BARE `stop` splits to the local (own-node) path, `stop --at <peer>`

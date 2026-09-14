@@ -98,6 +98,7 @@ impl crate::reaching::Reaching for StatusCmd {
             node,
             ctx.contacts,
             ctx.transport,
+            ctx.local,
             ctx.present,
             ctx.membership,
         )
@@ -114,6 +115,7 @@ impl StatusCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
+        local: bool,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
@@ -158,7 +160,7 @@ impl StatusCmd {
         }
 
         node.close().await;
-        reach::fanout_outcome(any_healthy, any_refused, &peer, transport)
+        reach::fanout_outcome(any_healthy, any_refused, &peer, transport, local)
     }
 
     /// The bare (no-peer) path: query YOUR OWN node's status over the local control socket. Runs

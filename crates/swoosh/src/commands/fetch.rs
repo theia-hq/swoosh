@@ -85,6 +85,7 @@ impl crate::reaching::Reaching for FetchCmd {
             node,
             ctx.contacts,
             ctx.transport,
+            ctx.local,
             ctx.present,
             ctx.membership,
         )
@@ -104,12 +105,14 @@ impl FetchCmd {
         node: &Node<T, D>,
         contacts: &Contacts,
         transport: transport::Transport,
+        local: bool,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
         // The redundant-present conflict is rejected ONCE in the composition root via
         // `Reaching::reject_redundant_present`, before this runs.
-        let Reached { session, label } = reach::dial(node, contacts, &self.via, transport).await?;
+        let Reached { session, label } =
+            reach::dial(node, contacts, &self.via, transport, local).await?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
         let addr = listener.local_addr()?;
         println!("swoosh fetch ready. local URL:\n");
