@@ -69,6 +69,7 @@ but it is direct-only: use iroh when you need NAT traversal.
 peer: mainly a quirk dial across networks, or a locked-down network where automatic discovery is
 blocked. Take the `direct` line a peer's `serve` printed and pass it back:
 
+<!-- manual: needs a direct peer and its address -->
 ```console
 $ swoosh ping bf01hcq6… --transport quirk+noise --peer bf01hcq6…=127.0.0.1:50902 -c 4
 ```

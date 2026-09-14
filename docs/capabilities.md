@@ -42,6 +42,7 @@ bf01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.115:51445 and relayed)
 If they already reach the node another way (a petname they saved, say), they name the peer and present
 the link separately:
 
+<!-- manual: needs a live gated peer -->
 ```console
 $ swoosh ping bf01hcq6… --present sheer:bf01hcq6…
 ```
@@ -53,7 +54,7 @@ The gate checks the link offline, against your key. The holder gets that one ser
 The link stops working at its expiry; `swoosh grant ls` then marks it `expired`. To cut access early,
 revoke it on the node that issued it:
 
-<!-- capture: swoosh grant revoke sheer:bf01hcq6… -->
+<!-- manual: needs the link you issued -->
 ```console
 $ swoosh grant revoke sheer:bf01hcq6…
 revoked link (…/revoked)
@@ -61,7 +62,7 @@ revoked link (…/revoked)
 
 Either way the next dial is refused, with no restart:
 
-<!-- capture: swoosh ping sheer:bf01hcq6… (revoked) -->
+<!-- manual: needs a revoked link -->
 ```console
 $ swoosh ping sheer:bf01hcq6…
 bf01hcq6balrlxwa via iroh: reached, but refused (not admitted: not a member of this node's family, and no capability for this service)

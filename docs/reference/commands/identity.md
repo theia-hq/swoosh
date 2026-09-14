@@ -10,6 +10,7 @@ Usage: swoosh identity [OPTIONS]
 ```
 
 **Example.**
+<!-- capture: swoosh identity -->
 ```console
 $ swoosh identity
 bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
