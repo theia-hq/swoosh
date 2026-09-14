@@ -106,7 +106,7 @@ async fn a_gated_dial_rides_the_sealed_wrapper_over_loopback_quirk() {
     let hint: PeerHint = format!("{host_id}={}", addr.hints[0])
         .parse()
         .expect("the direct hint parses");
-    let discovery = PeerHint::discovery(&member_transport, [hint]);
+    let discovery = PeerHint::discovery(&member_transport, [hint]).discovery;
     let member = Node::new(member_transport, discovery);
     let badge = signet_badge(member.node_id());
 
