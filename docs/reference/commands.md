@@ -3,7 +3,7 @@
 Every verb, with a real example and the one thing to know about it. This is a lookup, not a read: if you
 are going top to bottom, you probably want a [use case](../use-cases/README.md) instead.
 
-The `Usage` line under each command is generated from the parser, so it cannot drift from `--help`. Run
+The `Usage` line under each command is hand-copied from the parser's `-h` output. Run
 `swoosh <command> --help` for the full text of any flag.
 
 ## Common options

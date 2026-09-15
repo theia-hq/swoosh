@@ -23,7 +23,7 @@ gated to your signet.
 `news=fetch:<origin>` (fetch URLs for callers), or `web=127.0.0.1:8080`
 (front any local TCP service). Every entry must be `name=target`: a bare `ping` or `ping:` is refused with a
 message naming this form.
-`control.stop` and `control.services` are always served and always gated.
+`control.stop` and `control.services` are always served, and member-only.
 A raw-stream service (`file:`, `fifo:`, `stdin:`) has no auth of its own, so `--public` refuses it and
 points at `--public-unsafe`; that flag prints the resolved absolute path in the readiness banner, so name
 only a file you mean to hand out. `--resident` holds the home's lock and serves the local control socket

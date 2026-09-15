@@ -6,8 +6,8 @@ Show the connection path to a peer: direct or relayed, the remote address, and a
 
 <!-- generated: usage from `swoosh status -h`; option lines curated -->
 ```
-Usage: swoosh status [OPTIONS] <peer>
-  <peer>   a petname, a raw node id, or a sheer: link
+Usage: swoosh status [OPTIONS] [peer]
+  [peer]   a petname, a raw node id, or a sheer: link
 ```
 
 **Example.** `swoosh status desk` answers the one question a p2p link always raises: am I talking to
