@@ -35,10 +35,10 @@ const KEY_LEN: usize = 32;
 ///
 /// A stored badge is a longer-lived bearer credential than the 5-minute self-sign a signet holder mints
 /// per dial, so it must carry a FINITE lifetime, not "forever" -- a lost, un-denylisted device then ages
-/// out on its own even absent an explicit revoke. Offline there is no control plane to split the authkey's
+/// out on its own even absent an explicit revoke. Offline there is no control plane to split the invite's
 /// leak-window from the badge lifetime, so this value IS the worst-case leak window for a mint that is
 /// never revoked. 90 days is the chosen default: a real re-mint cadence (about quarterly) a homelab owner
-/// can absorb, and a 90-day backstop instead of a year, matching the auth-key default operators expect. A
+/// can absorb, and a 90-day backstop instead of a year, matching the invite default operators expect. A
 /// longer window (up to a year via `swoosh invite add --expires 365d`, for a controlled reused-secret case such
 /// as qat) stays reachable, but is now a conscious opt-in rather than the silent, only value. Revocation
 /// stays the primary, immediate control (the `FileDenylist`, offline + live); the TTL is the backstop for

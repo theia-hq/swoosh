@@ -23,7 +23,7 @@ hand this invite to the machine (a SECRET: adopting it becomes this identity and
 A derived invite's membership badge lasts 90 days unless you pass `--expires`; see
 [`swoosh invite`](../reference/commands.md#invite).
 
-Store that invite as a CI secret named `THEIA_AUTHKEY`. On GitHub Actions, use the flagship action: it
+Store that invite as a CI secret named `THEIA_INVITE`. On GitHub Actions, use the flagship action: it
 installs swoosh, adopts the invite, and serves the runner's default services (a keyless shell plus
 `ping`/`speed` diagnostics), all gated to your signet:
 
@@ -31,7 +31,7 @@ installs swoosh, adopts the invite, and serves the runner's default services (a 
 # in your CI job
 - uses: theia-hq/swoosh-action@v2
   with:
-    authkey: ${{ secrets.THEIA_AUTHKEY }}
+    invite: ${{ secrets.THEIA_INVITE }}
 ```
 
 After this step, the runner is a device your signet trusts, reachable over the overlay as `me/ci-runner`.
@@ -40,9 +40,9 @@ Not on GitHub Actions? Install swoosh directly and adopt by hand:
 
 ```yaml
 - run: curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/install.sh | sh
-- run: swoosh adopt          # reads SWOOSH_AUTHKEY from the environment
+- run: swoosh adopt          # reads SWOOSH_INVITE from the environment
   env:
-    SWOOSH_AUTHKEY: ${{ secrets.THEIA_AUTHKEY }}
+    SWOOSH_INVITE: ${{ secrets.THEIA_INVITE }}
 ```
 
 ## Ssh into the runner
@@ -52,7 +52,7 @@ To reach the runner interactively (poke at a live failure, say), hold it open wi
 ```yaml
 - uses: theia-hq/swoosh-action@v2
   with:
-    authkey: ${{ secrets.THEIA_AUTHKEY }}
+    invite: ${{ secrets.THEIA_INVITE }}
     expires: 15m
 ```
 
@@ -103,7 +103,7 @@ To rotate instead of revoke, create a fresh invite, update the CI secret, and re
 
 ## The limit
 
-Anyone who can read the `THEIA_AUTHKEY` secret can adopt that device identity, so scope the secret to
+Anyone who can read the `THEIA_INVITE` secret can adopt that device identity, so scope the secret to
 the job that needs it and rotate it like any credential. A revoke is node-local: it writes that node's own
 denylist, so revoke on every machine the runner reaches. See [revocation](../keys.md#revocation).
 

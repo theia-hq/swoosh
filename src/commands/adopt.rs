@@ -7,7 +7,7 @@
 //!   The token carries no secret, so it is safe in transit; it is NOT authenticated, so the badge is
 //!   checked against this machine's key, and the full signet is printed for an out-of-band compare,
 //!   before anything is written.
-//! - A DERIVED invite (`invite:<seed>.<signet>.<badge>`, or a legacy `authkey:`) carries a child seed.
+//! - A DERIVED invite (`invite:<seed>.<signet>.<badge>`) carries a child seed.
 //!   Adopting writes that seed as this machine's identity, so it comes up AS the derived device. The seed
 //!   is a device SECRET: hand this shape over a private channel only.
 //!
@@ -17,8 +17,8 @@
 //!
 //! An invite is a secret only for the derived shape, so it is not forced onto argv (visible in `ps` /
 //! `/proc`): the value comes off the command line where the caller chooses, via the shared secret-input
-//! convention (a literal, `-` for stdin, `@<path>` for a file, or `SWOOSH_AUTHKEY`). The `-`/`@`
-//! redirection is an argv convention only: an invite read from `SWOOSH_AUTHKEY` is taken VERBATIM (a
+//! convention (a literal, `-` for stdin, `@<path>` for a file, or `SWOOSH_INVITE`). The `-`/`@`
+//! redirection is an argv convention only: an invite read from `SWOOSH_INVITE` is taken VERBATIM (a
 //! leading `-` or `@` there is part of the token, not a stdin/file redirect).
 
 use std::time::SystemTime;
@@ -35,14 +35,13 @@ use crate::{config, identity};
 
 /// The environment variable an operator may set instead of putting the invite on argv. A PARTIAL close
 /// only: the value is owner-readable in `/proc/<pid>/environ`, but every child the process spawns inherits
-/// it (and `swoosh ssh` spawns `ssh`), so it is a convenience, never a full close of the argv leak. The
-/// name keeps the legacy spelling so a CI secret provisioned before the invite rename still lands.
-const AUTHKEY_ENV: &str = "SWOOSH_AUTHKEY";
+/// it (and `swoosh ssh` spawns `ssh`), so it is a convenience, never a full close of the argv leak.
+const INVITE_ENV: &str = "SWOOSH_INVITE";
 
 /// Adopt an invite: trust its signet and store its badge (a derived invite also becomes its identity).
 #[derive(Debug, Args)]
 pub struct AdoptCmd {
-    /// the invite to adopt (a secret for a derived invite; `-` stdin, `@<path>` file, or SWOOSH_AUTHKEY)
+    /// the invite to adopt (a secret for a derived invite; `-` stdin, `@<path>` file, or SWOOSH_INVITE)
     #[arg(
         value_name = "invite",
         long_help = "The invite to adopt. A derived invite (`invite add` with no `--for`) carries a \
@@ -50,7 +49,7 @@ pub struct AdoptCmd {
                      --for <key>`) carries no secret and leaves this machine's identity alone. Give it as \
                      a literal, `-` to read stdin, or `@<path>` to read a file. argv is visible to other \
                      processes (`ps`, `/proc`), so prefer stdin or a file when the invite carries a \
-                     secret.\n\nOr set SWOOSH_AUTHKEY: a convenience, not a full close (spawned children \
+                     secret.\n\nOr set SWOOSH_INVITE: a convenience, not a full close (spawned children \
                      inherit it). The env value is taken VERBATIM: a leading `-` or `@` has no special \
                      meaning there, so it must be the invite itself, never a redirection."
     )]
@@ -71,9 +70,9 @@ impl AdoptCmd {
         let from_argv = matches!(self.invite, Some(SecretSource::Literal(_)));
         let token = SecretSource::resolve_quiet(
             self.invite,
-            std::env::var(AUTHKEY_ENV).ok(),
+            std::env::var(INVITE_ENV).ok(),
             "invite",
-            AUTHKEY_ENV,
+            INVITE_ENV,
         )?
         .read()?;
         let invite = Invite::parse(&token)?;
@@ -122,35 +121,27 @@ impl AdoptCmd {
                 let node = NodeId::from_ed25519_secret(&seed);
                 // Same device-side check as the bound arm, on the node the seed derives: the badge must
                 // root at the named signet and bind this device before the seed or badge is persisted.
-                if let Some(badge) = &badge {
-                    verify_badge(badge, node, signet)?;
-                }
+                verify_badge(&badge, node, signet)?;
                 admit_signet(home, signet, self.force).await?;
                 // Same badge guard as the bound arm, before the seed write: a differing stored badge
                 // cannot be displaced by a replayed token without `--force`.
-                if let Some(badge) = &badge {
-                    admit_badge(home, badge, self.force).await?;
-                }
+                admit_badge(home, &badge, self.force).await?;
                 // Become the derived device: write the child seed as SWOOSH's persisted identity -- the
                 // SAME store `swoosh serve` binds under -- so this node comes up AS the adopted device.
                 identity::write(&seed, home).await?;
                 // Trust the signet, exactly as the bound shape does.
                 config::write_signet(home, signet).await?;
-                // Store the badge when the invite carried one; a legacy two-field authkey has none, and
-                // the device falls back to self-signing (only useful for the signet holder).
-                if let Some(badge) = &badge {
-                    config::write_badge(home, badge).await?;
-                }
+                // Store the badge the derived invite carries, so this device presents the signet-signed
+                // credential when it dials a family-gated node.
+                config::write_badge(home, &badge).await?;
                 println!("adopted this machine as {node}  [mine]");
                 println!(
                     "trusting signet {signet}: `swoosh serve` now admits its members and delegates."
                 );
                 println!("{}", COMPARE_SIGNET);
-                if badge.is_some() {
-                    println!(
-                        "stored your membership badge: this device now reaches your gated services."
-                    );
-                }
+                println!(
+                    "stored your membership badge: this device now reaches your gated services."
+                );
             }
         }
         Ok(())

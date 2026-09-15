@@ -28,7 +28,7 @@ pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
 }
 
 /// Write this node's signet: the public [`NodeId`] its default gate will trust, as `adopt` sets it from an
-/// authkey. Overwrites any prior signet (re-provisioning re-trusts), creating the store dir. Written
+/// invite. Overwrites any prior signet (re-provisioning re-trusts), creating the store dir. Written
 /// `0600` beside the secret identity: the signet roots this node's whole trust decision (whose devices it
 /// admits), so it must not be world-readable to a local user who could read or (worse) rewrite it.
 pub async fn write_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
@@ -37,8 +37,8 @@ pub async fn write_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
 
 /// Load this device's stored membership badge: the signet-signed, device-bound `sheer:` link it presents
 /// on connect, or `None` if none was stored. An absent file means the node was provisioned without a badge
-/// (a legacy two-field authkey) or is the signet holder itself (person-zero), either of which falls back to
-/// self-signing. Mirrors [`load_signet`].
+/// (a home from before badges were carried, or a self-rooted node) or is the signet holder itself
+/// (person-zero), either of which falls back to self-signing. Mirrors [`load_signet`].
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 pub async fn load_badge(home: &Home) -> eyre::Result<Option<String>> {
@@ -53,7 +53,7 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<String>> {
 }
 
 /// Write this device's membership badge: the signet-signed, device-bound `sheer:` link it presents on
-/// connect, as `adopt` stores it from an authkey's badge field. Overwrites any prior badge (re-provisioning
+/// connect, as `adopt` stores it from an invite's badge field. Overwrites any prior badge (re-provisioning
 /// re-badges), creating the store dir. It lands beside the identity, mirroring [`write_signet`], and is
 /// written `0600`: though the signet already signed it (it carries no secret), it is a device-bound
 /// membership credential and this store is owner-only throughout, so it is not left world-readable either.
