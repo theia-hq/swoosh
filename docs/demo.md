@@ -156,10 +156,19 @@ The ed25519 NodeId is derived from the persisted secret, so it is the same acros
 construction, not coincidence (pinned in CI: one secret over both backends asserts equal NodeIds). The
 member runs the identical commands, now over iroh with no `--peer`:
 
-<!-- pending live-run: iroh reach over the internet; needs a second host for an internet leg (the 2026-09-15 run dialed same-host, direct) -->
+<!-- live-run: iroh reach over the internet observed 2026-09-15 (a GitHub runner reached a home node across NAT); RTT, path, and throughput vary per run -->
 ```console
 $ swoosh ping  $SERVER --transport iroh -c 5 -i 0.2
+bf01f62wtyapessv via iroh: mixed (direct to 143.105.x.x:41125 and relayed)
+  5 sent, 5 received, 0% loss
+  rtt min/avg/max/mdev = 193.685/233.854/306.825/45.510 ms
 $ swoosh speed $SERVER --transport iroh --down -t 3
+speed test to bf01f62wtyapessv via iroh (down)
+    1.0s  0.01 MiB/s
+    2.0s  0.17 MiB/s
+    3.0s  0.61 MiB/s
+path: mixed (direct to 143.105.x.x:41125 and relayed)
+down  0.91 MiB in 3.01s = 0.30 MiB/s
 ```
 
 Same member, same server key, same verbs, real reach over the internet path. Add `-v` to `ping` to
