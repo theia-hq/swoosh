@@ -105,9 +105,14 @@ UNIVERSE=$(printf '%s\n%s\n' "$universe_pkgs" "$universe_deps" | grep -v '^$' | 
 #     (the substrate crates in a workspace document each other: bifrost-core points at where
 #     the `Transport` seam lives, quirk describes its bifrost adapter). Naming an EXTERNAL
 #     crate you do not depend on is the cross-layer leak (`measure` naming `tightbeam`).
-#   * APP     -- a package whose primary product is a binary (a `src/main.rs`, Cargo's
-#     application convention: `swoosh`). The application IS the consumer; NO other crate may
-#     name it, even a co-located sibling (`measure`/`fetch`/`beam` must not name `swoosh`).
+#   * APP     -- a package whose primary product is a binary, under EITHER Cargo binary
+#     layout: the conventional root `src/main.rs`, or its own bin tree at
+#     `src/bin/<package>/main.rs` (swoosh's CLI-as-its-own-tree shape). The application IS
+#     the consumer; NO other crate may name it, even a co-located sibling
+#     (`measure`/`fetch`/`beam` must not name `swoosh`). Scope note: the name match cannot
+#     separate a bin-tree app from a library shipping a same-named demo bin (tightbeam's
+#     layout); each repo runs its OWN copy, and this copy gates the swoosh repo, whose one
+#     package is the app. Re-decide before syncing this probe into tightbeam's copy.
 LOCAL_PKGS=" "
 APP_PKGS=" "
 for m in $manifests; do
@@ -117,7 +122,9 @@ for m in $manifests; do
   nm=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$m" | head -n1)
   [ -n "$nm" ] || continue
   LOCAL_PKGS="${LOCAL_PKGS}${nm} "
-  [ -f "$d/src/main.rs" ] && APP_PKGS="${APP_PKGS}${nm} "
+  if [ -f "$d/src/main.rs" ] || [ -f "$d/src/bin/$nm/main.rs" ]; then
+    APP_PKGS="${APP_PKGS}${nm} "
+  fi
 done
 
 # ---------------------------------------------------------------------------------------
@@ -208,13 +215,14 @@ for manifest in $manifests; do
 
   # 2. FLAG check: a prime LIBRARY must not allude to a consumer CLI flag. Two surfaces name
   # flags legitimately and are derived, not listed:
-  #   * An APPLICATION crate (its primary product IS the CLI) -- signalled by a `src/main.rs`
-  #     (Cargo's primary-binary convention). swoosh IS the consumer; its flags are its own.
-  #     Such a crate is skipped ENTIRELY.
+  #   * An APPLICATION crate (its primary product IS the CLI) -- signalled by a binary target
+  #     named for the package: the root `src/main.rs`, or a bin tree at
+  #     `src/bin/<package>/main.rs` (Cargo's two primary-binary conventions). swoosh IS the
+  #     consumer; its flags are its own. Such a crate is skipped ENTIRELY.
   #   * A library that also ships an auxiliary demo binary under `src/bin/` (tightbeam) -- the
   #     library is the product and IS policed, but its `src/bin/` files are the CLI surface
   #     ("the bin's OWN flags are fine") and are excluded from THIS check only.
-  if [ ! -f "$dir/src/main.rs" ]; then
+  if [ ! -f "$dir/src/main.rs" ] && [ ! -f "$dir/src/bin/$own/main.rs" ]; then
     libfiles=""
     for f in "$@"; do
       case "$f" in */src/bin/*) continue ;; esac

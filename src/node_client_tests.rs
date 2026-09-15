@@ -9,8 +9,8 @@ use bifrost::NodeId;
 use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 
 use super::{NodeClient as _, UidSocket};
-use crate::commands::serve::Resident;
-use crate::commands::serve::control_codec::{ControlError, DisabledList, Request, Response};
+use crate::serve::Resident;
+use crate::serve::control_codec::{ControlError, DisabledList, Request, Response};
 
 /// Serializes scratch dir names within this test process; the pid keeps two concurrent runs apart.
 /// Names stay short: the control socket path must fit `sun_path` (104 bytes on macOS).

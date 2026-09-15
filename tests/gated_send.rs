@@ -28,7 +28,7 @@ use bifrost::wire::{Blob, Transfer};
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::{FileDenylist, Identity};
-use swoosh::commands::serve::Recv;
+use swoosh::serve::Recv;
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 

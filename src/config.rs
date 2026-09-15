@@ -67,7 +67,7 @@ pub async fn write_badge(home: &Home, badge: &str) -> eyre::Result<()> {
 /// group/world-traversable. Mirrors the mint-log's dir-create ([`Grants::append`](crate::grants::Grants)):
 /// create-with-mode tightens only a dir WE make and is a no-op on an existing one, so an already-provisioned
 /// store another verb (or the user) made is left as they set it, never chmod'd out from under them.
-pub(crate) fn create_store_dir(dir: &Path) -> std::io::Result<()> {
+pub fn create_store_dir(dir: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;

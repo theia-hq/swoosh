@@ -37,7 +37,7 @@ use crate::{config, transport};
 /// ALREADY-RESOLVED [`present`](Self::present) badge (minted once by [`resolve`], so the verb never
 /// re-derives it), and the [`home`](Self::home) a verb that opens its own store needs. A verb ignores
 /// the fields it does not use. `serve`'s `ExposeContext` is DELIBERATELY not here (Craftsman): it lives on
-/// [`ServeCmd`](crate::commands::serve::ServeCmd), which reads its own, so this context stays uniform.
+/// the serve command's own type (the CLI's `ServeCmd`), which reads its own, so this context stays uniform.
 pub struct ReachCtx<'a> {
     /// The address book, to resolve a petname in a verb's peer slot.
     pub contacts: &'a Contacts,
@@ -238,7 +238,7 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
 /// [`reject_redundant_present`](Reaching::reject_redundant_present), so without this guard the flag
 /// parsed and was silently ignored (I.3 forbids a flag with no effect). One home for the exact teaching
 /// line, called by each bare arm before it resolves the local socket.
-pub(crate) fn reject_bare_present(present: Option<&SheerLink>) -> eyre::Result<()> {
+pub fn reject_bare_present(present: Option<&SheerLink>) -> eyre::Result<()> {
     if present.is_some() {
         eyre::bail!("--present only applies when reaching a peer; drop it or name one");
     }
@@ -251,7 +251,7 @@ pub(crate) fn reject_bare_present(present: Option<&SheerLink>) -> eyre::Result<(
 /// root reads these flags, so without this guard they parsed and were silently ignored (I.3 forbids a
 /// flag with no effect). One home for the teaching line, called by each bare arm beside
 /// [`reject_bare_present`].
-pub(crate) fn reject_bare_reach(reach: &transport::ReachArgs) -> eyre::Result<()> {
+pub fn reject_bare_reach(reach: &transport::ReachArgs) -> eyre::Result<()> {
     if reach.transport != transport::Transport::default() {
         eyre::bail!("--transport only applies when reaching a peer; drop it or name one");
     }

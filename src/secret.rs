@@ -165,7 +165,7 @@ impl SecretSource {
 /// The one-line argv-leak warning for a SECRET value named `what`, written best-effort to `warn`: a
 /// broken stderr must not fail the command. Shared by [`SecretSource::resolve`] (the value is always a
 /// secret there) and a caller that classifies the value itself after [`SecretSource::resolve_quiet`].
-pub(crate) fn warn_argv_leak<W: std::io::Write>(warn: &mut W, what: &str) {
+pub fn warn_argv_leak<W: std::io::Write>(warn: &mut W, what: &str) {
     let _ = writeln!(
         warn,
         "warning: passing the {what} as a bare argument leaks it to other processes (`ps`, `/proc/<pid>/cmdline`); prefer `-` to read stdin or `@<path>` to read a file"

@@ -6,9 +6,8 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
-[[bin]]
-name = "swoosh"
-path = "src/main.rs"
+# No explicit `[[bin]]`: the CLI is its own module tree under the conventional `src/bin/swoosh/`, which
+# Cargo's target discovery names from the directory. The library (`src/lib.rs`) is the node engine.
 
 [features]
 # `ssh` pulls in the `sshh` engine from the services repo and binds the `sshd:` handler at the serve

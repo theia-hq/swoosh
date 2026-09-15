@@ -20,7 +20,7 @@ use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, ProtocolError, Refusal, Speedtest};
 use nauthy::FileDenylist;
-use swoosh::commands::serve::{CONTROL_STOP_SERVICE, Stop};
+use swoosh::serve::{CONTROL_STOP_SERVICE, Stop};
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
 /// The signet's fixed secret: its public half is the family the gate trusts. No badge here is rooted at it,
@@ -64,7 +64,7 @@ async fn proof() {
         // gated `ping` binds the owner engine.
         let public: Vec<nauthy::Service> = vec!["speed".parse().unwrap()];
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-        let exposer = swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED, &public)
+        let exposer = swoosh::serve::diagnostics(Router::new(gate), HOST_SEED, &public)
             .unwrap()
             .member_service(
                 CONTROL_STOP_SERVICE.parse().unwrap(),
