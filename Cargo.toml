@@ -1,13 +1,25 @@
-[workspace]
-resolver = "3"
-members = ["crates/swoosh"]
-
-[workspace.package]
+[package]
+publish = false  # git-only for now, not published to crates.io
+name = "swoosh"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 
-[workspace.dependencies]
+[[bin]]
+name = "swoosh"
+path = "src/main.rs"
+
+[features]
+# `ssh` pulls in the `sshh` engine from the services repo and binds the `sshd:` handler at the serve
+# root, so a default swoosh serves `tunnel expose ssh=sshd:` and `swoosh ssh` reaches it. DEFAULT-ON: the
+# keyless shell is a headline capability, not an opt-in. A lean client that only reaches out
+# (`ping`/`speed`/`fetch`) can drop the russh/pty tree with `--no-default-features`, keeping swoosh the
+# one binary either way.
+default = ["ssh"]
+ssh = ["dep:sshh"]
+
+[dependencies]
 # theia. Each sibling git-dep is pinned to an EXACT rev so a `swoosh vX` tag records exactly which
 # nauthy/tightbeam/bifrost commit compiled in, instead of floating on default-branch HEAD (an unpinned
 # HEAD is how a past auth-bypass slipped in unnoticed). The local dev `.cargo/config.toml` still [patch]es
@@ -19,7 +31,6 @@ bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "e75a728b304b6cc2
 bifrost-core = { git = "https://github.com/theia-hq/bifrost", rev = "e75a728b304b6cc2bd090dbb45c0f9e6a3dafa74" }
 bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "e75a728b304b6cc2bd090dbb45c0f9e6a3dafa74" }
 bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "e75a728b304b6cc2bd090dbb45c0f9e6a3dafa74" }
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "e75a728b304b6cc2bd090dbb45c0f9e6a3dafa74" }
 bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "e75a728b304b6cc2bd090dbb45c0f9e6a3dafa74" }
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "e75a728b304b6cc2bd090dbb45c0f9e6a3dafa74" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "4086838c65f176a402a746ced0b7f76992171301" }
@@ -29,29 +40,42 @@ tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "937a4fbdd88e
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
 fetch = { git = "https://github.com/theia-hq/services", rev = "426482adec279fa5910b642b744fb3a7a7ef672b" }
 measure = { git = "https://github.com/theia-hq/services", rev = "426482adec279fa5910b642b744fb3a7a7ef672b" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "426482adec279fa5910b642b744fb3a7a7ef672b" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "426482adec279fa5910b642b744fb3a7a7ef672b", optional = true }
 transfer = { git = "https://github.com/theia-hq/services", rev = "426482adec279fa5910b642b744fb3a7a7ef672b" }
 
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
 eyre = "0.6"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+httparse = "1"
+# `service enable`/`disable` take an flock around the read-modify-write of `<home>/disabled` so two
+# concurrent toggles cannot lose an edit. std file locking is MSRV-1.89 (this package targets 1.85), so
+# the flock rides libc, matching how `sshh` already reaches for the same crate.
 libc = "0.2"
 rand = "0.8"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = { version = "1", features = ["derive"] }
 
-[workspace.lints.clippy]
+[dev-dependencies]
+# The in-process transport the `gated_measure` proof drives: two mem nodes share a global registry, so a
+# client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "e75a728b304b6cc2bd090dbb45c0f9e6a3dafa74" }
+
+# `test-util` gives the control-client deadline test tokio's paused clock, so the 5 s read bound is
+# asserted without a wall-clock wait. Dev-only: the shipped binary never compiles it in.
+tokio = { version = "1", features = ["test-util"] }
+
+[lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
 wildcard_imports = "deny"
 std_instead_of_core = "warn"
 
-[workspace.lints.rust]
+[lints.rust]
 unused_must_use = "deny"
 
 # Ship a lean release binary: strip symbols, whole-program LTO, single codegen unit. Roughly halves the

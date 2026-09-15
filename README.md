@@ -54,7 +54,7 @@ This page describes the default branch; the released docs are at the newest tag.
 
 ## Layout
 
-- `crates/swoosh` the CLI: binds one node under the chosen key and transport, then runs a command.
+- `src` the CLI: binds one node under the chosen key and transport, then runs a command.
 - The service engines (`fetch`, `measure`, `sshh`, `transfer`) live in
   [theia-hq/services](https://github.com/theia-hq/services) and are consumed here as exact-rev git
   dependencies.
