@@ -155,6 +155,44 @@ async fn bare_ls_without_resident_is_teaching() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A bare `service ls` reaches no peer, so the reach trio (`--transport`/`--local`/`--peer`) has nothing
+/// to bind or find: each is refused by name, never silently ignored (I.3, B4).
+#[tokio::test]
+async fn bare_ls_rejects_the_reach_flags() {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        ls: ServiceLsCmd,
+    }
+
+    let base = scratch("reach");
+    let home = home_in(&base);
+    let hint = format!(
+        "{}=127.0.0.1:9000",
+        bifrost::NodeId::from_ed25519_secret(&[5u8; 32])
+    );
+    let cases: [(&[&str], &str); 3] = [
+        (&["x", "--transport", "quirk"], "--transport"),
+        (&["x", "--local"], "--local"),
+        (&["x", "--peer", &hint], "--peer"),
+    ];
+    for (argv, flag) in cases {
+        let ls = Wrap::try_parse_from(argv)
+            .expect("the reach flag parses")
+            .ls;
+        let error = ls
+            .run_local(&home)
+            .await
+            .expect_err("no peer, no effect: the flag must refuse, never be ignored");
+        assert_eq!(
+            format!("{error:#}"),
+            format!("{flag} only applies when reaching a peer; drop it or name one")
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// A bare `service ls` reaches no peer, so `--present` has nothing to select: it is refused with the
 /// exact teaching line, never silently dropped (I.3, MAJOR-1).
 #[tokio::test]

@@ -124,6 +124,9 @@ impl StopCmd {
         // A bare `stop` reaches no peer, so an explicit `--present` has nothing to select: refuse it
         // rather than silently dropping it (I.3), before touching the socket.
         crate::reaching::reject_bare_present(self.present.as_ref())?;
+        // The reach trio binds a transport and seeds discovery for a PEER; a bare `stop` binds neither,
+        // so the flags are refused by name rather than silently ignored (I.3, B4).
+        crate::reaching::reject_bare_reach(&self.reach)?;
         let client = ControlClient::resolve(home).map_err(control_error_report)?;
         Self::stop_resolved(&client).await
     }
