@@ -65,7 +65,7 @@ Either way the next dial is refused, with no restart:
 <!-- manual: needs a revoked link -->
 ```console
 $ swoosh ping sheer:bf01hcq6…
-bf01hcq6balrlxwa via iroh: reached, but refused (not admitted: not a member of this node's family, and no capability for this service)
+bf01hcq6balrlxwa via iroh: reached, but refused (not admitted: no member badge or capability for this service was accepted)
 Error: bf01hcq6balrlxwa: reached, but refused
 ```
 

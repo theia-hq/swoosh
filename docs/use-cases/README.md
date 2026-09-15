@@ -3,8 +3,8 @@
 Each page below is one real task, start to finish: who runs what, on which machine, with real commands
 and real output. Open the one that sounds like your problem.
 
-Read [keys](../keys.md) first if a word like *signet*, *grant*, or *fleet* is new. Every page here
-assumes that model.
+[Keys](../keys.md) explains signet, grant, and fleet; the pages inline what they need if you want to
+start now.
 
 | Situation | Page |
 | --- | --- |

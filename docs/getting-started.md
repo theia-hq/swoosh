@@ -6,7 +6,9 @@ another machine, done. Auth, names, and sharing come after, each a small additio
 
 You will need two machines (your laptop and a desktop, a home box, or a cheap VPS).
 
-> **Only one machine?** You can run the whole loop on one machine over `quirk+noise`; see
+> **Only one machine?** Run both ends on it over `quirk+noise`: start `swoosh serve --transport
+> quirk+noise` in one terminal, then reach it from another with `swoosh ping <key> --transport
+> quirk+noise --peer <key>=<addr>`, using the key and the `direct` address `serve` prints. See
 > [transports](transports.md#quirk).
 
 ## 1. Install
@@ -17,8 +19,9 @@ $ curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/inst
 ```
 
 This downloads the right binary for your platform, verifies its checksum, and installs it to
-`~/.local/bin`. Do it on both machines. (Prefer to do it yourself? Grab a binary from the
-[releases page](https://github.com/theia-hq/swoosh/releases); each carries a checksum and a signature.)
+`~/.local/bin`. Do it on both machines. Prefer to do it yourself? Grab a binary from the
+[releases page](https://github.com/theia-hq/swoosh/releases); each carries a checksum and a
+build-provenance attestation (`gh attestation verify`).
 
 ## 2. Open a service to anyone (machine A)
 
@@ -60,18 +63,15 @@ bf01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.64:51778 and relayed)
   rtt min/avg/max/mdev = 0.532/0.739/0.888/0.103 ms
 ```
 
-<!-- live-run: real iroh throughput over the internet, non-deterministic; re-capture before release -->
+<!-- live-run: real iroh throughput; a public route is metered, so the run may stop before -t -->
 ```console
-$ swoosh speed bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q --down -t 5
-speed test to bf01hcq6balrlxwa via iroh (down)
-    1.0s  38.24 MiB/s
-    2.0s  60.25 MiB/s
-    3.0s  60.18 MiB/s
-    4.0s  59.46 MiB/s
-    5.0s  59.63 MiB/s
-path: mixed (direct and relayed)
-down  297.79 MiB in 5.00s = 59.56 MiB/s
+$ swoosh speed bf01uyi7g54bpea45hafea4gohlnay5bs23p3ck4z4g24dvcpeldkczq --down -t 5
+speed test to bf01uyi7g54bpea4 via iroh (down)
+path: direct to 127.0.0.1:50769
+down  64.00 MiB in 0.58s = 110.87 MiB/s
 ```
+
+An open route is metered: 64 MiB per direction per stream, so the test may stop before `-t`.
 
 That is a real round trip and real throughput to another machine, reached by key alone, across the
 internet, with no account anywhere. That is your first success.

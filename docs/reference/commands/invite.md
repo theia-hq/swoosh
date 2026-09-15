@@ -26,13 +26,13 @@ its public half: `swoosh invite add laptop --for <key>` prints an invite with no
 signs a year-long badge.
 
 **Things to know.** A derived invite (`--for` omitted) carries the device seed, so hand it over something
-private. A bound invite (`--for`) carries no secret, so it is safe in transit, but it is not signed by the
-signet it names: `invite add` prints the full signet and the full admitted key so the two sides can compare
-them out of band before the device serves. The badge expiry is the leak window for a derived invite, and
-`adopt` checks the badge is bound to the machine's own key and is unexpired before storing it. An invite
-admits one device at the whole gate; to open one service to a device or a whole fleet, use
-`swoosh grant issue`. A label already recorded for a different key is refused; `invite rm <label>` cuts the
-old badge and `swoosh contact rm me/<label>` frees the name.
+private. A bound invite (`--for`) carries no secret, so it is safe in transit. It is not signed by the
+signet it names, so compare the full signet and the full admitted key that `invite add` prints out of band
+before admission: the invite is a token, not proof of who sent it. The badge expiry is the leak window for
+a derived invite, and `adopt` checks the badge is bound to the machine's own key and is unexpired before
+storing it. An invite admits one device at the whole gate; to open one service to a device or a whole
+fleet, use `swoosh grant issue`. A label already recorded for a different key is refused; `invite rm <label>`
+cuts the old badge and `swoosh contact rm me/<label>` frees the name.
 
 ## `swoosh invite ls`
 

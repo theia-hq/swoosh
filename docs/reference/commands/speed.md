@@ -17,6 +17,7 @@ Usage: swoosh speed [OPTIONS] <peer>
 **Example.** `swoosh speed desk --bidir -t 5` measures upload and download at once.
 
 **Things to know.** `--bidir` works over `quirk+noise` too. Numbers over iroh depend on the live path
-(direct vs relayed) and are not comparable to a local `quirk+noise` run.
+(direct vs relayed) and are not comparable to a local `quirk+noise` run. A `--public` speed route
+binds the metered engine: one transfer at a time, a 64 MiB per-direction and 15-second per-stream cap.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

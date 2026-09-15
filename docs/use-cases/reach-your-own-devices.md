@@ -30,10 +30,12 @@ line to a file, the `invite:` prefix included. The file must be `0600` (`chmod 6
 $ swoosh adopt @invite.txt
 adopted this machine as bf01imv3ljql6kjn  [mine]
 trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates.
+compare that signet with the owner out of band before serving: the token is not signed by the signet it names, so it alone does not prove who sent it.
 stored your membership badge: this device now reaches your gated services.
 ```
 
-The laptop is now a device your signet vouches for. Repeat once per machine. To keep the secret from
+An invite is a token, not proof of who sent it: compare that signet with the owner out of band before
+serving. The laptop is now a device your signet vouches for. Repeat once per machine. To keep the secret from
 travelling at all, make the key ON the new machine first (`swoosh identity` prints it) and sign for that
 key with `swoosh invite add laptop --for <key>` instead.
 
@@ -73,7 +75,7 @@ added desk -> bf01hcq6balrlxwa
 <!-- live-run: real iroh RTT over the internet, non-deterministic; re-capture before release -->
 ```console
 $ swoosh ping desk -c 4
-desk/default via iroh: mixed (direct to 135.129.124.149:56141 and relayed)
+desk/default via iroh: mixed (direct to 135.129.x.x:56141 and relayed)
   4 sent, 4 received, 0% loss
   rtt min/avg/max/mdev = 41.843/113.534/299.872/93.169 ms
 ```
