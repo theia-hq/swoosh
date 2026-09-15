@@ -26,10 +26,8 @@ pub enum ContactCmd {
     /// Record a person's signet root, so `--for fleet:<petname>` binds their fleet.
     Signet(SignetCmd),
     /// List saved contacts, or one contact's devices.
-    #[command(alias = "list")]
     Ls(LsCmd),
     /// Remove a contact, or one of its devices (`alice` or `alice/macbook`).
-    #[command(alias = "remove")]
     Rm(RmCmd),
 }
 

@@ -28,6 +28,6 @@ speed             gated
 the name to `<home>/disabled` and `enable <service>` removes it. A running `serve` honors the change on
 the next connection, no restart, and the file is fail-closed: if it is deleted or unreadable, the
 last-known disabled set stays in force. `--at` applies to `ls` only. A bare `ls` reads your own node,
-which needs a resident `serve` (`serve --resident`). `ls` also answers to `list`.
+which needs a resident `serve` (`serve --resident`).
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
