@@ -7,7 +7,7 @@ service on your own node.
 
 <!-- generated: usage from `swoosh service -h`; option lines curated -->
 ```
-Usage: swoosh service <COMMAND>
+Usage: swoosh service [OPTIONS] <COMMAND>
   ls [--at <peer>]     list the served menu; a petname, a raw node id, or a sheer: link
   enable <service>     re-enable a disabled service
   disable <service>    disable a service

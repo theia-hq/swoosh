@@ -7,7 +7,7 @@ offline with no server and no allowlist. See [keys](../../keys.md#grant) for whe
 
 <!-- generated: usage from `swoosh grant -h`; option lines curated -->
 ```
-Usage: swoosh grant <issue | ls | narrow | revoke>
+Usage: swoosh grant [OPTIONS] <COMMAND>
   issue <service>   mint a capability link for one service
     --expires <duration>   how long the link is valid [default: 1h]
     --for <who>            bind to a device (person/device or a key) or a fleet (fleet:<person>)

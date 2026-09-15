@@ -7,7 +7,7 @@ TOML beside the identity they belong to. `alice` means whoever you pointed it at
 
 <!-- generated: usage from `swoosh contact -h`; option lines curated -->
 ```
-Usage: swoosh contact <add | signet | ls | rm>
+Usage: swoosh contact [OPTIONS] <COMMAND>
   add <name> <key>       save (or re-point) a name: alice, or alice/laptop for a device
   signet <petname> <key> record a person's signet root, so --for fleet:<petname> binds their fleet
   ls [petname]           list contacts, or one contact's devices (-q for names only)

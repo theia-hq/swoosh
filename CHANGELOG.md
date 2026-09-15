@@ -2,7 +2,26 @@
 
 All notable changes to swoosh, newest first.
 
-## Unreleased
+## v0.9.0
+
+Invite replaces mint, a node is a home, quirk gets Noise, and revocation lands live.
+
+### New
+- **`--transport quirk+noise`.** quirk behind a Noise handshake that proves the peer's key and encrypts
+  the session: the same direct-only backend, with the key proven before any byte flows. It is the only
+  quirk spelling that serves gated traffic, and the only one that carries a credential.
+- **`--local` (reach family).** No internet discovery or relays: dials and advertisements resolve over
+  local mDNS or a `--peer` hint only. A no-op on `quirk`/`quirk+noise`, which are already direct-only.
+- **`service enable <svc>` / `disable <svc>`.** Turn a served service off or on live, no restart: the change
+  is written to `<home>/disabled` and the running node honors it on the next connection, the same
+  mtime-watched, fail-closed mechanism as revocation.
+- **`invite add --expires <duration>`.** Choose a device badge's lifetime (default 90 days, previously a hardcoded
+  year); a controlled reused-secret case can opt into `--expires 365d`.
+- **`adopt` verifies the badge, and `--force` re-roots.** Adoption checks the badge binds this machine's key
+  and is unexpired before storing it; a differing badge, or an invite naming a different signet, is refused
+  unless you pass `--force`.
+- **`serve --resident`, and the bare control verbs.** A resident `serve` holds the home's lock and serves
+  the local control socket, so a bare `stop`, `service ls`, or `status` acts on your own running node.
 
 ### Changed
 - **BREAKING: bare `--transport quirk` refuses every serve and every credential-bearing dial.** quirk
@@ -24,8 +43,16 @@ All notable changes to swoosh, newest first.
   name, matching `ssh` and `forward`.
 - **BREAKING: `--key <file>` is now `--home <dir>` (env `SWOOSH_HOME`).** A node is selected by its home
   directory; the key lives at `<home>/identity.key` (the GNUPGHOME model). `--key` errors forward.
-- **BREAKING: `stop` and `service` reshaped for local-vs-peer.** A peer is now `--at <peer>` (a bare command
-  targets your own node, which lands with the daemon); `service` is a group: `ls` / `enable` / `disable`.
+- **BREAKING: every `serve` entry must be `name=target`.** A bare entry no longer takes the `default` name;
+  it is refused at startup with a message naming the form (`membership` and `cluster` are reserved, never
+  service names).
+- **BREAKING: `stop` and `service` reshaped for local-vs-peer.** A peer is now `--at <peer>`; a bare `stop`
+  or `service ls` acts on your own node over its control socket, which needs a resident `serve`
+  (`serve --resident`); `service` is a group: `ls` / `enable` / `disable`.
+- **`control.stop` and `control.services` are member-only.** A delegated `sheer:` slip reaches the gate but
+  is refused at the route, so only your own devices can stop or inspect a node.
+- **Revocation lands live.** A revoke reaches a running node's next connection: the gate re-reads the
+  denylist when the file changes (`(mtime, len)` stamp, fail-closed), not only when `serve` starts.
 - **Diagnostic metering is exposure-coupled.** A family-gated `ping`/`speed` route binds the owner engine
   (no run interval, no transfer slot, no byte or wall-clock cap: a member speed run can saturate the
   link), while `--public ping`/`--public speed` binds the metered engine (ping: one run per caller per
@@ -35,19 +62,16 @@ All notable changes to swoosh, newest first.
   `transfer` copies are gone; the node consumes the services repo at a pinned rev. The `sshd` route keeps
   the same host key and ceilings, and the public diagnostics now carry their caps in shipped builds.
 
-### Added
-- **`--local` (reach family).** No internet discovery or relays: dials and advertisements resolve over
-  local mDNS or a `--peer` hint only. A no-op on `quirk`/`quirk+noise`, which are already direct-only.
-- **`service enable <svc>` / `disable <svc>`.** Turn a served service off or on live, no restart: the change
-  is written to `<home>/disabled` and the running node honors it on the next connection, the same
-  mtime-watched, fail-closed mechanism as revocation.
-- **`invite add --expires <duration>`.** Choose a device badge's lifetime (default 90 days, previously a hardcoded
-  year); a controlled reused-secret case can opt into `--expires 365d`.
-- **`--transport quirk+noise`.** quirk behind a Noise handshake that proves the peer's key and encrypts
-  the session: the same direct-only backend, with the key proven before any byte flows. It is the only
-  quirk spelling that serves gated traffic, and the only one that carries a credential.
-
 ### Fixed
+- **`stop` no longer reports a false failure while landing.** A teardown race in the v0.8.0 client could
+  print an error after the node had already stopped; a peer that vanishes mid-stop now reads as a
+  completed stop, a live peer keeps the loud error, and a gate refusal is never probed away.
+- **A hostile filename cannot forge a send line.** Every path `send` prints or wraps is escaped and capped,
+  so a peer-supplied name cannot fake a skip or an error line.
+- **The serve banner tells the truth about local discovery.** A blocked mDNS advertise now says so on the
+  reach line instead of a hardcoded `automatic`.
+- **A corrupt key file is an error, never replaced.** A present identity that does not decode is no longer
+  overwritten by a freshly minted key, and the key file is written atomically (temp, fsync, rename).
 - **Store files were world-readable.** The signet, membership badge, contacts book, and revocation denylist
   landed `0644` in a `0755` store dir; they are now written `0600` inside a `0700` store dir, so the trust
   graph and revocation metadata are not exposed to other local users.
