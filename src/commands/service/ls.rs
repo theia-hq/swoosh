@@ -76,6 +76,12 @@ impl crate::reaching::Reaching for ServiceLsCmd {
         self.credential().identity()
     }
 
+    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
+    /// bind must not write the key's address record (0.9.0 F1).
+    fn bind_role(&self) -> crate::reaching::BindRole {
+        crate::reaching::BindRole::Dialing
+    }
+
     /// Uniform dispatch: `service ls` reads the resolved `present` badge and `contacts` (to resolve a petname
     /// like `me/qat` in its `--at` slot); it ignores `transport` and `key`. Only reached WITH `--at`: a bare
     /// `service ls` splits to [`run_local`](Self::run_local) before any transport is composed, so `at` is

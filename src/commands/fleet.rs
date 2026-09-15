@@ -66,6 +66,12 @@ impl crate::reaching::Reaching for FleetCmd {
         self.credential().identity()
     }
 
+    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
+    /// bind must not write the key's address record (0.9.0 F1).
+    fn bind_role(&self) -> crate::reaching::BindRole {
+        crate::reaching::BindRole::Dialing
+    }
+
     /// Uniform dispatch: unpack the reach context and run. `fleet` reads `contacts` (to resolve a petname in
     /// its `--pull` peer), the resolved `present` badge, and the `home` (it opens its OWN store to WRITE
     /// hydrated contacts, unlike the read-only `contacts`); it ignores `transport`.
