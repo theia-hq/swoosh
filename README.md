@@ -23,10 +23,10 @@ and a keyless signature.
 
 ## First reach
 
-On the machine you want to reach, stay online and note the key it prints:
+On the machine you want to reach, open two diagnostics to anyone and note the key it prints:
 
 ```sh
-swoosh serve
+swoosh serve --public ping,speed
 ```
 
 From another machine, reach it by that key:

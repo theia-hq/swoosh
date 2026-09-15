@@ -86,7 +86,8 @@ feed, never exact bytes).
 
 tightbeam's loopback reflector: it returns the caller's own bytes and opens no host resource.
 
-- Posture: family-gated. `--public demo` is allowed: nothing local is exposed.
+- Posture: family-gated. `--public demo` is allowed: nothing local is exposed. Metered by construction:
+  it can only reflect the bytes the caller sent.
 - Example: `swoosh serve demo=echo:`
 - Limits: [tightbeam](https://github.com/theia-hq/tightbeam).
 
@@ -95,7 +96,8 @@ tightbeam's loopback reflector: it returns the caller's own bytes and opens no h
 The signet-signed membership snapshot of your fleet. Serve it on a node you own; another member reads it
 with `swoosh fleet --pull <peer>`.
 
-- Posture: family-gated, no public form.
+- Posture: family-gated, no public form. Unmetered: the handler sets no cap, and no public form can
+  ever open it.
 - Example: `swoosh serve hub=roster:`
 - Limits: [fleet](commands/fleet.md).
 
@@ -143,8 +145,8 @@ Every service row links the doc that owns its sharp edges. The engine limits liv
 
 ## Not built
 
-`pickup:` and the invite flow are not built; this page documents only what `serve` can do today. What is
-planned lives in the [roadmap](../roadmap.md).
+The redemption doors (`redeem:`/`grant:`) are not built; this page documents only what `serve` can do
+today. What is planned lives in the [roadmap](../roadmap.md).
 
 ## Next
 
