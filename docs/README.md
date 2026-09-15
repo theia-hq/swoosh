@@ -4,6 +4,8 @@ swoosh reaches a machine by its public key: ping it, measure it, ssh in, send fi
 fetch through it, and share access, across any network with no address to look up and no server in the
 middle. These docs take you from your first reach to every command.
 
+These pages describe the default branch; the released docs are at the newest tag.
+
 **Start here:** [Getting started](getting-started.md), then [Keys](keys.md).
 
 ## The map

@@ -50,6 +50,8 @@ The [getting-started guide](docs/getting-started.md) walks this end to end in tw
 - [Transports](docs/transports.md) · [Troubleshooting](docs/troubleshooting.md) ·
   [Demo](docs/demo.md) · [Roadmap](docs/roadmap.md)
 
+This page describes the default branch; the released docs are at the newest tag.
+
 ## Layout
 
 - `crates/swoosh` the CLI: binds one node under the chosen key and transport, then runs a command.
