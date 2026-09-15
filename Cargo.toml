@@ -34,7 +34,7 @@ bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "dccfb1f4a82
 bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "dccfb1f4a82d348dc3a7b50793ff4f26f8e98962" }
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "dccfb1f4a82d348dc3a7b50793ff4f26f8e98962" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "4086838c65f176a402a746ced0b7f76992171301" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "6df1983" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "6df1983f6cb77fe65dc398e79b49cddb1ae10071" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
