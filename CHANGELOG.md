@@ -4,9 +4,18 @@ All notable changes to swoosh, newest first.
 
 ## v0.9.1
 
-`--home` keeps its ssh pins to itself, and the installer names each reason a provenance check was skipped.
+`--home` keeps its ssh pins to itself, the installer names each reason a provenance check was skipped, a
+dialing command no longer overwrites the serving node's address record, and the credential noun is `invite`
+everywhere.
+
+### Changed
+- **BREAKING: the credential noun is `invite` everywhere.** `SWOOSH_INVITE` replaces `SWOOSH_AUTHKEY`, the
+  action input is `invite`, and a pre-rename `authkey:` token is refused with a teaching error; no compat
+  alias ships.
 
 ### Fixed
+- **A dialing command no longer overwrites the node's address record.** Only `serve` publishes; every other
+  reaching verb resolves without writing, so a short-lived process cannot send dialers to a dead relay path.
 - **`ssh`'s host-key pins follow the selected home.** `--home <dir>` (or `SWOOSH_HOME`) now keeps
   `known_hosts` beside that home's identity, so an isolated run no longer appends to the default book,
   and a run with `HOME` unset works.
