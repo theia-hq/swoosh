@@ -32,8 +32,8 @@ swoosh serve
 From another machine, reach it by that key:
 
 ```sh
-swoosh ping bf01hcq6…      # round trip, by key, across NATs
-swoosh contact add desk bf01hcq6…   # name it once
+swoosh ping bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q  # example key; round trip, across NATs
+swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q  # name it once
 swoosh ping desk           # then reach it by name
 ```
 

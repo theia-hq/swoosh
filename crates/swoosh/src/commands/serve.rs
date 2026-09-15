@@ -92,7 +92,7 @@ const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 /// Be a node: publish these services behind your signet gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// publish local services as `name=svc` (empty = `ping=ping: speed=speed:`, reach diagnostics)
+    /// publish local services as `name=svc` (empty serves `ping` and `speed`)
     #[arg(value_name = "name=svc")]
     pub services: Vec<String>,
     /// open named services to anyone, unauthenticated (comma-list, repeatable)

@@ -47,15 +47,15 @@ pub struct SendCmd {
     /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
-    /// which served service to reach
+    /// the peer's file-receiving service
     #[arg(long, value_name = "service", default_value = RECV_SERVICE)]
     pub service: String,
-    /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
+    /// present a `sheer:` link to reach as a delegate
     #[arg(
         long,
         value_name = "link",
-        long_help = "Optional: your own devices need no link, the dial presents the self-signed \
-                     membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
+        long_help = "Optional: your own devices need no link; this machine's membership badge is \
+                     presented automatically. Pass a `sheer:` link only to reach as a delegate."
     )]
     pub present: Option<crate::credential::SheerLink>,
     #[command(flatten)]
