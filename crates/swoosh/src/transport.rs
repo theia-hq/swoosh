@@ -32,7 +32,11 @@ pub struct ReachArgs {
         long,
         value_enum,
         default_value_t,
-        value_name = "iroh|quirk|quirk+noise"
+        value_name = "iroh|quirk|quirk+noise",
+        long_help = "Backend to bind under this identity. Serving means accepting peers and running \
+                     the node's exposed services; the gate admits a dialer only on its proven key, so \
+                     serving gated services needs a backend that proves that key. Both quirk \
+                     spellings are direct-only."
     )]
     pub transport: Transport,
     /// No internet discovery or relays: local mDNS or a direct hint
@@ -54,12 +58,12 @@ pub struct ReachArgs {
 /// arm over it and a credential is never written to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 pub enum Transport {
-    /// across the internet, NAT-traversing
+    /// across the internet, NAT-traversing; serves gated
     #[default]
     Iroh,
-    /// our own QUIC; direct-only; cannot serve (key unproven)
+    /// our own QUIC; dials public/ungated; cannot serve gated; base of quirk+noise
     Quirk,
-    /// our own QUIC; direct-only; can serve (key proven)
+    /// our own QUIC; serves gated; a Noise handshake proves the peer's key
     #[value(name = "quirk+noise")]
     QuirkNoise,
 }
