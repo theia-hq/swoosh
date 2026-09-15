@@ -417,7 +417,9 @@ impl ServeCmd {
         // socket taken for a serve that cannot arm).
         exposer
             .prove_security::<T>()
-            .wrap_err("use `--transport quirk+noise` to serve gated quirk traffic")?;
+            .wrap_err(
+                "bare quirk cannot serve: it does not prove the peer's key; use `--transport quirk+noise`",
+            )?;
 
         // The resident listener arm (S4), after the proven overlay so a refused serve never binds
         // a socket. Order: (1) plain serve acquires nothing (byte-identical, no dir, no lock, no

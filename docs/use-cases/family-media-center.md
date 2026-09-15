@@ -12,24 +12,9 @@ hold its key and do the admitting. Every family member reaches it by presenting 
 
 Publish the box's services behind its own gate:
 
-<!-- capture: swoosh serve ssh=sshd: tv=127.0.0.1:8096 -->
+<!-- pending live-run: banner wording -->
 ```console
 $ swoosh serve ssh=sshd: tv=127.0.0.1:8096
-swoosh ready
-
-    bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-
-how peers reach you
-  internet   automatic; peers reach you by the key above, even across NATs
-  LAN        automatic; your devices just need the key (mDNS)
-
-serving
-  family-gated   your devices + peers you've granted
-    ssh -> sshd            a shell on this machine
-    tv -> 127.0.0.1:8096   local TCP service
-    control.*              node control (never public)
-
-ctrl-c to stop
 ```
 
 Then, per family member, record their signet and grant their whole [fleet](../keys.md#fleet) the service

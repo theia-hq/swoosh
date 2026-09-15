@@ -9,8 +9,8 @@ and says why, rather than reporting a healthy-looking result.
 Error: the transport does not prove the peer (declared: announced); presenting a credential would send it to whoever answers
 ```
 
-Bare `quirk` announces the reached key, so swoosh refuses to write a credential over it: the dial never
-reaches the gate. Use `--transport quirk+noise`, the sealed spelling that proves the key before any byte
+Bare `quirk` never proves the peer holds the key it presents, so swoosh refuses to write a credential over
+it: the dial never reaches the gate. Use `--transport quirk+noise`, which proves the key before any byte
 flows. See [transports](transports.md#quirk).
 
 ## "reached, but refused (not admitted)"
