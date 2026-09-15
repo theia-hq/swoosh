@@ -24,9 +24,25 @@ This downloads the right binary for your platform, verifies its checksum, and in
 
 On the machine you want to reach, open two diagnostics to anyone and note the key it prints:
 
-<!-- pending live-run: banner wording -->
+<!-- capture: swoosh serve --public ping,speed -->
 ```console
 $ swoosh serve --public ping,speed
+swoosh ready
+
+    bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
+
+how peers reach you
+  internet   automatic; peers reach you by the key above, even across NATs
+  local      automatic; your devices just need the key (mDNS)
+
+serving
+  family-gated   your devices + peers you've granted
+    control.*   node control (never public)
+  public !   anyone, unauthenticated
+    ping    round-trip probe
+    speed   throughput test
+
+ctrl-c to stop
 ```
 
 The key it prints is machine A's public key. Copy it. Leave this running.

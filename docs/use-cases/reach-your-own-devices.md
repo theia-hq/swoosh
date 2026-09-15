@@ -41,9 +41,24 @@ key with `swoosh invite add laptop --for <key>` instead.
 
 On the machine you want to reach, stay online:
 
-<!-- pending live-run: banner wording -->
+<!-- capture: swoosh serve -->
 ```console
 $ swoosh serve
+swoosh ready
+
+    bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
+
+how peers reach you
+  internet   automatic; peers reach you by the key above, even across NATs
+  local      automatic; your devices just need the key (mDNS)
+
+serving
+  family-gated   your devices + peers you've granted
+    ping        round-trip probe
+    speed       throughput test
+    control.*   node control (never public)
+
+ctrl-c to stop
 ```
 
 Save its key under a name once, then reach it by name from any of your devices. Because both machines

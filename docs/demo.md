@@ -78,9 +78,10 @@ one-key demo could never run over iroh.
 Bare `quirk` never proves the peer holds the key it presents; the key travels in plaintext, so `swoosh
 serve` refuses over it. The serve exits before printing a banner:
 
-<!-- pending live-run: refusal wording -->
+<!-- capture: scripts/demo.sh quirk-refusal -->
 ```console
 $ swoosh serve --transport quirk
+Error: bare quirk cannot serve: it does not prove the peer's key; use `--transport quirk+noise`: this node gates on a signet, but the bound transport declares announced peer proof, so a gated dial could never be admitted; bind a transport that proves the peer (the default iroh transport does), or serve with an open gate (`Gate::Open`), which needs no peer proof
 ```
 
 Exit status 1. That is the refusal, live: a transport that does not prove the key cannot root-admit, so a
@@ -91,9 +92,25 @@ credential is never written to it. The `quirk+noise` spelling, below, is the opt
 `quirk+noise` runs a Noise handshake over the same backend and proves the reached key, so the SAME
 rooted gate arms here. It is still direct-only, so `serve` prints the address it is reachable at:
 
-<!-- pending live-run: banner wording -->
+<!-- capture: scripts/demo.sh serve-quirk-noise -->
 ```console
 $ swoosh serve --transport quirk+noise
+swoosh ready
+
+    bf01tldy5zh5nvbqhfbvk46ijdppyay6ma6nkh76axuoh2tu7dpz6rfq
+
+how peers reach you
+  local    automatic; local mDNS, or direct, no NAT traversal
+  direct   reachable on this machine only:
+           127.0.0.1:64368
+
+serving
+  family-gated   your devices + peers you've granted
+    ping        round-trip probe
+    speed       throughput test
+    control.*   node control (never public)
+
+ctrl-c to stop
 ```
 
 The member dials, presenting the membership the server's signet signed for it, and passes the address
@@ -115,16 +132,31 @@ that proves the key.
 Now start `serve` again from the SAME server key, over iroh. iroh self-discovers over the internet, so
 no `--peer` is needed. The NodeId is byte-for-byte identical:
 
-<!-- pending live-run: banner wording -->
+<!-- capture: scripts/demo.sh serve-iroh -->
 ```console
 $ swoosh serve --transport iroh
+swoosh ready
+
+    bf01tldy5zh5nvbqhfbvk46ijdppyay6ma6nkh76axuoh2tu7dpz6rfq
+
+how peers reach you
+  internet   automatic; peers reach you by the key above, even across NATs
+  local      automatic; your devices just need the key (mDNS)
+
+serving
+  family-gated   your devices + peers you've granted
+    ping        round-trip probe
+    speed       throughput test
+    control.*   node control (never public)
+
+ctrl-c to stop
 ```
 
 The ed25519 NodeId is derived from the persisted secret, so it is the same across transports by
 construction, not coincidence (pinned in CI: one secret over both backends asserts equal NodeIds). The
 member runs the identical commands, now over iroh with no `--peer`:
 
-<!-- pending live-run: iroh reach over the internet, non-deterministic; needs n0 discovery reachable -->
+<!-- pending live-run: iroh reach over the internet; needs a second host for an internet leg (the 2026-09-15 run dialed same-host, direct) -->
 ```console
 $ swoosh ping  $SERVER --transport iroh -c 5 -i 0.2
 $ swoosh speed $SERVER --transport iroh --down -t 3
