@@ -141,7 +141,7 @@ Every service row links the doc that owns its sharp edges. The engine limits liv
 [ssh](commands/ssh.md), [forward](commands/forward.md), [service](commands/service.md),
 [stop](commands/stop.md), and [fleet](commands/fleet.md) for the client verbs. The gate itself is
 [Keys](../keys.md#the-gate). An open `ping` or `speed` is metered by the engine, per
-[Public service](../use-cases/public-service.md#the-honest-limit).
+[Public service](../use-cases/public-service.md#the-limit).
 
 ## Not built
 

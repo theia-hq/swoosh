@@ -69,7 +69,7 @@ bf01hcq6balrlxwa via iroh: reached, but refused (not admitted: not a member of t
 Error: bf01hcq6balrlxwa: reached, but refused
 ```
 
-## The honest limit
+## The limit
 
 A bearer link is a bearer token: whoever holds an unexpired, un-revoked one gets that one service until
 it expires or you revoke it. Keep bearer links short-lived, or bind them with `--for`. A revoke is

@@ -58,8 +58,8 @@ ctrl-c to stop
 
 Hand that address to the peer with `--peer` (below).
 
-**The honest limit.** Bare `quirk` cannot serve and never carries a credential, because it does not
-prove the peer's key. `quirk+noise` proves the key and encrypts the session, but it is direct-only: use
+**Bare `quirk` cannot serve.** It never carries a credential: it does not prove the peer's key.
+`quirk+noise` proves the key and encrypts the session, but it is direct-only: use
 iroh when you need NAT traversal.
 
 ## <a id="peer"></a>Advanced: `--peer`, when discovery cannot reach them

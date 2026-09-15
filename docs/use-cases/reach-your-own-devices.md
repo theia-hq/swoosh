@@ -94,7 +94,7 @@ $ swoosh ssh desk
 The desktop offers its shell once with `swoosh serve ssh=sshd:` (a keyless shell, gated to your signet)
 or points at an existing sshd with `swoosh serve ssh=127.0.0.1:22`.
 
-## The honest limit
+## The limit
 
 A device carrying your membership reaches every gated service on any node you run. If a device is lost or
 stolen, revoke it (`swoosh grant revoke me/laptop`) on each node you run. A revoke is node-local and

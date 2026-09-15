@@ -50,14 +50,10 @@ bf01hcq6balrlxwa via iroh: mixed (direct to 135.129.124.149:56141 and relayed)
 - **`control.*` stays gated.** Even with public diagnostics, only your own devices can stop or inspect
   the node.
 
-## The honest limit
+## The limit
 
-An open `ping` or `speed` binds the metered engine: one ping run per caller per second and a 60-second/1
-GiB stream cap for ping, one transfer at a time with a 64 MiB/15-second per-stream cap for speed. A
-family-gated route binds the owner engine instead, uncapped, because the gate is the terminator there.
-The coupling is structural: the owner engine cannot be opened (the startup proof refuses it), and the
-engine an open route binds is capped by construction. Only open services you are willing to let a
-stranger use.
+An open `ping` or `speed` is metered: one run per caller per second, and a stream caps at 60 s/1 GiB
+(ping) or 64 MiB/15 s (speed). Keep diagnostics gated if you need the full link.
 
 ## Next
 
