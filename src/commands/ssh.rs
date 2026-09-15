@@ -31,14 +31,14 @@
 //! `--transport`), so "first use" always rides the authenticated tunnel.
 //!
 //! So rather than pollute the user's global `~/.ssh/known_hosts` and prompt an interactive TOFU keyed on a
-//! mutable petname, `swoosh ssh` keeps its OWN known_hosts (`~/.config/swoosh/known_hosts`), keyed on the
-//! immutable node id via `HostKeyAlias`, with `StrictHostKeyChecking=accept-new`: pin on first sight (safe,
-//! because first sight is over the authenticated overlay), reject a later key change. `accept-new` not
-//! `yes`, precisely because the derived key is not client-computable; node id not petname, so a rename
-//! never orphans a pin. The private file is `0600` in a `0700` dir, and a loose one is refused rather than
-//! trusted.
+//! mutable petname, `swoosh ssh` keeps its OWN known_hosts (`<home>/known_hosts`, read off the resolved
+//! home like every other node path), keyed on the immutable node id via `HostKeyAlias`, with
+//! `StrictHostKeyChecking=accept-new`: pin on first sight (safe, because first sight is over the
+//! authenticated overlay), reject a later key change. `accept-new` not `yes`, precisely because the
+//! derived key is not client-computable; node id not petname, so a rename never orphans a pin. The private
+//! file is `0600` in a `0700` dir, and a loose one is refused rather than trusted.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use clap::Args;
 
@@ -110,10 +110,12 @@ impl SshCmd {
         let host = self.peer.to_string();
         let key = first.node.to_string();
 
-        // swoosh keeps its own host-key book (see module docs): prepare the private file, and on the first
-        // sight of this node id print the id being pinned, so a human can eyeball it against an out-of-band
-        // value. First sight is over the already-authenticated overlay, so this is a record, not blind TOFU.
-        let known_hosts = known_hosts_path()?;
+        // swoosh keeps its own host-key book under the RESOLVED home (see module docs): prepare the private
+        // file, and on the first sight of this node id print the id being pinned, so a human can eyeball it
+        // against an out-of-band value. First sight is over the already-authenticated overlay, so this is a
+        // record, not blind TOFU. Same home seam as the identity (`--home`/`SWOOSH_HOME`), so an isolated
+        // run pins into its own book instead of appending to the live one.
+        let known_hosts = home.known_hosts();
         prepare_known_hosts(&known_hosts)?;
         if !already_pinned(&known_hosts, &key) {
             eprintln!("swoosh: pinning {key} on first connection (over the authenticated overlay)");
@@ -215,16 +217,6 @@ fn ssh_argv(
     ];
     argv.extend(args.iter().cloned());
     argv
-}
-
-/// swoosh's private known_hosts, `~/.config/swoosh/known_hosts`, beside the identity and address book.
-/// Isolated from the user's global `~/.ssh/known_hosts` so pins never pollute or collide with it.
-fn known_hosts_path() -> eyre::Result<PathBuf> {
-    let home = std::env::var_os("HOME").ok_or_else(|| eyre::eyre!("HOME is not set"))?;
-    Ok(Path::new(&home)
-        .join(".config")
-        .join("swoosh")
-        .join("known_hosts"))
 }
 
 /// Ensure the private known_hosts directory exists (`0700`) and refuse a file writable by group or other.
@@ -330,6 +322,8 @@ fn exec_ssh(argv: Vec<String>) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use clap::Parser as _;
 
     use super::*;
