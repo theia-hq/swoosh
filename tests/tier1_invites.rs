@@ -52,7 +52,7 @@ async fn gated_exposer(tag: &str, signet: NodeId) -> tightbeam::tunnel::Exposer 
     let _ = std::fs::remove_file(&path);
     let gate = tunnel::resolve_gate(Some(signet), FileDenylist::load(path).await.unwrap())
         .expect("the signet-rooted gate resolves");
-    swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
+    swoosh::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
         .expect("the diagnostics routes bind")
         .expose()
         .expect("the exposer assembles")

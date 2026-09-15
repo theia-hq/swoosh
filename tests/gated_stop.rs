@@ -28,7 +28,7 @@ use core::time::Duration;
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::{FileDenylist, Identity, Link};
-use swoosh::commands::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop, Stopped};
+use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop, Stopped};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router};
 use tokio::io::AsyncReadExt as _;

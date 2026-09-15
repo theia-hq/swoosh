@@ -4,7 +4,7 @@
 //! once and both stay in step. The verbs (bare control) reach a node through [`ControlClient`], which
 //! today has exactly one arm, the local socket; the overlay joins as a second arm in a later phase and
 //! is closed out of any local-only operation by construction. The SWC1 value types live in
-//! [`crate::commands::serve::control`]; this module imports them and adds behavior only, so the module
+//! [`crate::serve::control`]; this module imports them and adds behavior only, so the module
 //! graph stays a one-way edge from the client seam to the codec.
 
 use core::future::Future;
@@ -17,10 +17,8 @@ use std::path::{Path, PathBuf};
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
-use crate::commands::serve::control_codec::{
-    ControlError, Request, Response, ServiceMenu, StatusReply,
-};
 use crate::home::Home;
+use crate::serve::control_codec::{ControlError, Request, Response, ServiceMenu, StatusReply};
 
 /// How long a connect to the local control socket may take before it is a [`ControlError::Timeout`].
 /// A local listener admits at once; this bounds only a wedged path, never a normal dial.
@@ -242,8 +240,7 @@ impl ControlClient {
     /// Verify an already-derived socket path without resolving the process-global runtime root: the
     /// path half of [`resolve`](Self::resolve), for tests that drive the local backend over a scratch
     /// socket. Never connects; production always comes through `resolve`.
-    #[cfg(test)]
-    pub(crate) fn resolve_socket(socket: PathBuf) -> Result<Self, ControlError> {
+    pub fn resolve_socket(socket: PathBuf) -> Result<Self, ControlError> {
         Ok(Self::Socket(UidSocket::resolve_socket(socket)?))
     }
 
@@ -278,7 +275,7 @@ impl NodeClient for ControlClient {
 /// Render a [`ControlError`] for a verb boundary, where `eyre` takes over. Every typed error's own
 /// message is used as-is, except `Protocol`, which names the skew fix because every protocol error on
 /// an already-verified local socket is a client/resident version mismatch.
-pub(crate) fn control_error_report(error: ControlError) -> eyre::Report {
+pub fn control_error_report(error: ControlError) -> eyre::Report {
     match error {
         ControlError::Protocol(reason) => eyre::eyre!(
             "the resident is a different swoosh version ({reason}); restart it with this binary"

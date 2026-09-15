@@ -17,7 +17,7 @@
 //!
 //! (Fetch is not exercised here: each fetch service is now its own instance under a synthetic scheme,
 //! bound by the product `serve` path, not by the shared `diagnostics` helper; its per-service scoping and
-//! isolation are proven in `commands/serve_tests.rs`.)
+//! isolation are proven in `src/bin/swoosh/commands/serve_tests.rs`.)
 //!
 //! The two-service split adds a wire-level invariant proven here too: a member admitted at `ping` who
 //! sends a SPEED frame is refused at the wire (and a `speed` member who sends a PING frame), so the served
@@ -88,7 +88,7 @@ async fn proof() {
             // only there; the proof exercises the ping + speed services, so gating this keeps it green WITH
             // and WITHOUT the feature.
             let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-            swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
+            swoosh::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
                 .unwrap()
                 .expose()
                 .unwrap()

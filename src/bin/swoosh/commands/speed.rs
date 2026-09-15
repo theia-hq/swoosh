@@ -1,0 +1,299 @@
+//! `swoosh speed <peer>`: measure throughput to a peer over the overlay, iperf-shaped. One direction at
+//! a time (`--up` or `--down`, default down) or both at once (`--bidir`), bounded by time (`-t`) or
+//! bytes (`-n`, default `-t 5`).
+//!
+//! One target, unlike `ping`/`status`: a speed test saturates a link, so fanning out over a person's
+//! devices would just contend for the one uplink and have no single number to report. A bare person
+//! (`alice`) dials her first reachable device; `alice/macbook` picks the one. Throughput prints OVER
+//! TIME: a line per interval as it runs, then the per-direction totals. The connection path (direct vs
+//! relayed, the same source `status` reads) is reported after the transfer, since the run is the window
+//! in which a relayed iroh link may hole-punch up to direct: a slow number then reads as "it relayed",
+//! not a mystery.
+
+use core::time::Duration;
+use std::time::Instant;
+
+use bifrost::{Discovery, Node, Session, Transport};
+use clap::{ArgGroup, Args};
+use measure::{
+    Limit, MethodRefusal, Mode, Progress, ProtocolError, Refusal, SpeedReport, Speedtest,
+    Throughput,
+};
+use nauthy::{Link, Service};
+use swoosh::contacts::Contacts;
+use swoosh::peer::Peer;
+use swoosh::reach::{self, Resolved};
+use swoosh::transport::{self, ReachArgs};
+
+/// How often a running speed test prints its current rate. One second matches iperf's default report
+/// interval and reads as a live, once-a-second heartbeat without flooding the terminal.
+const REPORT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Measure throughput to a peer: iperf, but over the overlay.
+#[derive(Debug, Args)]
+#[command(group = ArgGroup::new("way").args(["up", "down", "bidir"]))]
+#[command(group = ArgGroup::new("bound").args(["secs", "bytes"]))]
+pub struct SpeedCmd {
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
+    #[arg(value_name = "peer")]
+    pub peer: Peer,
+    /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
+    #[arg(
+        long,
+        value_name = "link",
+        long_help = "Optional: your own devices need no link, the dial presents the self-signed \
+                     membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
+    )]
+    pub present: Option<swoosh::credential::SheerLink>,
+    /// Measure the upload direction (this node sends).
+    #[arg(long)]
+    pub up: bool,
+    /// Measure the download direction (this node receives).
+    #[arg(long)]
+    pub down: bool,
+    /// Measure upload and download at once, full-duplex on one stream. Works over quirk too.
+    #[arg(long)]
+    pub bidir: bool,
+    /// Run for this many seconds. Defaults to 5 when no bound is given.
+    #[arg(short = 't', long, value_name = "seconds")]
+    pub secs: Option<f64>,
+    /// Transfer this many bytes instead of running for a fixed time.
+    #[arg(short = 'n', long, value_name = "bytes")]
+    pub bytes: Option<u64>,
+    #[command(flatten)]
+    pub reach: ReachArgs,
+}
+
+impl swoosh::reaching::Reaching for SpeedCmd {
+    fn reach_args(&self) -> &swoosh::transport::ReachArgs {
+        &self.reach
+    }
+
+    /// `speed` reaches the peer's family-gated `speed` service, so it presents the member badge rooted at
+    /// the dialing key (like `ping`). `Family` fuses the identity to `PersistedIfPresent`. The effective
+    /// slip is the FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded
+    /// INTO the credential so the ONE resolver owns both slots.
+    fn credential(&self) -> swoosh::credential::Credential {
+        swoosh::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        }
+    }
+
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.peer.reject_redundant_present(self.present.as_ref())
+    }
+
+    fn identity(&self) -> swoosh::identity::Identity {
+        self.credential().identity()
+    }
+
+    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
+    /// bind must not write the key's address record (0.9.0 F1).
+    fn bind_role(&self) -> swoosh::reaching::BindRole {
+        swoosh::reaching::BindRole::Dialing
+    }
+
+    /// Uniform dispatch: unpack the reach context and run. `speed` reads `contacts`, the `transport`
+    /// label, and the resolved `present` badge; it ignores `key`.
+    async fn run<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        ctx: swoosh::reaching::ReachCtx<'_>,
+    ) -> eyre::Result<()>
+    where
+        <T::Session as Session>::Write: Send + 'static,
+        <T::Session as Session>::Read: Send + 'static,
+    {
+        self.run_speed(
+            node,
+            ctx.contacts,
+            ctx.transport,
+            ctx.local,
+            ctx.present,
+            ctx.membership,
+        )
+        .await
+    }
+}
+
+impl SpeedCmd {
+    /// Dial the first reachable device, run the transfer while a ticker prints the rate each interval,
+    /// then report the settled connection path and the per-direction totals.
+    async fn run_speed<T: Transport, D: Discovery>(
+        self,
+        node: &Node<T, D>,
+        contacts: &Contacts,
+        transport: transport::Transport,
+        local: bool,
+        present: Option<Link>,
+        membership: Option<Link>,
+    ) -> eyre::Result<()> {
+        // The redundant-present conflict is rejected ONCE in the composition root via
+        // `Reaching::reject_redundant_present`, before this runs.
+        let mode = self.mode();
+        let limit = self.limit();
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
+        // link-as-peer through that same resolver, so the verb never threads `--present` itself.
+        let service: Service = reach::SPEED_SERVICE.parse()?;
+        let Resolved { session, label } = reach::dial_service(
+            node, contacts, &self.peer, &service, present, membership, transport, local,
+        )
+        .await?;
+        // Path at connect. The transfer below is the window where iroh's hole-punch lands, so the
+        // settled path (and any relayed-to-direct upgrade) is read and reported after it, not here.
+        let initial = session.conn_info().path;
+        println!(
+            "speed test to {label} via {} ({})",
+            transport.name(),
+            mode.label()
+        );
+
+        // A shared counter the transfer bumps and the ticker reads, so the rate prints live rather than
+        // only at the end. The ticker runs until the transfer finishes and drops its end of the channel.
+        let progress = Progress::new();
+        let outcome = {
+            let ticker = report_over_time(progress.clone());
+            let test = Speedtest::new(mode, limit)
+                .tracking(progress.clone())
+                .run(&session);
+            // Race the transfer against the ticker: the transfer completes, the ticker loops forever, so
+            // select ends the ticker the moment the run returns.
+            tokio::select! {
+                report = test => report,
+                never = ticker => match never {},
+            }
+        };
+        // A refusal is a LOUD, distinct error, never `0.00 MiB/s`: the node reached us but refused the
+        // run, so name what refused it (a missing method, a rate limit, a busy service) rather than
+        // reporting a zero-byte transfer over the elapsed window. A Layer-2 method refusal means the
+        // stream was admitted but not the method; anything else (a Layer-1 gate refusal) means the dial
+        // itself was refused.
+        let report = match outcome {
+            Ok(report) => report,
+            Err(ProtocolError::Refused(Refusal::Method { code, detail })) => {
+                node.close().await;
+                let line = refusal_line(&label, code, &detail);
+                eyre::bail!("{line}");
+            }
+            Err(ProtocolError::Refused(refusal)) => {
+                node.close().await;
+                eyre::bail!("{label}: reached, but refused: {refusal}");
+            }
+            Err(error) => {
+                node.close().await;
+                return Err(error.into());
+            }
+        };
+
+        // Read the settled path now: the transfer gave hole-punching time to land, and we must read
+        // before the transport closes.
+        let path = reach::conn_path(initial, &session.conn_info());
+
+        // Drain and close the transport so the last frames land and iroh shuts down cleanly.
+        node.close().await;
+        println!("path: {path}");
+        print_totals(&report);
+        Ok(())
+    }
+}
+
+impl SpeedCmd {
+    /// What to measure: `--up`, `--bidir`, or download (the group makes more than one impossible).
+    fn mode(&self) -> Mode {
+        if self.up {
+            Mode::Up
+        } else if self.bidir {
+            Mode::Bidir
+        } else {
+            Mode::Down
+        }
+    }
+
+    /// The stop condition: an explicit byte count, else an explicit or default duration.
+    fn limit(&self) -> Limit {
+        match (self.bytes, self.secs) {
+            (Some(bytes), _) => Limit::ByBytes(bytes),
+            (None, Some(secs)) => Limit::ByTime(Duration::from_secs_f64(secs)),
+            (None, None) => Limit::ByTime(Duration::from_secs(5)),
+        }
+    }
+}
+
+/// Print the rate over each [`REPORT_INTERVAL`] until cancelled: the bytes moved since the last tick as
+/// a MiB/s line. Never returns (its result is [`core::convert::Infallible`]); the caller races it against the
+/// transfer and drops it when the run finishes, so the last partial interval is covered by the totals.
+async fn report_over_time(progress: Progress) -> core::convert::Infallible {
+    let started = Instant::now();
+    let mut ticker = tokio::time::interval(REPORT_INTERVAL);
+    ticker.tick().await; // The first tick fires immediately; skip it so the first line is one interval in.
+    let mut last_bytes = 0u64;
+    let mut last_at = started;
+    loop {
+        ticker.tick().await;
+        let now = Instant::now();
+        let bytes = progress.bytes();
+        let delta = bytes - last_bytes;
+        let secs = now.duration_since(last_at).as_secs_f64();
+        println!(
+            "  {:>5.1}s  {}",
+            now.duration_since(started).as_secs_f64(),
+            rate(delta, secs)
+        );
+        last_bytes = bytes;
+        last_at = now;
+    }
+}
+
+/// Print the final totals: one line per direction the run measured, direction-labelled and aligned so a
+/// `--bidir` run stacks cleanly.
+fn print_totals(report: &SpeedReport) {
+    let elapsed = report.elapsed().as_secs_f64();
+    if let Some(up) = report.up() {
+        print_leg("up", up, elapsed);
+    }
+    if let Some(down) = report.down() {
+        print_leg("down", down, elapsed);
+    }
+}
+
+/// Print one direction's total: bytes moved over the whole window and the average rate.
+fn print_leg(direction: &str, leg: Throughput, elapsed: f64) {
+    println!(
+        "{:<4}  {} in {elapsed:.2}s = {:.2} MiB/s",
+        direction,
+        mib(leg.bytes()),
+        leg.mib_per_sec(),
+    );
+}
+
+/// A per-interval rate as MiB/s, from bytes moved over a span. Zero if no time elapsed.
+fn rate(bytes: u64, secs: f64) -> String {
+    let mib_per_sec = if secs > 0.0 {
+        (bytes as f64 / (1024.0 * 1024.0)) / secs
+    } else {
+        0.0
+    };
+    format!("{mib_per_sec:.2} MiB/s")
+}
+
+/// A byte count rendered as mebibytes.
+fn mib(bytes: u64) -> String {
+    format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
+}
+
+/// The one line a post-admission `speed` refusal renders: the typed code chooses the phrase, never the
+/// detail prose. `WrongMethod` names the method the peer does not serve; `RateLimited` and `Busy` name
+/// the bound that stopped the run, so a capped run never reads as a missing service (the render table
+/// in `notes/design/typed-refusal-and-errors.md`). A new code breaks this match at compile time.
+fn refusal_line(label: &str, code: MethodRefusal, detail: impl core::fmt::Display) -> String {
+    match code {
+        MethodRefusal::WrongMethod => format!("{label} does not serve `speed`: {detail}"),
+        MethodRefusal::RateLimited => format!("{label} is rate limited: {detail}"),
+        MethodRefusal::Busy => format!("{label} is busy: {detail}"),
+    }
+}
+
+#[cfg(test)]
+#[path = "speed_tests.rs"]
+mod speed_tests;

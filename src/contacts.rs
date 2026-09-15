@@ -107,7 +107,7 @@ impl DeviceLabel {
     /// so a device literally labelled `signet` would collide with it on save. This is the ONE source of
     /// truth for that reserved string, shared with the store codec so the parse-reject and the on-disk key
     /// can never drift apart.
-    pub(crate) const SIGNET_RESERVED: &'static str = "signet";
+    pub const SIGNET_RESERVED: &'static str = "signet";
 
     /// The `--for` WIDENING prefixes reserved out of the device-label namespace: a label that looked
     /// like a widening token (`fleet:alice`) would collide with `invite rm fleet:<person>` and read as a

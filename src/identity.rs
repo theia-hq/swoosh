@@ -1,11 +1,10 @@
 //! The node identity: the ed25519 secret every swoosh verb binds under.
 //!
 //! Identity is chosen by intent, not one-size-fits-all. A verb that must be *reachable at a stable
-//! address* ([`serve`](crate::commands::serve)) persists its secret to disk, so restarting the node
-//! keeps its address. A verb that only *reaches outward* ([`ping`](crate::commands::ping),
-//! [`speed`](crate::commands::speed), [`status`](crate::commands::status)) needs no lasting identity,
-//! so it mints a fresh random ephemeral key each run: nothing on disk, no address to pin, no key file to
-//! provision before a speed test. An explicit home (`--home <dir>` or `SWOOSH_HOME`) overrides either way,
+//! address* (`serve`) persists its secret to disk, so restarting the node keeps its address. A verb
+//! that only *reaches outward* (`ping`, `speed`, `status`) needs no lasting identity, so it mints a
+//! fresh random ephemeral key each run: nothing on disk, no address to pin, no key file to provision
+//! before a speed test. An explicit home (`--home <dir>` or `SWOOSH_HOME`) overrides either way,
 //! pinning the identity at `<home>/identity.key` even when reaching outward, for the caller who wants it.
 //!
 //! The secret is a [`Secret`] newtype, never a bare `[u8; 32]`: it zeroizes its bytes on drop so the
@@ -45,7 +44,7 @@ const KEY_LEN: usize = 32;
 /// a leak never noticed.
 ///
 /// 90d is the ratified default pending final founder confirm.
-pub(crate) const DEVICE_BADGE_TTL: core::time::Duration =
+pub const DEVICE_BADGE_TTL: core::time::Duration =
     core::time::Duration::from_secs(90 * 24 * 60 * 60);
 
 /// The ed25519 secret key a verb binds under. Wraps the raw bytes so they zeroize on drop and never
@@ -300,7 +299,7 @@ async fn guard_mode(_file: &tokio::fs::File, _path: &Path) -> eyre::Result<()> {
 }
 
 /// Write `seed` as the persisted identity at `<home>/identity.key`, mode 0600, creating the store dir.
-/// This is how [`adopt`](crate::commands::adopt) provisions the device identity a later `serve` binds: it
+/// This is how `adopt` provisions the device identity a later `serve` binds: it
 /// MUST land in the same store [`resolve`] reads, so the node comes up AS the adopted device. (Writing
 /// tightbeam's separate store instead was the qat identity-mismatch bug: `serve` bound swoosh's own key,
 /// never the adopted one, so the exposed node had a different id than the contact pointed at.)

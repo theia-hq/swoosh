@@ -76,10 +76,7 @@ async fn proof() {
         // `serve` path uses for `roster=roster:`.
         let gate = tunnel::resolve_gate(Some(signet_id), empty_denylist("host").await).unwrap();
         let router = Router::new(gate)
-            .service(
-                "roster".parse().unwrap(),
-                swoosh::commands::serve::Roster::new(blob),
-            )
+            .service("roster".parse().unwrap(), swoosh::serve::Roster::new(blob))
             .unwrap();
         router
             .expose()

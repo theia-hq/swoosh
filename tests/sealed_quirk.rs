@@ -84,7 +84,7 @@ async fn gated_exposer(tag: &str) -> tightbeam::tunnel::Exposer {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist(tag).await)
         .expect("the signet-rooted gate resolves");
-    swoosh::commands::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
+    swoosh::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
         .expect("the diagnostics routes bind")
         .expose()
         .expect("the exposer assembles")
