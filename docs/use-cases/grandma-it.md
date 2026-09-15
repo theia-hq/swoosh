@@ -29,8 +29,12 @@ start a gated shell that comes back on reboot:
 $ swoosh adopt @invite.txt
 adopted this machine as bf01imv3ljql6kjn  [mine]
 trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates.
+compare that signet with the owner out of band before serving: the token is not signed by the signet it names, so it alone does not prove who sent it.
 stored your membership badge: this device now reaches your gated services.
 ```
+
+An invite is a token, not proof of who sent it: compare that signet with the owner out of band before
+serving.
 
 <!-- capture: swoosh serve ssh=sshd: -->
 ```console
@@ -51,8 +55,53 @@ serving
 ctrl-c to stop
 ```
 
-Set that `swoosh serve ssh=sshd:` to run at login (a launchd or systemd unit, or a startup item), so the
-machine is reachable whenever it is on. That is the last thing they ever have to touch.
+Set that `swoosh serve ssh=sshd:` to run at login, so the machine is reachable whenever it is on. On
+Linux, a systemd user service:
+
+```ini
+# ~/.config/systemd/user/swoosh.service
+[Unit]
+Description=swoosh shell
+[Service]
+ExecStart=%h/.local/bin/swoosh serve ssh=sshd:
+Restart=always
+[Install]
+WantedBy=default.target
+```
+
+<!-- manual: runs on the relative's machine, not here -->
+```console
+$ systemctl --user enable --now swoosh
+$ sudo loginctl enable-linger "$USER"   # start it at boot, before anyone logs in
+```
+
+On macOS, a launchd agent at `~/Library/LaunchAgents/com.theia.swoosh.plist` (the `ProgramArguments`
+path is the installed `swoosh`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.theia.swoosh</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/grandma/.local/bin/swoosh</string>
+    <string>serve</string>
+    <string>ssh=sshd:</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+</dict>
+</plist>
+```
+
+<!-- manual: runs on the relative's machine, not here -->
+```console
+$ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.theia.swoosh.plist
+```
+
+That is the last thing they ever have to touch.
 
 ## Fix it from home, any time
 
@@ -77,7 +126,8 @@ The gate admits you because your machine carries the membership your signet issu
 
 Their machine trusts your signet fully: adoption makes it one of your devices, so you can reach every
 gated service on it. That is the point here, but it means you should only do this on a machine you are
-meant to administer. If you stop being their IT, revoke the device on their machine to sever it.
+meant to administer. If you stop being their IT, revoke the device on each node you run:
+`swoosh grant revoke me/grandma-pc`.
 
 ## Next
 

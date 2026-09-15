@@ -10,13 +10,14 @@ Usage: swoosh ssh [OPTIONS] <peer> [-- <ssh args>...]
   <peer>          a petname, a raw node id, or a sheer: link
   [ssh args]...   forwarded verbatim to ssh, after --
   --service <name>   the exposed service name to reach [default: ssh]
+  --present <link>   a sheer: capability link to present to a gated peer
 ```
 
 **Example.** `swoosh ssh desk -- ls` runs a one-off command; `swoosh ssh desk -- -p 2222` passes ssh
 flags through.
 
-**Things to know.** Auth is your normal ssh keys. The peer serves its shell with `swoosh serve
-ssh=sshd:` (a keyless shell it stands up) or points at an existing sshd with `serve ssh=127.0.0.1:22`.
-`ssh` has no `--transport`: it is iroh-only today, so it cannot run over `quirk+noise`.
+**Things to know.** The built-in shell (`ssh=sshd:`) needs no key setup; swoosh pins the peer on first
+connection. Point at an existing sshd (`serve ssh=127.0.0.1:22`) to use your normal ssh keys. `ssh` has
+no `--transport`: it is iroh-only today, so it cannot run over `quirk+noise`.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
