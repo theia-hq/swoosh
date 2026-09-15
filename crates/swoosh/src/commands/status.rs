@@ -171,6 +171,9 @@ impl StatusCmd {
         // A bare `status` reaches no peer, so an explicit `--present` has nothing to select: refuse it
         // rather than silently dropping it (I.3), before touching the socket.
         crate::reaching::reject_bare_present(self.present.as_ref())?;
+        // The reach trio binds a transport and seeds discovery for a PEER; a bare `status` binds
+        // neither, so the flags are refused by name rather than silently ignored (I.3, B4).
+        crate::reaching::reject_bare_reach(&self.reach)?;
         let client = ControlClient::resolve(home).map_err(control_error_report)?;
         let status = client.status().await.map_err(control_error_report)?;
         // The disabled-list diagnostic goes to stderr, BEFORE the clean stdout table (I.5): the `?`
@@ -512,6 +515,44 @@ mod tests {
             format!("{error:#}"),
             "--present only applies when reaching a peer; drop it or name one"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A bare `status` reaches no peer, so the reach trio (`--transport`/`--local`/`--peer`) has nothing
+    /// to bind or find: each is refused by name, never silently ignored (I.3, B4).
+    #[tokio::test]
+    async fn bare_status_rejects_the_reach_flags() {
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            status: super::StatusCmd,
+        }
+
+        let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+        let base =
+            std::env::temp_dir().join(format!("sw4-status-reach-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(base.join("home")).expect("scratch home");
+        let home = Home::resolve(Some(base.join("home"))).expect("the scratch home resolves");
+        let hint = format!("{}=127.0.0.1:9000", NodeId::from_ed25519_secret(&[5u8; 32]));
+        let cases: [(&[&str], &str); 3] = [
+            (&["x", "--transport", "quirk"], "--transport"),
+            (&["x", "--local"], "--local"),
+            (&["x", "--peer", &hint], "--peer"),
+        ];
+        for (argv, flag) in cases {
+            let status = Wrap::try_parse_from(argv)
+                .expect("the reach flag parses")
+                .status;
+            let error = status
+                .run_local(&home)
+                .await
+                .expect_err("no peer, no effect: the flag must refuse, never be ignored");
+            assert_eq!(
+                format!("{error:#}"),
+                format!("{flag} only applies when reaching a peer; drop it or name one")
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&base);
     }

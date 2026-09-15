@@ -967,6 +967,37 @@ mod tests {
         }
     }
 
+    /// B1: at the root, an ssh passthrough token can no longer swallow `--home`. After `--` everything is
+    /// ssh's (including a literal `--home`); without the separator an ssh-shaped token is a parse error,
+    /// so `swoosh ssh alice -p 2222 --home <dir>` can never silently dial the default home again.
+    #[test]
+    fn ssh_passthrough_args_do_not_swallow_root_flags() {
+        let cli = Cli::try_parse_from([
+            "swoosh",
+            "--home",
+            "/tmp/right",
+            "ssh",
+            "alice",
+            "--",
+            "-p",
+            "2222",
+            "--home",
+            "/tmp/is-ssh-arg",
+        ])
+        .expect("the separated form parses");
+        assert_eq!(cli.home, Some(PathBuf::from("/tmp/right")));
+        let Some(Command::Ssh(cmd)) = cli.command else {
+            panic!("ssh parses to the ssh verb");
+        };
+        assert_eq!(cmd.args, ["-p", "2222", "--home", "/tmp/is-ssh-arg"]);
+
+        assert!(
+            Cli::try_parse_from(["swoosh", "ssh", "alice", "-p", "2222", "--home", "/tmp/x"])
+                .is_err(),
+            "an ssh-shaped token before `--` must be a parse error, never a silent capture"
+        );
+    }
+
     /// The `--peer` HINT flag still parses, now under its de-collided clap id `peer-hint`, alongside a
     /// verb's positional `<peer>` with no clap id collision.
     #[test]

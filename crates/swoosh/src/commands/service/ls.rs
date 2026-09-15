@@ -104,6 +104,9 @@ impl ServiceLsCmd {
         // A bare `service ls` reaches no peer, so an explicit `--present` has nothing to select: refuse
         // it rather than silently dropping it (I.3), before touching the socket.
         crate::reaching::reject_bare_present(self.present.as_ref())?;
+        // The reach trio binds a transport and seeds discovery for a PEER; a bare `service ls` binds
+        // neither, so the flags are refused by name rather than silently ignored (I.3, B4).
+        crate::reaching::reject_bare_reach(&self.reach)?;
         let client = ControlClient::resolve(home).map_err(control_error_report)?;
         let menu = client.services().await.map_err(control_error_report)?;
         // The disabled-list diagnostic goes to stderr, BEFORE the clean stdout table (I.5): the `?`

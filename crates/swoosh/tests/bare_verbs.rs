@@ -253,6 +253,37 @@ fn bare_stop_stops_the_resident() {
         );
     }
 
+    // A bare reach flag is refused by name too (I.3, B4): the trio binds a transport and seeds discovery
+    // for a peer, and a bare verb reaches none, so each is a loud error, never a silent no-op. The
+    // resident stays untouched (the later real stop still finds it).
+    let hint = format!(
+        "{}=127.0.0.1:9000",
+        swoosh::identity::Secret::ephemeral().node_id()
+    );
+    let reach_cases: [(&[&str], &str); 9] = [
+        (&["stop", "--transport", "quirk"], "--transport"),
+        (&["stop", "--local"], "--local"),
+        (&["stop", "--peer", &hint], "--peer"),
+        (&["status", "--transport", "quirk"], "--transport"),
+        (&["status", "--local"], "--local"),
+        (&["status", "--peer", &hint], "--peer"),
+        (&["service", "ls", "--transport", "quirk"], "--transport"),
+        (&["service", "ls", "--local"], "--local"),
+        (&["service", "ls", "--peer", &hint], "--peer"),
+    ];
+    for (args, flag) in reach_cases {
+        let refused = swoosh(&scratch, args);
+        assert!(
+            !refused.status.success(),
+            "bare {args:?} with {flag} exits non-zero"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&refused.stderr).trim_end(),
+            format!("Error: {flag} only applies when reaching a peer; drop it or name one"),
+            "the refusal names the ignored flag: {args:?}"
+        );
+    }
+
     // Bare `stop` stops it, naming the pid the resident recorded in its lock.
     let stop = swoosh(&scratch, &["stop"]);
     assert!(

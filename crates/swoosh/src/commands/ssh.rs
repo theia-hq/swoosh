@@ -72,11 +72,14 @@ pub struct SshCmd {
     #[arg(id = "peer-hint", long = "peer", value_name = "key=addr")]
     pub peer_hint: Vec<transport::PeerHint>,
     /// Args forwarded verbatim to the system ssh, after `--`.
-    #[arg(
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        value_name = "ssh args"
-    )]
+    // `last = true` makes `--` the ONLY door into this positional: before it, every token is still
+    // parsed as swoosh's own, so a root/leaf flag can never be swallowed by ssh's args. The old
+    // `trailing_var_arg` form captured everything after the first ssh-shaped token, so
+    // `swoosh ssh alice -p 2222 --home <dir>` silently resolved `alice` from the DEFAULT home and
+    // dialed the wrong identity (the class this fix closes). clap refuses `last` together with
+    // `trailing_var_arg`, so the passthrough now requires the separator the spec's
+    // `[-- <ssh args>...]` already documents.
+    #[arg(last = true, allow_hyphen_values = true, value_name = "ssh args")]
     pub args: Vec<String>,
 }
 
@@ -615,6 +618,35 @@ mod tests {
             .or_else(|| cmd.present.clone())
             .expect("the explicit --present is the forwarded slip");
         assert_eq!(present.link(), link);
+    }
+
+    /// B1: the passthrough only opens after `--`, so while swoosh still has flags to parse no ssh-shaped
+    /// token can capture them. Before the fix (`trailing_var_arg`, no `last`), `-p 2222 --home <dir>`
+    /// landed in `args` wholesale and `swoosh ssh` dialed the default home.
+    #[test]
+    fn passthrough_args_require_the_separator() {
+        // After `--`, ssh-shaped tokens land verbatim in `args`.
+        let cmd = parse_ssh(&["swoosh", "alice", "--", "-p", "2222", "ls"]);
+        assert_eq!(cmd.args, ["-p", "2222", "ls"]);
+
+        // swoosh's own flags still parse before the separator.
+        let cmd = parse_ssh(&[
+            "swoosh",
+            "alice",
+            "--service",
+            "web",
+            "--peer",
+            &format!("{KEY}=127.0.0.1:9000"),
+            "--",
+            "-p",
+            "2222",
+        ]);
+        assert_eq!(cmd.service, "web");
+        assert_eq!(cmd.peer_hint.len(), 1);
+        assert_eq!(cmd.args, ["-p", "2222"]);
+
+        // Without the separator an ssh-shaped flag is a hard parse error, never a silent capture.
+        assert!(WrapSsh::try_parse_from(["swoosh", "alice", "-p", "2222"]).is_err());
     }
 
     #[test]

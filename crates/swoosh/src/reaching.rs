@@ -217,6 +217,25 @@ pub(crate) fn reject_bare_present(present: Option<&SheerLink>) -> eyre::Result<(
     Ok(())
 }
 
+/// Reject the reach-family flags on a BARE (local) invocation: `--transport`, `--local`, and `--peer`
+/// choose how a PEER is bound and found, and a bare `status`/`stop`/`service ls` reaches no peer (it
+/// queries the local resident over the control socket). The bare arms return before the composition
+/// root reads these flags, so without this guard they parsed and were silently ignored (I.3 forbids a
+/// flag with no effect). One home for the teaching line, called by each bare arm beside
+/// [`reject_bare_present`].
+pub(crate) fn reject_bare_reach(reach: &transport::ReachArgs) -> eyre::Result<()> {
+    if reach.transport != transport::Transport::default() {
+        eyre::bail!("--transport only applies when reaching a peer; drop it or name one");
+    }
+    if reach.local {
+        eyre::bail!("--local only applies when reaching a peer; drop it or name one");
+    }
+    if !reach.peer.is_empty() {
+        eyre::bail!("--peer only applies when reaching a peer; drop it or name one");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use nauthy::Link;
@@ -454,5 +473,62 @@ mod tests {
             membership.is_none(),
             "a non-signet link-as-peer attaches NO slot 2 (no signet-linkage over-share)"
         );
+    }
+
+    /// B4: the bare-form guard refuses each reach-family flag by name (never silently ignoring it), and
+    /// the defaults pass through: a bare `stop`/`service ls`/`status` binds no transport and seeds no
+    /// discovery, so there is nothing for the trio to do.
+    #[test]
+    fn bare_reach_flags_are_rejected_by_name() {
+        let defaulted = transport::ReachArgs {
+            transport: transport::Transport::default(),
+            local: false,
+            peer: Vec::new(),
+        };
+        assert!(
+            reject_bare_reach(&defaulted).is_ok(),
+            "the parsed defaults have nothing to refuse"
+        );
+
+        let hint = format!(
+            "{}=127.0.0.1:9000",
+            crate::identity::Secret::ephemeral().node_id()
+        )
+        .parse::<transport::PeerHint>()
+        .expect("a valid peer hint");
+        let cases = [
+            (
+                transport::ReachArgs {
+                    transport: transport::Transport::Quirk,
+                    local: false,
+                    peer: Vec::new(),
+                },
+                "--transport",
+            ),
+            (
+                transport::ReachArgs {
+                    transport: transport::Transport::default(),
+                    local: true,
+                    peer: Vec::new(),
+                },
+                "--local",
+            ),
+            (
+                transport::ReachArgs {
+                    transport: transport::Transport::default(),
+                    local: false,
+                    peer: vec![hint],
+                },
+                "--peer",
+            ),
+        ];
+        for (reach, flag) in cases {
+            let error = reject_bare_reach(&reach)
+                .expect_err("a flag with no effect on a bare form must refuse");
+            assert_eq!(
+                format!("{error:#}"),
+                format!("{flag} only applies when reaching a peer; drop it or name one")
+            );
+        }
     }
 }
