@@ -1060,7 +1060,7 @@ fn named_fetch_origins_de_merge_into_per_service_instances() {
     );
 }
 
-/// A bare `fetch:` (no `=`, no name) names no service and is refused with the `name=addr` teaching
+/// A bare `fetch:` (no `=`, no name) names no service and is refused with the `name=target` teaching
 /// error: only `name=fetch:<origin>` is spelled.
 #[test]
 fn bare_fetch_is_refused_with_the_name_addr_teaching_error() {
@@ -1069,7 +1069,7 @@ fn bare_fetch_is_refused_with_the_name_addr_teaching_error() {
         panic!("a bare `fetch:` should be refused, not served");
     };
     assert!(
-        error.to_string().contains("name=addr"),
+        error.to_string().contains("name=target"),
         "the refusal teaches the grammar: {error}"
     );
 }
@@ -1233,7 +1233,7 @@ fn named_recv_dirs_de_merge_into_per_service_instances() {
     );
 }
 
-/// A bare `recv:` (no `=`, no name) names no service and is refused with the `name=addr` teaching
+/// A bare `recv:` (no `=`, no name) names no service and is refused with the `name=target` teaching
 /// error: only `name=recv:<dir>` is spelled.
 #[test]
 fn bare_recv_is_refused_with_the_name_addr_teaching_error() {
@@ -1242,7 +1242,7 @@ fn bare_recv_is_refused_with_the_name_addr_teaching_error() {
         panic!("a bare `recv:` should be refused, not served");
     };
     assert!(
-        error.to_string().contains("name=addr"),
+        error.to_string().contains("name=target"),
         "the refusal teaches the grammar: {error}"
     );
 }

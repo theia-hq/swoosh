@@ -92,44 +92,24 @@ const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 /// Be a node: publish these services behind your signet gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// publish local services as `name=svc` (empty serves `ping` and `speed`)
-    #[arg(value_name = "name=svc")]
+    /// publish services as `name=target` (bare: `ping` and `speed`)
+    #[arg(value_name = "name=target")]
     pub services: Vec<String>,
-    /// open named services to anyone, unauthenticated (comma-list, repeatable)
+    /// open named services to anyone (comma-list, repeatable)
     #[arg(
         long,
         value_name = "svc",
         value_delimiter = ',',
-        long_help = "Open these NAMED services to anyone, unauthenticated (comma-list, repeatable: \
-                     `--public speed,fetch` or `--public speed --public fetch`): the per-service opt-out \
-                     from the signet gate. Each name must be a service you serve.\n\nA keyless shell \
-                     (`sshd:`, remote code execution) is refused with a teaching error, and \
-                     `control.stop`/`control.services` can never be opened. `ping`/`speed` MAY be opened; \
-                     an open one is METERED (a per-caller run interval, one transfer at a time, byte \
-                     and wall-clock caps), so it is a bounded unit rather than an unmetered drain. A \
-                     member-only route may run unmetered, and the readiness banner warns whenever an open \
-                     service is unmetered.\n\nA \
-                     raw-stream service (file:/fifo:/stdin:) has no auth of its own, so --public refuses it \
-                     and points you at --public-unsafe, the distinct, louder opt-in."
+        long_help = "A keyless shell is refused; a raw stream goes to `--public-unsafe`."
     )]
     pub public: Vec<String>,
-    /// serve named RAW-STREAM services (file:/fifo:/stdin:) to anyone, unauthenticated (comma-list, repeatable)
-    // CLI-Architect round-3 (Rulings 1 & 2): the founder's `--public <svc>!` bang-suffix was REJECTED (a
-    // name-dependent shell footgun that reopens the accident-vs-intent gap); the separate `--public-unsafe
-    // <names>` value-grammar sibling of `--public` is KEPT. Unlike the thin bin, swoosh has a family base, so
-    // a named raw stream is opened by this overlay alone: NO `requires` (the thin bin's whole-node `--public`
-    // is why it alone carries `requires = "public"`).
+    /// open named raw-stream services (file:, fifo:, stdin:) to anyone
+    // A raw stream opens only through this flag, and only when named: no bang suffix, no whole-node form.
     #[arg(
         long,
         value_name = "svc",
         value_delimiter = ',',
-        long_help = "Serve these NAMED raw-stream services (file:/fifo:/stdin:) to anyone, unauthenticated \
-                     (comma-list, repeatable). This is the DISTINCT, louder opt-in for a source that has NO \
-                     auth of its own: --public refuses a raw stream and points you here. The readiness \
-                     banner names the RESOLVED ABSOLUTE PATH of each, because `--public-unsafe logs` where \
-                     `logs=file:~/.ssh/id_rsa` would hand that file's bytes to anyone who reaches this node. \
-                     Each name must be a raw-stream service you serve; a handler or a forward is redirected \
-                     to --public."
+        long_help = "A raw stream has no auth of its own; `--public` refuses it and points here."
     )]
     pub public_unsafe: Vec<String>,
     /// suppress the readiness banner (for unattended/CI use)
@@ -138,7 +118,7 @@ pub struct ServeCmd {
     /// serve for a bounded time, then stop (`30m`, `2h`, `1d`)
     #[arg(long, value_name = "duration")]
     pub expires: Option<Lifetime>,
-    /// be the resident node: local control socket; stays foreground
+    /// be the resident node: one per home, control socket; stays foreground
     #[arg(long)]
     pub resident: bool,
     #[command(flatten)]
@@ -709,7 +689,7 @@ fn display_targets(requested: &[String]) -> eyre::Result<HashMap<String, String>
     for entry in requested {
         let Some((name, addr)) = entry.split_once('=') else {
             eyre::bail!(
-                "`{entry}` names no service. Every serve entry must be `name=addr`, e.g. \
+                "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
                  `ping=ping:`, `web=127.0.0.1:8080`"
             );
         };
@@ -1301,7 +1281,7 @@ fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<RecvSe
         // Split off the `name=` prefix; only the ADDR side names a scheme, so the dir is read from there.
         let Some((name, addr)) = entry.split_once('=') else {
             eyre::bail!(
-                "`{entry}` names no service. Every serve entry must be `name=addr`, e.g. \
+                "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
                  `inbox=recv:/tmp/x`"
             );
         };
@@ -1377,7 +1357,7 @@ impl FetchScope {
             // from there.
             let Some((name, addr)) = entry.split_once('=') else {
                 eyre::bail!(
-                    "`{entry}` names no service. Every serve entry must be `name=addr`, e.g. \
+                    "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
                      `news=fetch:https://news.example`"
                 );
             };
