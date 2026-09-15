@@ -140,7 +140,7 @@ A grant locked to a device or a fleet is theft-resistant: a stolen copy is worth
 works from the key it is bound to. A bearer grant can be freely handed on, which is exactly why it
 should expire soon. You pick binding or delegation per grant; the math will not give you both at once.
 
-**The honest limit.** A bearer grant is a bearer token: whoever holds an unexpired, un-revoked one gets
+**A bearer grant is a bearer token.** Whoever holds an unexpired, un-revoked one gets
 that one service until it expires or you revoke it. Keep bearer grants short-lived.
 
 ## Using a grant you were given

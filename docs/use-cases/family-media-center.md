@@ -79,7 +79,7 @@ $ swoosh grant revoke bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
 revoked 1 grant(s) to bf01o6vqymgz727g… (…/revoked)
 ```
 
-## Honest limits
+## The limits
 
 - **No family group yet.** You grant each member one by one. A named group that holds people (grant it
   once, everyone in it is covered) is [planned](../roadmap.md).

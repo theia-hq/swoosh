@@ -64,7 +64,7 @@ $ swoosh grant revoke bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
 revoked 1 grant(s) to bf01o6vqymgz727g… (…/revoked)
 ```
 
-## The honest limit
+## The limit
 
 A revoke is node-local and lands live: it takes effect on the box's next dial, typically within a couple
 of seconds, no restart. It does not cut a session already in progress. If you serve the box from more

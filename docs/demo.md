@@ -23,7 +23,7 @@ $ scripts/demo.sh
 
 Everything below is captured from that script.
 
-> Honest captions, read them before the numbers:
+> Read the captions before the numbers:
 >
 > - **quirk's throughput is not a speed claim.** quirk is young; its loopback throughput varies run to
 >   run and is nowhere near a mature stack. The point is that the SAME command runs over a transport we
@@ -189,7 +189,7 @@ unchanged identity, and the same signet gate admits your devices and refuses eve
 transport. No incumbent (ssh, cloudflared, tailscale, plain iroh tooling) can pull its transport out
 from under the same address and command while proving the same membership gate holds.
 
-## The honest limitations
+## The limits
 
 - Bare `quirk` never proves the peer's key, so swoosh refuses to serve gated traffic over it; `quirk+noise`
   runs a Noise handshake over the same direct-only backend and proves the key.

@@ -34,7 +34,7 @@ rest is planned and lands as it is built.
 - [ ] `ssh config`: emit ssh `Host` aliases for devices that advertise ssh.
 - [ ] A machine group (`cluster`): name a local set of machines and share the whole group as one capability link.
 - [ ] `run`: run code at a peer addressed by its key.
-- [ ] MagicDNS names: type `ssh desk.alice` into any app and have it resolve.
+- [ ] Names that resolve: type `ssh desk.alice` into any app.
 
 ## Next
 

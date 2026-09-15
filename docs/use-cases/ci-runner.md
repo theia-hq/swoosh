@@ -102,7 +102,7 @@ $ swoosh grant revoke me/ci-runner
 
 To rotate instead of revoke, create a fresh invite, update the CI secret, and revoke the old device.
 
-## The honest limit
+## The limit
 
 Anyone who can read the `SWOOSH_AUTHKEY` secret can adopt that device identity, so scope the secret to
 the job that needs it and rotate it like any credential. A revoke is node-local: it writes that node's own

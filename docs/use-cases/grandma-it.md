@@ -73,7 +73,7 @@ $ swoosh ssh me/grandma-pc -- sudo apt upgrade -y
 
 The gate admits you because your machine carries the membership your signet issued. Nobody else gets in.
 
-## The honest limit
+## The limit
 
 Their machine trusts your signet fully: adoption makes it one of your devices, so you can reach every
 gated service on it. That is the point here, but it means you should only do this on a machine you are

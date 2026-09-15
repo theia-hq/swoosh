@@ -16,7 +16,7 @@
 # iroh leg has no self-connect: iroh accepts the dial. The old one-key demo
 # could not run over iroh at all (iroh forbids connecting to your own NodeId).
 #
-# Honest captions (see DEMO.md):
+# The captions (see DEMO.md):
 #   - quirk phase 0 is stop-and-wait (~14 MiB/s). That is not a speed claim; the
 #     point of the swap is the key, not the number.
 #   - bare quirk announces its key, so a signet-rooted gate refuses to arm over
