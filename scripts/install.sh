@@ -49,9 +49,13 @@ if command -v gh >/dev/null 2>&1; then
   say "verifying build provenance (gh attestation)..."
   if gh attestation verify "${tmp}/${BIN}" --repo "${REPO}" >/dev/null 2>&1; then
     say "provenance verified: built by ${REPO}'s release workflow."
+  elif gh auth status >/dev/null 2>&1; then
+    say "provenance not verified (verification failed; checksum still holds); install continues."
   else
-    say "provenance not verified (checksum still holds); install continues."
+    say "provenance not verified (gh not authenticated; checksum still holds); install continues."
   fi
+else
+  say "provenance not verified (gh not found; checksum still holds); install continues."
 fi
 
 chmod +x "${tmp}/${BIN}"

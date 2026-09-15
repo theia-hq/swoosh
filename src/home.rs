@@ -124,6 +124,14 @@ impl Home {
         self.dir.join("contacts.toml")
     }
 
+    /// `<home>/known_hosts`: the private host-key book `swoosh ssh` pins peers into, keyed on the
+    /// immutable node id (not the petname) via ssh's `HostKeyAlias`. A node path like every other, so an
+    /// isolated `--home` isolates its pins too; the default home's book stays at the historical
+    /// `~/.config/swoosh/known_hosts`, since that IS the default home.
+    pub fn known_hosts(&self) -> PathBuf {
+        self.dir.join("known_hosts")
+    }
+
     /// The 16-char hex key scoping this home's resident state: inline 64-bit FNV-1a over the
     /// canonicalized home path, the full 64 bits rendered as 16 lowercase hex chars. Dependency
     /// free and stable across daemon and client because both binaries carry this same function.
