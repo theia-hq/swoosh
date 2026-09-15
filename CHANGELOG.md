@@ -2,6 +2,18 @@
 
 All notable changes to swoosh, newest first.
 
+## v0.9.1
+
+`--home` keeps its ssh pins to itself, and the installer names each reason a provenance check was skipped.
+
+### Fixed
+- **`ssh`'s host-key pins follow the selected home.** `--home <dir>` (or `SWOOSH_HOME`) now keeps
+  `known_hosts` beside that home's identity, so an isolated run no longer appends to the default book,
+  and a run with `HOME` unset works.
+- **The installer names the cause when it skips provenance verification.** `gh not found`,
+  `gh not authenticated`, and `verification failed` are distinct lines, each saying the checksum still
+  holds, so a skipped check reads as a cause, not a mystery.
+
 ## v0.9.0
 
 Invite replaces mint, a node is a home, quirk gets Noise, and revocation lands live.
