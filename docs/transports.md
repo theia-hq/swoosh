@@ -35,9 +35,25 @@ there is no fallback.
 
 Because it is direct-only, a `quirk+noise` `serve` prints the address the peer needs:
 
-<!-- pending live-run: banner wording -->
+<!-- capture: swoosh serve --transport quirk+noise -->
 ```console
 $ swoosh serve --transport quirk+noise
+swoosh ready
+
+    bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
+
+how peers reach you
+  local    automatic; local mDNS, or direct, no NAT traversal
+  direct   reachable on this machine only:
+           127.0.0.1:58476
+
+serving
+  family-gated   your devices + peers you've granted
+    ping        round-trip probe
+    speed       throughput test
+    control.*   node control (never public)
+
+ctrl-c to stop
 ```
 
 Hand that address to the peer with `--peer` (below).
