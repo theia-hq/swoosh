@@ -1380,8 +1380,8 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fetch"
-version = "0.1.0"
-source = "git+https://github.com/theia-hq/services?rev=426482adec279fa5910b642b744fb3a7a7ef672b#426482adec279fa5910b642b744fb3a7a7ef672b"
+version = "0.1.1"
+source = "git+https://github.com/theia-hq/services?rev=cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5#cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5"
 dependencies = [
  "futures",
  "reqwest 0.12.28",
@@ -2529,8 +2529,8 @@ checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
 
 [[package]]
 name = "measure"
-version = "0.1.0"
-source = "git+https://github.com/theia-hq/services?rev=426482adec279fa5910b642b744fb3a7a7ef672b#426482adec279fa5910b642b744fb3a7a7ef672b"
+version = "0.1.1"
+source = "git+https://github.com/theia-hq/services?rev=cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5#cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5"
 dependencies = [
  "bifrost",
  "futures",
@@ -4729,8 +4729,8 @@ dependencies = [
 
 [[package]]
 name = "sshh"
-version = "0.1.0"
-source = "git+https://github.com/theia-hq/services?rev=426482adec279fa5910b642b744fb3a7a7ef672b#426482adec279fa5910b642b744fb3a7a7ef672b"
+version = "0.1.1"
+source = "git+https://github.com/theia-hq/services?rev=cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5#cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5"
 dependencies = [
  "blake3",
  "libc",
@@ -5310,8 +5310,8 @@ dependencies = [
 
 [[package]]
 name = "transfer"
-version = "0.1.0"
-source = "git+https://github.com/theia-hq/services?rev=426482adec279fa5910b642b744fb3a7a7ef672b#426482adec279fa5910b642b744fb3a7a7ef672b"
+version = "0.1.1"
+source = "git+https://github.com/theia-hq/services?rev=cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5#cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5"
 dependencies = [
  "bifrost",
  "eyre",
