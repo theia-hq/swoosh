@@ -12,10 +12,10 @@
 //!   SECRET, so this shape is handed over a private channel only.
 //!
 //! The signet SECRET never travels in either shape: only the child seed (derived), the signet's PUBLIC
-//! node id, and the already-signed public badge (a `sheer:` link). `authkey:` is accepted for one release
-//! as the legacy scheme of the derived shape, so a token minted before the rename still adopts; the
-//! encoder only ever emits `invite:`. Sibling to the `sheer:` capability link: one scheme per kind of
-//! thing you hand a machine, so a glance at the prefix says what it is.
+//! node id, and the already-signed public badge (a `sheer:` link). `invite:` is the one accepted scheme:
+//! there is no legacy spelling, so a retired token fails loudly instead of parsing as a second shape.
+//! Sibling to the `sheer:` capability link: one scheme per kind of thing you hand a machine, so a glance
+//! at the prefix says what it is.
 
 use core::fmt;
 
@@ -25,9 +25,6 @@ use zeroize::{Zeroize as _, Zeroizing};
 
 /// The `invite:` scheme prefix.
 pub const SCHEME: &str = "invite:";
-
-/// The retired scheme the derived shape was minted under: parsed for one release, never emitted.
-pub const LEGACY_SCHEME: &str = "authkey:";
 
 /// Separates the encoded fields. A base32 seed, a node id, and a `sheer:` link all lack one, so it
 /// delimits unambiguously.
@@ -47,15 +44,14 @@ pub enum Invite {
         /// The signet-signed, device-bound membership badge (a `sheer:` link).
         badge: String,
     },
-    /// `invite:<seed>.<signet>.<badge>`: adopting writes the seed as the device identity. `badge` is
-    /// `None` only for a legacy two-field `authkey:<seed>.<signet>` minted before badges were carried.
+    /// `invite:<seed>.<signet>.<badge>`: adopting writes the seed as the device identity.
     Derived {
         /// The device's derived child seed. SECRET: adopting it IS becoming that device.
         seed: Zeroizing<[u8; 32]>,
         /// The signet's PUBLIC node id, the root the device's gate trusts.
         signet: NodeId,
-        /// The signet-signed, device-bound membership badge, absent for a legacy two-field authkey.
-        badge: Option<String>,
+        /// The signet-signed, device-bound membership badge.
+        badge: String,
     },
 }
 
@@ -70,16 +66,16 @@ impl Invite {
         Self::Derived {
             seed: Zeroizing::new(seed),
             signet,
-            badge: Some(badge),
+            badge,
         }
     }
 
-    /// Parse an `invite:` token (or a legacy `authkey:` token) into its shape.
+    /// Parse an `invite:` token into its shape.
     ///
     /// The badge is a `sheer:` link, which itself contains a `.` (the root and the token), so the field
     /// count cannot decide the shape: the badge's `sheer:` scheme marks where it starts, and the fields
-    /// before it (one for bound, two for derived) decide the shape. A legacy `authkey:` is always
-    /// [`Derived`] (two fields carry no badge). The decoded seed buffer is wiped before returning, and the
+    /// before it (one for bound, two for derived) decide the shape. Any other scheme is refused: a token
+    /// parses under `invite:` or not at all. The decoded seed buffer is wiped before returning, and the
     /// returned seed zeroizes on drop, so no key material lingers in freed memory.
     ///
     /// [`Derived`]: Invite::Derived
@@ -101,26 +97,9 @@ impl Invite {
                 [seed, signet] => Ok(Self::Derived {
                     seed: parse_seed(seed)?,
                     signet: parse_signet(signet)?,
-                    badge: Some(badge),
+                    badge,
                 }),
                 _ => Err(InviteError::Malformed),
-            };
-        }
-        if let Some(body) = token.strip_prefix(LEGACY_SCHEME) {
-            // The legacy shape puts the seed first and carries the badge as the remainder, split off
-            // before any further `.` so a dot inside the `sheer:` link stays part of the badge.
-            let (seed, rest) = body.split_once(SEPARATOR).ok_or(InviteError::Malformed)?;
-            return match rest.split_once(SEPARATOR) {
-                Some((signet, badge)) => Ok(Self::Derived {
-                    seed: parse_seed(seed)?,
-                    signet: parse_signet(signet)?,
-                    badge: Some(nonempty(badge)?),
-                }),
-                None => Ok(Self::Derived {
-                    seed: parse_seed(seed)?,
-                    signet: parse_signet(rest)?,
-                    badge: None,
-                }),
             };
         }
         Err(InviteError::Scheme)
@@ -141,34 +120,24 @@ impl fmt::Debug for Invite {
                 .debug_struct("Invite::Derived")
                 .field("seed", &"<redacted>")
                 .field("signet", signet)
-                .field("badge", &badge.as_ref().map(String::len))
+                .field("badge", &badge.len())
                 .finish(),
         }
     }
 }
 
 impl fmt::Display for Invite {
-    /// The canonical token for this shape. A legacy two-field derived invite (parsed from `authkey:`)
-    /// renders under its original scheme, so re-encoding can never turn it into the bound shape.
+    /// The canonical token for this shape: both shapes render under `invite:`, so re-encoding is stable.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bound { signet, badge } => write!(f, "{SCHEME}{signet}{SEPARATOR}{badge}"),
             Self::Derived {
                 seed,
                 signet,
-                badge: Some(badge),
+                badge,
             } => write!(
                 f,
                 "{SCHEME}{}{SEPARATOR}{signet}{SEPARATOR}{badge}",
-                encode_seed(seed).as_str()
-            ),
-            Self::Derived {
-                seed,
-                signet,
-                badge: None,
-            } => write!(
-                f,
-                "{LEGACY_SCHEME}{}{SEPARATOR}{signet}",
                 encode_seed(seed).as_str()
             ),
         }
@@ -204,19 +173,10 @@ fn parse_signet(text: &str) -> Result<NodeId, InviteError> {
     text.parse::<NodeId>().map_err(InviteError::Signet)
 }
 
-/// A required token field: an empty one is malformed, never a silently empty badge.
-fn nonempty(text: &str) -> Result<String, InviteError> {
-    if text.is_empty() {
-        Err(InviteError::Malformed)
-    } else {
-        Ok(text.to_owned())
-    }
-}
-
 /// Why a string was not a valid [`Invite`] token.
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {
-    /// The token carried neither the `invite:` nor the legacy `authkey:` prefix.
+    /// The token did not carry the `invite:` prefix.
     #[error("not an invite (expected the `invite:` prefix)")]
     Scheme,
     /// The token had the wrong number of fields.
@@ -276,7 +236,7 @@ mod tests {
             } => {
                 assert_eq!(&*seed, &[7u8; 32]);
                 assert_eq!(root, signet());
-                assert_eq!(badge.as_deref(), Some("sheer:BADGE"));
+                assert_eq!(badge, "sheer:BADGE");
             }
             other => panic!("expected the derived shape, got {other:?}"),
         }
@@ -308,37 +268,25 @@ mod tests {
         );
     }
 
-    /// A legacy `authkey:` token still parses (both the two-field and three-field shapes), so a device
-    /// minted before the rename adopts unchanged.
+    /// A pre-rename `authkey:` token is REFUSED, both shapes: `invite:` is the one scheme, with no
+    /// aliasing, so a token carrying the retired prefix fails loudly instead of half-working as a
+    /// legacy shape.
     #[test]
-    fn legacy_authkeys_still_parse() {
-        let token = Invite::parse(&format!(
+    fn a_pre_rename_token_is_refused() {
+        let two_field = format!(
             "authkey:{}.{}",
-            BASE32_NOPAD.encode(&[4u8; 32]).to_lowercase(),
-            signet()
-        ))
-        .expect("a legacy two-field authkey parses");
-        match token {
-            Invite::Derived {
-                seed,
-                signet: root,
-                badge,
-            } => {
-                assert_eq!(&*seed, &[4u8; 32]);
-                assert_eq!(root, signet());
-                assert!(badge.is_none(), "a two-field authkey carries no badge");
-            }
-            other => panic!("expected the derived shape, got {other:?}"),
-        }
-
-        let three = format!(
-            "authkey:{}.{}.sheer:BADGE",
             BASE32_NOPAD.encode(&[4u8; 32]).to_lowercase(),
             signet()
         );
         assert!(matches!(
-            Invite::parse(&three).expect("a legacy three-field authkey parses"),
-            Invite::Derived { badge: Some(_), .. }
+            Invite::parse(&two_field),
+            Err(InviteError::Scheme)
+        ));
+
+        let three_field = format!("{two_field}.sheer:BADGE");
+        assert!(matches!(
+            Invite::parse(&three_field),
+            Err(InviteError::Scheme)
         ));
     }
 

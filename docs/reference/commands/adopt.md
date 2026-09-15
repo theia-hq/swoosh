@@ -7,12 +7,12 @@ Adopt an invite: join a signet's family as this machine.
 <!-- generated: usage from `swoosh adopt -h`; option lines curated -->
 ```
 Usage: swoosh adopt [OPTIONS] [invite]
-  [invite]   the invite to adopt (a secret for a derived invite; - stdin, @<path> file, or SWOOSH_AUTHKEY)
+  [invite]   the invite to adopt (a secret for a derived invite; - stdin, @<path> file, or SWOOSH_INVITE)
   --force    re-root this machine when the invite names a different signet, or replace a differing stored badge
 ```
 
 **Example.** `swoosh adopt @invite.txt` reads the invite from a file. `swoosh adopt` alone reads
-`SWOOSH_AUTHKEY` from the environment.
+`SWOOSH_INVITE` from the environment.
 
 **Things to know.** A derived invite (`invite add` with no `--for`) carries a device seed: adopting it
 replaces this home's identity and becomes that device. A bound invite (`invite add --for <key>`) carries

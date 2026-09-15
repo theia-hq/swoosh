@@ -102,7 +102,7 @@ impl FleetCmd {
     {
         // The signet we verify against: the key our own gate trusts, written by `adopt`.
         let signet = crate::config::load_signet(home).await?.ok_or_else(|| {
-            eyre::eyre!("this node has no signet; run `swoosh adopt <authkey>` first")
+            eyre::eyre!("this node has no signet; run `swoosh adopt <invite>` first")
         })?;
 
         // Dial the GATED roster: service through the unified peer resolver (so a petname/link coordination

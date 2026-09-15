@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use eyre::WrapErr as _;
 use zeroize::Zeroizing;
 
-/// Cap on a stdin or `@<path>` secret read. An authkey is ~120 bytes; 64 KiB is generous headroom for any
+/// Cap on a stdin or `@<path>` secret read. An invite is ~120 bytes; 64 KiB is generous headroom for any
 /// legitimate secret while a runaway source (`swoosh adopt - < /dev/zero`, or `@/dev/zero` -- NUL is valid
 /// UTF-8, so `read_to_string` never bails on it) hits the cap instead of growing until it exhausts memory.
 const READ_LIMIT: u64 = 64 * 1024;

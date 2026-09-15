@@ -23,7 +23,7 @@
 #      naming the consumer `swoosh`). See the classification block below.
 #
 #   2. FLAG check -- a prime LIBRARY (not a `src/bin/` CLI) alludes to a consumer long-flag
-#      (`--for`/`--public`/`--peer`/`--authkey`/`--to`). A library owns a concept, never the
+#      (`--for`/`--public`/`--peer`/`--invite`/`--to`). A library owns a concept, never the
 #      flag a CLI paints over it.
 #
 # NOTHING IS HARDCODED about WHICH crates exist. The crate SET is DERIVED (see below) from
@@ -48,7 +48,7 @@ ALLOW_MARK="layering-gate:allow"
 # source -- deriving it would mean parsing every clap-derive struct's fields, kebab-casing
 # them, and unwinding raw idents / `rename_all`, precisely the fragile parse we avoid. The
 # check MATCHES a literal `--flag`, which is distinctive and cannot collide with prose.
-FLAG_TOKENS="--for --public --peer --authkey --to"
+FLAG_TOKENS="--for --public --peer --invite --to"
 
 # ---------------------------------------------------------------------------------------
 # DERIVE the crate SET (the "universe" of theia crate names) from the manifests under ROOT.
