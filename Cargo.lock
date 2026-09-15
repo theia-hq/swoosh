@@ -4956,7 +4956,7 @@ dependencies = [
 [[package]]
 name = "tightbeam"
 version = "0.5.1"
-source = "git+https://github.com/theia-hq/tightbeam?rev=6df1983#6df1983"
+source = "git+https://github.com/theia-hq/tightbeam?rev=6df1983f6cb77fe65dc398e79b49cddb1ae10071#6df1983f6cb77fe65dc398e79b49cddb1ae10071"
 dependencies = [
  "bifrost",
  "bifrost-iroh",
@@ -4979,7 +4979,7 @@ dependencies = [
 [[package]]
 name = "tightbeam-handler"
 version = "0.4.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=6df1983#6df1983"
+source = "git+https://github.com/theia-hq/tightbeam?rev=6df1983f6cb77fe65dc398e79b49cddb1ae10071#6df1983f6cb77fe65dc398e79b49cddb1ae10071"
 dependencies = [
  "bifrost-core",
  "nauthy",
