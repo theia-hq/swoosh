@@ -38,10 +38,10 @@ tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "6df1983f6cb7
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "426482adec279fa5910b642b744fb3a7a7ef672b" }
-measure = { git = "https://github.com/theia-hq/services", rev = "426482adec279fa5910b642b744fb3a7a7ef672b" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "426482adec279fa5910b642b744fb3a7a7ef672b", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "426482adec279fa5910b642b744fb3a7a7ef672b" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5" }
+measure = { git = "https://github.com/theia-hq/services", rev = "cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "cc33c444ba9df50bfaa69b2a5d322a5c744e8cb5" }
 
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
