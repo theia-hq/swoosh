@@ -111,9 +111,9 @@ mod tests {
 
     /// The ledger is issuer-side audit only: the gate never consults it, so it must never appear on the
     /// admit path. This test fails the moment `serve` or the bin root names [`Grants`]. Rerun by hand
-    /// with: `rg -n Grants crates/swoosh/src/commands/serve.rs crates/swoosh/src/main.rs` from the
-    /// workspace root and confirm no hits; the same holds for the nauthy gate and tightbeam tunnel
-    /// sources, which live in sibling repos and cannot be included here.
+    /// with: `rg -n Grants src/commands/serve.rs src/main.rs` from the repo root and confirm no hits;
+    /// the same holds for the nauthy gate and tightbeam tunnel sources, which live in sibling repos
+    /// and cannot be included here.
     #[test]
     fn the_gate_never_reads_the_ledger() {
         for (name, text) in [
