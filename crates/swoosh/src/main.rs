@@ -65,7 +65,7 @@ use swoosh::{config, credential, identity, reaching, transport};
     arg_required_else_help = true
 )]
 struct Cli {
-    /// the node home: key, trust, contacts (the key lives at <home>/identity.key)
+    /// the node home: key, contacts, trust (default `~/.config/swoosh`)
     // clap appends the `[env: SWOOSH_HOME=]` annotation itself from `env` below, so the help must NOT
     // spell the env var again (doing so double-prints it).
     #[arg(

@@ -27,22 +27,18 @@ use eyre::WrapErr as _;
 /// the bound key both live in, meaningful to both families.
 #[derive(Debug, Args)]
 pub struct ReachArgs {
-    /// Backend to bind under this identity
+    /// which backend to bind
     #[arg(
         long,
         value_enum,
         default_value_t,
-        value_name = "iroh|quirk|quirk+noise",
-        long_help = "Backend to bind under this identity. Serving means accepting peers and running \
-                     the node's exposed services; the gate admits a dialer only on its proven key, so \
-                     serving gated services needs a backend that proves that key. Both quirk \
-                     spellings are direct-only."
+        value_name = "iroh|quirk|quirk+noise"
     )]
     pub transport: Transport,
-    /// No internet discovery or relays: local mDNS or a direct hint
+    /// no internet discovery or relays: local mDNS or a direct --peer hint
     #[arg(long)]
     pub local: bool,
-    /// Direct address hint for a peer, `<key>=<addr>` (repeatable)
+    /// direct address hint for a peer, `<key>=<addr>` (repeatable)
     // The clap id is `peer-hint`, not `peer`: this frees the id `peer` for the positional `<peer>` slot
     // every dialing verb now names, so a verb hosts both this `--peer` HINT and a positional peer without a
     // clap id collision. The flag NAME stays `--peer` (no user-facing change).
@@ -61,9 +57,9 @@ pub enum Transport {
     /// across the internet, NAT-traversing; serves gated
     #[default]
     Iroh,
-    /// our own QUIC; dials public/ungated; cannot serve gated; base of quirk+noise
+    /// our own QUIC; direct-only; reaches open services; cannot serve gated
     Quirk,
-    /// our own QUIC; serves gated; a Noise handshake proves the peer's key
+    /// our own QUIC; direct-only; serves gated; a Noise handshake proves the key
     #[value(name = "quirk+noise")]
     QuirkNoise,
 }

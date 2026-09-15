@@ -6,9 +6,9 @@ Be a node: publish named services behind your signet gate. Bare, it answers reac
 
 <!-- generated: usage from `swoosh serve -h`; option lines curated -->
 ```
-Usage: swoosh serve [OPTIONS] [name=svc]...
-  [name=svc]...          publish a service, e.g. ssh=sshd:, tv=127.0.0.1:8096 (empty = ping + speed)
-  --public <svc>         open named services to anyone, unauthenticated (comma-list, repeatable)
+Usage: swoosh serve [OPTIONS] [name=target]...
+  [name=target]...       publish a service, e.g. ssh=sshd:, tv=127.0.0.1:8096 (bare = ping + speed)
+  --public <svc>         open named services to anyone (comma-list, repeatable)
   --public-unsafe <svc>  open named raw-stream services (file:, fifo:, stdin:) to anyone
   --expires <duration>   serve for a bounded time, then stop (30m, 2h, 1d)
   --quiet                suppress the readiness banner (for unattended/CI use)
