@@ -57,9 +57,9 @@ pub enum Transport {
     /// across the internet, NAT-traversing
     #[default]
     Iroh,
-    /// our own QUIC; announced key; all serves refused
+    /// our own QUIC; direct-only; cannot serve (key unproven)
     Quirk,
-    /// our own QUIC behind the sealed wrapper; direct-only, key proven
+    /// our own QUIC; direct-only; can serve (key proven)
     #[value(name = "quirk+noise")]
     QuirkNoise,
 }

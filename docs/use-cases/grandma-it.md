@@ -32,23 +32,9 @@ trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates
 stored your membership badge: this device now reaches your gated services.
 ```
 
-<!-- capture: swoosh serve ssh=sshd: -->
+<!-- pending live-run: banner wording -->
 ```console
 $ swoosh serve ssh=sshd:
-swoosh ready
-
-    bf01imv3ljql6kjnkw2cunbihhceq4ktg4yrcm7bygshuj6u27cciviq
-
-how peers reach you
-  internet   automatic; peers reach you by the key above, even across NATs
-  LAN        automatic; your devices just need the key (mDNS)
-
-serving
-  family-gated   your devices + peers you've granted
-    ssh -> sshd   a shell on this machine
-    control.*     node control (never public)
-
-ctrl-c to stop
 ```
 
 Set that `swoosh serve ssh=sshd:` to run at login (a launchd or systemd unit, or a startup item), so the
