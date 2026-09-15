@@ -64,6 +64,9 @@ Invite replaces mint, a node is a home, quirk gets Noise, and revocation lands l
 - **BREAKING: one spelling per act; the five convenience aliases no longer resolve.** `swoosh id`,
   `service list`, `grant list`, `contact list`, and `contact remove` are parse errors now; the canonical
   forms are `identity`, `service ls`, `grant ls`, `contact ls`, and `contact rm`.
+- **BREAKING: `swoosh ssh` now requires `--` before ssh flags.** Everything after the separator goes
+  to ssh verbatim; before it, every flag is swoosh's own. `swoosh ssh desk -p 2222` is now a parse
+  error, and `swoosh ssh desk -- -p 2222` works.
 
 ### Fixed
 - **`stop` no longer reports a false failure while landing.** A teardown race in the v0.8.0 client could
