@@ -14,6 +14,7 @@ start now.
 | Give a contractor one service, for a while, then cut them off | [Contractor access](contractor-access.md) |
 | Let a CI job reach a machine, with a credential you can revoke | [CI runner](ci-runner.md) |
 | Offer a service to anyone, no credential | [Public service](public-service.md) |
+| Keep a machine reachable after a reboot | [Run a node at login](run-at-login.md) |
 
 ## Next
 

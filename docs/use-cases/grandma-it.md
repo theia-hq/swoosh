@@ -55,53 +55,8 @@ serving
 ctrl-c to stop
 ```
 
-Set that `swoosh serve ssh=sshd:` to run at login, so the machine is reachable whenever it is on. On
-Linux, a systemd user service:
-
-```ini
-# ~/.config/systemd/user/swoosh.service
-[Unit]
-Description=swoosh shell
-[Service]
-ExecStart=%h/.local/bin/swoosh serve ssh=sshd:
-Restart=always
-[Install]
-WantedBy=default.target
-```
-
-<!-- manual: runs on the relative's machine, not here -->
-```console
-$ systemctl --user enable --now swoosh
-$ sudo loginctl enable-linger "$USER"   # start it at boot, before anyone logs in
-```
-
-On macOS, a launchd agent at `~/Library/LaunchAgents/com.theia.swoosh.plist` (the `ProgramArguments`
-path is the installed `swoosh`):
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.theia.swoosh</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/Users/grandma/.local/bin/swoosh</string>
-    <string>serve</string>
-    <string>ssh=sshd:</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-</dict>
-</plist>
-```
-
-<!-- manual: runs on the relative's machine, not here -->
-```console
-$ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.theia.swoosh.plist
-```
-
-That is the last thing they ever have to touch.
+Set that `swoosh serve ssh=sshd:` to [run at login](run-at-login.md), so the machine is reachable
+whenever it is on. That is the last thing they ever have to touch.
 
 ## Fix it from home, any time
 
