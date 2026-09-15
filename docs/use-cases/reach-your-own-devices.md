@@ -15,7 +15,7 @@ machine:
 <!-- capture: swoosh invite add laptop -->
 ```console
 $ swoosh invite add laptop
-invite:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
+invite:….bf01hcq6…
 
 recorded me/laptop -> bf01imv3ljql6kjn  [derived]
 hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
@@ -41,29 +41,15 @@ key with `swoosh invite add laptop --for <key>` instead.
 
 On the machine you want to reach, stay online:
 
-<!-- capture: swoosh serve -->
+<!-- pending live-run: banner wording -->
 ```console
 $ swoosh serve
-swoosh ready
-
-    bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-
-how peers reach you
-  internet   automatic; peers reach you by the key above, even across NATs
-  LAN        automatic; your devices just need the key (mDNS)
-
-serving
-  family-gated   your devices + peers you've granted
-    ping        round-trip probe
-    speed       throughput test
-    control.*   node control (never public)
-
-ctrl-c to stop
 ```
 
 Save its key under a name once, then reach it by name from any of your devices. Because both machines
 carry your membership, the gate admits you with nothing to present:
 
+<!-- capture: swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -->
 ```console
 $ swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
 added desk -> bf01hcq6balrlxwa
@@ -85,6 +71,7 @@ filed as `default`.
 If the desktop serves its shell, ssh to it by name over the overlay. It uses your normal ssh keys; there
 is no public IP or port to expose:
 
+<!-- manual: interactive ssh -->
 ```console
 $ swoosh ssh desk
 ```

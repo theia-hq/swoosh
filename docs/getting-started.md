@@ -6,15 +6,12 @@ another machine, done. Auth, names, and sharing come after, each a small additio
 
 You will need two machines (your laptop and a desktop, a home box, or a cheap VPS).
 
-> **Only one machine?** Try the whole loop on it with quirk+noise, which dials a direct address instead
-> of discovering the peer. In one terminal, serve and note the `direct` address it prints
-> (`127.0.0.1:<port>`): `swoosh serve --public ping,speed --transport quirk+noise`. In a second terminal,
-> reach it there: `swoosh ping <key> --transport quirk+noise --peer <key>=127.0.0.1:<port>`. The
-> two-machine steps below are the same, without `--transport quirk+noise` or the address. See
+> **Only one machine?** You can run the whole loop on one machine over `quirk+noise`; see
 > [transports](transports.md#quirk).
 
 ## 1. Install
 
+<!-- manual: installs a released binary over the network -->
 ```console
 $ curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/install.sh | sh
 ```
@@ -27,28 +24,12 @@ This downloads the right binary for your platform, verifies its checksum, and in
 
 On the machine you want to reach, open two diagnostics to anyone and note the key it prints:
 
-<!-- capture: swoosh serve --public ping,speed -->
+<!-- pending live-run: banner wording -->
 ```console
 $ swoosh serve --public ping,speed
-swoosh ready
-
-    bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-
-how peers reach you
-  internet   automatic; peers reach you by the key above, even across NATs
-  LAN        automatic; your devices just need the key (mDNS)
-
-serving
-  family-gated   your devices + peers you've granted
-    control.*   node control (never public)
-  public !   anyone, unauthenticated
-    ping    round-trip probe
-    speed   throughput test
-
-ctrl-c to stop
 ```
 
-That base32 string is machine A's public key. Copy it. Leave this running.
+The key it prints is machine A's public key. Copy it. Leave this running.
 
 ## 3. Reach it (machine B)
 
@@ -83,13 +64,13 @@ internet, with no account anywhere. That is your first success.
 
 You just did the zero-auth version. Each step from here adds exactly one thing:
 
+- **Enroll your own machines.** `swoosh invite add` / `swoosh adopt` bring a laptop or server under your
+  one identity, so they all reach each other with no per-service step. See
+  [Reach your own devices](use-cases/reach-your-own-devices.md).
 - **Add a gate.** Drop `--public` and the same services admit only your own devices, refusing strangers.
   A machine is its own root of trust. See [Keys: the gate](keys.md#the-gate).
 - **Reach by name.** Save a key under a petname once, then use the name everywhere:
   `swoosh contact add desk <key>`, then `swoosh ping desk`. See [contact](reference/commands.md#contact).
-- **Enroll your own machines.** `swoosh invite add` / `swoosh adopt` bring a laptop or server under your
-  one identity, so they all reach each other with no per-service step. See
-  [Reach your own devices](use-cases/reach-your-own-devices.md).
 - **Let other people in.** Issue a `sheer:` capability link to one service, for one person or their
   whole fleet, revocable. [Capabilities](capabilities.md) walks the whole loop in a minute.
 

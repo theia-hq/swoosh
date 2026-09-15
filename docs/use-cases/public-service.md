@@ -8,25 +8,9 @@ named opt-out.
 
 Name the services you want public. Everything else stays [gated](../keys.md#the-gate):
 
-<!-- capture: swoosh serve --public ping,speed -->
+<!-- pending live-run: banner wording -->
 ```console
 $ swoosh serve --public ping,speed
-swoosh ready
-
-    bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-
-how peers reach you
-  internet   automatic; peers reach you by the key above, even across NATs
-  LAN        automatic; your devices just need the key (mDNS)
-
-serving
-  family-gated   your devices + peers you've granted
-    control.*   node control (never public)
-  public !   anyone, unauthenticated
-    ping    round-trip probe
-    speed   throughput test
-
-ctrl-c to stop
 ```
 
 Anyone with the key reaches the two public services and nothing else. There is no link to hand out and

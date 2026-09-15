@@ -15,6 +15,7 @@ Usage: swoosh contact <add | signet | ls | rm>
 ```
 
 **Example.**
+<!-- capture: swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -->
 ```console
 $ swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
 added desk -> bf01hcq6balrlxwa

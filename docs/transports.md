@@ -7,8 +7,7 @@ and takes no `--transport`.
 ## iroh (the default)
 
 `iroh` is what you get with no flag. It finds and reaches peers across the internet, punching through
-NATs, and discovers peers on your LAN automatically. You give it a key; it does the rest. Nothing to
-configure, no addresses to pass.
+NATs. You give it a key; it does the rest. Nothing to configure, no addresses to pass.
 
 This is the transport for everyday use. Every [use case](use-cases/README.md) and the
 [getting-started](getting-started.md) walkthrough use it.
@@ -19,49 +18,33 @@ cannot read them. Self-hosting the relays is not wired through swoosh today.
 ## <a id="quirk"></a>quirk (our own QUIC)
 
 `quirk` is our own QUIC, written from scratch over UDP. It is direct-only: it does no internet discovery
-and no NAT traversal, so it reaches a peer only on the same LAN or at an address you give it.
+and no NAT traversal, so it reaches a peer only at an address you hand it with `--peer` (below).
 
 Two spellings share that backend:
 
-- `quirk` announces the reached key in plaintext. A signet-rooted gate refuses to arm over it, and a
-  credential is never written to it. It is the base `quirk+noise` composes over; `swoosh serve
-  --transport quirk` shows the enforcement.
-- `quirk+noise` wraps quirk in a Noise handshake that proves the reached key before any byte flows, and
-  encrypts the session. Gated services work over it. It is still direct-only, so it is for a LAN or a
-  known address.
+- `quirk` never proves the far side holds the key it presents; the key travels in plaintext. A
+  [gate](keys.md#the-gate) admits a peer by its key, so without that proof anyone could claim it;
+  `swoosh serve` therefore refuses over it, and swoosh never writes a credential over it. It is the base
+  `quirk+noise` builds on; run `swoosh serve --transport quirk` to see the refusal.
+- `quirk+noise` runs a Noise handshake before any byte flows: the far side proves the key it presents,
+  and the session is encrypted. Gated services work over it. It is still direct-only, so hand the peer's
+  address over with `--peer` (below).
 
-Both ends must use the same spelling: a `quirk+noise` peer cannot talk to a bare `quirk` peer (the
-wrapper tag fails closed, with no fallback).
+Both ends must use the same spelling: a `quirk+noise` peer cannot talk to a bare `quirk` peer, and
+there is no fallback.
 
-Because it does no discovery, a `quirk+noise` `serve` prints the address it is reachable at:
+Because it is direct-only, a `quirk+noise` `serve` prints the address the peer needs:
 
-<!-- capture: swoosh serve --transport quirk+noise -->
+<!-- pending live-run: banner wording -->
 ```console
 $ swoosh serve --transport quirk+noise
-swoosh ready
-
-    bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-
-how peers reach you
-  LAN      automatic; your devices just need the key (mDNS)
-  direct   reachable on this machine only:
-           127.0.0.1:50902
-
-serving
-  family-gated   your devices + peers you've granted
-    ping        round-trip probe
-    speed       throughput test
-    control.*   node control (never public)
-
-ctrl-c to stop
 ```
 
-On a shared LAN, peers still find each other automatically over either spelling. Off-LAN, you feed the
-address back with `--peer` (below).
+Hand that address to the peer with `--peer` (below).
 
-**The honest limit.** Bare `quirk` announces the reached key, so a signet-rooted gate refuses to arm over
-it and a credential is never written to it. `quirk+noise` proves the peer's key and encrypts the session,
-but it is direct-only: use iroh when you need NAT traversal.
+**The honest limit.** Bare `quirk` cannot serve and never carries a credential, because it does not
+prove the peer's key. `quirk+noise` proves the key and encrypts the session, but it is direct-only: use
+iroh when you need NAT traversal.
 
 ## <a id="peer"></a>Advanced: `--peer`, when discovery cannot reach them
 
@@ -69,6 +52,7 @@ but it is direct-only: use iroh when you need NAT traversal.
 peer: mainly a quirk dial across networks, or a locked-down network where automatic discovery is
 blocked. Take the `direct` line a peer's `serve` printed and pass it back:
 
+<!-- manual: needs a direct peer and its address -->
 ```console
 $ swoosh ping bf01hcq6… --transport quirk+noise --peer bf01hcq6…=127.0.0.1:50902 -c 4
 ```

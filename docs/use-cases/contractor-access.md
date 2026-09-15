@@ -27,6 +27,7 @@ sheer:bf01hcq6…
 
 Hand them the `sheer:` link. On the build box, serve the shell gated:
 
+<!-- manual: long-running serve -->
 ```console
 $ swoosh serve ssh=sshd:
 ```
@@ -36,6 +37,7 @@ $ swoosh serve ssh=sshd:
 They present the link when they ssh in. Any machine their signet vouches for can use it, so their work
 laptop and their spare both reach the box, with the same link:
 
+<!-- manual: interactive ssh -->
 ```console
 $ swoosh ssh buildbox --present sheer:bf01hcq6…
 ```

@@ -14,7 +14,7 @@ From your own machine, create a device invite for the runner:
 <!-- capture: swoosh invite add ci-runner -->
 ```console
 $ swoosh invite add ci-runner
-invite:jm3cahyz2nbywedca3vzjrjfp65kbnli752in7oa2e4ouakfq5na.bf01hcq6…
+invite:….bf01hcq6…
 
 recorded me/ci-runner -> bf01imv3ljql6kjn  [derived]
 hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
@@ -59,6 +59,7 @@ stays up after the rest of the job finishes:
 
 From your own machine:
 
+<!-- manual: opens an interactive ssh session -->
 ```console
 $ swoosh ssh me/ci-runner
 ```
@@ -69,6 +70,7 @@ The hold ends after 15 minutes, or early if you `touch $RUNNER_TEMP/theia-releas
 
 On the deploy box, receive pushed files behind the gate:
 
+<!-- manual: long-running serve on the deploy host -->
 ```console
 $ swoosh serve recv=recv:/srv/releases
 ```
@@ -93,6 +95,7 @@ deploybox -- <command>` from the job.
 Revokes land live: a [revoke](../keys.md#revocation) written while a node runs takes effect on the next
 dial, no restart:
 
+<!-- capture: swoosh grant revoke me/ci-runner -->
 ```console
 $ swoosh grant revoke me/ci-runner
 ```

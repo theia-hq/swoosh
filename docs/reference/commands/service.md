@@ -14,6 +14,7 @@ Usage: swoosh service <COMMAND>
 ```
 
 **Example.**
+<!-- capture: swoosh service ls --at desk -->
 ```console
 $ swoosh service ls --at desk
 SERVICE           GATE

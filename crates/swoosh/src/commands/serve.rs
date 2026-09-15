@@ -92,7 +92,7 @@ const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 /// Be a node: publish these services behind your signet gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// publish local services as `name=svc` (empty = `ping=ping: speed=speed:`, reach diagnostics)
+    /// publish local services as `name=svc` (empty serves `ping` and `speed`)
     #[arg(value_name = "name=svc")]
     pub services: Vec<String>,
     /// open named services to anyone, unauthenticated (comma-list, repeatable)
@@ -434,7 +434,9 @@ impl ServeCmd {
         // socket taken for a serve that cannot arm).
         exposer
             .prove_security::<T>()
-            .wrap_err("use `--transport quirk+noise` to serve gated quirk traffic")?;
+            .wrap_err(
+                "bare quirk cannot serve: it does not prove the peer's key; use `--transport quirk+noise`",
+            )?;
 
         // The resident listener arm (S4), after the proven overlay so a refused serve never binds
         // a socket. Order: (1) plain serve acquires nothing (byte-identical, no dir, no lock, no

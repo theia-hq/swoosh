@@ -14,9 +14,9 @@ These apply to most commands and are omitted from the per-command signatures bel
   key lives at `<home>/identity.key`, and its contacts, the signet it trusts, and its membership all live
   beside it, so one `--home` moves the whole identity. Without it the default `~/.config/swoosh` applies.
 - `--transport <iroh|quirk|quirk+noise>` which backend to bind. `iroh` (default) reaches peers across the
-  internet; `quirk` is direct-only and announces its key (a signet-rooted gate refuses to arm over it);
-  `quirk+noise` wraps quirk in the sealed Noise handshake (the only quirk spelling that serves gated
-  traffic). See [transports](../transports.md).
+  internet; `quirk` is direct-only and never proves the peer holds the key it presents, so `swoosh serve`
+  refuses over it; `quirk+noise` runs a Noise handshake that proves the key and encrypts the session (the
+  only quirk spelling that serves gated traffic). See [transports](../transports.md).
 - `--peer <key=addr>` a direct address hint, for when discovery cannot reach a peer (mainly quirk). See
   [transports](../transports.md#quirk).
 - `--present <link>` present a `sheer:` capability link when reaching a gated peer you are not a member of.
