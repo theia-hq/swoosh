@@ -213,6 +213,12 @@ impl crate::reaching::Reaching for ServeCmd {
         crate::identity::Identity::Persisted
     }
 
+    /// Serving: `serve` is the process that accepts connections under the home key, so its bind publishes
+    /// the key's address record (n0 pkarr/DNS) for peers to dial. The one `Serving` verb.
+    fn bind_role(&self) -> crate::reaching::BindRole {
+        crate::reaching::BindRole::Serving
+    }
+
     /// Uniform dispatch: `serve` reads its OWN [`ExposeContext`] (attached by the root via
     /// [`with_expose`](Self::with_expose)), so it ignores every `ReachCtx` field. This is where the old
     /// `Option<ExposeContext>` threaded through the generic reach dispatch, and its

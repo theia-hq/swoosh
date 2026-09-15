@@ -96,6 +96,12 @@ impl crate::reaching::Reaching for StopCmd {
         self.credential().identity()
     }
 
+    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
+    /// bind must not write the key's address record (0.9.0 F1).
+    fn bind_role(&self) -> crate::reaching::BindRole {
+        crate::reaching::BindRole::Dialing
+    }
+
     /// Uniform dispatch: unpack the reach context and run. `stop --at` reads the resolved `present` badge and
     /// `contacts` (to resolve a petname like `me/qat` in its `--at` slot); it ignores `transport` and `key`.
     /// Only reached WITH `--at`: a bare `stop` splits to [`run_local`](Self::run_local) before any transport

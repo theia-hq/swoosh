@@ -1,4 +1,5 @@
-//! The one thing every reaching verb must state: how it authenticates.
+//! The two things every reaching verb must state: how it authenticates, and what its bind does with the
+//! home key's address record.
 //!
 //! A reaching verb's auth need used to be spread across five hand-synced match arms in `main.rs`, one of
 //! which (`self_badge()`) ended in a `_ => Ok(None)` wildcard: a verb the author forgot to list reached a
@@ -6,6 +7,11 @@
 //! with a method the compiler forces: a verb cannot compile without stating its [`Credential`], and
 //! `Credential` has no "unset" arm to fall through to, so the fleet/fetch badge-omission bug is now a
 //! COMPILE error, not a runtime refusal against a real node.
+//!
+//! The same non-forgettable discipline covers the bind role: a verb cannot compile without stating
+//! [`BindRole`], so only the process that accepts connections under the home key publishes its address
+//! record (0.9.0 F1: every reaching verb published, so a short-lived command overwrote the live `serve`'s
+//! record and dialers followed a dead relay).
 //!
 //! [`resolve`] is the ONE home of the `--present`-overrides-self-badge rule that used to be copy-pasted
 //! into six verbs: it turns a declared [`Credential`] into the concrete badge to present, once, in the
@@ -88,6 +94,11 @@ pub trait Reaching {
     /// silent default.
     fn identity(&self) -> Identity;
 
+    /// Whether this verb's bind writes the home key's address record. `Serving` publishes it so peers can
+    /// dial the key; `Dialing` resolves only and MUST NOT publish, or a short-lived command overwrites a
+    /// live `serve`'s record (0.9.0 F1). Required with no default body, like `identity`.
+    fn bind_role(&self) -> BindRole;
+
     /// Run this verb against the composed node under the uniform [`ReachCtx`]. Every verb takes the same
     /// context, so the composition root dispatches with ONE line (`cmd.run(node, ctx)`), not a per-verb
     /// argument-threading match. A verb reads the ctx fields it needs and ignores the rest. The `Send`
@@ -105,6 +116,23 @@ pub trait Reaching {
         Self: Sized,
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static;
+}
+
+/// What a reaching verb's bind does with the home key's address record: `Serving` writes it, `Dialing`
+/// resolves it and never writes.
+///
+/// Deliberately no `Default`: like [`Credential`], omission must not silently pick a side. The two are
+/// not derivable from each other (`serve` is `Anonymous` + `Persisted`, `tunnel-connect` is `Family` +
+/// `Persisted`, `forward` is `Anonymous` + `Ephemeral`), so every verb states its role.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BindRole {
+    /// The bind accepts connections under the key, so it publishes the key's address record (n0
+    /// pkarr/DNS) and peers reach it by key. Only `serve` is `Serving`.
+    Serving,
+    /// The bind only dials peers: n0 resolution and relays, no address record. A dialing process is not
+    /// reachable at its key, so publishing here overwrites the live `serve` under the same key with a
+    /// relay that dies when the command exits (0.9.0 F1).
+    Dialing,
 }
 
 /// The two concrete slots a resolved [`Credential`] presents on the wire: slot 1 the grant, slot 2 a

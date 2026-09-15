@@ -161,6 +161,13 @@ impl crate::reaching::Reaching for TunnelConnectCmd {
         crate::identity::Identity::Persisted
     }
 
+    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
+    /// bind must not write the key's address record (0.9.0 F1). It binds `Persisted` to dial under
+    /// swoosh's own key, which is not a reachability claim.
+    fn bind_role(&self) -> crate::reaching::BindRole {
+        crate::reaching::BindRole::Dialing
+    }
+
     /// Uniform dispatch: unpack the reach context and run. `tunnel-connect` reads only the resolved
     /// `present` badge; its peer is a raw key (`swoosh ssh` resolved any petname before invoking this
     /// bridge), so the `connect` runner's contact resolution is a no-op for it.

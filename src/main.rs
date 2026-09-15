@@ -48,7 +48,7 @@ use swoosh::commands::tunnel_connect::TunnelConnectCmd;
 use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::home::Home;
 use swoosh::identity::Identity;
-use swoosh::reaching::Reaching;
+use swoosh::reaching::{BindRole, Reaching};
 use swoosh::transport::{MdnsState, PeerHint};
 use swoosh::{config, credential, identity, reaching, transport};
 
@@ -299,6 +299,26 @@ impl Reach {
             Self::Service(cmd) => cmd.identity(),
             Self::Fleet(cmd) => cmd.identity(),
             Self::TunnelConnect(cmd) => cmd.identity(),
+        }
+    }
+
+    /// Whether this verb's bind writes the home key's address record, forwarded to each verb's
+    /// [`Reaching::bind_role`] (the ONE place a verb states it). Read BEFORE the bind, since it selects the
+    /// iroh constructor: only `serve` publishes, so a short-lived command cannot overwrite the live
+    /// record (0.9.0 F1).
+    fn bind_role(&self) -> BindRole {
+        match self {
+            Self::Serve(cmd) => cmd.bind_role(),
+            Self::Ping(cmd) => cmd.bind_role(),
+            Self::Speed(cmd) => cmd.bind_role(),
+            Self::Status(cmd) => cmd.bind_role(),
+            Self::Fetch(cmd) => cmd.bind_role(),
+            Self::Forward(cmd) => cmd.bind_role(),
+            Self::Send(cmd) => cmd.bind_role(),
+            Self::Stop(cmd) => cmd.bind_role(),
+            Self::Service(cmd) => cmd.bind_role(),
+            Self::Fleet(cmd) => cmd.bind_role(),
+            Self::TunnelConnect(cmd) => cmd.bind_role(),
         }
     }
 
@@ -678,6 +698,10 @@ async fn run() -> eyre::Result<()> {
     // the backend and the dial hints are read off the chosen reaching verb, not a root global.
     let transport = reach.args().transport;
     let local = reach.args().local;
+    // The verb's bind role, read BEFORE the bind selects a constructor: only a `Serving` verb publishes
+    // the home key's address record, so a dial-only command never overwrites the live `serve` record
+    // (0.9.0 F1). Read here, before `reach` is consumed by dispatch.
+    let bind_role = reach.bind_role();
     let peers = reach.args().peer.clone();
     // Reject a redundant `--present` alongside a self-addressing `sheer:` link peer ONCE here, before any
     // dial, so the conflict is loud and compiler-forced for every verb (each states its own check via
@@ -709,12 +733,16 @@ async fn run() -> eyre::Result<()> {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
         // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
         // addresses, so a same-network dial goes straight there instead of relaying. With nothing
-        // known locally the resolve is empty and iroh self-discovers exactly as before. `--local`
-        // keeps the same arm and swaps the constructor: the persisted key, no n0, no relays.
+        // known locally the resolve is empty and iroh self-discovers exactly as before. The verb's bind
+        // role picks the n0 constructor (serving publishes the address record, dialing does not);
+        // `--local` keeps the same arm and swaps in the persisted key with no n0, no relays.
         transport::Transport::Iroh => {
-            let endpoint = match IrohBind::of(local) {
-                IrohBind::N0 => {
-                    bifrost_iroh::Endpoint::bind_with_secret(secret.into_bytes()).await?
+            let endpoint = match IrohBind::of(local, bind_role) {
+                IrohBind::Reachable => {
+                    bifrost_iroh::Endpoint::bind_reachable_with_secret(secret.into_bytes()).await?
+                }
+                IrohBind::Dialing => {
+                    bifrost_iroh::Endpoint::bind_dialing_with_secret(secret.into_bytes()).await?
                 }
                 IrohBind::Local => {
                     bifrost_iroh::Endpoint::bind_local_with_secret(secret.into_bytes()).await?
@@ -749,21 +777,33 @@ async fn run() -> eyre::Result<()> {
     }
 }
 
-/// Which iroh constructor the bind selects, the flag's one mechanism. A named choice instead of an
+/// Which iroh constructor the bind selects, the flags' one mechanism. A named choice instead of an
 /// inline `if local`, so the composition root's match has an arm per mode with no wildcard to fall
 /// through, and the mapping is a pure value a unit test can pin without binding a socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum IrohBind {
-    /// The n0 default: discovery (pkarr/DNS) plus relays.
-    N0,
+    /// The n0 default under a SERVING verb: discovery (pkarr/DNS) plus relays, and the address-record
+    /// write peers resolve.
+    Reachable,
+    /// The n0 default under a DIALING verb: the same resolvers and relays, no publisher, so a
+    /// short-lived command never overwrites the live `serve` record (0.9.0 F1).
+    Dialing,
     /// `--local`: the persisted key with no n0 discovery, no relays, and no NAT traversal.
     Local,
 }
 
 impl IrohBind {
-    /// Map the `--local` bit to the constructor it selects.
-    fn of(local: bool) -> Self {
-        if local { Self::Local } else { Self::N0 }
+    /// Map the `--local` bit and the verb's [`BindRole`] to the constructor they select. `--local` wins:
+    /// it removes n0 entirely, so there is no discovery to resolve and no record to write either way.
+    fn of(local: bool, role: BindRole) -> Self {
+        if local {
+            Self::Local
+        } else {
+            match role {
+                BindRole::Serving => Self::Reachable,
+                BindRole::Dialing => Self::Dialing,
+            }
+        }
     }
 }
 
@@ -1142,13 +1182,74 @@ mod tests {
         );
     }
 
-    /// The flag's one mechanism is constructor selection: `--local` picks the persisted-minimal iroh
-    /// bind, the unset bit the n0 default. A pure mapping, so the branch is covered without a socket,
+    /// The bind's one mechanism is constructor selection: `--local` picks the persisted-minimal iroh
+    /// bind, else the verb's bind role picks between the serving (publishing) and the dialing
+    /// (non-publishing) n0 constructors. A pure mapping, so every branch is covered without a socket,
     /// and the composition root's match has an arm per mode with no wildcard.
     #[test]
-    fn the_local_flag_selects_the_local_iroh_constructor() {
-        assert_eq!(IrohBind::of(false), IrohBind::N0);
-        assert_eq!(IrohBind::of(true), IrohBind::Local);
+    fn the_local_flag_and_bind_role_select_the_iroh_constructor() {
+        assert_eq!(IrohBind::of(false, BindRole::Serving), IrohBind::Reachable);
+        assert_eq!(IrohBind::of(false, BindRole::Dialing), IrohBind::Dialing);
+        assert_eq!(IrohBind::of(true, BindRole::Serving), IrohBind::Local);
+        assert_eq!(IrohBind::of(true, BindRole::Dialing), IrohBind::Local);
+    }
+
+    /// F1 (0.9.1): only `serve` writes the home key's address record. A dialing verb on the serving
+    /// machine must not touch what other machines resolve, and the table fails on the old switch (every
+    /// verb selected the publishing constructor). One parseable argv per reach verb, split to its
+    /// [`Verb::Reach`] arm.
+    #[test]
+    fn only_serve_registers_the_node_record() {
+        let key = NodeId::from_ed25519_secret(&[7u8; 32]).to_string();
+        let cases: Vec<(Vec<&str>, BindRole)> = vec![
+            (vec!["swoosh", "serve"], BindRole::Serving),
+            (vec!["swoosh", "ping", &key], BindRole::Dialing),
+            (vec!["swoosh", "speed", &key], BindRole::Dialing),
+            (vec!["swoosh", "status", &key], BindRole::Dialing),
+            (
+                vec!["swoosh", "fetch", "https://example.com", "--via", &key],
+                BindRole::Dialing,
+            ),
+            (
+                vec!["swoosh", "forward", &key, "--to", "-"],
+                BindRole::Dialing,
+            ),
+            (vec!["swoosh", "send", "notes.md", &key], BindRole::Dialing),
+            (vec!["swoosh", "stop", "--at", &key], BindRole::Dialing),
+            (
+                vec!["swoosh", "service", "ls", "--at", &key],
+                BindRole::Dialing,
+            ),
+            (vec!["swoosh", "fleet", "--pull", &key], BindRole::Dialing),
+            (
+                vec![
+                    "swoosh",
+                    "tunnel-connect",
+                    &key,
+                    "--service",
+                    "ssh",
+                    "--to",
+                    "-",
+                ],
+                BindRole::Dialing,
+            ),
+        ];
+
+        for (argv, expected) in cases {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .unwrap_or_else(|err| panic!("{argv:?} parses: {err}"));
+            let Some(command) = cli.command else {
+                panic!("{argv:?} selects a verb");
+            };
+            let Verb::Reach(reach) = command.split() else {
+                panic!("{argv:?} must split to the reach path");
+            };
+            assert_eq!(
+                reach.bind_role(),
+                expected,
+                "{argv:?} must declare {expected:?}"
+            );
+        }
     }
 
     /// `--local` is a bind knob, not an auth knob: it must not change what `serve` gates or what

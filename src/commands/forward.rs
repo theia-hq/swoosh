@@ -61,6 +61,12 @@ impl crate::reaching::Reaching for ForwardCmd {
         self.credential().identity()
     }
 
+    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
+    /// bind must not write the key's address record (0.9.0 F1).
+    fn bind_role(&self) -> crate::reaching::BindRole {
+        crate::reaching::BindRole::Dialing
+    }
+
     /// Drive the sink `--to` names: bind a local port and forward each connection, stream to stdout, or the
     /// reserved unix listener, all over the overlay. A dial-only client presenting its own `--present`
     /// link (it is `Anonymous`), so it reads only `contacts` from `ctx`, to resolve a petname in its peer
