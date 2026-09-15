@@ -120,7 +120,6 @@ enum Command {
     #[command(subcommand)]
     Contact(ContactCmd),
     /// Print this node's identity (its NodeId), minting a key if there is none.
-    #[command(visible_alias = "id")]
     Identity(IdentityCmd),
     /// Create, list, and cancel invites: one device per invite.
     #[command(subcommand)]
@@ -810,6 +809,37 @@ mod tests {
         assert!(Cli::try_parse_from(["swoosh", "issue", "ssh"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "narrow", "sheer:x"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "revoke", "sheer:x"]).is_err());
+    }
+
+    /// I.2 (no aliases, one spelling per act): the five retired spellings do not resolve, and the
+    /// canonical spelling of each act still does. The B3 removal (CLI-DESIGN section 5c), pinned so a
+    /// convenience alias cannot reappear unnoticed.
+    #[test]
+    fn retired_aliases_do_not_resolve() {
+        for argv in [
+            vec!["swoosh", "id"],
+            vec!["swoosh", "service", "list"],
+            vec!["swoosh", "grant", "list"],
+            vec!["swoosh", "contact", "list"],
+            vec!["swoosh", "contact", "remove"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "{argv:?} must not resolve: one spelling per act (I.2)"
+            );
+        }
+        for argv in [
+            vec!["swoosh", "identity"],
+            vec!["swoosh", "service", "ls"],
+            vec!["swoosh", "grant", "ls"],
+            vec!["swoosh", "contact", "ls"],
+            vec!["swoosh", "contact", "rm", "alice"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "{argv:?} is the canonical spelling and must resolve"
+            );
+        }
     }
 
     /// The `tunnel` noun is retired: its two leaves are now the flat top-level verbs `serve` (publish

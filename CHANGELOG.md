@@ -61,6 +61,9 @@ Invite replaces mint, a node is a home, quirk gets Noise, and revocation lands l
 - **The serve engines now come from `theia-hq/services`.** The in-repo `fetch`, `measure`, `sshh`, and
   `transfer` copies are gone; the node consumes the services repo at a pinned rev. The `sshd` route keeps
   the same host key and ceilings, and the public diagnostics now carry their caps in shipped builds.
+- **BREAKING: one spelling per act; the five convenience aliases no longer resolve.** `swoosh id`,
+  `service list`, `grant list`, `contact list`, and `contact remove` are parse errors now; the canonical
+  forms are `identity`, `service ls`, `grant ls`, `contact ls`, and `contact rm`.
 
 ### Fixed
 - **`stop` no longer reports a false failure while landing.** A teardown race in the v0.8.0 client could

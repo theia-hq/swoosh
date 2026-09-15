@@ -18,7 +18,6 @@ pub enum GrantCmd {
     /// Mint a `sheer:` capability link granting one service.
     Issue(ShareCmd),
     /// List the grants you have issued, grouped by service.
-    #[command(visible_alias = "list")]
     Ls(LsCmd),
     /// Narrow an existing `sheer:` link offline before handing it on.
     Narrow(AttenuateCmd),

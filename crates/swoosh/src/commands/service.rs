@@ -22,7 +22,6 @@ pub use toggle::ServiceToggleCmd;
 #[derive(Debug, Subcommand)]
 pub enum ServiceCmd {
     /// List the served menu (bare: your own node; `--at <peer>`: a peer).
-    #[command(visible_alias = "list")]
     Ls(ServiceLsCmd),
     /// Re-enable a disabled service (a file-write on `<home>/disabled`, honored live, no restart).
     Enable(ServiceToggleCmd),
