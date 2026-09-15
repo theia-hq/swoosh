@@ -31,16 +31,9 @@ Each machine you own is a **device**, with its own key. Your laptop, your deskto
 separate device with a separate key, all vouched for by your one signet.
 
 You do not copy your signet onto every machine. Instead you create an invite for each new device from a
-machine that already holds your signet:
-
-<!-- capture: swoosh invite add laptop -->
-```console
-$ swoosh invite add laptop
-invite:….bf01hcq6…
-
-recorded me/laptop -> bf01imv3ljql6kjn  [derived]
-hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
-```
+machine that already holds your signet: `swoosh invite add laptop` records the device under `me/laptop`
+and prints a single `invite:` line to hand to the new machine; adopting it makes that machine this
+identity.
 
 An invite's membership badge lasts 90 days unless you pass `--expires`; see
 [`swoosh invite`](reference/commands.md#invite).
@@ -154,24 +147,13 @@ that one service until it expires or you revoke it. Keep bearer grants short-liv
 
 Everything above is how you hand access OUT. Using a grant someone handed YOU is the mirror image. A
 `sheer:` link carries both the node to reach and the grant to present, so you pass it in place of a peer on
-any reach verb:
-
-<!-- manual: interactive ssh and forward with a link you hold -->
-```console
-$ swoosh ssh sheer:bf01hcq6….<token>
-$ swoosh forward sheer:bf01hcq6….<token> --to 2222
-```
+any reach verb.
 
 Nothing else is needed: the link names the node, names the one service it grants, and proves you may reach
 it. It works only for that service, and stops the moment it expires or the issuer revokes it.
 
 When you already reach a node another way (a petname you recorded, say) but hold a separate grant,
-present it with `--present`:
-
-<!-- manual: long-running forward with a link you were given -->
-```console
-$ swoosh forward alice/box --present sheer:… --to 2222
-```
+present it with `--present`.
 
 Your own devices never need a link: their membership gets them in. Reach for `--present` only to reach
 as a delegate holding someone's grant.
