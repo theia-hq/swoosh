@@ -2,7 +2,9 @@
 
 A service is a named target your node publishes: `name=target`. `swoosh serve` puts every service behind
 one [gate](../keys.md#the-gate). A peer the gate admits gets a byte stream to the target it named: the
-name is what a dialer asks for, the target is what the bytes come from.
+name is what a dialer asks for, the target is what the bytes come from. A <a id="names"></a>name is an
+address, not an authority. Two names can point at the same target (`a=sshd: b=sshd:`); each carries its
+own grant, toggle, and posture, and neither is a second service nor a second authority.
 
 This page is the catalog: every target you can put after `name=`, what it does, and how it is gated.
 
