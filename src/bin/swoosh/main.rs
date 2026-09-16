@@ -149,9 +149,94 @@ struct RetiredMintCmd {
     args: Vec<String>,
 }
 
-/// A verb that reaches a peer: it binds a transport and dials. Split from the local `contact` group,
-/// which touches only the address book and never composes a transport.
-enum Reach {
+/// Declare the reaching verbs ONCE: the list below becomes both the [`Reach`] enum and its whole
+/// [`Reaching`] impl, so a verb joins the reach family by adding one line rather than an arm in each of
+/// six parallel matches. Six hand-written arm lists is the shape the retired `self_badge()` drifted in:
+/// nothing keeps them in step but the author's eye, and a `_` wildcard in any one of them silently admits
+/// a verb that never stated its auth need. Generated, the six cannot disagree, and a verb missing from the
+/// list is a compile error at [`Command::split`] rather than a verb that reaches a gate carrying nothing.
+///
+/// Earned by that invariant, not by the keystrokes: the forwarding is mechanical, identical per arm, and
+/// there is no way to express "these six matches share one arm list" in the type system, because
+/// [`Reaching::run`] is generic over the transport and cannot be a `dyn` object.
+macro_rules! reaching_verbs {
+    ($($(#[$note:meta])* $verb:ident($cmd:ty)),+ $(,)?) => {
+        /// A verb that reaches a peer: it binds a transport and dials. Split from the local `contact` group,
+        /// which touches only the address book and never composes a transport.
+        enum Reach {
+            $($(#[$note])* $verb($cmd),)+
+        }
+
+        impl Reaching for Reach {
+            /// The reach-family flags this verb carries (`--transport`, `--local`, `--peer`). Shared by every
+            /// reaching verb and no local one, so they are flattened into each reach command rather than made
+            /// a root global; the composition root reads them here to pick the backend, the bind mode, and
+            /// the discovery seed.
+            fn reach_args(&self) -> &transport::ReachArgs {
+                match self {
+                    $(Self::$verb(cmd) => cmd.reach_args(),)+
+                }
+            }
+
+            /// How this verb authenticates: the ONE place a verb's auth need lives. There is no wildcard to
+            /// fall through, and [`credential`](Reaching::credential) is total, so a verb that reaches a
+            /// family-gated service without a badge is unrepresentable.
+            fn credential(&self) -> credential::Credential {
+                match self {
+                    $(Self::$verb(cmd) => cmd.credential(),)+
+                }
+            }
+
+            /// Reject a redundant `--present` alongside a self-addressing `sheer:` link peer, ONCE for every
+            /// reaching verb, so the guard can never be forgotten in a verb's own `run`.
+            fn reject_redundant_present(&self) -> eyre::Result<()> {
+                match self {
+                    $(Self::$verb(cmd) => cmd.reject_redundant_present(),)+
+                }
+            }
+
+            /// The identity this verb binds under. For the reach-outward verbs it derives from the
+            /// credential (`Family -> PersistedIfPresent`, `Anonymous -> Ephemeral`), so identity and badge
+            /// cannot disagree; `serve`/`tunnel-connect` declare `Persisted` explicitly. An explicit
+            /// `--home` still overrides either (see [`swoosh::identity::resolve`]).
+            fn identity(&self) -> Identity {
+                match self {
+                    $(Self::$verb(cmd) => cmd.identity(),)+
+                }
+            }
+
+            /// Whether this verb's bind writes the home key's address record. Read BEFORE the bind, since it
+            /// selects the iroh constructor: only `serve` publishes, so a short-lived command cannot
+            /// overwrite the live record (0.9.0 F1).
+            fn bind_role(&self) -> BindRole {
+                match self {
+                    $(Self::$verb(cmd) => cmd.bind_role(),)+
+                }
+            }
+
+            /// Run the selected verb against the composed node with ONE uniform [`reaching::ReachCtx`], not
+            /// a per-verb argument-threading match. Every verb is generic over `Node<T, D>`, so this stays
+            /// transport-blind: the concrete transport was chosen once, at the seam below. A verb reads the
+            /// ctx fields it needs and ignores the rest; `serve` reads its own attached
+            /// [`serve::ExposeContext`] instead.
+            async fn run<T: Transport, D: Discovery>(
+                self,
+                node: &Node<T, D>,
+                ctx: reaching::ReachCtx<'_>,
+            ) -> eyre::Result<()>
+            where
+                <T::Session as bifrost::Session>::Write: Send + 'static,
+                <T::Session as bifrost::Session>::Read: Send + 'static,
+            {
+                match self {
+                    $(Self::$verb(cmd) => cmd.run(node, ctx).await,)+
+                }
+            }
+        }
+    };
+}
+
+reaching_verbs! {
     Serve(serve::ServeCmd),
     Ping(ping::PingCmd),
     Speed(speed::SpeedCmd),
@@ -207,8 +292,8 @@ impl Command {
             // `<home>/disabled`. Split each here so the local arms never compose a transport they would not use.
             Self::Service(cmd) => match cmd {
                 service::ServiceCmd::Ls(ls) => match ls.at {
-                    Some(_) => Verb::Reach(Reach::Service(ls)),
-                    None => Verb::ServiceLs(ls),
+                    Some(_) => Verb::Reach(Reach::Service(*ls)),
+                    None => Verb::ServiceLs(*ls),
                 },
                 service::ServiceCmd::Enable(toggle) => Verb::ServiceEnable(toggle),
                 service::ServiceCmd::Disable(toggle) => Verb::ServiceDisable(toggle),
@@ -270,67 +355,6 @@ enum Verb {
 }
 
 impl Reach {
-    /// The identity this verb binds under, forwarded to each verb's [`Reaching::identity`] (the ONE place
-    /// a verb states it). A thin dispatch like [`credential`](Self::credential): for the reach-outward
-    /// verbs `identity()` derives from the credential (`Family -> PersistedIfPresent`,
-    /// `Anonymous -> Ephemeral`), so identity and badge cannot disagree; `serve`/`tunnel-connect` declare
-    /// `Persisted` explicitly there. An explicit `--home` still overrides either (see [`swoosh::identity::resolve`]).
-    fn identity(&self) -> Identity {
-        match self {
-            Self::Serve(cmd) => cmd.identity(),
-            Self::Ping(cmd) => cmd.identity(),
-            Self::Speed(cmd) => cmd.identity(),
-            Self::Status(cmd) => cmd.identity(),
-            Self::Fetch(cmd) => cmd.identity(),
-            Self::Forward(cmd) => cmd.identity(),
-            Self::Send(cmd) => cmd.identity(),
-            Self::Stop(cmd) => cmd.identity(),
-            Self::Service(cmd) => cmd.identity(),
-            Self::Fleet(cmd) => cmd.identity(),
-            Self::TunnelConnect(cmd) => cmd.identity(),
-        }
-    }
-
-    /// Whether this verb's bind writes the home key's address record, forwarded to each verb's
-    /// [`Reaching::bind_role`] (the ONE place a verb states it). Read BEFORE the bind, since it selects the
-    /// iroh constructor: only `serve` publishes, so a short-lived command cannot overwrite the live
-    /// record (0.9.0 F1).
-    fn bind_role(&self) -> BindRole {
-        match self {
-            Self::Serve(cmd) => cmd.bind_role(),
-            Self::Ping(cmd) => cmd.bind_role(),
-            Self::Speed(cmd) => cmd.bind_role(),
-            Self::Status(cmd) => cmd.bind_role(),
-            Self::Fetch(cmd) => cmd.bind_role(),
-            Self::Forward(cmd) => cmd.bind_role(),
-            Self::Send(cmd) => cmd.bind_role(),
-            Self::Stop(cmd) => cmd.bind_role(),
-            Self::Service(cmd) => cmd.bind_role(),
-            Self::Fleet(cmd) => cmd.bind_role(),
-            Self::TunnelConnect(cmd) => cmd.bind_role(),
-        }
-    }
-
-    /// The reach-family flags this verb carries (`--transport`, `--local`, `--peer`). Shared by every
-    /// reaching verb and no local one, so they are flattened into each reach command rather than made a
-    /// root global; the composition root reads them here to pick the backend, the bind mode, and the
-    /// discovery seed.
-    fn args(&self) -> &transport::ReachArgs {
-        match self {
-            Self::Serve(cmd) => &cmd.reach,
-            Self::Ping(cmd) => &cmd.reach,
-            Self::Speed(cmd) => &cmd.reach,
-            Self::Status(cmd) => &cmd.reach,
-            Self::Fetch(cmd) => &cmd.reach,
-            Self::Forward(cmd) => &cmd.reach,
-            Self::Send(cmd) => &cmd.reach,
-            Self::Stop(cmd) => &cmd.reach,
-            Self::Service(cmd) => &cmd.reach,
-            Self::Fleet(cmd) => &cmd.reach,
-            Self::TunnelConnect(cmd) => &cmd.reach,
-        }
-    }
-
     /// Attach the resolved [`serve::ExposeContext`] to the `serve` verb (a no-op for every other verb, which
     /// carries no expose context), so `serve` reads its OWN context at run time. Called once in the root
     /// after the context is cut (while the secret is still live), before dispatch. This is why the reach
@@ -354,76 +378,6 @@ impl Reach {
         match self {
             Self::Serve(cmd) => Self::Serve(cmd.with_mdns(mdns)),
             reach => reach,
-        }
-    }
-
-    /// Run the selected verb against the composed node, dispatching to each verb's [`Reaching::run`] with
-    /// ONE uniform [`ReachCtx`] (`cmd.run(node, ctx)`), not a per-verb argument-threading match. Every verb
-    /// is generic over `Node<T, D>`, so this stays transport-blind: the concrete transport was chosen once,
-    /// at the seam below. A verb reads the ctx fields it needs (`contacts` to resolve a petname, the
-    /// `transport` label to report, the resolved `present` badge, the `home`) and ignores the rest; `serve`
-    /// reads its own attached [`serve::ExposeContext`] instead.
-    async fn run<T: Transport, D: Discovery>(
-        self,
-        node: &Node<T, D>,
-        ctx: reaching::ReachCtx<'_>,
-    ) -> eyre::Result<()>
-    where
-        <T::Session as bifrost::Session>::Write: Send + 'static,
-        <T::Session as bifrost::Session>::Read: Send + 'static,
-    {
-        match self {
-            Self::Serve(cmd) => cmd.run(node, ctx).await,
-            Self::Ping(cmd) => cmd.run(node, ctx).await,
-            Self::Speed(cmd) => cmd.run(node, ctx).await,
-            Self::Status(cmd) => cmd.run(node, ctx).await,
-            Self::Fetch(cmd) => cmd.run(node, ctx).await,
-            Self::Forward(cmd) => cmd.run(node, ctx).await,
-            Self::Send(cmd) => cmd.run(node, ctx).await,
-            Self::Fleet(cmd) => cmd.run(node, ctx).await,
-            Self::Stop(cmd) => cmd.run(node, ctx).await,
-            Self::Service(cmd) => cmd.run(node, ctx).await,
-            Self::TunnelConnect(cmd) => cmd.run(node, ctx).await,
-        }
-    }
-
-    /// How this verb authenticates: forwards to each verb's [`Reaching::credential`], the ONE place a
-    /// verb's auth need lives. A thin dispatch (each arm just calls the trait method), so unlike the old
-    /// hand-synced `self_badge()`/`identity()` matches, there is nothing to keep in sync and no wildcard
-    /// to forget an arm in: a new `Reach` variant that omits its arm here does not compile.
-    fn credential(&self) -> credential::Credential {
-        match self {
-            Self::Serve(cmd) => cmd.credential(),
-            Self::Ping(cmd) => cmd.credential(),
-            Self::Speed(cmd) => cmd.credential(),
-            Self::Status(cmd) => cmd.credential(),
-            Self::Fetch(cmd) => cmd.credential(),
-            Self::Forward(cmd) => cmd.credential(),
-            Self::Send(cmd) => cmd.credential(),
-            Self::Stop(cmd) => cmd.credential(),
-            Self::Service(cmd) => cmd.credential(),
-            Self::Fleet(cmd) => cmd.credential(),
-            Self::TunnelConnect(cmd) => cmd.credential(),
-        }
-    }
-
-    /// Reject a redundant `--present` alongside a self-addressing `sheer:` link peer, ONCE for every
-    /// reaching verb: forwards to each verb's [`Reaching::reject_redundant_present`], the compiler-forced
-    /// conflict check. A thin dispatch like [`credential`](Self::credential), so a new `Reach` variant that
-    /// omits its arm does not compile, and the guard can never be forgotten in a verb's own `run`.
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        match self {
-            Self::Serve(cmd) => cmd.reject_redundant_present(),
-            Self::Ping(cmd) => cmd.reject_redundant_present(),
-            Self::Speed(cmd) => cmd.reject_redundant_present(),
-            Self::Status(cmd) => cmd.reject_redundant_present(),
-            Self::Fetch(cmd) => cmd.reject_redundant_present(),
-            Self::Forward(cmd) => cmd.reject_redundant_present(),
-            Self::Send(cmd) => cmd.reject_redundant_present(),
-            Self::Stop(cmd) => cmd.reject_redundant_present(),
-            Self::Service(cmd) => cmd.reject_redundant_present(),
-            Self::Fleet(cmd) => cmd.reject_redundant_present(),
-            Self::TunnelConnect(cmd) => cmd.reject_redundant_present(),
         }
     }
 
@@ -683,13 +637,13 @@ async fn run() -> eyre::Result<()> {
     // same secret yields the same NodeId whether bound under iroh or quirk, which is what makes the
     // transport swap a swap and not a new node. The reach-family flags travel on the verb itself now, so
     // the backend and the dial hints are read off the chosen reaching verb, not a root global.
-    let transport = reach.args().transport;
-    let local = reach.args().local;
+    let transport = reach.reach_args().transport;
+    let local = reach.reach_args().local;
     // The verb's bind role, read BEFORE the bind selects a constructor: only a `Serving` verb publishes
     // the home key's address record, so a dial-only command never overwrites the live `serve` record
     // (0.9.0 F1). Read here, before `reach` is consumed by dispatch.
     let bind_role = reach.bind_role();
-    let peers = reach.args().peer.clone();
+    let peers = reach.reach_args().peer.clone();
     // Reject a redundant `--present` alongside a self-addressing `sheer:` link peer ONCE here, before any
     // dial, so the conflict is loud and compiler-forced for every verb (each states its own check via
     // `Reaching::reject_redundant_present`), never a per-verb one-liner a new verb could forget.

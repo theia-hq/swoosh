@@ -24,7 +24,7 @@ use nauthy::Link;
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::contacts::Contacts;
-use crate::credential::{Credential, MemberBadge, SheerLink};
+use crate::credential::{Credential, LinkExt as _};
 use crate::home::Home;
 use crate::identity::{Identity, Secret};
 use crate::{config, transport};
@@ -197,9 +197,9 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
                     let signet = config::load_signet(home)
                         .await?
                         .unwrap_or_else(|| secret.node_id());
-                    (MemberBadge::new(stored), signet)
+                    (stored, signet)
                 }
-                None => (MemberBadge::new(secret.member_badge()?), secret.node_id()),
+                None => (secret.member_badge()?, secret.node_id()),
             };
             match present {
                 // A `--present` (or link-as-peer) slip is slot 1. Attach the member badge in slot 2 ONLY when
@@ -214,17 +214,19 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
                         .ok()
                         .and_then(|cap| cap.authority_bound_root().ok().flatten())
                         .is_some_and(|pinned| pinned == own_fleet.verify_key());
-                    let grant = Box::new(slip.into_link().parse::<Link>()?);
                     let membership = if pins_own_fleet {
-                        Some(Box::new(badge.into_link().parse::<Link>()?))
+                        Some(Box::new(badge))
                     } else {
                         None
                     };
-                    Ok(Resolved::Family { grant, membership })
+                    Ok(Resolved::Family {
+                        grant: slip,
+                        membership,
+                    })
                 }
                 // A plain member dial: the badge is slot 1, slot 2 empty (byte-parity, no over-share).
                 None => Ok(Resolved::Family {
-                    grant: Box::new(badge.into_link().parse::<Link>()?),
+                    grant: Box::new(badge),
                     membership: None,
                 }),
             }
@@ -238,7 +240,7 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
 /// [`reject_redundant_present`](Reaching::reject_redundant_present), so without this guard the flag
 /// parsed and was silently ignored (I.3 forbids a flag with no effect). One home for the exact teaching
 /// line, called by each bare arm before it resolves the local socket.
-pub fn reject_bare_present(present: Option<&SheerLink>) -> eyre::Result<()> {
+pub fn reject_bare_present(present: Option<&Link>) -> eyre::Result<()> {
     if present.is_some() {
         eyre::bail!("--present only applies when reaching a peer; drop it or name one");
     }
@@ -301,7 +303,7 @@ mod tests {
     #[tokio::test]
     async fn family_without_slip_presents_only_the_member_badge_in_slot_one() {
         let secret = Secret::ephemeral();
-        let resolved = resolve(Credential::Family { present: None }, &secret, &test_home())
+        let resolved = resolve(Credential::family(None), &secret, &test_home())
             .await
             .expect("family resolves");
         let (grant, membership) = resolved.into_slots();
@@ -323,19 +325,13 @@ mod tests {
     async fn family_with_a_plain_slip_attaches_no_membership_badge() {
         let secret = Secret::ephemeral();
         // A member badge stands in for a plain (non-signet-bound) `--present` slip.
-        let slip_text = Secret::ephemeral()
+        let slip = Secret::ephemeral()
             .member_badge()
             .expect("mint a stand-in plain slip");
-        let slip: SheerLink = slip_text.parse().expect("a valid SheerLink");
-        let resolved = resolve(
-            Credential::Family {
-                present: Some(slip),
-            },
-            &secret,
-            &test_home(),
-        )
-        .await
-        .expect("family-with-plain-slip resolves");
+        let slip_text = slip.to_string();
+        let resolved = resolve(Credential::family(Some(slip)), &secret, &test_home())
+            .await
+            .expect("family-with-plain-slip resolves");
         let (grant, membership) = resolved.into_slots();
         assert_eq!(
             grant.as_ref().map(Link::as_str),
@@ -359,24 +355,17 @@ mod tests {
         // roots at `secret.node_id()`, so that is the fleet slot 2 can help admit at). Work issues it.
         let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
         let fleet = secret.node_id().verify_key();
-        let slip_text = Link::mint_signet(
+        let slip = Link::mint_signet(
             &work,
             &"ssh".parse().expect("valid service"),
             fleet,
             core::time::Duration::from_secs(3600),
         )
-        .expect("mint a signet-bound slip")
-        .to_string();
-        let slip: SheerLink = slip_text.parse().expect("a valid SheerLink");
-        let resolved = resolve(
-            Credential::Family {
-                present: Some(slip),
-            },
-            &secret,
-            &test_home(),
-        )
-        .await
-        .expect("family-with-signet-slip resolves");
+        .expect("mint a signet-bound slip");
+        let slip_text = slip.to_string();
+        let resolved = resolve(Credential::family(Some(slip)), &secret, &test_home())
+            .await
+            .expect("family-with-signet-slip resolves");
         let (grant, membership) = resolved.into_slots();
         assert_eq!(
             grant.as_ref().map(Link::as_str),
@@ -402,25 +391,18 @@ mod tests {
         let foreign_fleet = nauthy::Identity::from_secret(&[2u8; 32])
             .expect("valid fleet secret")
             .verifying_key();
-        let slip_text = Link::mint_signet(
+        let slip = Link::mint_signet(
             &work,
             &"ssh".parse().expect("valid service"),
             foreign_fleet,
             core::time::Duration::from_secs(3600),
         )
-        .expect("mint a signet-bound slip")
-        .to_string();
-        let slip: SheerLink = slip_text.parse().expect("a valid SheerLink");
-        let (grant, membership) = resolve(
-            Credential::Family {
-                present: Some(slip),
-            },
-            &secret,
-            &test_home(),
-        )
-        .await
-        .expect("family-with-foreign-fleet-slip resolves")
-        .into_slots();
+        .expect("mint a signet-bound slip");
+        let slip_text = slip.to_string();
+        let (grant, membership) = resolve(Credential::family(Some(slip)), &secret, &test_home())
+            .await
+            .expect("family-with-foreign-fleet-slip resolves")
+            .into_slots();
         assert_eq!(
             grant.as_ref().map(Link::as_str),
             Some(slip_text.as_str()),
@@ -455,9 +437,7 @@ mod tests {
         // The slip arrives AS THE PEER: a `Capability` peer self-presents its own link, which the verb's
         // `credential()` folds into `present` exactly as an explicit `--present` slip would be.
         let peer: Peer = link_text.parse().expect("a sheer: link is a peer");
-        let cred = Credential::Family {
-            present: peer.self_present(),
-        };
+        let cred = Credential::family(peer.self_present());
         let (grant, membership) = resolve(cred, &secret, &test_home())
             .await
             .expect("family-with-link-peer resolves")
@@ -483,11 +463,10 @@ mod tests {
         // A member badge stands in for a plain (non-signet-bound) `sheer:` link passed as the peer.
         let link_text = Secret::ephemeral()
             .member_badge()
-            .expect("mint a stand-in plain slip");
+            .expect("mint a stand-in plain slip")
+            .to_string();
         let peer: Peer = link_text.parse().expect("a sheer: link is a peer");
-        let cred = Credential::Family {
-            present: peer.self_present(),
-        };
+        let cred = Credential::family(peer.self_present());
         let (grant, membership) = resolve(cred, &secret, &test_home())
             .await
             .expect("family-with-plain-link-peer resolves")

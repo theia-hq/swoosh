@@ -114,7 +114,7 @@ async fn revoking_a_holder_with_a_badge_plus_a_service_grant_cuts_both() {
     let badge_link = secret
         .sign_device_badge(device, Duration::from_secs(3600))
         .unwrap();
-    let badge = Cap::parse(&badge_link).unwrap();
+    let badge = Cap::parse(badge_link.as_str()).unwrap();
     let badge_root = badge.root_revocation_id().unwrap();
     // A service grant, minted the way `grant issue --for` does.
     let link = Link::mint_bound(

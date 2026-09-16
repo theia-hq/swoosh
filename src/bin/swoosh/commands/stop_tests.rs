@@ -110,7 +110,8 @@ async fn bare_stop_rejects_present() {
     let home = home_in(&base);
     let link = swoosh::identity::Secret::ephemeral()
         .member_badge()
-        .expect("mint a stand-in slip");
+        .expect("mint a stand-in slip")
+        .to_string();
     let stop = Wrap::try_parse_from(["x", "--present", &link])
         .expect("bare stop --present parses")
         .stop;

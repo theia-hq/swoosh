@@ -39,7 +39,7 @@ pub struct ServiceLsCmd {
         long_help = "Optional: your own devices need no link, the dial presents the self-signed \
                      membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
     )]
-    pub present: Option<swoosh::credential::SheerLink>,
+    pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -55,13 +55,12 @@ impl swoosh::reaching::Reaching for ServiceLsCmd {
     /// `sheer:` link in the `--at` peer with an explicit `--present`, threaded INTO the credential so the
     /// ONE resolver owns both slots.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self
-                .at
+        swoosh::credential::Credential::family(
+            self.at
                 .as_ref()
                 .and_then(Peer::self_present)
                 .or_else(|| self.present.clone()),
-        }
+        )
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

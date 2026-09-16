@@ -56,7 +56,7 @@ pub struct SendCmd {
         long_help = "Optional: your own devices need no link; this machine's membership badge is \
                      presented automatically. Pass a `sheer:` link only to reach as a delegate."
     )]
-    pub present: Option<swoosh::credential::SheerLink>,
+    pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -72,9 +72,9 @@ impl swoosh::reaching::Reaching for SendCmd {
     /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
     /// badge exactly as a `--present` link does).
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.peer.self_present().or_else(|| self.present.clone()),
-        }
+        swoosh::credential::Credential::family(
+            self.peer.self_present().or_else(|| self.present.clone()),
+        )
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

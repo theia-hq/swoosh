@@ -11,7 +11,6 @@
 use bifrost::{Discovery, Node, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
-use swoosh::credential::SheerLink;
 use swoosh::peer::Peer;
 use swoosh::transport::ReachArgs;
 
@@ -36,7 +35,7 @@ pub struct ForwardCmd {
         long_help = "Optional. `forward` dials as a stranger by construction (it never presents this \
                      node's identity), so pass a `sheer:` slip to reach a cap-gated service."
     )]
-    pub present: Option<SheerLink>,
+    pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -87,12 +86,7 @@ impl swoosh::reaching::Reaching for ForwardCmd {
         // `--present`, so a link-as-peer and a `--present` link flow through ONE path (defect #2: `forward`
         // no longer hand-threads a raw slot 1 divergent from the family verbs). Slot 2 is always empty: a
         // dial-only client presents its own link, never a fleet badge to AND.
-        let slot1 = self
-            .peer
-            .self_present()
-            .or_else(|| self.present.clone())
-            .map(|slip| slip.into_link().parse::<Link>())
-            .transpose()?;
+        let slot1 = self.peer.self_present().or_else(|| self.present.clone());
         tunnel_connect::connect(
             node,
             ctx.contacts,

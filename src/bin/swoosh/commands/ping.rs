@@ -40,7 +40,7 @@ pub struct PingCmd {
         long_help = "Optional: your own devices need no link, the dial presents the self-signed \
                      membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
     )]
-    pub present: Option<swoosh::credential::SheerLink>,
+    pub present: Option<Link>,
     /// Print a line per probe as it lands, showing the path at that moment (watch iroh punch to direct).
     #[arg(short = 'v', long)]
     pub verbose: bool,
@@ -61,9 +61,9 @@ impl swoosh::reaching::Reaching for PingCmd {
     /// a self-addressing `sheer:` link-as-peer with an explicit `--present`, so a link-as-peer resolves
     /// through the same slot path as a `--present` link.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.peer.self_present().or_else(|| self.present.clone()),
-        }
+        swoosh::credential::Credential::family(
+            self.peer.self_present().or_else(|| self.present.clone()),
+        )
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

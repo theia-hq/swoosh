@@ -17,9 +17,10 @@
 
 use bifrost::NodeId;
 use clap::Args;
-use nauthy::Cap;
+use nauthy::Link;
 use swoosh::config;
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, Petname};
+use swoosh::credential::LinkExt as _;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
@@ -118,7 +119,7 @@ impl AddCmd {
                 // badge cannot be replayed from another key). The signet SECRET stays in `signet`; only
                 // the signed PUBLIC badge leaves.
                 let badge = signet.sign_device_badge(node, ttl)?;
-                let token = Invite::bound(signet_id, badge.clone());
+                let token = Invite::bound(signet_id, Link::clone(&badge));
                 record(&mut store, home, &device, node, ttl, &badge).await?;
                 // The token carries no secret, so it needs no private hand-off; the record lines are what
                 // the owner keeps. Blank-frame the token so it is copy-obvious, like `serve` frames the
@@ -141,7 +142,7 @@ impl AddCmd {
                 // used with `--for` would still be shadowed: refuse on the same rule.
                 refuse_shadowed(store.contacts(), &device, node)?;
                 let badge = signet.sign_device_badge(node, ttl)?;
-                let token = Invite::derived(seed, signet_id, badge.clone());
+                let token = Invite::derived(seed, signet_id, Link::clone(&badge));
                 seed.zeroize();
                 record(&mut store, home, &device, node, ttl, &badge).await?;
                 println!("{token}\n");
@@ -196,13 +197,13 @@ async fn record(
     device: &DeviceLabel,
     node: NodeId,
     ttl: core::time::Duration,
-    badge: &str,
+    badge: &Link,
 ) -> eyre::Result<()> {
     // The ledger row lands BEFORE the contact is saved: a row with no contact is harmless (a raw-key
     // `invite rm` still cuts it), while a contact with no row is an unrevocable badge, the exact class
     // the mint-log fix closed. The contact `add` below can then no longer displace a different key:
     // `refuse_shadowed` refused that before signing.
-    let root_id = Cap::parse(badge)?.root_revocation_id().ok_or_else(|| {
+    let root_id = badge.cap()?.root_revocation_id().ok_or_else(|| {
         eyre::eyre!("signed membership badge has no authority block to key revocation on")
     })?;
     let record = GrantRecord {

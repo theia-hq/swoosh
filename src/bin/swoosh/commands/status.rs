@@ -48,7 +48,7 @@ pub struct StatusCmd {
         long_help = "Optional: your own devices need no link, the dial presents the self-signed \
                      membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
     )]
-    pub present: Option<swoosh::credential::SheerLink>,
+    pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -63,13 +63,12 @@ impl swoosh::reaching::Reaching for StatusCmd {
     /// effective slip is the FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`,
     /// threaded INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self
-                .peer
+        swoosh::credential::Credential::family(
+            self.peer
                 .as_ref()
                 .and_then(Peer::self_present)
                 .or_else(|| self.present.clone()),
-        }
+        )
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {
@@ -506,7 +505,8 @@ mod tests {
         let home = Home::resolve(Some(base.join("home"))).expect("the scratch home resolves");
         let link = swoosh::identity::Secret::ephemeral()
             .member_badge()
-            .expect("mint a stand-in slip");
+            .expect("mint a stand-in slip")
+            .to_string();
         let status = Wrap::try_parse_from(["x", "--present", &link])
             .expect("bare status --present parses")
             .status;

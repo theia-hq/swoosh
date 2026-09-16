@@ -44,7 +44,7 @@ pub struct SpeedCmd {
         long_help = "Optional: your own devices need no link, the dial presents the self-signed \
                      membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
     )]
-    pub present: Option<swoosh::credential::SheerLink>,
+    pub present: Option<Link>,
     /// Measure the upload direction (this node sends).
     #[arg(long)]
     pub up: bool,
@@ -74,9 +74,9 @@ impl swoosh::reaching::Reaching for SpeedCmd {
     /// slip is the FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded
     /// INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.peer.self_present().or_else(|| self.present.clone()),
-        }
+        swoosh::credential::Credential::family(
+            self.peer.self_present().or_else(|| self.present.clone()),
+        )
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

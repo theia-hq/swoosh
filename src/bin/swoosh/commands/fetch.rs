@@ -35,7 +35,7 @@ pub struct FetchCmd {
     pub service: String,
     /// present a `sheer:` cap link to a cap-gated node (a delegate's slip)
     #[arg(long, value_name = "link")]
-    pub present: Option<swoosh::credential::SheerLink>,
+    pub present: Option<Link>,
     /// Pin the local listener port (default: an OS-assigned free port).
     #[arg(long, value_name = "port")]
     pub port: Option<u16>,
@@ -56,9 +56,9 @@ impl swoosh::reaching::Reaching for FetchCmd {
     /// slip is the FOLD of a self-addressing `sheer:` link in the `--via` peer with an explicit `--present`,
     /// threaded INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.via.self_present().or_else(|| self.present.clone()),
-        }
+        swoosh::credential::Credential::family(
+            self.via.self_present().or_else(|| self.present.clone()),
+        )
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

@@ -2,6 +2,11 @@
 
 All notable changes to swoosh, newest first.
 
+## Unreleased
+
+### Fixed
+- **A corrupt stored membership badge fails closed.** A `<home>/badge` that is not a usable `sheer:` link now refuses every family dial and a plain `adopt` with the fix named (`swoosh adopt --force <invite>`, or move the file aside), instead of being carried to the peer and refused there.
+
 ## v0.9.1
 
 `--home` keeps its ssh pins to itself, the installer names each reason a provenance check was skipped, a

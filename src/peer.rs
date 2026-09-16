@@ -15,7 +15,7 @@ use nauthy::{Link, SCHEME, Service};
 use tightbeam::tunnel::Connector;
 
 use crate::contacts::{Candidate, ContactRef, ContactRefParseError, Contacts};
-use crate::credential::SheerLink;
+use crate::credential::LinkExt as _;
 
 /// A peer a dialing verb reaches, before resolution. Replaces BOTH the reach family's old `Target` and the
 /// tunnel family's old `Dial`: one type, three arms, tried in a fixed order at the clap boundary.
@@ -35,7 +35,10 @@ pub enum Peer {
     Raw(NodeId),
     /// A `sheer:` capability link. Self-addressing: it supplies the dial target (the cap's root node) AND
     /// the slot-1 credential, so a separate `--present` is redundant (see the fold in [`self_present`](Self::self_present)).
-    Capability(SheerLink),
+    ///
+    /// Boxed because a parsed link carries its whole decoded cap: inline it would dwarf the two key-shaped
+    /// arms, and every dialing verb holds a `Peer` in its clap field.
+    Capability(Box<Link>),
 }
 
 impl FromStr for Peer {
@@ -46,7 +49,7 @@ impl FromStr for Peer {
     /// are additive), else a saved petname address (validated here, resolved against the store at dial time).
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if text.starts_with(SCHEME) {
-            Ok(Self::Capability(text.parse::<SheerLink>()?))
+            Ok(Self::Capability(Box::new(text.parse::<Link>()?)))
         } else if let Ok(node) = text.parse::<NodeId>() {
             Ok(Self::Raw(node))
         } else {
@@ -73,10 +76,9 @@ impl Peer {
     /// candidate exactly as `Raw` does. An unknown name surfaces the contact resolver's clean error, never a
     /// silent empty dial.
     ///
-    /// `eyre::Result` rather than the contact resolver's typed `ResolveError`, because the `Capability` arm
-    /// self-addresses via `link.dial_node()` (a nauthy `CapError`): folding that cap concern into the
-    /// address-book error would leak nauthy into the contacts domain, which stays pure (the accessor keeps
-    /// nauthy knowledge in `credential.rs`). Every caller resolves in an eyre context already.
+    /// `eyre::Result` rather than the contact resolver's typed `ResolveError`: the store's own resolve
+    /// failure is the only error here, and folding it into a peer-level type would buy a caller nothing.
+    /// Every caller resolves in an eyre context already.
     pub fn candidates(&self, contacts: &Contacts) -> eyre::Result<Vec<Candidate>> {
         match self {
             Self::Named(reference) => Ok(contacts.resolve_candidates(reference)?),
@@ -84,13 +86,10 @@ impl Peer {
                 label: node.short(),
                 node: *node,
             }]),
-            Self::Capability(link) => {
-                let node = link.dial_node()?;
-                Ok(vec![Candidate {
-                    label: link.short(),
-                    node,
-                }])
-            }
+            Self::Capability(link) => Ok(vec![Candidate {
+                label: link.short(),
+                node: link.dial_node(),
+            }]),
         }
     }
 
@@ -110,7 +109,7 @@ impl Peer {
     ) -> eyre::Result<Connector> {
         let dial = match self {
             Self::Raw(id) => *id,
-            Self::Capability(link) => link.dial_node()?,
+            Self::Capability(link) => link.dial_node(),
             Self::Named(reference) => {
                 contacts
                     .resolve_candidates(reference)?
@@ -133,9 +132,9 @@ impl Peer {
     /// the fold prefers over an explicit `--present`: a `sheer:` link passed AS the peer flows through the
     /// same [`resolve`](crate::reaching::resolve) path as an explicit `--present`, so a signet-bound
     /// link-as-peer computes its slot-2 member badge exactly as a `--present` link does.
-    pub fn self_present(&self) -> Option<SheerLink> {
+    pub fn self_present(&self) -> Option<Link> {
         match self {
-            Self::Capability(link) => Some(SheerLink::clone(link)),
+            Self::Capability(link) => Some(Link::clone(link)),
             _ => None,
         }
     }
@@ -145,7 +144,7 @@ impl Peer {
     /// peer, where `--present` is the credential (the fleet/delegate case, a slip rooted elsewhere). Called
     /// once at the top of each verb's run before resolving, so the conflict is loud and local while
     /// [`credential`](crate::reaching::Reaching::credential) stays infallible.
-    pub fn reject_redundant_present(&self, explicit: Option<&SheerLink>) -> eyre::Result<()> {
+    pub fn reject_redundant_present(&self, explicit: Option<&Link>) -> eyre::Result<()> {
         if matches!(self, Self::Capability(_)) && explicit.is_some() {
             eyre::bail!(
                 "a `sheer:` link peer already presents its own credential; drop `--present` (or name \
@@ -175,6 +174,7 @@ mod tests {
 
     use super::Peer;
     use crate::contacts::{Contacts, Petname};
+    use crate::credential::LinkExt as _;
 
     /// A distinct node id for a test, derived from a fixed seed so it is stable and comparable.
     fn node(seed: u8) -> NodeId {
@@ -269,7 +269,7 @@ mod tests {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a sheer: link parses");
         let root = match &peer {
-            Peer::Capability(link) => link.dial_node().expect("the link self-addresses"),
+            Peer::Capability(link) => link.dial_node(),
             _ => panic!("a sheer: link parses as a Capability peer"),
         };
 
@@ -311,7 +311,7 @@ mod tests {
     fn link_peer_plus_present_is_a_loud_error() {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a link peer");
-        let explicit: crate::credential::SheerLink = link.parse().expect("a slip");
+        let explicit: Link = link.parse().expect("a slip");
         assert!(
             peer.reject_redundant_present(Some(&explicit)).is_err(),
             "a link peer + --present is a loud conflict, not a silent pick"
@@ -338,7 +338,7 @@ mod tests {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a link peer");
         let root = match &peer {
-            Peer::Capability(link) => link.dial_node().expect("the link self-addresses"),
+            Peer::Capability(link) => link.dial_node(),
             _ => panic!("a sheer: link parses as a Capability peer"),
         };
         // The two slots come from the resolver, not from the peer link: distinct valid links prove the
