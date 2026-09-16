@@ -12,13 +12,16 @@ NATs. You give it a key; it does the rest. Nothing to configure, no addresses to
 This is the transport for everyday use. Every [use case](use-cases/README.md) and the
 [getting-started](getting-started.md) walkthrough use it.
 
-`iroh` falls back to public relays when a direct path fails; the relays forward encrypted bytes and
-cannot read them. Self-hosting the relays is not wired through swoosh today.
+Finding a peer and the relay fallback are iroh's: a serving node publishes where it can be reached to
+n0's public discovery service, and when a direct path fails, n0's public relays forward encrypted bytes
+they cannot read. Pointing swoosh at a relay and a resolver you run is not wired today.
 
-## <a id="quirk"></a>quirk (our own QUIC)
+## <a id="quirk"></a>quirk (our own transport)
 
-`quirk` is our own QUIC, written from scratch over UDP. It is direct-only: it does no internet discovery
-and no NAT traversal, so it reaches a peer only at an address you hand it with `--peer` (below).
+`quirk` is a transport we wrote from scratch over UDP. It is shaped like QUIC and is not QUIC: one stream
+per connection, no congestion control, not interoperable with anything else. It is direct-only: it does
+no internet discovery and no NAT traversal, so it reaches a peer only at an address you hand it with
+`--peer` (below).
 
 Two spellings share that backend:
 

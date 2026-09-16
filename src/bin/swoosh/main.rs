@@ -1,7 +1,7 @@
 //! swoosh: work with a machine addressed by its public key, not its address.
 //!
 //! You give swoosh a peer's public key and it dials that peer directly, wherever the peer is on the
-//! internet, across NATs, without you knowing the peer's address: no lookup, no server in the middle.
+//! internet, across NATs, without you knowing the peer's address: no lookup, no account.
 //! From that one connection swoosh does whatever you ask of the machine: today it stays reachable and
 //! measures the link; as it grows, the same primitive carries files, tunnels, shared access, and
 //! fetches. Under the hood every job is one cap-gated byte-stream to a key, behind a thin front door

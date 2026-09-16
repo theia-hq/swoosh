@@ -7,7 +7,7 @@ trade the math forces on you. Once you hold these, the rest of swoosh is just ve
 
 swoosh reaches a machine by its **public key**, not its IP address. A key is a short base32 string like
 `bf01hcq6…`. You hand someone your key; they reach you, wherever you are, across home routers and NATs,
-with no address to look up and no server in the middle.
+with no address to look up.
 
 An IP address changes: you move networks, your router hands out a new lease. A key does not. Reach a
 key and you reach the same machine every time, and the link is authenticated end to end by that key, so

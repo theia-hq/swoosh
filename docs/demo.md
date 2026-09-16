@@ -6,7 +6,7 @@ stranger who was never admitted is refused at the door, over either transport.
 
 You address *who* (an ed25519 public key), never *where*, so the transport under the reach can be pulled
 out and replaced. swoosh runs `ping` and `speed` over iroh (real QUIC, NAT traversal, relays)
-and over **quirk+noise**, our own QUIC written from scratch over UDP with a Noise handshake that proves
+and over **quirk+noise**, a QUIC-shaped transport we wrote from scratch over UDP, with a Noise handshake that proves
 the key, at the same peer, from the same member identity. Same key, same NodeId, different transport. And
 the gate holds across both.
 
