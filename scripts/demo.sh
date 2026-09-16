@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # The membership + transport-swap demo: admit a second machine to a node you
-# run, reach it by its public key over iroh and over quirk+noise (our own QUIC
+# run, reach it by its public key over iroh and over quirk+noise (our own UDP transport
 # behind the sealed wrapper), and watch a stranger who was never admitted get
 # refused at the gate. Bare quirk shows the enforcement: it announces peer keys
 # in plaintext, so a signet-rooted gate refuses to arm over it.

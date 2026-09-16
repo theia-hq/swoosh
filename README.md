@@ -3,7 +3,7 @@
 swoosh reaches a machine by its public key instead of its IP address: ping it, measure the link, ssh
 in, send files, forward ports, fetch through it, and share access. You give it a peer's key (a short
 base32 string) and it dials that peer directly, wherever the peer is, across home routers and NATs. No
-address to look up, no account, no server in the middle.
+address to look up and no account.
 
 A key does not change when a machine moves networks, and the connection is authenticated end to end by
 that key, so you reach the machine you meant and no one sits in the middle.
@@ -57,8 +57,7 @@ This page describes the default branch; the released docs are at the newest tag.
 
 - The CLI (`src/`): binds one node under the chosen key and transport, then runs a command.
 - The service engines (`fetch`, `measure`, `sshh`, `transfer`) live in
-  [theia-hq/services](https://github.com/theia-hq/services) and are consumed here as exact-rev git
-  dependencies.
+  [theia-hq/services](https://github.com/theia-hq/services).
 
 ## License
 
