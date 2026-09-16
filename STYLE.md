@@ -15,7 +15,7 @@ The code should be beautiful to read and tell a story as you scroll._
 - **Enums over bools.** State is an `enum` with an exhaustive `match`, so a new variant is a compile error at every decision site. A closed set of modes is one typed selector (`--to <port | - | unix:PATH>` parses to one enum), never two flags or a pile of bools.
 - **`::new` only when construction has logic.** A 1:1 field assignment is a struct literal, `Default`, or `From`.
 - **Constraints live in the type system,** and constant relationships in `const { assert!(..) }`.
-- **`#[must_use`] where ignoring the return is a bug,** with `unused_must_use = deny`.
+- **`#[must_use]` where ignoring the return is a bug,** with `unused_must_use = deny`.
 - **In trait impls, name associated types as `Self::Assoc`,** so changing one propagates.
 - **A wire form and a domain form are different types.** Convert at the boundary; a cohesive family of conversions is one small local trait, not a bag of free functions.
 - **A measurement returns its report and knows nothing of display.** A live view is a caller-supplied observer; the plain run is the same loop with a no-op observer.
