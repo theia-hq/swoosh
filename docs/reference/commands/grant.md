@@ -34,6 +34,8 @@ device bind never silently becomes a fleet bind. A bind is theft-resistant and c
 bearer grant can be delegated but is meant to be short-lived (the [one trade](../../keys.md#the-one-trade)).
 A revoke is node-local: see [revocation](../../keys.md#revocation). Revoke on each node you run. `ls`
 groups grants by service and shows each one's time left; a bearer row has no bind key (`bearer  -  1m
-non-delegable`), and an expired grant reads `expired`.
+non-delegable`), and an expired grant reads `expired`. A name is an address, not an authority
+([Services](../services.md#names)): grants are per name, so two names over one target need a grant each,
+and revoking one does not touch the other.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
