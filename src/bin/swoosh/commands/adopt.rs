@@ -26,6 +26,8 @@ use std::time::SystemTime;
 use bifrost::NodeId;
 use clap::Args;
 use eyre::WrapErr as _;
+use nauthy::Link;
+use swoosh::credential::LinkExt as _;
 use swoosh::home::Home;
 use swoosh::invite::Invite;
 use swoosh::secret::SecretSource;
@@ -93,7 +95,7 @@ impl AdoptCmd {
                 let node = secret.node_id();
                 // The token is unauthenticated transport: anyone can name any signet. Verify the badge
                 // actually roots at the named signet AND binds THIS machine, unexpired, before any write.
-                verify_badge(&badge, node, signet)?;
+                let badge = verify_badge(badge, node, signet)?;
                 admit_signet(home, signet, self.force).await?;
                 // The credential half of the same rule: a token is not authenticated, so an old or
                 // revoked badge replayed under the live signet must not silently overwrite this one.
@@ -120,7 +122,7 @@ impl AdoptCmd {
                 let node = NodeId::from_ed25519_secret(&seed);
                 // Same device-side check as the bound arm, on the node the seed derives: the badge must
                 // root at the named signet and bind this device before the seed or badge is persisted.
-                verify_badge(&badge, node, signet)?;
+                let badge = verify_badge(badge, node, signet)?;
                 admit_signet(home, signet, self.force).await?;
                 // Same badge guard as the bound arm, before the seed write: a differing stored badge
                 // cannot be displaced by a replayed token without `--force`.
@@ -153,25 +155,29 @@ impl AdoptCmd {
 const COMPARE_SIGNET: &str = "compare that signet with the owner out of band before serving: the token is \
                               not signed by the signet it names, so it alone does not prove who sent it.";
 
-/// Verify a carried badge is a usable credential for THIS machine: a well-formed membership cap, rooted
-/// at `signet`, bound to `node`, and unexpired now. The invite token is unauthenticated transport, so
-/// this is the check that keeps a forged, mismatched, or stale badge off disk.
-fn verify_badge(badge: &str, node: NodeId, signet: NodeId) -> eyre::Result<()> {
-    let cap = nauthy::Cap::parse(badge)
-        .wrap_err("the invite's badge is not a well-formed membership link")?;
-    cap.verify_member_at_root_without_revocation(
-        SystemTime::now(),
-        node.verify_key(),
-        signet.verify_key(),
-    )
-    .wrap_err_with(|| {
-        format!(
-            "the invite's badge does not bind this machine ({node}) at signet {signet}: it is bound to \
-             another key, rooted elsewhere, or expired. Ask the owner to sign a fresh invite for this \
-             machine's key: `swoosh invite add <label> --for {node}`"
+/// Verify a carried badge is a usable credential for THIS machine: a membership cap rooted at `signet`,
+/// bound to `node`, and unexpired now. The invite token is unauthenticated transport, so this is the check
+/// that keeps a forged, mismatched, or stale badge off disk.
+///
+/// It CONSUMES the badge and hands it back, so the only way to reach a write is through the check: a
+/// caller cannot hold a verified badge it never verified, and skipping the call is a missing binding the
+/// compiler names rather than a check a reader has to spot the absence of.
+fn verify_badge(badge: Link, node: NodeId, signet: NodeId) -> eyre::Result<Link> {
+    badge
+        .cap()?
+        .verify_member_at_root_without_revocation(
+            SystemTime::now(),
+            node.verify_key(),
+            signet.verify_key(),
         )
-    })?;
-    Ok(())
+        .wrap_err_with(|| {
+            format!(
+                "the invite's badge does not bind this machine ({node}) at signet {signet}: it is bound \
+                 to another key, rooted elsewhere, or expired. Ask the owner to sign a fresh invite for \
+                 this machine's key: `swoosh invite add <label> --for {node}`"
+            )
+        })?;
+    Ok(badge)
 }
 
 /// Refuse to silently re-root this machine: when the home already trusts a DIFFERENT signet than the
@@ -197,12 +203,12 @@ async fn admit_signet(home: &Home, signet: NodeId, force: bool) -> eyre::Result<
 /// token under the SAME signet would otherwise overwrite the live credential (the signet compare cannot
 /// catch it). A differing stored badge takes the same explicit `--force` as a differing signet: an absent
 /// badge is first provisioning, and re-adopting the exact bytes already stored is a no-op.
-async fn admit_badge(home: &Home, badge: &str, force: bool) -> eyre::Result<()> {
+async fn admit_badge(home: &Home, badge: &Link, force: bool) -> eyre::Result<()> {
     if force {
         return Ok(());
     }
     if let Some(stored) = config::load_badge(home).await? {
-        if stored.as_str() != badge {
+        if stored.as_str() != badge.as_str() {
             eyre::bail!(
                 "this machine already stores a different membership badge than this invite carries; \
                  adopting it would replace the stored badge. Re-run with --force if that is intended"

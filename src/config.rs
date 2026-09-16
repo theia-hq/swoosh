@@ -10,6 +10,8 @@
 use std::path::Path;
 
 use bifrost::NodeId;
+use eyre::WrapErr as _;
+use nauthy::Link;
 
 use crate::home::Home;
 
@@ -39,13 +41,29 @@ pub async fn write_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
 /// on connect, or `None` if none was stored. An absent file means the node was provisioned without a badge
 /// (a home from before badges were carried, or a self-rooted node) or is the signet holder itself
 /// (person-zero), either of which falls back to self-signing. Mirrors [`load_signet`].
+///
+/// The text becomes a [`Link`] HERE, at the one place it leaves the disk, so every consumer downstream
+/// holds a credential that already decoded and verified against its embedded root. A file that holds
+/// something else fails closed with the fix named, rather than travelling the reach path as a badge the
+/// far gate will refuse without ever saying why.
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
-pub async fn load_badge(home: &Home) -> eyre::Result<Option<String>> {
-    match tokio::fs::read_to_string(home.badge()).await {
+pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
+    let path = home.badge();
+    match tokio::fs::read_to_string(&path).await {
         Ok(text) => {
             let badge = text.trim();
-            Ok((!badge.is_empty()).then(|| badge.to_owned()))
+            if badge.is_empty() {
+                return Ok(None);
+            }
+            let badge = badge.parse::<Link>().wrap_err_with(|| {
+                format!(
+                    "the stored membership badge {} is not a usable `sheer:` link; re-run `swoosh \
+                     adopt --force <invite>` to replace it, or move the file aside",
+                    path.display(),
+                )
+            })?;
+            Ok(Some(badge))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -57,7 +75,10 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<String>> {
 /// re-badges), creating the store dir. It lands beside the identity, mirroring [`write_signet`], and is
 /// written `0600`: though the signet already signed it (it carries no secret), it is a device-bound
 /// membership credential and this store is owner-only throughout, so it is not left world-readable either.
-pub async fn write_badge(home: &Home, badge: &str) -> eyre::Result<()> {
+///
+/// Takes the [`Link`] [`load_badge`] returns, so the store speaks one type in both directions and only a
+/// badge that has decoded and verified against its root can ever reach the disk.
+pub async fn write_badge(home: &Home, badge: &Link) -> eyre::Result<()> {
     write_private(&home.badge(), format!("{badge}\n").as_bytes()).await
 }
 

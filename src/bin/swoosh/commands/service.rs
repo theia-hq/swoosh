@@ -22,7 +22,11 @@ pub use toggle::ServiceToggleCmd;
 #[derive(Debug, Subcommand)]
 pub enum ServiceCmd {
     /// List the served menu (bare: your own node; `--at <peer>`: a peer).
-    Ls(ls::ServiceLsCmd),
+    ///
+    /// Boxed because `ls` is the only leaf here that reaches a peer, so it carries the whole reach
+    /// surface (a peer, a `--present` link with its decoded cap) while its two siblings carry one service
+    /// name each; inline, every `service` invocation would pay for the reaching arm.
+    Ls(Box<ls::ServiceLsCmd>),
     /// Re-enable a disabled service (a file-write on `<home>/disabled`, honored live, no restart).
     Enable(toggle::ServiceToggleCmd),
     /// Disable a service (a file-write on `<home>/disabled`, persisted fail-closed, honored live).

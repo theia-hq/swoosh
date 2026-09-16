@@ -41,8 +41,8 @@
 use std::path::Path;
 
 use clap::Args;
+use nauthy::Link;
 use swoosh::contacts::Contacts;
-use swoosh::credential::SheerLink;
 use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::transport;
@@ -66,7 +66,7 @@ pub struct SshCmd {
     pub service: String,
     /// present a `sheer:` cap link to a cap-gated host (a delegate's slip)
     #[arg(long, value_name = "link")]
-    pub present: Option<SheerLink>,
+    pub present: Option<Link>,
     /// direct address hint for the peer, `<key>=<addr>` (repeatable)
     #[arg(id = "peer-hint", long = "peer", value_name = "key=addr")]
     pub peer_hint: Vec<transport::PeerHint>,
@@ -135,7 +135,7 @@ impl SshCmd {
             &proxy,
             &key,
             &self.service,
-            present.as_ref().map(SheerLink::link),
+            present.as_ref().map(Link::as_str),
             &host,
             &known_hosts,
             home_arg.as_deref(),
@@ -568,7 +568,7 @@ mod tests {
             .self_present()
             .expect("a link peer self-presents its own slip");
         assert_eq!(
-            present.link(),
+            present.as_str(),
             link,
             "the forwarded present is the link itself"
         );
@@ -585,7 +585,7 @@ mod tests {
             PROXY,
             &root,
             "ssh",
-            Some(present.link()),
+            Some(present.as_str()),
             &cmd.peer.to_string(),
             &known_hosts(),
             None,
@@ -610,7 +610,7 @@ mod tests {
             .self_present()
             .or_else(|| cmd.present.clone())
             .expect("the explicit --present is the forwarded slip");
-        assert_eq!(present.link(), link);
+        assert_eq!(present.as_str(), link);
     }
 
     /// B1: the passthrough only opens after `--`, so while swoosh still has flags to parse no ssh-shaped

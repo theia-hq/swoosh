@@ -15,7 +15,6 @@ use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::{Link, Service};
 use swoosh::contacts::{Contacts, ContactsStore};
-use swoosh::credential::SheerLink;
 use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::roster;
@@ -37,7 +36,7 @@ pub struct FleetCmd {
     pub pull: Peer,
     /// present a `sheer:` cap link to a cap-gated coordination node (a delegate's slip)
     #[arg(long, value_name = "link")]
-    pub present: Option<SheerLink>,
+    pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -52,9 +51,9 @@ impl swoosh::reaching::Reaching for FleetCmd {
     /// effective slip is the FOLD of a self-addressing `sheer:` link in the `--pull` peer with an explicit
     /// `--present`, threaded INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.pull.self_present().or_else(|| self.present.clone()),
-        }
+        swoosh::credential::Credential::family(
+            self.pull.self_present().or_else(|| self.present.clone()),
+        )
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

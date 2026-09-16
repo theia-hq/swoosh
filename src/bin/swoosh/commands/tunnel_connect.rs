@@ -121,7 +121,7 @@ pub struct TunnelConnectCmd {
     /// present a membership badge or capability link to a family/cap-gated host (a `sheer:` link, parsed
     /// at the boundary)
     #[arg(long, value_name = "link")]
-    pub present: Option<swoosh::credential::SheerLink>,
+    pub present: Option<Link>,
     /// where to put the stream: the `swoosh ssh` ProxyCommand ABI always passes `-` (stdout). Accepted as
     /// the shared `--to` selector so the bridge speaks the same flag as `forward`; hidden, never typed.
     #[arg(long, value_name = "port | - | unix:PATH", hide = true)]
@@ -142,9 +142,7 @@ impl swoosh::reaching::Reaching for TunnelConnectCmd {
     /// the credential so the ONE resolver owns both slots (slot 1 present-or-badge, slot 2 the fleet badge
     /// for a signet-bound slip).
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.present.clone(),
-        }
+        swoosh::credential::Credential::family(self.present.clone())
     }
 
     /// `tunnel-connect`'s peer is a raw key (`swoosh ssh` resolved any petname before re-invoking), never a

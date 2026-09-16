@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
 use eyre::WrapErr as _;
+use nauthy::Link;
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::{Zeroize as _, ZeroizeOnDrop};
 
@@ -92,20 +93,19 @@ impl Secret {
     /// (it holds the root), so when it dials a family-gated node it mints one in-process rather than
     /// carrying a stored one. Short-lived because it is re-minted per dial; the binding makes it useless if
     /// intercepted off another key. Returns the `sheer:` link to present.
-    pub fn member_badge(&self) -> eyre::Result<String> {
+    pub fn member_badge(&self) -> eyre::Result<Link> {
         use core::time::Duration;
 
         // Minted fresh each dial, so a few minutes is ample and bounds a leaked in-flight badge.
         let ttl = Duration::from_secs(5 * 60);
-        let badge = self
+        Ok(self
             .cap_identity()?
             .mint_member(
                 self.node_id().verify_key(),
                 nauthy::Request::expires_in(ttl),
             )?
             .seal()?
-            .link()?;
-        Ok(badge.to_string())
+            .link()?)
     }
 
     /// A stable seed for this node's ssh host key, so a swoosh node exposing `ssh=sshd:` under its persisted
@@ -137,13 +137,12 @@ impl Secret {
         &self,
         device: NodeId,
         ttl: core::time::Duration,
-    ) -> eyre::Result<String> {
-        let badge = self
+    ) -> eyre::Result<Link> {
+        Ok(self
             .cap_identity()?
             .mint_member(device.verify_key(), nauthy::Request::expires_in(ttl))?
             .seal()?
-            .link()?;
-        Ok(badge.to_string())
+            .link()?)
     }
 
     /// The seed for a device identity derived from this key (the signet) under `label`: the secret a

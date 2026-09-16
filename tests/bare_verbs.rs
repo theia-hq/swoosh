@@ -234,7 +234,8 @@ fn bare_stop_stops_the_resident() {
     // exact teaching line, and the resident is untouched (the later real stop still finds it).
     let link = swoosh::identity::Secret::ephemeral()
         .member_badge()
-        .expect("mint a stand-in slip");
+        .expect("mint a stand-in slip")
+        .to_string();
     let cases: [&[&str]; 3] = [
         &["status", "--present", link.as_str()],
         &["service", "ls", "--present", link.as_str()],

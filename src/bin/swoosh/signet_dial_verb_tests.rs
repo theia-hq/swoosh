@@ -25,7 +25,7 @@ use tightbeam::identity::AsVerifyKey as _;
 use crate::commands::ping;
 
 /// Clap-parse a `ping` verb exactly as the CLI would, so `--present <link>` runs through
-/// [`SheerLink`](swoosh::credential::SheerLink)'s `FromStr` and lands on the real command's field.
+/// [`Link`](nauthy::Link)'s `FromStr` and lands on the real command's field.
 #[derive(Parser)]
 struct PingWrap {
     #[command(flatten)]

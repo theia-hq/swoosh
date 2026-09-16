@@ -207,7 +207,8 @@ async fn bare_ls_rejects_present() {
     let home = home_in(&base);
     let link = swoosh::identity::Secret::ephemeral()
         .member_badge()
-        .expect("mint a stand-in slip");
+        .expect("mint a stand-in slip")
+        .to_string();
     let ls = Wrap::try_parse_from(["x", "--present", &link])
         .expect("bare service ls --present parses")
         .ls;
