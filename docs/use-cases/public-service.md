@@ -42,13 +42,10 @@ bf01hcq6balrlxwa via iroh: mixed (direct to 135.129.x.x:56141 and relayed)
 
 ## The rules on `--public`
 
-- **You must name the services.** Bare `--public` fails with clap's missing-value error: `a value is
-  required for '--public <svc>'`. There is no `all` or `*`. You open exactly what you list.
-- **Some services can never be public.** A keyless shell (`sshd:`) is refused by name, and
-  `control.stop` / `control.services` are always gated. The gate will not let you open a service that
-  has no safe public form.
-- **`control.*` stays gated.** Even with public diagnostics, only your own devices can stop or inspect
-  the node.
+- **You must name the services.** There is no `all` or `*`.
+- **Not every service opens.** A keyless shell ([`sshd:`](../reference/services.md#sshd)) has no
+  public form. `control.stop` and `control.services` are member-only: only your own devices can stop
+  or inspect the node.
 
 ## The limit
 

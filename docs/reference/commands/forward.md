@@ -15,6 +15,8 @@ Usage: swoosh forward [OPTIONS] --to <port | - | unix:PATH> <peer>
 **Example.** `swoosh forward desk --service tv --to 8096` puts the peer's `tv` service on
 `127.0.0.1:8096`, so a local client talks to it as if it were local.
 
-**Things to know.** `--to -` streams to stdout, to compose with the shell (`--to - | mpv -`).
+**Things to know.** `--to -` streams to stdout, to compose with the shell (`--to - | mpv -`). `--service`
+defaults to `default`, a name no swoosh node serves unless a service is named `default`; pass the service
+name you want.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
