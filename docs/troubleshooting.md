@@ -66,6 +66,15 @@ drains. See [revocation](keys.md#revocation).
 - A fleet-bound grant stays usable from any device that person still holds until it expires or you
   revoke it. Keep fleet grants short-lived.
 
+## "a value is required for '--public <svc>'"
+
+```
+error: a value is required for '--public <svc>' but none was supplied
+```
+
+Bare `--public` names nothing to open. List the services you want public:
+`swoosh serve --public ping,speed`.
+
 ## A public ping or speed is being hammered
 
 The open `ping` and `speed` routes bind the metered engine: one ping run per caller per second, one
