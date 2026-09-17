@@ -1,9 +1,8 @@
 //! `swoosh tree`: print the command tree by walking clap's own model.
 //!
 //! A local verb (binds no transport, dials nobody). It reads the same `///` one-liners clap renders for
-//! `--help`, so the printed tree can never drift from the help text: that is the whole point. A Newcomer
-//! or a re-review diffs "what the binary exposes" against CLI-DESIGN in one command, rather than
-//! eyeballing help screens. Rendered with the same two-space indentation as `contact ls`, so there is
+//! `--help`, so the printed tree can never drift from the help text: that is the whole point. It makes
+//! "what the binary actually exposes" readable in one command, rather than by eyeballing help screens. Rendered with the same two-space indentation as `contact ls`, so there is
 //! one tree idiom across the tool.
 
 use clap::{Args, Command};
@@ -25,7 +24,7 @@ impl TreeCmd {
 fn walk(cmd: &Command, depth: usize) {
     for sub in cmd.get_subcommands() {
         // Hidden subcommands (the ssh ProxyCommand `tunnel-connect`) are plumbing, not user verbs: keep
-        // them out of the tree exactly as `--help` does, so the printed surface matches CLI-DESIGN.
+        // them out of the tree exactly as `--help` does, so the printed surface matches the parser.
         if sub.is_hide_set() {
             continue;
         }

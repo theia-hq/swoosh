@@ -39,8 +39,6 @@ impl ServiceToggleCmd {
         edit(home, |disabled| {
             disabled.insert(self.service.clone());
         })?;
-        // CLI-Architect ratified voice (delib-47 round-2, "Output shapes"): one terse line naming that the
-        // effect persists. FLAG(CLI-Architect): exact wording is yours.
         println!("{}: disabled (persisted)", self.service);
         Ok(())
     }
@@ -52,7 +50,6 @@ impl ServiceToggleCmd {
         edit(home, |disabled| {
             disabled.remove(&self.service);
         })?;
-        // CLI-Architect ratified voice (delib-47 round-2, "Output shapes"). FLAG(CLI-Architect): wording yours.
         println!("{}: enabled", self.service);
         Ok(())
     }

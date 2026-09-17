@@ -96,7 +96,7 @@ impl AddCmd {
                 );
             }
         }
-        // The badge lifetime is the operator's `--expires`, or the ratified default when absent. This same
+        // The badge lifetime is the operator's `--expires`, or the default when absent. This same
         // window bounds the badge (via `sign_device_badge`) and the ledger row's expiry below, so the two
         // agree on the one lifetime the token really has.
         let ttl = self

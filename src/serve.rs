@@ -43,8 +43,8 @@ pub use self::stop::{STOP_ACK, Stop};
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
 /// teardown (the remote twin of a local Ctrl-C or a `--expires` deadline). The client verb is `swoosh stop`.
 ///
-/// SETTLED name (delib-23, Principal-ruled): one unified `control.*` family over both the reads
-/// (`control.status`) and the mutations (`control.stop`); the dotted name is the verbatim wire name,
+/// One unified `control.*` family covers both the reads (`control.status`) and the mutations
+/// (`control.stop`); the dotted name is the verbatim wire name,
 /// gated exact-name, so a grant for one method can never open another. Public so the `swoosh stop` client
 /// verb requests the SAME name the served handler is keyed under, one source of truth for the wire string.
 pub const CONTROL_STOP_SERVICE: &str = "control.stop";
@@ -55,8 +55,8 @@ pub const CONTROL_STOP_SERVICE: &str = "control.stop";
 /// client verb is `swoosh service --at <peer>`.
 ///
 /// GATED (`type Exposure = Never`, like `control.stop`): the service menu is member-only, so a stranger never
-/// learns what a node serves (delib-18: existence and shape are revealed only AFTER admission; this is the
-/// teaching read the wrong-name path deliberately withholds). One unified `control.*` family, the dotted
+/// learns what a node serves: existence and shape are revealed only AFTER admission, and this is the
+/// teaching read the wrong-name path deliberately withholds. One unified `control.*` family, the dotted
 /// name is the verbatim wire name. Public so the `swoosh service` client requests the SAME name the
 /// served handler is keyed under, one source of truth for the wire string.
 pub const CONTROL_SERVICES_SERVICE: &str = "control.services";
@@ -203,7 +203,7 @@ pub fn diagnostics(
 ///
 /// The epoch is READ from the persisted roster epoch beside the contacts (default 0 before any is set), so
 /// the puller's anti-rollback floor is not pinned at 0. The BUMP verb (a `swoosh fleet cut` that increments
-/// and re-signs) is deferred to B2; today the read is real, so once the counter advances the floor tracks
+/// and re-signs) is not built yet; today the read is real, so once the counter advances the floor tracks
 /// it. A member's label IS a [`DeviceLabel`], the same type contacts hold, so there is no lossy re-parse.
 pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>> {
     let me: Petname = "me".parse()?;
@@ -218,7 +218,7 @@ pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>>
         .collect();
     let epoch = Epoch(contacts.roster_epoch().unwrap_or(0));
     let doc = RosterDoc::new(epoch, members)?;
-    // One-writer LOCK (delib-28): the SIGNET is the sole cutter. Cutting needs the live secret (only it
+    // One-writer LOCK: the SIGNET is the sole cutter. Cutting needs the live secret (only it
     // signs a roster the signet verifies), so this path holds `secret`; a relay-only `serve` node holds
     // just the bytes and cannot cut. See `roster::cut` for the full rule and why multi-writer is rejected.
     Ok(crate::roster::cut(&secret.cap_identity()?, &doc))
@@ -231,8 +231,8 @@ pub const RECV_SCHEME: &str = "recv";
 /// One de-merged receive service: its served NAME (the wire name `swoosh send --service` requests, e.g. the
 /// default `recv`) and ONLY its own sink directory. Because each receive service holds its own [`Recv`]
 /// instance, `a=recv:/x b=recv:/y` writes alice's pushes into /x and bob's into /y: a node-wide sink cannot
-/// say which of two receive services saves where, so the dir rides the per-service instance (delib-39
-/// de-merge, mirroring `fetch:`).
+/// say which of two receive services saves where, so the dir rides the per-service instance, the same
+/// de-merge `fetch:` uses.
 pub struct RecvService {
     name: String,
     out: PathBuf,
@@ -297,8 +297,8 @@ const FETCH_SCHEME: &str = "fetch";
 
 /// One de-merged fetch service: its served NAME (the wire name a dialer requests, e.g. `news`) and ONLY its
 /// own origin scope. Because each fetch service holds its own [`Fetch`] instance, a public fetch physically
-/// cannot reach a gated fetch's origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention
-/// (delib-39 BLOCKER-3).
+/// cannot reach a gated fetch's origins: the SSRF pivot is unrepresentable, not
+/// fail-closed-by-convention.
 pub struct FetchService {
     name: String,
     allow: OriginAllowlist,

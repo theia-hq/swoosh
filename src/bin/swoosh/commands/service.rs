@@ -1,7 +1,7 @@
 //! `swoosh service`: the node-service control group.
 //!
 //! Nesting is earned: this group owns three real ops (`ls`, `enable`, `disable`), so it reads as a noun with
-//! verbs, like the `grant` group. It follows the one control grammar (delib-47): BARE acts on YOUR OWN node,
+//! verbs, like the `grant` group. It follows the one control grammar: BARE acts on YOUR OWN node,
 //! `--at <peer>` acts on a peer.
 //!
 //! - `service ls [--at <peer>]` reads the served menu: bare reads your own live node over the local

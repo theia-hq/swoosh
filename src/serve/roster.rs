@@ -5,7 +5,7 @@ use tightbeam::tunnel::{BoxRead, BoxWrite, Handler, ServeError, Served};
 use tokio::io::AsyncWriteExt as _;
 
 /// The `roster:` handler: serve the signet-signed membership snapshot to an admitted member, then close.
-/// GATED (a stranger must never read the member set: delib-28 containment). Only the signet SIGNED the blob;
+/// GATED, because a stranger must never read the member set. Only the signet SIGNED the blob;
 /// this node merely serves a pre-cut snapshot, so a popped courier leaks a read of a member-known set, never
 /// authority (the signing secret is not needed to serve, only to have signed). The blob is self-delimiting
 /// and signature-validated by the puller, so the handler just writes it and closes the write half.
@@ -21,7 +21,7 @@ impl Roster {
 }
 
 impl Handler for Roster {
-    // GATED (a stranger must never read the member set: delib-28 containment): no legitimate public use.
+    // GATED, because a stranger must never read the member set: no legitimate public use.
     type Exposure = Never;
 
     async fn serve(

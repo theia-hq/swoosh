@@ -139,7 +139,7 @@ fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
         !banner.contains("iroh"),
         "the backend is never named: {banner}"
     );
-    // "automatic" leads BOTH auto channels (the Newcomer fix), not just the local one.
+    // "automatic" leads BOTH auto channels, not just the local one.
     assert_eq!(banner.matches("automatic").count(), 2, "{banner}");
     assert!(
         banner.contains("(mDNS)"),
@@ -1516,7 +1516,7 @@ fn public_speed_builds_and_public_unknown_is_refused() {
 /// `serve logs=file:<path> --public-unsafe logs` lights the `public-UNSAFE` banner tier end-to-end: the raw
 /// stream the operator KNOWINGLY named reaches `Posture::Open`, so `Group::of` sorts it into `PublicUnsafe`,
 /// and the banner carries BOTH the loud `public-UNSAFE !!` marker and the RESOLVED ABSOLUTE path of the
-/// source (the delib-11 exfil tell: the operator sees the exact bytes a stranger can read). Built through the
+/// source (the exfil tell: the operator sees the exact bytes a stranger can read). Built through the
 /// real router `expose` + `manifest` path so the posture-union and `raw_source` resolution are exercised, not
 /// a hand-built manifest.
 #[test]

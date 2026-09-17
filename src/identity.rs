@@ -42,8 +42,6 @@ const KEY_LEN: usize = 32;
 /// as qat) stays reachable, but is now a conscious opt-in rather than the silent, only value. Revocation
 /// stays the primary, immediate control (the `FileDenylist`, offline + live); the TTL is the backstop for
 /// a leak never noticed.
-///
-/// 90d is the ratified default pending final founder confirm.
 pub const DEVICE_BADGE_TTL: core::time::Duration =
     core::time::Duration::from_secs(90 * 24 * 60 * 60);
 

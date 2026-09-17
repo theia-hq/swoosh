@@ -1,6 +1,6 @@
 //! `swoosh stop [--at <peer>]`: stop a node (stop it serving).
 //!
-//! Follows the one control grammar (delib-47): BARE stops YOUR OWN node over the local control socket,
+//! Follows the one control grammar: BARE stops YOUR OWN node over the local control socket,
 //! `--at <peer>` stops a peer's. Bare `stop` resolves the resident's socket, asks it to stop, and prints
 //! the pid that answered; with no resident it teaches (`swoosh serve --resident`) and exits non-zero. A
 //! foreground `serve` without `--resident` is still stopped with Ctrl-C or an `--expires` deadline.
@@ -14,8 +14,8 @@
 //! badge under your identity; a `--present` slip reaches the gate but cannot stop the node. For a fleet
 //! this means any of your own devices can stop it, which is correct for the qat CI-teardown consumer.
 //! Hardening the lifecycle further (an arm->confirm nonce + a single-use device-bound destroy-cap, ideally
-//! owner-only so another fleet device cannot stop the node) is a flagged follow that needs an Adversary
-//! review before `control.stop` is trusted across a multi-device fleet.
+//! owner-only so another fleet device cannot stop the node) is a follow-up, and it needs a security review
+//! before `control.stop` is trusted across a multi-device fleet.
 //!
 //! A refusal is a LOUD typed error, never a silent success: if the node's gate does not admit this caller,
 //! opening the control stream fails and `stop` reports the refusal and exits non-zero.

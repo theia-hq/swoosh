@@ -446,7 +446,7 @@ impl Reach {
                         .unwrap_or_else(|| secret.node_id()),
                 ),
                 denylist: nauthy::FileDenylist::load(home.revoked()).await?,
-                // The live enable/disable oracle (delib-47): the running exposer consults it per stream, so a
+                // The live enable/disable oracle: the running exposer consults it per stream, so a
                 // `service disable`/`enable` written to `<home>/disabled` is honored with no restart. Loaded
                 // here beside the denylist because both are home files the gate reads.
                 enabled: tightbeam::enabled::FileDisabledList::load(home.disabled()).await?,
@@ -500,8 +500,8 @@ fn reject_retired_key_env(present: bool) -> eyre::Result<()> {
 
 /// The default `RUST_LOG` directives: ERROR everywhere, INFO for the receive engine, so a stock
 /// `swoosh serve` surfaces the structured event a pushed file emits when it lands (the 0.9 workaround
-/// for the receiver line the engine consumption dropped; delib-63 arm A keeps the line default-on for
-/// 0.9, and quiet gating the activity class lands with the post-0.9 reporting contract).
+/// for the receiver line the engine consumption dropped: the line stays default-on for 0.9, and gating
+/// the activity class quiet waits for the post-0.9 reporting contract).
 ///
 /// The ERROR baseline is SPELLED OUT, not left to the builder's default directive: once any directive
 /// parses, `with_default_directive` is not applied, so a bare `transfer=info` would drop every error on
@@ -855,7 +855,7 @@ mod tests {
     }
 
     /// I.2 (no aliases, one spelling per act): the five retired spellings do not resolve, and the
-    /// canonical spelling of each act still does. The B3 removal (CLI-DESIGN section 5c), pinned so a
+    /// canonical spelling of each act still does. The retired alias stays retired, pinned so a
     /// convenience alias cannot reappear unnoticed.
     #[test]
     fn retired_aliases_do_not_resolve() {
@@ -1040,7 +1040,7 @@ mod tests {
         }
     }
 
-    /// B1: at the root, an ssh passthrough token can no longer swallow `--home`. After `--` everything is
+    /// At the root, an ssh passthrough token can no longer swallow `--home`. After `--` everything is
     /// ssh's (including a literal `--home`); without the separator an ssh-shaped token is a parse error,
     /// so `swoosh ssh alice -p 2222 --home <dir>` can never silently dial the default home again.
     #[test]
@@ -1282,7 +1282,7 @@ mod tests {
         );
     }
 
-    /// The one control grammar (delib-47): BARE `stop` splits to the local (own-node) path, `stop --at <peer>`
+    /// The one control grammar: BARE `stop` splits to the local (own-node) path, `stop --at <peer>`
     /// to the reach path. The bare form takes NO positional peer (the old `stop <peer>` is retired).
     #[test]
     fn stop_bare_is_local_and_at_is_the_reach_path() {

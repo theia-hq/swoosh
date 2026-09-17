@@ -429,7 +429,7 @@ fn fill_accept_queue(path: &Path) -> Vec<std::os::unix::net::UnixStream> {
     panic!("the accept queue never filled within 1024 clients");
 }
 
-/// The platform asymmetry the B1 re-gate reproduced: a live listener with a FULL accept queue
+/// The platform asymmetry this test pins: a live listener with a FULL accept queue
 /// answers the nonblocking probe differently per kernel. Linux answers `EAGAIN`, not a stale answer,
 /// so the probe refuses `ProbeUnclassified` and never unlinks. macOS answers `ECONNREFUSED`, the
 /// same errno a dead path returns, so `acquire` reclaims it (unlink + rebind) exactly as crash
