@@ -2,7 +2,9 @@
 
 All notable changes to swoosh, newest first.
 
-## Unreleased
+## v0.10.0
+
+Reach a relay and a resolver you run yourself, and a banner that tells the truth about how peers find you.
 
 ### New
 - **`--relay` and `--resolver` (reach family).** Point a node at a relay and a resolver you run
