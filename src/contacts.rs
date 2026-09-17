@@ -314,8 +314,8 @@ pub struct Contacts {
     people: BTreeMap<Petname, Person>,
     /// The highest roster epoch this book has applied: the anti-rollback FLOOR. `None` before any roster is
     /// hydrated. A snapshot at or below it is refused as stale, so a replayed old-but-genuine roster can
-    /// never roll the fleet back (delib-28 F1). For B1 there is one signet, so one floor; a device in two
-    /// fleets is out of scope until the floor is keyed per-signet.
+    /// never roll the fleet back. There is one signet today, so one floor; a device in two fleets is out of
+    /// scope until the floor is keyed per-signet.
     roster_epoch: Option<u64>,
 }
 
@@ -415,8 +415,8 @@ impl Contacts {
     /// safe by construction: the only way to obtain a [`RosterDoc`] is [`crate::roster::verify`], so a
     /// `Roster` provenance can only ever come from the signet, never from a hand-typed op.
     ///
-    /// A roster is a whole SNAPSHOT, not an op-log, so the correct fold is a REPLACE under a persisted floor
-    /// (delib-28 F1). Returns whether the doc was applied:
+    /// A roster is a whole SNAPSHOT, not an op-log, so the correct fold is a REPLACE under a persisted
+    /// floor. Returns whether the doc was applied:
     ///
     /// - `doc.epoch <= floor` (a stale or same-epoch replay from a lagging/hostile courier) is REFUSED
     ///   wholesale, a no-op, so a genuinely-signed OLD roster can never roll the fleet back or re-add a

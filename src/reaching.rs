@@ -36,7 +36,7 @@ use crate::{config, transport};
 /// petname, the [`bound`](Self::bound) facts a verb reports and a failed dial names, the
 /// ALREADY-RESOLVED [`present`](Self::present) badge (minted once by [`resolve`], so the verb never
 /// re-derives it), and the [`home`](Self::home) a verb that opens its own store needs. A verb ignores
-/// the fields it does not use. `serve`'s `ExposeContext` is DELIBERATELY not here (Craftsman): it lives on
+/// the fields it does not use. `serve`'s `ExposeContext` is DELIBERATELY not here: it lives on
 /// the serve command's own type (the CLI's `ServeCmd`), which reads its own, so this context stays uniform.
 pub struct ReachCtx<'a> {
     /// The address book, to resolve a petname in a verb's peer slot.
@@ -89,13 +89,13 @@ pub trait Reaching {
     /// common reaching verbs write the one-liner `self.credential().identity()` (the derivation, so
     /// identity and badge cannot disagree); the two that need `Persisted` for a reason OTHER than
     /// family-rooting (a stable address / dialing under swoosh's own key) declare it EXPLICITLY here.
-    /// This is the Adversary's non-forgettable override: `Persisted` is a written declaration, never a
+    /// The override is non-forgettable by construction: `Persisted` is a written declaration, never a
     /// silent default.
     fn identity(&self) -> Identity;
 
     /// Whether this verb's bind writes the home key's address record. `Serving` publishes it so peers can
     /// dial the key; `Dialing` resolves only and MUST NOT publish, or a short-lived command overwrites a
-    /// live `serve`'s record (0.9.0 F1). Required with no default body, like `identity`.
+    /// live `serve`'s record. Required with no default body, like `identity`.
     fn bind_role(&self) -> BindRole;
 
     /// Run this verb against the composed node under the uniform [`ReachCtx`]. Every verb takes the same
@@ -329,7 +329,7 @@ mod tests {
         );
     }
 
-    /// REGRESSION (Adversary privacy fix): a `--present` slip that is NOT signet-bound (a plain member
+    /// REGRESSION, the privacy rule: a `--present` slip that is NOT signet-bound (a plain member
     /// badge, a bearer or device slip) is slot 1 alone; slot 2 stays `None`, so the dialer never leaks its
     /// own device-to-signet membership badge on a non-signet dial.
     #[tokio::test]

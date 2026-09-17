@@ -1,16 +1,16 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! The CLI wiring the Operator caught live: a reach VERB dialed with a signet-bound `--present` slip must
-//! put the fleet membership badge in wire slot 2, or the gate refuses "slip alone, no fleet badge".
+//! The CLI wiring, proven through the real verb: a reach VERB dialed with a signet-bound `--present` slip
+//! must put the fleet membership badge in wire slot 2, or the gate refuses "slip alone, no fleet badge".
 //!
 //! The 7 diagnostic/control verbs used to thread `--present` themselves and declare
 //! `credential() -> Family { present: None }`, so `resolve()` never saw the slip, never ran
 //! `is_authority_bound()`, and left slot 2 empty. This test drives the REAL verb (clap-parsed, exactly as the
 //! CLI builds it) through `credential() -> resolve() -> slots`, the chain the old `resolve()`-direct unit
 //! test bypassed by hand-constructing `Family { present: Some(slip) }` (a state the verbs never produced).
-//! It also proves the Adversary privacy fix survives the verb path: a NON-signet `--present` leaves slot 2
-//! empty, so a bearer/device dial never leaks the dialer's device-to-signet linkage.
+//! It also proves the privacy rule survives the verb path: a NON-signet `--present` leaves slot 2 empty,
+//! so a bearer/device dial never leaks the dialer's device-to-signet linkage.
 
 use core::time::Duration;
 
@@ -89,8 +89,8 @@ async fn a_verb_with_a_signet_bound_present_slip_fills_slot_two() {
 
 #[tokio::test]
 async fn a_verb_with_a_bearer_present_slip_leaves_slot_two_empty() {
-    // A plain bearer slip is NOT signet-bound, so no fleet badge is attached: the Adversary privacy fix
-    // survives the verb path (no device-to-signet leak on a non-signet dial).
+    // A plain bearer slip is NOT signet-bound, so no fleet badge is attached: a dial that does not already
+    // prove fleet membership must not leak the dialer's device-to-signet linkage.
     let secret = Secret::ephemeral();
     let work = Identity::from_secret(&[1u8; 32]).unwrap();
     let service: Service = "ping".parse().unwrap();

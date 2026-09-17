@@ -91,7 +91,7 @@ pub struct ServeCmd {
     /// What `serve` needs beyond the bound node, resolved by the composition root BEFORE the transport
     /// consumes the secret (the ssh host seed derives from it). Not a flag: clap skips it, and the root
     /// fills it in via [`with_expose`](Self::with_expose) before dispatch. Lives HERE, on `ServeCmd`, so
-    /// `serve` reads its OWN context (Craftsman): it is deliberately NOT a `ReachCtx` field, so the reach
+    /// `serve` reads its OWN context: it is deliberately NOT a `ReachCtx` field, so the reach
     /// context stays uniform, and the old `Option<ExposeContext>` threaded through the generic reach
     /// dispatch plus its "internal: serve reached without its expose context" runtime guard are gone.
     // Boxed so the runtime context (which embeds a `FileDenylist`, itself carrying a `Mutex` and its
@@ -138,7 +138,7 @@ pub struct ExposeContext {
     pub signet: Option<NodeId>,
     /// The revocation denylist the gate honors.
     pub denylist: FileDenylist,
-    /// The live enable/disable oracle the exposer's per-stream gate consults (delib-47): a `service disable`
+    /// The live enable/disable oracle the exposer's per-stream gate consults: a `service disable`
     /// written to `<home>/disabled` refuses the service live, and a `service enable` restores it, both with no
     /// restart. The exact mtime-watch shape as the denylist, loaded beside it in the composition root.
     pub enabled: FileDisabledList,
@@ -314,9 +314,9 @@ impl ServeCmd {
         // Pull each fetch service out of the requested set BEFORE the router binds it, and de-merge: every
         // `name=fetch:<origin>` becomes its OWN handler instance holding ONLY its own origin scope. A public
         // fetch handler therefore physically holds only its own origins and cannot reach a gated fetch's
-        // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention (delib-39 BLOCKER-3).
+        // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention.
         let fetch = FetchScope::extract(&mut requested)?;
-        // De-merge the receive services the SAME way (delib-39): every `name=recv:<dir>` becomes its OWN
+        // De-merge the receive services the SAME way: every `name=recv:<dir>` becomes its OWN
         // `Recv` instance bound to ONLY its own sink directory, so `a=recv:/x b=recv:/y` writes alice's
         // pushes into /x and bob's into /y, each scoped to its own service and grant. A public fetch's
         // SSRF-pivot argument does not apply (recv is always gated), so this is the plain per-instance
@@ -389,7 +389,7 @@ impl ServeCmd {
             CONTROL_SERVICES_SERVICE.parse()?,
             ServiceList::new(catalog.clone()),
         )?;
-        // Wire the live enable/disable oracle (delib-47) alongside the proven public overlay: a stream for a
+        // Wire the live enable/disable oracle alongside the proven public overlay: a stream for a
         // service named in `<home>/disabled` is refused at the gate seam, live, and a re-enable restores it
         // with no restart. `with_enabled` cannot fail (it only stores the oracle), so it tails the chain.
         let exposer = router.expose()?.with_enabled(enabled);
@@ -476,8 +476,6 @@ impl ServeCmd {
                 None => "ctrl-c to stop".to_owned(),
             };
             let manifest = exposer.manifest();
-            // FLAG(CLI-Architect): the `control` banner line wording is the surface owner's call;
-            // picked here as one extra line under `--resident` only, after the reach section.
             let resident_socket = resident.as_ref().map(|(_, _, lock)| lock.socket_path());
             let control_line = self.control_line(resident_socket);
             print!(
@@ -687,7 +685,7 @@ fn display_targets(requested: &[String]) -> eyre::Result<HashMap<String, String>
 /// How peers reach this node, for the banner's `how peers reach you` section: whether the bound transport
 /// routes across the internet (an `internet` channel) or is local/direct-only. Read off the SELECTED
 /// transport and bind mode at the composition seam, never inferred from whether hints are present (that
-/// would conflate the channel with the hint state, delib-41 CLI-Architect note). An enum, not a bool, so a
+/// would conflate the channel with the hint state). An enum, not a bool, so a
 /// third reach kind forces a decision here rather than defaulting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReachKind {
@@ -716,7 +714,7 @@ impl ReachKind {
 }
 
 /// The posture group a served service sits under in the banner, safest-first. The security weight lives on the
-/// GROUP and escalates monotonically DOWN the list (delib-41 Newcomer fix): `FamilyGated` (no overlay) <
+/// GROUP and escalates monotonically DOWN the list: `FamilyGated` (no overlay) <
 /// `Public` (an open overlay) < `PublicUnsafe` (the loudest). A per-service caveat (an unmetered one) is quiet inline
 /// prose, never a marker louder than the group above it, so a reader can never conclude a `public` service is
 /// scarier than a `public-UNSAFE` one. Ordered so the derived `Ord` IS the safest-first render order.
@@ -741,8 +739,6 @@ impl Group {
 
     /// The header this group renders: its name carrying the monotonic danger marker, and its one-line
     /// audience gloss. The marker escalates down the list and is the ONLY loud danger glyph in the section.
-    // FLAG(CLI-Architect): the exact marker glyphs (`!` / `!!`) and the audience wording are a banner-format
-    // detail; picked here to satisfy the monotonic-loudness rule, open to the owner's final call.
     fn header(self) -> (&'static str, &'static str) {
         match self {
             Self::FamilyGated => ("family-gated", "your devices + peers you've granted"),
@@ -752,7 +748,7 @@ impl Group {
     }
 }
 
-/// The gloss for a bare handler scheme, the terse right-column description (delib-41 CLI-Architect gloss set).
+/// The gloss for a bare handler scheme, the terse right-column description.
 /// An unrecognized scheme falls back to a plain `<scheme> service`, so a future handler still renders a line.
 fn handler_gloss(scheme: &str) -> String {
     match scheme {
@@ -845,7 +841,7 @@ fn is_forward(addr: &str) -> bool {
 
 /// Render the full readiness banner as ONE string (pure, so it is unit-testable and printed once): the
 /// `swoosh ready` header, the copy-clean node id, the `how peers reach you` section, the grouped `serving`
-/// section, and the stop line. Every line is a tell (delib-41): no raw dial flags, no split posture, one
+/// section, and the stop line. Every line is a tell: no raw dial flags, no split posture, one
 /// monotonic danger vocabulary. Blank-line framed so the id (and any direct address) is copy-paste-clean.
 #[expect(
     clippy::too_many_arguments,
@@ -892,9 +888,8 @@ fn render_ready_banner(
 /// and the local lane carries the ADVERTISEMENT's own outcome: how far this node was published is a fact only
 /// the advertisement knows, and the dial hints cannot stand in for it (they rewrite a wildcard bind to
 /// loopback, so every bind would read the same whatever it reaches).
-// FLAG(CLI-Architect): the channel glosses (wording, "even across NATs", the per-outcome next-step) are a
-// banner-format detail; picked here to satisfy the Newcomer fixes (no backend name, "automatic" on both, a
-// down-state next-step), open to the owner's final call.
+// No gloss here names the transport backend: the operator is told how far they can be reached, never which
+// implementation carries it, because the backend is swappable and the reach promise is not.
 fn reach_section(
     reach: ReachKind,
     mdns: &MdnsState,

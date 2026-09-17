@@ -18,7 +18,7 @@
 //!
 //! `ssh` is spec'd as a group that will also own `ssh config` (emit `~/.ssh/config` blocks) once contacts
 //! carry advertised-service metadata; that leaf is HELD and deliberately not built. This one shipping op
-//! takes the peer positionally, the shape CLI-DESIGN reserves for it.
+//! takes the peer positionally, the shape reserved for a verb with one required target.
 //!
 //! ## Host-key pinning
 //!
@@ -618,7 +618,7 @@ mod tests {
         assert_eq!(present.as_str(), link);
     }
 
-    /// B1: the passthrough only opens after `--`, so while swoosh still has flags to parse no ssh-shaped
+    /// The passthrough only opens after `--`, so while swoosh still has flags to parse no ssh-shaped
     /// token can capture them. Before the fix (`trailing_var_arg`, no `last`), `-p 2222 --home <dir>`
     /// landed in `args` wholesale and `swoosh ssh` dialed the default home.
     #[test]

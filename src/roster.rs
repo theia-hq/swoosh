@@ -1,17 +1,17 @@
 //! The membership snapshot an operator's signet vouches for: the payload of a signed roster.
 //!
-//! B1 (deliberation 28, D1) is bootstrap roster-sync: one member node serves the operator's fleet
-//! membership to a fresh device, SIGNED by the signet so a courier that merely relays the blob cannot forge
-//! it. This module is the payload and its canonical encoding; the SIGNING is nauthy's generic
+//! Roster-sync bootstraps a fresh device: one member node serves the operator's fleet membership to it,
+//! SIGNED by the signet so a courier that merely relays the blob cannot forge it. This module is the payload and its canonical encoding; the SIGNING is nauthy's generic
 //! [`sign_document`](nauthy::Identity::sign_document) / [`Signed`](nauthy::Signed) primitive, which roots a
 //! blob at the same ed25519 key the signet mints caps with. The payload schema lives HERE, in swoosh, next
 //! to the [`Contacts`](crate::contacts::Contacts) it is cut from and hydrated into: the whole roster story
 //! (build a doc from contacts, canonicalize, sign, serve, verify, parse, fold) reads in one crate, and
 //! nauthy carries only the generic verb, no fleet-directory concept.
 //!
-//! A member entry is (who, what the operator calls it) and NOTHING else: no last-seen (a pattern-of-life
-//! oracle, delib-28 fix 1) and no capability (a roster that grants is a coordinator, delib-28 fix 2). Both
-//! are TYPE properties here, unrepresentable rather than merely omitted. A member's label is a
+//! A member entry is (who, what the operator calls it) and NOTHING else: no last-seen (that would make the
+//! roster a pattern-of-life oracle for anyone who reads it) and no capability (a roster that grants is a
+//! coordinator, not a directory). Both are TYPE properties here, unrepresentable rather than merely
+//! omitted. A member's label is a
 //! [`DeviceLabel`], the SAME type local contacts use: one label type, no lossy seam to cross.
 
 use nauthy::{SignError, Signed, VerifyKey};
@@ -198,13 +198,13 @@ impl RosterDoc {
 /// blob a `roster:` handler serves. The single CUT seam, so the canonicalize-then-sign pair is one call and
 /// a caller cannot sign bytes that are not this doc's canonical form.
 ///
-/// DESIGN LOCK (delib-28, the one-writer rule): the SIGNET is the sole cutter. Only the signet SECRET can
+/// DESIGN LOCK, the one-writer rule: the SIGNET is the sole cutter. Only the signet SECRET can
 /// produce a signature the signet verifies, so cutting a roster requires the secret (this `identity`), and
 /// there is exactly ONE writer. SERVE (relaying an already-signed blob) needs only the bytes, so any member
 /// node may courier a roster, but none may cut one. Multi-writer is rejected by rule: two signet-holding
 /// devices cutting concurrently is not supported, which is what makes reconciliation trivial (highest epoch
 /// wins, a total order, because one writer never reuses an epoch). Any feature that would need a second
-/// writer (co-owned fleets, delegated cutting) is a new deliberation, not a roster change.
+/// writer (co-owned fleets, delegated cutting) is a new design, not a roster change.
 pub fn cut(identity: &nauthy::Identity, doc: &RosterDoc) -> Vec<u8> {
     identity.sign_document(&doc.canonical_bytes()).encode()
 }

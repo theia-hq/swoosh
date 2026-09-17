@@ -35,7 +35,7 @@ impl LsCmd {
 
 /// The overview: every contact, short keys, a device-less person on one line and everyone else as an
 /// indented person -> devices block. The two-space indent reads as a tree at a glance and stays
-/// copy-pasteable (the `contact ls` decision in CLI-DESIGN); keys are short here since this is a map, not
+/// copy-pasteable, the way this verb prints them; keys are short here since this is a map, not
 /// a place to copy a key from (that is `contact ls <name>`).
 fn print_overview(contacts: &Contacts) {
     let mut any = false;

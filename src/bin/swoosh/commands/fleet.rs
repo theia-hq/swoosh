@@ -1,14 +1,14 @@
 //! `swoosh fleet --pull <coord>`: learn your fleet from a coordination node.
 //!
-//! The client side of B1 roster-sync. A fresh device that has adopted its signet dials a coordination node
+//! The client side of roster-sync. A fresh device that has adopted its signet dials a coordination node
 //! (any member of the fleet serving `roster:`), reads the signet-signed membership snapshot, VERIFIES it
 //! against the signet it trusts, and folds the members into its contacts as `me/<device>` entries. After
 //! this, `swoosh ssh me/<device>` reaches any fleet member by key, with nothing copied by hand.
 //!
 //! The verification is the whole security seam: a roster NOT signed by your signet (a forged blob, or one
 //! from a foreign key) is refused HERE, before any contact is written. The bare `swoosh fleet` READ (list
-//! the fleet you already know) is a later, offline slice (delib-30 B2); B1 ships the `--pull` that populates
-//! it.
+//! the fleet you already know) is not built yet: today the verb only pulls, which is what populates the
+//! contacts that read will one day list.
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;

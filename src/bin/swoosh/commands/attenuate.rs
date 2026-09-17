@@ -66,7 +66,7 @@ mod tests {
 
     use super::*;
 
-    /// B2: a sealed link (the default from `swoosh grant issue`, and every bound slip by construction)
+    /// A sealed link (the default from `swoosh grant issue`, and every bound slip by construction)
     /// is refused with a line naming the state and the fix, never the token library's internal
     /// "tried to seal an already sealed token".
     #[test]
@@ -117,8 +117,8 @@ mod tests {
         cmd.run().expect("an unsealed link narrows offline");
     }
 
-    /// B2: the `--service` help keeps the `-h` line to one clause and carries the monotone truth on the
-    /// `--help` block, so the flag is a map row on `-h`, not a paragraph (DOCS-BAR help budget).
+    /// The `--service` help keeps the `-h` line to one clause and carries the monotone truth on the
+    /// `--help` block, so the flag is a map row on `-h`, not a paragraph (the help budget).
     #[test]
     fn service_help_splits_the_short_line_from_the_long_truth() {
         let mut cmd = AttenuateCmd::augment_args(Command::new("narrow"));
