@@ -7,7 +7,8 @@
 //! this node's trust graph. All three files move as one unit when the home moves, since they all hang off
 //! the same [`Home`].
 
-use std::path::Path;
+use core::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
 use eyre::WrapErr as _;
@@ -102,6 +103,58 @@ pub fn create_store_dir(dir: &Path) -> std::io::Result<()> {
     {
         std::fs::create_dir_all(dir)
     }
+}
+
+/// Write `contents` to `path` owner-only, through a unique temp sibling renamed over the target.
+///
+/// The one atomic private write in the tree: the identity key ([`identity::write`]) and the two reach
+/// files (`<home>/relay`, `<home>/resolver`) all land this way. Each is read by a later run and each is
+/// unrecoverable if it is torn, so the bytes are durable (`sync_all`) before the rename makes them
+/// visible, and the temp is opened `create_new` at mode `0600` so the file is never world-readable for
+/// an instant and the rename carries that mode onto the target. A failed write or rename removes the
+/// temp, leaving the previous contents intact and no litter behind.
+///
+/// [`identity::write`]: crate::identity::write
+pub async fn write_private_atomic(path: &Path, contents: &[u8]) -> eyre::Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    if let Some(parent) = path.parent() {
+        create_store_dir(parent)?;
+    }
+    let temp = temp_path(path);
+    let written = async {
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // tokio's `OpenOptions` carries the `mode` setter inherently under the `fs` feature, so no
+        // `OpenOptionsExt` import is needed.
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temp).await?;
+        file.write_all(contents).await?;
+        file.flush().await?;
+        file.sync_all().await
+    }
+    .await;
+    if let Err(error) = written {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error.into());
+    }
+    if let Err(error) = tokio::fs::rename(&temp, path).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// A temp sibling unique to ONE write: the target name plus `.tmp.<pid>.<seq>`. The pid separates
+/// processes and an atomic sequence separates writes within one, so two writers can never share a temp
+/// path and truncate each other's in-flight bytes.
+fn temp_path(path: &Path) -> PathBuf {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp.{}.{seq}", std::process::id()));
+    path.with_file_name(name)
 }
 
 /// Write `contents` to `path` as an owner-only (`0600` on Unix) file, creating the store dir `0700` first.

@@ -39,7 +39,7 @@ use swoosh::serve::{
     Resident, ServiceList, Stop, StopKind, Stopped, acquire_single, bind_entry, classify_stop,
     extract_recv_services,
 };
-use swoosh::transport::{MdnsState, ReachArgs};
+use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
 use tightbeam::enabled::FileDisabledList;
 use tightbeam::tunnel::{
@@ -109,6 +109,17 @@ pub struct ServeCmd {
     /// uniform; the banner reports what started rather than assuming it.
     #[arg(skip)]
     pub mdns: Option<MdnsState>,
+    /// The relay and the resolver this bind actually leaned on, attached by the composition root after
+    /// it composed them from the flags and the home files. Not a flag: clap skips it, and the root fills
+    /// it in via [`with_bound_reach`](Self::with_bound_reach) alongside [`mdns`](Self::mdns). The
+    /// default is n0's on both halves, which is what every bind that has no relay or resolver of its own
+    /// (quirk, `--local`) leans on, so an un-attached value still tells the banner the truth.
+    // Boxed for the same reason [`expose`](Self::expose) is: each named half holds a parsed URL, which is
+    // large by value, and `Serve(ServeCmd)` is a variant of the clap command enums, so inline this one
+    // pair would make that variant tower over the rest (`clippy::large_enum_variant`). A root-attached,
+    // run-once value, so the one allocation is free of any hot path.
+    #[arg(skip)]
+    pub bound_reach: Box<Reach>,
 }
 
 /// What `serve` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, the revocation
@@ -245,6 +256,14 @@ impl ServeCmd {
     /// root bug, surfaced there rather than defaulted.
     pub fn with_mdns(mut self, mdns: MdnsState) -> Self {
         self.mdns = Some(mdns);
+        self
+    }
+
+    /// Attach the [`Reach`] the composition root composed for this bind, so the banner names the relay
+    /// this node offers and the resolver it publishes to rather than promising n0's. Called at the iroh
+    /// arm only, beside [`with_mdns`](Self::with_mdns).
+    pub fn with_bound_reach(mut self, bound_reach: Reach) -> Self {
+        self.bound_reach = Box::new(bound_reach);
         self
     }
 }
@@ -467,6 +486,7 @@ impl ServeCmd {
                     &addr.node.to_string(),
                     reach,
                     mdns,
+                    &self.bound_reach,
                     &addr.hints,
                     &manifest,
                     &addr_by_name,
@@ -829,14 +849,16 @@ fn is_forward(addr: &str) -> bool {
 /// monotonic danger vocabulary. Blank-line framed so the id (and any direct address) is copy-paste-clean.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the banner is assembled from independent facts (id, reach kind, mDNS state, hints, the \
-              declared manifest, swoosh's display map, the fetch names, the stop line); bundling them into \
-              one struct would only move the argument list, not remove it"
+    reason = "the banner is assembled from independent facts (id, reach kind, mDNS state, the bound \
+              relay and resolver, hints, the declared manifest, swoosh's display map, the fetch names, \
+              the stop line); bundling them into one struct would only move the argument list, not \
+              remove it"
 )]
 fn render_ready_banner(
     node_id: &str,
     reach: ReachKind,
     mdns: &MdnsState,
+    bound_reach: &Reach,
     hints: &[SocketAddr],
     manifest: &[ManifestEntry],
     addr_by_name: &HashMap<String, String>,
@@ -849,7 +871,7 @@ fn render_ready_banner(
     // The FULL node id, alone, indented, blank-framed, no trailing gloss (a trailing label would spoil a
     // select-to-end-of-line copy). The next section explains what the key is for.
     out.push_str(&format!("    {node_id}\n\n"));
-    out.push_str(&reach_section(reach, mdns, hints));
+    out.push_str(&reach_section(reach, mdns, bound_reach, hints));
     out.push('\n');
     out.push_str(&serving_section(manifest, addr_by_name, fetch_names));
     out.push('\n');
@@ -873,7 +895,12 @@ fn render_ready_banner(
 // FLAG(CLI-Architect): the channel glosses (wording, "even across NATs", the per-outcome next-step) are a
 // banner-format detail; picked here to satisfy the Newcomer fixes (no backend name, "automatic" on both, a
 // down-state next-step), open to the owner's final call.
-fn reach_section(reach: ReachKind, mdns: &MdnsState, hints: &[SocketAddr]) -> String {
+fn reach_section(
+    reach: ReachKind,
+    mdns: &MdnsState,
+    bound_reach: &Reach,
+    hints: &[SocketAddr],
+) -> String {
     // A loopback hint names the DIALER's own machine, so it is never an address to hand a peer: only a
     // routable hint opens the direct channel, and an un-handable one is left out entirely rather than
     // printed under a scope claim that the bind does not back.
@@ -882,10 +909,31 @@ fn reach_section(reach: ReachKind, mdns: &MdnsState, hints: &[SocketAddr]) -> St
         .filter(|addr| !addr.ip().is_loopback())
         .collect();
     let direct = matches!(reach, ReachKind::DirectOnly) && !handable.is_empty();
+    // Where the node's record goes, and which relay it offers. Only an internet bind has either, and
+    // only a node that named one has anything to say: a bind on n0's two services is the default every
+    // page describes, so it renders exactly the section it always did. Naming ONE of the two prints BOTH
+    // lines, because what an operator who runs half of this most needs to see is which half is still
+    // n0's, and a line that is absent says nothing.
+    let split = reach == ReachKind::Internet
+        && (bound_reach.relay != RelayHome::N0 || bound_reach.resolver != Resolver::N0);
+    let records = split.then(|| match &bound_reach.resolver {
+        Resolver::N0 => "published to n0's public discovery".to_owned(),
+        Resolver::Custom(url) => format!("published to {url}"),
+    });
+    let relay = split.then(|| match &bound_reach.relay {
+        RelayHome::N0 => "n0's public relays".to_owned(),
+        RelayHome::Custom(url) => url.to_string(),
+    });
     // Width the label column to the widest channel label actually shown.
     let mut labels: Vec<&str> = Vec::new();
     if reach == ReachKind::Internet {
         labels.push("internet");
+    }
+    if records.is_some() {
+        labels.push("records");
+    }
+    if relay.is_some() {
+        labels.push("relay");
     }
     labels.push("local");
     if direct {
@@ -903,6 +951,14 @@ fn reach_section(reach: ReachKind, mdns: &MdnsState, hints: &[SocketAddr]) -> St
             "internet",
             "automatic; peers reach you by the key above, even across NATs",
         ));
+    }
+    // Directly under the internet channel: the two servers that channel runs on, in the order a dial
+    // uses them (find the peer's record, then fall back to its relay).
+    if let Some(records) = &records {
+        out.push_str(&reach_line(width, gutter, "records", records));
+    }
+    if let Some(relay) = &relay {
+        out.push_str(&reach_line(width, gutter, "relay", relay));
     }
     // One arm per outcome of the ONE advertise call: a node another host can hear, a node only this host
     // can, a node that hears but is not heard, and no mDNS at all. The three degraded arms each name the

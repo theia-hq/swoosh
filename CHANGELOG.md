@@ -4,6 +4,12 @@ All notable changes to swoosh, newest first.
 
 ## Unreleased
 
+### New
+- **`--relay` and `--resolver` (reach family).** Point a node at a relay and a resolver you run
+  (`iroh-relay` and `iroh-dns-server`). `serve` remembers each under the node home, so every later command
+  under that home reaches the same two servers. Name one without the other; what you do not name stays
+  n0's.
+
 ### Changed
 - **The sibling pins move forward together.** bifrost, nauthy, tightbeam, and the service engines (fetch,
   measure, sshh, transfer) are each pinned to a newer revision, so a build of this version records exactly

@@ -93,6 +93,20 @@ impl Home {
         self.dir.join("badge")
     }
 
+    /// `<home>/relay`: the relay this node offers as its home relay, written by `serve --relay` and read
+    /// by every later iroh bind under this home. A per-NODE setting: a peer dials you through whatever
+    /// relay your published record names, so each node names its own.
+    pub fn relay(&self) -> PathBuf {
+        self.dir.join("relay")
+    }
+
+    /// `<home>/resolver`: the pkarr base this node publishes its address record to and looks peers up
+    /// through, written by `serve --resolver` and read by every later iroh bind under this home. A
+    /// FLEET-wide setting: two nodes find each other only through the same resolver.
+    pub fn resolver(&self) -> PathBuf {
+        self.dir.join("resolver")
+    }
+
     /// `<home>/revoked`: the revocation denylist the expose gate honors, the next `serve` reads.
     pub fn revoked(&self) -> PathBuf {
         self.dir.join("revoked")

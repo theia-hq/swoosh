@@ -13,8 +13,7 @@
 //!
 //! The persisted default lives at `~/.config/swoosh/identity.key`, mode 0600.
 
-use core::sync::atomic::{AtomicU64, Ordering};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use bifrost::NodeId;
 use eyre::WrapErr as _;
@@ -225,7 +224,7 @@ async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
     }
 
     let secret = Secret::ephemeral();
-    write_atomic(path, &secret.0).await?;
+    crate::config::write_private_atomic(path, &secret.0).await?;
     Ok(secret)
 }
 
@@ -306,51 +305,7 @@ async fn guard_mode(_file: &tokio::fs::File, _path: &Path) -> eyre::Result<()> {
 /// The write is ATOMIC (a unique temp sibling in the same directory, then one rename over the target), so
 /// a crash or a failed write can never truncate the key: the old file stays intact until the rename lands.
 pub async fn write(seed: &[u8; 32], home: &Home) -> eyre::Result<()> {
-    write_atomic(&home.identity_key(), seed).await
-}
-
-/// The atomic write behind [`write`]: create the store dir 0700, write the seed to a temp sibling opened
-/// 0600 (so the rename carries owner-only onto the target), then rename it over `path`. A failed write or
-/// rename removes the temp best-effort, leaving the previous key untouched and no litter behind.
-async fn write_atomic(path: &Path, seed: &[u8; 32]) -> eyre::Result<()> {
-    use tokio::io::AsyncWriteExt as _;
-
-    if let Some(parent) = path.parent() {
-        crate::config::create_store_dir(parent)?;
-    }
-    let tmp = temp_path(path);
-    // A fresh temp sibling: the pid separates processes and an atomic sequence separates writes within
-    // one, so two writers can never share one temp path and truncate each other's in-flight seed.
-    let written = async {
-        let mut options = tokio::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(&tmp).await?;
-        file.write_all(seed).await?;
-        file.flush().await?;
-        file.sync_all().await
-    }
-    .await;
-    if let Err(error) = written {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(error.into());
-    }
-    if let Err(error) = tokio::fs::rename(&tmp, path).await {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(error.into());
-    }
-    Ok(())
-}
-
-/// A temp sibling unique to ONE write: the key path plus `.tmp.<pid>.<seq>`. The pid separates processes
-/// and an atomic sequence separates writes within one, so two writers can never share one temp path.
-fn temp_path(path: &Path) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".tmp.{}.{seq}", std::process::id()));
-    path.with_file_name(name)
+    crate::config::write_private_atomic(&home.identity_key(), seed).await
 }
 
 #[cfg(test)]

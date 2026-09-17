@@ -100,15 +100,8 @@ impl swoosh::reaching::Reaching for StatusCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_status(
-            node,
-            ctx.contacts,
-            ctx.transport,
-            ctx.local,
-            ctx.present,
-            ctx.membership,
-        )
-        .await
+        self.run_status(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
+            .await
     }
 }
 
@@ -120,8 +113,7 @@ impl StatusCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        transport: transport::Transport,
-        local: bool,
+        bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
@@ -157,8 +149,8 @@ impl StatusCmd {
             )
             .await
             {
-                Ok(session) => probe(&session, &candidate.label, transport).await,
-                Err(_error) => Line::unreachable(&candidate.label, transport.name()),
+                Ok(session) => probe(&session, &candidate.label, bound.transport).await,
+                Err(_error) => Line::unreachable(&candidate.label, bound.transport.name()),
             };
             any_healthy |= line.is_healthy();
             any_refused |= line.is_refused();
@@ -166,7 +158,7 @@ impl StatusCmd {
         }
 
         node.close().await;
-        reach::fanout_outcome(any_healthy, any_refused, &peer, transport, local)
+        reach::fanout_outcome(any_healthy, any_refused, &peer, bound)
     }
 
     /// The bare (no-peer) path: query YOUR OWN node's status over the local control socket. Runs

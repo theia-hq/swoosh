@@ -104,15 +104,8 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_speed(
-            node,
-            ctx.contacts,
-            ctx.transport,
-            ctx.local,
-            ctx.present,
-            ctx.membership,
-        )
-        .await
+        self.run_speed(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
+            .await
     }
 }
 
@@ -123,8 +116,7 @@ impl SpeedCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        transport: transport::Transport,
-        local: bool,
+        bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
@@ -137,7 +129,7 @@ impl SpeedCmd {
         // link-as-peer through that same resolver, so the verb never threads `--present` itself.
         let service: Service = reach::SPEED_SERVICE.parse()?;
         let Resolved { session, label } = reach::dial_service(
-            node, contacts, &self.peer, &service, present, membership, transport, local,
+            node, contacts, &self.peer, &service, present, membership, bound,
         )
         .await?;
         // Path at connect. The transfer below is the window where iroh's hole-punch lands, so the
@@ -145,7 +137,7 @@ impl SpeedCmd {
         let initial = session.conn_info().path;
         println!(
             "speed test to {label} via {} ({})",
-            transport.name(),
+            bound.transport.name(),
             mode.label()
         );
 

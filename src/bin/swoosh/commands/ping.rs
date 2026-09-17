@@ -91,15 +91,8 @@ impl swoosh::reaching::Reaching for PingCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_ping(
-            node,
-            ctx.contacts,
-            ctx.transport,
-            ctx.local,
-            ctx.present,
-            ctx.membership,
-        )
-        .await
+        self.run_ping(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
+            .await
     }
 }
 
@@ -111,8 +104,7 @@ impl PingCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        transport: transport::Transport,
-        local: bool,
+        bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
@@ -153,7 +145,7 @@ impl PingCmd {
                     // borrows the session read-only, alongside the run's own read-only borrow.
                     let report = if self.verbose {
                         let label = &candidate.label;
-                        let name = transport.name();
+                        let name = bound.transport.name();
                         plan.observing(&session, |probe| {
                             println!(
                                 "{}",
@@ -168,7 +160,7 @@ impl PingCmd {
                         Ok(report) => {
                             any_healthy = true;
                             let path = reach::conn_path(initial, &session.conn_info());
-                            print_device(&candidate.label, transport.name(), &path, &report);
+                            print_device(&candidate.label, bound.transport.name(), &path, &report);
                         }
                         // The node was REACHED but refused this probe: a distinct line that says so (not a
                         // healthy device with 100% loss, and NOT "unreachable"), rendering the typed refusal
@@ -179,21 +171,25 @@ impl PingCmd {
                             println!(
                                 "{} via {}: reached, but refused ({refusal})",
                                 candidate.label,
-                                transport.name(),
+                                bound.transport.name(),
                             );
                         }
                         Err(error) => return Err(error.into()),
                     }
                 }
                 Err(_error) => {
-                    println!("{} via {}: unreachable", candidate.label, transport.name());
+                    println!(
+                        "{} via {}: unreachable",
+                        candidate.label,
+                        bound.transport.name()
+                    );
                 }
             }
         }
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;
-        reach::fanout_outcome(any_healthy, any_refused, &self.peer, transport, local)
+        reach::fanout_outcome(any_healthy, any_refused, &self.peer, bound)
     }
 }
 
