@@ -16,6 +16,10 @@ These apply to most commands and are omitted from the per-command signatures bel
 - `--transport <iroh|quirk|quirk+noise>` which backend to bind. See [transports](../transports.md).
 - `--peer <key=addr>` a direct address hint, for when discovery cannot reach a peer (mainly quirk). See
   [transports](../transports.md#quirk).
+- `--relay <url>` the relay peers reach this node through (per node). See
+  [run the relay and the resolver yourself](../transports.md#self-run).
+- `--resolver <url>` where address records are published and read (fleet-wide). See
+  [run the relay and the resolver yourself](../transports.md#self-run).
 - `--present <link>` present a `sheer:` capability link when reaching a gated peer you are not a member of.
 
 ## Commands

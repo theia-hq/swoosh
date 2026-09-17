@@ -86,15 +86,8 @@ impl swoosh::reaching::Reaching for FetchCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_fetch(
-            node,
-            ctx.contacts,
-            ctx.transport,
-            ctx.local,
-            ctx.present,
-            ctx.membership,
-        )
-        .await
+        self.run_fetch(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
+            .await
     }
 }
 
@@ -109,15 +102,13 @@ impl FetchCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
-        transport: transport::Transport,
-        local: bool,
+        bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
         // The redundant-present conflict is rejected ONCE in the composition root via
         // `Reaching::reject_redundant_present`, before this runs.
-        let Reached { session, label } =
-            reach::dial(node, contacts, &self.via, transport, local).await?;
+        let Reached { session, label } = reach::dial(node, contacts, &self.via, bound).await?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
         let addr = listener.local_addr()?;
         println!("swoosh fetch ready. local URL:\n");

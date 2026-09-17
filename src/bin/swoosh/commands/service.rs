@@ -22,7 +22,12 @@ pub use toggle::ServiceToggleCmd;
 #[derive(Debug, Subcommand)]
 pub enum ServiceCmd {
     /// List the served menu (bare: your own node; `--at <peer>`: a peer).
-    Ls(ls::ServiceLsCmd),
+    ///
+    /// Boxed because `ls` is the only leaf here that reaches a peer, so it carries the whole reach
+    /// flag set, and two of those flags are parsed URLs (a relay and a resolver) that are large by
+    /// value; inline, every `service enable`/`disable` would pay for them
+    /// (`clippy::large_enum_variant`). One run-once allocation on a path that parses a command line.
+    Ls(Box<ls::ServiceLsCmd>),
     /// Re-enable a disabled service (a file-write on `<home>/disabled`, honored live, no restart).
     Enable(toggle::ServiceToggleCmd),
     /// Disable a service (a file-write on `<home>/disabled`, persisted fail-closed, honored live).

@@ -14,7 +14,48 @@ This is the transport for everyday use. Every [use case](use-cases/README.md) an
 
 Finding a peer and the relay fallback are iroh's: a serving node publishes where it can be reached to
 n0's public discovery service, and when a direct path fails, n0's public relays forward encrypted bytes
-they cannot read. Pointing swoosh at a relay and a resolver you run is not wired today.
+they cannot read.
+
+## <a id="self-run"></a>Run the relay and the resolver yourself
+
+Both are programs from the iroh project. Run them on a host with a certificate the public trusts:
+swoosh accepts `https` only, and a self-signed certificate is refused.
+
+- `iroh-relay` forwards encrypted bytes between peers that cannot reach each other directly.
+- `iroh-dns-server` stores and serves the signed address records a node publishes and a dialer reads.
+
+Point swoosh at them with `--relay <url>` and `--resolver <url>`. The resolver URL is the server's
+`/pkarr` path, not its bare host:
+
+<!-- pending live-run: needs iroh-relay and iroh-dns-server on a host with a public certificate -->
+```console
+$ swoosh serve --relay https://relay.example --resolver https://dns.example/pkarr
+```
+
+`serve` remembers each URL it was given under the node home, so every later command under that home
+reaches the same two servers with no flags to repeat. A flag on a dial overrides the remembered one for
+that run.
+
+**A resolver is a fleet setting; a relay is a node setting.** Two peers find each other only if both
+resolve through the same resolver, so every node in a fleet names the same one. A relay travels in the
+record a node publishes, and you dial a peer through whatever relay the peer's record names, so each node
+names its own.
+
+Either flag stands alone. `--relay` without `--resolver` leaves finding a peer to n0, and the banner says
+so:
+
+<!-- pending live-run: needs iroh-relay on a host with a public certificate -->
+```text
+how peers reach you
+  internet   automatic; peers reach you by the key above, even across NATs
+  records    published to n0's public discovery
+  relay      https://relay.example/
+  local      automatic; your devices just need the key (mDNS), announced at:
+             192.168.1.24:58131
+```
+
+An `iroh-relay` relays for anyone by default. Its `access` setting names the node ids allowed to relay;
+its `limits` settings cap connections and bandwidth per client.
 
 ## <a id="quirk"></a>quirk (our own transport)
 

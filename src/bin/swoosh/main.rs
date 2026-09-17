@@ -292,8 +292,8 @@ impl Command {
             // `<home>/disabled`. Split each here so the local arms never compose a transport they would not use.
             Self::Service(cmd) => match cmd {
                 service::ServiceCmd::Ls(ls) => match ls.at {
-                    Some(_) => Verb::Reach(Reach::Service(ls)),
-                    None => Verb::ServiceLs(ls),
+                    Some(_) => Verb::Reach(Reach::Service(*ls)),
+                    None => Verb::ServiceLs(*ls),
                 },
                 service::ServiceCmd::Enable(toggle) => Verb::ServiceEnable(toggle),
                 service::ServiceCmd::Disable(toggle) => Verb::ServiceDisable(toggle),
@@ -378,6 +378,17 @@ impl Reach {
         match self {
             Self::Serve(cmd) => Self::Serve(cmd.with_mdns(mdns)),
             reach => reach,
+        }
+    }
+
+    /// Attach the composed [`transport::Reach`] to the `serve` verb (a no-op for every other verb), so
+    /// its banner names the relay it offers and the resolver it publishes to instead of promising n0's.
+    /// Called at the iroh arm only, beside [`attach_mdns`](Self::attach_mdns): every other bind leans on
+    /// neither, and its banner says the same thing it always did.
+    fn attach_bound_reach(self, bound: &transport::Reach) -> Self {
+        match self {
+            Self::Serve(cmd) => Self::Serve(cmd.with_bound_reach(transport::Reach::clone(bound))),
+            verb => verb,
         }
     }
 
@@ -620,7 +631,13 @@ async fn run() -> eyre::Result<()> {
             let store = ContactsStore::open(home.contacts()).await?;
             return cmd.run(store.contacts(), &home);
         }
-        Verb::Reach(reach) => reach,
+        Verb::Reach(reach) => {
+            // Before anything is opened or minted: a flag the selected bind would never read is refused
+            // here, not after the store is loaded and a key provisioned, so a refused
+            // `serve --local --relay` on a fresh home leaves that home exactly as it found it.
+            reach.reach_args().reject_unused_reach()?;
+            reach
+        }
     };
 
     // The address book lives in the node home, `<home>/contacts.toml`. A reach verb reads it to resolve a
@@ -644,6 +661,27 @@ async fn run() -> eyre::Result<()> {
     // (0.9.0 F1). Read here, before `reach` is consumed by dispatch.
     let bind_role = reach.bind_role();
     let peers = reach.reach_args().peer.clone();
+    // What this run bound, as ONE value: every consumer (a verb reporting its backend, a failed dial's
+    // teaching line, `serve`'s banner) reads all three facts, so they travel together from here. The
+    // relay and the resolver come from the flags and the home files, over the ONE bind that reads them
+    // (the guard at the arm above refused the flags on every other), so a stale file can never refuse a
+    // quirk or `--local` bind that would not have opened it.
+    let bound = transport::Bound {
+        transport,
+        local,
+        reach: match reach.reach_args().unused_reach_bind() {
+            Some(_unused) => transport::Reach::default(),
+            None => {
+                // A serving verb OWNS the home, so the two servers it was pointed at become the home's
+                // and every later verb under it reaches the same fleet with no flags repeated. A dialing
+                // verb's flag is this run only, so it writes nothing.
+                if bind_role == BindRole::Serving {
+                    reach.reach_args().persist_reach(&home).await?;
+                }
+                reach.reach_args().reach(&home).await?
+            }
+        },
+    };
     // Reject a redundant `--present` alongside a self-addressing `sheer:` link peer ONCE here, before any
     // dial, so the conflict is loud and compiler-forced for every verb (each states its own check via
     // `Reaching::reject_redundant_present`), never a per-verb one-liner a new verb could forget.
@@ -664,8 +702,7 @@ async fn run() -> eyre::Result<()> {
     // `cmd.run(node, ctx)` per verb, not a per-verb argument-threading match.
     let ctx = reaching::ReachCtx {
         contacts: &contacts,
-        transport,
-        local,
+        bound: &bound,
         present,
         membership,
         home: &home,
@@ -680,10 +717,18 @@ async fn run() -> eyre::Result<()> {
         transport::Transport::Iroh => {
             let endpoint = match IrohBind::of(local, bind_role) {
                 IrohBind::Reachable => {
-                    bifrost_iroh::Endpoint::bind_reachable_with_secret(secret.into_bytes()).await?
+                    bifrost_iroh::Endpoint::bind_reachable_with_secret_via(
+                        secret.into_bytes(),
+                        transport::Reach::clone(&bound.reach),
+                    )
+                    .await?
                 }
                 IrohBind::Dialing => {
-                    bifrost_iroh::Endpoint::bind_dialing_with_secret(secret.into_bytes()).await?
+                    bifrost_iroh::Endpoint::bind_dialing_with_secret_via(
+                        secret.into_bytes(),
+                        transport::Reach::clone(&bound.reach),
+                    )
+                    .await?
                 }
                 IrohBind::Local => {
                     bifrost_iroh::Endpoint::bind_local_with_secret(secret.into_bytes()).await?
@@ -691,6 +736,7 @@ async fn run() -> eyre::Result<()> {
             };
             let composed = PeerHint::discovery(&endpoint, peers);
             let node = Node::new(endpoint, composed.discovery);
+            let reach = reach.attach_bound_reach(&bound.reach);
             run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
         }
         // quirk is direct-only with no internal discovery, so the composed discovery is its only way

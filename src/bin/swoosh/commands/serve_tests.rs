@@ -21,7 +21,7 @@ use swoosh::serve::{
     CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, FetchService, ServiceList, Stop,
     Stopped, bind_entry, extract_recv_services,
 };
-use swoosh::transport::MdnsState;
+use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use tightbeam::tunnel::{
     CancellationToken, ManifestEntry, Metering, Posture, RawSource, Router, ServiceCatalog,
     TargetKind,
@@ -31,6 +31,12 @@ use super::{
     Group, ReachKind, describe, display_targets, reach_section, render_ready_banner,
     serving_section,
 };
+
+/// n0's relay and n0's discovery: the bind every banner test but the reach-flag one is about, and the
+/// state whose lines the docs pin byte for byte.
+fn n0() -> Reach {
+    Reach::default()
+}
 
 /// A service name for a test-built router overlay.
 fn svc(name: &str) -> nauthy::Service {
@@ -111,6 +117,7 @@ fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
         "bf01exampleid",
         ReachKind::Internet,
         &heard_on_the_network(),
+        &n0(),
         &[],
         &default_manifest(),
         &default_targets(),
@@ -337,7 +344,7 @@ fn the_unmetered_caveat_derives_from_the_bound_metering() {
 /// line.
 #[test]
 fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
-    let blocked = reach_section(ReachKind::Internet, &MdnsState::Blocked, &[]);
+    let blocked = reach_section(ReachKind::Internet, &MdnsState::Blocked, &n0(), &[]);
     assert!(blocked.contains("off; mDNS unavailable here"), "{blocked}");
     assert!(
         blocked.contains("over the internet"),
@@ -345,7 +352,12 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     );
 
     let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
-    let quirk = reach_section(ReachKind::DirectOnly, &heard_on_the_network(), &[routable]);
+    let quirk = reach_section(
+        ReachKind::DirectOnly,
+        &heard_on_the_network(),
+        &n0(),
+        &[routable],
+    );
     assert!(
         !quirk.contains("internet"),
         "a direct-only node shows no internet channel: {quirk}"
@@ -361,6 +373,7 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     let local = reach_section(
         ReachKind::DirectOnly,
         &MdnsState::LoopbackOnly,
+        &n0(),
         &[loop_addr],
     );
     assert!(local.contains("mDNS on this host only"), "{local}");
@@ -368,6 +381,79 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     assert!(
         !local.contains("127.0.0.1:58131"),
         "an address no peer can dial is never printed: {local}"
+    );
+}
+
+/// The reach section under the reach states an operator can be in. Naming either half prints BOTH lines,
+/// so the half that is still n0's is said out loud (the split is the whole point of running one of the
+/// two), and a bind on n0's two services renders the section unchanged, byte for byte, because the docs
+/// pin those lines.
+#[test]
+fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
+    let relay: RelayHome =
+        RelayHome::Custom("https://relay.example".parse().expect("a valid relay url"));
+    let resolver: Resolver = Resolver::Custom(
+        "https://dns.example/pkarr"
+            .parse()
+            .expect("a valid resolver url"),
+    );
+
+    let n0_only = reach_section(ReachKind::Internet, &heard_on_the_network(), &n0(), &[]);
+    assert!(
+        !n0_only.contains("records") && !n0_only.contains("relay"),
+        "n0's two services are the documented default and add no line: {n0_only}"
+    );
+
+    let resolver_only = reach_section(
+        ReachKind::Internet,
+        &heard_on_the_network(),
+        &Reach {
+            relay: RelayHome::N0,
+            resolver: Resolver::clone(&resolver),
+        },
+        &[],
+    );
+    assert!(
+        resolver_only.contains("  records    published to https://dns.example/pkarr\n"),
+        "{resolver_only}"
+    );
+    assert!(
+        resolver_only.contains("  relay      n0's public relays\n"),
+        "naming one half says which half is still n0's: {resolver_only}"
+    );
+
+    let relay_only = reach_section(
+        ReachKind::Internet,
+        &heard_on_the_network(),
+        &Reach {
+            relay: RelayHome::clone(&relay),
+            resolver: Resolver::N0,
+        },
+        &[],
+    );
+    assert!(
+        relay_only.contains("  relay      https://relay.example/\n"),
+        "{relay_only}"
+    );
+    assert!(
+        relay_only.contains("  records    published to n0's public discovery\n"),
+        "a relay of your own leaves finding a peer to n0, and the split is said out loud: {relay_only}"
+    );
+
+    let both = reach_section(
+        ReachKind::Internet,
+        &heard_on_the_network(),
+        &Reach { relay, resolver },
+        &[],
+    );
+    assert!(
+        both.contains("  records    published to https://dns.example/pkarr\n")
+            && both.contains("  relay      https://relay.example/\n"),
+        "{both}"
+    );
+    assert!(
+        !both.contains("n0"),
+        "nothing is n0's when both halves are yours: {both}"
     );
 }
 
@@ -386,6 +472,7 @@ fn a_disabled_discovery_says_so_plainly() {
             "bf01exampleid",
             reach,
             &MdnsState::Blocked,
+            &n0(),
             &[routable],
             &default_manifest(),
             &default_targets(),
@@ -404,13 +491,23 @@ fn a_disabled_discovery_says_so_plainly() {
         );
     }
 
-    let handable = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &[routable]);
+    let handable = reach_section(
+        ReachKind::DirectOnly,
+        &MdnsState::Blocked,
+        &n0(),
+        &[routable],
+    );
     assert!(
         handable.contains("hand a peer the address below"),
         "a routable hint is the handable next-step: {handable}"
     );
 
-    let loopback = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &[loop_addr]);
+    let loopback = reach_section(
+        ReachKind::DirectOnly,
+        &MdnsState::Blocked,
+        &n0(),
+        &[loop_addr],
+    );
     assert!(
         !loopback.contains("hand a peer"),
         "with no handable hint there is no address on this banner to point at: {loopback}"
@@ -429,7 +526,7 @@ fn a_disabled_discovery_says_so_plainly() {
 /// line, so an operator can hand one straight to a peer that cannot hear multicast.
 #[test]
 fn an_advertised_node_names_the_addresses_it_is_heard_at() {
-    let section = reach_section(ReachKind::Internet, &heard_on_the_network(), &[]);
+    let section = reach_section(ReachKind::Internet, &heard_on_the_network(), &n0(), &[]);
     assert!(section.contains("(mDNS), announced at:"), "{section}");
     assert!(
         section.lines().any(|line| line.trim() == HEARD_AT),
@@ -446,7 +543,7 @@ fn an_advertised_node_names_the_addresses_it_is_heard_at() {
 /// address names the DIALER's own machine, so it is not one to hand over).
 #[test]
 fn a_loopback_only_advertisement_says_this_host_only_and_asks_for_a_hint() {
-    let section = reach_section(ReachKind::Internet, &MdnsState::LoopbackOnly, &[]);
+    let section = reach_section(ReachKind::Internet, &MdnsState::LoopbackOnly, &n0(), &[]);
     assert!(section.contains("mDNS on this host only"), "{section}");
     assert!(
         section.contains("a direct address hint"),
@@ -465,6 +562,7 @@ fn a_browse_only_node_says_it_is_not_announcing_and_names_the_cause() {
     let section = reach_section(
         ReachKind::Internet,
         &MdnsState::BrowseOnly(MdnsError::NoAddrs),
+        &n0(),
         &[],
     );
     assert!(
@@ -508,7 +606,12 @@ fn a_local_bind_is_direct_only_and_never_says_lan() {
     );
 
     let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
-    let section = reach_section(ReachKind::DirectOnly, &heard_on_the_network(), &[routable]);
+    let section = reach_section(
+        ReachKind::DirectOnly,
+        &heard_on_the_network(),
+        &n0(),
+        &[routable],
+    );
     assert!(
         section.contains("automatic; local mDNS, or direct, no NAT traversal"),
         "a direct-only bind glosses the local mDNS lane and the no-NAT limit: {section}"
@@ -870,6 +973,7 @@ fn resident_banner_differs_only_by_the_control_line() {
         "bf01exampleid",
         ReachKind::Internet,
         &heard_on_the_network(),
+        &n0(),
         &[],
         &default_manifest(),
         &default_targets(),
@@ -881,6 +985,7 @@ fn resident_banner_differs_only_by_the_control_line() {
         "bf01exampleid",
         ReachKind::Internet,
         &heard_on_the_network(),
+        &n0(),
         &[],
         &default_manifest(),
         &default_targets(),
@@ -1447,6 +1552,7 @@ fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
         "bf01exampleid",
         ReachKind::Internet,
         &heard_on_the_network(),
+        &n0(),
         &[],
         &manifest,
         &display_targets(&[format!("logs=file:{}", path.display())])

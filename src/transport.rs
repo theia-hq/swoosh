@@ -9,20 +9,31 @@
 //! every choice derives the [`NodeId`] from the same ed25519 secret, the node keeps ONE address
 //! whichever transport is bound: swap the transport, keep the key, reach the same peer. That is the
 //! whole point of the seam.
+//!
+//! The iroh bind leans on two services to be reachable at all: a relay for the peers it cannot meet
+//! directly, and a resolver its address record is published to and peers are looked up through. Both
+//! are n0's unless an operator names their own, so resolving which pair THIS run binds over (the flags,
+//! else the files `serve` wrote in the home, else n0's) lives here too, at the same seam.
 
+use core::fmt;
 use core::net::SocketAddr;
 use core::str::FromStr;
 use std::net::ToSocketAddrs;
+use std::path::Path;
 
 use bifrost::{Layered, NodeId, StaticDiscovery};
+pub use bifrost_iroh::{Reach, RelayHome, RelayUrl, Resolver, ResolverUrl};
 use bifrost_mdns::{Advertising, MdnsDiscovery, MdnsError, Started};
 use clap::{Args, ValueEnum};
 use eyre::WrapErr as _;
 
+use crate::config;
+use crate::home::Home;
+
 /// The flags every reaching verb shares and no local verb has: which backend to bind, whether the
-/// bind stays off n0, and any direct address hints. Flattened into each reach command
-/// (`serve`/`ping`/`speed`/`status`) rather than made a root global, so `contact add/ls/rm` (which
-/// bind no transport and dial nobody) are never offered a `--transport`/`--local`/`--peer` that would
+/// bind stays off n0, any direct address hints, and the relay and resolver the bind leans on.
+/// Flattened into each reach command (`serve`/`ping`/`speed`/`status`) rather than made a root global,
+/// so `contact add/ls/rm` (which bind no transport and dial nobody) are never offered a flag that would
 /// do nothing there. `--home` stays a root global, since it names the node home the address book AND
 /// the bound key both live in, meaningful to both families.
 #[derive(Debug, Args)]
@@ -44,6 +55,154 @@ pub struct ReachArgs {
     // clap id collision. The flag NAME stays `--peer` (no user-facing change).
     #[arg(id = "peer-hint", long = "peer", value_name = "key=addr")]
     pub peer: Vec<PeerHint>,
+    /// the relay peers reach this node through (per node)
+    // A `RelayUrl`, not a `String`: clap parses the URL here at the edge, so a bad one is a parse error
+    // naming the fault (`only https is accepted, not http: ...`) before any bind, and everything
+    // downstream holds a URL that is valid by construction.
+    #[arg(long, value_name = "url")]
+    pub relay: Option<RelayUrl>,
+    /// where address records are published and read (fleet-wide)
+    #[arg(long, value_name = "url")]
+    pub resolver: Option<ResolverUrl>,
+}
+
+impl ReachArgs {
+    /// The relay and the resolver THIS run binds over: each flag if it was given, else the file `serve`
+    /// wrote under this home, else n0's.
+    ///
+    /// Read on a DEFAULT home too. A dial-only verb under the default home mints an ephemeral key and
+    /// otherwise never opens the home at all, so without this a `swoosh ping` would quietly go back to
+    /// n0's resolver and never find a fleet that publishes to its own.
+    pub async fn reach(&self, home: &Home) -> eyre::Result<Reach> {
+        let relay = match Option::clone(&self.relay) {
+            Some(url) => Some(url),
+            None => load_reach_url(&home.relay(), "relay").await?,
+        };
+        let resolver = match Option::clone(&self.resolver) {
+            Some(url) => Some(url),
+            None => load_reach_url(&home.resolver(), "resolver").await?,
+        };
+        Ok(Reach {
+            relay: relay.map_or(RelayHome::N0, RelayHome::Custom),
+            resolver: resolver.map_or(Resolver::N0, Resolver::Custom),
+        })
+    }
+
+    /// Persist each reach flag this run was given, so every later verb under the home reaches the same
+    /// two servers without repeating the flags. Only `serve` calls it: a node's relay and its fleet's
+    /// resolver are settings of the NODE, and the node is what `serve` is.
+    ///
+    /// A flag that was not given leaves its file alone, so naming one of the two never silently drops
+    /// the other, and `--relay` on a dial stays a one-run override rather than a rewrite of the home.
+    pub async fn persist_reach(&self, home: &Home) -> eyre::Result<()> {
+        if let Some(relay) = &self.relay {
+            config::write_private_atomic(&home.relay(), format!("{relay}\n").as_bytes()).await?;
+        }
+        if let Some(resolver) = &self.resolver {
+            config::write_private_atomic(&home.resolver(), format!("{resolver}\n").as_bytes())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Refuse `--relay`/`--resolver` on a bind that would never read them, by name.
+    ///
+    /// Only a non-local iroh bind has a relay to offer and a record to publish. Under `--local` there is
+    /// no n0 and no relay at all, and quirk (bare or sealed) is direct-only with no record of its own, so
+    /// either flag on those binds names a server the run would never touch. Refusing says which flag and
+    /// which bind disagree; accepting would leave an operator believing their own relay was in play when
+    /// the run went somewhere else entirely.
+    pub fn reject_unused_reach(&self) -> eyre::Result<()> {
+        let Some(bind) = self.unused_reach_bind() else {
+            return Ok(());
+        };
+        if self.relay.is_some() {
+            eyre::bail!(
+                "--relay has no effect under {bind}: {subject} uses no relay; drop one of the two",
+                subject = bind.subject(),
+            );
+        }
+        if self.resolver.is_some() {
+            eyre::bail!(
+                "--resolver has no effect under {bind}: {subject} publishes no record; drop one of \
+                 the two",
+                subject = bind.subject(),
+            );
+        }
+        Ok(())
+    }
+
+    /// The bind this run selected IF that bind reads neither reach flag, and `None` when it reads both.
+    ///
+    /// The ONE predicate behind [`reject_unused_reach`](Self::reject_unused_reach) and the composition
+    /// root's decision to compose a [`Reach`] at all, so the flags can never be refused on a bind that
+    /// uses them, nor the home files read on a bind that does not.
+    pub fn unused_reach_bind(&self) -> Option<UnusedReach> {
+        // `--local` leads: it removes n0 whatever the backend, so it is the cause to name even when a
+        // quirk spelling was selected alongside it.
+        if self.local {
+            return Some(UnusedReach::Local);
+        }
+        match self.transport {
+            Transport::Iroh => None,
+            Transport::Quirk => Some(UnusedReach::Quirk),
+            Transport::QuirkNoise => Some(UnusedReach::QuirkNoise),
+        }
+    }
+}
+
+/// A bind that reads neither reach flag, named as the user spelled it so a refusal points at a flag they
+/// can find on their own command line. An enum rather than a message string: a fourth bind shape has to
+/// be decided here rather than defaulting into one of these sentences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnusedReach {
+    /// `--local`: no n0 discovery, no relays, no record, whatever the backend under it.
+    Local,
+    /// `--transport quirk`: direct-only, with no discovery and no relay of its own.
+    Quirk,
+    /// `--transport quirk+noise`: the same direct-only backend under the sealed wrapper.
+    QuirkNoise,
+}
+
+impl UnusedReach {
+    /// The subject of the refusal's middle clause (`quirk uses no relay`), so the line reads as prose
+    /// about the thing that was bound rather than naming a flag twice.
+    fn subject(self) -> &'static str {
+        match self {
+            Self::Local => "a local bind",
+            Self::Quirk | Self::QuirkNoise => "quirk",
+        }
+    }
+}
+
+impl fmt::Display for UnusedReach {
+    /// How the bind was SPELLED on the command line, which is what the refusal has to name.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => f.write_str("--local"),
+            Self::Quirk => f.write_str("--transport quirk"),
+            Self::QuirkNoise => f.write_str("--transport quirk+noise"),
+        }
+    }
+}
+
+/// What this run actually bound: the backend, the bind mode, and the two reach services.
+///
+/// The three travel together because every consumer wants all three: a failed dial's teaching line reads
+/// each of them, and a verb that reports its bind reads the backend off the same value. Composed ONCE in
+/// the composition root, then carried as one field rather than three parallel parameters that a new verb
+/// could thread out of step.
+#[derive(Debug, Clone)]
+pub struct Bound {
+    /// The backend that was bound, for the fix a failed dial needs (quirk's `--peer` remedy) and for a
+    /// verb that names which transport carried the session.
+    pub transport: Transport,
+    /// Whether the bind is the `--local` shape (no n0 discovery, no relays): a failed reach names the
+    /// flag as the cause, since the internet fallback is what it removed.
+    pub local: bool,
+    /// The relay this node offers and the resolver it publishes to and looks peers up through, each n0's
+    /// unless the operator named their own.
+    pub reach: Reach,
 }
 
 /// Which concrete transport to bind under the shared identity. Default [`iroh`](Self::Iroh).
@@ -227,6 +386,47 @@ impl FromStr for PeerHint {
             text: text.to_owned(),
         })
     }
+}
+
+/// Read one reach file into its URL newtype: absent is n0's default, present is parsed here.
+///
+/// An empty or malformed file is a REFUSAL, not a shrug back to n0: the operator wrote it to keep this
+/// node's traffic off n0's servers, so falling back silently would put it back there without a word.
+/// `what` is the noun and the flag stem (`relay`, `resolver`), so the message names the file (nothing
+/// else on screen says which home is in play) and both fixes, a leftover file being as likely as a typo.
+// `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+async fn load_reach_url<T: FromStr>(path: &Path, what: &str) -> eyre::Result<Option<T>>
+where
+    T::Err: core::error::Error + Send + Sync + 'static,
+{
+    let text = match tokio::fs::read_to_string(path).await {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // A directory where the file belongs is the same mistake as a file holding nothing usable, and
+        // the raw `Is a directory (os error 21)` names neither the file nor the way out.
+        Err(error) if error.kind() == std::io::ErrorKind::IsADirectory => {
+            eyre::bail!(
+                "the {what} file {path} is a directory; remove it, or pass --{what} <url>",
+                path = path.display()
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let url = text.trim();
+    if url.is_empty() {
+        eyre::bail!(
+            "the {what} file {path} is empty; delete it, or pass --{what} <url>",
+            path = path.display()
+        );
+    }
+    let url = url.parse::<T>().wrap_err_with(|| {
+        format!(
+            "the {what} file {path} does not name a usable {what}; delete it, or pass --{what} <url>",
+            path = path.display()
+        )
+    })?;
+    Ok(Some(url))
 }
 
 #[cfg(test)]

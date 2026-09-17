@@ -33,7 +33,7 @@ use crate::{config, transport};
 /// instead of a per-verb argument-threading match with a different signature per arm.
 ///
 /// It carries what a reach-outward verb needs and no more: the [`contacts`](Self::contacts) to resolve a
-/// petname, the bound [`transport`](Self::transport) label a verb reports and a failed dial names, the
+/// petname, the [`bound`](Self::bound) facts a verb reports and a failed dial names, the
 /// ALREADY-RESOLVED [`present`](Self::present) badge (minted once by [`resolve`], so the verb never
 /// re-derives it), and the [`home`](Self::home) a verb that opens its own store needs. A verb ignores
 /// the fields it does not use. `serve`'s `ExposeContext` is DELIBERATELY not here (Craftsman): it lives on
@@ -41,12 +41,11 @@ use crate::{config, transport};
 pub struct ReachCtx<'a> {
     /// The address book, to resolve a petname in a verb's peer slot.
     pub contacts: &'a Contacts,
-    /// The bound transport label: a verb reports which backend carried the session, and a failed dial
-    /// names the fix that backend needs.
-    pub transport: transport::Transport,
-    /// Whether the bind is the `--local` shape (no n0 discovery, no relays): a failed reach names the
-    /// flag as the cause, since the internet fallback is what it removed.
-    pub local: bool,
+    /// What this run bound: the backend a verb reports, the `--local` bit, and the two reach services.
+    /// One value, composed once in the composition root, because a failed dial reads all three: iroh's
+    /// own error names none of them, so without this an unreachable resolver of your own reads as "the
+    /// peer is offline".
+    pub bound: &'a transport::Bound,
     /// Slot 1, the grant to present, resolved ONCE in the composition root via [`resolve`]: a `--present`
     /// slip if given, else the stored/self-signed member badge (the plain member dial). `None` for an
     /// `Anonymous` dial.
@@ -241,12 +240,12 @@ pub fn reject_bare_present(present: Option<&Link>) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Reject the reach-family flags on a BARE (local) invocation: `--transport`, `--local`, and `--peer`
-/// choose how a PEER is bound and found, and a bare `status`/`stop`/`service ls` reaches no peer (it
-/// queries the local resident over the control socket). The bare arms return before the composition
-/// root reads these flags, so without this guard they parsed and were silently ignored (I.3 forbids a
-/// flag with no effect). One home for the teaching line, called by each bare arm beside
-/// [`reject_bare_present`].
+/// Reject the reach-family flags on a BARE (local) invocation: `--transport`, `--local`, `--peer`,
+/// `--relay`, and `--resolver` choose how a PEER is bound and found, and a bare `status`/`stop`/`service
+/// ls` reaches no peer (it queries the local resident over the control socket). The bare arms return
+/// before the composition root reads these flags, so without this guard they parsed and were silently
+/// ignored (I.3 forbids a flag with no effect). One home for the teaching line, called by each bare arm
+/// beside [`reject_bare_present`].
 pub fn reject_bare_reach(reach: &transport::ReachArgs) -> eyre::Result<()> {
     if reach.transport != transport::Transport::default() {
         eyre::bail!("--transport only applies when reaching a peer; drop it or name one");
@@ -257,6 +256,12 @@ pub fn reject_bare_reach(reach: &transport::ReachArgs) -> eyre::Result<()> {
     if !reach.peer.is_empty() {
         eyre::bail!("--peer only applies when reaching a peer; drop it or name one");
     }
+    if reach.relay.is_some() {
+        eyre::bail!("--relay only applies when reaching a peer; drop it or name one");
+    }
+    if reach.resolver.is_some() {
+        eyre::bail!("--resolver only applies when reaching a peer; drop it or name one");
+    }
     Ok(())
 }
 
@@ -266,6 +271,18 @@ mod tests {
 
     use super::*;
     use crate::peer::Peer;
+
+    /// The parsed reach-family defaults: what clap hands a bare verb that named none of the flags. Each
+    /// case below overrides exactly the one flag it is about, so a new flag joins the guard in one line.
+    fn defaults() -> transport::ReachArgs {
+        transport::ReachArgs {
+            transport: transport::Transport::default(),
+            local: false,
+            peer: Vec::new(),
+            relay: None,
+            resolver: None,
+        }
+    }
 
     /// The default home for a resolver test: no stored badge/signet, so a `Family` dial falls back to the
     /// self-sign, exactly as an unprovisioned reach-outward verb does. Mirrors the old `None` key argument.
@@ -503,13 +520,8 @@ mod tests {
     /// discovery, so there is nothing for the trio to do.
     #[test]
     fn bare_reach_flags_are_rejected_by_name() {
-        let defaulted = transport::ReachArgs {
-            transport: transport::Transport::default(),
-            local: false,
-            peer: Vec::new(),
-        };
         assert!(
-            reject_bare_reach(&defaulted).is_ok(),
+            reject_bare_reach(&defaults()).is_ok(),
             "the parsed defaults have nothing to refuse"
         );
 
@@ -523,26 +535,41 @@ mod tests {
             (
                 transport::ReachArgs {
                     transport: transport::Transport::Quirk,
-                    local: false,
-                    peer: Vec::new(),
+                    ..defaults()
                 },
                 "--transport",
             ),
             (
                 transport::ReachArgs {
-                    transport: transport::Transport::default(),
                     local: true,
-                    peer: Vec::new(),
+                    ..defaults()
                 },
                 "--local",
             ),
             (
                 transport::ReachArgs {
-                    transport: transport::Transport::default(),
-                    local: false,
                     peer: vec![hint],
+                    ..defaults()
                 },
                 "--peer",
+            ),
+            (
+                transport::ReachArgs {
+                    relay: Some("https://relay.example".parse().expect("a valid relay url")),
+                    ..defaults()
+                },
+                "--relay",
+            ),
+            (
+                transport::ReachArgs {
+                    resolver: Some(
+                        "https://dns.example/pkarr"
+                            .parse()
+                            .expect("a valid resolver url"),
+                    ),
+                    ..defaults()
+                },
+                "--resolver",
             ),
         ];
         for (reach, flag) in cases {
