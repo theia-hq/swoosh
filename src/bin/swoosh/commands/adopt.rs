@@ -27,7 +27,6 @@ use bifrost::NodeId;
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::Link;
-use swoosh::credential::LinkExt as _;
 use swoosh::home::Home;
 use swoosh::invite::Invite;
 use swoosh::secret::SecretSource;
@@ -164,7 +163,7 @@ const COMPARE_SIGNET: &str = "compare that signet with the owner out of band bef
 /// compiler names rather than a check a reader has to spot the absence of.
 fn verify_badge(badge: Link, node: NodeId, signet: NodeId) -> eyre::Result<Link> {
     badge
-        .cap()?
+        .cap()
         .verify_member_at_root_without_revocation(
             SystemTime::now(),
             node.verify_key(),

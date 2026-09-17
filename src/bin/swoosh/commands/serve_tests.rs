@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
+use bifrost_mdns::MdnsError;
 use swoosh::home::Home;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
@@ -59,6 +60,17 @@ fn entry_open(name: &str, kind: TargetKind, metering: Option<Metering>) -> Manif
     }
 }
 
+/// The address a test node is heard at: routable, never loopback, so every rendered address is one a peer
+/// could actually dial. Deliberately NOT the routable dial hint the direct-channel tests use, so each
+/// lane's assertion can only be satisfied by its own lane.
+const HEARD_AT: &str = "192.168.1.40:58131";
+
+/// A live advertisement other hosts can hear, at one routable address: the ordinary outcome for the banner
+/// tests that are about posture rather than discovery.
+fn heard_on_the_network() -> MdnsState {
+    MdnsState::OnLan(vec![HEARD_AT.parse().expect("valid addr")])
+}
+
 /// The default `swoosh serve` manifest (gated ping + speed + the two control.* reads), name-sorted as the
 /// exposer returns it, so a banner test exercises the same shape the product path builds. The default
 /// diagnostic routes are family-gated, so they bind the OWNER engines and report unmetered.
@@ -98,7 +110,7 @@ fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
     let banner = render_ready_banner(
         "bf01exampleid",
         ReachKind::Internet,
-        MdnsState::Available,
+        &heard_on_the_network(),
         &[],
         &default_manifest(),
         &default_targets(),
@@ -325,7 +337,7 @@ fn the_unmetered_caveat_derives_from_the_bound_metering() {
 /// line.
 #[test]
 fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
-    let blocked = reach_section(ReachKind::Internet, MdnsState::Blocked, &[]);
+    let blocked = reach_section(ReachKind::Internet, &MdnsState::Blocked, &[]);
     assert!(blocked.contains("off; mDNS unavailable here"), "{blocked}");
     assert!(
         blocked.contains("over the internet"),
@@ -333,7 +345,7 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     );
 
     let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
-    let quirk = reach_section(ReachKind::DirectOnly, MdnsState::Available, &[routable]);
+    let quirk = reach_section(ReachKind::DirectOnly, &heard_on_the_network(), &[routable]);
     assert!(
         !quirk.contains("internet"),
         "a direct-only node shows no internet channel: {quirk}"
@@ -342,17 +354,28 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     assert!(quirk.contains("hand a peer this address:"), "{quirk}");
     assert!(quirk.contains("192.168.1.20:58131"), "{quirk}");
 
-    // A loopback-only bind reads "on this machine only", never "hand a peer" an un-handable address.
+    // A hint that only names this machine is never "hand a peer" material, and the scope claim now comes
+    // from the advertisement (which knows the bind) rather than from the hint (which cannot tell a
+    // wildcard bind from a deliberate loopback one).
     let loop_addr: SocketAddr = "127.0.0.1:58131".parse().expect("valid addr");
-    let local = reach_section(ReachKind::DirectOnly, MdnsState::Available, &[loop_addr]);
-    assert!(local.contains("reachable on this machine only:"), "{local}");
+    let local = reach_section(
+        ReachKind::DirectOnly,
+        &MdnsState::LoopbackOnly,
+        &[loop_addr],
+    );
+    assert!(local.contains("mDNS on this host only"), "{local}");
     assert!(!local.contains("hand a peer"), "{local}");
+    assert!(
+        !local.contains("127.0.0.1:58131"),
+        "an address no peer can dial is never printed: {local}"
+    );
 }
 
 /// A disabled discovery says so plainly: the readiness banner reports mDNS unavailable in both the
 /// local and the default (internet) glosses, never the `automatic; ... mDNS` lines it prints when the
-/// layer is live. The local down-state points at the direct address only when one is handable;
-/// a loopback-only bind has none, so it must not promise one.
+/// layer is live. The local down-state points at the direct address only when one is handable; with no
+/// handable hint it asks for a hint instead, and never claims no address exists (a wildcard bind whose
+/// mDNS never started has addresses nobody enumerated).
 #[test]
 fn a_disabled_discovery_says_so_plainly() {
     let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
@@ -362,7 +385,7 @@ fn a_disabled_discovery_says_so_plainly() {
         let banner = render_ready_banner(
             "bf01exampleid",
             reach,
-            MdnsState::Blocked,
+            &MdnsState::Blocked,
             &[routable],
             &default_manifest(),
             &default_targets(),
@@ -381,24 +404,80 @@ fn a_disabled_discovery_says_so_plainly() {
         );
     }
 
-    let handable = reach_section(ReachKind::DirectOnly, MdnsState::Blocked, &[routable]);
+    let handable = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &[routable]);
     assert!(
         handable.contains("hand a peer the address below"),
         "a routable hint is the handable next-step: {handable}"
     );
 
-    let loopback = reach_section(ReachKind::DirectOnly, MdnsState::Blocked, &[loop_addr]);
+    let loopback = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &[loop_addr]);
     assert!(
         !loopback.contains("hand a peer"),
-        "a loopback-only bind has no address to hand over: {loopback}"
+        "with no handable hint there is no address on this banner to point at: {loopback}"
     );
     assert!(
-        loopback.contains("no address can be handed to a peer"),
-        "the down-state says why it cannot point below: {loopback}"
+        loopback.contains("a peer needs a direct address hint"),
+        "the down-state names the next step instead of pointing below: {loopback}"
     );
     assert!(
-        loopback.contains("reachable on this machine only:"),
-        "the direct section below still names the truth: {loopback}"
+        !loopback.contains("127.0.0.1:58131"),
+        "an address no peer can dial is never printed: {loopback}"
+    );
+}
+
+/// An advertisement other hosts can hear names the addresses it went out on, each on its own copy-clean
+/// line, so an operator can hand one straight to a peer that cannot hear multicast.
+#[test]
+fn an_advertised_node_names_the_addresses_it_is_heard_at() {
+    let section = reach_section(ReachKind::Internet, &heard_on_the_network(), &[]);
+    assert!(section.contains("(mDNS), announced at:"), "{section}");
+    assert!(
+        section.lines().any(|line| line.trim() == HEARD_AT),
+        "each published address is bare on its own line: {section}"
+    );
+    assert!(
+        !section.contains("LAN"),
+        "the banner states the addresses it observed and promises no reach: {section}"
+    );
+}
+
+/// A loopback-only advertisement is invisible to every other host while looking live from the inside, so
+/// the lane says whose machine it covers and names the next step, and prints no address (a loopback
+/// address names the DIALER's own machine, so it is not one to hand over).
+#[test]
+fn a_loopback_only_advertisement_says_this_host_only_and_asks_for_a_hint() {
+    let section = reach_section(ReachKind::Internet, &MdnsState::LoopbackOnly, &[]);
+    assert!(section.contains("mDNS on this host only"), "{section}");
+    assert!(
+        section.contains("a direct address hint"),
+        "the degraded lane names the next step: {section}"
+    );
+    assert!(
+        !section.contains("automatic; your devices just need the key (mDNS)"),
+        "a loopback-only advertisement never claims the live gloss: {section}"
+    );
+}
+
+/// A node that browses without advertising hears peers and is heard by none, which resolves exactly like a
+/// live advertisement from the inside, so the lane says both halves and carries the cause.
+#[test]
+fn a_browse_only_node_says_it_is_not_announcing_and_names_the_cause() {
+    let section = reach_section(
+        ReachKind::Internet,
+        &MdnsState::BrowseOnly(MdnsError::NoAddrs),
+        &[],
+    );
+    assert!(
+        section.contains("finding peers, not announcing you"),
+        "{section}"
+    );
+    assert!(
+        section.contains("no local addresses to advertise"),
+        "the lane carries the cause of the empty advertisement: {section}"
+    );
+    assert!(
+        !section.contains("automatic; your devices just need the key (mDNS)"),
+        "a node announcing nothing never claims the live gloss: {section}"
     );
 }
 
@@ -429,7 +508,7 @@ fn a_local_bind_is_direct_only_and_never_says_lan() {
     );
 
     let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
-    let section = reach_section(ReachKind::DirectOnly, MdnsState::Available, &[routable]);
+    let section = reach_section(ReachKind::DirectOnly, &heard_on_the_network(), &[routable]);
     assert!(
         section.contains("automatic; local mDNS, or direct, no NAT traversal"),
         "a direct-only bind glosses the local mDNS lane and the no-NAT limit: {section}"
@@ -647,10 +726,10 @@ fn plain_serve_creates_no_runtime_state() {
 }
 
 /// `serve --local` must keep the node's address: the bind takes the PERSISTED key, so two runs report
-/// the same NodeId the `identity` verb prints, never a fresh key per run. The banner also hands out only
-/// dialable hints: the wildcard sockets rewrite to loopback, so no `[::]` reaches a peer. Its local
-/// gloss reports the discovery that actually started: the held mDNS gloss when the advertise call
-/// succeeded, the off-state when the run warned it could not (read off the same run's stderr).
+/// the same NodeId the `identity` verb prints, never a fresh key per run. The banner also prints only
+/// addresses a peer could dial: never the unspecified socket, never one that names the dialer's own
+/// machine. Its local gloss reports the advertisement that actually happened: one of the started
+/// outcomes, or the off-state when the run warned mDNS could not start (read off the same run's stderr).
 #[test]
 fn serve_local_keeps_the_persisted_key_across_two_runs() {
     let scratch = ProcessScratch::new("local-key");
@@ -723,9 +802,13 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
                 "serve --local run {run} warned mDNS was unavailable, so the banner says so: {stdout}"
             );
         } else {
+            // Which outcome a real run gets depends on the host's interfaces, so the assertion is that the
+            // line is one of the three the advertisement can produce, never an assumed reach.
             assert!(
-                stdout.contains("automatic; local mDNS, or direct, no NAT traversal"),
-                "serve --local run {run} started mDNS, so the banner renders the held local gloss: {stdout}"
+                stdout.contains("automatic; local mDNS, or direct, no NAT traversal")
+                    || stdout.contains("mDNS on this host only")
+                    || stdout.contains("finding peers, not announcing you"),
+                "serve --local run {run} started mDNS, so the banner renders the outcome it observed: {stdout}"
             );
         }
         assert!(
@@ -737,8 +820,12 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
             "serve --local run {run} says no LAN until the two-host proof lands: {stdout}"
         );
         assert!(
-            stdout.contains("reachable on this machine only:"),
-            "the wildcard bind renders as loopback-only, not as a handable LAN address: {stdout}"
+            !stdout.contains("reachable on this machine only"),
+            "the scope claim the dial hints could not back is gone for every bind: {stdout}"
+        );
+        assert!(
+            !stdout.contains("127.0.0.1"),
+            "an address that names the dialer's own machine is never printed: {stdout}"
         );
     }
 }
@@ -782,7 +869,7 @@ fn resident_banner_differs_only_by_the_control_line() {
     let plain = render_ready_banner(
         "bf01exampleid",
         ReachKind::Internet,
-        MdnsState::Available,
+        &heard_on_the_network(),
         &[],
         &default_manifest(),
         &default_targets(),
@@ -793,7 +880,7 @@ fn resident_banner_differs_only_by_the_control_line() {
     let resident = render_ready_banner(
         "bf01exampleid",
         ReachKind::Internet,
-        MdnsState::Available,
+        &heard_on_the_network(),
         &[],
         &default_manifest(),
         &default_targets(),
@@ -1359,7 +1446,7 @@ fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
     let banner = render_ready_banner(
         "bf01exampleid",
         ReachKind::Internet,
-        MdnsState::Available,
+        &heard_on_the_network(),
         &[],
         &manifest,
         &display_targets(&[format!("logs=file:{}", path.display())])

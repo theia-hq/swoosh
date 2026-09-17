@@ -51,9 +51,9 @@ impl swoosh::reaching::Reaching for FleetCmd {
     /// effective slip is the FOLD of a self-addressing `sheer:` link in the `--pull` peer with an explicit
     /// `--present`, threaded INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::family(
-            self.pull.self_present().or_else(|| self.present.clone()),
-        )
+        swoosh::credential::Credential::Family {
+            present: self.pull.self_present().or_else(|| self.present.clone()),
+        }
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

@@ -55,12 +55,13 @@ impl swoosh::reaching::Reaching for ServiceLsCmd {
     /// `sheer:` link in the `--at` peer with an explicit `--present`, threaded INTO the credential so the
     /// ONE resolver owns both slots.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::family(
-            self.at
+        swoosh::credential::Credential::Family {
+            present: self
+                .at
                 .as_ref()
                 .and_then(Peer::self_present)
                 .or_else(|| self.present.clone()),
-        )
+        }
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

@@ -35,10 +35,7 @@ pub enum Peer {
     Raw(NodeId),
     /// A `sheer:` capability link. Self-addressing: it supplies the dial target (the cap's root node) AND
     /// the slot-1 credential, so a separate `--present` is redundant (see the fold in [`self_present`](Self::self_present)).
-    ///
-    /// Boxed because a parsed link carries its whole decoded cap: inline it would dwarf the two key-shaped
-    /// arms, and every dialing verb holds a `Peer` in its clap field.
-    Capability(Box<Link>),
+    Capability(Link),
 }
 
 impl FromStr for Peer {
@@ -49,7 +46,7 @@ impl FromStr for Peer {
     /// are additive), else a saved petname address (validated here, resolved against the store at dial time).
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if text.starts_with(SCHEME) {
-            Ok(Self::Capability(Box::new(text.parse::<Link>()?)))
+            Ok(Self::Capability(text.parse::<Link>()?))
         } else if let Ok(node) = text.parse::<NodeId>() {
             Ok(Self::Raw(node))
         } else {
@@ -134,7 +131,7 @@ impl Peer {
     /// link-as-peer computes its slot-2 member badge exactly as a `--present` link does.
     pub fn self_present(&self) -> Option<Link> {
         match self {
-            Self::Capability(link) => Some(Link::clone(link)),
+            Self::Capability(link) => Some(link.clone()),
             _ => None,
         }
     }

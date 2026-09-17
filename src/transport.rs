@@ -15,7 +15,7 @@ use core::str::FromStr;
 use std::net::ToSocketAddrs;
 
 use bifrost::{Layered, NodeId, StaticDiscovery};
-use bifrost_mdns::MdnsDiscovery;
+use bifrost_mdns::{Advertising, MdnsDiscovery, MdnsError, Started};
 use clap::{Args, ValueEnum};
 use eyre::WrapErr as _;
 
@@ -102,29 +102,57 @@ pub struct PeerHint {
 /// which is how iroh keeps self-discovering when nothing is known locally.
 pub type Discovery = Layered<StaticDiscovery, MdnsDiscovery>;
 
-/// Whether the composed discovery's mDNS half is live: [`Available`](Self::Available) when this node
-/// advertised, [`Blocked`](Self::Blocked) when [`MdnsDiscovery::advertise`] failed and the layer fell
-/// back to [`MdnsDiscovery::disabled`]. A first-class reachability tell: the banner's `local` line
-/// flips to the off-state when unavailable, so a surface never claims a discovery that did not start.
-/// An enum, not a bool, so the down-state is a named case a reader must handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How far the composed discovery's mDNS half actually reaches, read off the ONE `advertise` call that
+/// started it.
+///
+/// A first-class reachability tell: a node that publishes nothing, a node that publishes an address only
+/// it can dial, and a node other machines can hear all browse identically, so nothing downstream can ask
+/// the discovery value which one it is. The banner keys its `local` line on this, so a surface reports
+/// the reach that happened instead of the one it assumed. Each degraded case carries its own cause, so
+/// the report names why rather than leaving the operator to guess.
+///
+/// swoosh's own enum rather than [`Advertising`] itself: this crosses into a clap command struct and is
+/// rendered by a pure banner function the unit tests drive, and `Advertising` is constructible only by a
+/// live `advertise` call.
+#[derive(Debug)]
 pub enum MdnsState {
-    /// mDNS is advertising this node locally: devices find it by the key alone.
-    Available,
-    /// mDNS could not start here (multicast unavailable, no advertisable address), so local
-    /// auto-discovery is off; reach falls to the internet or a handed address.
+    /// Advertising addresses that reach past this machine: another host hears this node and dials what
+    /// it heard. Carries the published set, at least one address (the conversion below is the only
+    /// constructor, over a record that is non-empty by construction).
+    OnLan(Vec<SocketAddr>),
+    /// Advertising loopback addresses only: another process on THIS machine finds this node by the key,
+    /// and no other host can, because a loopback address names the dialer's own machine.
+    LoopbackOnly,
+    /// Browsing without advertising: this node hears peers and puts no record of its own on the wire,
+    /// with the cause of the empty advertisement.
+    BrowseOnly(MdnsError),
+    /// mDNS could not start at all (multicast unavailable), so the layer fell back to
+    /// [`MdnsDiscovery::disabled`]: this node neither advertises nor hears anyone, and reach falls to
+    /// the internet or a handed address.
     Blocked,
+}
+
+impl From<Advertising> for MdnsState {
+    /// Read the started advertisement into the state a surface reports. The loopback record's addresses
+    /// are dropped on purpose: no surface may hand them to a peer, so the arm carries only its name.
+    fn from(advertising: Advertising) -> Self {
+        match advertising {
+            Advertising::OnLan(advertised) => Self::OnLan(advertised.addrs().to_vec()),
+            Advertising::LoopbackOnly(_) => Self::LoopbackOnly,
+            Advertising::BrowseOnly(cause) => Self::BrowseOnly(cause),
+        }
+    }
 }
 
 /// The composed discovery for a freshly bound transport, plus the live state of its mDNS half.
 ///
 /// The two travel together because the ONE `advertise` call that starts mDNS is also the one source
-/// of the availability tell: a caller either composes discovery here and receives the truth about it,
-/// or it would have to predict the outcome a second time.
+/// of the reach tell: a caller either composes discovery here and receives the truth about it, or it
+/// would have to predict the outcome a second time from a bind it no longer owns.
 pub struct ComposedDiscovery {
     /// The static hints layered over mDNS, to hand [`Node::new`](bifrost::Node::new).
     pub discovery: Discovery,
-    /// Whether the mDNS layer advertised or fell back to disabled.
+    /// How far the mDNS layer's advertisement reaches, or that it never started.
     pub mdns: MdnsState,
 }
 
@@ -136,13 +164,13 @@ impl PeerHint {
     }
 
     /// Compose the discovery for a freshly bound `transport`: the `--peer` hints layered over an mDNS
-    /// resolver that advertises this node at its bound local addresses and browses the LAN for peers,
-    /// plus the live state of that mDNS half.
+    /// resolver that advertises this node at the sockets it bound and browses the LAN for peers, plus
+    /// how far that advertisement reaches.
     ///
-    /// Called once per run, at the seam, after the transport binds (so its local address is known).
-    /// If mDNS cannot start (multicast blocked, no advertisable address), discovery degrades to the
-    /// static hints alone rather than failing the whole command, since a hinted or self-discovering
-    /// dial still works; the returned [`MdnsState`] reports that degradation so a surface can say so.
+    /// Called once per run, at the seam, after the transport binds (so its bind is known). If mDNS
+    /// cannot start at all (multicast blocked), discovery degrades to the static hints alone rather
+    /// than failing the whole command, since a hinted or self-discovering dial still works; the
+    /// returned [`MdnsState`] carries that, and every lesser degradation, so a surface can say so.
     pub fn discovery<T: bifrost::Transport>(
         transport: &T,
         peers: impl IntoIterator<Item = Self>,
@@ -151,9 +179,17 @@ impl PeerHint {
         for Self { node, addrs, .. } in peers {
             hints.insert(node, addrs);
         }
-        let local = transport.local_addr();
-        let (mdns, state) = match MdnsDiscovery::advertise(local.node, local.hints) {
-            Ok(mdns) => (mdns, MdnsState::Available),
+        // Bind truth, never `local_addr`'s hints: the hints rewrite an unspecified bind to loopback, so
+        // handing them over would advertise `127.0.0.1` for a node bound to every interface and point
+        // every dialer at its own machine. Discovery owns what of the bind is publishable.
+        let (mdns, state) = match MdnsDiscovery::advertise(
+            transport.node_id(),
+            transport.bound_sockets(),
+        ) {
+            Ok(Started {
+                discovery,
+                advertising,
+            }) => (discovery, MdnsState::from(advertising)),
             Err(err) => {
                 tracing::warn!(error = %err, "mDNS discovery unavailable; using --peer hints only");
                 (MdnsDiscovery::disabled(), MdnsState::Blocked)
