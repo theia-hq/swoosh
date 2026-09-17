@@ -49,7 +49,7 @@ pub struct SendCmd {
     /// the peer's file-receiving service
     #[arg(long, value_name = "service", default_value = RECV_SERVICE)]
     pub service: String,
-    /// present a `sheer:` link to reach as a delegate
+    /// present a `sheer:` capability link to reach a gated peer
     #[arg(
         long,
         value_name = "link",

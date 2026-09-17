@@ -118,7 +118,7 @@ pub struct TunnelConnectCmd {
     /// the exposed service name to reach on the host
     #[arg(long, value_name = "service", default_value = "default")]
     pub service: String,
-    /// present a membership badge or capability link to a family/cap-gated host (a `sheer:` link, parsed
+    /// present a membership badge or capability link to a gated host (a `sheer:` link, parsed
     /// at the boundary)
     #[arg(long, value_name = "link")]
     pub present: Option<Link>,

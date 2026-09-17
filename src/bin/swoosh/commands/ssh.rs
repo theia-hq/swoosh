@@ -64,8 +64,13 @@ pub struct SshCmd {
     /// The exposed service name to reach on the host.
     #[arg(long, value_name = "service", default_value = DEFAULT_SERVICE)]
     pub service: String,
-    /// present a `sheer:` cap link to a cap-gated host (a delegate's slip)
-    #[arg(long, value_name = "link")]
+    /// present a `sheer:` capability link to reach a gated peer
+    #[arg(
+        long,
+        value_name = "link",
+        long_help = "Optional: your own devices need no link; this machine's membership badge is \
+                     presented automatically. Pass a `sheer:` link only to reach as a delegate."
+    )]
     pub present: Option<Link>,
     /// direct address hint for the peer, `<key>=<addr>` (repeatable)
     #[arg(id = "peer-hint", long = "peer", value_name = "key=addr")]

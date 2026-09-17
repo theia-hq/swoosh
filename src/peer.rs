@@ -145,7 +145,7 @@ impl Peer {
         if matches!(self, Self::Capability(_)) && explicit.is_some() {
             eyre::bail!(
                 "a `sheer:` link peer already presents its own credential; drop `--present` (or name \
-                 a petname/key peer to present a different slip)"
+                 a petname/key peer to present a different link)"
             );
         }
         Ok(())

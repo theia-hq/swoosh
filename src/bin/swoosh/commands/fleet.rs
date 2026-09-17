@@ -34,8 +34,13 @@ pub struct FleetCmd {
     /// your signet, and fold its members into your contacts as `me/<device>` entries
     #[arg(long, value_name = "peer")]
     pub pull: Peer,
-    /// present a `sheer:` cap link to a cap-gated coordination node (a delegate's slip)
-    #[arg(long, value_name = "link")]
+    /// present a `sheer:` capability link to reach a gated coordination node
+    #[arg(
+        long,
+        value_name = "link",
+        long_help = "Optional: your own devices need no link; this machine's membership badge is \
+                     presented automatically. Pass a `sheer:` link only to reach as a delegate."
+    )]
     pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
