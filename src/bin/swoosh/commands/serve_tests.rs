@@ -440,12 +440,11 @@ fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
         "a relay of your own leaves finding a peer to n0, and the split is said out loud: {relay_only}"
     );
 
-    let both = reach_section(
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &Reach { relay, resolver },
-        &[],
-    );
+    let paired = Reach {
+        relay: relay.clone(),
+        resolver: resolver.clone(),
+    };
+    let both = reach_section(ReachKind::Internet, &heard_on_the_network(), &paired, &[]);
     assert!(
         both.contains("  records    published to https://dns.example/pkarr\n")
             && both.contains("  relay      https://relay.example/\n"),
@@ -454,6 +453,14 @@ fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
     assert!(
         !both.contains("n0"),
         "nothing is n0's when both halves are yours: {both}"
+    );
+
+    // A direct-only bind uses neither server, so naming one must not make the banner claim it. Without
+    // this a `--local --relay` banner could advertise a relay the bind will never reach through.
+    let direct = reach_section(ReachKind::DirectOnly, &heard_on_the_network(), &paired, &[]);
+    assert!(
+        !direct.contains("records") && !direct.contains("relay"),
+        "a direct-only bind names neither server even when both are set: {direct}"
     );
 }
 

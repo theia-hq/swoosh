@@ -672,13 +672,16 @@ async fn run() -> eyre::Result<()> {
         reach: match reach.reach_args().unused_reach_bind() {
             Some(_unused) => transport::Reach::default(),
             None => {
+                // Resolve BEFORE persisting: a malformed file or a refused flag must leave the home as
+                // it found it, so a run that cannot compose its reach never writes one half of it.
+                let composed = reach.reach_args().reach(&home).await?;
                 // A serving verb OWNS the home, so the two servers it was pointed at become the home's
                 // and every later verb under it reaches the same fleet with no flags repeated. A dialing
                 // verb's flag is this run only, so it writes nothing.
                 if bind_role == BindRole::Serving {
                     reach.reach_args().persist_reach(&home).await?;
                 }
-                reach.reach_args().reach(&home).await?
+                composed
             }
         },
     };
