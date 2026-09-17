@@ -1,6 +1,6 @@
 # Keys: the whole model, on one page
 
-Read this first. Every other page assumes it. It is short on purpose: five nouns, one gate, and one
+Read this first. Every other page assumes it. It is short on purpose: eight nouns, one gate, and one
 trade the math forces on you. Once you hold these, the rest of swoosh is just verbs.
 
 ## You are your key
@@ -79,6 +79,8 @@ The proof a device gets in adoption is its **membership**: a signature, made by 
 to that device's key, that says "this machine is mine." A device carrying your membership reaches every
 gated service on any node you run, with no per-service step. That is how your laptop, your desktop, and
 a server all get in at once.
+
+A device stores that membership as its **badge**, and presents it on every gated dial.
 
 ## The gate
 
@@ -165,8 +167,11 @@ as a delegate holding someone's grant.
 | [signet](#signet) | your root identity; one key that means "me" |
 | [device](#device) | one machine you own; its own key, vouched for by your signet |
 | [membership](#membership) | the signature that proves a device is yours; admits it to your gated services |
+| [invite](reference/commands.md#invite) | a one-device token from your signet; adopting it stores that device's membership |
+| [badge](#membership) | a device's membership as a credential: the signet-signed proof it stores and presents |
 | [fleet](#fleet) | one person's devices; everything their signet vouches for |
 | [grant](#grant) | access to one service; its shareable form is a `sheer:` capability link, checked offline |
+| [capability link](#grant) | a grant's shareable form, a `sheer:` link; commands name it `<link>` |
 
 ## Next
 

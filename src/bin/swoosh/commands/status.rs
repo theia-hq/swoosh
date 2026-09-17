@@ -41,12 +41,12 @@ pub struct StatusCmd {
     /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
     #[arg(value_name = "peer")]
     pub peer: Option<Peer>,
-    /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
+    /// present a `sheer:` capability link to reach a gated peer
     #[arg(
         long,
         value_name = "link",
         long_help = "Optional: your own devices need no link, the dial presents the self-signed \
-                     membership badge under this identity. Pass a `sheer:` slip only to reach as a delegate."
+                     membership badge under this identity. Pass a `sheer:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     #[command(flatten)]

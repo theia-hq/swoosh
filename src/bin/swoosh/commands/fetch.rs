@@ -33,8 +33,13 @@ pub struct FetchCmd {
     /// which served service to reach
     #[arg(long, value_name = "service", default_value = "fetch")]
     pub service: String,
-    /// present a `sheer:` cap link to a cap-gated node (a delegate's slip)
-    #[arg(long, value_name = "link")]
+    /// present a `sheer:` capability link to reach a gated node
+    #[arg(
+        long,
+        value_name = "link",
+        long_help = "Optional: your own devices need no link; this machine's membership badge is \
+                     presented automatically. Pass a `sheer:` link only to reach as a delegate."
+    )]
     pub present: Option<Link>,
     /// Pin the local listener port (default: an OS-assigned free port).
     #[arg(long, value_name = "port")]

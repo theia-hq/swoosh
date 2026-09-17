@@ -28,12 +28,12 @@ pub struct ForwardCmd {
     /// which served service to reach
     #[arg(long, value_name = "service", default_value = "default")]
     pub service: String,
-    /// present a `sheer:` cap link to a cap-gated peer (a delegate's slip)
+    /// present a `sheer:` capability link to reach a gated peer
     #[arg(
         long,
         value_name = "link",
         long_help = "Optional. `forward` dials as a stranger by construction (it never presents this \
-                     node's identity), so pass a `sheer:` slip to reach a cap-gated service."
+                     node's identity), so pass a `sheer:` link to reach a gated service."
     )]
     pub present: Option<Link>,
     #[command(flatten)]

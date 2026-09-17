@@ -47,7 +47,7 @@ pub struct ShareCmd {
                      must type `fleet:` to widen, so a device bind can never silently become a fleet bind."
     )]
     pub bind: Option<GrantFor>,
-    /// Let the holder narrow and re-share the link (a delegable bearer slip); not valid with a bind.
+    /// Let the holder narrow and re-share the link (a delegable bearer grant); not valid with a bind.
     #[arg(long)]
     pub delegable: bool,
 }
