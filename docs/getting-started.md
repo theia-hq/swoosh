@@ -27,7 +27,10 @@ build-provenance attestation (`gh attestation verify`).
 
 On the machine you want to reach, open two diagnostics to anyone and note the key it prints:
 
-<!-- capture: swoosh serve --public ping,speed -->
+<!-- The `local` lane below is stale: a wildcard bind now appends "announced at:" and the real
+     addresses. Re-capture needs the harness to normalize a host address the way it already
+     normalizes keys and ports. -->
+<!-- pending live-run: swoosh serve --public ping,speed -->
 ```console
 $ swoosh serve --public ping,speed
 swoosh ready

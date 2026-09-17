@@ -135,7 +135,10 @@ that proves the key.
 Now start `serve` again from the SAME server key, over iroh. iroh self-discovers over the internet, so
 no `--peer` is needed. The NodeId is byte-for-byte identical:
 
-<!-- capture: scripts/demo.sh serve-iroh -->
+<!-- The `local` lane below is stale: a wildcard bind now appends "announced at:" and the real
+     addresses. Re-capture needs the harness to normalize a host address the way it already
+     normalizes keys and ports. -->
+<!-- pending live-run: scripts/demo.sh serve-iroh -->
 ```console
 $ swoosh serve --transport iroh
 swoosh ready
