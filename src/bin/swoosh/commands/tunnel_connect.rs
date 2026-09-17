@@ -142,7 +142,9 @@ impl swoosh::reaching::Reaching for TunnelConnectCmd {
     /// the credential so the ONE resolver owns both slots (slot 1 present-or-badge, slot 2 the fleet badge
     /// for a signet-bound slip).
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::family(self.present.clone())
+        swoosh::credential::Credential::Family {
+            present: self.present.clone(),
+        }
     }
 
     /// `tunnel-connect`'s peer is a raw key (`swoosh ssh` resolved any petname before re-invoking), never a

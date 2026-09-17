@@ -38,7 +38,10 @@ there is no fallback.
 
 Because it is direct-only, a `quirk+noise` `serve` prints the address the peer needs:
 
-<!-- capture: swoosh serve --transport quirk+noise -->
+<!-- The `direct` lane below is stale: the bind-truth fix deleted the "reachable on this machine
+     only" line and a wildcard bind now announces real addresses. Re-capture needs the harness to
+     normalize a host address the way it already normalizes keys and ports. -->
+<!-- pending live-run: swoosh serve --transport quirk+noise -->
 ```console
 $ swoosh serve --transport quirk+noise
 swoosh ready

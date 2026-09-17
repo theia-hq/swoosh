@@ -61,9 +61,9 @@ impl swoosh::reaching::Reaching for PingCmd {
     /// a self-addressing `sheer:` link-as-peer with an explicit `--present`, so a link-as-peer resolves
     /// through the same slot path as a `--present` link.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::family(
-            self.peer.self_present().or_else(|| self.present.clone()),
-        )
+        swoosh::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        }
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

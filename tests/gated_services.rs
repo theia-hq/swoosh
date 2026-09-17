@@ -193,21 +193,12 @@ async fn build_exposer() -> Exposer {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
     // The served menu is raw socket forwards (no injected handler), so the route table holds them plus the
-    // `control.services` read handler over the catalog snapshot. `Router::catalog` reads only whether the
-    // base gate is whole-node open, and this gate is rooted, so a rooted display gate on the same authority
-    // renders the same posture (the catalog never reads the revocation store).
-    let catalog_gate = nauthy::Gate::rooted(
-        signet.verify_key(),
-        FileDenylist::empty(std::path::PathBuf::new()),
-    );
+    // `control.services` read handler over the catalog snapshot.
     let mut router = Router::new(gate);
     for entry in SERVED {
         router = router.parse(&[entry.to_owned()]).unwrap();
     }
-    let catalog = router.catalog(
-        &catalog_gate,
-        Some(CONTROL_SERVICES_SERVICE.parse().unwrap()),
-    );
+    let catalog = router.catalog(Some(CONTROL_SERVICES_SERVICE.parse().unwrap()));
     router
         .member_service(
             CONTROL_SERVICES_SERVICE.parse().unwrap(),

@@ -20,7 +20,6 @@ use clap::Args;
 use nauthy::Link;
 use swoosh::config;
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, Petname};
-use swoosh::credential::LinkExt as _;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
@@ -203,7 +202,7 @@ async fn record(
     // `invite rm` still cuts it), while a contact with no row is an unrevocable badge, the exact class
     // the mint-log fix closed. The contact `add` below can then no longer displace a different key:
     // `refuse_shadowed` refused that before signing.
-    let root_id = badge.cap()?.root_revocation_id().ok_or_else(|| {
+    let root_id = badge.cap().root_revocation_id().ok_or_else(|| {
         eyre::eyre!("signed membership badge has no authority block to key revocation on")
     })?;
     let record = GrantRecord {

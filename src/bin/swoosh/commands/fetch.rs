@@ -56,9 +56,9 @@ impl swoosh::reaching::Reaching for FetchCmd {
     /// slip is the FOLD of a self-addressing `sheer:` link in the `--via` peer with an explicit `--present`,
     /// threaded INTO the credential so the ONE resolver owns both slots.
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::family(
-            self.via.self_present().or_else(|| self.present.clone()),
-        )
+        swoosh::credential::Credential::Family {
+            present: self.via.self_present().or_else(|| self.present.clone()),
+        }
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

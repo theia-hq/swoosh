@@ -23,7 +23,7 @@
 
 use core::net::SocketAddr;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
@@ -313,11 +313,6 @@ impl ServeCmd {
         // the ONE shared policy point, rather than ever serving on a permissive default. Opening individual
         // services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
         //
-        // `Router::catalog` renders the `control.services` read and reads only whether the base gate is
-        // whole-node open; `Router` owns its gate with no accessor, so the display render gets a second
-        // rooted gate through the same policy on the same authority (the catalog never reads the
-        // revocation store). A `Router::base_gate()` accessor would delete this second value.
-        let catalog_gate = tunnel::resolve_gate(signet, FileDenylist::empty(PathBuf::new()))?;
         let gate = tunnel::resolve_gate(signet, denylist)?;
         // One `Router`: each route binds a handler VALUE (the engine handlers, roster, stop, the fetch and
         // recv instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector)
@@ -370,7 +365,7 @@ impl ServeCmd {
         // overlay, else gated) ONCE, here, for the `control.services` read handler AND the resident socket
         // read to serve. Both serve the same snapshot. `self_listing` renders the one row being built:
         // `control.services` itself, always gated (a `Never` route can never be open).
-        let catalog = router.catalog(&catalog_gate, Some(CONTROL_SERVICES_SERVICE.parse()?));
+        let catalog = router.catalog(Some(CONTROL_SERVICES_SERVICE.parse()?));
         let router = router.member_service(
             CONTROL_SERVICES_SERVICE.parse()?,
             ServiceList::new(catalog.clone()),
@@ -443,11 +438,11 @@ impl ServeCmd {
                 .collect();
             // Reach-kind is the selected transport, not an inference from whether hints are present (which
             // conflates the channel with the hint state): iroh routes across the internet, quirk is
-            // direct-only. The live mDNS state is a SEPARATE reachability fact, attached by the
+            // direct-only. How far the advertisement reaches is a SEPARATE fact, attached by the
             // composition root from the SAME `advertise` call that composed discovery, so the banner
-            // reports what started rather than assuming it.
+            // reports what was published rather than assuming it.
             let reach = ReachKind::of(self.reach.transport, self.reach.local);
-            let Some(mdns) = self.mdns else {
+            let Some(mdns) = self.mdns.as_ref() else {
                 eyre::bail!(
                     "internal: serve reached its banner without the mDNS state (composition-root bug)"
                 );
@@ -841,7 +836,7 @@ fn is_forward(addr: &str) -> bool {
 fn render_ready_banner(
     node_id: &str,
     reach: ReachKind,
-    mdns: MdnsState,
+    mdns: &MdnsState,
     hints: &[SocketAddr],
     manifest: &[ManifestEntry],
     addr_by_name: &HashMap<String, String>,
@@ -871,17 +866,22 @@ fn render_ready_banner(
 
 /// The `how peers reach you` section: one channel per line with a short label column that scans at a glance.
 /// The `internet` channel appears only when the transport routes across the internet; `direct` only when the
-/// bind is direct-only AND hands out address hints. "automatic" leads both auto channels, and the local mDNS
-/// lane is a first-class tell that flips to an off-state naming what to do instead when discovery did not
-/// start.
-// FLAG(CLI-Architect): the channel glosses (wording, "even across NATs", the off-state next-step) are a
+/// bind is direct-only AND holds an address a peer could actually dial. "automatic" leads both auto channels,
+/// and the local lane carries the ADVERTISEMENT's own outcome: how far this node was published is a fact only
+/// the advertisement knows, and the dial hints cannot stand in for it (they rewrite a wildcard bind to
+/// loopback, so every bind would read the same whatever it reaches).
+// FLAG(CLI-Architect): the channel glosses (wording, "even across NATs", the per-outcome next-step) are a
 // banner-format detail; picked here to satisfy the Newcomer fixes (no backend name, "automatic" on both, a
 // down-state next-step), open to the owner's final call.
-fn reach_section(reach: ReachKind, mdns: MdnsState, hints: &[SocketAddr]) -> String {
-    let direct = matches!(reach, ReachKind::DirectOnly) && !hints.is_empty();
-    // Whether the direct channel below would hold an address a peer could actually dial: a loopback
-    // hint resolves to the peer's own machine, so a loopback-only bind has nothing to hand over.
-    let handable = hints.iter().any(|addr| !addr.ip().is_loopback());
+fn reach_section(reach: ReachKind, mdns: &MdnsState, hints: &[SocketAddr]) -> String {
+    // A loopback hint names the DIALER's own machine, so it is never an address to hand a peer: only a
+    // routable hint opens the direct channel, and an un-handable one is left out entirely rather than
+    // printed under a scope claim that the bind does not back.
+    let handable: Vec<&SocketAddr> = hints
+        .iter()
+        .filter(|addr| !addr.ip().is_loopback())
+        .collect();
+    let direct = matches!(reach, ReachKind::DirectOnly) && !handable.is_empty();
     // Width the label column to the widest channel label actually shown.
     let mut labels: Vec<&str> = Vec::new();
     if reach == ReachKind::Internet {
@@ -904,47 +904,55 @@ fn reach_section(reach: ReachKind, mdns: MdnsState, hints: &[SocketAddr]) -> Str
             "automatic; peers reach you by the key above, even across NATs",
         ));
     }
-    let local = match (mdns, reach) {
-        // A direct-only bind resolves on local mDNS or a hand-fed address, and its advertised hints are
-        // loopback today (the same-host mDNS defect), so the gloss promises local discovery only. The
-        // founder's LAN sentence returns with the advertisement fix (LOOSE-ENDS, two-host Operator gate).
-        (MdnsState::Available, ReachKind::DirectOnly) => {
-            "automatic; local mDNS, or direct, no NAT traversal".to_owned()
+    // One arm per outcome of the ONE advertise call: a node another host can hear, a node only this host
+    // can, a node that hears but is not heard, and no mDNS at all. The three degraded arms each name the
+    // next step (or the cause), because from the inside they all look identical to a live advertisement.
+    let (local, announced): (String, &[SocketAddr]) = match (mdns, reach) {
+        (MdnsState::OnLan(addrs), ReachKind::Internet) => (
+            "automatic; your devices just need the key (mDNS), announced at:".to_owned(),
+            addrs,
+        ),
+        (MdnsState::OnLan(addrs), ReachKind::DirectOnly) => (
+            "automatic; local mDNS, or direct, no NAT traversal; announced at:".to_owned(),
+            addrs,
+        ),
+        (MdnsState::LoopbackOnly, _) => (
+            "mDNS on this host only; another host needs a direct address hint".to_owned(),
+            &[],
+        ),
+        (MdnsState::BrowseOnly(cause), _) => {
+            (format!("finding peers, not announcing you ({cause})"), &[])
         }
-        (MdnsState::Available, ReachKind::Internet) => {
-            "automatic; your devices just need the key (mDNS)".to_owned()
-        }
-        (MdnsState::Blocked, ReachKind::Internet) => {
-            "off; mDNS unavailable here, so reach by the key over the internet".to_owned()
-        }
-        (MdnsState::Blocked, ReachKind::DirectOnly) => {
-            // The down-state is what the operator reads when discovery did not start, so it points at
-            // a direct address only when one is actually handable; a loopback-only bind has none, and
-            // saying otherwise would promise an address the section below contradicts.
-            if handable {
-                "off; mDNS unavailable here, so hand a peer the address below".to_owned()
-            } else {
-                "off; mDNS unavailable here, so no address can be handed to a peer".to_owned()
-            }
-        }
+        (MdnsState::Blocked, ReachKind::Internet) => (
+            "off; mDNS unavailable here, so reach by the key over the internet".to_owned(),
+            &[],
+        ),
+        // The down-state points at the direct channel only when that channel is actually rendered below;
+        // with no handable hint there is no address on this banner to point at, and the operator needs a
+        // hint from the peer's side instead.
+        (MdnsState::Blocked, ReachKind::DirectOnly) if direct => (
+            "off; mDNS unavailable here, so hand a peer the address below".to_owned(),
+            &[],
+        ),
+        (MdnsState::Blocked, ReachKind::DirectOnly) => (
+            "off; mDNS unavailable here, so a peer needs a direct address hint".to_owned(),
+            &[],
+        ),
     };
     out.push_str(&reach_line(width, gutter, "local", &local));
+    // Each address on its own line, bare and copy-clean (the same standard as the node id), aligned under
+    // the header's gloss column.
+    for addr in announced {
+        out.push_str(&format!("{:gloss_col$}{addr}\n", ""));
+    }
     if direct {
-        // Loopback hints cannot be handed to a peer (they resolve to the peer's own machine), so a
-        // loopback-only bind reads "reachable on this machine only" rather than "hand a peer this address".
-        let (routable, loopback): (Vec<&SocketAddr>, Vec<&SocketAddr>) =
-            hints.iter().partition(|addr| !addr.ip().is_loopback());
-        let (header, addrs): (&str, Vec<&SocketAddr>) = if routable.is_empty() {
-            ("reachable on this machine only:", loopback)
-        } else if routable.len() == 1 {
-            ("hand a peer this address:", routable)
+        let header = if handable.len() == 1 {
+            "hand a peer this address:"
         } else {
-            ("hand a peer one of these:", routable)
+            "hand a peer one of these:"
         };
         out.push_str(&reach_line(width, gutter, "direct", header));
-        // Each address on its own line, bare and copy-clean (the same standard as the node id), aligned
-        // under the header's gloss column.
-        for addr in addrs {
+        for addr in handable {
             out.push_str(&format!("{:gloss_col$}{addr}\n", ""));
         }
     }

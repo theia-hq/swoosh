@@ -292,8 +292,8 @@ impl Command {
             // `<home>/disabled`. Split each here so the local arms never compose a transport they would not use.
             Self::Service(cmd) => match cmd {
                 service::ServiceCmd::Ls(ls) => match ls.at {
-                    Some(_) => Verb::Reach(Reach::Service(*ls)),
-                    None => Verb::ServiceLs(*ls),
+                    Some(_) => Verb::Reach(Reach::Service(ls)),
+                    None => Verb::ServiceLs(ls),
                 },
                 service::ServiceCmd::Enable(toggle) => Verb::ServiceEnable(toggle),
                 service::ServiceCmd::Disable(toggle) => Verb::ServiceDisable(toggle),

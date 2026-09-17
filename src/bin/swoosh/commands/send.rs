@@ -72,9 +72,9 @@ impl swoosh::reaching::Reaching for SendCmd {
     /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
     /// badge exactly as a `--present` link does).
     fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::family(
-            self.peer.self_present().or_else(|| self.present.clone()),
-        )
+        swoosh::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        }
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {

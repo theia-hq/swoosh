@@ -14,17 +14,17 @@
 //! two reads swoosh needs of a link that nauthy does not owe a consumer.
 
 use bifrost::NodeId;
-use nauthy::{Cap, Link};
+use nauthy::Link;
 use tightbeam::identity::AsNodeId as _;
 
-/// The reads swoosh takes of a [`Link`]: the node it self-addresses, its short form for output, and the
-/// decoded cap behind a local check.
+/// The reads swoosh takes of a [`Link`]: the node it self-addresses and its short form for output.
 ///
-/// An extension trait rather than a bag of free functions, because the three are one cohesive family over
+/// An extension trait rather than a bag of free functions, because the two are one cohesive family over
 /// a type this crate cannot own an inherent impl on (it lives in nauthy, so the orphan rule forbids one).
 /// At the call site `link.dial_node()` then reads as the link's own behaviour, which is what it is, and
 /// the cap-to-node conversion stays here instead of being re-implemented in every caller that would
-/// otherwise have to reach into nauthy itself.
+/// otherwise have to reach into nauthy itself. The cap itself is NOT one of these: `Link::cap` is the
+/// link's own accessor, and a same-named extension method would silently shadow it.
 pub trait LinkExt {
     /// The node this link self-addresses: the cap's ROOT key as a bifrost [`NodeId`], the node a connector
     /// dials when the link IS the peer. The same target
@@ -34,12 +34,6 @@ pub trait LinkExt {
     /// The short form for output: the root key's short id, uniform with a raw key's short form, so a link
     /// peer and a key peer print the same way.
     fn short(&self) -> String;
-
-    /// The decoded capability, for a local check that needs a caveat the link text does not surface (the
-    /// fleet a signet-bound slip pins). A link keeps its parsed cap private, so this decodes the text
-    /// again; it verified at construction and cannot have changed since, so a failure here is a bug rather
-    /// than a caller error, which is why the `Result` is surfaced rather than hidden behind a panic.
-    fn cap(&self) -> Result<Cap, nauthy::CapError>;
 }
 
 impl LinkExt for Link {
@@ -49,10 +43,6 @@ impl LinkExt for Link {
 
     fn short(&self) -> String {
         self.dial_node().short()
-    }
-
-    fn cap(&self) -> Result<Cap, nauthy::CapError> {
-        Cap::parse(self.as_str())
     }
 }
 
@@ -77,25 +67,11 @@ pub enum Credential {
         /// A delegate's explicit `--present` slip, if given; it overrides the default member badge. The
         /// ONLY surviving `Option` on this path, and an honest one (the user optionally overrode), not
         /// "the author forgot".
-        ///
-        /// Boxed for the same reason [`Resolved`](crate::reaching::Resolved) boxes its links: a parsed
-        /// link carries its whole decoded cap, so inline it would dwarf the [`Anonymous`](Self::Anonymous)
-        /// arm and make every `Credential` pay for a slip most dials do not carry. Construct through
-        /// [`family`](Self::family), which owns that indirection.
-        present: Option<Box<Link>>,
+        present: Option<Link>,
     },
 }
 
 impl Credential {
-    /// A family dial presenting `present` (a `--present` slip or a self-addressing link peer) if the verb
-    /// resolved one, else the default member badge. The one home of the slip's indirection, so a verb
-    /// hands over the link it holds and never spells the representation.
-    pub fn family(present: Option<Link>) -> Self {
-        Self::Family {
-            present: present.map(Box::new),
-        }
-    }
-
     /// The identity a verb with this credential must bind under. This is the ONLY place the
     /// identity/badge coupling lives, so a `Family` credential is always `PersistedIfPresent` (its badge
     /// roots at the dialing key) and an `Anonymous` one is always `Ephemeral`. `serve`/`tunnel-connect`

@@ -92,7 +92,10 @@ credential is never written to it. The `quirk+noise` spelling, below, is the opt
 `quirk+noise` runs a Noise handshake over the same backend and proves the reached key, so the SAME
 rooted gate arms here. It is still direct-only, so `serve` prints the address it is reachable at:
 
-<!-- capture: scripts/demo.sh serve-quirk-noise -->
+<!-- The `direct` lane below is stale: the bind-truth fix deleted the "reachable on this machine
+     only" line and a wildcard bind now announces real addresses. Re-capture needs the harness to
+     normalize a host address the way it already normalizes keys and ports. -->
+<!-- pending live-run: scripts/demo.sh serve-quirk-noise -->
 ```console
 $ swoosh serve --transport quirk+noise
 swoosh ready

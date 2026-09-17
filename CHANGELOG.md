@@ -4,7 +4,19 @@ All notable changes to swoosh, newest first.
 
 ## Unreleased
 
+### Changed
+- **The sibling pins move forward together.** bifrost, nauthy, tightbeam, and the service engines (fetch,
+  measure, sshh, transfer) are each pinned to a newer revision, so a build of this version records exactly
+  the revision set the address fix below is built on.
+
 ### Fixed
+- **The readiness banner reports the addresses this node was actually announced at.** A node bound to every
+  interface advertised the loopback rewrite of that bind, so a peer that heard it was sent back to its own
+  machine, and the banner printed `reachable on this machine only` over an address it could not back.
+  Discovery now takes the sockets the transport really bound: a bind to every interface is announced at this
+  host's own addresses, a bind to `127.0.0.1` is announced exactly as bound, and the banner's `local` line
+  names the outcome it observed, whether that is the addresses it announced at, this host alone, or finding
+  peers while announcing nothing, with the cause. An address no peer could dial is no longer printed at all.
 - **A corrupt stored membership badge fails closed.** A `<home>/badge` that is not a usable `sheer:` link now refuses every family dial and a plain `adopt` with the fix named (`swoosh adopt --force <invite>`, or move the file aside), instead of being carried to the peer and refused there.
 
 ## v0.9.1
