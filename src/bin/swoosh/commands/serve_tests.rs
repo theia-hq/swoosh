@@ -67,9 +67,13 @@ fn entry_open(name: &str, kind: TargetKind, metering: Option<Metering>) -> Manif
 }
 
 /// The address a test node is heard at: routable, never loopback, so every rendered address is one a peer
-/// could actually dial. Deliberately NOT the routable dial hint the direct-channel tests use, so each
-/// lane's assertion can only be satisfied by its own lane.
+/// could actually dial. The direct lane reads this same advertised set (it is the only expansion of a
+/// wildcard bind this process has), so under a direct-only bind it is the address the lane hands over.
 const HEARD_AT: &str = "192.168.1.40:58131";
+
+/// The dial hint a WILDCARD bind reports: the transport rewrites `0.0.0.0:p` to loopback for a same-host
+/// dialer. swoosh has no bind flag, so this is the shape of `hints` on every real serve.
+const WILDCARD_HINT: &str = "127.0.0.1:58131";
 
 /// A live advertisement other hosts can hear, at one routable address: the ordinary outcome for the banner
 /// tests that are about posture rather than discovery.
@@ -410,10 +414,9 @@ fn the_unmetered_caveat_derives_from_the_bound_metering() {
 }
 
 /// The reach section flips the local line to a next-step down-state when mDNS is unavailable, and a
-/// quirk node with a routable hint prints a `direct` channel with the address on its own copy-clean
-/// line.
+/// direct-only node prints a `direct` channel whose addresses each sit on their own line.
 #[test]
-fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
+fn the_reach_section_handles_blocked_mdns_and_the_direct_lane() {
     let blocked = reach_section(ReachKind::Internet, &MdnsState::Blocked, &n0(), &[]);
     assert!(blocked.contains("off; mDNS unavailable here"), "{blocked}");
     assert!(
@@ -421,36 +424,34 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
         "the down-state says what to do instead: {blocked}"
     );
 
-    let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
+    let hint: SocketAddr = WILDCARD_HINT.parse().expect("valid addr");
     let quirk = reach_section(
         ReachKind::DirectOnly,
         &heard_on_the_network(),
         &n0(),
-        &[routable],
+        &[hint],
     );
     assert!(
         !quirk.contains("internet"),
         "a direct-only node shows no internet channel: {quirk}"
     );
     assert!(quirk.contains("direct"), "{quirk}");
-    assert!(quirk.contains("hand a peer this address:"), "{quirk}");
-    assert!(quirk.contains("192.168.1.20:58131"), "{quirk}");
+    assert!(quirk.contains("hand a peer one of these:"), "{quirk}");
+    assert!(quirk.contains(HEARD_AT), "{quirk}");
 
-    // A hint that only names this machine is never "hand a peer" material, and the scope claim now comes
-    // from the advertisement (which knows the bind) rather than from the hint (which cannot tell a
-    // wildcard bind from a deliberate loopback one).
-    let loop_addr: SocketAddr = "127.0.0.1:58131".parse().expect("valid addr");
+    // A node whose advertisement never left this machine still has an address: the bind's loopback one,
+    // which is what a second node on this machine dials. The lane says so, scope-marked.
     let local = reach_section(
         ReachKind::DirectOnly,
         &MdnsState::LoopbackOnly,
         &n0(),
-        &[loop_addr],
+        &[hint],
     );
     assert!(local.contains("mDNS on this host only"), "{local}");
-    assert!(!local.contains("hand a peer"), "{local}");
+    assert!(local.contains("hand a peer this address:"), "{local}");
     assert!(
-        !local.contains("127.0.0.1:58131"),
-        "an address no peer can dial is never printed: {local}"
+        local.contains(&format!("{WILDCARD_HINT}  (this machine only)")),
+        "the one address it has is loopback, and the mark says who it reaches: {local}"
     );
 }
 
@@ -587,13 +588,11 @@ fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
 
 /// A disabled discovery says so plainly: the readiness banner reports mDNS unavailable in both the
 /// local and the default (internet) glosses, never the `automatic; ... mDNS` lines it prints when the
-/// layer is live. The local down-state points at the direct address only when one is handable; with no
-/// handable hint it asks for a hint instead, and never claims no address exists (a wildcard bind whose
-/// mDNS never started has addresses nobody enumerated).
+/// layer is live. Under direct-only the down-state points at the direct lane unconditionally, because
+/// that lane always renders and always carries at least the bind's loopback address.
 #[test]
 fn a_disabled_discovery_says_so_plainly() {
-    let routable: SocketAddr = "192.168.1.20:58131".parse().expect("valid addr");
-    let loop_addr: SocketAddr = "127.0.0.1:58131".parse().expect("valid addr");
+    let hint: SocketAddr = WILDCARD_HINT.parse().expect("valid addr");
 
     for reach in [ReachKind::Internet, ReachKind::DirectOnly] {
         let banner = render_ready_banner(
@@ -601,7 +600,7 @@ fn a_disabled_discovery_says_so_plainly() {
             reach,
             &MdnsState::Blocked,
             &n0(),
-            &[routable],
+            &[hint],
             &default_manifest(),
             &default_targets(),
             &HashSet::new(),
@@ -619,34 +618,21 @@ fn a_disabled_discovery_says_so_plainly() {
         );
     }
 
-    let handable = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &[routable],
+    // mDNS never started, so nothing enumerated this host's interfaces: the bind still has the one
+    // address the transport reported, and the down-state points at it rather than asking the operator
+    // to find a hint they were never given.
+    let blocked = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &[hint]);
+    assert!(
+        blocked.contains("hand a peer the address below"),
+        "the down-state points at the lane that always renders: {blocked}"
     );
     assert!(
-        handable.contains("hand a peer the address below"),
-        "a routable hint is the handable next-step: {handable}"
-    );
-
-    let loopback = reach_section(
-        ReachKind::DirectOnly,
-        &MdnsState::Blocked,
-        &n0(),
-        &[loop_addr],
+        blocked.contains(&format!("{WILDCARD_HINT}  (this machine only)")),
+        "and the lane below it carries that address, scope-marked: {blocked}"
     );
     assert!(
-        !loopback.contains("hand a peer"),
-        "with no handable hint there is no address on this banner to point at: {loopback}"
-    );
-    assert!(
-        loopback.contains("a peer needs a direct address hint"),
-        "the down-state names the next step instead of pointing below: {loopback}"
-    );
-    assert!(
-        !loopback.contains("127.0.0.1:58131"),
-        "an address no peer can dial is never printed: {loopback}"
+        !blocked.contains("a peer needs a direct address hint"),
+        "the fork that asked for a hint is gone: {blocked}"
     );
 }
 
@@ -663,6 +649,84 @@ fn an_advertised_node_names_the_addresses_it_is_heard_at() {
     assert!(
         !section.contains("LAN"),
         "the banner states the addresses it observed and promises no reach: {section}"
+    );
+}
+
+/// THE defect the direct lane exists to kill. swoosh has no bind flag, so every bind is wildcard, and a
+/// wildcard bind's dial hint is rewritten to loopback by the transport; reading that hint as the set to
+/// hand over filtered the ONLY lane that carries an address out of every direct-only banner, for a
+/// transport with no relay and no NAT traversal. The lane now renders the bind's DIALABLE set, off-host
+/// addresses first and loopback last under its scope mark, and the `local` lane keeps its outcome
+/// sentence alone so one banner holds one address list.
+#[test]
+fn a_wildcard_direct_bind_hands_over_its_dialable_addresses() {
+    let hint: SocketAddr = WILDCARD_HINT.parse().expect("valid addr");
+    let section = reach_section(
+        ReachKind::DirectOnly,
+        &heard_on_the_network(),
+        &n0(),
+        &[hint],
+    );
+
+    assert!(
+        section.contains("  direct   hand a peer one of these:\n"),
+        "a direct-only bind always renders the lane that hands an address over: {section}"
+    );
+    let addresses: Vec<String> = section
+        .lines()
+        .skip_while(|line| !line.starts_with("  direct"))
+        .skip(1)
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        addresses,
+        [
+            format!("           {HEARD_AT}"),
+            format!("           {WILDCARD_HINT}  (this machine only)"),
+        ],
+        "off-host first at the gloss column, loopback last and scope-marked: {section}"
+    );
+
+    // One banner, one address list: the announced set is a subset of the lane above, so repeating it on
+    // the local lane would ask the operator which of two lists to take an address from.
+    assert!(
+        !section.contains("announced at:"),
+        "the local lane drops its address list under direct-only: {section}"
+    );
+    assert_eq!(
+        section.matches(HEARD_AT).count(),
+        1,
+        "each address is named exactly once: {section}"
+    );
+
+    // The standing width: no line on this banner is wider than the `local` line.
+    let local_width = section
+        .lines()
+        .find(|line| line.starts_with("  local"))
+        .map(|line| line.chars().count())
+        .expect("the local lane renders");
+    assert!(
+        section
+            .lines()
+            .all(|line| line.chars().count() <= local_width),
+        "the lane stays inside the banner width budget ({local_width}): {section}"
+    );
+
+    // An advertisement that never left this machine enumerated no interface address, so the lane hands
+    // over the one address the bind does have rather than rendering a header over nothing.
+    let alone = reach_section(
+        ReachKind::DirectOnly,
+        &MdnsState::LoopbackOnly,
+        &n0(),
+        &[hint],
+    );
+    assert!(
+        alone.contains("  direct   hand a peer this address:\n"),
+        "the lane renders whatever the bind has: {alone}"
+    );
+    assert!(
+        !alone.contains(HEARD_AT),
+        "and never an address this bind never advertised: {alone}"
     );
 }
 
@@ -958,9 +1022,10 @@ fn plain_serve_creates_no_runtime_state() {
 
 /// `serve --local` must keep the node's address: the bind takes the PERSISTED key, so two runs report
 /// the same NodeId the `identity` verb prints, never a fresh key per run. The banner also prints only
-/// addresses a peer could dial: never the unspecified socket, never one that names the dialer's own
-/// machine. Its local gloss reports the advertisement that actually happened: one of the started
-/// outcomes, or the off-state when the run warned mDNS could not start (read off the same run's stderr).
+/// addresses a peer could dial: never the unspecified socket, and loopback only under the mark that
+/// says it reaches a peer on this machine. Its local gloss reports the advertisement that actually
+/// happened: one of the started outcomes, or the off-state when the run warned mDNS could not start
+/// (read off the same run's stderr).
 #[test]
 fn serve_local_keeps_the_persisted_key_across_two_runs() {
     let scratch = ProcessScratch::new("local-key");
@@ -1054,9 +1119,16 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
             !stdout.contains("reachable on this machine only"),
             "the scope claim the dial hints could not back is gone for every bind: {stdout}"
         );
+        // A direct-only bind has no relay and no NAT traversal, so the banner owes it an address: the
+        // one every wildcard bind always has is loopback, printed under the mark that says who it
+        // reaches. The mark is what the bind can back, unlike the old blanket scope claim above.
         assert!(
-            !stdout.contains("127.0.0.1"),
-            "an address that names the dialer's own machine is never printed: {stdout}"
+            stdout.contains("127.0.0.1"),
+            "a direct-only bind hands over the address a peer on this machine dials: {stdout}"
+        );
+        assert!(
+            stdout.contains("  (this machine only)"),
+            "and marks whose machine that address reaches: {stdout}"
         );
     }
 }

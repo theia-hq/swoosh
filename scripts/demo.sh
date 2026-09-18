@@ -34,11 +34,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-BIN="${SWOOSH_BIN:-./target/debug/swoosh}"
-if [ ! -x "$BIN" ]; then
-  echo "building swoosh..." >&2
-  cargo build
+# ASK CARGO where the binary lands rather than assuming `./target`. A checkout inside a workspace that
+# sets its own `target-dir` (this project's container does, to share one build across sibling repos) puts
+# it somewhere else entirely, and the assumed path then still holds whatever stale binary was last built
+# there. That is worse than a missing one: the demo runs, passes, and proves nothing about the code in
+# front of you. A plain clone of this repo alone resolves to `./target/debug` exactly as before.
+if [ -z "${SWOOSH_BIN:-}" ]; then
+  TARGET_DIR="$(cargo metadata --no-deps --format-version 1 \
+    | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
+  BIN="${TARGET_DIR:-./target}/debug/swoosh"
+else
+  BIN="$SWOOSH_BIN"
 fi
+echo "building swoosh..." >&2
+cargo build
+[ -x "$BIN" ] || { echo "demo: no swoosh binary at $BIN after a build" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
 SERVE_PID=""
@@ -72,7 +82,15 @@ start_server() {
   # The key is always in the banner; the address only appears on the direct
   # (quirk) spellings, so a miss there is expected and not a failure.
   SERVER_KEY="$(grep -m1 -oE 'bf01[a-z0-9]+' "$out" || true)"
-  SERVER_ADDR="$(grep -m1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+' "$out" || true)"
+  # LOOPBACK FIRST, deliberately. Both nodes in this demo run on this machine, and the banner's direct
+  # lane lists the LAN address ahead of loopback because it is ordered for the common case, a peer on
+  # another host. Taking the first address would hand this script the LAN one, which is the address that
+  # does not work here: a platform that gates a binary from the local network refuses it while loopback
+  # is never gated. Fall back to the first address only when the bind offered no loopback line at all.
+  SERVER_ADDR="$(grep -m1 -oE '127\.0\.0\.1:[0-9]+' "$out" || true)"
+  if [ -z "$SERVER_ADDR" ]; then
+    SERVER_ADDR="$(grep -m1 -oE '([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+' "$out" || true)"
+  fi
 }
 
 # Stop the running server (by its exact PID) and clear SERVE_PID.
