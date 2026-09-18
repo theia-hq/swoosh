@@ -27,6 +27,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
+// The expansion of THIS bind into the sockets it answers on. Its `Reach` stays qualified at every
+// use below: swoosh's own `Reach` (the relay and resolver this bind runs on) is in scope in this
+// file, and two types of that name unqualified would read as one.
+use bifrost_mdns::Dialable;
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::{FileDenylist, Service};
@@ -445,12 +449,17 @@ impl ServeCmd {
             let runtime_root = swoosh::home::runtime_root()
                 .map_err(|error| eyre::eyre!("could not resolve the runtime root: {error}"))?;
             let addr = node.local_addr();
+            // The status address is the first entry of the bind's own dialable set, the address the
+            // banner leads with: a peer elsewhere can route to it where one exists, and it falls back
+            // to loopback on a host that has nothing else. `local_addr().hints` cannot stand in, since
+            // it rewrites every wildcard bind to loopback.
+            let dialable = Dialable::of(node.bound_sockets());
             Some(self.resident_parts(
                 &home,
                 &runtime_root,
                 tightbeam::tunnel::ServiceCatalog::clone(&catalog),
                 addr.node,
-                addr.hints.first().copied(),
+                dialable.all().first().map(|at| at.socket),
                 &cancel,
             )?)
         } else {
@@ -458,10 +467,12 @@ impl ServeCmd {
         };
 
         if !self.quiet {
-            // The banner reads its own `local_addr` snapshot beside the one the resident arm already
-            // carried: a plain serve (resident `None`) reads exactly once here, as today, and the
-            // resident arm carries the status `addr` from the same bound node.
+            // The banner reads its own snapshot beside the one the resident arm already carried: a
+            // plain serve (resident `None`) reads exactly once here, as today, and the resident arm
+            // carries the status `addr` from the same bound node. The id comes from `local_addr`; the
+            // addresses to hand over come from bind truth, expanded through this host's interfaces.
             let addr = node.local_addr();
+            let dialable = Dialable::of(node.bound_sockets());
             // A display map of served name -> target address, read off the SAME requested strings the router
             // bound (fetch already de-merged out), so the banner renders `name -> target` from what the
             // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
@@ -509,7 +520,7 @@ impl ServeCmd {
                     reach,
                     mdns,
                     &self.bound_reach,
-                    &addr.hints,
+                    &dialable,
                     &manifest,
                     &addr_by_name,
                     &fetch_names,
@@ -868,16 +879,16 @@ fn is_forward(addr: &str) -> bool {
 #[expect(
     clippy::too_many_arguments,
     reason = "the banner is assembled from independent facts (id, reach kind, mDNS state, the bound \
-              relay and resolver, hints, the declared manifest, swoosh's display map, the fetch names, \
-              the stop line); bundling them into one struct would only move the argument list, not \
-              remove it"
+              relay and resolver, the bind's dialable set, the declared manifest, swoosh's display map, \
+              the fetch names, the stop line); bundling them into one struct would only move the \
+              argument list, not remove it"
 )]
 fn render_ready_banner(
     node_id: &str,
     reach: ReachKind,
     mdns: &MdnsState,
     bound_reach: &Reach,
-    hints: &[SocketAddr],
+    dialable: &Dialable,
     manifest: &[ManifestEntry],
     addr_by_name: &HashMap<String, String>,
     fetch_names: &HashSet<String>,
@@ -889,7 +900,7 @@ fn render_ready_banner(
     // The FULL node id, alone, indented, blank-framed, no trailing gloss (a trailing label would spoil a
     // select-to-end-of-line copy). The next section explains what the key is for.
     out.push_str(&format!("    {node_id}\n\n"));
-    out.push_str(&reach_section(reach, mdns, bound_reach, hints));
+    out.push_str(&reach_section(reach, mdns, bound_reach, dialable));
     out.push('\n');
     out.push_str(&serving_section(manifest, addr_by_name, fetch_names));
     out.push('\n');
@@ -920,12 +931,14 @@ fn reach_section(
     reach: ReachKind,
     mdns: &MdnsState,
     bound_reach: &Reach,
-    hints: &[SocketAddr],
+    dialable: &Dialable,
 ) -> String {
-    // The lane is the bind's dialable set, never `hints()`: the hint rewrite is a dial-side convenience
-    // that turns a wildcard bind into loopback, and reading it as the set to hand out filtered the lane
-    // away on every bind swoosh can make (there is no bind flag, so every bind is wildcard).
-    let dialable = matches!(reach, ReachKind::DirectOnly).then(|| Dialable::of(mdns, hints));
+    // The lane renders on every direct-only bind, off the BIND's own expansion. Never off `hints()`
+    // (a dial-side convenience that rewrites a wildcard to loopback, which filtered the lane away on
+    // every bind swoosh can make, since there is no bind flag) and never off the mDNS report, which
+    // says how far an ANNOUNCEMENT reached: on a network that blocks multicast that report is empty
+    // while the host's addresses are exactly as dialable as ever.
+    let direct = matches!(reach, ReachKind::DirectOnly);
     // Where the node's addresses go. EVERY internet bind publishes them, so every internet bind says so:
     // the default is the one nobody chose, and telling an operator about the mDNS announcement on their
     // LAN while staying quiet about the public one would disclose the smaller thing and hide the larger.
@@ -962,7 +975,7 @@ fn reach_section(
         labels.push("relay");
     }
     labels.push("local");
-    if dialable.is_some() {
+    if direct {
         labels.push("direct");
     }
     let width = labels.iter().map(|l| l.len()).max().unwrap_or(0);
@@ -1024,70 +1037,74 @@ fn reach_section(
     for addr in announced {
         out.push_str(&format!("{:gloss_col$}{addr}\n", ""));
     }
-    if let Some(dialable) = &dialable {
-        out.push_str(&reach_line(width, gutter, "direct", dialable.gloss()));
-        out.push_str(&dialable.lines(gloss_col));
+    if direct {
+        out.push_str(&direct_lane(dialable, width, gutter, gloss_col));
     }
     out
 }
 
-/// The addresses a direct-only bind can be dialed at, in the order the `direct` lane hands them over:
-/// every address that reaches this host from another machine first, then loopback last.
+/// The `direct` lane: the gloss that says what to DO with the lines, then one address per line.
 ///
-/// The ORDER is the invariant, established once in [`Self::of`] and relied on by [`Self::lines`], so the
-/// lane can never lead with the one address that only works for a peer already on this machine.
-struct Dialable(Vec<SocketAddr>);
-
-impl Dialable {
-    /// Read the dialable set off the facts a bound node already has.
-    ///
-    /// The off-host half comes from the mDNS advertisement: expanding a wildcard bind into this host's
-    /// interface addresses is work the advertisement already did, and it is the only place in this process
-    /// that has done it. A bind whose advertisement never reached past this machine has no enumerated
-    /// interface address to offer, so it hands over loopback alone rather than guessing at one.
-    ///
-    /// Loopback comes from the bind's own hints, which is where the port lives. It is printed rather than
-    /// dropped: it is what demonstrably works for a second node on this machine, and that is the case the
-    /// walkthroughs actually run.
-    fn of(mdns: &MdnsState, hints: &[SocketAddr]) -> Self {
-        let mut addrs = match mdns {
-            // Non-loopback and off-host by construction (`HostAddrs::expand` drops loopback and link-local),
-            // so this half never needs re-filtering here.
-            MdnsState::OnLan(announced) => announced.clone(),
-            MdnsState::LoopbackOnly | MdnsState::BrowseOnly(_) | MdnsState::Blocked => Vec::new(),
-        };
-        addrs.extend(hints.iter().filter(|addr| addr.ip().is_loopback()));
-        Self(addrs)
-    }
-
-    /// The lane's gloss: what the operator is meant to DO with the lines under it.
-    fn gloss(&self) -> &'static str {
-        match self.0.len() {
-            // Unreachable on any bind that came up (a bound socket reports its address, and loopback alone
-            // is still an address), stated rather than left to render a header over nothing.
-            0 => "the bind reported no address to hand over",
-            1 => "hand a peer this address:",
-            _ => "hand a peer one of these:",
-        }
-    }
-
-    /// One address per line at the gloss column, the address leading each line so a copy starts clean.
-    ///
-    /// Loopback carries a scope mark: it names the DIALER's own machine, so it reaches a peer on this
-    /// machine and nobody else, and handing it to a peer elsewhere fails in a way the banner should have
-    /// warned about. Every other address is bare.
-    fn lines(&self, gloss_col: usize) -> String {
-        let mut out = String::new();
-        for addr in &self.0 {
-            let scope = if addr.ip().is_loopback() {
-                "  (this machine only)"
-            } else {
-                ""
+/// A rendering adapter over a type that lives in a lower crate, which is why it is a function and not a
+/// method: the order and the marks are the expansion's facts, and this only spells them.
+///
+/// The ORDER comes from the expansion ([`Dialable::all`]): everything a peer elsewhere can route to
+/// first, then a tunnel address, then loopback last, so the lane can never lead with the one address
+/// that works only for a peer already on this machine.
+///
+/// EVERY line carries a mark, the widest included. A bare line reads as the default and there is no
+/// default: this host cannot know where the operator's peer is, so it states how far each address goes
+/// and leaves the choosing to the one person who does know. It was bare for the widest class once, and
+/// the result was a real banner where four of eight lines claimed the widest reach and two had it: a
+/// private address and a unique-local one look nothing alike and behave identically, while a
+/// unique-local and a global v6 look alike and do not.
+///
+/// The marks align in a column so the classes scan against each other rather than ragged against the
+/// addresses, and the padding sits BEFORE the mark, so a copy that ends at the address is still clean.
+fn direct_lane(dialable: &Dialable, width: usize, gutter: usize, gloss_col: usize) -> String {
+    let gloss = match dialable.all().len() {
+        // Unreachable on any bind that came up (a bound socket answers at loopback at the very least),
+        // stated rather than left to render a header over nothing.
+        0 => "the bind reported no address to hand over",
+        1 => "hand a peer this address:",
+        _ => "hand a peer one of these:",
+    };
+    let mut out = reach_line(width, gutter, "direct", gloss);
+    let rows: Vec<(String, &'static str, String)> = dialable
+        .all()
+        .iter()
+        .map(|at| {
+            let (mark, link) = match &at.reach {
+                // Four marks that read as one family, so the classes scan against each other:
+                // anywhere, this network, over <link>, this machine. Terse on purpose. An IPv6
+                // address is 46 columns before the mark, and the longest phrasing of these pushed
+                // the line to 82, which wraps an 80-column terminal and destroys the alignment the
+                // marks exist for.
+                bifrost_mdns::Reach::Internet => ("anywhere", String::new()),
+                bifrost_mdns::Reach::Network => ("this network", String::new()),
+                bifrost_mdns::Reach::Tunnel { link } => ("over", format!(" {link}")),
+                bifrost_mdns::Reach::ThisMachine => ("this machine", String::new()),
             };
-            out.push_str(&format!("{:gloss_col$}{addr}{scope}\n", ""));
-        }
-        out
+            (at.socket.to_string(), mark, link)
+        })
+        .collect();
+    // One column for the marks, measured over the addresses actually being printed rather than a fixed
+    // budget: an IPv6 line is far wider than an IPv4 one and a fixed column would either waste the
+    // banner's width on every v4-only host or wrap on every v6 one.
+    let addr_col = rows
+        .iter()
+        .map(|(addr, _, _)| addr.len())
+        .max()
+        .unwrap_or(0);
+    for (addr, mark, link) in &rows {
+        // The address leads each line so a copy starts clean, at the gloss column, the same standard the
+        // node id is held to.
+        out.push_str(&format!(
+            "{:gloss_col$}{addr:<addr_col$}  ({mark}{link})\n",
+            ""
+        ));
     }
+    out
 }
 
 /// One `how peers reach you` line: `  <label padded>   <gloss>`.

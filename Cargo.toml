@@ -27,21 +27,21 @@ ssh = ["dep:sshh"]
 # locally regardless of the rev; CI (no parent config) resolves the rev from GitHub. All bifrost-* crates
 # live in one repo, so they share one rev. Bump these deliberately each release (see the reproducible-build
 # gate in .github/workflows/release.yml and the lock-regen step in notes/02-DECISIONS.md).
-bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "70a7c7e122300a9956874af76873950b24fc1dda" }
-bifrost-core = { git = "https://github.com/theia-hq/bifrost", rev = "70a7c7e122300a9956874af76873950b24fc1dda" }
-bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "70a7c7e122300a9956874af76873950b24fc1dda" }
-bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "70a7c7e122300a9956874af76873950b24fc1dda" }
-bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "70a7c7e122300a9956874af76873950b24fc1dda" }
-bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "70a7c7e122300a9956874af76873950b24fc1dda" }
-nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "fcd30ccd295aee03a7b0b12de4ebf4b8b7e09d54" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "652c8392c82510678d1fc4d4f8bb34107df7cb5a" }
+bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "21ea41f13ea5dedfc95c98e7f01234c38fe11b74" }
+bifrost-core = { git = "https://github.com/theia-hq/bifrost", rev = "21ea41f13ea5dedfc95c98e7f01234c38fe11b74" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "21ea41f13ea5dedfc95c98e7f01234c38fe11b74" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "21ea41f13ea5dedfc95c98e7f01234c38fe11b74" }
+bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "21ea41f13ea5dedfc95c98e7f01234c38fe11b74" }
+bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "21ea41f13ea5dedfc95c98e7f01234c38fe11b74" }
+nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "f2ad714070ced87f91dae5275d30e9b2fa10e3dd" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "3efcb23cfa6e66a0a3ea049e501cef5081b9357e" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "47c641804cbc0a49fe528f48a9595f32504ba25b" }
-measure = { git = "https://github.com/theia-hq/services", rev = "47c641804cbc0a49fe528f48a9595f32504ba25b" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "47c641804cbc0a49fe528f48a9595f32504ba25b", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "47c641804cbc0a49fe528f48a9595f32504ba25b" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "96e980014c5f8a73c20a591b72471561bfc4940b" }
+measure = { git = "https://github.com/theia-hq/services", rev = "96e980014c5f8a73c20a591b72471561bfc4940b" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "96e980014c5f8a73c20a591b72471561bfc4940b", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "96e980014c5f8a73c20a591b72471561bfc4940b" }
 
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
@@ -63,7 +63,7 @@ zeroize = { version = "1", features = ["derive"] }
 [dev-dependencies]
 # The in-process transport the `gated_measure` proof drives: two mem nodes share a global registry, so a
 # client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "70a7c7e122300a9956874af76873950b24fc1dda" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "21ea41f13ea5dedfc95c98e7f01234c38fe11b74" }
 
 # `test-util` gives the control-client deadline test tokio's paused clock, so the 5 s read bound is
 # asserted without a wall-clock wait. Dev-only: the shipped binary never compiles it in.
