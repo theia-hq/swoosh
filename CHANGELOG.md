@@ -13,11 +13,21 @@ Reach a relay and a resolver you run yourself, and a banner that tells the truth
   n0's.
 
 ### Changed
+- **A relayed path can turn direct, and the docs now say so.** No behaviour change: a session that starts
+  through a relay upgrades to a direct path the moment a hole punch lands, so `swoosh status` can read
+  `relayed` on one run and `direct` on the next. That read as a fault to a first-time reader.
 - **The sibling pins move forward together.** bifrost, nauthy, tightbeam, and the service engines (fetch,
   measure, sshh, transfer) are each pinned to a newer revision, so a build of this version records exactly
   the revision set the address fix below is built on.
 
 ### Fixed
+- **The published checksum verifies with the command people actually type.** Each release asset's
+  `.sha256` file now carries the standard two-field line (the hash, then the file it names), so
+  `shasum -a 256 -c swoosh-<target>.sha256` works on a downloaded asset. It previously held a bare hash,
+  which that command rejects; the installer had been rebuilding the line itself, so nothing here caught it.
+- **`--at` says what it does.** Its help line gave only the value grammar, so the bare form of `stop` and
+  `service ls` read as an omission rather than the default. The short line now names the flag's job and the
+  long line keeps the grammar and states the bare form.
 - **The readiness banner reports the addresses this node was actually announced at.** A node bound to every
   interface advertised the loopback rewrite of that bind, so a peer that heard it was sent back to its own
   machine, and the banner printed `reachable on this machine only` over an address it could not back.

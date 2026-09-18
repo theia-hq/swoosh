@@ -21,7 +21,7 @@ pub use toggle::ServiceToggleCmd;
 /// Read, enable, or disable this node's services (or read a peer's with `service ls --at <peer>`).
 #[derive(Debug, Subcommand)]
 pub enum ServiceCmd {
-    /// List the served menu (bare: your own node; `--at <peer>`: a peer).
+    /// List the served menu: your own node, or a peer's with `--at`.
     // Boxed because `ls` is the only leaf here that reaches a peer, so it carries the whole reach
     // flag set, and two of those flags are parsed URLs (a relay and a resolver) that are large by
     // value; inline, every `service enable`/`disable` would pay for them

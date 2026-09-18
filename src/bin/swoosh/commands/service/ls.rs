@@ -26,11 +26,17 @@ use swoosh::transport::ReachArgs;
 use tightbeam::tunnel;
 use tokio::io::AsyncReadExt as _;
 
-/// List the served menu (bare: your own node; `--at <peer>`: a peer)
+/// List the served menu: your own node, or a peer's with `--at`
 #[derive(Debug, Args)]
 pub struct ServiceLsCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
-    #[arg(long, value_name = "peer")]
+    /// list a peer's menu rather than your own
+    #[arg(
+        long,
+        value_name = "peer",
+        long_help = "list a peer's menu rather than your own\n\
+                     Bare `swoosh service ls` lists the menu of the node running on this machine.\n\
+                     A peer is a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link."
+    )]
     pub at: Option<Peer>,
     /// present a `sheer:` capability link to reach a gated peer
     #[arg(

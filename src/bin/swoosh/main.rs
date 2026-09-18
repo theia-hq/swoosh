@@ -85,7 +85,7 @@ struct Cli {
 enum Command {
     /// Serve services on this machine; peers you admit reach them.
     Serve(serve::ServeCmd),
-    /// Stop a node (stop it serving): bare stops your own node, `--at <peer>` stops a peer's.
+    /// Stop a node (stop it serving): your own, or a peer's with `--at`.
     Stop(stop::StopCmd),
     /// Read, enable, or disable this node's services (`ls`/`enable`/`disable`; `ls --at <peer>` reads a peer).
     #[command(subcommand)]
