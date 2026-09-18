@@ -49,14 +49,14 @@ names its own.
 Either flag stands alone. `--relay` without `--resolver` leaves finding a peer to n0, and the banner says
 so:
 
-<!-- pending live-run: needs iroh-relay on a host with a public certificate -->
+<!-- pending live-run: needs iroh-relay on a host with a public certificate; 192.168.x.x stands in for the announced LAN address -->
 ```text
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
   records    n0's public discovery: your addresses, for anyone with your key
   relay      https://relay.example/
   local      automatic; your devices just need the key (mDNS), announced at:
-             192.168.1.24:58131
+             192.168.x.x:58131
 ```
 
 An `iroh-relay` relays for anyone by default. Its `access` setting names the node ids allowed to relay;
@@ -84,9 +84,9 @@ there is no fallback.
 
 Because it is direct-only, a `quirk+noise` `serve` prints the address the peer needs:
 
-<!-- The `direct` lane below is stale: the bind-truth fix deleted the "reachable on this machine
-     only" line and a wildcard bind now announces real addresses. Re-capture needs the harness to
-     normalize a host address the way it already normalizes keys and ports. -->
+<!-- The `direct` lane below no longer renders: a wildcard bind holds no routable hint, so the
+     announced LAN address on the `local` lane is the only address this banner offers a peer. The
+     surrounding prose says `serve` prints the address the peer needs; settle that, then capture. -->
 <!-- pending live-run: swoosh serve --transport quirk+noise -->
 ```console
 $ swoosh serve --transport quirk+noise

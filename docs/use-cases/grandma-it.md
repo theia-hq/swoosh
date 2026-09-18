@@ -36,7 +36,7 @@ stored your membership badge: this device now reaches your gated services.
 An invite is a token, not proof of who sent it: compare that signet with the owner out of band before
 serving.
 
-<!-- capture: swoosh serve ssh=sshd: -->
+<!-- live-run: the announced LAN address is this host's, one line each; 192.168.x.x stands in for yours -->
 ```console
 $ swoosh serve ssh=sshd:
 swoosh ready
@@ -46,7 +46,8 @@ swoosh ready
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
   records    n0's public discovery: your addresses, for anyone with your key
-  local      automatic; your devices just need the key (mDNS)
+  local      automatic; your devices just need the key (mDNS), announced at:
+             192.168.x.x:58131
 
 serving
   family-gated   your devices + peers you've granted

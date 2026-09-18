@@ -27,10 +27,7 @@ build-provenance attestation (`gh attestation verify`).
 
 On the machine you want to reach, open two diagnostics to anyone and note the key it prints:
 
-<!-- The `local` lane below is stale: a wildcard bind now appends "announced at:" and the real
-     addresses. Re-capture needs the harness to normalize a host address the way it already
-     normalizes keys and ports. -->
-<!-- pending live-run: swoosh serve --public ping,speed -->
+<!-- live-run: the announced LAN address is this host's, one line each; 192.168.x.x stands in for yours -->
 ```console
 $ swoosh serve --public ping,speed
 swoosh ready
@@ -40,7 +37,8 @@ swoosh ready
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
   records    n0's public discovery: your addresses, for anyone with your key
-  local      automatic; your devices just need the key (mDNS)
+  local      automatic; your devices just need the key (mDNS), announced at:
+             192.168.x.x:58131
 
 serving
   family-gated   your devices + peers you've granted

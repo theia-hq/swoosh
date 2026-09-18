@@ -8,7 +8,7 @@ named opt-out.
 
 Name the services you want public. Everything else stays [gated](../keys.md#the-gate):
 
-<!-- capture: swoosh serve --public ping,speed -->
+<!-- live-run: the announced LAN address is this host's, one line each; 192.168.x.x stands in for yours -->
 ```console
 $ swoosh serve --public ping,speed
 swoosh ready
@@ -18,7 +18,8 @@ swoosh ready
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
   records    n0's public discovery: your addresses, for anyone with your key
-  local      automatic; your devices just need the key (mDNS)
+  local      automatic; your devices just need the key (mDNS), announced at:
+             192.168.x.x:58131
 
 serving
   family-gated   your devices + peers you've granted
@@ -33,7 +34,7 @@ ctrl-c to stop
 Anyone with the key reaches the two public services and nothing else. There is no link to hand out and
 nothing to present:
 
-<!-- live-run: real iroh RTT over the internet, non-deterministic; re-capture before release -->
+<!-- live-run: real iroh RTT over the internet, non-deterministic; 135.129.x.x masks the peer's address; re-capture before release -->
 ```console
 $ swoosh ping bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -c 4
 bf01hcq6balrlxwa via iroh: mixed (direct to 135.129.x.x:56141 and relayed)
