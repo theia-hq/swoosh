@@ -208,6 +208,33 @@ done <<EOF
 $manifests
 EOF
 
+# (f): a lock block with NO `source` is a WORKSPACE member. Any other sourceless block is a path-patched
+# build's leak, and the checks above cannot see it: (a)/(b) iterate the git deps this repo's manifests
+# DECLARE, and a transitive-only sibling (tightbeam-handler, reached through tightbeam) is declared
+# nowhere here; (e) unions in the lock's git-sourced names, and a leaked block has no source to union on.
+# So a sibling that arrives only through another sibling could leak in as a path entry and pass both.
+# Enumerating the repo's own [package] names and calling every OTHER sourceless block a leak needs no
+# name list and cannot go stale.
+own=$(printf '%s\n' "$manifests" | while IFS= read -r m; do
+  [ -n "$m" ] || continue
+  read_indexed "$m" | grep -q '^\[package\]' || continue
+  read_indexed "$m" | sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+done | sort -u)
+sourceless=$(awk '
+  /^\[\[package\]\]/ { if (name != "" && !seen) print name; name = ""; seen = 0 }
+  /^name = "/ { name = $0; sub(/^name = "/, "", name); sub(/"$/, "", name) }
+  /^source = / { seen = 1 }
+  END { if (name != "" && !seen) print name }
+' "$LOCK_TMP" | sort -u)
+while IFS= read -r nm; do
+  [ -n "$nm" ] || continue
+  printf '%s\n' "$own" | grep -qx "$nm" && continue
+  echo "DRIFT $nm has a [[package]] block with NO source and is not a crate of this repo (a path-patched build leaked in); resolve patch-free outside theia-hq, then copy the lock back"
+  fail=1
+done <<EOF
+$sourceless
+EOF
+
 # BELT (spec §6): a theia [patch] belongs ONLY in the local umbrella .cargo/config.toml, never
 # committed inside a repo (a committed patch would re-introduce the ancestor-walk footgun in CI,
 # where the single-repo checkout must resolve git sources like an outsider). Check the committed
