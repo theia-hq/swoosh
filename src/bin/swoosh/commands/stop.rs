@@ -47,11 +47,17 @@ const STOP_PROBE_WINDOW: Duration = Duration::from_secs(3);
 /// The delay between probe dials inside [`STOP_PROBE_WINDOW`].
 const STOP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Stop a node (stop it serving): bare stops your own node, `--at <peer>` stops a peer's.
+/// Stop a node (stop it serving): your own, or a peer's with `--at`.
 #[derive(Debug, Args)]
 pub struct StopCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
-    #[arg(long, value_name = "peer")]
+    /// stop a peer's node rather than your own
+    #[arg(
+        long,
+        value_name = "peer",
+        long_help = "stop a peer's node rather than your own\n\
+                     Bare `swoosh stop` stops the node running on this machine.\n\
+                     A peer is a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link."
+    )]
     pub at: Option<Peer>,
     /// present a `sheer:` capability link to reach a gated peer
     #[arg(

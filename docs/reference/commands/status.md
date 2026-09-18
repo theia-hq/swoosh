@@ -13,6 +13,8 @@ Usage: swoosh status [OPTIONS] [peer]
 **Example.** `swoosh status desk` answers the one question a p2p link always raises: am I talking to
 the peer directly, or bouncing through a relay?
 
-**Things to know.** `mixed` means some paths are direct and some relayed while a session settles.
+**Things to know.** The path is read after the probe, so a hole punch has a round trip to land: the same
+peer can read `relayed` on one run and `direct` on the next. `mixed` means some paths are direct and some
+relayed while a session settles. [Why a path changes](../../transports.md#iroh).
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

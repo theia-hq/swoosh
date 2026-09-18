@@ -4,7 +4,7 @@ swoosh carries most connections three ways, chosen with `--transport`. The key i
 switching transports reaches the same peer. `swoosh ssh` is the one exception: it is iroh-only today
 and takes no `--transport`.
 
-## iroh (the default)
+## <a id="iroh"></a>iroh (the default)
 
 `iroh` is what you get with no flag. It finds and reaches peers across the internet, punching through
 NATs. You give it a key; it does the rest. Nothing to configure, no addresses to pass.
@@ -15,6 +15,11 @@ This is the transport for everyday use. Every [use case](use-cases/README.md) an
 Finding a peer and the relay fallback are iroh's: a serving node publishes where it can be reached to
 n0's public discovery service, and when a direct path fails, n0's public relays forward encrypted bytes
 they cannot read.
+
+A relayed path is not a settled one. A session can start relayed and upgrade to direct the moment a hole
+punch lands, so the same peer can read `relayed` on one run of
+[`swoosh status`](reference/commands/status.md) and `direct` on the next. That is the punch landing, not
+a fault, and either path is encrypted end to end.
 
 ## <a id="self-run"></a>Run the relay and the resolver yourself
 
