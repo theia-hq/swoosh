@@ -19,8 +19,12 @@ curl -fsSL https://raw.githubusercontent.com/theia-hq/swoosh/main/scripts/instal
 Downloads the right binary for your platform, verifies its checksum (and, with the GitHub CLI, its
 build-provenance attestation), and installs it to `~/.local/bin`. Prebuilt for x86_64 and aarch64
 Linux and Apple Silicon macOS. Prefer to do it yourself? Grab a binary from the
-[releases page](https://github.com/theia-hq/swoosh/releases); each carries a checksum and a
-build-provenance attestation (`gh attestation verify`).
+[releases page](https://github.com/theia-hq/swoosh/releases) and verify it yourself:
+
+```sh
+shasum -a 256 -c swoosh-aarch64-macos.sha256   # or sha256sum -c, on Linux
+gh attestation verify swoosh-aarch64-macos --repo theia-hq/swoosh
+```
 
 ## First reach
 

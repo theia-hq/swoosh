@@ -66,7 +66,10 @@ jobs:
       - name: package + checksum
         run: |
           cp "swoosh/target/${{ matrix.target }}/release/swoosh" "${{ matrix.asset }}"
-          shasum -a 256 "${{ matrix.asset }}" | awk '{print $1}' > "${{ matrix.asset }}.sha256"
+          # The standard two-field form (`<hash>  <filename>`), so `shasum -a 256 -c <asset>.sha256`
+          # works as typed. A bare hash makes the first thing a careful person does fail, and leaves them
+          # hand-comparing strings at exactly the moment they are deciding whether to trust us.
+          shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
       - name: attest build provenance
         # Keyless (sigstore/OIDC, no key to manage): records a signed provenance attestation binding this
         # binary to the workflow that built it. Verify with `gh attestation verify <bin> --repo theia-hq/swoosh`.

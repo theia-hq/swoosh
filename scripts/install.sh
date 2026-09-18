@@ -38,16 +38,18 @@ tmp=$(mktemp -d) || die "mktemp failed"
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 say "downloading ${asset} from the latest release..."
-curl -fsSL "${base}/${asset}" -o "${tmp}/${BIN}" || die "could not download ${asset}"
-curl -fsSL "${base}/${asset}.sha256" -o "${tmp}/${BIN}.sha256" || die "could not download the checksum"
+# Downloaded under the ASSET name, because the checksum file names the asset: `shasum -c` then works as
+# published, the same command a careful person runs by hand.
+curl -fsSL "${base}/${asset}" -o "${tmp}/${asset}" || die "could not download ${asset}"
+curl -fsSL "${base}/${asset}.sha256" -o "${tmp}/${asset}.sha256" || die "could not download the checksum"
 
 say "verifying checksum..."
-printf '%s  %s\n' "$(cat "${tmp}/${BIN}.sha256")" "${tmp}/${BIN}" | $SHA -c - >/dev/null 2>&1 \
+(cd "$tmp" && $SHA -c "${asset}.sha256" >/dev/null 2>&1) \
   || die "checksum mismatch: refusing to install"
 
 if command -v gh >/dev/null 2>&1; then
   say "verifying build provenance (gh attestation)..."
-  if gh attestation verify "${tmp}/${BIN}" --repo "${REPO}" >/dev/null 2>&1; then
+  if gh attestation verify "${tmp}/${asset}" --repo "${REPO}" >/dev/null 2>&1; then
     say "provenance verified: built by ${REPO}'s release workflow."
   elif gh auth status >/dev/null 2>&1; then
     say "provenance not verified (verification failed; checksum still holds); install continues."
@@ -58,15 +60,15 @@ else
   say "provenance not verified (gh not found; checksum still holds); install continues."
 fi
 
-chmod +x "${tmp}/${BIN}"
+chmod +x "${tmp}/${asset}"
 
 dir="${INSTALL_DIR:-${HOME}/.local/bin}"
 mkdir -p "$dir" 2>/dev/null || true
 if [ -w "$dir" ]; then
-  install -m 0755 "${tmp}/${BIN}" "${dir}/${BIN}"
+  install -m 0755 "${tmp}/${asset}" "${dir}/${BIN}"
 else
   say "elevated permissions needed to write ${dir}"
-  sudo install -m 0755 "${tmp}/${BIN}" "${dir}/${BIN}"
+  sudo install -m 0755 "${tmp}/${asset}" "${dir}/${BIN}"
 fi
 
 say "installed: $("${dir}/${BIN}" --version) -> ${dir}/${BIN}"
