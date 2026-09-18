@@ -58,7 +58,31 @@ const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 #[derive(Debug, Args)]
 pub struct ServeCmd {
     /// publish services as `name=target` (bare: `ping` and `speed`)
-    #[arg(value_name = "name=target")]
+    // The long form lists every target scheme, both halves: the four engines swoosh serves and the six
+    // forms the tunnel grammar routes. A refusal from either half points here, so this list is the one a
+    // mistyped scheme is sent to and it has to be complete.
+    #[arg(
+        value_name = "name=target",
+        long_help = "publish services as `name=target` (bare: `ping` and `speed`)\n\
+                     \n\
+                     Every target carries a scheme. swoosh serves:\n\
+                     \x20 ping:            round-trip probe\n\
+                     \x20 speed:           throughput test\n\
+                     \x20 roster:          this node's signed membership snapshot\n\
+                     \x20 sshd:            a shell, keyless (the node's gate is the auth)\n\
+                     \n\
+                     and it forwards or streams:\n\
+                     \x20 tcp:<host>:<port>  a local TCP service\n\
+                     \x20 unix:<path>        a local Unix socket\n\
+                     \x20 file:<path>        an existing file's bytes\n\
+                     \x20 fifo:<path>        a named pipe, live\n\
+                     \x20 stdin:             this process's own stdin\n\
+                     \x20 echo:              reflects whatever is sent\n\
+                     \n\
+                     The four swoosh serves take no argument, and neither do `stdin:` and `echo:`. \
+                     A live single-writer source (`stdin:`, `fifo:`) may be suffixed `+lossy` to fan \
+                     out to many readers at once, dropping bytes for one that falls behind."
+    )]
     pub services: Vec<String>,
     /// open named services to anyone (comma-list, repeatable)
     #[arg(

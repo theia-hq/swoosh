@@ -225,6 +225,26 @@ fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
     );
 }
 
+/// A scheme neither half of the grammar knows is refused with a pointer to the one complete list. The
+/// tunnel grammar names the schemes IT routes, and it cannot name the engines swoosh serves on top of it
+/// without a scheme registry it deliberately does not have, so a user who types `png:` would otherwise be
+/// handed a legal set that omits `ping:`.
+#[test]
+fn an_unknown_scheme_is_pointed_at_the_list_that_holds_both_halves() {
+    let empty_roster = std::sync::Arc::new(Vec::new());
+    for entry in ["x=png:", "x=nonsense", "x=tcp:nope"] {
+        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], &empty_roster, &[])
+        else {
+            panic!("`{entry}` is not a target either half of the grammar routes");
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("`swoosh serve --help` lists every target this node accepts"),
+            "a refused target points at the list carrying both halves: {message}"
+        );
+    }
+}
+
 /// THE defect the scheme-on-every-target grammar exists to kill. While a bare `host:port` was a legal
 /// target, `ping=ping:80` was syntactically indistinguishable from a forward to a host named `ping`, so a
 /// probe entry that missed the exact string `ping:` silently became a TCP forward instead. Every engine

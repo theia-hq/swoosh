@@ -135,26 +135,58 @@ pub fn bind_entry(
     // the whole string. No scheme at all is not swoosh's to refuse either: tightbeam's grammar owns that
     // teaching error like every other.
     let Some((scheme, rest)) = addr.split_once(':') else {
-        return router.parse(&[entry.to_owned()]);
+        return router.parse(&[entry.to_owned()]).map_err(target_help);
     };
-    match (scheme, rest) {
-        ("ping", "") => bind_ping(router, name, public),
-        ("speed", "") => bind_speed(router, name, public),
-        ("roster", "") => router.service(name, Roster::new(Arc::clone(roster_blob))),
+    // ONE arm per scheme swoosh serves, matching the scheme alone. The arity check is a call inside each
+    // arm rather than a second arm listing the schemes again: two arms that must agree is how `ping:80`
+    // came to mean a forward to a host named `ping` in the first place, and a fifth zero-argument engine
+    // added to a second list is the same bug waiting.
+    match scheme {
+        "ping" => {
+            no_argument(scheme, rest, entry)?;
+            bind_ping(router, name, public)
+        }
+        "speed" => {
+            no_argument(scheme, rest, entry)?;
+            bind_speed(router, name, public)
+        }
+        "roster" => {
+            no_argument(scheme, rest, entry)?;
+            router.service(name, Roster::new(Arc::clone(roster_blob)))
+        }
+        // Without the `ssh` engine compiled in there is no arm at all, so `sshd:` falls through to the
+        // refusal below and is told it is unknown, which is true of this build.
         #[cfg(feature = "ssh")]
-        ("sshd", "") => router.service(name, sshh::Sshd::new(host_seed)),
-        // Each engine above IS the whole target, so none takes an argument and a tail is a typo. It is
-        // refused HERE, by the layer that serves the scheme: falling through would hand `ping=ping:80` to
-        // tightbeam, which would call `ping` unknown when swoosh serves it. The guard keeps the empty tail
-        // out, so a build without the `ssh` engine still lets `sshd:` fall through to the unknown-scheme
-        // refusal rather than claiming an argument it was never given.
-        ("ping" | "speed" | "roster" | "sshd", tail) if !tail.is_empty() => {
-            eyre::bail!("`{scheme}:` takes no argument, but `{entry}` gives it `{tail}`")
+        "sshd" => {
+            no_argument(scheme, rest, entry)?;
+            router.service(name, sshh::Sshd::new(host_seed))
         }
         // Not swoosh's: a `tcp:`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the `echo:`
-        // reflector, or a scheme nobody serves. tightbeam's grammar owns it, refusal included.
-        _ => router.parse(&[entry.to_owned()]),
+        // reflector, or a scheme nobody serves. tightbeam's grammar owns it, refusal included. Its
+        // refusal names the schemes IT routes, which cannot include the ones above without handing it a
+        // scheme registry it deliberately does not have, so the pointer is added here instead: a reader
+        // refused by either half gets told where the whole list is.
+        _ => router.parse(&[entry.to_owned()]).map_err(target_help),
     }
+}
+
+/// Point a refused target at the one complete list. The tunnel grammar refuses by naming the schemes IT
+/// routes, which cannot include the engines above without handing it a scheme registry it deliberately
+/// does not have. So the pointer is added on this side, where both halves are known, and `serve --help`
+/// is the page that carries them.
+fn target_help(error: eyre::Report) -> eyre::Report {
+    error.wrap_err("`swoosh serve --help` lists every target this node accepts")
+}
+
+/// Refuse a tail on a scheme that takes no argument. Every engine swoosh binds by scheme IS the whole
+/// target (a probe, a throughput test, the roster snapshot, a shell), so none of them takes one, and a
+/// tail is a typo. Refused HERE, by the layer that serves the scheme: falling through would hand
+/// `ping=ping:80` to tightbeam, which would call `ping` unknown when swoosh is the thing serving it.
+fn no_argument(scheme: &str, rest: &str, entry: &str) -> eyre::Result<()> {
+    if rest.is_empty() {
+        return Ok(());
+    }
+    eyre::bail!("`{scheme}:` takes no argument, but `{entry}` gives it `{rest}`")
 }
 
 /// Bind the `ping:` engine a route's exposure requires: the METERED engine when `name` is in the open set,
