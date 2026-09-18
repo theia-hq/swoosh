@@ -2,7 +2,9 @@
 
 All notable changes to swoosh, newest first.
 
-## Unreleased
+## v0.11.1
+
+A direct-only bind hands over an address again, and a fan-out reports every device.
 
 ### Fixed
 - **`ping` no longer abandons the rest of your devices for one broken peer.** A device that answered the
