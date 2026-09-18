@@ -5,6 +5,12 @@ All notable changes to swoosh, newest first.
 ## Unreleased
 
 ### Fixed
+- **`ping` no longer abandons the rest of your devices for one broken peer.** A device that answered the
+  dial and then broke mid-exchange ended the whole run with its error, so every device after it went
+  untried and you learned nothing about them, while `swoosh status` reported all of them. It is a line
+  now, beside the refused and unreachable lines it already had: it says the node was reached, names what
+  broke rather than a round-trip time, and the run continues to the next device with a verdict that is
+  not green.
 - **A direct-only bind hands over an address again.** `serve --transport quirk+noise` printed no `direct`
   lane at all, so the banner gave the operator nothing to pass to a peer, on a transport that has no relay
   and no NAT traversal and where an address is the whole of its reach. The lane was not merely empty: a

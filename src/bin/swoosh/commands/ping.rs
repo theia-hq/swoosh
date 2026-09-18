@@ -172,7 +172,20 @@ impl PingCmd {
                                 bound.transport.name(),
                             );
                         }
-                        Err(error) => return Err(error.into()),
+                        // The node was REACHED and the exchange then broke. One broken device used to
+                        // abort the whole run with its error, so the devices after it were never tried and
+                        // the operator learned nothing about them: a fan-out that gives up on the first
+                        // bad peer answers a narrower question than the one asked. It is a line now, like
+                        // a refusal and like an unreachable, and the run continues. The full cause chain
+                        // is rendered because the outer half of a stream failure is routinely the useless
+                        // half.
+                        Err(error) => {
+                            outcome = outcome.max(reach::Outcome::Failed);
+                            println!(
+                                "{}",
+                                failed_line(&candidate.label, bound.transport.name(), &error)
+                            );
+                        }
                     }
                 }
                 Err(_error) => {
@@ -243,6 +256,33 @@ fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+/// The line for a device that was reached and whose exchange then broke.
+///
+/// Says it was REACHED, so it is never confused with `unreachable`, and names the cause rather than a
+/// round-trip time, because a broken exchange measured nothing.
+fn failed_line(label: &str, transport: &str, error: &ProtocolError) -> String {
+    format!(
+        "{label} via {transport}: reached, but the probe failed ({})",
+        causes(error)
+    )
+}
+
+/// A probe failure's full cause chain, rendered `outer: inner`.
+///
+/// A fan-out owes every device a line, so it cannot bail with a report the way a single-target verb can,
+/// and the outer message is routinely the useless half: a stream failure says only that a stream failed,
+/// and the cause underneath it is the part a person can act on.
+fn causes(error: &ProtocolError) -> String {
+    let mut chain = error.to_string();
+    let mut next = core::error::Error::source(error);
+    while let Some(cause) = next {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        next = cause.source();
+    }
+    chain
+}
+
 #[cfg(test)]
 mod tests {
     use core::net::SocketAddr;
@@ -282,6 +322,38 @@ mod tests {
     }
 
     const RTT: Option<Duration> = Some(Duration::from_millis(24));
+
+    /// A device that answered the dial and then broke gets a LINE, not the end of the run. It used to
+    /// abort the whole fan-out with its error, so every device after it went untried and the operator
+    /// learned nothing about them, while `status` reported all of them. The line says the node was
+    /// reached, renders the cause chain rather than a round-trip time (a broken exchange measured
+    /// nothing), and folds to an outcome that is not healthy.
+    ///
+    /// What this cannot assert is the control flow itself: the loop has no seam a unit test can drive.
+    /// It pins the rendering and the rank; the continuing is structural, in the arm no longer returning.
+    #[test]
+    fn a_broken_device_gets_a_line_and_the_run_keeps_its_verdict() {
+        let error = ProtocolError::from(bifrost::Error::Stream("peer went away".into()));
+        let line = failed_line("alice/nas", "iroh", &error);
+
+        assert!(
+            line.starts_with("alice/nas via iroh: reached, but the probe failed ("),
+            "the line names the device and says it was reached: {line}"
+        );
+        assert!(
+            line.contains("peer went away"),
+            "the cause chain is rendered, not just its useless outer half: {line}"
+        );
+        assert!(
+            !line.contains("rtt"),
+            "a broken exchange measured nothing, so no time is reported: {line}"
+        );
+        assert_ne!(
+            reach::Outcome::default().max(reach::Outcome::Failed),
+            reach::Outcome::Healthy,
+            "one broken device must not leave the run's verdict green"
+        );
+    }
 
     #[test]
     fn a_relayed_to_direct_sequence_shows_the_upgrade_on_the_flip_probe() {
