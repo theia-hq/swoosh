@@ -12,9 +12,12 @@ hold its key and do the admitting. Every family member reaches it by presenting 
 
 Publish the box's services behind its own gate:
 
-<!-- capture: swoosh serve ssh=sshd: tv=127.0.0.1:8096 -->
+<!-- The node id below is the docs-wide example key and the `local` line is this host's, so the
+     block is not reproducible as shown. Re-capture needs the harness to normalize a host address
+     the way it already normalizes keys and ports. -->
+<!-- pending live-run: swoosh serve ssh=sshd: tv=tcp:127.0.0.1:8096 -->
 ```console
-$ swoosh serve ssh=sshd: tv=127.0.0.1:8096
+$ swoosh serve ssh=sshd: tv=tcp:127.0.0.1:8096
 swoosh ready
 
     bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
@@ -26,9 +29,9 @@ how peers reach you
 
 serving
   family-gated   your devices + peers you've granted
-    ssh -> sshd            a shell on this machine
-    tv -> 127.0.0.1:8096   local TCP service
-    control.*              node control (never public)
+    ssh -> sshd                a shell on this machine
+    tv -> tcp:127.0.0.1:8096   local TCP service
+    control.*                  node control (never public)
 
 ctrl-c to stop
 ```

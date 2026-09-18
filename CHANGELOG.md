@@ -2,6 +2,18 @@
 
 All notable changes to swoosh, newest first.
 
+## Unreleased
+
+### Changed
+- **Every service target carries a scheme: a TCP forward is now `tcp:<host>:<port>`.** The bare
+  `host:port` form is gone, not deprecated: `swoosh serve web=127.0.0.1:8080` becomes
+  `swoosh serve web=tcp:127.0.0.1:8080`. It was the one target without a scheme, so a hostname followed by
+  a colon and a number was indistinguishable from a scheme carrying an argument, and an entry that missed
+  an engine's exact spelling silently became a forward to a host of that name. Now `ping=ping:80` is a
+  parse error saying `ping:` takes no argument, a scheme nothing serves is refused by name, and the
+  readiness banner tells a forward from an engine by its scheme rather than by sniffing for a port.
+  `unix:<path>` is unchanged.
+
 ## v0.10.0
 
 Reach a relay and a resolver you run yourself, and a banner that tells the truth about how peers find you.

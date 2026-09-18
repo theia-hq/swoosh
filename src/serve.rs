@@ -107,7 +107,7 @@ pub fn classify_stop(source: Option<StopKind>) -> Stopped {
 
 /// Bind one operator `name=addr` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
 /// left tightbeam's public API, so a handler route is never a spellable addr): the diagnostic engines here,
-/// and tightbeam's own primitives (a `host:port`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the
+/// and tightbeam's own primitives (a `tcp:`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the
 /// `echo:` reflector) through [`Router::parse`], which owns the grammar and its teaching errors.
 ///
 /// `public` is the operator's parsed open set: a diagnostic name in it binds the METERED engine (the safety
@@ -131,13 +131,28 @@ pub fn bind_entry(
         return router.parse(&[entry.to_owned()]);
     };
     let name: Service = name.parse()?;
-    match addr {
-        "ping:" => bind_ping(router, name, public),
-        "speed:" => bind_speed(router, name, public),
-        "roster:" => router.service(name, Roster::new(Arc::clone(roster_blob))),
+    // Every target is `<scheme>:<rest>`, so the dispatch splits the addr ONCE and matches the SCHEME, never
+    // the whole string. No scheme at all is not swoosh's to refuse either: tightbeam's grammar owns that
+    // teaching error like every other.
+    let Some((scheme, rest)) = addr.split_once(':') else {
+        return router.parse(&[entry.to_owned()]);
+    };
+    match (scheme, rest) {
+        ("ping", "") => bind_ping(router, name, public),
+        ("speed", "") => bind_speed(router, name, public),
+        ("roster", "") => router.service(name, Roster::new(Arc::clone(roster_blob))),
         #[cfg(feature = "ssh")]
-        "sshd:" => router.service(name, sshh::Sshd::new(host_seed)),
-        // A forward, a raw stream, the `echo:` reflector, or an unknown scheme: tightbeam's grammar.
+        ("sshd", "") => router.service(name, sshh::Sshd::new(host_seed)),
+        // Each engine above IS the whole target, so none takes an argument and a tail is a typo. It is
+        // refused HERE, by the layer that serves the scheme: falling through would hand `ping=ping:80` to
+        // tightbeam, which would call `ping` unknown when swoosh serves it. The guard keeps the empty tail
+        // out, so a build without the `ssh` engine still lets `sshd:` fall through to the unknown-scheme
+        // refusal rather than claiming an argument it was never given.
+        ("ping" | "speed" | "roster" | "sshd", tail) if !tail.is_empty() => {
+            eyre::bail!("`{scheme}:` takes no argument, but `{entry}` gives it `{tail}`")
+        }
+        // Not swoosh's: a `tcp:`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the `echo:`
+        // reflector, or a scheme nobody serves. tightbeam's grammar owns it, refusal included.
         _ => router.parse(&[entry.to_owned()]),
     }
 }

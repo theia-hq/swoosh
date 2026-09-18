@@ -95,7 +95,7 @@ $ swoosh ssh desk
 ```
 
 The desktop offers its shell once with `swoosh serve ssh=sshd:` (a keyless shell, gated to your signet)
-or points at an existing sshd with `swoosh serve ssh=127.0.0.1:22`.
+or points at an existing sshd with `swoosh serve ssh=tcp:127.0.0.1:22`.
 
 ## The limit
 

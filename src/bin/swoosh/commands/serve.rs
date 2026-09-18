@@ -674,7 +674,7 @@ fn display_targets(requested: &[String]) -> eyre::Result<HashMap<String, String>
         let Some((name, addr)) = entry.split_once('=') else {
             eyre::bail!(
                 "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
-                 `ping=ping:`, `web=127.0.0.1:8080`"
+                 `ping=ping:`, `web=tcp:127.0.0.1:8080`"
             );
         };
         map.insert(name.to_owned(), addr.to_owned());
@@ -748,7 +748,7 @@ impl Group {
     }
 }
 
-/// The gloss for a bare handler scheme, the terse right-column description.
+/// The gloss for a named engine's scheme, the terse right-column description.
 /// An unrecognized scheme falls back to a plain `<scheme> service`, so a future handler still renders a line.
 fn handler_gloss(scheme: &str) -> String {
     match scheme {
@@ -764,7 +764,7 @@ fn handler_gloss(scheme: &str) -> String {
 /// (`ssh -> sshd`, `logs -> file:...`), or just `name` when the name IS the target scheme (`speed`). Fetch
 /// services gloss by name (their synthetic scheme is unspellable). The KIND is tightbeam's declared
 /// [`TargetKind`] (handler vs raw stream); within the handler kind the operator's typed target distinguishes
-/// the built-in forward and the `echo:` reflector from a named handler scheme, because both built-ins are
+/// the built-in forward and the `echo:` reflector from a named engine, because both built-ins are
 /// first-party handlers now and carry no addr tail of their own.
 fn describe(
     entry: &ManifestEntry,
@@ -791,8 +791,8 @@ fn describe(
             if addr == "echo:" {
                 return (name.to_owned(), "echoes your bytes back to you".to_owned());
             }
-            // tightbeam's built-in local forward (`host:port` / `unix:<path>`): a socket the operator
-            // deliberately stood up, glossed as such.
+            // tightbeam's built-in local forward (`tcp:<host>:<port>` / `unix:<path>`): a socket the
+            // operator deliberately stood up, glossed as such.
             if is_forward(addr) {
                 return (format!("{name} -> {addr}"), "local TCP service".to_owned());
             }
@@ -828,15 +828,13 @@ fn describe(
     }
 }
 
-/// Whether the operator's typed target is tightbeam's built-in local forward (`host:port` / `unix:<path>`)
-/// rather than a named handler scheme. Both forwards and the `echo:` reflector are first-party [`Handler`]s,
-/// so the manifest's [`TargetKind`] names only handler-vs-raw-stream; the display map carries the finer
-/// render distinction. Mirrors tightbeam's own forward grammar so the two never disagree.
+/// Whether the operator's typed target is tightbeam's built-in local forward (`tcp:<host>:<port>` /
+/// `unix:<path>`) rather than a named engine. Both forwards and the `echo:` reflector are first-party
+/// [`Handler`]s, so the manifest's [`TargetKind`] names only handler-vs-raw-stream; the display map carries
+/// the finer render distinction. Now that every target carries a scheme this is the scheme test it always
+/// wanted to be: no port sniffing, and a host named like an engine can never read as one.
 fn is_forward(addr: &str) -> bool {
-    addr.starts_with("unix:")
-        || addr
-            .rsplit_once(':')
-            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok())
+    matches!(addr.split_once(':'), Some(("tcp" | "unix", _)))
 }
 
 /// Render the full readiness banner as ONE string (pure, so it is unit-testable and printed once): the

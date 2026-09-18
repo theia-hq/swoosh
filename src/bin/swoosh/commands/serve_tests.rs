@@ -225,6 +225,46 @@ fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
     );
 }
 
+/// THE defect the scheme-on-every-target grammar exists to kill. While a bare `host:port` was a legal
+/// target, `ping=ping:80` was syntactically indistinguishable from a forward to a host named `ping`, so a
+/// probe entry that missed the exact string `ping:` silently became a TCP forward instead. Every engine
+/// swoosh serves takes no argument, so a tail is refused here, by name, with the rule stated.
+#[test]
+fn ping_with_an_argument_is_refused_rather_than_read_as_a_forward() {
+    let empty_roster = std::sync::Arc::new(Vec::new());
+    for (entry, scheme) in [
+        ("ping=ping:80", "ping"),
+        ("speed=speed:80", "speed"),
+        ("members=roster:80", "roster"),
+    ] {
+        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], &empty_roster, &[])
+        else {
+            panic!("`{entry}` gives an argument to an engine that takes none and must be refused");
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!("`{scheme}:` takes no argument")),
+            "the refusal names the scheme and the rule: {message}"
+        );
+        assert!(
+            message.contains("`80`"),
+            "the refusal quotes the offending tail: {message}"
+        );
+    }
+    // The zero-argument spelling still binds, so the refusal is about the tail and nothing else.
+    assert!(
+        bind_entry(
+            Router::new(gated()),
+            "ping=ping:",
+            [0u8; 32],
+            &empty_roster,
+            &[]
+        )
+        .is_ok(),
+        "`ping=ping:` is the spelling that binds the probe"
+    );
+}
+
 /// The exposure coupling on the product path: a diagnostic route binds the METERED engine when the operator
 /// opens it (the safety caps by construction), and the OWNER engine when it stays family-gated (owner
 /// limits, unbounded). The manifest is tightbeam's own read of the bound handler, so this asserts the same
@@ -1344,14 +1384,14 @@ fn bare_fetch_is_refused_with_the_name_addr_teaching_error() {
 fn non_fetch_services_pass_through_and_only_fetch_is_removed() {
     let mut requested = vec![
         "ping=ping:".to_owned(),
-        "web=127.0.0.1:8080".to_owned(),
+        "web=tcp:127.0.0.1:8080".to_owned(),
         "gh=fetch:https://api.github.com".to_owned(),
     ];
     let fetch = FetchScope::extract(&mut requested).expect("origin parses");
 
     assert_eq!(
         requested,
-        vec!["ping=ping:".to_owned(), "web=127.0.0.1:8080".to_owned()],
+        vec!["ping=ping:".to_owned(), "web=tcp:127.0.0.1:8080".to_owned()],
         "the fetch entry is removed; ping and the raw forward are left exactly as given, in order"
     );
     assert_eq!(
@@ -1518,13 +1558,13 @@ fn non_recv_services_pass_through_and_only_recv_is_removed() {
     let mut requested = vec![
         "ping=ping:".to_owned(),
         "in=recv:/tmp/x".to_owned(),
-        "web=127.0.0.1:8080".to_owned(),
+        "web=tcp:127.0.0.1:8080".to_owned(),
     ];
     let recv = extract_recv_services(&mut requested).expect("entries parse");
 
     assert_eq!(
         requested,
-        vec!["ping=ping:".to_owned(), "web=127.0.0.1:8080".to_owned()],
+        vec!["ping=ping:".to_owned(), "web=tcp:127.0.0.1:8080".to_owned()],
         "the recv entry is removed; ping and the raw forward are left exactly as given, in order"
     );
     assert_eq!(
