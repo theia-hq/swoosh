@@ -16,11 +16,21 @@ Reach a relay and a resolver you run yourself, and a banner that tells the truth
 - **A relayed path can turn direct, and the docs now say so.** No behaviour change: a session that starts
   through a relay upgrades to a direct path the moment a hole punch lands, so `swoosh status` can read
   `relayed` on one run and `direct` on the next. That read as a fault to a first-time reader.
+- **The readiness banner discloses the address records it publishes.** A default internet bind now prints
+  `records  n0's public discovery: your addresses, for anyone with your key`. It used to print that line
+  only when you named your own relay or resolver, so the banner disclosed the mDNS announcement on your
+  LAN and stayed quiet about the larger one. A node naming its own resolver reads the same consequence.
 - **The sibling pins move forward together.** bifrost, nauthy, tightbeam, and the service engines (fetch,
   measure, sshh, transfer) are each pinned to a newer revision, so a build of this version records exactly
   the revision set the address fix below is built on.
 
 ### Fixed
+- **`swoosh status` no longer prints a healthy line for a peer that answered nothing.** A node that took
+  the dial and then broke mid-exchange rendered its path and the transport's own round-trip estimate, and
+  held a fan-out's exit code green. A probe that fails and a probe that goes unanswered are each their own
+  line now, both saying the node was reached, neither reporting a time, and neither counting as healthy.
+  The unanswered case is the common one: the engine folds a broken exchange into loss and returns an empty
+  report rather than an error.
 - **The published checksum verifies with the command people actually type.** Each release asset's
   `.sha256` file now carries the standard two-field line (the hash, then the file it names), so
   `shasum -a 256 -c swoosh-<target>.sha256` works on a downloaded asset. It previously held a bare hash,

@@ -13,6 +13,28 @@ Bare `quirk` never proves the peer holds the key it presents, so swoosh refuses 
 it: the dial never reaches the gate. Use `--transport quirk+noise`, which proves the key before any byte
 flows. See [transports](transports.md#quirk).
 
+## "reached, but the probe failed" / "reached, but the probe went unanswered"
+
+```
+desk via iroh: reached, but the probe failed (read frame: stream: peer went away)
+nas via iroh: reached, but the probe went unanswered (1 sent, 0 back)
+Error: desk: reached, but the probe failed
+```
+
+The dial landed and the exchange did not finish. Two shapes: the first names what broke, the second means
+the probe went out and nothing came back. Either way the node is up enough to answer a dial and not up
+enough to answer a service, which is usually a service task that died while the node kept running.
+
+These are not healthy lines and they do not hold the exit code green. Neither reports a round-trip time,
+because nothing was measured; the path estimate the transport keeps is not a measurement of your probe.
+
+Fix one of:
+
+- Check the node is still serving the name: `swoosh service ls --at <peer>`.
+- Restart the node if the menu is right and the probe still fails.
+- Try `--transport quirk+noise` if only one transport shows it, which points at the path rather than the
+  node.
+
 ## "reached, but refused (not admitted)"
 
 ```

@@ -119,12 +119,10 @@ impl PingCmd {
             interval: Duration::from_secs_f64(self.interval),
         };
 
-        // Track whether any device was HEALTHY (answered the probe), so a fan-out where every device was
-        // unreachable OR refused ends non-zero. A refused device answered the dial but does not serve
-        // ping, so it prints a distinct line and does not hold the exit code green: a refusal is never
-        // rendered as `100% loss`.
-        let mut any_healthy = false;
-        let mut any_refused = false;
+        // Fold how far each device got, so a fan-out where every device was unreachable OR refused ends
+        // non-zero. A refused device answered the dial but does not serve ping, so it prints a distinct
+        // line and does not hold the exit code green: a refusal is never rendered as `100% loss`.
+        let mut outcome = reach::Outcome::default();
         let service: Service = reach::PING_SERVICE.parse()?;
         for candidate in &candidates {
             match reach::connect_service(
@@ -158,7 +156,7 @@ impl PingCmd {
                     };
                     match report {
                         Ok(report) => {
-                            any_healthy = true;
+                            outcome = outcome.max(reach::Outcome::Healthy);
                             let path = reach::conn_path(initial, &session.conn_info());
                             print_device(&candidate.label, bound.transport.name(), &path, &report);
                         }
@@ -167,7 +165,7 @@ impl PingCmd {
                         // so a gate refusal reads descriptively and is never doubled (`refused (refused)`).
                         // The run continues to the next device.
                         Err(ProtocolError::Refused(refusal)) => {
-                            any_refused = true;
+                            outcome = outcome.max(reach::Outcome::Refused);
                             println!(
                                 "{} via {}: reached, but refused ({refusal})",
                                 candidate.label,
@@ -189,7 +187,7 @@ impl PingCmd {
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;
-        reach::fanout_outcome(any_healthy, any_refused, &self.peer, bound)
+        reach::fanout_outcome(outcome, &self.peer, bound)
     }
 }
 

@@ -240,27 +240,47 @@ pub fn hint(error: eyre::Report, bound: &transport::Bound) -> eyre::Report {
     }
 }
 
+/// How far ONE device in a fan-out got, ordered by exactly that: no answer, an answer that refused, an
+/// answer whose probe then broke, a full round trip. A fan-out folds its devices with [`Ord::max`], so the
+/// verb reports the FURTHEST any device got, and [`fanout_outcome`] turns that into the exit code.
+///
+/// An enum rather than a pile of `any_*` booleans because only [`Healthy`](Self::Healthy) may exit green:
+/// a new device state has to name its rank here, in one exhaustive place, instead of quietly failing to
+/// set a flag and inheriting success. That silent inheritance is the bug this type exists to prevent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Outcome {
+    /// No device answered the dial. The default, so a fan-out that reports nothing at all reads as
+    /// unreachable rather than as a success.
+    #[default]
+    Unreachable,
+    /// The device answered the dial and refused the probe: reached, but it does not serve this.
+    Refused,
+    /// The device answered the dial and was admitted, and the probe then failed mid-protocol. Ranked
+    /// above a refusal because the exchange got further, not because it is better news.
+    Failed,
+    /// The device answered the probe. The ONLY outcome that keeps the exit code green.
+    Healthy,
+}
+
 /// The exit outcome of a fan-out reach verb (`ping`, `status`) from what its devices reported.
 ///
-/// A fan-out ends non-zero unless at least one device answered the probe, but the two failing shapes carry
-/// DIFFERENT errors so a refusal is never dressed as an addressing problem. If every device was
-/// unreachable, the error carries the transport's reach [`hint`] (over quirk, the `--peer`/discovery
-/// remedy; under `--local`, the flag named as the cause). But if any device was REACHED and only refused
-/// the probe, reach was NOT the problem: the error says so plainly and carries no reach hint, so a refused
-/// stranger over quirk never sees the misleading "quirk is direct-only: pass --peer ..." line after it
-/// already reached the node.
+/// A fan-out ends non-zero unless at least one device answered the probe, but the failing shapes carry
+/// DIFFERENT errors so a failure that was REACHED is never dressed as an addressing problem. If every
+/// device was unreachable, the error carries the transport's reach [`hint`] (over quirk, the
+/// `--peer`/discovery remedy; under `--local`, the flag named as the cause). If any device was reached and
+/// only refused the probe, or answered and then broke mid-protocol, reach was NOT the problem: the error
+/// says which of the two it was and carries no reach hint, so a refused stranger over quirk never sees the
+/// misleading "quirk is direct-only: pass --peer ..." line after it already reached the node.
 pub fn fanout_outcome(
-    any_healthy: bool,
-    any_refused: bool,
+    outcome: Outcome,
     target: &impl core::fmt::Display,
     bound: &transport::Bound,
 ) -> eyre::Result<()> {
-    if any_healthy {
-        Ok(())
-    } else if any_refused {
-        Err(eyre::eyre!("{target}: reached, but refused"))
-    } else {
-        Err(hint(eyre::eyre!("could not reach {target}"), bound))
+    match outcome {
+        Outcome::Healthy => Ok(()),
+        Outcome::Failed => Err(eyre::eyre!("{target}: reached, but the probe failed")),
+        Outcome::Refused => Err(eyre::eyre!("{target}: reached, but refused")),
+        Outcome::Unreachable => Err(hint(eyre::eyre!("could not reach {target}"), bound)),
     }
 }
 
@@ -319,8 +339,7 @@ mod tests {
     #[test]
     fn a_reached_but_refused_fanout_is_a_refusal_without_the_reach_hint() {
         let err = fanout_outcome(
-            false,
-            true,
+            Outcome::Refused,
             &"alice",
             &bound(transport::Transport::Quirk, false),
         )
@@ -335,8 +354,7 @@ mod tests {
     #[test]
     fn an_all_unreachable_fanout_carries_the_quirk_reach_hint() {
         let err = fanout_outcome(
-            false,
-            false,
+            Outcome::Unreachable,
             &"alice",
             &bound(transport::Transport::Quirk, false),
         )
@@ -351,7 +369,7 @@ mod tests {
     #[test]
     fn an_all_unreachable_local_fanout_names_the_flag_as_the_cause() {
         for transport in [transport::Transport::Iroh, transport::Transport::QuirkNoise] {
-            let err = fanout_outcome(false, false, &"alice", &bound(transport, true))
+            let err = fanout_outcome(Outcome::Unreachable, &"alice", &bound(transport, true))
                 .expect_err("all-unreachable is non-zero");
             let msg = format!("{err:#}");
             assert!(msg.contains("could not reach alice"), "{msg}");
@@ -386,7 +404,7 @@ mod tests {
                 ),
             },
         };
-        let err = fanout_outcome(false, false, &"alice", &over_own)
+        let err = fanout_outcome(Outcome::Unreachable, &"alice", &over_own)
             .expect_err("all-unreachable is non-zero");
         let msg = format!("{err:#}");
         assert_eq!(
@@ -400,8 +418,7 @@ mod tests {
     #[test]
     fn an_all_unreachable_n0_fanout_names_no_reach_service() {
         let err = fanout_outcome(
-            false,
-            false,
+            Outcome::Unreachable,
             &"alice",
             &bound(transport::Transport::Iroh, false),
         )
@@ -409,17 +426,46 @@ mod tests {
         assert_eq!(format!("{err:#}"), "could not reach alice");
     }
 
-    // Any healthy device keeps the fan-out green, whatever the others did.
+    // A probe that failed mid-protocol is its OWN non-zero outcome: the node was reached, so the error
+    // says the probe failed rather than claiming the peer could not be reached, and it carries no reach
+    // hint (reach was not the problem). Without this a mid-protocol failure exited green.
+    #[test]
+    fn a_failed_probe_fanout_is_non_zero_and_says_the_probe_failed() {
+        let err = fanout_outcome(
+            Outcome::Failed,
+            &"alice",
+            &bound(transport::Transport::Quirk, false),
+        )
+        .expect_err("a failed probe is non-zero");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("reached, but the probe failed"), "{msg}");
+        assert!(!msg.contains("could not reach"), "{msg}");
+        assert!(!msg.contains("quirk is direct-only"), "{msg}");
+    }
+
+    // Any healthy device keeps the fan-out green, whatever the others did: the fold takes the furthest
+    // any device got, and only `Healthy` is green.
     #[test]
     fn any_healthy_device_makes_the_fanout_succeed() {
+        let folded = [Outcome::Unreachable, Outcome::Refused, Outcome::Healthy]
+            .into_iter()
+            .fold(Outcome::default(), Outcome::max);
         assert!(
-            fanout_outcome(
-                true,
-                true,
-                &"alice",
-                &bound(transport::Transport::Quirk, false)
-            )
-            .is_ok()
+            fanout_outcome(folded, &"alice", &bound(transport::Transport::Quirk, false)).is_ok()
         );
+    }
+
+    // The fold never lets a failing device outrank a healthy one, and never lets an empty fan-out or a
+    // mixed one land in the green: every non-healthy fold is an error.
+    #[test]
+    fn only_a_healthy_device_folds_to_a_green_fanout() {
+        let quirk = bound(transport::Transport::Quirk, false);
+        for outcome in [Outcome::Unreachable, Outcome::Refused, Outcome::Failed] {
+            assert!(
+                fanout_outcome(outcome, &"alice", &quirk).is_err(),
+                "{outcome:?} must not exit green"
+            );
+            assert_eq!(outcome.max(Outcome::Healthy), Outcome::Healthy);
+        }
     }
 }

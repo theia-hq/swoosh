@@ -156,9 +156,19 @@ fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
             && !banner.contains("control.services"),
         "the two control reads fold to one control.* line: {banner}"
     );
+    // "anyone" is the PUBLIC group's danger word, and it is the serving section that must not use it
+    // when nothing is public. The reach section says it of the address records on purpose: they really
+    // are readable by anyone holding the key.
+    let (reach, serving) = banner
+        .split_once("serving\n")
+        .expect("the banner has a serving section");
     assert!(
-        !banner.contains("anyone"),
+        !serving.contains("anyone"),
         "no group is opened to anyone when nothing is public: {banner}"
+    );
+    assert!(
+        reach.contains("records"),
+        "a default internet bind discloses that it publishes its addresses: {banner}"
     );
     assert!(banner.trim_end().ends_with("ctrl-c to stop"), "{banner}");
 }
@@ -384,6 +394,52 @@ fn the_reach_section_handles_blocked_mdns_and_direct_hints() {
     );
 }
 
+/// A default internet bind discloses that it publishes its addresses PUBLICLY, in the same breath it
+/// discloses the mDNS announcement. Every serving iroh node publishes an address record keyed by its node
+/// id, so anyone holding the key reads those addresses from a public service without ever dialing: a
+/// larger disclosure than the LAN broadcast the `local` line has always named. A banner that told an
+/// operator about the small one and stayed quiet about the large one was the bug.
+#[test]
+fn a_default_internet_bind_discloses_its_public_address_records() {
+    let section = reach_section(ReachKind::Internet, &heard_on_the_network(), &n0(), &[]);
+    assert!(
+        section.contains(
+            "  records    n0's public discovery: your addresses, for anyone with your key\n"
+        ),
+        "the default bind names the consequence, not the record format: {section}"
+    );
+    assert!(
+        section.contains("(mDNS)"),
+        "the LAN disclosure still rides the local line: {section}"
+    );
+
+    // One line, no wider than the widest line the banner already prints: the disclosure rides the
+    // existing budget rather than setting a new one.
+    let widest_other = section
+        .lines()
+        .filter(|line| !line.contains("records"))
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or(0);
+    let records: Vec<&str> = section
+        .lines()
+        .filter(|line| line.contains("records"))
+        .collect();
+    assert_eq!(records.len(), 1, "the disclosure is ONE line: {section}");
+    assert!(
+        records[0].chars().count() <= widest_other,
+        "the disclosure stays inside the banner's width budget ({widest_other}): {section}"
+    );
+
+    // A direct-only bind publishes no record at all, so it must still say nothing: the line is a fact
+    // about this bind, never a blanket warning.
+    let direct = reach_section(ReachKind::DirectOnly, &heard_on_the_network(), &n0(), &[]);
+    assert!(
+        !direct.contains("records"),
+        "a bind that publishes nothing discloses nothing: {direct}"
+    );
+}
+
 /// The reach section under the reach states an operator can be in. Naming either half prints BOTH lines,
 /// so the half that is still n0's is said out loud (the split is the whole point of running one of the
 /// two), and a bind on n0's two services renders the section unchanged, byte for byte, because the docs
@@ -400,8 +456,8 @@ fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
 
     let n0_only = reach_section(ReachKind::Internet, &heard_on_the_network(), &n0(), &[]);
     assert!(
-        !n0_only.contains("records") && !n0_only.contains("relay"),
-        "n0's two services are the documented default and add no line: {n0_only}"
+        !n0_only.contains("relay"),
+        "n0's relays are the documented default and add no line: {n0_only}"
     );
 
     let resolver_only = reach_section(
@@ -414,7 +470,9 @@ fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
         &[],
     );
     assert!(
-        resolver_only.contains("  records    published to https://dns.example/pkarr\n"),
+        resolver_only.contains(
+            "  records    https://dns.example/pkarr: your addresses, for anyone with your key\n"
+        ),
         "{resolver_only}"
     );
     assert!(
@@ -436,7 +494,9 @@ fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
         "{relay_only}"
     );
     assert!(
-        relay_only.contains("  records    published to n0's public discovery\n"),
+        relay_only.contains(
+            "  records    n0's public discovery: your addresses, for anyone with your key\n"
+        ),
         "a relay of your own leaves finding a peer to n0, and the split is said out loud: {relay_only}"
     );
 
@@ -446,8 +506,9 @@ fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
     };
     let both = reach_section(ReachKind::Internet, &heard_on_the_network(), &paired, &[]);
     assert!(
-        both.contains("  records    published to https://dns.example/pkarr\n")
-            && both.contains("  relay      https://relay.example/\n"),
+        both.contains(
+            "  records    https://dns.example/pkarr: your addresses, for anyone with your key\n"
+        ) && both.contains("  relay      https://relay.example/\n"),
         "{both}"
     );
     assert!(
