@@ -904,17 +904,26 @@ fn reach_section(
         .filter(|addr| !addr.ip().is_loopback())
         .collect();
     let direct = matches!(reach, ReachKind::DirectOnly) && !handable.is_empty();
-    // Where the node's record goes, and which relay it offers. Only an internet bind has either, and
-    // only a node that named one has anything to say: a bind on n0's two services is the default every
-    // page describes, so it renders exactly the section it always did. Naming ONE of the two prints BOTH
-    // lines, because what an operator who runs half of this most needs to see is which half is still
-    // n0's, and a line that is absent says nothing.
+    // Where the node's addresses go. EVERY internet bind publishes them, so every internet bind says so:
+    // the default is the one nobody chose, and telling an operator about the mDNS announcement on their
+    // LAN while staying quiet about the public one would disclose the smaller thing and hide the larger.
+    // The line states the CONSEQUENCE rather than the record format, because the operator who needs it is
+    // the one not thinking about DNS at all: their addresses are readable by key, without a dial.
+    let records = (reach == ReachKind::Internet).then(|| match &bound_reach.resolver {
+        Resolver::N0 => {
+            "n0's public discovery: your addresses, for anyone with your key".to_owned()
+        }
+        // The same consequence, said the same way. A custom resolver is not a private one: pkarr records
+        // are readable by anyone holding the key, so naming only the URL here would let the operator who
+        // stood one up read this line as the disclosure going away.
+        Resolver::Custom(url) => format!("{url}: your addresses, for anyone with your key"),
+    });
+    // Which relay this node offers, and only for a node that named one: a bind on n0's relays is the
+    // default every page describes, and it costs the operator nothing they did not already read. Naming
+    // EITHER of the two servers prints this line, because what an operator who runs half of this most
+    // needs to see is which half is still n0's, and a line that is absent says nothing.
     let split = reach == ReachKind::Internet
         && (bound_reach.relay != RelayHome::N0 || bound_reach.resolver != Resolver::N0);
-    let records = split.then(|| match &bound_reach.resolver {
-        Resolver::N0 => "published to n0's public discovery".to_owned(),
-        Resolver::Custom(url) => format!("published to {url}"),
-    });
     let relay = split.then(|| match &bound_reach.relay {
         RelayHome::N0 => "n0's public relays".to_owned(),
         RelayHome::Custom(url) => url.to_string(),

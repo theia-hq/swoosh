@@ -13,8 +13,13 @@ Usage: swoosh status [OPTIONS] [peer]
 **Example.** `swoosh status desk` answers the one question a p2p link always raises: am I talking to
 the peer directly, or bouncing through a relay?
 
-**Things to know.** The path is read after the probe, so a hole punch has a round trip to land: the same
-peer can read `relayed` on one run and `direct` on the next. `mixed` means some paths are direct and some
+**Things to know.** A device reads one of four ways: a path and a round-trip time, `unreachable`,
+`reached, but refused (...)`, or `reached, but the probe failed / went unanswered`. Only the first is
+healthy; the last three each exit non-zero. A failure reports no time, because nothing was measured.
+[What the failure lines mean](../../troubleshooting.md).
+
+The path is read after the probe, so a hole punch has a round trip to land: the same peer can read
+`relayed` on one run and `direct` on the next. `mixed` means some paths are direct and some
 relayed while a session settles. [Why a path changes](../../transports.md#iroh).
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

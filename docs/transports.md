@@ -53,7 +53,7 @@ so:
 ```text
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
-  records    published to n0's public discovery
+  records    n0's public discovery: your addresses, for anyone with your key
   relay      https://relay.example/
   local      automatic; your devices just need the key (mDNS), announced at:
              192.168.1.24:58131

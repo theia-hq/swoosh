@@ -17,6 +17,7 @@ swoosh ready
 
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
+  records    n0's public discovery: your addresses, for anyone with your key
   local      automatic; your devices just need the key (mDNS)
 
 serving
