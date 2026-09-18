@@ -905,11 +905,15 @@ fn render_ready_banner(
 }
 
 /// The `how peers reach you` section: one channel per line with a short label column that scans at a glance.
-/// The `internet` channel appears only when the transport routes across the internet; `direct` only when the
-/// bind is direct-only AND holds an address a peer could actually dial. "automatic" leads both auto channels,
-/// and the local lane carries the ADVERTISEMENT's own outcome: how far this node was published is a fact only
-/// the advertisement knows, and the dial hints cannot stand in for it (they rewrite a wildcard bind to
-/// loopback, so every bind would read the same whatever it reaches).
+/// The `internet` channel appears only when the transport routes across the internet; `direct` on every
+/// direct-only bind, because that bind has no relay and no NAT traversal, so an address is the whole of its
+/// reach and a direct-only banner without one hands the operator nothing. "automatic" leads both auto
+/// channels, and the local lane carries the ADVERTISEMENT's own outcome: how far this node was published is a
+/// fact only the advertisement knows, and the dial hints cannot stand in for it (they rewrite a wildcard bind
+/// to loopback, so every bind would read the same whatever it reaches).
+///
+/// ONE address list per banner: under direct-only the addresses live on the `direct` lane, which is the lane
+/// that exists to hand one over, and the `local` lane keeps only its mDNS-outcome sentence.
 // No gloss here names the transport backend: the operator is told how far they can be reached, never which
 // implementation carries it, because the backend is swappable and the reach promise is not.
 fn reach_section(
@@ -918,14 +922,10 @@ fn reach_section(
     bound_reach: &Reach,
     hints: &[SocketAddr],
 ) -> String {
-    // A loopback hint names the DIALER's own machine, so it is never an address to hand a peer: only a
-    // routable hint opens the direct channel, and an un-handable one is left out entirely rather than
-    // printed under a scope claim that the bind does not back.
-    let handable: Vec<&SocketAddr> = hints
-        .iter()
-        .filter(|addr| !addr.ip().is_loopback())
-        .collect();
-    let direct = matches!(reach, ReachKind::DirectOnly) && !handable.is_empty();
+    // The lane is the bind's dialable set, never `hints()`: the hint rewrite is a dial-side convenience
+    // that turns a wildcard bind into loopback, and reading it as the set to hand out filtered the lane
+    // away on every bind swoosh can make (there is no bind flag, so every bind is wildcard).
+    let dialable = matches!(reach, ReachKind::DirectOnly).then(|| Dialable::of(mdns, hints));
     // Where the node's addresses go. EVERY internet bind publishes them, so every internet bind says so:
     // the default is the one nobody chose, and telling an operator about the mDNS announcement on their
     // LAN while staying quiet about the public one would disclose the smaller thing and hide the larger.
@@ -962,7 +962,7 @@ fn reach_section(
         labels.push("relay");
     }
     labels.push("local");
-    if direct {
+    if dialable.is_some() {
         labels.push("direct");
     }
     let width = labels.iter().map(|l| l.len()).max().unwrap_or(0);
@@ -994,9 +994,11 @@ fn reach_section(
             "automatic; your devices just need the key (mDNS), announced at:".to_owned(),
             addrs,
         ),
-        (MdnsState::OnLan(addrs), ReachKind::DirectOnly) => (
-            "automatic; local mDNS, or direct, no NAT traversal; announced at:".to_owned(),
-            addrs,
+        // The announced set is a subset of the direct lane's below, and one banner carries one address
+        // list: a direct-only node names its addresses once, where a peer is told to take them.
+        (MdnsState::OnLan(_), ReachKind::DirectOnly) => (
+            "automatic; local mDNS, or direct, no NAT traversal".to_owned(),
+            &[],
         ),
         (MdnsState::LoopbackOnly, _) => (
             "mDNS on this host only; another host needs a direct address hint".to_owned(),
@@ -1009,15 +1011,10 @@ fn reach_section(
             "off; mDNS unavailable here, so reach by the key over the internet".to_owned(),
             &[],
         ),
-        // The down-state points at the direct channel only when that channel is actually rendered below;
-        // with no handable hint there is no address on this banner to point at, and the operator needs a
-        // hint from the peer's side instead.
-        (MdnsState::Blocked, ReachKind::DirectOnly) if direct => (
-            "off; mDNS unavailable here, so hand a peer the address below".to_owned(),
-            &[],
-        ),
+        // The direct lane always renders under direct-only, so the down-state can always point at it:
+        // there is no bind whose banner offers no address to hand over.
         (MdnsState::Blocked, ReachKind::DirectOnly) => (
-            "off; mDNS unavailable here, so a peer needs a direct address hint".to_owned(),
+            "off; mDNS unavailable here, so hand a peer the address below".to_owned(),
             &[],
         ),
     };
@@ -1027,18 +1024,70 @@ fn reach_section(
     for addr in announced {
         out.push_str(&format!("{:gloss_col$}{addr}\n", ""));
     }
-    if direct {
-        let header = if handable.len() == 1 {
-            "hand a peer this address:"
-        } else {
-            "hand a peer one of these:"
-        };
-        out.push_str(&reach_line(width, gutter, "direct", header));
-        for addr in handable {
-            out.push_str(&format!("{:gloss_col$}{addr}\n", ""));
-        }
+    if let Some(dialable) = &dialable {
+        out.push_str(&reach_line(width, gutter, "direct", dialable.gloss()));
+        out.push_str(&dialable.lines(gloss_col));
     }
     out
+}
+
+/// The addresses a direct-only bind can be dialed at, in the order the `direct` lane hands them over:
+/// every address that reaches this host from another machine first, then loopback last.
+///
+/// The ORDER is the invariant, established once in [`Self::of`] and relied on by [`Self::lines`], so the
+/// lane can never lead with the one address that only works for a peer already on this machine.
+struct Dialable(Vec<SocketAddr>);
+
+impl Dialable {
+    /// Read the dialable set off the facts a bound node already has.
+    ///
+    /// The off-host half comes from the mDNS advertisement: expanding a wildcard bind into this host's
+    /// interface addresses is work the advertisement already did, and it is the only place in this process
+    /// that has done it. A bind whose advertisement never reached past this machine has no enumerated
+    /// interface address to offer, so it hands over loopback alone rather than guessing at one.
+    ///
+    /// Loopback comes from the bind's own hints, which is where the port lives. It is printed rather than
+    /// dropped: it is what demonstrably works for a second node on this machine, and that is the case the
+    /// walkthroughs actually run.
+    fn of(mdns: &MdnsState, hints: &[SocketAddr]) -> Self {
+        let mut addrs = match mdns {
+            // Non-loopback and off-host by construction (`HostAddrs::expand` drops loopback and link-local),
+            // so this half never needs re-filtering here.
+            MdnsState::OnLan(announced) => announced.clone(),
+            MdnsState::LoopbackOnly | MdnsState::BrowseOnly(_) | MdnsState::Blocked => Vec::new(),
+        };
+        addrs.extend(hints.iter().filter(|addr| addr.ip().is_loopback()));
+        Self(addrs)
+    }
+
+    /// The lane's gloss: what the operator is meant to DO with the lines under it.
+    fn gloss(&self) -> &'static str {
+        match self.0.len() {
+            // Unreachable on any bind that came up (a bound socket reports its address, and loopback alone
+            // is still an address), stated rather than left to render a header over nothing.
+            0 => "the bind reported no address to hand over",
+            1 => "hand a peer this address:",
+            _ => "hand a peer one of these:",
+        }
+    }
+
+    /// One address per line at the gloss column, the address leading each line so a copy starts clean.
+    ///
+    /// Loopback carries a scope mark: it names the DIALER's own machine, so it reaches a peer on this
+    /// machine and nobody else, and handing it to a peer elsewhere fails in a way the banner should have
+    /// warned about. Every other address is bare.
+    fn lines(&self, gloss_col: usize) -> String {
+        let mut out = String::new();
+        for addr in &self.0 {
+            let scope = if addr.ip().is_loopback() {
+                "  (this machine only)"
+            } else {
+                ""
+            };
+            out.push_str(&format!("{:gloss_col$}{addr}{scope}\n", ""));
+        }
+        out
+    }
 }
 
 /// One `how peers reach you` line: `  <label padded>   <gloss>`.

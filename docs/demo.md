@@ -90,12 +90,10 @@ credential is never written to it. The `quirk+noise` spelling, below, is the opt
 ## Part 3: quirk+noise admits the gate
 
 `quirk+noise` runs a Noise handshake over the same backend and proves the reached key, so the SAME
-rooted gate arms here. It is still direct-only, so `serve` prints the address it is reachable at:
+rooted gate arms here. It is still direct-only, so `serve` lists every address it is dialable at. Both
+nodes in this demo run on this machine, so the loopback line is the one to copy:
 
-<!-- The `direct` lane below no longer renders: a wildcard bind holds no routable hint, so the
-     announced LAN address on the `local` lane is the only address this banner offers a peer. The
-     surrounding prose says `serve` prints the address the peer needs; settle that, then capture. -->
-<!-- pending live-run: scripts/demo.sh serve-quirk-noise -->
+<!-- live-run: the NodeId is the demo server's, carried from part 4 so the same key reads the same on both; the port is this bind's and 192.168.x.x stands in for this host's address -->
 ```console
 $ swoosh serve --transport quirk+noise
 swoosh ready
@@ -104,8 +102,9 @@ swoosh ready
 
 how peers reach you
   local    automatic; local mDNS, or direct, no NAT traversal
-  direct   reachable on this machine only:
-           127.0.0.1:64368
+  direct   hand a peer one of these:
+           192.168.x.x:55149
+           127.0.0.1:55149  (this machine only)
 
 serving
   family-gated   your devices + peers you've granted

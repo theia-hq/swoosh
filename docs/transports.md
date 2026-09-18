@@ -82,22 +82,20 @@ Two spellings share that backend:
 Both ends must use the same spelling: a `quirk+noise` peer cannot talk to a bare `quirk` peer, and
 there is no fallback.
 
-Because it is direct-only, a `quirk+noise` `serve` prints the address the peer needs:
+Because it is direct-only, a `quirk+noise` `serve` lists every address it is dialable at:
 
-<!-- The `direct` lane below no longer renders: a wildcard bind holds no routable hint, so the
-     announced LAN address on the `local` lane is the only address this banner offers a peer. The
-     surrounding prose says `serve` prints the address the peer needs; settle that, then capture. -->
-<!-- pending live-run: swoosh serve --transport quirk+noise -->
+<!-- live-run: the addresses and the port are this host's and this bind's; 192.168.x.x stands in for yours -->
 ```console
 $ swoosh serve --transport quirk+noise
 swoosh ready
 
-    bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
+    bf01bck7z4f2knn43y2a6lvpidk4a2x5lueu6jhcvdlskxkhkq47phhq
 
 how peers reach you
   local    automatic; local mDNS, or direct, no NAT traversal
-  direct   reachable on this machine only:
-           127.0.0.1:58476
+  direct   hand a peer one of these:
+           192.168.x.x:53013
+           127.0.0.1:53013  (this machine only)
 
 serving
   family-gated   your devices + peers you've granted
@@ -108,7 +106,8 @@ serving
 ctrl-c to stop
 ```
 
-Hand that address to the peer with `--peer` (below).
+Hand the peer whichever one reaches them, with `--peer` (below): a LAN address from another host,
+loopback from a second node on this machine.
 
 **Bare `quirk` cannot serve.** It never carries a credential: it does not prove the peer's key.
 `quirk+noise` proves the key and encrypts the session, but it is direct-only: use

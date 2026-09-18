@@ -2,6 +2,22 @@
 
 All notable changes to swoosh, newest first.
 
+## Unreleased
+
+### Fixed
+- **A direct-only bind hands over an address again.** `serve --transport quirk+noise` printed no `direct`
+  lane at all, so the banner gave the operator nothing to pass to a peer, on a transport that has no relay
+  and no NAT traversal and where an address is the whole of its reach. The lane was not merely empty: a
+  wildcard bind's dial hint is rewritten to loopback and the lane filtered loopback out, and swoosh binds
+  wildcard always, so it could never render. It now lists every address the bind is dialable at, the ones
+  that reach this host from another machine first and loopback last, marked as reaching only this machine.
+  A direct-only `local` lane drops its own address list, so one banner carries one list.
+- **The demo script runs the binary you just built.** It looked for one under this repo's own `target`
+  directory, which is the wrong place whenever the build writes somewhere else, and the stale binary
+  sitting there ran instead. The demo passed and proved nothing. It asks cargo where the binary lands now,
+  always builds first, and refuses to run if one is missing. It also hands the second node the loopback
+  address rather than the first address in the banner, because both nodes run on one machine.
+
 ## v0.11.0
 
 Every service target carries a scheme, so a near-miss is a refusal rather than a different service.
