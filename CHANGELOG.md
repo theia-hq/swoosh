@@ -2,7 +2,9 @@
 
 All notable changes to swoosh, newest first.
 
-## Unreleased
+## v0.11.0
+
+Every service target carries a scheme, so a near-miss is a refusal rather than a different service.
 
 ### Changed
 - **Every service target carries a scheme: a TCP forward is now `tcp:<host>:<port>`.** The bare
@@ -13,6 +15,11 @@ All notable changes to swoosh, newest first.
   parse error saying `ping:` takes no argument, a scheme nothing serves is refused by name, and the
   readiness banner tells a forward from an engine by its scheme rather than by sniffing for a port.
   `unix:<path>` is unchanged.
+- **`swoosh serve --help` lists every target it accepts.** Both halves: the four engines swoosh serves
+  (`ping:`, `speed:`, `roster:`, `sshd:`) and the six forms it forwards or streams. A refused target points
+  there, because the tunnel grammar refuses by naming the forms it routes and cannot name the engines
+  layered on top of it, so a mistyped `png:` used to be handed a legal set with no `ping:` in it.
+- **The sibling pins follow tightbeam v0.7.0 and services v0.1.4,** which is where this grammar lives.
 
 ## v0.10.0
 
