@@ -11,8 +11,10 @@ This page is the catalog: every target you can put after `name=`, what it does, 
 ## Available today
 
 Bare `swoosh serve` publishes `ping=ping: speed=speed:`, gated. Every entry after the verb must be
-`name=target`; a bare `ping` or `ping:` is refused with a message naming that form.
-[`swoosh serve`](commands/serve.md) has the flags.
+`name=target`; a bare `ping` or `ping:` is refused with a message naming that form. Every target carries a
+scheme, including a TCP forward (`tcp:<host>:<port>`), so a scheme nothing serves is refused by name and a
+scheme that takes no argument refuses a tail: `ping=ping:80` is an error, not a forward to a host called
+`ping`. [`swoosh serve`](commands/serve.md) has the flags.
 
 ### `ping:`
 
@@ -41,7 +43,8 @@ A keyless shell on this machine, run as the serving process's user. Serve it und
 
 - Posture: family-gated, and no public form: `--public ssh` is refused by name at startup.
 - Example: `swoosh serve ssh=sshd:`
-- To front an existing sshd instead, use a forward: `swoosh serve ssh=127.0.0.1:22` keeps SSH's own auth.
+- To front an existing sshd instead, use a forward: `swoosh serve ssh=tcp:127.0.0.1:22` keeps SSH's own
+  auth.
 - Limits: [sshh](https://github.com/theia-hq/services/blob/main/crates/sshh/README.md).
 
 ### `recv:<dir>`
@@ -62,14 +65,15 @@ The node performs an HTTP `GET`/`HEAD` for the caller and streams the origin res
 - Example: `swoosh serve news=fetch:https://news.example`
 - Limits: [fetch](https://github.com/theia-hq/services/blob/main/crates/fetch/README.md).
 
-### A TCP or Unix forward
+### `tcp:<host>:<port>` and `unix:<path>`
 
 Front an existing local socket; tightbeam connects it and splices bytes, so the service keeps its own
-protocol and auth.
+protocol and auth. The two are siblings, a TCP socket and a Unix socket, and a forward carries bytes either
+way.
 
 - Posture: family-gated. `--public web` is allowed: you stood the socket up, and opening it hands that
   socket to anyone.
-- Example: `swoosh serve web=127.0.0.1:8080` or `swoosh serve db=unix:/run/db.sock`
+- Example: `swoosh serve web=tcp:127.0.0.1:8080` or `swoosh serve db=unix:/run/db.sock`
 - Limits: [tightbeam](https://github.com/theia-hq/tightbeam#what-a-forward-carries).
 
 ### The raw streams: `file:`, `fifo:`, `stdin:`

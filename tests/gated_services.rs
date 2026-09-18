@@ -41,9 +41,9 @@ const SIGNET_SECRET: [u8; 32] = [7u8; 32];
 /// `control.services` handler while the catalog still lists these by name: the read reflects what the node
 /// serves, not what the test happened to register.
 const SERVED: [&str; 3] = [
-    "web=127.0.0.1:8080",
-    "db=127.0.0.1:5432",
-    "api=127.0.0.1:9000",
+    "web=tcp:127.0.0.1:8080",
+    "db=tcp:127.0.0.1:5432",
+    "api=tcp:127.0.0.1:9000",
 ];
 
 /// An ADMITTED member reaching `control.services` reads the node's served list: it decodes the catalog blob
