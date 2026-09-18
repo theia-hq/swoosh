@@ -12,10 +12,7 @@ hold its key and do the admitting. Every family member reaches it by presenting 
 
 Publish the box's services behind its own gate:
 
-<!-- The node id below is the docs-wide example key and the `local` line is this host's, so the
-     block is not reproducible as shown. Re-capture needs the harness to normalize a host address
-     the way it already normalizes keys and ports. -->
-<!-- pending live-run: swoosh serve ssh=sshd: tv=tcp:127.0.0.1:8096 -->
+<!-- live-run: the announced LAN address is this host's, one line each; 192.168.x.x stands in for yours -->
 ```console
 $ swoosh serve ssh=sshd: tv=tcp:127.0.0.1:8096
 swoosh ready
@@ -25,7 +22,8 @@ swoosh ready
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
   records    n0's public discovery: your addresses, for anyone with your key
-  local      automatic; your devices just need the key (mDNS)
+  local      automatic; your devices just need the key (mDNS), announced at:
+             192.168.x.x:58131
 
 serving
   family-gated   your devices + peers you've granted

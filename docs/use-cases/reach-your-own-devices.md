@@ -43,7 +43,7 @@ key with `swoosh invite add laptop --for <key>` instead.
 
 On the machine you want to reach, stay online:
 
-<!-- capture: swoosh serve -->
+<!-- live-run: the announced LAN address is this host's, one line each; 192.168.x.x stands in for yours -->
 ```console
 $ swoosh serve
 swoosh ready
@@ -53,7 +53,8 @@ swoosh ready
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
   records    n0's public discovery: your addresses, for anyone with your key
-  local      automatic; your devices just need the key (mDNS)
+  local      automatic; your devices just need the key (mDNS), announced at:
+             192.168.x.x:58131
 
 serving
   family-gated   your devices + peers you've granted
@@ -73,7 +74,7 @@ $ swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k
 added desk -> bf01hcq6balrlxwa
 ```
 
-<!-- live-run: real iroh RTT over the internet, non-deterministic; re-capture before release -->
+<!-- live-run: real iroh RTT over the internet, non-deterministic; 135.129.x.x masks the peer's address; re-capture before release -->
 ```console
 $ swoosh ping desk -c 4
 desk/default via iroh: mixed (direct to 135.129.x.x:56141 and relayed)

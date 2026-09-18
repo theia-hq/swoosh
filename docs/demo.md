@@ -92,9 +92,9 @@ credential is never written to it. The `quirk+noise` spelling, below, is the opt
 `quirk+noise` runs a Noise handshake over the same backend and proves the reached key, so the SAME
 rooted gate arms here. It is still direct-only, so `serve` prints the address it is reachable at:
 
-<!-- The `direct` lane below is stale: the bind-truth fix deleted the "reachable on this machine
-     only" line and a wildcard bind now announces real addresses. Re-capture needs the harness to
-     normalize a host address the way it already normalizes keys and ports. -->
+<!-- The `direct` lane below no longer renders: a wildcard bind holds no routable hint, so the
+     announced LAN address on the `local` lane is the only address this banner offers a peer. The
+     surrounding prose says `serve` prints the address the peer needs; settle that, then capture. -->
 <!-- pending live-run: scripts/demo.sh serve-quirk-noise -->
 ```console
 $ swoosh serve --transport quirk+noise
@@ -135,10 +135,7 @@ that proves the key.
 Now start `serve` again from the SAME server key, over iroh. iroh self-discovers over the internet, so
 no `--peer` is needed. The NodeId is byte-for-byte identical:
 
-<!-- The `local` lane below is stale: a wildcard bind now appends "announced at:" and the real
-     addresses. Re-capture needs the harness to normalize a host address the way it already
-     normalizes keys and ports. -->
-<!-- pending live-run: scripts/demo.sh serve-iroh -->
+<!-- live-run: the announced LAN address is this host's, one line each; 192.168.x.x stands in for yours -->
 ```console
 $ swoosh serve --transport iroh
 swoosh ready
@@ -148,7 +145,8 @@ swoosh ready
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
   records    n0's public discovery: your addresses, for anyone with your key
-  local      automatic; your devices just need the key (mDNS)
+  local      automatic; your devices just need the key (mDNS), announced at:
+             192.168.x.x:58131
 
 serving
   family-gated   your devices + peers you've granted
@@ -163,7 +161,7 @@ The ed25519 NodeId is derived from the persisted secret, so it is the same acros
 construction, not coincidence (pinned in CI: one secret over both backends asserts equal NodeIds). The
 member runs the identical commands, now over iroh with no `--peer`:
 
-<!-- live-run: iroh reach over the internet observed 2026-09-15 (a GitHub runner reached a home node across NAT); RTT, path, and throughput vary per run -->
+<!-- live-run: iroh reach over the internet observed 2026-09-15 (a GitHub runner reached a home node across NAT); RTT, path, and throughput vary per run, and 143.105.x.x masks the peer's address -->
 ```console
 $ swoosh ping  $SERVER --transport iroh -c 5 -i 0.2
 bf01f62wtyapessv via iroh: mixed (direct to 143.105.x.x:41125 and relayed)
