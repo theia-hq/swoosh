@@ -104,7 +104,7 @@ how peers reach you
   local    automatic; local mDNS, or direct, no NAT traversal
   direct   hand a peer one of these:
            192.168.x.x:63872  (this network)
-           100.x.x.x:63872    (on utun4)
+           100.x.x.x:63872    (this tunnel)
            127.0.0.1:63872    (this machine)
 
 serving

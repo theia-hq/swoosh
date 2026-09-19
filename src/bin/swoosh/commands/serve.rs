@@ -28,7 +28,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
-use bifrost_mdns::{At, Dialable, Expiring, Missing, Scope, ScopeClass};
+use bifrost_mdns::{At, Dialable, Expiring, Missing, ScopeClass};
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::{FileDenylist, Service};
@@ -435,7 +435,12 @@ impl ServeCmd {
         // name different hosts. Bind truth cannot disagree with itself; the interface list very much
         // can, so it is read once. Still lazy: a plain quiet serve reads neither, so it performs no
         // new syscall at all.
-        let dialable = (self.resident || !self.quiet).then(|| Dialable::of(node.bound_sockets()));
+        // Expanded here ONLY for the resident arm, which needs the status address before the
+        // banner runs. The banner expands for itself when this is `None`, so a plain serve is
+        // still one expansion and a quiet non-resident serve is still none. Gating this on
+        // `resident || !quiet` instead would make `None` unreachable at the banner and leave a
+        // state that cannot happen to be handled there anyway.
+        let dialable = self.resident.then(|| Dialable::of(node.bound_sockets()));
 
         // The resident listener arm (S4), after the proven overlay so a refused serve never binds
         // a socket. Order: (1) plain serve acquires nothing (byte-identical, no dir, no lock, no
@@ -478,11 +483,9 @@ impl ServeCmd {
             // above, which the resident arm's status address was read from too, so the two can only
             // ever name the same host.
             let addr = node.local_addr();
-            let Some(dialable) = dialable.as_ref() else {
-                eyre::bail!(
-                    "internal: serve reached its banner without the bind's dialable set (composition-root bug)"
-                );
-            };
+            // The resident arm's expansion when there was one, so the status address and the banner
+            // can only ever name the same host; otherwise this is the only one taken.
+            let dialable = dialable.unwrap_or_else(|| Dialable::of(node.bound_sockets()));
             // A display map of served name -> target address, read off the SAME requested strings the router
             // bound (fetch already de-merged out), so the banner renders `name -> target` from what the
             // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
@@ -530,7 +533,7 @@ impl ServeCmd {
                     reach,
                     mdns,
                     &self.bound_reach,
-                    dialable,
+                    &dialable,
                     &manifest,
                     &addr_by_name,
                     &fetch_names,
@@ -1053,12 +1056,6 @@ fn reach_section(
     out
 }
 
-/// The hard bound on a rendered banner line, the mark included. A line past it wraps on an
-/// 80-column terminal, and a wrapped line destroys the very mark column the marks are aligned into.
-/// Only the tunnel mark is variable, so only the tunnel mark can breach it, and it gives up the link
-/// name rather than the bound (see [`tunnel_mark`]).
-const LINE_BUDGET: usize = 80;
-
 /// The `direct` lane: the gloss that says what to DO with the lines, then ONE address per reach class.
 ///
 /// A rendering adapter over a type that lives in a lower crate, which is why it is a function and not a
@@ -1084,6 +1081,12 @@ const LINE_BUDGET: usize = 80;
 ///
 /// The marks align in a column so the classes scan against each other rather than ragged against the
 /// addresses, and the padding sits BEFORE the mark, so a copy that ends at the address is still clean.
+///
+/// The 80-column bound holds BY CONSTRUCTION, with nothing to check at runtime: every term of the
+/// widest line is fixed. The gloss column is 11, the widest legal socket is a v6 with no
+/// compressible group and a five-digit port at 47 (link-locals are filtered one crate down, so no
+/// `%zone` can widen one), the mark gutter is 2, and the widest mark is 14 including its
+/// parentheses. `11 + 47 + 2 + 14 = 74`, which is why no line here measures itself.
 fn direct_lane(dialable: &Dialable, width: usize, gutter: usize) -> String {
     let gloss_col = 2 + width + gutter;
     // Same reach class whatever the tunnel's link name: two overlays are two spellings of one
@@ -1115,63 +1118,62 @@ fn direct_lane(dialable: &Dialable, width: usize, gutter: usize) -> String {
     // budget: an IPv6 line is far wider than an IPv4 one and a fixed column would either waste the
     // banner's width on every v4-only host or wrap on every v6 one.
     let addr_col = addrs.iter().map(String::len).max().unwrap_or(0);
-    // What every row spends before its mark's opening parenthesis: the gloss column, the address
-    // column, and the two-space gutter the marks align after. The mark has the rest of the budget.
-    let before_mark = gloss_col + addr_col + 2;
-    let rows: Vec<(String, Cow<'static, str>)> = addrs
+    let rows: Vec<(String, &'static str)> = addrs
         .into_iter()
         .zip(&chosen)
-        .map(|(addr, at)| {
-            let mark = match &at.scope {
-                // Four marks that read as one family, so the classes scan against each other, and
-                // three of them are a determiner and two words wide on purpose: the widest legal v6
-                // socket is 47 columns and a longer phrasing wraps.
-                Scope::Internet => Cow::Borrowed("the internet"),
-                Scope::Network => Cow::Borrowed("this network"),
-                Scope::Tunnel { link } => tunnel_mark(link, before_mark),
-                Scope::ThisMachine => Cow::Borrowed("this machine"),
-            };
-            (addr, mark)
-        })
+        .map(|(addr, at)| (addr, mark(at.scope.class())))
         .collect();
+    // The class a drop took the last row of, asked only of a drop report: it is the one fact the
+    // expiring arm renders, and `emptied` is where the whole of that question lives.
+    let emptied = match dialable.missing() {
+        Missing::Expiring(dropped) => emptied(dropped, &chosen),
+        _ => None,
+    };
     // ONE clause, first match wins, loudest first. The lane carries a single gloss because the
     // operator gives it a single glance, so the conditions are ranked rather than concatenated: a
     // list that could not be read outranks one that lost a class, which outranks a list nothing
     // could be checked against, which outranks a port skew every row already answers for itself.
     // `Missing::Expiring` and `Missing::Flags` cannot co-occur (nothing is dropped when nothing
     // was read), so there is no arm for the pair and no order to settle between them.
-    let gloss = match (dialable.missing(), rows.len()) {
+    let gloss: Cow<'static, str> = match (dialable.missing(), emptied, rows.len()) {
         // Unreachable on any bind that came up (a bound socket answers at loopback at the very least),
         // stated rather than left to render a header over nothing.
-        (_, 0) => "no address to hand over",
+        (_, _, 0) => Cow::Borrowed("no address to hand over"),
         // The cause, then the bound: without this a lone `127.0.0.1  (this machine)` row asserts
         // this host is loopback-only when the truth is that nothing could be read. The errno stays
         // in the log, where it is free to be as long as it likes.
-        (Missing::Interfaces(_), 1) => {
-            "could not read this host's addresses; only this one is known:"
+        (Missing::Interfaces(_), _, 1) => {
+            Cow::Borrowed("could not read this host's addresses; only this one is known:")
         }
-        (Missing::Interfaces(_), _) => {
-            "could not read this host's addresses; only these are known:"
+        (Missing::Interfaces(_), _, _) => {
+            Cow::Borrowed("could not read this host's addresses; only these are known:")
         }
-        // Only a drop that took a whole class off the screen; see `emptied_a_class`.
-        (Missing::Expiring(dropped), 1) if emptied_a_class(dropped, &chosen) => {
-            "some of this host's addresses are expiring; only this one is left:"
-        }
-        (Missing::Expiring(dropped), _) if emptied_a_class(dropped, &chosen) => {
-            "some of this host's addresses are expiring; only these are left:"
-        }
+        // Only a drop that took a whole class off the screen; see [`emptied`]. ONE arm at any row
+        // count: `what is left:` is count-free, so it is correct over one row and over five, and
+        // the mark is the row's own word, so a reader matches the ABSENT line by literal compare
+        // against the marks that are still on screen.
+        (_, Some(class), _) => Cow::Owned(format!(
+            "only expiring addresses reach {}; what is left:",
+            mark(class)
+        )),
         // WHOLE and unchecked rather than short, so the instruction stays intact and the caveat is a
         // parenthetical: every row still dials, and only how long it will keep dialing is unknown.
         // The misread to kill is an operator who believes we checked.
-        (Missing::Flags, 1) => "hand a peer this address (could not check for expiry):",
-        (Missing::Flags, _) => "hand a peer one of these (could not check for expiry):",
-        (_, 1) => "hand a peer this address:",
+        (Missing::Flags, _, 1) => {
+            Cow::Borrowed("hand a peer this address (could not check for expiry):")
+        }
+        (Missing::Flags, _, _) => {
+            Cow::Borrowed("hand a peer one of these (could not check for expiry):")
+        }
+        (_, _, 1) => Cow::Borrowed("hand a peer this address:"),
         // One rendered row is one port, so the mixed condition cannot hold at one address and the
         // clause lives on the many arm alone.
-        (_, _) if mixed_ports => "hand a peer one of these (each address has its own port):",
-        (_, _) => "hand a peer one of these:",
+        (_, _, _) if mixed_ports => {
+            Cow::Borrowed("hand a peer one of these (each address has its own port):")
+        }
+        (_, _, _) => Cow::Borrowed("hand a peer one of these:"),
     };
-    let mut out = reach_line(width, gutter, "direct", gloss);
+    let mut out = reach_line(width, gutter, "direct", &gloss);
     for (addr, mark) in &rows {
         // The address leads each line so a copy starts clean, at the gloss column, the same standard the
         // node id is held to.
@@ -1180,53 +1182,56 @@ fn direct_lane(dialable: &Dialable, width: usize, gutter: usize) -> String {
     out
 }
 
-/// The mark for a tunnel address: `on <link>` where the whole line still fits, `on a tunnel` where it
-/// would not.
+/// How far a class of address reaches, in the words the banner spells it with.
 ///
-/// The link name is the ONLY externally sourced string on this banner and the only variable-width
-/// mark, so both of the things that can go wrong with it are handled here. `IFNAMSIZ` permits 15
-/// characters, which lands a `wg-corporate-01` beside a full-width v6 at exactly 80: the budget
-/// survives every legal Unix name, and the generic form stays a true edge (a Windows adapter name, or
-/// a name carrying a control character that would move the cursor instead of printing). A name that
-/// breaches either is dropped whole rather than truncated: `(on wg-corpora)` is a stub an operator
-/// could mistake for a real link.
-fn tunnel_mark(link: &str, before_mark: usize) -> Cow<'static, str> {
-    let named = format!("on {link}");
-    // The two parentheses the mark is wrapped in are the render's, so the budget pays for them here.
-    let breaches = before_mark + 2 + named.chars().count() > LINE_BUDGET;
-    if breaches || link.chars().any(char::is_control) {
-        return Cow::Borrowed("on a tunnel");
+/// ONE spelling of each class for the whole lane: the rows carry these, and the expiring gloss
+/// interpolates the same word, so a reader who is told `only expiring addresses reach the internet`
+/// matches that against the row marks by literal compare. Two spellings of `the internet` in one
+/// file would be two strings to keep in step and one of them eventually wrong.
+///
+/// Four marks that read as one family (a determiner and a noun), so the classes scan against each
+/// other, and short on purpose: the widest legal v6 socket is 47 columns and a longer phrasing
+/// wraps. A tunnel is `this tunnel` and does NOT name its link. The cap renders one line per class,
+/// so at most one tunnel row ever appears and the name has no second overlay to tell it apart from:
+/// it was redundant where it informed (the address already said it) and empty where it did not (on
+/// macOS every overlay is `utunN`). Dropping it is also what leaves this banner with NO
+/// externally-sourced string at all, which is why nothing here guards against control characters or
+/// measures a line: there is no longer an input to guard. Re-adding an OS-supplied string here
+/// brings both of those back with it.
+fn mark(class: ScopeClass) -> &'static str {
+    match class {
+        ScopeClass::Internet => "the internet",
+        ScopeClass::Network => "this network",
+        ScopeClass::Tunnel => "this tunnel",
+        ScopeClass::ThisMachine => "this machine",
     }
-    Cow::Owned(named)
 }
 
-/// Whether the addresses this host dropped as expiring took a whole reach class off the lane.
+/// The reach class that the addresses dropped as expiring took the last row of, if any: the
+/// highest-ranked one when a drop emptied several at once.
 ///
-/// The fact an operator can act on is not how MANY addresses went, it is whether a class went. The
+/// The fact an operator can act on is not how MANY addresses went, it is WHICH class went. The
 /// cap already renders one line per class, so a drop a class survived is invisible by design and a
 /// tally of hidden addresses is noise in a glance: that arm would fire on every laptop that has ever
 /// slept and tell its operator nothing to do. A class with no row left is the opposite case, and the
 /// one the lane would otherwise lie about: silence where an address used to be reads as "this host
 /// has none", when the truth is that this host is losing them and may want to wait or renew.
 ///
-/// Asked class by class, over the classes this host can name without a link. [`Scope::Tunnel`] is
-/// compared by its own link name, and a link whose only address expired has no row left to take that
-/// name from, so the question cannot be formed for it and a tunnel drop renders as the plain arms.
-fn emptied_a_class(dropped: &Expiring, chosen: &[&At]) -> bool {
-    // Every class, the tunnel included. It was left out while the question was phrased over a
-    // `Scope`, because a tunnel scope carries its link name and a link whose only address expired
-    // leaves no surviving row to take that name from -- so the one case that most needed asking
-    // was the one that could not be asked. `ScopeClass` asks by class, which is what the cap above
-    // groups by, so the two now mean the same thing by construction rather than by a `discriminant`
-    // call spelling it here.
-    [
-        ScopeClass::Internet,
-        ScopeClass::Network,
-        ScopeClass::Tunnel,
-        ScopeClass::ThisMachine,
-    ]
-    .into_iter()
-    .any(|class| dropped.reached(class) && !chosen.iter().any(|at| at.scope.class() == class))
+/// Asked over the classes that actually lost an address, by CLASS and never by scope. A tunnel
+/// scope carries the link it rides, and the link whose only address expired leaves no surviving row
+/// to take that name from, so the drop that most needs saying is the one a question phrased as
+/// `Scope::Tunnel` could not even be formed for. Reading the report's own classes is also what
+/// keeps this honest as the classes change: a sweep of every class written out here answers for the
+/// four that exist today and silently skips the fifth.
+///
+/// The FIRST emptied class is the highest-ranked one, for free: [`Expiring::classes`] yields in
+/// [`ScopeClass`]'s own rank order, so the one gloss the lane can spend goes to the class whose
+/// absence costs the operator most. It can never be all four, because a lane with no rows at all is
+/// the first arm.
+fn emptied(dropped: &Expiring, chosen: &[&At]) -> Option<ScopeClass> {
+    dropped
+        .classes()
+        .find(|class| !chosen.iter().any(|at| at.scope.class() == *class))
 }
 
 /// One `how peers reach you` line: `  <label padded>   <gloss>`.

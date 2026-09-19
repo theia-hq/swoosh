@@ -95,7 +95,7 @@ how peers reach you
   local    automatic; local mDNS, or direct, no NAT traversal
   direct   hand a peer one of these:
            192.168.x.x:61444  (this network)
-           100.x.x.x:61444    (on utun4)
+           100.x.x.x:61444    (this tunnel)
            127.0.0.1:61444    (this machine)
 
 serving

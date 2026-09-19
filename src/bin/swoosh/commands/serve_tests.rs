@@ -80,6 +80,12 @@ const NETWORK_AT: &str = "192.168.1.44:58131";
 /// every real serve is a wildcard bind and every one of them has this entry.
 const LOOPBACK_AT: &str = "127.0.0.1:58131";
 
+/// The loopback socket a v6 wildcard answers on, at the v6 socket's own port: the whole lane of an
+/// isolated host that binds `[::]` and nothing else. Every fixture for an unread flag read is built
+/// on a bind that expands v6, because the per-address flags are IPv6's own and bifrost narrows that
+/// gap away on a bind that expands no v6 wildcard.
+const LOOPBACK_V6_AT: &str = "[::1]:58569";
+
 /// A globally routable v6 address a wildcard bind answers on, at ITS OWN port. An unnamed dual-stack
 /// bind asks the OS for a v4 socket and a v6only socket separately, so the two families routinely
 /// land on different ephemeral ports: that skew is the shape the lane's port clause exists for, so
@@ -587,8 +593,8 @@ fn a_blocked_advertisement_still_hands_over_the_hosts_network_addresses() {
 /// A point-to-point link (utun, tun, wg, a tailnet) is handed over and MARKED. The socket answers there,
 /// and for a direct-only bind it is the one address that can reach a peer off this LAN, so dropping it
 /// would hide the most useful line; leading with it, or leaving it bare, would invite a paste to a peer
-/// that is not on that link and cannot route to it. It sits below the network address, marked with the
-/// link it rides, and never goes on the mDNS wire.
+/// that is not on that link and cannot route to it. It sits below the network address, marked by its
+/// CLASS and never by the link it rides, and never goes on the mDNS wire.
 #[test]
 fn a_tunnel_address_is_handed_over_marked_and_below_the_network_one() {
     // Shuffled: the order below is the expansion's, established by `FromIterator`, not this array's.
@@ -611,14 +617,19 @@ fn a_tunnel_address_is_handed_over_marked_and_below_the_network_one() {
         lane_rows(&section),
         [
             format!("           {NETWORK_AT}    (this network)"),
-            format!("           {TUNNEL_AT}  (on {TUNNEL_LINK})"),
+            format!("           {TUNNEL_AT}  (this tunnel)"),
             format!("           {LOOPBACK_AT}       (this machine)"),
         ],
-        "network first, then the tunnel address under the link it rides, then loopback: {section}"
+        "network first, then the address the overlay answers on, then loopback: {section}"
+    );
+    assert!(
+        !section.contains(TUNNEL_LINK),
+        "the OS's name for the link never reaches the screen, so a screenshot names no VPN \
+         vendor and no employer: {section}"
     );
     assert!(
         !section.contains("tailnet") && !section.contains("internet"),
-        "the mark names the link this host can see, never what the link joins: {section}"
+        "and the mark claims nothing about what the link joins: {section}"
     );
 }
 
@@ -689,7 +700,7 @@ fn the_lane_renders_one_line_per_class_and_the_v4_leads_its_class() {
         lane_rows(&section),
         [
             format!("           {NETWORK_AT}    (this network)"),
-            format!("           {TUNNEL_AT}  (on {TUNNEL_LINK})"),
+            format!("           {TUNNEL_AT}  (this tunnel)"),
             format!("           {LOOPBACK_AT}       (this machine)"),
         ],
         "six entries, three decisions, and the v4 of each class: {section}"
@@ -767,62 +778,58 @@ fn a_bind_with_no_address_says_so_rather_than_rendering_a_header_over_nothing() 
     );
 }
 
-/// The 80-column bound holds INCLUDING the mark, and the link name is what gives way. A v6 with no
-/// compressible group and a five-digit port is 47 columns, and `IFNAMSIZ` permits a 15-character
-/// name, so the two together are the pathological line: it lands at exactly 80 and still carries the
-/// name, which is what keeps the generic form a true edge rather than a second normal render. A name
-/// that cannot fit, or one carrying a control character (the only externally sourced string on this
-/// banner), is dropped WHOLE: a truncated stub is a link name an operator could believe.
+/// The 80-column bound holds BY CONSTRUCTION, with nothing measured at runtime. Every term of the
+/// widest line is fixed: the gloss column, the widest legal socket (a v6 with no compressible group
+/// and a five-digit port, 47 columns), the two-space mark gutter, and the widest mark. The lane used
+/// to measure itself here because the tunnel mark carried the OS's name for the link and could
+/// overflow on a legal `IFNAMSIZ` name; with the name gone the arithmetic IS the proof, and an
+/// over-budget fallback would be unreachable code.
 #[test]
-fn the_widest_line_gives_up_the_link_name_rather_than_the_eighty_column_bound() {
-    let widest = |link: &str| -> Vec<String> {
-        let bind: Dialable = [
-            at(
-                TUNNEL_AT,
-                Scope::Tunnel {
-                    link: link.to_owned(),
-                },
-            ),
-            at(WIDEST_V6_AT, Scope::Internet),
-        ]
-        .into_iter()
-        .collect();
-        lane_rows(&reach_section(
-            ReachKind::DirectOnly,
-            &MdnsState::Blocked,
-            &n0(),
-            &bind,
-        ))
-    };
+fn the_widest_line_the_lane_can_render_is_the_static_bound() {
+    // Every term written exactly once, so the bound is derived here rather than typed twice:
+    // `  direct   ` IS the gloss column the rows indent to.
+    let bound =
+        "  direct   ".len() + WIDEST_V6_AT.chars().count() + 2 + "(the internet)".chars().count();
+    assert!(
+        bound <= 80,
+        "the whole of the lane fits an 80-column terminal: {bound}"
+    );
 
-    let named = widest("wg-corporate-01");
+    // The widest address the render can be handed, in the class carrying the widest mark, beside a
+    // link whose name could never have fitted: not bounded by `IFNAMSIZ` (a Windows adapter name),
+    // and carrying a control character that would move the terminal's cursor instead of printing.
+    // Neither is guarded against any more, because neither reaches the screen.
+    let bind: Dialable = [
+        at(
+            TUNNEL_AT,
+            Scope::Tunnel {
+                link: "Local Area Connection\u{7}".to_owned(),
+            },
+        ),
+        at(WIDEST_V6_AT, Scope::Internet),
+    ]
+    .into_iter()
+    .collect();
+
+    let rows = lane_rows(&reach_section(
+        ReachKind::DirectOnly,
+        &MdnsState::Blocked,
+        &n0(),
+        &bind,
+    ));
     assert_eq!(
-        named[1].chars().count(),
-        80,
-        "the longest legal name beside the widest v6 lands exactly at the bound: {named:?}"
+        rows.iter().map(|row| row.chars().count()).max(),
+        Some(bound),
+        "the widest line the lane can render is the static bound: {rows:?}"
     );
     assert!(
-        named[1].ends_with("(on wg-corporate-01)"),
-        "and still names the link: {named:?}"
+        rows[1].ends_with("  (this tunnel)"),
+        "the tunnel mark is fixed-width like every other: {rows:?}"
     );
-
-    // A Windows adapter name is not bounded by `IFNAMSIZ`, and a control character would move the
-    // terminal's cursor instead of printing.
-    for unrenderable in ["Local Area Connection", "utun\u{7}4"] {
-        let rows = widest(unrenderable);
-        assert!(
-            rows.iter().all(|row| row.chars().count() <= 80),
-            "{unrenderable:?} stays inside the bound: {rows:?}"
-        );
-        assert!(
-            rows[1].ends_with("  (on a tunnel)"),
-            "{unrenderable:?} falls back to the generic mark whole: {rows:?}"
-        );
-        assert!(
-            !rows[1].contains("Local") && !rows[1].contains("utun"),
-            "and leaves no truncated stub a reader could take for a link: {rows:?}"
-        );
-    }
+    assert!(
+        !rows[1].contains("Local") && !rows[1].contains('\u{7}'),
+        "and the banner carries no externally sourced string at all, whole or truncated: {rows:?}"
+    );
 }
 
 /// The interface read failed, so the list is SHORT and the lane says so. A wildcard bind still answers
@@ -878,11 +885,15 @@ fn a_failed_interface_read_says_the_list_is_short_and_why() {
 /// A drop that EMPTIED a reach class is the one an operator has to hear about. Where that class's
 /// row used to be the lane now says nothing, and silence reads as "this host has none" rather than
 /// "this host is losing them": the same silent degradation a failed interface read causes, one cause
-/// over. `are expiring` is the word that moves the reader from reconfigure to wait-or-renew, and the
-/// gloss names no class on purpose, because a host that never had a global address can lose a
-/// deprecated unique-local one and a named claim would be false.
+/// over. `expiring` is the word that moves the reader from reconfigure to wait-or-renew, and the
+/// gloss names the missing class with the ROW's own mark, so the reader matches the absent line
+/// against the marks still on screen by literal compare.
+///
+/// ONE arm, whatever the row count: `what is left:` is count-free, so the same string is correct
+/// over one row and over many. Both counts are pinned here because the string must READ right at
+/// both even though nothing branches on it any more.
 #[test]
-fn a_drop_that_empties_a_class_says_this_host_is_losing_addresses() {
+fn a_drop_that_empties_a_class_says_which_class_is_expiring() {
     // This host's only globally routable address expired: the internet class had a row, and has
     // none. The rows left are shuffled, like every multi-entry fixture here.
     let left = || {
@@ -898,9 +909,7 @@ fn a_drop_that_empties_a_class_says_this_host_is_losing_addresses() {
         &expiring(left(), [Scope::Internet]),
     );
     assert!(
-        section.contains(
-            "  direct   some of this host's addresses are expiring; only these are left:\n"
-        ),
+        section.contains("  direct   only expiring addresses reach the internet; what is left:\n"),
         "the class that went is the fact, and the rows left are the bound: {section}"
     );
     let untouched: Dialable = left().into_iter().collect();
@@ -915,8 +924,10 @@ fn a_drop_that_empties_a_class_says_this_host_is_losing_addresses() {
         "and the gloss is the ONLY thing the drop changes: {section}"
     );
 
-    // One row left, and the dropped address is never named: it is the RFC 8981 temporary address
-    // privacy addressing exists to keep unpublished, so printing it would defeat the drop.
+    // ONE row left, the same string: `what is left:` promises no count, so the arm that dissolved
+    // the singular/plural split still reads correctly here. The dropped address is never named: it
+    // is the RFC 8981 temporary address privacy addressing exists to keep unpublished, so printing
+    // it would defeat the drop.
     let alone = reach_section(
         ReachKind::DirectOnly,
         &MdnsState::Blocked,
@@ -924,9 +935,7 @@ fn a_drop_that_empties_a_class_says_this_host_is_losing_addresses() {
         &expiring([at(LOOPBACK_AT, Scope::ThisMachine)], [Scope::Network]),
     );
     assert!(
-        alone.contains(
-            "  direct   some of this host's addresses are expiring; only this one is left:\n"
-        ),
+        alone.contains("  direct   only expiring addresses reach this network; what is left:\n"),
         "{alone}"
     );
     assert_eq!(
@@ -935,12 +944,75 @@ fn a_drop_that_empties_a_class_says_this_host_is_losing_addresses() {
         "{alone}"
     );
 
-    for rendered in [&section, &alone] {
+    // The class only a CLASS question can catch. A tunnel scope carries the link it rides, and the
+    // link's only address is the one that expired, so no surviving row can be read for the name a
+    // question phrased as `Tunnel { link }` would need. The arm has to fire off the class alone,
+    // which is the whole of the fix, and nothing else here reaches it.
+    let tunnel_gone = reach_section(
+        ReachKind::DirectOnly,
+        &MdnsState::Blocked,
+        &n0(),
+        &expiring(
+            left(),
+            [Scope::Tunnel {
+                link: TUNNEL_LINK.to_owned(),
+            }],
+        ),
+    );
+    assert!(
+        tunnel_gone
+            .contains("  direct   only expiring addresses reach this tunnel; what is left:\n"),
+        "the overlay this host had an address on is a class that lost its only row: {tunnel_gone}"
+    );
+    assert!(
+        !tunnel_gone.contains(TUNNEL_LINK),
+        "and the link the dropped address rode is never named, like the address itself: \
+         {tunnel_gone}"
+    );
+
+    for rendered in [&section, &alone, &tunnel_gone] {
         assert!(
             rendered.lines().all(|line| line.chars().count() <= 80),
-            "the widest of the two arms stays inside the 80-column bound: {rendered}"
+            "the widest of the three arms stays inside the 80-column bound: {rendered}"
         );
     }
+}
+
+/// Several classes emptied at once, and the lane has ONE gloss to spend: it names the
+/// highest-ranked of them. The rank is how far a class reaches without the peer first joining
+/// something, so the class whose absence costs the operator most is the one the gloss is spent on.
+/// A laptop that wakes with its SLAAC globals deprecated and its overlay down loses both at once,
+/// and `the internet` is the loss that changes what the operator can do.
+#[test]
+fn several_classes_emptied_at_once_name_the_highest_ranked() {
+    // Dropped OUT of rank order, so an arm that reported whichever class came first would name the
+    // tunnel: the order is the report's, not this array's.
+    let losing = reach_section(
+        ReachKind::DirectOnly,
+        &MdnsState::Blocked,
+        &n0(),
+        &expiring(
+            [
+                at(LOOPBACK_AT, Scope::ThisMachine),
+                at(NETWORK_AT, Scope::Network),
+            ],
+            [
+                Scope::Tunnel {
+                    link: TUNNEL_LINK.to_owned(),
+                },
+                Scope::Internet,
+            ],
+        ),
+    );
+
+    assert!(
+        losing.contains("  direct   only expiring addresses reach the internet; what is left:\n"),
+        "the widest-reaching class that lost its row is the one the gloss names: {losing}"
+    );
+    assert!(
+        !losing.contains("this tunnel"),
+        "and the lane spends exactly one gloss, never a list: {losing}"
+    );
 }
 
 /// A drop every class SURVIVED says nothing at all. The lane renders one line per class, so a second
@@ -973,9 +1045,14 @@ fn a_drop_every_class_survived_says_nothing() {
 /// exact misread killer, because the danger is an operator who believes we checked. A sandbox that
 /// refuses the flags socket is the live trigger, and it leaves one of these rows possibly holding an
 /// RFC 8981 temporary address.
+///
+/// Both lanes here expand IPv6, because that is the only kind of bind this caveat can reach. The
+/// flags are IPv6's own (only IPv6 has the temporary-address mechanism they report), so bifrost
+/// narrows the gap away on a bind that expands no v6 wildcard: a v4-only fixture would pin a render
+/// no bind can produce, and would have kept the false caveat quirk was carrying on every banner.
 #[test]
 fn unreadable_flags_caveat_the_instruction_without_shortening_the_list() {
-    let one = Dialable::short([at(LOOPBACK_AT, Scope::ThisMachine)], Missing::Flags);
+    let one = Dialable::short([at(LOOPBACK_V6_AT, Scope::ThisMachine)], Missing::Flags);
     let section = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &one);
     assert!(
         section.contains("  direct   hand a peer this address (could not check for expiry):\n"),
@@ -983,14 +1060,14 @@ fn unreadable_flags_caveat_the_instruction_without_shortening_the_list() {
     );
     assert_eq!(
         lane_rows(&section),
-        [format!("           {LOOPBACK_AT}  (this machine)")],
+        [format!("           {LOOPBACK_V6_AT}  (this machine)")],
         "and the row is still handed over, marked: {section}"
     );
 
     let many = Dialable::short(
         [
-            at(LOOPBACK_AT, Scope::ThisMachine),
-            at(NETWORK_AT, Scope::Network),
+            at(LOOPBACK_V6_AT, Scope::ThisMachine),
+            at(INTERNET_AT, Scope::Internet),
         ],
         Missing::Flags,
     );
@@ -1049,9 +1126,8 @@ fn the_loudest_clause_wins_when_two_conditions_hold() {
     );
     let losing = reach_section(ReachKind::DirectOnly, &MdnsState::Blocked, &n0(), &short);
     assert!(
-        losing.contains(
-            "  direct   some of this host's addresses are expiring; only these are left:\n"
-        ) && !losing.contains("its own port"),
+        losing.contains("  direct   only expiring addresses reach this network; what is left:\n")
+            && !losing.contains("its own port"),
         "a class that went missing outranks a skew every row answers for itself: {losing}"
     );
 }
