@@ -87,6 +87,14 @@ The code should be beautiful to read and tell a story as you scroll._
   The common shape: guard and test are written together and inherit the same assumption about what
   can reach the code, so the test cannot see the case the guard exists for. Deleting the guard is the
   only cheap way to find that out.
+  When NO test can hold the invariant, say so and gate it mechanically instead. Some guards are
+  structurally untestable: nauthy's datalog budget is one, because the deterministic caps
+  deliberately match the library's defaults so only the wall-clock limit differs, and a test that
+  can tell 1 ms from 1 s is the clock race the guard exists to prevent. Writing a test that passes
+  either way is worse than writing none, because it reports the protection as covered. The rule is
+  then: prove the guard cannot be tested, say it in the commit, and close it with a gate script that
+  fails when the guard is removed. The gate is held to this same rule, so introduce the violation,
+  watch the gate fail, restore it.
 - **Docs are cut against the reader-first bar** (`DOCS-BAR.md`): say what it is first, a real command early, captured output only (one marker per block), one limit per page, no manifest or process leaks, a lib README shows the API and a bin README shows verbs. The voice is `DOC-VOICE.md`; the founder's register is `FOUNDER-DOC-STYLE.md`. Both live in the theia-hq notes corpus.
 
 ## Tests
