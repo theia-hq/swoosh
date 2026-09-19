@@ -75,6 +75,18 @@ The code should be beautiful to read and tell a story as you scroll._
 - **Why, not what.** A comment that restates the next line is deleted. No deliberation numbers, review names, or process history in shipped source: the invariant is stated as a rule, the story lives in the notes corpus.
 - **`///` on every public item and every enforced invariant,** saying why at the point of enforcement.
 - **No em dashes** anywhere: comments, docs, READMEs, commit messages, PR text.
+- **A guard's test must fail when the guard is removed.** Write the guard, delete or invert it, watch
+  the test go red, put it back. A test that exercises the guard's neighbourhood without ever reaching
+  the failure it prevents is worse than no test: it reports the protection as covered. Five shipped
+  this way in one night (2026-09-19) and each passed review: two netlink anti-spin bounds whose
+  fixture tripped an OUTER bound first so the inner one never ran; a `ScopeClass` declaration order
+  that became the sort order, where swapping two variants left 39 tests green; a reach class that
+  could be dropped from an enumeration with the suite still passing; a zero-consumer session
+  invariant that held only because no `.await` sat between the drop and the reopen, so the task was
+  never polled; and an anti-rollback floor tested only on literal values no product path can emit.
+  The common shape: guard and test are written together and inherit the same assumption about what
+  can reach the code, so the test cannot see the case the guard exists for. Deleting the guard is the
+  only cheap way to find that out.
 - **Docs are cut against the reader-first bar** (`DOCS-BAR.md`): say what it is first, a real command early, captured output only (one marker per block), one limit per page, no manifest or process leaks, a lib README shows the API and a bin README shows verbs. The voice is `DOC-VOICE.md`; the founder's register is `FOUNDER-DOC-STYLE.md`. Both live in the theia-hq notes corpus.
 
 ## Tests
