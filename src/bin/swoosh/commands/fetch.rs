@@ -53,6 +53,17 @@ impl swoosh::reaching::Reaching for FetchCmd {
         &self.reach
     }
 
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.via.reject_redundant_present(self.present.as_ref())
+    }
+
+    fn identity(&self) -> swoosh::identity::Identity {
+        self.bind_role().identity()
+    }
+
+    /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
+    /// home key, so its bind must not write the key's address record (0.9.0 F1).
+    ///
     /// `fetch:` is FAMILY-GATED: the owner reaching their OWN exit node presents the member badge by
     /// default (rooted at the dialing key), and a delegate may override with `--present <slip>`. Stating
     /// `Family` FUSES the identity to `PersistedIfPresent`, so the owner's self-badge roots at the same
@@ -60,24 +71,10 @@ impl swoosh::reaching::Reaching for FetchCmd {
     /// (the verb used to dial `Ephemeral` + slip-only, so an owner with no slip was refused). The effective
     /// slip is the FOLD of a self-addressing `sheer:` link in the `--via` peer with an explicit `--present`,
     /// threaded INTO the credential so the ONE resolver owns both slots.
-    fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.via.self_present().or_else(|| self.present.clone()),
-        }
-    }
-
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        self.via.reject_redundant_present(self.present.as_ref())
-    }
-
-    fn identity(&self) -> swoosh::identity::Identity {
-        self.credential().identity()
-    }
-
-    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
-    /// bind must not write the key's address record (0.9.0 F1).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
+            present: self.via.self_present().or_else(|| self.present.clone()),
+        })
     }
 
     /// Uniform dispatch: unpack the reach context and run. `fetch` reads `contacts` (to resolve `--via`),
@@ -410,7 +407,7 @@ mod tests {
     use clap::Parser as _;
     use nauthy::Identity;
     use swoosh::credential::Credential;
-    use swoosh::reaching::Reaching as _;
+    use swoosh::reaching::{BindRole, Reaching as _};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -450,10 +447,11 @@ mod tests {
         fetch: FetchCmd,
     }
 
-    /// `swoosh fetch --via <peer>` is FAMILY-gated by default: its credential is `Family`, so the owner
-    /// reaching their OWN exit node presents the member badge (the fix for the owner-reaching-own-node
-    /// 403). Before this redesign `fetch` was `Anonymous`/slip-only and an owner with no slip was refused.
-    /// The identity derived from `Family` is `PersistedIfPresent`, so the self-badge roots correctly.
+    /// `swoosh fetch --via <peer>` is FAMILY-gated by default: it dials carrying the `Family` credential,
+    /// so the owner reaching their OWN exit node presents the member badge (the fix for the
+    /// owner-reaching-own-node 403). Before this redesign `fetch` was slip-only and an owner with no slip
+    /// was refused. The identity derived from `Family` is `PersistedIfPresent`, so the self-badge roots
+    /// correctly.
     #[test]
     fn fetch_is_family_gated_by_default_so_it_presents_a_badge() {
         let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
@@ -461,8 +459,11 @@ mod tests {
             .expect("fetch parses")
             .fetch;
         assert!(
-            matches!(cmd.credential(), Credential::Family { present: None }),
-            "fetch with no --present is Family (presents the member badge), not Anonymous"
+            matches!(
+                cmd.bind_role(),
+                BindRole::Dialing(Credential::Family { present: None })
+            ),
+            "fetch with no --present dials presenting the member badge"
         );
         assert_eq!(
             cmd.identity(),

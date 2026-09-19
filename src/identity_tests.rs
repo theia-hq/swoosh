@@ -173,3 +173,43 @@ async fn a_group_or_world_readable_key_is_refused_with_a_chmod_hint() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An outward dial never CREATES the key, and an explicit home does not change that: `--home`/`SWOOSH_HOME`
+/// says where this node's files live, not that a dial should provision one. The home a caller names for
+/// one `swoosh forward` is left exactly as it was found, because the key that would appear there is the
+/// root a later `serve` gates its whole fleet on. The loading half still holds: once a key exists, the
+/// same outward dial binds it, which is what makes a member's badge admit at their own node.
+#[tokio::test]
+async fn an_outward_dial_never_creates_the_key_under_an_explicit_home() {
+    let (home, dir) = home("outward-no-create");
+    let path = home.identity_key();
+
+    let dialed = super::resolve(super::Identity::PersistedIfPresent, &home)
+        .await
+        .expect("an outward dial resolves against a home with no key");
+    assert!(
+        !path.exists(),
+        "an outward dial must write nothing, whatever home it was pointed at"
+    );
+
+    let served = super::resolve(super::Identity::Persisted, &home)
+        .await
+        .expect("a serving verb provisions the key");
+    assert!(path.exists(), "only a persisting intent writes the key");
+    assert_ne!(
+        dialed.node_id(),
+        served.node_id(),
+        "the throwaway the dial minted was never the key on disk"
+    );
+
+    let reached = super::resolve(super::Identity::PersistedIfPresent, &home)
+        .await
+        .expect("an outward dial resolves against a provisioned home");
+    assert_eq!(
+        reached.node_id(),
+        served.node_id(),
+        "with a key on disk the outward dial binds it, so the badge it presents roots there"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

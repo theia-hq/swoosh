@@ -1,11 +1,17 @@
 //! The node identity: the ed25519 secret every swoosh verb binds under.
 //!
-//! Identity is chosen by intent, not one-size-fits-all. A verb that must be *reachable at a stable
-//! address* (`serve`) persists its secret to disk, so restarting the node keeps its address. A verb
-//! that only *reaches outward* (`ping`, `speed`, `status`) needs no lasting identity, so it mints a
-//! fresh random ephemeral key each run: nothing on disk, no address to pin, no key file to provision
-//! before a speed test. An explicit home (`--home <dir>` or `SWOOSH_HOME`) overrides either way,
-//! pinning the identity at `<home>/identity.key` even when reaching outward, for the caller who wants it.
+//! Identity is chosen by intent, and exactly one intent CREATES a key. A verb that must be *reachable at
+//! a stable address* (`serve`), or that must dial under this node's own key (the `swoosh ssh` bridge),
+//! persists its secret at `<home>/identity.key`: it loads that key and writes one on first use, so
+//! restarting the node keeps its address. A verb that only *reaches outward* (`ping`, `speed`, `forward`)
+//! LOADS that key when it already exists, because the membership badge it presents must root at the key
+//! the dial binds under, and mints a throwaway in-memory key when it does not. It never writes one: a
+//! dial does not provision a node, and the file it would write is the very key a later `serve` roots its
+//! fleet at.
+//!
+//! An explicit home (`--home <dir>` or `SWOOSH_HOME`) chooses WHERE that key lives, never WHETHER one is
+//! created. The verb's intent alone decides that, so a home named for one outward dial is left exactly as
+//! it was found.
 //!
 //! The secret is a [`Secret`] newtype, never a bare `[u8; 32]`: it zeroizes its bytes on drop so the
 //! key does not linger in freed memory, and it is only unwrapped at the single boundary where the
@@ -155,42 +161,41 @@ impl Secret {
 /// How a verb wants its identity: pinned to a stable address, or freshly minted for one run.
 ///
 /// The distinction that drives the whole module: `serve` must be reachable at the same address across
-/// runs, so it [`Persisted`](Self::Persisted); the reach-outward verbs address a peer and never need to
-/// be found again, so they are [`Ephemeral`](Self::Ephemeral). An explicit home (`--home`/`SWOOSH_HOME`)
-/// overrides either intent (see [`resolve`]).
+/// runs, so it is [`Persisted`](Self::Persisted); a reach-outward verb addresses a peer and never needs
+/// to be found again, so it is [`PersistedIfPresent`](Self::PersistedIfPresent), binding the home's key
+/// where one exists (its badge roots there) and a throwaway where none does. The home says where the key
+/// lives; only the intent says whether one is written (see [`resolve`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Identity {
     /// Persist the secret to disk and reuse it every run, so this node keeps one stable address.
     Persisted,
     /// Mint a fresh random secret in memory for this run only; nothing is written or read.
     Ephemeral,
-    /// Dial under the persisted identity WHEN one already exists, else mint a fresh ephemeral key. The
-    /// diagnostic verbs (`ping`/`speed`/`status`) want this: a self-signed membership badge only admits at
-    /// a family-gated node when it roots at the SAME key the dial binds under, so a provisioned operator
-    /// reaches their own gated node by loading the persisted identity, while a fresh install still dials
-    /// out ephemerally with nothing on disk. Never CREATES the persisted file (unlike `Persisted`): an
-    /// outward dial must not silently mint a lasting identity where one was not asked for.
+    /// Dial under the persisted identity WHEN one already exists, else mint a fresh ephemeral key. Every
+    /// reach-outward verb wants this: a membership badge only admits at a family-gated node when it roots
+    /// at the SAME key the dial binds under, so a provisioned operator reaches their own gated node by
+    /// loading the persisted identity, while a fresh install still dials out with nothing on disk. Never
+    /// CREATES the persisted file, under any home: an outward dial must not mint a lasting identity where
+    /// one was not asked for, least of all the key a later `serve` would gate its whole fleet on.
     PersistedIfPresent,
 }
 
-/// Resolve the secret a verb binds under from its home, honoring an explicit home before the verb's
-/// [`Identity`].
+/// Resolve the secret a verb binds under from its home: the key is always `<home>/identity.key`, and the
+/// verb's [`Identity`] ALONE decides whether one is written.
 ///
-/// The key is always `<home>/identity.key`. An explicit home (`--home`/`SWOOSH_HOME`, see
-/// [`Home::is_explicit`]) pins the identity: load it, creating and saving one if it does not exist yet,
-/// whatever the verb's intent. With the DEFAULT home, [`Persisted`](Identity::Persisted) loads-or-creates
-/// the key and [`Ephemeral`](Identity::Ephemeral) mints a random key that never touches disk.
+/// The home names the directory, default or explicit alike. A `--home`/`SWOOSH_HOME` run does not turn an
+/// outward dial into a provisioning step: the home the caller named for one `swoosh forward` must be left
+/// as it was found, because the key that would appear there is the root a later `serve` gates its fleet
+/// on, and nothing asked for a fleet.
 pub async fn resolve(intent: Identity, home: &Home) -> eyre::Result<Secret> {
     let key = home.identity_key();
-    match (home.is_explicit(), intent) {
-        // An explicit home pins the identity (load-or-create) even for a reach-outward verb, the override
-        // the retired explicit `--key` carried; `Persisted` always loads-or-creates too.
-        (true, _) | (_, Identity::Persisted) => load_or_create(&key).await,
-        (false, Identity::Ephemeral) => Ok(Secret::ephemeral()),
+    match intent {
+        Identity::Persisted => load_or_create(&key).await,
+        Identity::Ephemeral => Ok(Secret::ephemeral()),
         // Load the persisted key only if it already exists; never create it. So a provisioned operator's
-        // outward dial roots at their own key (their self-badge admits at their gated node) while a fresh
+        // outward dial roots at their own key (their badge admits at their gated node) while a fresh
         // install dials out ephemerally, with nothing written to disk.
-        (false, Identity::PersistedIfPresent) => match load_existing(&key).await? {
+        Identity::PersistedIfPresent => match load_existing(&key).await? {
             Some(secret) => Ok(secret),
             None => Ok(Secret::ephemeral()),
         },

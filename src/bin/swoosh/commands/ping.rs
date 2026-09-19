@@ -53,6 +53,17 @@ impl swoosh::reaching::Reaching for PingCmd {
         &self.reach
     }
 
+    fn reject_redundant_present(&self) -> eyre::Result<()> {
+        self.peer.reject_redundant_present(self.present.as_ref())
+    }
+
+    fn identity(&self) -> swoosh::identity::Identity {
+        self.bind_role().identity()
+    }
+
+    /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
+    /// home key, so its bind must not write the key's address record (0.9.0 F1).
+    ///
     /// `ping` reaches the peer's family-gated `ping` service, so it presents the member badge rooted at
     /// the dialing key. Stating `Family` FUSES the identity to `PersistedIfPresent`, so the self-badge
     /// roots correctly. A `--present` slip is threaded INTO the credential so the ONE resolver
@@ -60,24 +71,10 @@ impl swoosh::reaching::Reaching for PingCmd {
     /// privacy-aware slot 2 (a fleet badge, only for a signet-bound slip). The effective slip is the FOLD of
     /// a self-addressing `sheer:` link-as-peer with an explicit `--present`, so a link-as-peer resolves
     /// through the same slot path as a `--present` link.
-    fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.peer.self_present().or_else(|| self.present.clone()),
-        }
-    }
-
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        self.peer.reject_redundant_present(self.present.as_ref())
-    }
-
-    fn identity(&self) -> swoosh::identity::Identity {
-        self.credential().identity()
-    }
-
-    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
-    /// bind must not write the key's address record (0.9.0 F1).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        })
     }
 
     /// Uniform dispatch: unpack the reach context and run. `ping` reads `contacts` (fan-out), the

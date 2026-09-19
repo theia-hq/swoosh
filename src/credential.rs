@@ -48,17 +48,16 @@ impl LinkExt for Link {
 
 /// How a reaching verb authenticates to the service it dials.
 ///
-/// Exhaustive: every reaching verb resolves to exactly one of these, and the resolution is TOTAL (see
-/// [`Reaching::credential`](crate::reaching::Reaching::credential)), so "forgot to say" is not
-/// representable. Deliberately NO `Default`/`#[default]`: omission must not mint [`Anonymous`](Self::Anonymous)
-/// (a stranger dial, strictly worse than today's refusal). The badge to present AND the
+/// A DIAL always presents something: there is no "present nothing" arm to reach for, and none meaning
+/// "not applicable" either. A verb that does not dial states no credential at all (it declares
+/// [`BindRole::Serving`](crate::reaching::BindRole::Serving)), so not-applicable is the ABSENCE of this
+/// value rather than one of its arms. An arm that means both is the hazard: read as not-applicable it is
+/// harmless, and read as a deliberate stranger dial it sends a member to their own fleet carrying
+/// nothing, so the two must not share a spelling. Deliberately NO `Default`/`#[default]`: the slip
+/// override is the user's choice, not the author's omission. The badge to present AND the
 /// [`Identity`](crate::identity::Identity) mode both derive from this one value.
 #[derive(Debug, Clone)]
 pub enum Credential {
-    /// Dials as a stranger by construction: the service is ungated, or the verb presents its OWN link
-    /// (never swoosh's identity). A NAMED, deliberate no-badge (e.g. `forward`), not a forgettable
-    /// `None`. Derives [`Identity::Ephemeral`](crate::identity::Identity::Ephemeral).
-    Anonymous,
     /// Reaches a FAMILY-GATED service: presents the member badge rooted at the dialing key (a stored
     /// device badge, else the signet-holder self-sign), which an explicit `--present` link overrides.
     /// Derives [`Identity::PersistedIfPresent`](crate::identity::Identity::PersistedIfPresent), so the
@@ -73,14 +72,13 @@ pub enum Credential {
 
 impl Credential {
     /// The identity a verb with this credential must bind under. This is the ONLY place the
-    /// identity/badge coupling lives, so a `Family` credential is always `PersistedIfPresent` (its badge
-    /// roots at the dialing key) and an `Anonymous` one is always `Ephemeral`. `serve`/`tunnel-connect`
-    /// bind `Persisted` for a different reason (a stable address / dialing under swoosh's own key) via a
-    /// non-forgettable override, not this derivation.
+    /// identity/badge coupling lives, so a `Family` credential is always `PersistedIfPresent`: its badge
+    /// roots at the dialing key, so the dial MUST bind that same key wherever it exists.
+    /// `serve`/`tunnel-connect` bind `Persisted` for a different reason (a stable address / dialing under
+    /// swoosh's own key) via a non-forgettable override, not this derivation.
     pub fn identity(&self) -> crate::identity::Identity {
         match self {
             Self::Family { .. } => crate::identity::Identity::PersistedIfPresent,
-            Self::Anonymous => crate::identity::Identity::Ephemeral,
         }
     }
 
@@ -90,7 +88,7 @@ impl Credential {
     pub fn warm_mode(&self) -> WarmMode {
         match self {
             Self::Family { present: None } => WarmMode::Resident,
-            Self::Family { present: Some(_) } | Self::Anonymous => WarmMode::Personal,
+            Self::Family { present: Some(_) } => WarmMode::Personal,
         }
     }
 }
@@ -101,7 +99,7 @@ pub enum WarmMode {
     /// The default member-badge dial: the resident may reach as THIS home's node. The peer sees the
     /// resident key, which is the warm-reuse tradeoff.
     Resident,
-    /// A personal credential (an explicit `--present` slip, a link-as-peer, or an anonymous stranger
-    /// dial): never warm. A personal credential must not ride the socket.
+    /// A personal credential (an explicit `--present` slip, or a link-as-peer): never warm. A personal
+    /// credential must not ride the socket.
     Personal,
 }

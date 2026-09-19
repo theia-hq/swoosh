@@ -4,14 +4,17 @@
 //! A reaching verb's auth need used to be spread across five hand-synced match arms in `main.rs`, one of
 //! which (`self_badge()`) ended in a `_ => Ok(None)` wildcard: a verb the author forgot to list reached a
 //! family-gated service carrying no badge, and it still compiled. The [`Reaching`] trait replaces that
-//! with a method the compiler forces: a verb cannot compile without stating its [`Credential`], and
-//! `Credential` has no "unset" arm to fall through to, so the fleet/fetch badge-omission bug is now a
-//! COMPILE error, not a runtime refusal against a real node.
+//! with a method the compiler forces: a verb cannot compile without stating its [`BindRole`], and a
+//! `Dialing` role cannot be written without the [`Credential`] it dials with, so the fleet/fetch
+//! badge-omission bug is now a COMPILE error, not a runtime refusal against a real node.
 //!
-//! The same non-forgettable discipline covers the bind role: a verb cannot compile without stating
-//! [`BindRole`], so only the process that accepts connections under the home key publishes its address
-//! record (0.9.0 F1: every reaching verb published, so a short-lived command overwrote the live `serve`'s
-//! record and dialers followed a dead relay).
+//! Serving and dialing-as-someone are ONE declaration because they are one question. Only the process
+//! that accepts connections under the home key publishes its address record (0.9.0 F1: every reaching
+//! verb published, so a short-lived command overwrote the live `serve`'s record and dialers followed a
+//! dead relay), and that is exactly the process that presents no credential (it RECEIVES badges). Split
+//! across two declarations, the credential side has to spell "not applicable" for the serving verb, and
+//! that spelling reads equally as "a deliberate stranger dial", so a dialing verb transcribed with it
+//! reaches its own fleet carrying nothing and still compiles.
 //!
 //! [`resolve`] is the ONE home of the `--present`-overrides-self-badge rule that used to be copy-pasted
 //! into six verbs: it turns a declared [`Credential`] into the concrete badge to present, once, in the
@@ -47,12 +50,13 @@ pub struct ReachCtx<'a> {
     /// peer is offline".
     pub bound: &'a transport::Bound,
     /// Slot 1, the grant to present, resolved ONCE in the composition root via [`resolve`]: a `--present`
-    /// slip if given, else the stored/self-signed member badge (the plain member dial). `None` for an
-    /// `Anonymous` dial.
+    /// slip if given, else the stored/self-signed member badge (the plain member dial). `None` only for
+    /// the [`Serving`](BindRole::Serving) verb, which resolves no slots because it never dials.
     pub present: Option<Link>,
     /// Slot 2, the membership badge under the dialing key, for a signet-bound slip's AND: the badge the
-    /// far gate verifies under the FOREIGN fleet a slip in slot 1 names. Always the stored/self-signed
-    /// badge on a `Family` dial (mirrored into slot 1 when no slip overrides), `None` for `Anonymous`.
+    /// far gate verifies under the FOREIGN fleet a slip in slot 1 names. `None` on a plain member dial
+    /// (the badge is slot 1 there) and on every non-signet slip, so a dial never leaks this device's
+    /// fleet-signet linkage where it cannot help.
     pub membership: Option<Link>,
     /// The node home, for a verb that opens its OWN store (`fleet` writes contacts; a write, unlike the
     /// read-only `contacts` the reach verbs share) or reads a trust file (its signet).
@@ -62,18 +66,14 @@ pub struct ReachCtx<'a> {
 /// A verb that reaches a peer over a transport, stating how it authenticates and how it runs.
 ///
 /// The compiler forces every method on every reaching verb, so adding a verb that forgets its auth need
-/// does not compile (the fleet/fetch bug class). [`credential`](Self::credential) is TOTAL: it returns a
-/// [`Credential`], an enum with no "unset" arm, so "forgot to say" is unrepresentable. The identity mode
-/// derives from the credential ([`Credential::identity`]), so identity and badge can never disagree.
+/// does not compile (the fleet/fetch bug class). [`bind_role`](Self::bind_role) is TOTAL and carries the
+/// auth need: a [`Dialing`](BindRole::Dialing) role cannot be written without a [`Credential`], and
+/// `Credential` has no "present nothing" arm, so "forgot to say" is unrepresentable. The identity mode
+/// derives from the same declaration ([`BindRole::identity`]), so identity and badge cannot disagree.
 pub trait Reaching {
     /// The reach-family flags this verb carries (`--transport`, `--local`, `--peer`). One accessor,
     /// not a match arm.
     fn reach_args(&self) -> &transport::ReachArgs;
-
-    /// How this verb authenticates to the service it dials. Required and self-contained: a new verb
-    /// cannot compile without returning a [`Credential`], and there is no `None`/default to fall through
-    /// to, so a verb that reaches a family-gated service without a badge is unrepresentable.
-    fn credential(&self) -> Credential;
 
     /// Reject a redundant `--present` alongside a self-addressing `sheer:` link peer: the link already
     /// presents its own credential (it is folded into [`credential`](Self::credential)), so a second
@@ -84,18 +84,18 @@ pub trait Reaching {
     fn reject_redundant_present(&self) -> eyre::Result<()>;
 
     /// The identity this verb binds under. REQUIRED with NO default body: a verb must state it, so a
-    /// verb that needs a stable address (`serve`, `tunnel-connect`) cannot SILENTLY inherit
-    /// [`Ephemeral`](Identity::Ephemeral) and come up as a broken node (a new address every run). The
-    /// common reaching verbs write the one-liner `self.credential().identity()` (the derivation, so
-    /// identity and badge cannot disagree); the two that need `Persisted` for a reason OTHER than
-    /// family-rooting (a stable address / dialing under swoosh's own key) declare it EXPLICITLY here.
-    /// The override is non-forgettable by construction: `Persisted` is a written declaration, never a
-    /// silent default.
+    /// verb that needs the persisted key for a reason of its own (`tunnel-connect` dials under swoosh's
+    /// OWN key, so the far gate proves the identity the badge was minted for) cannot SILENTLY inherit the
+    /// role's derivation. The common reaching verbs write the one-liner `self.bind_role().identity()`
+    /// (the derivation, so identity and badge cannot disagree); the two that need `Persisted` for another
+    /// reason declare it EXPLICITLY here. The override is non-forgettable by construction: `Persisted` is
+    /// a written declaration, never a silent default.
     fn identity(&self) -> Identity;
 
-    /// Whether this verb's bind writes the home key's address record. `Serving` publishes it so peers can
-    /// dial the key; `Dialing` resolves only and MUST NOT publish, or a short-lived command overwrites a
-    /// live `serve`'s record. Required with no default body, like `identity`.
+    /// What this verb's bind is for, and (when it dials) what it presents. `Serving` publishes the home
+    /// key's address record so peers can dial the key, and states no credential; `Dialing` resolves only,
+    /// MUST NOT publish (or a short-lived command overwrites a live `serve`'s record), and carries the
+    /// credential it dials with. Required with no default body, like `identity`.
     fn bind_role(&self) -> BindRole;
 
     /// Run this verb against the composed node under the uniform [`ReachCtx`]. Every verb takes the same
@@ -117,113 +117,121 @@ pub trait Reaching {
         <T::Session as Session>::Read: Send + 'static;
 }
 
-/// What a reaching verb's bind does with the home key's address record: `Serving` writes it, `Dialing`
-/// resolves it and never writes.
+/// What a reaching verb's bind is for: accepting connections under the home key, or dialing out as the
+/// member this home is.
 ///
-/// Deliberately no `Default`: like [`Credential`], omission must not silently pick a side. The two are
-/// not derivable from each other (`serve` is `Anonymous` + `Persisted`, `tunnel-connect` is `Family` +
-/// `Persisted`, `forward` is `Anonymous` + `Ephemeral`), so every verb states its role.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// ONE declaration for what the address record and the presented credential both turn on, because it is
+/// one question. The process that accepts connections under the key is the GATE: it receives badges and
+/// presents none. Every other verb dials, and a dial always presents something. So `Serving` carries no
+/// credential and `Dialing` cannot be written without one: "the serving verb's dial credential" and "a
+/// dialing verb that presents nothing" are both unrepresentable, and there is no spelling of
+/// not-applicable for a dialing verb to be transcribed with.
+///
+/// Deliberately no `Default`: omission must not silently pick a side.
+#[derive(Debug, Clone)]
 pub enum BindRole {
     /// The bind accepts connections under the key, so it publishes the key's address record (n0
-    /// pkarr/DNS) and peers reach it by key. Only `serve` is `Serving`.
+    /// pkarr/DNS) and peers reach it by key. Only `serve` is `Serving`, and it declares no credential:
+    /// it is the gate, so it verifies badges rather than presenting one.
     Serving,
-    /// The bind only dials peers: n0 resolution and relays, no address record. A dialing process is not
-    /// reachable at its key, so publishing here overwrites the live `serve` under the same key with a
-    /// relay that dies when the command exits (0.9.0 F1).
-    Dialing,
+    /// The bind only dials peers, as the [`Credential`] it carries: n0 resolution and relays, no address
+    /// record. A dialing process is not reachable at its key, so publishing here overwrites the live
+    /// `serve` under the same key with a relay that dies when the command exits (0.9.0 F1).
+    Dialing(Credential),
+}
+
+impl BindRole {
+    /// The identity this role binds under, derived rather than restated per verb. A `Dialing` verb
+    /// inherits its credential's ([`Credential::identity`]), so the badge roots at the key the dial binds
+    /// under and the two can never disagree; a `Serving` verb binds `Persisted`, because a node peers
+    /// dial by key must answer at the same address across runs. A verb needing `Persisted` for some OTHER
+    /// reason overrides this in its own [`identity`](Reaching::identity), which the trait requires anyway.
+    pub fn identity(&self) -> Identity {
+        match self {
+            Self::Serving => Identity::Persisted,
+            Self::Dialing(credential) => credential.identity(),
+        }
+    }
 }
 
 /// The two concrete slots a resolved [`Credential`] presents on the wire: slot 1 the grant, slot 2 a
 /// membership badge for a signet-bound slip's AND.
 ///
-/// A named result rather than a bare pair so a caller reads intent, not two nullable links:
-/// [`None`](Self::None) is a deliberate stranger dial, [`Family`](Self::Family) a proven membership dial.
-pub enum Resolved {
-    /// Present nothing: an [`Anonymous`](Credential::Anonymous) dial (ungated service, or the verb presents
-    /// its own link).
-    None,
-    /// A `Family` dial. `grant` (slot 1) is a `--present` slip if given, else the member badge. `membership`
-    /// (slot 2) is the member badge under the dialing key, attached ONLY when the slot-1 slip is
-    /// signet-bound (its gate ANDs a fleet badge under the foreign fleet). It is `None` for a plain member
-    /// dial (no slip) and for a plain/bearer/device `--present` slip, so a non-signet dial never transmits
-    /// this device's signet linkage to the peer.
-    Family {
-        /// Slot 1: the grant (a `--present` slip, or the member badge when none was given).
-        grant: Link,
-        /// Slot 2: the member badge, present only for a signet-bound slip's AND, `None` otherwise.
-        membership: Option<Link>,
-    },
+/// A named pair rather than a bare tuple so a caller reads intent, not two links of one type. The grant
+/// is a [`Link`], not an option: a dial ALWAYS presents one (a `--present` slip, else the member badge),
+/// so "a dial that resolved to nothing" is unrepresentable. The verb that presents nothing is the one
+/// that never dials, and it never reaches [`resolve`] at all.
+pub struct Resolved {
+    /// Slot 1: the grant (a `--present` slip, or the member badge when none was given).
+    pub grant: Link,
+    /// Slot 2: the member badge under the dialing key, attached ONLY when the slot-1 slip is signet-bound
+    /// and pins the dialer's own fleet (its gate ANDs a fleet badge under the fleet it names). `None` for
+    /// a plain member dial and for a plain/bearer/device slip, so a non-signet dial never transmits this
+    /// device's signet linkage to the peer.
+    pub membership: Option<Link>,
 }
 
 impl Resolved {
     /// The two links to hand a [`Connector`](tightbeam::tunnel::Connector): slot 1 (the grant) and slot 2
     /// (the membership badge, only for a signet-bound slip). The one place the resolved credential becomes
-    /// the connector's typed slots.
+    /// the connector's typed slots, whose slot 1 is optional because the connector also serves the verb
+    /// that presents nothing.
     pub fn into_slots(self) -> (Option<Link>, Option<Link>) {
-        match self {
-            Self::None => (None, None),
-            Self::Family { grant, membership } => (Some(grant), membership),
-        }
+        (Some(self.grant), self.membership)
     }
 }
 
 /// Resolve a declared [`Credential`] into the concrete badge to present, ONCE, in the composition root.
 ///
-/// The single home of the `--present`-overrides-self-badge rule copy-pasted into six verbs today:
-///
-/// - [`Anonymous`](Credential::Anonymous) presents nothing (a deliberate stranger dial).
-/// - [`Family`](Credential::Family) presents the member badge rooted at the dialing key. A delegate's
-///   explicit `--present` slip wins; else the STORED signet-signed device badge; else the signet
-///   holder's own self-sign (person-zero: it IS the root, so its self-sign admits). A fresh install with
-///   neither badge nor signet self-signs an ephemeral badge that the peer's gate correctly refuses.
+/// The single home of the `--present`-overrides-self-badge rule copy-pasted into six verbs today: a
+/// [`Family`](Credential::Family) dial presents the member badge rooted at the dialing key. A delegate's
+/// explicit `--present` slip wins; else the STORED signet-signed device badge; else the signet holder's
+/// own self-sign (person-zero: it IS the root, so its self-sign admits). A fresh install with neither
+/// badge nor signet self-signs an ephemeral badge that the peer's gate correctly refuses. Reached only
+/// from a [`Dialing`](BindRole::Dialing) verb: a serving verb resolves no slots because it presents none.
 pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Result<Resolved> {
-    match cred {
-        Credential::Anonymous => Ok(Resolved::None),
-        Credential::Family { present } => {
-            // The member badge rooted at the dialing key, AND the fleet key that badge roots under: a STORED
-            // signet-signed device badge roots at the adopted signet; else the signet holder's self-sign
-            // roots at this key. The badge is the whole grant on a plain member dial (slot 1), and its OWN
-            // fleet is the only fleet a slot-2 badge can help admit (a badge never verifies at a fleet you
-            // are not in), so the fleet is computed here beside the badge for the slot-2 decision below.
-            let (badge, own_fleet) = match config::load_badge(home).await? {
-                // A stored badge exists only after `adopt`, which also wrote the signet it roots at; fall
-                // back to self defensively if the signet file is somehow absent (fails closed: no slot 2).
-                Some(stored) => {
-                    let signet = config::load_signet(home)
-                        .await?
-                        .unwrap_or_else(|| secret.node_id());
-                    (stored, signet)
-                }
-                None => (secret.member_badge()?, secret.node_id()),
-            };
-            match present {
-                // A `--present` (or link-as-peer) slip is slot 1. Attach the member badge in slot 2 ONLY when
-                // the slip pins the SAME foreign fleet the dialer's own badge roots under: that is the only
-                // dial where the badge can help admission (the far gate ANDs a fleet badge under the fleet
-                // the slip names, and a badge for a fleet you are not in never verifies there). A slip
-                // pinning any OTHER fleet, and a plain/bearer/device slip (no pinned fleet at all), attach
-                // nothing, so a dial never leaks this device's fleet-signet linkage where it cannot help.
-                Some(slip) => {
-                    let pins_own_fleet = slip
-                        .cap()
-                        .authority_bound_root()
-                        .ok()
-                        .flatten()
-                        .is_some_and(|pinned| pinned == own_fleet.verify_key());
-                    let membership = pins_own_fleet.then_some(badge);
-                    Ok(Resolved::Family {
-                        grant: slip,
-                        membership,
-                    })
-                }
-                // A plain member dial: the badge is slot 1, slot 2 empty (byte-parity, no over-share).
-                None => Ok(Resolved::Family {
-                    grant: badge,
-                    membership: None,
-                }),
-            }
+    let Credential::Family { present } = cred;
+    // The member badge rooted at the dialing key, AND the fleet key that badge roots under: a STORED
+    // signet-signed device badge roots at the adopted signet; else the signet holder's self-sign
+    // roots at this key. The badge is the whole grant on a plain member dial (slot 1), and its OWN
+    // fleet is the only fleet a slot-2 badge can help admit (a badge never verifies at a fleet you
+    // are not in), so the fleet is computed here beside the badge for the slot-2 decision below.
+    let (badge, own_fleet) = match config::load_badge(home).await? {
+        // A stored badge exists only after `adopt`, which also wrote the signet it roots at; fall
+        // back to self defensively if the signet file is somehow absent (fails closed: no slot 2).
+        Some(stored) => {
+            let signet = config::load_signet(home)
+                .await?
+                .unwrap_or_else(|| secret.node_id());
+            (stored, signet)
         }
+        None => (secret.member_badge()?, secret.node_id()),
+    };
+    match present {
+        // A `--present` (or link-as-peer) slip is slot 1. Attach the member badge in slot 2 ONLY when
+        // the slip pins the SAME foreign fleet the dialer's own badge roots under: that is the only
+        // dial where the badge can help admission (the far gate ANDs a fleet badge under the fleet
+        // the slip names, and a badge for a fleet you are not in never verifies there). A slip
+        // pinning any OTHER fleet, and a plain/bearer/device slip (no pinned fleet at all), attach
+        // nothing, so a dial never leaks this device's fleet-signet linkage where it cannot help.
+        Some(slip) => {
+            let pins_own_fleet = slip
+                .cap()
+                .authority_bound_root()
+                .ok()
+                .flatten()
+                .is_some_and(|pinned| pinned == own_fleet.verify_key());
+            let membership = pins_own_fleet.then_some(badge);
+            Ok(Resolved {
+                grant: slip,
+                membership,
+            })
+        }
+        // A plain member dial: the badge is slot 1, slot 2 empty (byte-parity, no over-share).
+        None => Ok(Resolved {
+            grant: badge,
+            membership: None,
+        }),
     }
 }
 
@@ -288,21 +296,6 @@ mod tests {
     /// self-sign, exactly as an unprovisioned reach-outward verb does. Mirrors the old `None` key argument.
     fn test_home() -> Home {
         Home::resolve(None).expect("resolve the default home")
-    }
-
-    /// An `Anonymous` credential (e.g. `forward`) resolves to NO slot: a deliberate stranger dial presents
-    /// neither a grant nor a membership badge.
-    #[tokio::test]
-    async fn anonymous_presents_no_slots() {
-        let secret = Secret::ephemeral();
-        let resolved = resolve(Credential::Anonymous, &secret, &test_home())
-            .await
-            .expect("anonymous resolves");
-        let (grant, membership) = resolved.into_slots();
-        assert!(
-            grant.is_none() && membership.is_none(),
-            "an Anonymous dial presents nothing in either slot"
-        );
     }
 
     /// A `Family` credential with no `--present` slip and no stored badge falls back to the signet
@@ -444,7 +437,7 @@ mod tests {
     }
 
     /// REGRESSION (defect #1): a signet-bound `sheer:` link passed AS THE PEER (not via `--present`) folds
-    /// through `credential()` -> `resolve()` and attaches slot 2, IDENTICAL to passing it via `--present`.
+    /// through `bind_role()` -> `resolve()` and attaches slot 2, IDENTICAL to passing it via `--present`.
     /// A `Peer::Capability` self-presents its own link, so the peer-link and a `--present` link resolve
     /// through ONE path. Before this consolidation a signet-bound link-as-peer dropped slot 2 (it dialed via
     /// `from_link`, which ignored the resolver).
@@ -464,7 +457,7 @@ mod tests {
         .to_string();
 
         // The slip arrives AS THE PEER: a `Capability` peer self-presents its own link, which the verb's
-        // `credential()` folds into `present` exactly as an explicit `--present` slip would be.
+        // the credential fold puts it in `present` exactly as an explicit `--present` slip would be.
         let peer: Peer = link_text.parse().expect("a sheer: link is a peer");
         let cred = Credential::Family {
             present: peer.self_present(),

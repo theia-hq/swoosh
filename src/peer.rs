@@ -140,7 +140,7 @@ impl Peer {
     /// own credential, so a second one is ambiguous. A no-op for a [`Named`](Self::Named)/[`Raw`](Self::Raw)
     /// peer, where `--present` is the credential (the fleet/delegate case, a slip rooted elsewhere). Called
     /// once at the top of each verb's run before resolving, so the conflict is loud and local while
-    /// [`credential`](crate::reaching::Reaching::credential) stays infallible.
+    /// [`bind_role`](crate::reaching::Reaching::bind_role), which carries the credential, stays infallible.
     pub fn reject_redundant_present(&self, explicit: Option<&Link>) -> eyre::Result<()> {
         if matches!(self, Self::Capability(_)) && explicit.is_some() {
             eyre::bail!(

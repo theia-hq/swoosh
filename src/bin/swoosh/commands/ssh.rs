@@ -128,10 +128,10 @@ impl SshCmd {
         let proxy = self_invocation()?;
         // Thread the effective --home into the ProxyCommand so the re-invoked tunnel-connect dials under the
         // SAME identity `swoosh ssh` was given, not swoosh's default. ONLY when the home was named explicitly
-        // (the default carries forward on its own): an explicit home pins the identity, so the bridge must
-        // see the same --home or it would silently fall back to the default, the "one flag, a second surface
-        // that ignores it" bug that faked an auth bypass. Absolute, since the re-invocation may not share
-        // this CWD.
+        // (the default carries forward on its own): the named home is where this node's key lives, so the
+        // bridge must see the same --home or it would silently fall back to the default, the "one flag, a
+        // second surface that ignores it" bug that faked an auth bypass. Absolute, since the re-invocation
+        // may not share this CWD.
         let home_arg = home
             .is_explicit()
             .then(|| std::path::absolute(home.dir()))

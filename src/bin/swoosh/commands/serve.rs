@@ -32,7 +32,6 @@ use bifrost_mdns::{At, Dialable, Expiring, Missing, ScopeClass};
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::{FileDenylist, Service};
-use swoosh::credential::Credential;
 use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
@@ -193,30 +192,24 @@ impl Reaching for ServeCmd {
         &self.reach
     }
 
-    /// `serve` RECEIVES badges (it is the gate), it never presents one, so it dials as no one:
-    /// `Anonymous`. It must bind `Persisted` (a stable address), which is a SEPARATE, non-forgettable
-    /// concern, not this credential's derived `Ephemeral`: the composition root's identity override, not
-    /// this method, supplies it.
-    fn credential(&self) -> Credential {
-        Credential::Anonymous
-    }
-
     /// `serve` is the gate: it dials no peer and takes no `--present`, so there is no self-addressing link
     /// peer to conflict with. The check is vacuously satisfied.
     fn reject_redundant_present(&self) -> eyre::Result<()> {
         Ok(())
     }
 
-    /// `serve` MUST be reachable at one stable address across runs, so it declares `Persisted` EXPLICITLY
-    /// rather than inheriting the credential's derived `Ephemeral` (which would give a new address every
-    /// run: a broken node). This is a written declaration the compiler requires, not a forgettable
-    /// override, so a serve verb cannot silently come up ephemeral.
+    /// `serve` MUST be reachable at one stable address across runs, so it declares `Persisted`
+    /// EXPLICITLY. This is a written declaration the compiler requires, not a forgettable override, so a
+    /// serve verb cannot silently come up on a key that changes every run.
     fn identity(&self) -> Identity {
         Identity::Persisted
     }
 
     /// Serving: `serve` is the process that accepts connections under the home key, so its bind publishes
-    /// the key's address record (n0 pkarr/DNS) for peers to dial. The one `Serving` verb.
+    /// the key's address record (n0 pkarr/DNS) for peers to dial. The one `Serving` verb, and the one verb
+    /// that states NO dial credential: it is the gate, so it verifies badges and never presents one. There
+    /// is no "not applicable" credential for it to declare, which is why there is none for a dialing verb
+    /// to be transcribed with either.
     fn bind_role(&self) -> BindRole {
         BindRole::Serving
     }
