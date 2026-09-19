@@ -84,18 +84,19 @@ there is no fallback.
 
 Because it is direct-only, a `quirk+noise` `serve` lists every address it is dialable at:
 
-<!-- live-run: the addresses and the port are this host's and this bind's; 192.168.x.x stands in for yours -->
+<!-- live-run: the port is this bind's; 192.168.x.x and 100.x.x.x stand in for this host's network and tunnel addresses, and the mark column is measured over the stand-ins -->
 ```console
 $ swoosh serve --transport quirk+noise
 swoosh ready
 
-    bf01bck7z4f2knn43y2a6lvpidk4a2x5lueu6jhcvdlskxkhkq47phhq
+    bf014v3ob63glpu3xyi55uf4yadh2bjaq3pgycoucxsahwcc5ixodt5q
 
 how peers reach you
   local    automatic; local mDNS, or direct, no NAT traversal
   direct   hand a peer one of these:
-           192.168.x.x:53013
-           127.0.0.1:53013  (this machine only)
+           192.168.x.x:61444  (this network)
+           100.x.x.x:61444    (on utun4)
+           127.0.0.1:61444    (this machine)
 
 serving
   family-gated   your devices + peers you've granted
@@ -106,8 +107,7 @@ serving
 ctrl-c to stop
 ```
 
-Hand the peer whichever one reaches them, with `--peer` (below): a LAN address from another host,
-loopback from a second node on this machine.
+Hand the peer whichever one reaches them, with `--peer` (below).
 
 **Bare `quirk` cannot serve.** It never carries a credential: it does not prove the peer's key.
 `quirk+noise` proves the key and encrypts the session, but it is direct-only: use

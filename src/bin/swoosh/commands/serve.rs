@@ -22,15 +22,13 @@
 //! module, which the integration proofs also assemble their nodes from.
 
 use core::net::SocketAddr;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
-// The expansion of THIS bind into the sockets it answers on. Its `Reach` stays qualified at every
-// use below: swoosh's own `Reach` (the relay and resolver this bind runs on) is in scope in this
-// file, and two types of that name unqualified would read as one.
-use bifrost_mdns::Dialable;
+use bifrost_mdns::{At, Dialable, Expiring, Missing, Scope, ScopeClass};
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::{FileDenylist, Service};
@@ -431,14 +429,20 @@ impl ServeCmd {
                 "bare quirk cannot serve: it does not prove the peer's key; use `--transport quirk+noise`",
             )?;
 
+        // ONE expansion of this bind, read by BOTH the resident arm's status address and the banner
+        // below it. Expanding twice put a `getifaddrs` on either side of the flock and the unix bind,
+        // and a VPN or a wifi flap in that window makes the status address and the banner's lead line
+        // name different hosts. Bind truth cannot disagree with itself; the interface list very much
+        // can, so it is read once. Still lazy: a plain quiet serve reads neither, so it performs no
+        // new syscall at all.
+        let dialable = (self.resident || !self.quiet).then(|| Dialable::of(node.bound_sockets()));
+
         // The resident listener arm (S4), after the proven overlay so a refused serve never binds
         // a socket. Order: (1) plain serve acquires nothing (byte-identical, no dir, no lock, no
         // socket); (2) `--resident` acquires single-instance off the THREADED home (flock truth +
         // bound listener, held for life); the LIVE catalog snapshot above plus a CLONE of the node's
         // one teardown token ride the `Resident` state the accept loop serves from. The bound
         // address rides along as the status `addr`, carried with the arm (no second `local_addr`).
-        // Snapshot the address only when something reads it (the arm, or the banner): a plain
-        // quiet serve performs no new read at all.
         let resident = if self.resident {
             // The per-user runtime root, resolved ONCE here at the serve edge and handed to the lock
             // module as a value: `single` never reads `XDG_RUNTIME_DIR`/`confstr`, so a test drives
@@ -453,13 +457,16 @@ impl ServeCmd {
             // banner leads with: a peer elsewhere can route to it where one exists, and it falls back
             // to loopback on a host that has nothing else. `local_addr().hints` cannot stand in, since
             // it rewrites every wildcard bind to loopback.
-            let dialable = Dialable::of(node.bound_sockets());
+            let status_addr = dialable
+                .as_ref()
+                .and_then(|dialable| dialable.all().first())
+                .map(|at| at.socket);
             Some(self.resident_parts(
                 &home,
                 &runtime_root,
                 tightbeam::tunnel::ServiceCatalog::clone(&catalog),
                 addr.node,
-                dialable.all().first().map(|at| at.socket),
+                status_addr,
                 &cancel,
             )?)
         } else {
@@ -467,12 +474,15 @@ impl ServeCmd {
         };
 
         if !self.quiet {
-            // The banner reads its own snapshot beside the one the resident arm already carried: a
-            // plain serve (resident `None`) reads exactly once here, as today, and the resident arm
-            // carries the status `addr` from the same bound node. The id comes from `local_addr`; the
-            // addresses to hand over come from bind truth, expanded through this host's interfaces.
+            // The id comes from `local_addr`; the addresses to hand over come from the one expansion
+            // above, which the resident arm's status address was read from too, so the two can only
+            // ever name the same host.
             let addr = node.local_addr();
-            let dialable = Dialable::of(node.bound_sockets());
+            let Some(dialable) = dialable.as_ref() else {
+                eyre::bail!(
+                    "internal: serve reached its banner without the bind's dialable set (composition-root bug)"
+                );
+            };
             // A display map of served name -> target address, read off the SAME requested strings the router
             // bound (fetch already de-merged out), so the banner renders `name -> target` from what the
             // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
@@ -520,7 +530,7 @@ impl ServeCmd {
                     reach,
                     mdns,
                     &self.bound_reach,
-                    &dialable,
+                    dialable,
                     &manifest,
                     &addr_by_name,
                     &fetch_names,
@@ -1038,15 +1048,28 @@ fn reach_section(
         out.push_str(&format!("{:gloss_col$}{addr}\n", ""));
     }
     if direct {
-        out.push_str(&direct_lane(dialable, width, gutter, gloss_col));
+        out.push_str(&direct_lane(dialable, width, gutter));
     }
     out
 }
 
-/// The `direct` lane: the gloss that says what to DO with the lines, then one address per line.
+/// The hard bound on a rendered banner line, the mark included. A line past it wraps on an
+/// 80-column terminal, and a wrapped line destroys the very mark column the marks are aligned into.
+/// Only the tunnel mark is variable, so only the tunnel mark can breach it, and it gives up the link
+/// name rather than the bound (see [`tunnel_mark`]).
+const LINE_BUDGET: usize = 80;
+
+/// The `direct` lane: the gloss that says what to DO with the lines, then ONE address per reach class.
 ///
 /// A rendering adapter over a type that lives in a lower crate, which is why it is a function and not a
-/// method: the order and the marks are the expansion's facts, and this only spells them.
+/// method: the order, the classes and the ports are the expansion's facts, and this only spells them.
+///
+/// ONE LINE PER CLASS, the v4 address where that class has one. An ordinary two-interface laptop
+/// expands to eight entries and a wifi+ethernet+VPN+docker host to fifteen, but they offer at most
+/// FOUR decisions: the peer is out on the internet, on this network, on one named link, or on this
+/// machine. A second address in the same class is noise rather than a choice, so it does not render,
+/// and there is no flag to bring it back. v4 leads its class because it is the address a peer can
+/// paste anywhere.
 ///
 /// The ORDER comes from the expansion ([`Dialable::all`]): everything a peer elsewhere can route to
 /// first, then a tunnel address, then loopback last, so the lane can never lead with the one address
@@ -1054,57 +1077,156 @@ fn reach_section(
 ///
 /// EVERY line carries a mark, the widest included. A bare line reads as the default and there is no
 /// default: this host cannot know where the operator's peer is, so it states how far each address goes
-/// and leaves the choosing to the one person who does know. It was bare for the widest class once, and
-/// the result was a real banner where four of eight lines claimed the widest reach and two had it: a
-/// private address and a unique-local one look nothing alike and behave identically, while a
-/// unique-local and a global v6 look alike and do not.
+/// and leaves the choosing to the one person who does know. After the cap the mark is the ONLY thing
+/// telling two lines apart, which raises its bar rather than lowering it: it CLASSIFIES and never
+/// predicts. `the internet` says who can route to the address, not that a default-deny firewall will
+/// let them through.
 ///
 /// The marks align in a column so the classes scan against each other rather than ragged against the
 /// addresses, and the padding sits BEFORE the mark, so a copy that ends at the address is still clean.
-fn direct_lane(dialable: &Dialable, width: usize, gutter: usize, gloss_col: usize) -> String {
-    let gloss = match dialable.all().len() {
-        // Unreachable on any bind that came up (a bound socket answers at loopback at the very least),
-        // stated rather than left to render a header over nothing.
-        0 => "the bind reported no address to hand over",
-        1 => "hand a peer this address:",
-        _ => "hand a peer one of these:",
-    };
-    let mut out = reach_line(width, gutter, "direct", gloss);
-    let rows: Vec<(String, &'static str, String)> = dialable
-        .all()
-        .iter()
-        .map(|at| {
-            let (mark, link) = match &at.reach {
-                // Four marks that read as one family, so the classes scan against each other:
-                // anywhere, this network, over <link>, this machine. Terse on purpose. An IPv6
-                // address is 46 columns before the mark, and the longest phrasing of these pushed
-                // the line to 82, which wraps an 80-column terminal and destroys the alignment the
-                // marks exist for.
-                bifrost_mdns::Reach::Internet => ("anywhere", String::new()),
-                bifrost_mdns::Reach::Network => ("this network", String::new()),
-                bifrost_mdns::Reach::Tunnel { link } => ("over", format!(" {link}")),
-                bifrost_mdns::Reach::ThisMachine => ("this machine", String::new()),
-            };
-            (at.socket.to_string(), mark, link)
-        })
-        .collect();
+fn direct_lane(dialable: &Dialable, width: usize, gutter: usize) -> String {
+    let gloss_col = 2 + width + gutter;
+    // Same reach class whatever the tunnel's link name: two overlays are two spellings of one
+    // decision, and the cap is one line per DECISION. `class()` rather than `PartialEq`, which
+    // would read `Tunnel { link }` pairs as distinct classes on the strength of the name.
+    let mut chosen: Vec<&At> = Vec::new();
+    for at in dialable.all() {
+        let Some(kept) = chosen
+            .iter_mut()
+            .find(|kept| kept.scope.class() == at.scope.class())
+        else {
+            chosen.push(at);
+            continue;
+        };
+        // v4 wins its class: `Dialable::all` holds interface order within a class, so without this
+        // a host whose v6 happens to enumerate first hands its operator the harder address to paste.
+        if kept.socket.is_ipv6() && at.socket.is_ipv4() {
+            *kept = at;
+        }
+    }
+    // The two ephemeral binds an unnamed dual-stack bind gets are two ports, and the operator has to
+    // take the one that came with the address they picked. Measured over the RENDERED rows, so a
+    // v4-only host, quirk, and any same-port bind render byte-identically to a lane with no clause.
+    let mixed_ports = chosen
+        .windows(2)
+        .any(|pair| pair[0].socket.port() != pair[1].socket.port());
+    let addrs: Vec<String> = chosen.iter().map(|at| at.socket.to_string()).collect();
     // One column for the marks, measured over the addresses actually being printed rather than a fixed
     // budget: an IPv6 line is far wider than an IPv4 one and a fixed column would either waste the
     // banner's width on every v4-only host or wrap on every v6 one.
-    let addr_col = rows
-        .iter()
-        .map(|(addr, _, _)| addr.len())
-        .max()
-        .unwrap_or(0);
-    for (addr, mark, link) in &rows {
+    let addr_col = addrs.iter().map(String::len).max().unwrap_or(0);
+    // What every row spends before its mark's opening parenthesis: the gloss column, the address
+    // column, and the two-space gutter the marks align after. The mark has the rest of the budget.
+    let before_mark = gloss_col + addr_col + 2;
+    let rows: Vec<(String, Cow<'static, str>)> = addrs
+        .into_iter()
+        .zip(&chosen)
+        .map(|(addr, at)| {
+            let mark = match &at.scope {
+                // Four marks that read as one family, so the classes scan against each other, and
+                // three of them are a determiner and two words wide on purpose: the widest legal v6
+                // socket is 47 columns and a longer phrasing wraps.
+                Scope::Internet => Cow::Borrowed("the internet"),
+                Scope::Network => Cow::Borrowed("this network"),
+                Scope::Tunnel { link } => tunnel_mark(link, before_mark),
+                Scope::ThisMachine => Cow::Borrowed("this machine"),
+            };
+            (addr, mark)
+        })
+        .collect();
+    // ONE clause, first match wins, loudest first. The lane carries a single gloss because the
+    // operator gives it a single glance, so the conditions are ranked rather than concatenated: a
+    // list that could not be read outranks one that lost a class, which outranks a list nothing
+    // could be checked against, which outranks a port skew every row already answers for itself.
+    // `Missing::Expiring` and `Missing::Flags` cannot co-occur (nothing is dropped when nothing
+    // was read), so there is no arm for the pair and no order to settle between them.
+    let gloss = match (dialable.missing(), rows.len()) {
+        // Unreachable on any bind that came up (a bound socket answers at loopback at the very least),
+        // stated rather than left to render a header over nothing.
+        (_, 0) => "no address to hand over",
+        // The cause, then the bound: without this a lone `127.0.0.1  (this machine)` row asserts
+        // this host is loopback-only when the truth is that nothing could be read. The errno stays
+        // in the log, where it is free to be as long as it likes.
+        (Missing::Interfaces(_), 1) => {
+            "could not read this host's addresses; only this one is known:"
+        }
+        (Missing::Interfaces(_), _) => {
+            "could not read this host's addresses; only these are known:"
+        }
+        // Only a drop that took a whole class off the screen; see `emptied_a_class`.
+        (Missing::Expiring(dropped), 1) if emptied_a_class(dropped, &chosen) => {
+            "some of this host's addresses are expiring; only this one is left:"
+        }
+        (Missing::Expiring(dropped), _) if emptied_a_class(dropped, &chosen) => {
+            "some of this host's addresses are expiring; only these are left:"
+        }
+        // WHOLE and unchecked rather than short, so the instruction stays intact and the caveat is a
+        // parenthetical: every row still dials, and only how long it will keep dialing is unknown.
+        // The misread to kill is an operator who believes we checked.
+        (Missing::Flags, 1) => "hand a peer this address (could not check for expiry):",
+        (Missing::Flags, _) => "hand a peer one of these (could not check for expiry):",
+        (_, 1) => "hand a peer this address:",
+        // One rendered row is one port, so the mixed condition cannot hold at one address and the
+        // clause lives on the many arm alone.
+        (_, _) if mixed_ports => "hand a peer one of these (each address has its own port):",
+        (_, _) => "hand a peer one of these:",
+    };
+    let mut out = reach_line(width, gutter, "direct", gloss);
+    for (addr, mark) in &rows {
         // The address leads each line so a copy starts clean, at the gloss column, the same standard the
         // node id is held to.
-        out.push_str(&format!(
-            "{:gloss_col$}{addr:<addr_col$}  ({mark}{link})\n",
-            ""
-        ));
+        out.push_str(&format!("{:gloss_col$}{addr:<addr_col$}  ({mark})\n", ""));
     }
     out
+}
+
+/// The mark for a tunnel address: `on <link>` where the whole line still fits, `on a tunnel` where it
+/// would not.
+///
+/// The link name is the ONLY externally sourced string on this banner and the only variable-width
+/// mark, so both of the things that can go wrong with it are handled here. `IFNAMSIZ` permits 15
+/// characters, which lands a `wg-corporate-01` beside a full-width v6 at exactly 80: the budget
+/// survives every legal Unix name, and the generic form stays a true edge (a Windows adapter name, or
+/// a name carrying a control character that would move the cursor instead of printing). A name that
+/// breaches either is dropped whole rather than truncated: `(on wg-corpora)` is a stub an operator
+/// could mistake for a real link.
+fn tunnel_mark(link: &str, before_mark: usize) -> Cow<'static, str> {
+    let named = format!("on {link}");
+    // The two parentheses the mark is wrapped in are the render's, so the budget pays for them here.
+    let breaches = before_mark + 2 + named.chars().count() > LINE_BUDGET;
+    if breaches || link.chars().any(char::is_control) {
+        return Cow::Borrowed("on a tunnel");
+    }
+    Cow::Owned(named)
+}
+
+/// Whether the addresses this host dropped as expiring took a whole reach class off the lane.
+///
+/// The fact an operator can act on is not how MANY addresses went, it is whether a class went. The
+/// cap already renders one line per class, so a drop a class survived is invisible by design and a
+/// tally of hidden addresses is noise in a glance: that arm would fire on every laptop that has ever
+/// slept and tell its operator nothing to do. A class with no row left is the opposite case, and the
+/// one the lane would otherwise lie about: silence where an address used to be reads as "this host
+/// has none", when the truth is that this host is losing them and may want to wait or renew.
+///
+/// Asked class by class, over the classes this host can name without a link. [`Scope::Tunnel`] is
+/// compared by its own link name, and a link whose only address expired has no row left to take that
+/// name from, so the question cannot be formed for it and a tunnel drop renders as the plain arms.
+fn emptied_a_class(dropped: &Expiring, chosen: &[&At]) -> bool {
+    // Every class, the tunnel included. It was left out while the question was phrased over a
+    // `Scope`, because a tunnel scope carries its link name and a link whose only address expired
+    // leaves no surviving row to take that name from -- so the one case that most needed asking
+    // was the one that could not be asked. `ScopeClass` asks by class, which is what the cap above
+    // groups by, so the two now mean the same thing by construction rather than by a `discriminant`
+    // call spelling it here.
+    [
+        ScopeClass::Internet,
+        ScopeClass::Network,
+        ScopeClass::Tunnel,
+        ScopeClass::ThisMachine,
+    ]
+    .into_iter()
+    .any(|class| dropped.reached(class) && !chosen.iter().any(|at| at.scope.class() == class))
 }
 
 /// One `how peers reach you` line: `  <label padded>   <gloss>`.
