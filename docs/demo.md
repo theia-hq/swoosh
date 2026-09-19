@@ -93,7 +93,7 @@ credential is never written to it. The `quirk+noise` spelling, below, is the opt
 rooted gate arms here. It is still direct-only, so `serve` lists every address it is dialable at. Both
 nodes in this demo run on this machine, so the loopback line is the one to copy:
 
-<!-- live-run: the NodeId is the demo server's, carried from part 4 so the same key reads the same on both; the port is this bind's and 192.168.x.x stands in for this host's address -->
+<!-- live-run: the NodeId is the demo server's, carried from part 4 so the same key reads the same on both; the port is this bind's, and 192.168.x.x and 100.x.x.x stand in for this host's network and tunnel addresses, with the mark column measured over the stand-ins -->
 ```console
 $ swoosh serve --transport quirk+noise
 swoosh ready
@@ -103,8 +103,9 @@ swoosh ready
 how peers reach you
   local    automatic; local mDNS, or direct, no NAT traversal
   direct   hand a peer one of these:
-           192.168.x.x:55149
-           127.0.0.1:55149  (this machine only)
+           192.168.x.x:63872  (this network)
+           100.x.x.x:63872    (this tunnel)
+           127.0.0.1:63872    (this machine)
 
 serving
   family-gated   your devices + peers you've granted
