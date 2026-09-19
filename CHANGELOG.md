@@ -2,6 +2,41 @@
 
 All notable changes to swoosh, newest first.
 
+## v0.11.2
+
+The lane hands a peer an address that works, and says how far it goes.
+
+### Fixed
+- **The `direct` lane reads the BIND's dialable set, not the mDNS announcement.** The announcement
+  reports how far an ANNOUNCEMENT reached, which is a different fact from how far an ADDRESS goes: on
+  a network that blocks multicast the report is empty while the host's addresses are exactly as
+  dialable as ever, and the lane offered loopback alone.
+- **A temporary IPv6 address is no longer offered** (bifrost v0.2.3). It was deprecated within about
+  a day, so a peer's copy rotted; it was also the one address privacy addressing exists to keep
+  unpublished, and it was being multicast onto every network this node joined.
+- **A failed interface read no longer reads as "this host is loopback-only".** The lane says the list
+  is short and why.
+- **`swoosh status` reports the first dialable address** rather than loopback.
+
+### Changed
+- **One line per reach class, preferring v4.** Eight rows on an ordinary two-interface laptop offered
+  at most four decisions, and the banner's job is a glance. No flag and no `+k more`: machinery for a
+  case nobody has.
+- **Every row states who can route to it:** `the internet`, `this network`, `this tunnel`,
+  `this machine`. A bare line reads as a default and there is no default, because this host cannot
+  know where the operator's peer is. The widest mark was `anywhere`, which PREDICTED where the other
+  three CLASSIFY: this lane renders only for a bind with no relay and no NAT traversal, so a global
+  v6 behind a default-deny inbound firewall is the common case and the promise was falsifiable by a
+  firewall.
+- **The gloss says why a short list is short,** in one clause, loudest first. When addresses were
+  dropped but every class still has a row it says nothing: a count of hidden expiring addresses is a
+  fact nobody acts on.
+- **The tunnel mark names no link.** One row renders per class, so the name could no longer tell two
+  overlays apart; it was redundant where it informed and empty where it did not. The banner now holds
+  no externally sourced string, so the over-budget fallback, the runtime width check and the
+  control-character guard are gone and the 80-column bound is arithmetic rather than a measurement.
+- **Pins:** bifrost v0.2.3, tightbeam v0.8.1, services v0.1.7.
+
 ## v0.11.1
 
 A direct-only bind hands over an address again, and a fan-out reports every device.
