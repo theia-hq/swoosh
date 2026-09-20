@@ -37,6 +37,58 @@ The lane hands a peer an address that works, and says how far it goes.
   control-character guard are gone and the 80-column bound is arithmetic rather than a measurement.
 - **Pins:** bifrost v0.2.3, tightbeam v0.8.1, services v0.1.7.
 
+## v0.11.2
+
+Ten changes, no new capability. The thing gets more honest, not bigger.
+
+### Fixed
+- **`forward` refused a member of your own fleet.** It dialed as a stranger while `ping`, `speed`,
+  `ssh` and `fetch` presented the member badge, on the same runner, to the same peer, through the
+  same gate. It was never adjudicated: it was transcribed out of a badge wildcard while the verb in
+  the same arm was fixed. The fix is not the flip. The credential now rides the declaration that
+  already answers whether a verb dials, so a serving verb holding a dial credential and a dialing
+  verb holding none are both unrepresentable, and there is no spelling of "not applicable" left for
+  the next verb to inherit.
+- **`--service` defaulted to a name nothing could serve,** in three call sites, through four
+  releases. Zero-config `forward` against zero-config `serve` had never once worked.
+- **A device learned its fleet exactly once, ever.** The roster's version and the puller's
+  anti-rollback floor were ONE field, and it advanced only on pulling, which a signet holder never
+  does. So every cut was stamped epoch 0 and every pull after the first was silently refused as a
+  same-epoch replay. Restarting did not help. They are two types now, version 0 is unrepresentable,
+  and the cutter cannot read the floor.
+- **An explicit `--home` decided WHETHER a key existed, not just where it lived,** so an outward
+  dial created the signet its own doc promised never to create.
+- **A failed dial from an unprovisioned home minted your fleet root.** The `swoosh ssh` bridge
+  declared a persisting identity while every sibling did not, and a dial to a peer that was never
+  there wrote the key a later `serve` would gate everything on.
+- **`adopt` could silently destroy your signet.** The key write had no guard while the two siblings
+  in the same transaction were both flag-gated. It refuses now, and `--force` deliberately does not
+  reach it: what that flag waves through is re-issuable, and this key has no issuer and no second
+  copy.
+
+### Added
+- **Every address the banner hands over says how far it reaches:** the internet, this network, this
+  tunnel, this machine. One line per class, preferring v4. The widest mark used to PREDICT where
+  the others CLASSIFY, and a firewall falsified it.
+- **A badge says when it dies.** An expired one refuses locally instead of collecting the uniform
+  refusal that names nothing, a warning lands 30 days out, and `swoosh identity` states the badge's
+  life. Renewal stopped needing the flag that also disables the re-root guard, so re-running
+  `invite add` is the whole of it.
+- **A refused dial says what the peer would have to serve.** It cannot become an oracle: the
+  function that writes the sentence takes no error, no session and no response, so the wire is not
+  in scope and cannot be read even by accident.
+- **`docs/signet-backup.md`.** No doc anywhere mentioned backing up a key. The gap was silence
+  about loss, not a broken promise.
+
+### Changed
+- **`forward` is `reach <peer> <service>`,** both positional, stdout by default. A service earns a
+  top-level verb only when its client is a program rather than a pipe, and this one's body was
+  open-the-stream-and-copy. `echo hello | swoosh reach <key> echo` now works with no flags.
+- **`fleet <peer>`.** A flag that is never optional is a positional in costume.
+- **The hidden `tunnel-connect` leaf is gone.** `swoosh ssh` proxies through the public `reach`, so
+  the exact line that carries an ssh session is one you can run by hand to debug a launch.
+- **Pins:** bifrost v0.2.3, nauthy v0.3.1, tightbeam v0.8.2, services v0.1.8.
+
 ## v0.11.1
 
 A direct-only bind hands over an address again, and a fan-out reports every device.
