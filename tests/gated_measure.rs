@@ -49,10 +49,6 @@ use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 /// every membership badge minted here.
 const SIGNET_SECRET: [u8; 32] = [7u8; 32];
 
-/// The ssh host-key seed the exposer's route table carries. Unused by this test (it exercises `measure`, not
-/// `sshd`), but the shared `diagnostics` helper derives `sshd` from it, so a fixed value keeps the build stable.
-const HOST_SEED: [u8; 32] = [9u8; 32];
-
 /// Run the proof on a worker thread with a generous stack. measure's transfer engine holds a 64 KiB chunk
 /// buffer on the stack per direction (`payload::CHUNK`); over mem, client and responder run on ONE
 /// LocalSet thread, so a bidir speedtest nests several of those at once. That is fine over the real
@@ -84,11 +80,8 @@ async fn proof() {
         let host_id = host.node_id();
         let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
         tokio::task::spawn_local(async move {
-            // `sshd` is bound only under the `ssh` feature, so the shared `diagnostics` helper carries it
-            // only there; the proof exercises the ping + speed services, so gating this keeps it green WITH
-            // and WITHOUT the feature.
             let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-            swoosh::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
+            swoosh::serve::diagnostics(Router::new(gate), &[])
                 .unwrap()
                 .expose()
                 .unwrap()

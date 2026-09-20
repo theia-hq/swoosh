@@ -38,10 +38,6 @@ use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 /// composition root derives from `secret.node_id()` when no signet file was ever written.
 const SELF_SECRET: [u8; 32] = [11u8; 32];
 
-/// The ssh host-key seed the exposer's route table carries. Unused by this test (it exercises `measure`, not
-/// `sshd`), but the shared `diagnostics` helper derives `sshd` from it, so a fixed value keeps the build stable.
-const HOST_SEED: [u8; 32] = [9u8; 32];
-
 /// Run the proof on a worker thread with a generous stack, for the same reason as `gated_measure.rs`: measure's
 /// transfer engine holds a 64 KiB chunk buffer per direction on the stack, and over mem both sides run on
 /// one LocalSet thread, so a bidir speedtest nests several at once. An 8 MiB thread keeps that safe.
@@ -78,7 +74,7 @@ async fn proof() {
             // `resolve_gate(Some(secret.node_id()), ...)` builds it when nothing was adopted.
             let gate =
                 tunnel::resolve_gate(Some(self_signet), empty_denylist("self").await).unwrap();
-            swoosh::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
+            swoosh::serve::diagnostics(Router::new(gate), &[])
                 .unwrap()
                 .expose()
                 .unwrap()
