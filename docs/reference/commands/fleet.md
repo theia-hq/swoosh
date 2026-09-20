@@ -6,12 +6,12 @@ Learn your fleet: pull the signed roster from a coordination node and fold it in
 
 <!-- generated: usage from `swoosh fleet -h`; option lines curated -->
 ```
-Usage: swoosh fleet [OPTIONS] --pull <peer>
-  --pull <peer>   pull the roster from this coordination node (a member serving roster:)
+Usage: swoosh fleet [OPTIONS] <peer>
+  <peer>          the coordination node to pull from: a petname, a raw node id, or a sheer: link
 ```
 
-**Example.** `swoosh fleet --pull me/hub` verifies the roster against your signet and records each
-member as a `me/<device>` contact.
+**Example.** `swoosh fleet me/hub` verifies the roster against your signet and records each member
+as a `me/<device>` contact.
 
 **Things to know.** The roster is verified against your signet before anything is folded in, so a node
 cannot inject a contact you did not vouch for.
