@@ -100,7 +100,7 @@ tightbeam's loopback reflector: it returns the caller's own bytes and opens no h
 ### `roster:`
 
 The signet-signed membership snapshot of your fleet. Serve it on a node you own; another member reads it
-with `swoosh fleet --pull <peer>`.
+with `swoosh fleet <peer>`.
 
 - Posture: family-gated, no public form. Unmetered: the handler sets no cap, and no public form can
   ever open it.

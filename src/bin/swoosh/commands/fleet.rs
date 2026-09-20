@@ -1,4 +1,4 @@
-//! `swoosh fleet --pull <coord>`: learn your fleet from a coordination node.
+//! `swoosh fleet <peer>`: learn your fleet from a coordination node.
 //!
 //! The client side of roster-sync. A fresh device that has adopted its signet dials a coordination node
 //! (any member of the fleet serving `roster:`), reads the signet-signed membership snapshot, VERIFIES it
@@ -6,9 +6,9 @@
 //! this, `swoosh ssh me/<device>` reaches any fleet member by key, with nothing copied by hand.
 //!
 //! The verification is the whole security seam: a roster NOT signed by your signet (a forged blob, or one
-//! from a foreign key) is refused HERE, before any contact is written. The bare `swoosh fleet` READ (list
-//! the fleet you already know) is not built yet: today the verb only pulls, which is what populates the
-//! contacts that read will one day list.
+//! from a foreign key) is refused HERE, before any contact is written. Pulling is the whole verb today:
+//! there is no own-node form to fall back to, which is exactly why the coordination node is a positional
+//! and not a flag.
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
@@ -30,10 +30,13 @@ const MAX_ROSTER_BLOB: u64 = 1 << 20;
 /// Learn your fleet from a coordination node: pull, verify, and fold its members into your contacts.
 #[derive(Debug, Args)]
 pub struct FleetCmd {
-    /// pull the fleet roster from this coordination node (a member serving `roster:`), verify it against
-    /// your signet, and fold its members into your contacts as `me/<device>` entries
-    #[arg(long, value_name = "peer")]
-    pub pull: Peer,
+    /// the coordination node to pull from: a petname (`me/hub`), a raw node id, or a `sheer:` link
+    // POSITIONAL because it is mandatory and sole, and `fleet` has no own-node form to fall back to: a
+    // flag that is never optional is a positional in costume. It shipped as `--pull <peer>` through
+    // v0.11.2, the same shape the retired `forward --service` wore. A second act (cutting a roster)
+    // makes this a group of leaves, never an optional slot on this one.
+    #[arg(value_name = "peer")]
+    pub peer: Peer,
     /// present a `sheer:` capability link to reach a gated coordination node
     #[arg(
         long,
@@ -52,7 +55,7 @@ impl swoosh::reaching::Reaching for FleetCmd {
     }
 
     fn reject_redundant_present(&self) -> eyre::Result<()> {
-        self.pull.reject_redundant_present(self.present.as_ref())
+        self.peer.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> swoosh::identity::Identity {
@@ -62,18 +65,18 @@ impl swoosh::reaching::Reaching for FleetCmd {
     /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
     /// home key, so its bind must not write the key's address record (0.9.0 F1).
     ///
-    /// `fleet --pull` reaches the coordination node's family-gated `roster:` service, so it presents the
+    /// `fleet` reaches the coordination node's family-gated `roster:` service, so it presents the
     /// member badge rooted at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The
-    /// effective slip is the FOLD of a self-addressing `sheer:` link in the `--pull` peer with an explicit
+    /// effective slip is the FOLD of a self-addressing `sheer:` link in the `<peer>` slot with an explicit
     /// `--present`, threaded INTO the credential so the ONE resolver owns both slots.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
-            present: self.pull.self_present().or_else(|| self.present.clone()),
+            present: self.peer.self_present().or_else(|| self.present.clone()),
         })
     }
 
     /// Uniform dispatch: unpack the reach context and run. `fleet` reads `contacts` (to resolve a petname in
-    /// its `--pull` peer), the resolved `present` badge, and the `home` (it opens its OWN store to WRITE
+    /// its `<peer>` slot), the resolved `present` badge, and the `home` (it opens its OWN store to WRITE
     /// hydrated contacts, unlike the read-only `contacts`); it ignores `transport`.
     async fn run<T: Transport, D: Discovery>(
         self,
@@ -115,7 +118,7 @@ impl FleetCmd {
         // node resolves like every other verb), presenting our membership badge so the family gate admits us.
         // Slot 2 (membership) rides along for a signet-bound coordination node; a no-op on the plain member
         // dial. The redundant-present conflict was rejected in the composition root before this runs.
-        let connector = self.pull.connector(
+        let connector = self.peer.connector(
             contacts,
             "roster".parse::<Service>()?,
             self_badge,
@@ -138,7 +141,7 @@ impl FleetCmd {
             roster::RosterVerifyError::Empty => eyre::eyre!(
                 "{} has not cut a roster yet. Run `swoosh invite add <label>` on the machine holding \
                  your signet; that is what publishes one",
-                self.pull
+                self.peer
             ),
             other => {
                 eyre::eyre!("roster is not signed by your signet ({other}); refusing to hydrate")
@@ -159,14 +162,14 @@ impl FleetCmd {
                     "the roster {} served carries no version, so it predates roster versioning and \
                      cannot be applied safely. Upgrade swoosh on the machine holding your signet; its \
                      next `invite add` (or `contact rm me/<device>`) publishes a versioned roster",
-                    self.pull
+                    self.peer
                 );
             }
             Hydrated::NotNewer { floor } => {
                 println!(
                     "nothing to pull: the roster {} served is at epoch {epoch}, and you already have \
                      epoch {}",
-                    self.pull, floor.0
+                    self.peer, floor.0
                 );
                 return Ok(());
             }
@@ -197,11 +200,11 @@ impl FleetCmd {
         match applied.bound() {
             // A pull that bound nothing must not name a next step that cannot work: there is no
             // `me/<device>` to reach.
-            0 => println!("pulled nothing new from {}", self.pull),
+            0 => println!("pulled nothing new from {}", self.peer),
             bound => println!(
                 "pulled {bound} member(s) into your fleet from {}; reach one with \
                  `swoosh ssh me/<device>`",
-                self.pull
+                self.peer
             ),
         }
         Ok(())
