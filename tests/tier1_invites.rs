@@ -130,6 +130,49 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     let owner_id = NodeId::from_ed25519_secret(&owner_seed);
     assert_eq!(signet, owner_id, "the invite roots at the owner's signet");
 
+    // The membership edit CUT a signed roster on the owner's machine, there and then: no node is serving
+    // here and no second verb was typed. This is the write half the loop was missing, and the reason
+    // `fleet cut` is not a verb.
+    let owner_home = Home::resolve(Some(signet_dir.clone())).unwrap();
+    assert!(
+        owner_home.roster().exists(),
+        "`invite add` cuts a roster on the signet's machine"
+    );
+    let cut = swoosh::roster::Artifact::open(owner_home.roster())
+        .await
+        .unwrap();
+    let doc = swoosh::roster::verify(&cut.bytes(), owner_id.verify_key())
+        .expect("the cut roster verifies against the owner's signet");
+    assert_eq!(
+        doc.epoch(),
+        swoosh::roster::Epoch(1),
+        "the first membership edit publishes version 1, which is newer than every floor in the field"
+    );
+    assert_eq!(doc.members().len(), 1);
+    let first_cut = cut.bytes();
+
+    // A RENEWAL: `invite add` for a key already on file mints a fresh badge and leaves the member SET
+    // byte-identical, so it must publish nothing. Bumping here would weld the quarterly credential
+    // cadence to the membership version and drive a fleet-wide re-pull four times a year for no delta.
+    let renew = swoosh(&[
+        "invite",
+        "add",
+        "laptop",
+        "--for",
+        &device_id.to_string(),
+        "--home",
+        path_str(&signet_dir),
+    ]);
+    assert!(renew.status.success(), "renewal failed: {}", stderr(&renew));
+    let after_renewal = swoosh::roster::Artifact::open(owner_home.roster())
+        .await
+        .unwrap();
+    assert_eq!(
+        after_renewal.bytes(),
+        first_cut,
+        "a renewal changes no member, so it must not re-publish the roster"
+    );
+
     // 4a. The OWNER's node serves; the adopted device is ADMITTED with its stored badge.
     let host_transport = sealed(owner_seed).await;
     let host = Node::new(host_transport, NoDiscovery);

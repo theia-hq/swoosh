@@ -200,14 +200,7 @@ async fn expose(entries: &[String]) -> NodeId {
         let gate = tunnel::resolve_gate(Some(self_signet), empty_denylist("offer").await).unwrap();
         let mut router = Router::new(gate);
         for entry in &entries {
-            router = swoosh::serve::bind_entry(
-                router,
-                entry,
-                HOST_SEED,
-                &std::sync::Arc::new(Vec::new()),
-                &[],
-            )
-            .unwrap();
+            router = swoosh::serve::bind_entry(router, entry, HOST_SEED, None, &[]).unwrap();
         }
         router
             .expose()

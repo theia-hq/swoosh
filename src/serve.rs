@@ -3,20 +3,19 @@
 //! module is the reusable half the command drives and the integration proofs assemble their nodes
 //! from, so a test builds the same routers the product path binds.
 //!
-//! `bind_entry`/`diagnostics` bind the named routes (the diagnostics engines, the roster snapshot,
-//! tightbeam's own primitives), `cut_roster` signs the membership snapshot once per serve, and the
-//! `control.*` handlers plus `Resident`/`InstanceLock` carry the node's local control surface.
+//! `bind_entry`/`diagnostics` bind the named routes (the diagnostics engines, the roster the signet
+//! signed, tightbeam's own primitives), and the `control.*` handlers plus `Resident`/`InstanceLock`
+//! carry the node's local control surface. Nothing here SIGNS: `serve` relays a roster its operator's
+//! signet cut elsewhere, so the long-lived process never holds a signing identity.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ::fetch::OriginAllowlist;
-use nauthy::{Service, VerifyKey};
+use nauthy::Service;
 use tightbeam::tunnel::Router;
 
-use crate::contacts::{Contacts, Petname};
-use crate::identity::Secret;
-use crate::roster::{Epoch, Member, RosterDoc};
+use crate::roster::Artifact;
 
 mod control;
 mod resident;
@@ -115,13 +114,16 @@ pub fn classify_stop(source: Option<StopKind>) -> Stopped {
 /// (owner limits, effectively unbounded, at a family gate). One input decides both the engine and the
 /// overlay, so an open diagnostic cannot be armed uncapped.
 ///
-/// `roster:` binds the signed membership snapshot the run cut; a node that never names it never serves it.
+/// `roster:` binds the home's signed roster ARTIFACT, and `roster` is `None` when this node does not hold
+/// the signet and therefore can never have one. A node that never names `roster:` never touches it; a
+/// node that names it without the signet is REFUSED here, at serve start, rather than advertising a
+/// service every puller must reject.
 /// Public as the per-entry edge the split-service proof drives to offer a SUBSET of the diagnostics.
 pub fn bind_entry(
     router: Router,
     entry: &str,
     host_seed: [u8; 32],
-    roster_blob: &Arc<Vec<u8>>,
+    roster: Option<&Arc<Artifact>>,
     public: &[Service],
 ) -> eyre::Result<Router> {
     #[cfg(not(feature = "ssh"))]
@@ -152,7 +154,19 @@ pub fn bind_entry(
         }
         "roster" => {
             no_argument(scheme, rest, entry)?;
-            router.service(name, Roster::new(Arc::clone(roster_blob)))
+            // Only the signet's own machine has a roster to serve. Refuse LOUDLY here: the old path cut
+            // and signed a snapshot with whatever local key `serve` happened to hold, so a member node
+            // advertised a roster every puller rejected, silently, and the operator learned of it only
+            // from the far end. The predicate is the one in `config::holds_signet`, resolved once at the
+            // composition root, so this arm never re-derives it.
+            let Some(artifact) = roster else {
+                eyre::bail!(
+                    "`{entry}`: this node does not hold your signet, so it has no roster to serve and \
+                     any blob it cut would be refused by every device that pulled it. Serve `roster:` \
+                     from the machine whose `swoosh identity` prints your signet"
+                );
+            };
+            router.service(name, Roster::new(Arc::clone(artifact)))
         }
         // Without the `ssh` engine compiled in there is no arm at all, so `sshd:` falls through to the
         // refusal below and is told it is unknown, which is true of this build.
@@ -241,34 +255,6 @@ pub fn diagnostics(
     #[cfg(not(feature = "ssh"))]
     let _ = host_seed;
     Ok(router.public(public.iter().cloned()))
-}
-
-/// Cut the current roster from the operator's own contacts (the `me/<label>` partition, where `invite add`
-/// records each member) and sign it with the signet, returning the encoded blob the `roster:` handler
-/// serves. The SIGNET signs it (via [`Secret::cap_identity`]), so any member node can serve it and none can
-/// forge it. Cut ONCE at serve start (a snapshot); a member added later is picked up on the next `serve`.
-///
-/// The epoch is READ from the persisted roster epoch beside the contacts (default 0 before any is set), so
-/// the puller's anti-rollback floor is not pinned at 0. The BUMP verb (a `swoosh fleet cut` that increments
-/// and re-signs) is not built yet; today the read is real, so once the counter advances the floor tracks
-/// it. A member's label IS a [`DeviceLabel`], the same type contacts hold, so there is no lossy re-parse.
-pub fn cut_roster(contacts: &Contacts, secret: &Secret) -> eyre::Result<Vec<u8>> {
-    let me: Petname = "me".parse()?;
-    let members: Vec<Member> = contacts
-        .devices(&me)
-        .into_iter()
-        .flatten()
-        .map(|(label, node)| Member {
-            node: VerifyKey::new(*node.key()),
-            label: label.clone(),
-        })
-        .collect();
-    let epoch = Epoch(contacts.roster_epoch().unwrap_or(0));
-    let doc = RosterDoc::new(epoch, members)?;
-    // One-writer LOCK: the SIGNET is the sole cutter. Cutting needs the live secret (only it
-    // signs a roster the signet verifies), so this path holds `secret`; a relay-only `serve` node holds
-    // just the bytes and cannot cut. See `roster::cut` for the full rule and why multi-writer is rejected.
-    Ok(crate::roster::cut(&secret.cap_identity()?, &doc))
 }
 
 /// The scheme a receive service names, so the sink-dir extraction matches `recv:<dir>` on the ONE literal

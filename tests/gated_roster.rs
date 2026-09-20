@@ -64,7 +64,17 @@ async fn proof() {
         ],
     )
     .unwrap();
-    let blob = Arc::new(roster::cut(&signet, &doc));
+    // The blob a puller reads is the ARTIFACT on disk, cut by the signet when membership last changed,
+    // so this proof assembles the handler exactly as the product `serve` path does: write, load, serve.
+    let artifact_path = std::env::temp_dir().join(format!(
+        "swoosh-gated-roster-artifact-{}/roster",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(artifact_path.parent().unwrap());
+    roster::Artifact::write(&artifact_path, &signet, &doc)
+        .await
+        .unwrap();
+    let artifact = Arc::new(roster::Artifact::open(artifact_path.clone()).await.unwrap());
 
     // The coordination node: serves `roster:` behind a family gate rooted at the signet, through the SAME
     // handler the product `serve` path adds.
@@ -76,7 +86,10 @@ async fn proof() {
         // `serve` path uses for `roster=roster:`.
         let gate = tunnel::resolve_gate(Some(signet_id), empty_denylist("host").await).unwrap();
         let router = Router::new(gate)
-            .service("roster".parse().unwrap(), swoosh::serve::Roster::new(blob))
+            .service(
+                "roster".parse().unwrap(),
+                swoosh::serve::Roster::new(artifact),
+            )
             .unwrap();
         router
             .expose()
@@ -113,7 +126,7 @@ async fn proof() {
 
     // Hydrate contacts from the VERIFIED doc and see the whole fleet under `me`, with no id copied by hand.
     let mut contacts = Contacts::default();
-    contacts.hydrate(&verified);
+    let _ = contacts.hydrate(&verified);
     assert_eq!(
         resolve(&contacts, "me/desk"),
         vec![NodeId::new(CryptoKind::Ed25519, [1u8; 32])]
@@ -121,6 +134,47 @@ async fn proof() {
     assert_eq!(
         resolve(&contacts, "me/ci-runner"),
         vec![NodeId::new(CryptoKind::Ed25519, [2u8; 32])]
+    );
+
+    // A node whose signet has cut NOTHING yet: the puller must be able to tell that apart from a node
+    // serving a blob it cannot verify, because the two have completely different fixes.
+    let empty_path = std::env::temp_dir().join(format!(
+        "swoosh-gated-roster-empty-{}/roster",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(empty_path.parent().unwrap());
+    let empty = Arc::new(roster::Artifact::open(empty_path).await.unwrap());
+    let bare = Node::new(MemTransport::bind(), NoDiscovery);
+    let bare_id = bare.node_id();
+    tokio::task::spawn_local(async move {
+        let gate = tunnel::resolve_gate(Some(signet_id), empty_denylist("bare").await).unwrap();
+        Router::new(gate)
+            .service("roster".parse().unwrap(), swoosh::serve::Roster::new(empty))
+            .unwrap()
+            .expose()
+            .unwrap()
+            .run(&bare, CancellationToken::new())
+            .await
+            .unwrap();
+    });
+    let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
+    let session = Connector::to_node(
+        bare_id,
+        "roster".parse().unwrap(),
+        Some(member_badge.parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("a member reaches the service");
+    let (send, mut recv) = session.open_bi().await.expect("the member is admitted");
+    drop(send);
+    let mut bytes = Vec::new();
+    recv.read_to_end(&mut bytes).await.expect("the read lands");
+    assert_eq!(
+        roster::verify(&bytes, signet.verifying_key()),
+        Err(roster::RosterVerifyError::Empty),
+        "a node that has cut nothing is its OWN condition; reporting it as a signature failure sends \
+         the operator hunting a forgery that is not there"
     );
 
     // A STRANGER (a badge rooted at a key the gate never trusts) is refused at the gated roster service, so

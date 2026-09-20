@@ -13,8 +13,10 @@ use std::path::PathBuf;
 use bifrost::NodeIdParseError;
 
 use super::{
-    Binding, Contacts, DeviceLabel, DeviceLabelParseError, Petname, PetnameParseError, Source,
+    Binding, Contacts, DeviceLabel, DeviceLabelParseError, Petname, PetnameParseError,
+    RosterVersion, Source,
 };
+use crate::roster::Epoch;
 
 /// A contacts file at a known path, loaded into a mutable [`Contacts`] and saved back atomically.
 ///
@@ -91,6 +93,13 @@ impl ContactsStore {
 /// the fleet itself.
 const ROSTER_EPOCH_KEY: &str = "roster_epoch";
 
+/// The reserved top-level key carrying this book's OWN membership version: the number a roster cut here
+/// is stamped with, beside (and never confused with) the [`ROSTER_EPOCH_KEY`] floor. Two keys because
+/// they are two numbers with two owners; one key doing both jobs is the defect that pinned every fleet
+/// at epoch 0. Absent, or the reserved `0`, means unversioned, so a file written before this key existed
+/// loads correctly and the operator's next membership edit writes `1`.
+const ROSTER_VERSION_KEY: &str = "roster_version";
+
 /// The reserved per-person key carrying that person's SIGNET root. A person table's other keys are device
 /// labels; [`decode`] dispatches on this key FIRST (like [`ROSTER_EPOCH_KEY`] at the top level) so it never
 /// reaches the device parser, and [`encode`] writes it FIRST. The value reuses the device wire form: a bare
@@ -112,12 +121,19 @@ fn decode(text: &str) -> Result<Contacts, StoreError> {
     let wire: Wire = toml::from_str(text).map_err(StoreError::Parse)?;
     let mut contacts = Contacts::default();
     for (key, value) in wire {
-        // The reserved floor key is an integer, not a petname table; dispatch on it first so it never
-        // reaches the petname parser and a group table never masquerades as the floor.
+        // The two reserved counter keys are integers, not petname tables; dispatch on them first so
+        // neither reaches the petname parser and no group table can masquerade as one.
         if key == ROSTER_EPOCH_KEY {
             let floor = value.as_integer().ok_or(StoreError::BadEntry)?;
-            contacts.set_roster_epoch(Some(
+            contacts.set_roster_floor(Some(Epoch(
                 u64::try_from(floor).map_err(|_| StoreError::BadEntry)?,
+            )));
+            continue;
+        }
+        if key == ROSTER_VERSION_KEY {
+            let version = value.as_integer().ok_or(StoreError::BadEntry)?;
+            contacts.set_roster_version(RosterVersion::from_stored(
+                u64::try_from(version).map_err(|_| StoreError::BadEntry)?,
             ));
             continue;
         }
@@ -193,10 +209,18 @@ fn encode(contacts: &Contacts) -> Result<String, StoreError> {
     }
     // Persist the roster epoch floor so the anti-rollback high-water mark survives a restart; absent until
     // the first roster is hydrated, so a book with no fleet writes no such key.
-    if let Some(floor) = contacts.roster_epoch() {
+    if let Some(floor) = contacts.roster_floor() {
         wire.insert(
             ROSTER_EPOCH_KEY.to_owned(),
-            toml::Value::Integer(i64::try_from(floor).unwrap_or(i64::MAX)),
+            toml::Value::Integer(i64::try_from(floor.0).unwrap_or(i64::MAX)),
+        );
+    }
+    // Persist this book's own membership version so a restart does not re-cut the fleet at a version
+    // pullers have already applied. Absent until the first membership edit, exactly like the floor.
+    if let Some(version) = contacts.roster_version().stored() {
+        wire.insert(
+            ROSTER_VERSION_KEY.to_owned(),
+            toml::Value::Integer(i64::try_from(version).unwrap_or(i64::MAX)),
         );
     }
     toml::to_string_pretty(&wire).map_err(StoreError::Encode)

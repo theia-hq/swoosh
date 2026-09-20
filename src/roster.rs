@@ -18,6 +18,10 @@ use nauthy::{SignError, Signed, VerifyKey};
 
 use crate::contacts::DeviceLabel;
 
+mod artifact;
+
+pub use artifact::{Artifact, ArtifactError};
+
 /// The domain-separating prefix over the signed bytes: a `MAGIC`-prefixed message this key signs can never
 /// be confused with a cap or anything else it signs.
 const MAGIC: &[u8] = b"theia-roster";
@@ -64,12 +68,21 @@ fn take_array<const N: usize>(bytes: &[u8], cur: &mut usize) -> Result<[u8; N], 
         .map_err(|_| RosterError::Truncated)
 }
 
-/// A monotonically-increasing version of an operator's roster, bumped each time the snapshot is re-cut (a
-/// member added or removed). It orders two snapshots a device might see from two courier nodes: the higher
-/// epoch is newer. It is NOT a timestamp (no wall clock, so no pattern-of-life leak) and NOT a per-member
-/// field (no last-seen): it versions the WHOLE doc.
+/// A monotonically-increasing version of an operator's roster, carrying the cutter's own
+/// [`RosterVersion`](crate::contacts::RosterVersion) onto the wire: it advances when the MEMBER SET
+/// changes, not when a doc is re-cut or re-served. It orders two snapshots a device might see from two
+/// courier nodes: the higher epoch is newer. It is NOT a timestamp (no wall clock, so no pattern-of-life
+/// leak) and NOT a per-member field (no last-seen): it versions the WHOLE doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Epoch(pub u64);
+
+impl Epoch {
+    /// The reserved zero: a doc cut before membership versioning existed. Every roster in the field today
+    /// carries it, because the only writer of the old counter was the PULL path and a signet holder never
+    /// pulls. It is parsed like any other epoch (an old blob is well-formed, not corrupt) and refused at
+    /// the FOLD, so "not versioned" stays a distinct condition from "not newer".
+    pub const UNVERSIONED: Self = Self(0);
+}
 
 /// One member advertisement: a fleet node's identity and the operator's own label for it, and nothing else.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -215,6 +228,12 @@ pub fn cut(identity: &nauthy::Identity, doc: &RosterDoc) -> Vec<u8> {
 /// replay) is the caller's job on top of this, via the persisted epoch floor in
 /// [`Contacts::hydrate`](crate::contacts::Contacts::hydrate).
 pub fn verify(bytes: &[u8], signet: VerifyKey) -> Result<RosterDoc, RosterVerifyError> {
+    // An empty read is its OWN condition, checked before the envelope decoder turns it into a signature
+    // failure. A node that has cut nothing yet serves nothing, and telling its operator that their own
+    // coordination node is serving an unverifiable blob sends them hunting a forgery that is not there.
+    if bytes.is_empty() {
+        return Err(RosterVerifyError::Empty);
+    }
     let signed = Signed::decode(bytes)?;
     let payload = signed.verify(signet)?;
     Ok(RosterDoc::parse_canonical(payload)?)
@@ -224,6 +243,10 @@ pub fn verify(bytes: &[u8], signet: VerifyKey) -> Result<RosterDoc, RosterVerify
 /// truncated at the envelope) or the PAYLOAD parse (not a roster, or a malformed member list).
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum RosterVerifyError {
+    /// The node served NO bytes: it has cut no roster yet. Distinct from a signature failure, because
+    /// the fix is on the serving side (make one membership edit) and nothing is wrong with the key.
+    #[error("the node served no roster")]
+    Empty,
     /// The signed envelope did not verify: foreign signer, bad signature, or a truncated envelope.
     #[error("roster signature did not verify")]
     Signature(#[from] SignError),

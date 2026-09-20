@@ -327,10 +327,8 @@ fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
 /// handed a legal set that omits `ping:`.
 #[test]
 fn an_unknown_scheme_is_pointed_at_the_list_that_holds_both_halves() {
-    let empty_roster = std::sync::Arc::new(Vec::new());
     for entry in ["x=png:", "x=nonsense", "x=tcp:nope"] {
-        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], &empty_roster, &[])
-        else {
+        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], None, &[]) else {
             panic!("`{entry}` is not a target either half of the grammar routes");
         };
         let message = format!("{error:#}");
@@ -347,14 +345,12 @@ fn an_unknown_scheme_is_pointed_at_the_list_that_holds_both_halves() {
 /// swoosh serves takes no argument, so a tail is refused here, by name, with the rule stated.
 #[test]
 fn ping_with_an_argument_is_refused_rather_than_read_as_a_forward() {
-    let empty_roster = std::sync::Arc::new(Vec::new());
     for (entry, scheme) in [
         ("ping=ping:80", "ping"),
         ("speed=speed:80", "speed"),
         ("members=roster:80", "roster"),
     ] {
-        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], &empty_roster, &[])
-        else {
+        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], None, &[]) else {
             panic!("`{entry}` gives an argument to an engine that takes none and must be refused");
         };
         let message = format!("{error:#}");
@@ -369,16 +365,58 @@ fn ping_with_an_argument_is_refused_rather_than_read_as_a_forward() {
     }
     // The zero-argument spelling still binds, so the refusal is about the tail and nothing else.
     assert!(
+        bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], None, &[]).is_ok(),
+        "`ping=ping:` is the spelling that binds the probe"
+    );
+}
+
+/// A node that does not hold the signet REFUSES `roster:` at serve start, instead of coming up and
+/// advertising a service every puller must reject.
+///
+/// Before sign-on-change, `serve` cut and signed a snapshot with whatever local key it held, so a member
+/// node served a roster nobody could verify with no warning on this side: the operator learned about it
+/// from the far end, as "roster is not signed by your signet". The composition root resolves the signet
+/// predicate once and expresses it in the TYPE, so this arm cannot re-derive it wrongly.
+#[tokio::test]
+async fn a_node_without_the_signet_refuses_to_serve_a_roster() {
+    let Err(error) = bind_entry(Router::new(gated()), "hub=roster:", [0u8; 32], None, &[]) else {
+        panic!("a node with no cut roster must not bind `roster:`");
+    };
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("does not hold your signet") && message.contains("swoosh identity"),
+        "the refusal names the missing signet and the machine to serve from: {message}"
+    );
+
+    // With the signet's own oracle it binds, so the refusal is about the signet and nothing else.
+    let dir = std::env::temp_dir().join(format!("swoosh-serve-roster-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let path = dir.join("roster");
+    let signet = nauthy::Identity::from_secret(&[9u8; 32]).expect("a valid secret");
+    let doc = swoosh::roster::RosterDoc::new(
+        swoosh::roster::Epoch(1),
+        vec![swoosh::roster::Member {
+            node: nauthy::VerifyKey::new([1u8; 32]),
+            label: "desk".parse().expect("a valid label"),
+        }],
+    )
+    .expect("a well-formed doc");
+    swoosh::roster::Artifact::write(&path, &signet, &doc)
+        .await
+        .expect("cut");
+    let artifact = std::sync::Arc::new(swoosh::roster::Artifact::open(path).await.expect("load"));
+    assert!(
         bind_entry(
             Router::new(gated()),
-            "ping=ping:",
+            "hub=roster:",
             [0u8; 32],
-            &empty_roster,
+            Some(&artifact),
             &[]
         )
         .is_ok(),
-        "`ping=ping:` is the spelling that binds the probe"
+        "the signet's own machine serves its fleet's roster"
     );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The exposure coupling on the product path: a diagnostic route binds the METERED engine when the operator
@@ -388,13 +426,12 @@ fn ping_with_an_argument_is_refused_rather_than_read_as_a_forward() {
 #[test]
 fn an_open_diagnostic_binds_the_metered_engine_and_a_gated_one_the_owner_engine() {
     let speed: nauthy::Service = "speed".parse().expect("a valid service name");
-    let empty_roster = std::sync::Arc::new(Vec::new());
 
     let open = bind_entry(
         Router::new(gated()),
         "speed=speed:",
         [0u8; 32],
-        &empty_roster,
+        None,
         core::slice::from_ref(&speed),
     )
     .expect("speed binds")
@@ -413,16 +450,10 @@ fn an_open_diagnostic_binds_the_metered_engine_and_a_gated_one_the_owner_engine(
     );
     assert_eq!(entry.posture, Posture::Open);
 
-    let gated = bind_entry(
-        Router::new(gated()),
-        "speed=speed:",
-        [0u8; 32],
-        &empty_roster,
-        &[],
-    )
-    .expect("speed binds")
-    .expose()
-    .expect("a member-only speed route assembles");
+    let gated = bind_entry(Router::new(gated()), "speed=speed:", [0u8; 32], None, &[])
+        .expect("speed binds")
+        .expose()
+        .expect("a member-only speed route assembles");
     let entry = gated
         .manifest()
         .into_iter()
@@ -1617,17 +1648,9 @@ fn resident_manifest_equals_plain_manifest() {
     // The route table the resident path builds: the base ping/speed plus the two member-only control.*
     // handlers, one handler value per route (the Router's bind-by-value shape). `bind_entry` binds only the
     // named routes, so `sshd` is absent here exactly as it is from the plain default set.
-    let empty_roster = std::sync::Arc::new(Vec::new());
-    let router = bind_entry(
-        Router::new(gated()),
-        "ping=ping:",
-        [0u8; 32],
-        &empty_roster,
-        &[],
-    )
-    .expect("ping binds");
     let router =
-        bind_entry(router, "speed=speed:", [0u8; 32], &empty_roster, &[]).expect("speed binds");
+        bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], None, &[]).expect("ping binds");
+    let router = bind_entry(router, "speed=speed:", [0u8; 32], None, &[]).expect("speed binds");
     let router = router
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
