@@ -3,12 +3,16 @@
 //! A LAUNCHER, a third verb category beside the local and reach families. Like a local verb it reads the
 //! contact store (to resolve the peer to a raw key) and binds no bifrost `Node` in this process; unlike a
 //! local verb it ends up reaching a peer. It does so by `exec`ing the system `ssh` with a `ProxyCommand`
-//! that re-invokes THIS binary (`<self> tunnel-connect <key> --service <name> --to -`, via
-//! `current_exe()`, see [`self_invocation`]) and that hidden re-invocation binds the `Node` under
-//! swoosh's OWN identity and pipes the overlay stream over ssh's stdin/stdout, so ssh talks to the far
-//! sshd as if it were local. One binary, no `tightbeam` on PATH and no `$PATH` lookup at all, and the dial
-//! carries swoosh's key, so a membership badge presented there binds to the identity the family gate
-//! proves. `swoosh ssh alice` is a drop-in for `ssh <host>`.
+//! that re-invokes THIS binary (`<self> reach <key> <service> --to -`, via `current_exe()`, see
+//! [`self_invocation`]) and that re-invocation binds the `Node` under swoosh's OWN identity and pipes the
+//! overlay stream over ssh's stdin/stdout, so ssh talks to the far sshd as if it were local. One binary,
+//! no `tightbeam` on PATH and no `$PATH` lookup at all, and the dial presents this machine's membership
+//! badge rooted at the key it binds under, so the far family gate proves the identity the badge names.
+//! `swoosh ssh alice` is a drop-in for `ssh <host>`.
+//!
+//! The bridge is the PUBLIC `reach` verb, not a hidden leaf: the line in the `ProxyCommand` is one an
+//! operator can copy and run by hand when a launch fails, which is the whole reason it is not plumbing
+//! only this file can type.
 //!
 //! The peer resolves in-process, BEFORE ssh runs, through the same [`Peer`]/contact-store lookup
 //! `ping`/`speed` use, so `alice/desk` is fine here (ssh never sees the `/`; it sees only the resolved
@@ -103,7 +107,7 @@ impl SshCmd {
         self.peer.reject_redundant_present(self.present.as_ref())?;
         // The fold: a `sheer:` link-as-peer supplies its own slip (self-addressing), else the explicit
         // `--present`. `ssh` computes no slots; it forwards this slip as `--present <link>` into the
-        // ProxyCommand, where the re-invoked `tunnel-connect` runs the ONE resolver (so a signet-bound
+        // ProxyCommand, where the re-invoked `reach` runs the ONE resolver (so a signet-bound
         // link-as-peer gets its slot-2 badge there, for free, through the existing `--present` path).
         let present = self.peer.self_present().or_else(|| self.present.clone());
 
@@ -132,7 +136,7 @@ impl SshCmd {
         }
 
         let proxy = self_invocation()?;
-        // Thread the effective --home into the ProxyCommand so the re-invoked tunnel-connect dials under the
+        // Thread the effective --home into the ProxyCommand so the re-invoked `reach` dials under the
         // SAME identity `swoosh ssh` was given, not swoosh's default. ONLY when the home was named explicitly
         // (the default carries forward on its own): the named home is where this node's key lives, so the
         // bridge must see the same --home or it would silently fall back to the default, the "one flag, a
@@ -164,7 +168,7 @@ impl SshCmd {
 /// own path, see [`self_invocation`]), the resolved `key`, the `service`, an optional `present` capability
 /// link, the placeholder `host`, the private `known_hosts` path, the direct-address `hints`, and the user's
 /// trailing ssh `args`, it assembles the exact argv [`exec_ssh`] hands to `ssh`. The `ProxyCommand` value is
-/// `<self> tunnel-connect <key> --service <name> --to - [--present <link>] [--peer <key>=<addr>]...`: ssh
+/// `<self> reach <key> <service> --to - [--present <link>] [--peer <key>=<addr>]...`: ssh
 /// runs it to bridge the overlay stream in-process, under swoosh's own identity, with no `tightbeam` binary
 /// and no `$PATH` lookup. ssh splits `ProxyCommand` on whitespace, so `proxy` is pre-quoted and the other
 /// tokens are whitespace-free (a `NodeId` is base32, the service is a single name, a `sheer:` link is one
@@ -192,7 +196,7 @@ fn ssh_argv(
 ) -> Vec<String> {
     // `--to -` streams the overlay service over stdin/stdout (the ProxyCommand shape). `-` is one
     // whitespace-free token, safe in ssh's whitespace-split ProxyCommand, like the key and the service.
-    let mut proxy_command = format!("{proxy} tunnel-connect {key} --service {service} --to -");
+    let mut proxy_command = format!("{proxy} reach {key} {service} --to -");
     // Carry the caller's home into the re-invocation, so `swoosh ssh --home X` dials as X's identity (its
     // membership badge roots at X's key). `--home` is a global, valid after the subcommand; double-quoted so
     // a dir with a space stays one token. Absent, the bridge uses swoosh's default identity, as before.
@@ -403,7 +407,7 @@ mod tests {
             argv,
             vec![
                 "-o".to_owned(),
-                format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to -"),
+                format!("ProxyCommand={PROXY} reach {KEY} ssh --to -"),
                 "-o".to_owned(),
                 "UserKnownHostsFile=\"/home/me/.config/swoosh/known_hosts\"".to_owned(),
                 "-o".to_owned(),
@@ -417,9 +421,82 @@ mod tests {
         );
     }
 
+    /// The launcher and the parser cannot drift apart: the exact `ProxyCommand` [`ssh_argv`] writes is
+    /// parsed back through swoosh's OWN clap model, and it must be the `reach` it names.
+    ///
+    /// This binding is what the bridge earned by becoming a public verb. It used to be a hidden leaf
+    /// whose argv only this file could type; `reach`'s surface is owned elsewhere now, so a change to
+    /// its positionals or its flags has to fail HERE, in one cargo test, rather than at the first
+    /// `swoosh ssh` an operator runs. The other argv tests pin the exact string; this one pins that the
+    /// string still MEANS what the launcher intends.
+    #[test]
+    fn the_proxy_command_parses_back_as_the_reach_it_names() {
+        let link = signet_link();
+        let hints = [hint("127.0.0.1:9000")];
+        let argv = ssh_argv(
+            PROXY,
+            KEY,
+            "ssh",
+            Some(&link),
+            "alice",
+            &known_hosts(),
+            Some(Path::new("/tmp/yah")),
+            &hints,
+            &[],
+        );
+        let proxy_command = argv[1]
+            .strip_prefix("ProxyCommand=")
+            .expect("the first option is the bridge");
+        // ssh hands the whole value to `/bin/sh`, which splits it on whitespace and removes the quoting
+        // the launcher added for a path with a space; those tokens are the re-invocation's argv.
+        let mut tokens = proxy_command
+            .split_whitespace()
+            .map(|t| t.trim_matches('"'));
+        assert_eq!(
+            tokens.next(),
+            Some(PROXY),
+            "the bridge re-invokes THIS binary, never a `tightbeam` off PATH"
+        );
+
+        let parsed = crate::Cli::try_parse_from(core::iter::once("swoosh").chain(tokens))
+            .expect("the ProxyCommand line is a swoosh verb");
+        assert_eq!(
+            parsed.home.as_deref(),
+            Some(Path::new("/tmp/yah")),
+            "the home rides as the global it is, so the bridge dials under the named identity"
+        );
+        let Some(crate::Command::Reach(reach)) = parsed.command else {
+            panic!("the bridge is the public `reach` verb");
+        };
+        assert!(
+            matches!(&reach.peer, Peer::Raw(node) if node.to_string() == KEY),
+            "the launcher resolved the peer, so the bridge carries a raw key"
+        );
+        assert_eq!(
+            reach.service.as_str(),
+            "ssh",
+            "the service is positional now"
+        );
+        assert_eq!(
+            reach.to,
+            crate::commands::connect::To::Stdout,
+            "`--to -` is the stdin/stdout sink ssh pipes through"
+        );
+        assert_eq!(
+            reach.present.as_ref().map(Link::as_str),
+            Some(link.as_str()),
+            "the slip the launcher folded rides into the dial that presents it"
+        );
+        assert_eq!(
+            reach.reach.peer.len(),
+            1,
+            "each address hint arrives intact"
+        );
+    }
+
     #[test]
     fn argv_threads_the_home_into_the_proxy_command() {
-        // `swoosh ssh --home <dir>` must DIAL under that home's identity: the re-invoked tunnel-connect gets
+        // `swoosh ssh --home <dir>` must DIAL under that home's identity: the re-invoked `reach` gets
         // the same --home, so its membership badge roots at that key. Without this, --home was silently
         // dropped and the dial used swoosh's default identity -- the bug that faked an auth bypass.
         let with_home = ssh_argv(
@@ -435,7 +512,7 @@ mod tests {
         );
         assert!(
             with_home.iter().any(|a| a
-                == &format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to - --home \"/tmp/yah\"")),
+                == &format!("ProxyCommand={PROXY} reach {KEY} ssh --to - --home \"/tmp/yah\"")),
             "the ProxyCommand must carry --home so the dial uses the given identity: {with_home:?}"
         );
         // Absent, no --home rides the ProxyCommand: the bridge uses swoosh's default identity, as before.
@@ -509,7 +586,7 @@ mod tests {
         );
         assert_eq!(
             argv[1],
-            format!("ProxyCommand={PROXY} tunnel-connect {KEY} --service admin-ssh --to -")
+            format!("ProxyCommand={PROXY} reach {KEY} admin-ssh --to -")
         );
     }
 
@@ -531,9 +608,7 @@ mod tests {
         );
         assert_eq!(
             argv[1],
-            format!(
-                "ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to - --present {link}"
-            )
+            format!("ProxyCommand={PROXY} reach {KEY} ssh --to - --present {link}")
         );
     }
 
@@ -557,7 +632,7 @@ mod tests {
         assert_eq!(
             argv[1],
             format!(
-                "ProxyCommand={PROXY} tunnel-connect {KEY} --service ssh --to - \
+                "ProxyCommand={PROXY} reach {KEY} ssh --to - \
                  --peer {KEY}=127.0.0.1:9000 --peer {KEY}=198.51.100.4:22"
             )
         );
@@ -605,9 +680,7 @@ mod tests {
         );
         assert_eq!(
             argv[1],
-            format!(
-                "ProxyCommand={PROXY} tunnel-connect {root} --service ssh --to - --present {link}"
-            )
+            format!("ProxyCommand={PROXY} reach {root} ssh --to - --present {link}")
         );
 
         // A `Named`/`Raw` peer does NOT self-present, so the fold forwards the EXPLICIT `--present` instead.

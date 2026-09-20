@@ -1,5 +1,6 @@
-//! The persisted identity file's failure modes: a corrupt or too-open `identity.key` is refused, never
-//! silently replaced, and a write is atomic (a failed write leaves the old key intact).
+//! The persisted identity file's failure modes: a corrupt, too-open, or ALREADY-PROVISIONED
+//! `identity.key` is refused, never silently replaced, and a write is atomic (a failed one leaves the
+//! store exactly as it was).
 
 use std::path::PathBuf;
 
@@ -66,19 +67,18 @@ async fn a_wrong_size_key_file_refuses_and_is_never_overwritten() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A write lands atomically and owner-only: the new seed replaces the old one, no temp sibling survives,
-/// and the key is 0600.
+/// A write lands atomically and owner-only: the seed is on disk, no temp sibling survives, and the key
+/// is 0600.
 #[tokio::test]
-async fn a_write_replaces_the_key_atomically_owner_only() {
+async fn a_write_lands_the_key_atomically_owner_only() {
     let (home, dir) = home("atomic");
     let path = home.identity_key();
 
     super::write(&[1u8; 32], &home).await.expect("first write");
-    super::write(&[2u8; 32], &home).await.expect("second write");
     assert_eq!(
         std::fs::read(&path).expect("the key reads"),
-        [2u8; 32],
-        "the rename replaced the old key with the new seed"
+        [1u8; 32],
+        "the rename landed the seed"
     );
 
     #[cfg(unix)]
@@ -110,19 +110,66 @@ async fn a_write_replaces_the_key_atomically_owner_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A failed write leaves the previous key byte-identical: the temp sibling cannot be created, so the
-/// rename never happens (the atomicity guarantee, exercised rather than argued).
+/// The signet guard: a home that already holds a key is REFUSED, not re-identified. The key is the one
+/// file in the store nothing can re-issue, so `adopt`ing a derived invite onto a provisioned machine
+/// must leave it exactly as found and say what was at stake. Re-writing the seed already on disk is not
+/// a replacement, so a re-adopt of the same invite stays a silent no-op.
+///
+/// The file-survives assertion comes FIRST: with the guard deleted the write succeeds, and that
+/// assertion is the one that then fails, naming the protection rather than tripping on a missing error.
+#[tokio::test]
+async fn a_write_refuses_a_home_that_already_holds_a_different_key() {
+    let (home, dir) = home("already-provisioned");
+    let path = home.identity_key();
+    let provisioned = [9u8; 32];
+    super::write(&provisioned, &home)
+        .await
+        .expect("provision an empty home");
+
+    let result = super::write(&[8u8; 32], &home).await;
+    assert_eq!(
+        std::fs::read(&path).expect("the key is still there"),
+        provisioned,
+        "a refused write must leave the existing key byte-identical: it is the one file nothing can \
+         re-issue"
+    );
+    let error = result.expect_err("a different seed over a provisioned home must be refused");
+    let message = format!("{error:#}");
+    let held = bifrost::NodeId::from_ed25519_secret(&provisioned).to_string();
+    assert!(
+        message.contains(&held),
+        "the refusal names the identity this machine already has: {message}"
+    );
+    assert!(
+        message.contains(&path.display().to_string()),
+        "the refusal names the file to move aside: {message}"
+    );
+
+    // The same seed is not a replacement: re-adopting an invite this machine already adopted writes
+    // nothing and says nothing, so idempotence survives the guard.
+    super::write(&provisioned, &home)
+        .await
+        .expect("re-writing the key already on disk is a no-op, not a refusal");
+    assert_eq!(
+        std::fs::read(&path).expect("the key is still there"),
+        provisioned
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A failed write leaves the store exactly as it was: the temp sibling cannot be created, so the rename
+/// never happens and no key (and no litter) appears. The atomicity guarantee, exercised rather than
+/// argued; the already-provisioned case is the guard above, which never reaches a write at all.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_failed_write_leaves_the_old_key_intact() {
+async fn a_failed_write_leaves_the_store_untouched() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let (home, dir) = home("failed-write");
     let path = home.identity_key();
-    let old = [3u8; 32];
-    super::write(&old, &home).await.expect("seed the old key");
 
-    // Drop write permission on the store dir: the next write cannot create its temp sibling.
+    // Drop write permission on the store dir: the write cannot create its temp sibling.
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
         .expect("make the store dir read-only");
     let result = super::write(&[4u8; 32], &home).await;
@@ -130,11 +177,12 @@ async fn a_failed_write_leaves_the_old_key_intact() {
         .expect("restore the store dir");
 
     assert!(result.is_err(), "the write into a read-only dir must fail");
-    assert_eq!(
-        std::fs::read(&path).expect("the old key is still there"),
-        old,
-        "a failed write must leave the old key intact"
+    assert!(
+        !path.exists(),
+        "a failed write leaves no key behind, and no temp sibling either"
     );
+    let entries = std::fs::read_dir(&dir).expect("read the home dir").count();
+    assert_eq!(entries, 0, "the store is exactly as it was found");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

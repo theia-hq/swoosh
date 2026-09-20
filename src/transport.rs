@@ -244,7 +244,8 @@ impl Transport {
 /// A DIFFERENT concept from the dial target [`Peer`](crate::peer::Peer): a hint says WHERE to find a key,
 /// the dial target says WHO to reach. Named `PeerHint` so the two never share the `Peer` name that used to
 /// force the collision gymnastics. It retains its ORIGINAL text so `swoosh ssh` can forward it verbatim
-/// into the tunnel-connect bridge, resolving the address at the actual dial site, not the launcher.
+/// into the `reach` its ProxyCommand runs, resolving the address at the actual dial site, not the
+/// launcher.
 #[derive(Debug, Clone)]
 pub struct PeerHint {
     node: NodeId,
@@ -317,7 +318,7 @@ pub struct ComposedDiscovery {
 
 impl PeerHint {
     /// The original `<key>=<addr>` token, for `ssh` to forward verbatim into the ProxyCommand so the
-    /// address resolves at the actual dial site (`tunnel-connect`), not at the launcher.
+    /// address resolves at the actual dial site (the `reach` it re-invokes), not at the launcher.
     pub fn as_arg(&self) -> &str {
         &self.text
     }

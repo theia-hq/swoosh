@@ -87,12 +87,13 @@ pub trait Reaching {
     fn reject_redundant_present(&self) -> eyre::Result<()>;
 
     /// The identity this verb binds under. REQUIRED with NO default body: a verb must state it, so a
-    /// verb that needs the persisted key for a reason of its own (`tunnel-connect` dials under swoosh's
-    /// OWN key, so the far gate proves the identity the badge was minted for) cannot SILENTLY inherit the
-    /// role's derivation. The common reaching verbs write the one-liner `self.bind_role().identity()`
-    /// (the derivation, so identity and badge cannot disagree); the two that need `Persisted` for another
-    /// reason declare it EXPLICITLY here. The override is non-forgettable by construction: `Persisted` is
-    /// a written declaration, never a silent default.
+    /// verb that needs the persisted key for a reason of its own (`serve` must come up at ONE address
+    /// across runs, which an ephemeral key cannot do) cannot SILENTLY inherit the role's derivation. The
+    /// reaching verbs write the one-liner `self.bind_role().identity()` (the derivation, so identity and
+    /// badge cannot disagree); the one that needs `Persisted` for another reason declares it EXPLICITLY
+    /// here. The override is non-forgettable by construction: `Persisted` is a written declaration,
+    /// never a silent default, and it is the only intent that CREATES a key, so a verb claiming it is
+    /// claiming to provision this node.
     fn identity(&self) -> Identity;
 
     /// What this verb's bind is for, and (when it dials) what it presents. `Serving` publishes the home

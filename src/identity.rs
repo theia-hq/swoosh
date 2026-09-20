@@ -1,17 +1,24 @@
 //! The node identity: the ed25519 secret every swoosh verb binds under.
 //!
 //! Identity is chosen by intent, and exactly one intent CREATES a key. A verb that must be *reachable at
-//! a stable address* (`serve`), or that must dial under this node's own key (the `swoosh ssh` bridge),
-//! persists its secret at `<home>/identity.key`: it loads that key and writes one on first use, so
-//! restarting the node keeps its address. A verb that only *reaches outward* (`ping`, `speed`, `reach`)
-//! LOADS that key when it already exists, because the membership badge it presents must root at the key
-//! the dial binds under, and mints a throwaway in-memory key when it does not. It never writes one: a
-//! dial does not provision a node, and the file it would write is the very key a later `serve` roots its
-//! fleet at.
+//! a stable address* (`serve`) persists its secret at `<home>/identity.key`: it loads that key and writes
+//! one on first use, so restarting the node keeps its address. A verb that only *reaches outward* (`ping`,
+//! `speed`, `reach`, including the `reach` behind `swoosh ssh`) LOADS that key when it already exists,
+//! because the membership badge it presents must root at the key the dial binds under, and mints a
+//! throwaway in-memory key when it does not. It never writes one: a dial does not provision a node, and
+//! the file it would write is the very key a later `serve` roots its fleet at.
 //!
 //! An explicit home (`--home <dir>` or `SWOOSH_HOME`) chooses WHERE that key lives, never WHETHER one is
 //! created. The verb's intent alone decides that, so a home named for one outward dial is left exactly as
 //! it was found.
+//!
+//! Nothing here ever writes OVER a key that is already there, and that one rule is enforced in three
+//! places: [`load_or_create`] mints only into the absence of one, [`read_key`] refuses a file that is not
+//! exactly [`KEY_LEN`] bytes rather than minting over it, and [`write`] (the `adopt` path) refuses a home
+//! that already holds a different identity. The key is the one file in the store with no issuer and no
+//! second copy: a signet roots every badge its owner ever signed, and there is nobody to cut another. So
+//! it is replaced by the operator moving it aside, which is also how a copy of it comes to exist, never
+//! by a command doing it for them.
 //!
 //! The secret is a [`Secret`] newtype, never a bare `[u8; 32]`: it zeroizes its bytes on drop so the
 //! key does not linger in freed memory, and it is only unwrapped at the single boundary where the
@@ -299,16 +306,45 @@ async fn guard_mode(_file: &tokio::fs::File, _path: &Path) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Write `seed` as the persisted identity at `<home>/identity.key`, mode 0600, creating the store dir.
-/// This is how `adopt` provisions the device identity a later `serve` binds: it
-/// MUST land in the same store [`resolve`] reads, so the node comes up AS the adopted device. (Writing
-/// tightbeam's separate store instead was the qat identity-mismatch bug: `serve` bound swoosh's own key,
-/// never the adopted one, so the exposed node had a different id than the contact pointed at.)
+/// Write `seed` as the persisted identity at `<home>/identity.key`, mode 0600, creating the store dir,
+/// REFUSING a home that already holds a different one.
+///
+/// This is how `adopt` provisions the device identity a later `serve` binds: it MUST land in the same
+/// store [`resolve`] reads, so the node comes up AS the adopted device. (Writing tightbeam's separate
+/// store instead was the qat identity-mismatch bug: `serve` bound swoosh's own key, never the adopted
+/// one, so the exposed node had a different id than the contact pointed at.)
+///
+/// The refusal is here, in the module that owns the file, and not at the one call site, because it is
+/// the FILE's rule: the same one [`read_key`] already enforces for a corrupt key, in the same terms.
+/// What is at stake is not recoverable. Its siblings in `adopt`'s transaction (the trusted signet, the
+/// stored badge) are both `--force`-gated and both re-obtainable from the owner, so the flag that waves
+/// those through deliberately does not reach this one: the way past it is the operator moving the file,
+/// which is also how the copy that makes the act survivable comes to exist. Writing the seed ALREADY on
+/// disk is not a replacement, so re-adopting the same invite stays the silent no-op it should be.
 ///
 /// The write is ATOMIC (a unique temp sibling in the same directory, then one rename over the target), so
 /// a crash or a failed write can never truncate the key: the old file stays intact until the rename lands.
 pub async fn write(seed: &[u8; 32], home: &Home) -> eyre::Result<()> {
-    crate::config::write_private_atomic(&home.identity_key(), seed).await
+    let path = home.identity_key();
+    // Read through the guarded reader every load uses, so a corrupt or too-open file refuses for its own
+    // named reason rather than reading as "no key here" and being replaced by this write.
+    if let Some(existing) = read_key(&path).await? {
+        // Compare the public node ids, never the seeds: the ids are what the refusal must name, and the
+        // secret bytes never need to meet each other for this question to be answered.
+        let (existing, incoming) = (existing.node_id(), NodeId::from_ed25519_secret(seed));
+        if existing == incoming {
+            return Ok(());
+        }
+        eyre::bail!(
+            "this machine is already {existing}; adopting this would replace it with {incoming}. {} \
+             holds the only copy of that key: nobody can issue another, and if it is the signet your \
+             fleet roots at, every device you enrolled roots there too. --force will not do it either, \
+             because what it waves through is a credential the owner can re-issue. copy the file \
+             somewhere safe and move it aside, if becoming a different device is what you meant",
+            path.display(),
+        );
+    }
+    crate::config::write_private_atomic(&path, seed).await
 }
 
 #[cfg(test)]
