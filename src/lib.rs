@@ -6,6 +6,7 @@
 //! test can drive the SAME pieces the product path does (notably the shared `serve::diagnostics` and
 //! `serve::bind_entry` edges the `gated_measure` proof builds its exposer from).
 
+pub mod badge;
 pub mod config;
 pub mod contacts;
 pub mod credential;

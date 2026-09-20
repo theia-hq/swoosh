@@ -762,13 +762,17 @@ fn adopt_requires_force_to_switch_the_trusted_signet() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A same-signet re-adopt must not silently replace the stored badge: an old token (a rotated device, a
-/// revoked badge saved in a chat log) replayed under the live signet would otherwise downgrade the
-/// credential, and the signet compare cannot catch it because the signet is unchanged. A differing badge
-/// takes the same explicit `--force` as a differing signet; re-adopting the same bytes stays silent. The
-/// test also proves the replay cannot downgrade a device that already carries the newer badge.
+/// A same-signet re-adopt turns on ONE question: does the incoming badge outlive the stored one?
+///
+/// Renewal is re-enrolment (there is no renew verb), so the owner re-running `invite add` for a device
+/// already on file is the routine quarterly act and must land with no flag. What the guard exists for is
+/// the DOWNGRADE: an old token (a rotated device, a badge saved in a chat log) replayed under the live
+/// signet, which the signet compare cannot catch because the signet is unchanged. Refusing every
+/// DIFFERING badge caught the replay but made the routine act demand the same `--force` that disables
+/// the re-root guard, so the predicate is the downgrade and not the difference. Re-adopting the same
+/// bytes stays silent either way.
 #[test]
-fn adopt_requires_force_to_replace_a_differing_badge() {
+fn adopt_renews_without_a_flag_and_refuses_a_downgrade() {
     let base = std::env::temp_dir().join(format!("swoosh-badge-swap-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let owner_dir = base.join("owner");
@@ -786,98 +790,93 @@ fn adopt_requires_force_to_replace_a_differing_badge() {
         .parse()
         .expect("identity prints the node id first");
 
+    // A helper for the owner's side: sign a badge for this device with an explicit window, and hand back
+    // the token and the badge it carries.
+    let sign = |expires: &str| {
+        let out = swoosh(&[
+            "invite",
+            "add",
+            "laptop",
+            "--for",
+            &device.to_string(),
+            "--expires",
+            expires,
+            "--home",
+            path_str(&owner_dir),
+        ]);
+        assert!(out.status.success(), "{}", stderr(&out));
+        let token = first_invite(&String::from_utf8(out.stdout).unwrap()).expect("token");
+        let badge = bound_badge(&token);
+        (token, badge)
+    };
+
     // The owner signs the first badge for this device. Adopting it is first provisioning (no stored
     // badge), so it lands without an acknowledgement.
-    let first = swoosh(&[
-        "invite",
-        "add",
-        "laptop",
-        "--for",
-        &device.to_string(),
-        "--home",
-        path_str(&owner_dir),
-    ]);
-    assert!(first.status.success(), "{}", stderr(&first));
-    let old_token = first_invite(&String::from_utf8(first.stdout).unwrap()).expect("token");
-    let old_badge = bound_badge(&old_token);
-    let adopt = swoosh(&["adopt", &old_token, "--home", path_str(&device_dir)]);
+    let (short_token, short_badge) = sign("30d");
+    let adopt = swoosh(&["adopt", &short_token, "--home", path_str(&device_dir)]);
     assert!(adopt.status.success(), "{}", stderr(&adopt));
     assert_eq!(
         stored_badge(&device_dir),
-        old_badge,
+        short_badge,
         "the first badge lands"
     );
 
     // Re-adopting the exact bytes already stored is a replay of what is there, not a swap.
-    let same = swoosh(&["adopt", &old_token, "--home", path_str(&device_dir)]);
+    let same = swoosh(&["adopt", &short_token, "--home", path_str(&device_dir)]);
     assert!(same.status.success(), "{}", stderr(&same));
 
-    // The owner rotates the device: a second badge for the SAME device, with a shorter expiry, so the
-    // cap bytes differ and the two tokens are distinguishable.
-    let second = swoosh(&[
-        "invite",
-        "add",
-        "laptop",
-        "--for",
-        &device.to_string(),
-        "--expires",
-        "30d",
-        "--home",
-        path_str(&owner_dir),
-    ]);
-    assert!(second.status.success(), "{}", stderr(&second));
-    let new_token = first_invite(&String::from_utf8(second.stdout).unwrap()).expect("token");
-    let new_badge = bound_badge(&new_token);
+    // THE RENEWAL: the same signet signs the same device for longer. This is the whole quarterly
+    // mechanism, and it lands with no flag, through commands that already existed.
+    let (long_token, long_badge) = sign("90d");
     assert_ne!(
-        old_badge, new_badge,
+        short_badge, long_badge,
         "two invites for one device carry distinct badges"
     );
-
-    // Adopting the new badge without `--force` refuses: the stored credential would be replaced.
-    let refused = swoosh(&["adopt", &new_token, "--home", path_str(&device_dir)]);
+    let renewed = swoosh(&["adopt", &long_token, "--home", path_str(&device_dir)]);
     assert!(
-        !refused.status.success(),
-        "replacing a stored badge without --force must refuse: {}",
-        stderr(&refused)
-    );
-    assert!(
-        stderr(&refused).contains("--force"),
-        "the refusal names the acknowledgement: {}",
-        stderr(&refused)
+        renewed.status.success(),
+        "a badge that outlives the stored one is a renewal, not a swap: {}",
+        stderr(&renewed)
     );
     assert_eq!(
         stored_badge(&device_dir),
-        old_badge,
-        "the refused swap leaves the stored badge untouched"
+        long_badge,
+        "the renewed badge is what the device now presents"
     );
 
-    // With `--force`, the rotation lands.
+    // THE DOWNGRADE: the shorter token, replayed under the unchanged signet. It does not outlive what is
+    // stored, so it is refused and the live credential survives.
+    let replay = swoosh(&["adopt", &short_token, "--home", path_str(&device_dir)]);
+    assert!(
+        !replay.status.success(),
+        "replaying a badge that does not outlive the stored one must refuse: {}",
+        stderr(&replay)
+    );
+    assert!(
+        stderr(&replay).contains("--force"),
+        "the refusal names the acknowledgement: {}",
+        stderr(&replay)
+    );
+    assert_eq!(
+        stored_badge(&device_dir),
+        long_badge,
+        "the refused downgrade leaves the stored badge untouched"
+    );
+
+    // `--force` keeps its real meaning: accept a badge that is not an improvement.
     let forced = swoosh(&[
         "adopt",
-        &new_token,
+        &short_token,
         "--force",
         "--home",
         path_str(&device_dir),
     ]);
     assert!(
         forced.status.success(),
-        "--force performs the swap: {}",
+        "--force performs the downgrade: {}",
         stderr(&forced)
     );
-    assert_eq!(stored_badge(&device_dir), new_badge);
-
-    // Replaying the OLD token is refused too: the unchanged signet no longer hides a downgrade.
-    let replay = swoosh(&["adopt", &old_token, "--home", path_str(&device_dir)]);
-    assert!(
-        !replay.status.success(),
-        "replaying the old badge without --force must refuse: {}",
-        stderr(&replay)
-    );
-    assert_eq!(
-        stored_badge(&device_dir),
-        new_badge,
-        "the live badge survives the replay"
-    );
+    assert_eq!(stored_badge(&device_dir), short_badge);
 
     let _ = std::fs::remove_dir_all(&base);
 }
