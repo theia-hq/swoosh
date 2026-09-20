@@ -59,9 +59,9 @@ to you.)
 She registers nothing: no signet to record, no grant. Her device just presents the link when it reaches
 the box:
 
-<!-- manual: long-running forward -->
+<!-- manual: long-running port bind -->
 ```console
-$ swoosh forward mediacenter --service tv --to 8096 --present sheer:bf01hcq6…
+$ swoosh reach mediacenter tv --to 8096 --present sheer:bf01hcq6…
 ```
 
 Then she opens `http://127.0.0.1:8096` and watches. Any device her signet vouches for can present that

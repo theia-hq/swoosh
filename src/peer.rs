@@ -4,7 +4,7 @@
 //! (`ContactRef`, `Candidate`, `Contacts`) rather than squatting in it, and it unifies the two dial-target
 //! types the reach and tunnel families used to keep apart: the multi-device diagnostic verbs
 //! (`ping`/`speed`/`status`/`fetch`) fan a peer out via [`candidates`](Peer::candidates), the single-target
-//! verbs (`forward`/`send`/`stop`/`service`/`fleet`) resolve one via [`connector`](Peer::connector). Both
+//! verbs (`reach`/`send`/`stop`/`service`/`fleet`) resolve one via [`connector`](Peer::connector). Both
 //! shapes read the SAME three arms, so `alice`, `alice/desk`, a raw key, and a `sheer:` link all parse in
 //! one place, uniform across every dialing verb.
 
@@ -24,7 +24,7 @@ use crate::credential::LinkExt as _;
 /// the credential); else a raw base32 node id is dialed verbatim; else the text is a saved petname resolved
 /// against the contact store just before dialing (deferred because the store loads at startup, not at the
 /// clap boundary). Every dialing verb holds this in its peer slot, so `alice`, `alice/desk`, a raw key, and
-/// a `sheer:` link all parse in one place, uniform across `ping`/`speed`/`status`/`fetch`/`forward`/`send`/
+/// a `sheer:` link all parse in one place, uniform across `ping`/`speed`/`status`/`fetch`/`reach`/`send`/
 /// `stop`/`service`/`ssh`.
 #[derive(Debug, Clone)]
 pub enum Peer {
@@ -90,7 +90,7 @@ impl Peer {
         }
     }
 
-    /// SINGLE-CONNECTOR resolution, for the single-target verbs (`forward`/`beam`/`stop`/`service`/`fleet`,
+    /// SINGLE-CONNECTOR resolution, for the single-target verbs (`reach`/`send`/`stop`/`service`/`fleet`,
     /// and the `tunnel-connect` bridge). The resolver ALWAYS builds via [`Connector::to_node`] with the
     /// slot-1/slot-2 the caller resolved; the [`Capability`](Self::Capability) arm differs ONLY in computing
     /// the dial target from the link's root. It NEVER calls [`Connector::from_link`]: the link's credential

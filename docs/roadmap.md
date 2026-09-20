@@ -17,7 +17,7 @@ rest is planned and lands as it is built.
 - [x] `identity` print this machine's key, minting one if absent, to provision a node ahead of time
 - [x] `invite add` / `adopt` enroll a second machine under your signet via a signed invite
 - [x] `ssh` open an ssh session to a peer over the overlay
-- [x] `forward` put a peer's served service on a local port, stdout, or a unix socket
+- [x] `reach` reach any service a peer serves, on stdout or a local port
 - [x] `send` push a file or directory to a peer, verified end to end
 - [x] `fetch` mint a local URL whose fetch egresses at a node you name
 - [x] `fleet` pull a signed fleet roster and fold it into your contacts

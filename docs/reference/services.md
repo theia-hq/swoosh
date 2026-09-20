@@ -144,7 +144,7 @@ Every service row links the doc that owns its sharp edges. The engine limits liv
 [services repo](https://github.com/theia-hq/services); the raw-stream and forward rules live in the
 [tightbeam README](https://github.com/theia-hq/tightbeam#what-a-forward-carries). On the command side:
 [serve](commands/serve.md) for the flags, and [send](commands/send.md), [fetch](commands/fetch.md),
-[ssh](commands/ssh.md), [forward](commands/forward.md), [service](commands/service.md),
+[ssh](commands/ssh.md), [reach](commands/reach.md), [service](commands/service.md),
 [stop](commands/stop.md), and [fleet](commands/fleet.md) for the client verbs. The gate itself is
 [Keys](../keys.md#the-gate). An open `ping` or `speed` is metered by the engine, per
 [Public service](../use-cases/public-service.md#the-limit).
