@@ -148,7 +148,7 @@ pub struct ServeCmd {
 }
 
 /// What `serve` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, the revocation
-/// denylist the gate honors, and the pre-cut signed roster blob. All resolved in the composition root (the
+/// denylist the gate honors, and the signed roster artifact it relays. All resolved in the composition root (the
 /// host seed needs the secret before the transport consumes it), then attached to [`ServeCmd`] via
 /// [`with_expose`](ServeCmd::with_expose). Moved here from `main.rs` so `serve` reads its own context.
 /// The home rides along too: `serve --resident` names its socket/lock off the home, and the SAME `home`
@@ -167,9 +167,11 @@ pub struct ExposeContext {
     /// written to `<home>/disabled` refuses the service live, and a `service enable` restores it, both with no
     /// restart. The exact mtime-watch shape as the denylist, loaded beside it in the composition root.
     pub enabled: FileDisabledList,
-    /// The signet-signed roster blob the `roster:` handler serves, cut once per `serve` from the
-    /// operator's contacts while the secret is still live.
-    pub roster_blob: Arc<Vec<u8>>,
+    /// The home's signed roster artifact, `None` when the signet never cut one here. `serve` READS it
+    /// and never signs: the blob was cut by the verb that last changed the membership, on the machine
+    /// holding the signet, so this long-lived process holds no signing identity and a relay-only node
+    /// cannot mis-cut. Re-read per pull (a debounced stat), so an invite lands without a restart.
+    pub roster: Option<Arc<swoosh::roster::Artifact>>,
     /// The node home this serve runs under: the resident socket/lock derive from it, and the composition
     /// root resolves it ONCE, so a `--resident` serve and its future control clients name the same paths.
     pub home: Home,
@@ -182,7 +184,10 @@ impl core::fmt::Debug for ExposeContext {
         f.debug_struct("ExposeContext")
             .field("host_seed", &self.host_seed)
             .field("signet", &self.signet)
-            .field("roster_blob_len", &self.roster_blob.len())
+            .field(
+                "roster",
+                &self.roster.as_ref().map(|artifact| artifact.path()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -243,19 +248,11 @@ impl Reaching for ServeCmd {
             signet,
             denylist,
             enabled,
-            roster_blob,
+            roster,
             home,
         } = *expose;
-        self.run_serve(
-            node,
-            host_seed,
-            signet,
-            denylist,
-            enabled,
-            roster_blob,
-            home,
-        )
-        .await
+        self.run_serve(node, host_seed, signet, denylist, enabled, roster, home)
+            .await
     }
 }
 
@@ -308,7 +305,7 @@ impl ServeCmd {
         signet: Option<NodeId>,
         denylist: FileDenylist,
         enabled: FileDisabledList,
-        roster_blob: Arc<Vec<u8>>,
+        roster: Option<Arc<swoosh::roster::Artifact>>,
         home: Home,
     ) -> eyre::Result<()>
     where
@@ -361,7 +358,7 @@ impl ServeCmd {
         let public = parse_services(&self.public)?;
         let mut router = Router::new(gate);
         for entry in &requested {
-            router = bind_entry(router, entry, host_seed, &roster_blob, &public)?;
+            router = bind_entry(router, entry, host_seed, roster.as_ref(), &public)?;
         }
         for scoped in fetch.services() {
             // One engine handler per fetch service, holding ONLY its own origin scope: the SSRF pivot is

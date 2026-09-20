@@ -306,7 +306,7 @@ fn me_sources(contacts: &Contacts) -> Vec<Source> {
 #[test]
 fn hydrate_adds_members_under_me_tagged_roster() {
     let mut contacts = Contacts::default();
-    contacts.hydrate(&roster(
+    let _ = contacts.hydrate(&roster(
         3,
         vec![roster_member(1, "desk"), roster_member(2, "phone")],
     ));
@@ -332,7 +332,7 @@ fn hydrate_never_clobbers_a_hand_typed_binding() {
     // you set.
     let mut contacts = Contacts::default();
     contacts.add(petname("me"), Some(device("desk")), node(7));
-    contacts.hydrate(&roster(9, vec![roster_member(1, "desk")]));
+    let _ = contacts.hydrate(&roster(9, vec![roster_member(1, "desk")]));
     assert_eq!(
         resolve(&contacts, &"me/desk".parse().expect("addr")),
         Ok(vec![node(7)])
@@ -343,20 +343,20 @@ fn hydrate_never_clobbers_a_hand_typed_binding() {
 #[test]
 fn hydrate_refreshes_on_a_newer_epoch_and_ignores_a_stale_one() {
     let mut contacts = Contacts::default();
-    contacts.hydrate(&roster(5, vec![roster_member(1, "desk")]));
-    contacts.hydrate(&roster(6, vec![roster_member(2, "desk")])); // newer epoch refreshes
+    let _ = contacts.hydrate(&roster(5, vec![roster_member(1, "desk")]));
+    let _ = contacts.hydrate(&roster(6, vec![roster_member(2, "desk")])); // newer epoch refreshes
     assert_eq!(
         resolve(&contacts, &"me/desk".parse().expect("addr")),
         Ok(vec![node(2)])
     );
-    contacts.hydrate(&roster(4, vec![roster_member(3, "desk")])); // stale epoch is ignored
+    let _ = contacts.hydrate(&roster(4, vec![roster_member(3, "desk")])); // stale epoch is ignored
     assert_eq!(
         resolve(&contacts, &"me/desk".parse().expect("addr")),
         Ok(vec![node(2)])
     );
     assert_eq!(me_sources(&contacts), vec![Source::Roster { epoch: 6 }]);
     // The floor advanced to the highest APPLIED epoch, not the last one seen: the stale 4 did not lower it.
-    assert_eq!(contacts.roster_epoch(), Some(6));
+    assert_eq!(contacts.roster_floor(), Some(Epoch(6)));
 }
 
 #[test]
@@ -364,7 +364,7 @@ fn hydrate_drops_a_removed_member_on_a_forward_pull() {
     // F1 (the important one): a member removed in a newer roster must DISAPPEAR, not linger. A snapshot is a
     // full replace, so `phone` (absent from epoch 6) is dropped, and only `desk` survives.
     let mut contacts = Contacts::default();
-    contacts.hydrate(&roster(
+    let _ = contacts.hydrate(&roster(
         5,
         vec![roster_member(1, "desk"), roster_member(2, "phone")],
     ));
@@ -376,7 +376,7 @@ fn hydrate_drops_a_removed_member_on_a_forward_pull() {
             .collect::<Vec<_>>(),
         vec!["desk".to_owned(), "phone".to_owned()]
     );
-    contacts.hydrate(&roster(6, vec![roster_member(1, "desk")])); // phone removed at epoch 6
+    let _ = contacts.hydrate(&roster(6, vec![roster_member(1, "desk")])); // phone removed at epoch 6
     assert_eq!(
         contacts
             .devices(&petname("me"))
@@ -393,17 +393,24 @@ fn hydrate_refuses_a_replayed_old_roster_and_never_re_adds_a_removed_member() {
     // F1: after `phone` is removed at epoch 6, a hostile/stale courier replays the genuinely-signed epoch-5
     // roster that still lists `phone`. The floor (6) refuses the whole doc, so `phone` is NOT resurrected.
     let mut contacts = Contacts::default();
-    contacts.hydrate(&roster(
+    let _ = contacts.hydrate(&roster(
         5,
         vec![roster_member(1, "desk"), roster_member(2, "phone")],
     ));
-    assert!(contacts.hydrate(&roster(6, vec![roster_member(1, "desk")])));
-    // Replay the OLD epoch-5 roster: refused (returns false), a no-op.
+    assert!(matches!(
+        contacts.hydrate(&roster(6, vec![roster_member(1, "desk")])),
+        Hydrated::Applied(_)
+    ));
+    // Replay the OLD epoch-5 roster: refused as a not-newer doc, a no-op.
     let replayed = contacts.hydrate(&roster(
         5,
         vec![roster_member(1, "desk"), roster_member(2, "phone")],
     ));
-    assert!(!replayed, "a stale roster must be refused");
+    assert_eq!(
+        replayed,
+        Hydrated::NotNewer { floor: Epoch(6) },
+        "a stale roster must be refused"
+    );
     assert!(
         contacts
             .devices(&petname("me"))
@@ -411,16 +418,20 @@ fn hydrate_refuses_a_replayed_old_roster_and_never_re_adds_a_removed_member() {
             .all(|(label, _)| label.as_str() == "desk"),
         "the removed member must not be re-added by a replay"
     );
-    assert_eq!(contacts.roster_epoch(), Some(6));
+    assert_eq!(contacts.roster_floor(), Some(Epoch(6)));
 }
 
 #[test]
 fn hydrate_refuses_a_same_epoch_re_cut() {
     // F1: a same-epoch doc is a no-op (not a merge), so a re-cut at the same epoch cannot overwrite.
     let mut contacts = Contacts::default();
-    contacts.hydrate(&roster(6, vec![roster_member(1, "desk")]));
+    let _ = contacts.hydrate(&roster(6, vec![roster_member(1, "desk")]));
     let same = contacts.hydrate(&roster(6, vec![roster_member(2, "desk")]));
-    assert!(!same, "a same-epoch roster must be refused");
+    assert_eq!(
+        same,
+        Hydrated::NotNewer { floor: Epoch(6) },
+        "a same-epoch roster must be refused"
+    );
     assert_eq!(
         resolve(&contacts, &"me/desk".parse().expect("addr")),
         Ok(vec![node(1)])
@@ -433,8 +444,8 @@ fn hydrate_keeps_hand_typed_across_a_snapshot_replace() {
     // local `me/laptop` survives a forward pull that does not list it.
     let mut contacts = Contacts::default();
     contacts.add(petname("me"), Some(device("laptop")), node(7)); // hand-typed
-    contacts.hydrate(&roster(5, vec![roster_member(1, "desk")]));
-    contacts.hydrate(&roster(6, vec![roster_member(2, "phone")])); // replaces desk, keeps laptop
+    let _ = contacts.hydrate(&roster(5, vec![roster_member(1, "desk")]));
+    let _ = contacts.hydrate(&roster(6, vec![roster_member(2, "phone")])); // replaces desk, keeps laptop
     let devices: Vec<_> = contacts
         .devices(&petname("me"))
         .expect("me")
@@ -456,18 +467,22 @@ async fn store_round_trips_the_roster_epoch_floor() {
     let _ = tokio::fs::remove_dir_all(&dir).await;
 
     let mut store = ContactsStore::open(path.clone()).await.expect("open");
-    store
+    let _ = store
         .contacts_mut()
         .hydrate(&roster(6, vec![roster_member(1, "desk")]));
     store.save().await.expect("save");
 
     // A fresh open reloads the floor, so a replayed epoch-5 roster is still refused after a restart.
     let mut reloaded = ContactsStore::open(path.clone()).await.expect("reopen");
-    assert_eq!(reloaded.contacts().roster_epoch(), Some(6));
+    assert_eq!(reloaded.contacts().roster_floor(), Some(Epoch(6)));
     let replayed = reloaded
         .contacts_mut()
         .hydrate(&roster(5, vec![roster_member(2, "desk")]));
-    assert!(!replayed, "a replay must be refused after a reload too");
+    assert_eq!(
+        replayed,
+        Hydrated::NotNewer { floor: Epoch(6) },
+        "a replay must be refused after a reload too"
+    );
 
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
@@ -482,7 +497,7 @@ async fn store_round_trips_roster_provenance() {
     store
         .contacts_mut()
         .add(petname("alice"), Some(device("macbook")), node(1)); // hand-typed peer
-    store
+    let _ = store
         .contacts_mut()
         .hydrate(&roster(4, vec![roster_member(2, "desk")])); // roster member
     store.save().await.expect("save");
@@ -526,7 +541,7 @@ fn hydrate_keeps_a_hand_typed_signet_and_touches_only_devices() {
     // a hand-typed `me` signet survives every pull while the roster devices land.
     let mut contacts = Contacts::default();
     contacts.set_signet(petname("me"), node(7));
-    contacts.hydrate(&roster(
+    let _ = contacts.hydrate(&roster(
         9,
         vec![roster_member(1, "desk"), roster_member(2, "phone")],
     ));
@@ -628,6 +643,302 @@ async fn a_signet_only_person_survives_tidy_up_and_reload() {
         Some(node(2)),
         "a signet-only person round-trips through encode/decode"
     );
+
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+}
+
+/// The version counts CHANGES to the `me/*` member set, and nothing else.
+///
+/// The renewal case is the load-bearing one: `invite add` re-run for a device already on file at the same
+/// key is a quarterly badge renewal, it leaves the member set byte-identical, and bumping there would weld
+/// credential churn to the membership version and drive every device through a full re-pull four times a
+/// year for no delta.
+#[test]
+fn the_version_bumps_on_a_member_set_change_and_never_on_a_renewal() {
+    let mut contacts = Contacts::default();
+    assert_eq!(contacts.roster_version(), RosterVersion::Unversioned);
+
+    contacts.add(petname("me"), Some(device("desk")), node(1));
+    let after_enrol = contacts.roster_version();
+    assert_eq!(after_enrol.epoch(), Some(Epoch(1)), "the first edit is 1");
+
+    // A RENEWAL: the same label, the same key. `Added::Unchanged`, so no bump.
+    assert_eq!(
+        contacts.add(petname("me"), Some(device("desk")), node(1)),
+        Added::Unchanged
+    );
+    assert_eq!(
+        contacts.roster_version(),
+        after_enrol,
+        "re-inviting a device at the same key changes no member and must not bump"
+    );
+
+    // A re-key IS a member change.
+    assert_eq!(
+        contacts.add(petname("me"), Some(device("desk")), node(2)),
+        Added::Replaced(node(1))
+    );
+    assert_eq!(contacts.roster_version().epoch(), Some(Epoch(2)));
+
+    // A peer who is not in your fleet is not a member.
+    contacts.add(petname("alice"), Some(device("macbook")), node(3));
+    assert_eq!(
+        contacts.roster_version().epoch(),
+        Some(Epoch(2)),
+        "a contact outside `me` is not a fleet member"
+    );
+
+    // Removing a member is a change; removing nothing is not.
+    assert_eq!(
+        contacts.remove(&petname("me"), Some(&device("desk"))),
+        Removed::Removed
+    );
+    assert_eq!(contacts.roster_version().epoch(), Some(Epoch(3)));
+    assert_eq!(
+        contacts.remove(&petname("me"), Some(&device("ghost"))),
+        Removed::Absent
+    );
+    assert_eq!(
+        contacts.roster_version().epoch(),
+        Some(Epoch(3)),
+        "an absent removal changed no member"
+    );
+}
+
+/// Dropping a `me` that holds ONLY a signet changes no member, so it must not burn a version. A roster
+/// carries devices and no signet, so the cut would be byte-identical at a higher epoch.
+#[test]
+fn dropping_a_signet_only_me_does_not_bump_the_version() {
+    let mut contacts = Contacts::default();
+    contacts.set_signet(petname("me"), node(1));
+    assert_eq!(contacts.remove(&petname("me"), None), Removed::Removed);
+    assert_eq!(contacts.roster_version(), RosterVersion::Unversioned);
+}
+
+/// Hydrating someone else's snapshot advances the FLOOR and never this book's own version. One fleet has
+/// exactly one cutter, and a puller that bumped its version on every pull would be a second writer.
+#[test]
+fn a_pull_advances_the_floor_and_never_the_version() {
+    let mut contacts = Contacts::default();
+    assert!(matches!(
+        contacts.hydrate(&roster(4, vec![roster_member(1, "desk")])),
+        Hydrated::Applied(_)
+    ));
+    assert_eq!(contacts.roster_floor(), Some(Epoch(4)));
+    assert_eq!(contacts.roster_version(), RosterVersion::Unversioned);
+}
+
+/// Epoch 0 is RESERVED for a pre-versioning cutter, so it is refused even by a book with NO floor.
+///
+/// This is the migration rule's other half. The first hydrate normally always applies, which is exactly
+/// how every device in the field got pinned at floor 0 by a cutter that could only ever emit 0, after
+/// which no pull ever applied again. Refusing 0 outright means a stuck fleet unsticks itself on the
+/// owner's next edit instead of needing an operator to reset anything.
+#[test]
+fn an_unversioned_roster_is_refused_even_on_a_first_pull() {
+    let mut contacts = Contacts::default();
+    assert_eq!(
+        contacts.hydrate(&roster(0, vec![roster_member(1, "desk")])),
+        Hydrated::Unversioned
+    );
+    assert!(
+        contacts.devices(&petname("me")).is_none(),
+        "an unversioned roster writes nothing"
+    );
+    assert_eq!(
+        contacts.roster_floor(),
+        None,
+        "and it must not pin the floor, which is what froze every fleet in the field"
+    );
+}
+
+/// An applied pull reports what it actually did, because "pulled N member(s)" over a doc's member count
+/// is how a fold that bound nothing (or DELETED devices) still read as a success.
+#[test]
+fn an_applied_pull_reports_what_it_bound_skipped_and_removed() {
+    let mut contacts = Contacts::default();
+    contacts.add(petname("me"), Some(device("laptop")), node(7)); // sovereign, hand-typed
+    let Hydrated::Applied(first) = contacts.hydrate(&roster(
+        1,
+        vec![roster_member(1, "desk"), roster_member(2, "phone")],
+    )) else {
+        panic!("a versioned first pull applies");
+    };
+    assert_eq!(first.bound(), 2);
+    assert_eq!(first.skipped(), 0);
+    assert!(first.removed().is_empty(), "nothing was there to remove");
+
+    // A THINNER snapshot: the owner removed `phone`, and claims a label the operator holds by hand.
+    let Hydrated::Applied(second) = contacts.hydrate(&roster(
+        2,
+        vec![roster_member(1, "desk"), roster_member(3, "laptop")],
+    )) else {
+        panic!("a newer pull applies");
+    };
+    assert_eq!(second.bound(), 1, "only `desk` was actually bound");
+    assert_eq!(
+        second.skipped(),
+        1,
+        "`laptop` is a name the operator set, so the roster's member was not bound"
+    );
+    assert_eq!(
+        second
+            .removed()
+            .iter()
+            .map(DeviceLabel::as_str)
+            .collect::<Vec<_>>(),
+        vec!["phone"],
+        "a snapshot-replace DELETES a device the new doc omits, and must name it"
+    );
+}
+
+/// A refreshed member is not a removed one: the label was dropped and laid straight back down, at a new
+/// key. Reporting it as a removal would make every re-key read as a device leaving the fleet.
+#[test]
+fn a_refreshed_member_is_not_reported_as_removed() {
+    let mut contacts = Contacts::default();
+    let _ = contacts.hydrate(&roster(1, vec![roster_member(1, "desk")]));
+    let Hydrated::Applied(applied) = contacts.hydrate(&roster(2, vec![roster_member(2, "desk")]))
+    else {
+        panic!("a newer pull applies");
+    };
+    assert!(applied.removed().is_empty());
+    assert_eq!(applied.bound(), 1);
+}
+
+/// THE regression, driven through the real product loop rather than hand-written epochs: cut, pull, EDIT,
+/// cut, pull. The old single-field design passed every literal-epoch test and failed exactly here, because
+/// the cutter stamped its doc with the PULLER's floor, which only a pull advanced, so a signet holder cut
+/// epoch 0 forever and a device could learn its fleet exactly once, restart included.
+#[tokio::test]
+async fn a_device_keeps_learning_the_fleet_after_every_edit() {
+    let signet = nauthy::Identity::from_secret(&[5u8; 32]).expect("a valid signet secret");
+
+    // The owner's book: it CUTS and never pulls, so its floor stays None for the whole test.
+    let mut owner = Contacts::default();
+    owner.add(petname("me"), Some(device("desk")), node(1));
+
+    let cut = |owner: &Contacts| {
+        let doc = owner
+            .cut_roster()
+            .expect("a well-formed cut")
+            .expect("a versioned book has something to cut");
+        crate::roster::cut(&signet, &doc)
+    };
+
+    // Pull 1: the fresh device learns the fleet.
+    let mut device_zero = Contacts::default();
+    let doc = crate::roster::verify(&cut(&owner), signet.verifying_key()).expect("verify");
+    assert!(matches!(
+        device_zero.hydrate(&doc),
+        Hydrated::Applied(ref applied) if applied.bound() == 1
+    ));
+
+    // The owner invites a second machine. No restart, no second verb: the edit IS the version bump.
+    owner.add(petname("me"), Some(device("phone")), node(2));
+    assert_eq!(
+        owner.roster_floor(),
+        None,
+        "a cutter never pulls, so the floor is the wrong number to stamp a cut with"
+    );
+
+    // Pull 2: it applies, which is the whole fix.
+    let doc = crate::roster::verify(&cut(&owner), signet.verifying_key()).expect("verify");
+    let Hydrated::Applied(applied) = device_zero.hydrate(&doc) else {
+        panic!("the second pull must apply: a device learns its fleet more than once");
+    };
+    assert_eq!(applied.bound(), 2);
+    assert_eq!(
+        resolve(&device_zero, &"me/phone".parse().expect("addr")),
+        Ok(vec![node(2)])
+    );
+
+    // And the floor still refuses a genuine replay of the earlier cut, so freshness did not cost safety.
+    let stale = crate::roster::verify(
+        &crate::roster::cut(
+            &signet,
+            &RosterDoc::new(Epoch(1), vec![roster_member(1, "desk")]).expect("doc"),
+        ),
+        signet.verifying_key(),
+    )
+    .expect("verify");
+    assert_eq!(
+        device_zero.hydrate(&stale),
+        Hydrated::NotNewer { floor: Epoch(2) }
+    );
+}
+
+/// The version survives a restart. A cutter that reset to 1 on reboot would re-emit a version pullers
+/// have already applied, and their floor would refuse every later cut: the freeze, reintroduced.
+#[tokio::test]
+async fn the_store_round_trips_the_membership_version() {
+    let dir = std::env::temp_dir().join(format!("swoosh-contacts-ver-{}", std::process::id()));
+    let path = dir.join("contacts.toml");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+
+    let mut store = ContactsStore::open(path.clone()).await.expect("open");
+    store
+        .contacts_mut()
+        .add(petname("me"), Some(device("desk")), node(1));
+    store
+        .contacts_mut()
+        .add(petname("me"), Some(device("phone")), node(2));
+    store.save().await.expect("save");
+
+    let reloaded = ContactsStore::open(path.clone()).await.expect("reopen");
+    assert_eq!(
+        reloaded.contacts().roster_version().epoch(),
+        Some(Epoch(2)),
+        "the cutter's version must survive a restart"
+    );
+    // The two counters persist under two keys and stay independent.
+    assert_eq!(reloaded.contacts().roster_floor(), None);
+
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+}
+
+/// A book written before membership versioning existed loads as UNVERSIONED, and the operator's next edit
+/// lifts it to 1, which is newer than every floor in the field. That is the whole migration: no reset, no
+/// verb, no `--force`, nothing an operator has to know.
+#[tokio::test]
+async fn a_pre_versioning_book_unsticks_itself_on_the_next_edit() {
+    let dir = std::env::temp_dir().join(format!("swoosh-contacts-mig-{}", std::process::id()));
+    let path = dir.join("contacts.toml");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    tokio::fs::create_dir_all(&dir).await.expect("mkdir");
+    // Exactly what an upgrading operator's file looks like: a fleet, a floor pinned at 0 by the one pull
+    // that ever applied, and no version key at all.
+    tokio::fs::write(
+        &path,
+        format!("roster_epoch = 0\n\n[me]\ndesk = \"{}\"\n", node(1)),
+    )
+    .await
+    .expect("write the legacy file");
+
+    let mut store = ContactsStore::open(path.clone()).await.expect("open");
+    assert_eq!(
+        store.contacts().roster_version(),
+        RosterVersion::Unversioned
+    );
+    assert!(
+        store.contacts().cut_roster().expect("cut").is_none(),
+        "an unversioned book has nothing a puller may accept, so it cuts nothing"
+    );
+
+    store
+        .contacts_mut()
+        .add(petname("me"), Some(device("phone")), node(2));
+    let doc = store
+        .contacts()
+        .cut_roster()
+        .expect("cut")
+        .expect("the edit made it versioned");
+    assert_eq!(doc.epoch(), Epoch(1));
+
+    // And the stuck puller, floor 0, applies it.
+    let mut stuck = Contacts::default();
+    stuck.set_roster_floor(Some(Epoch(0)));
+    assert!(matches!(stuck.hydrate(&doc), Hydrated::Applied(_)));
 
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }

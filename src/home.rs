@@ -108,6 +108,13 @@ impl Home {
         self.dir.join("resolver")
     }
 
+    /// `<home>/roster`: the signet-signed membership snapshot of this operator's fleet, re-cut by every
+    /// verb that changes the `me/*` member set and served verbatim by `serve roster:`. Only the machine
+    /// holding the signet ever writes one, which is what makes a relay-only node unable to mis-cut.
+    pub fn roster(&self) -> PathBuf {
+        self.dir.join("roster")
+    }
+
     /// `<home>/revoked`: the revocation denylist the expose gate honors, the next `serve` reads.
     pub fn revoked(&self) -> PathBuf {
         self.dir.join("revoked")

@@ -14,7 +14,7 @@ use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::{Link, Service};
-use swoosh::contacts::{Contacts, ContactsStore};
+use swoosh::contacts::{Contacts, ContactsStore, Hydrated};
 use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::roster;
@@ -131,30 +131,79 @@ impl FleetCmd {
         recv.take(MAX_ROSTER_BLOB).read_to_end(&mut bytes).await?;
 
         // VERIFY against the signet, then parse the payload, as ONE seam. A forged or foreign roster is
-        // refused here, before any contact is touched.
-        let doc = roster::verify(&bytes, signet.verify_key()).map_err(|e| {
-            eyre::eyre!("roster is not signed by your signet ({e}); refusing to hydrate")
+        // refused here, before any contact is touched. The EMPTY case is split out: a node that has cut
+        // nothing is not a node forging rosters, and sending an operator hunting a key problem that does
+        // not exist is the same class of lie as reporting a pull that taught nothing.
+        let doc = roster::verify(&bytes, signet.verify_key()).map_err(|error| match error {
+            roster::RosterVerifyError::Empty => eyre::eyre!(
+                "{} has not cut a roster yet. Run `swoosh invite add <label>` on the machine holding \
+                 your signet; that is what publishes one",
+                self.pull
+            ),
+            other => {
+                eyre::eyre!("roster is not signed by your signet ({other}); refusing to hydrate")
+            }
         })?;
 
         // Fold the verified fleet into contacts (never clobbering a local petname you set), and persist.
-        // hydrate REFUSES a stale/replayed snapshot (epoch at or below the persisted floor): a lagging or
-        // hostile courier cannot roll the fleet back, so report the no-op honestly rather than claiming a
-        // pull that did nothing.
+        // Every arm below reports what actually happened: a refused fold writes nothing and says so, and
+        // an applied one names what it BOUND and what the snapshot-replace REMOVED. Claiming a pull that
+        // taught nothing, or one that silently deleted devices, is the surface lying about its own work.
         let mut store = ContactsStore::open(home.contacts()).await?;
-        let members = doc.members().len();
         let epoch = doc.epoch().0;
-        if !store.contacts_mut().hydrate(&doc) {
-            println!(
-                "roster epoch {epoch} from {} is not newer than what you already have; nothing to update",
-                self.pull
-            );
-            return Ok(());
-        }
+        let applied = match store.contacts_mut().hydrate(&doc) {
+            Hydrated::Unversioned => {
+                // Nothing this end can do: the fix is on the machine that cut it. Say which machine and
+                // which act, rather than leaving an operator to re-pull forever.
+                eyre::bail!(
+                    "the roster {} served carries no version, so it predates roster versioning and \
+                     cannot be applied safely. Upgrade swoosh on the machine holding your signet; its \
+                     next `invite add` (or `contact rm me/<device>`) publishes a versioned roster",
+                    self.pull
+                );
+            }
+            Hydrated::NotNewer { floor } => {
+                println!(
+                    "nothing to pull: the roster {} served is at epoch {epoch}, and you already have \
+                     epoch {}",
+                    self.pull, floor.0
+                );
+                return Ok(());
+            }
+            Hydrated::Applied(applied) => applied,
+        };
         store.save().await?;
-        println!(
-            "pulled {members} member(s) into your fleet from {}; reach one with `swoosh ssh me/<device>`",
-            self.pull
-        );
+        // The DESTRUCTIVE half, named first because it is the surprising one: a roster is a whole
+        // snapshot, so a member the owner removed disappears here. Silently dropping devices under the
+        // word "pulled" is the report this line exists to prevent.
+        if !applied.removed().is_empty() {
+            let labels: Vec<&str> = applied
+                .removed()
+                .iter()
+                .map(swoosh::contacts::DeviceLabel::as_str)
+                .collect();
+            println!(
+                "removed {} device(s) your fleet no longer lists: {}",
+                applied.removed().len(),
+                labels.join(", ")
+            );
+        }
+        if applied.skipped() > 0 {
+            println!(
+                "kept your own binding for {} member(s) (a name you set wins over the roster)",
+                applied.skipped()
+            );
+        }
+        match applied.bound() {
+            // A pull that bound nothing must not name a next step that cannot work: there is no
+            // `me/<device>` to reach.
+            0 => println!("pulled nothing new from {}", self.pull),
+            bound => println!(
+                "pulled {bound} member(s) into your fleet from {}; reach one with \
+                 `swoosh ssh me/<device>`",
+                self.pull
+            ),
+        }
         Ok(())
     }
 }

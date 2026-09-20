@@ -30,6 +30,19 @@ pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
     }
 }
 
+/// Whether this home holds the SIGNET itself, `node` being its own identity: no signet file (person-zero
+/// self-trusts, so its own key IS the root) or a signet file naming that same key.
+///
+/// The ONE predicate for "may this machine speak for the whole fleet". Both sides of the roster lean on
+/// it, so they cannot drift: the verb that CUTS refuses to sign one anywhere else, and `serve` refuses to
+/// advertise `roster:` anywhere else. A member device signing a roster with its own key produces a blob
+/// every puller rejects, and the operator only finds out from the far end.
+pub async fn holds_signet(home: &Home, node: NodeId) -> eyre::Result<bool> {
+    Ok(load_signet(home)
+        .await?
+        .is_none_or(|configured| configured == node))
+}
+
 /// Write this node's signet: the public [`NodeId`] its default gate will trust, as `adopt` sets it from an
 /// invite. Overwrites any prior signet (re-provisioning re-trusts), creating the store dir. Written
 /// `0600` beside the secret identity: the signet roots this node's whole trust decision (whose devices it

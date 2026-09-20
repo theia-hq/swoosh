@@ -398,13 +398,13 @@ impl Outward {
     async fn expose_context(
         &self,
         secret: &swoosh::identity::Secret,
-        contacts: &Contacts,
         home: &Home,
     ) -> eyre::Result<Option<serve::ExposeContext>> {
         match self {
             // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
-            // returns `None`. The roster is cut and signed HERE, where the secret is still live and the
-            // contacts store is loaded, then handed to the serve verb (via `attach_expose`) as a pre-cut blob.
+            // returns `None`. The roster is not cut here (or anywhere in `serve`): the artifact was
+            // signed by whichever verb last changed the membership, on the machine holding the signet,
+            // so this path only OPENS it, beside the two other home oracles the gate reads.
             Self::Serve(_) => Ok(Some(serve::ExposeContext {
                 #[cfg(feature = "ssh")]
                 host_seed: secret.ssh_host_seed(),
@@ -420,7 +420,19 @@ impl Outward {
                 // `service disable`/`enable` written to `<home>/disabled` is honored with no restart. Loaded
                 // here beside the denylist because both are home files the gate reads.
                 enabled: tightbeam::enabled::FileDisabledList::load(home.disabled()).await?,
-                roster_blob: std::sync::Arc::new(swoosh::serve::cut_roster(contacts, secret)?),
+                // The third home oracle, same read-on-demand shape as the two above, and `None` on a
+                // node that does not hold the signet: such a node can never have a roster to serve, and
+                // saying so at bind time is what the old self-signed cut hid. The oracle tolerates an
+                // absent file, so the signet's machine may `serve roster:` before its first invite and
+                // start serving the moment one is cut. Only an entry that actually names `roster:` acts
+                // on the `None`, so an unrelated serve never fails on a roster concern.
+                roster: if config::holds_signet(home, secret.node_id()).await? {
+                    Some(std::sync::Arc::new(
+                        swoosh::roster::Artifact::open(home.roster()).await?,
+                    ))
+                } else {
+                    None
+                },
                 // The SAME home the root resolved once: the resident socket/lock derive from it, so a
                 // `--resident` serve and its future control clients name the same paths by construction.
                 home: home.clone(),
@@ -555,7 +567,7 @@ async fn run() -> eyre::Result<()> {
         Verb::ServiceDisable(cmd) => return cmd.run_disable(&home),
         Verb::Contact(cmd) => {
             let store = ContactsStore::open(home.contacts()).await?;
-            return cmd.run(store).await;
+            return cmd.run(store, &home).await;
         }
         // Prints this node's NodeId (minting a key if absent). Needs only the home, not the store or
         // a transport, so it dispatches here beside the other local verbs.
@@ -677,9 +689,7 @@ async fn run() -> eyre::Result<()> {
                 .into_slots()
         }
     };
-    let expose = reach
-        .expose_context(&secret, store.contacts(), &home)
-        .await?;
+    let expose = reach.expose_context(&secret, &home).await?;
     // Attach the resolved exposer context to the `serve` verb (a no-op otherwise), so `serve` reads its OWN
     // context and every verb dispatches through the uniform `ReachCtx` below.
     let reach = reach.attach_expose(expose);
@@ -1015,7 +1025,7 @@ mod tests {
         };
 
         let expose = outward
-            .expose_context(&secret, &Contacts::default(), &home)
+            .expose_context(&secret, &home)
             .await
             .expect("expose context resolves")
             .expect("serve carries an expose context");
@@ -1023,6 +1033,61 @@ mod tests {
             expose.signet,
             Some(secret.node_id()),
             "an unprovisioned node gates on its OWN key (person-zero self-signet), not None"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The composition root decides ONCE whether this node may serve a roster, and it decides it on the
+    /// signet, not on whether a file happens to exist.
+    ///
+    /// A member device gets `None` (so naming `roster:` is refused at bind, loudly, instead of
+    /// advertising a service every puller must reject, which is what the old self-signed cut did
+    /// silently). The signet's own machine gets the oracle even with nothing cut yet, so it may serve
+    /// before its first invite and start serving the moment one lands.
+    #[tokio::test]
+    async fn only_the_signets_machine_carries_a_roster_to_serve() {
+        let dir = std::env::temp_dir().join(format!("swoosh-roster-ctx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create an empty config dir");
+        let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
+        let secret = swoosh::identity::Secret::ephemeral();
+        let serve_verb = || match Cli::try_parse_from(["swoosh", "serve"])
+            .expect("bare serve parses")
+            .command
+            .expect("serve is a command")
+            .split()
+        {
+            Verb::Outward(outward) => outward,
+            _ => panic!("serve splits to a reaching verb"),
+        };
+
+        // Person-zero: no signet file, so this node IS the root and carries the oracle, empty as it is.
+        let expose = serve_verb()
+            .expose_context(&secret, &home)
+            .await
+            .expect("expose context resolves")
+            .expect("serve carries an expose context");
+        let roster = expose
+            .roster
+            .expect("the signet's own machine may serve a roster");
+        assert!(
+            roster.bytes().is_empty(),
+            "nothing is cut yet, and that is not a reason to refuse the operator's serve"
+        );
+
+        // Adopt a foreign signet: this is now a MEMBER device and can never cut a verifiable roster.
+        swoosh::config::write_signet(&home, bifrost::NodeId::from_ed25519_secret(&[77u8; 32]))
+            .await
+            .expect("adopt");
+        let expose = serve_verb()
+            .expose_context(&secret, &home)
+            .await
+            .expect("expose context resolves")
+            .expect("serve carries an expose context");
+        assert!(
+            expose.roster.is_none(),
+            "a member device must not advertise a roster it cannot sign"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
