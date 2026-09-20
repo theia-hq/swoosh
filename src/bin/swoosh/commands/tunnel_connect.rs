@@ -24,6 +24,7 @@ use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::peer::Peer;
 use swoosh::transport;
+use swoosh::unbound::Unbound;
 
 /// Where a reached service's bytes go locally: the one `--to` selector, parsed to a closed enum so the
 /// three sinks are disjoint and "two sinks at once" is unrepresentable (no `ArgGroup`, no two-bool trap).
@@ -86,23 +87,43 @@ pub async fn connect<T: Transport, D: Discovery>(
     to: To,
 ) -> eyre::Result<()> {
     let connector = peer.connector(contacts, service, slot1, slot2)?;
-    match to {
+    // The name we are about to REQUEST, read off the connector before it is consumed. Everything the
+    // refusal path says about serving comes from this string and nothing else.
+    let requested = connector.service().as_str().to_owned();
+    let reached = match to {
         To::Port(port) => {
             // Prove the gate admits us BEFORE printing "forwarding …": `preflight` reaches, probes
             // admission on one stream, and binds the port, returning the host's refusal reason on an
             // Err. So an unauthorized forward fails loudly here (a clear one-line reason, non-zero exit),
             // never a hopeful banner followed by a silent reset.
             let (dial, service) = (connector.dial(), Service::clone(connector.service()));
-            let forward = connector.preflight(node, port).await?;
-            println!("forwarding 127.0.0.1:{port} to {dial} ({service})");
-            forward.run().await
+            // Matched rather than `?`d: a refusal here is a failed reach like any other, and it has
+            // to reach the tail below to be told what the peer would need to serve.
+            match connector.preflight(node, port).await {
+                Ok(forward) => {
+                    println!("forwarding 127.0.0.1:{port} to {dial} ({service})");
+                    forward.run().await
+                }
+                Err(refused) => Err(refused),
+            }
         }
         To::Stdout => connector.pipe_stdio(node).await,
+        // A sink this build does not have yet: nothing was dialed, so nothing about the peer's
+        // service set is relevant. Returned here rather than folded into the tail below.
         To::UnixListener(path) => eyre::bail!(
             "--to unix:{} is reserved, not yet built (bind a port and connect to it, or use `--to -`)",
             path.display()
         ),
-    }
+    };
+    // A dial of a name a bare `swoosh serve` does not bind names the `serve` line that would bind it.
+    // This is the seam `swoosh ssh` reaches it through: the launcher `exec`s the system ssh, which
+    // re-invokes this bridge as its `ProxyCommand`, so the bridge's stderr is the only place that
+    // failure can be explained to the person at the terminal.
+    //
+    // Attached to EVERY failed reach of that name, refusal or timeout alike, and derived from the
+    // name we requested rather than from anything the peer said. A client that said more about one
+    // refusal than another would be an oracle the day the wire refusal stops being uniform.
+    reached.map_err(|error| Unbound::name_the_entry(error, &requested))
 }
 
 /// Stream a peer's exposed service over stdin/stdout (the ssh `ProxyCommand` bridge). Hidden: reached only
@@ -215,7 +236,11 @@ impl TunnelConnectCmd {
 
 #[cfg(test)]
 mod tests {
-    use super::To;
+    use bifrost::{NoDiscovery, Node};
+    use bifrost_mem::MemTransport;
+    use swoosh::contacts::Contacts;
+
+    use super::{Peer, To, connect};
 
     #[test]
     fn to_parses_each_of_the_three_forms_and_rejects_the_rest() {
@@ -238,5 +263,52 @@ mod tests {
         ] {
             assert!(bad.parse::<To>().is_err(), "`{bad}` must be rejected");
         }
+    }
+
+    /// The bridge behind `swoosh ssh` names the `serve` line a peer would need when the dial of a
+    /// DEFAULTED name fails, and it names it for a failure that never reached a gate at all: this peer
+    /// was never bound, so nothing came back to read. That is the property: the line is owed to the
+    /// name we SENT, not to any answer, so a client that only said it on a refusal would be reporting
+    /// something the uniform refusal is there to withhold.
+    #[tokio::test]
+    async fn a_failed_dial_of_a_defaulted_name_says_what_the_peer_would_have_to_serve() {
+        let node = Node::new(MemTransport::bind(), NoDiscovery);
+        // A key nothing is bound at: the dial fails before any peer can answer.
+        let absent = Peer::Raw(bifrost::NodeId::from_ed25519_secret(&[3u8; 32]));
+        let contacts = Contacts::default();
+
+        let refused = connect(
+            &node,
+            &contacts,
+            &absent,
+            "ssh".parse().expect("a service name"),
+            None,
+            None,
+            To::Stdout,
+        )
+        .await
+        .expect_err("a dial to an unbound key fails");
+        assert!(
+            format!("{refused:#}").contains("swoosh serve ssh=sshd:"),
+            "the failure names the line that would bind `ssh`: {refused:#}"
+        );
+
+        // A name no verb defaults to is the user's own: they named it, so there is nothing for the
+        // client to teach, and nothing is added.
+        let plain = connect(
+            &node,
+            &contacts,
+            &absent,
+            "web".parse().expect("a service name"),
+            None,
+            None,
+            To::Stdout,
+        )
+        .await
+        .expect_err("a dial to an unbound key fails");
+        assert!(
+            !format!("{plain:#}").contains("swoosh serve"),
+            "a name the user chose gets no serve line appended: {plain:#}"
+        );
     }
 }

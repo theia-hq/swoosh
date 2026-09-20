@@ -46,9 +46,15 @@ use swoosh::contacts::Contacts;
 use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::transport;
+use swoosh::unbound::Unbound;
 
 /// The exposed service name reached when the user names none: a host's sshd under the default label.
-const DEFAULT_SERVICE: &str = "ssh";
+///
+/// Taken FROM the table that knows a bare `swoosh serve` does not bind it, so the name this verb
+/// dials and the name a failed dial teaches the `serve` line for are one value. The teaching itself
+/// is attached where the dial actually happens: this launcher `exec`s the system ssh, whose
+/// `ProxyCommand` re-invokes the `tunnel-connect` bridge, so the refusal is the BRIDGE's to name.
+const DEFAULT_SERVICE: &str = Unbound::SSH.name();
 
 /// The system binary a launch shells out to: the far sshd is reached by the system `SSH`, whose overlay
 /// transport is THIS binary re-invoked as its `ProxyCommand` (see [`self_invocation`]): no separate

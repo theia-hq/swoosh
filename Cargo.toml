@@ -33,15 +33,15 @@ bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "644c7c042bb
 bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "644c7c042bbb59238f72ea116a5b6058c6c2c44f" }
 bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "644c7c042bbb59238f72ea116a5b6058c6c2c44f" }
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "644c7c042bbb59238f72ea116a5b6058c6c2c44f" }
-nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "f2ad714070ced87f91dae5275d30e9b2fa10e3dd" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "a4768efcf2437ec6bace5d09871ba4781c0dae89" }
+nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "c31a3155bb8f8c17cdf49947c37fdb8fa8708e97" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "9ca3b65efe14efbc2cfcf8f6ff69785545e1c0c1" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "ff86b0a997734f08c1195120e674a1f0520bb879" }
-measure = { git = "https://github.com/theia-hq/services", rev = "ff86b0a997734f08c1195120e674a1f0520bb879" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "ff86b0a997734f08c1195120e674a1f0520bb879", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "ff86b0a997734f08c1195120e674a1f0520bb879" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "b6c6026aa3de74f25d3e66066d64929f1ca2f62d" }
+measure = { git = "https://github.com/theia-hq/services", rev = "b6c6026aa3de74f25d3e66066d64929f1ca2f62d" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "b6c6026aa3de74f25d3e66066d64929f1ca2f62d", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "b6c6026aa3de74f25d3e66066d64929f1ca2f62d" }
 
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"

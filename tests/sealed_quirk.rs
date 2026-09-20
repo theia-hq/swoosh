@@ -31,10 +31,6 @@ use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 /// every membership badge minted here.
 const SIGNET_SECRET: [u8; 32] = [7u8; 32];
 
-/// The ssh host-key seed the exposer's route table carries. Unused by this test (it exercises `ping`, not
-/// `sshd`), but the shared `diagnostics` helper derives `sshd` from it, so a fixed value keeps the build stable.
-const HOST_SEED: [u8; 32] = [9u8; 32];
-
 /// A fixed 32-byte identity seed, so each end binds and wraps under one deterministic `NodeId`.
 fn seed(byte: u8) -> [u8; 32] {
     [byte; 32]
@@ -84,7 +80,7 @@ async fn gated_exposer(tag: &str) -> tightbeam::tunnel::Exposer {
     let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist(tag).await)
         .expect("the signet-rooted gate resolves");
-    swoosh::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
+    swoosh::serve::diagnostics(Router::new(gate), &[])
         .expect("the diagnostics routes bind")
         .expose()
         .expect("the exposer assembles")

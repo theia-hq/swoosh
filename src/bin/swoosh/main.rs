@@ -246,7 +246,7 @@ reaching_verbs! {
     /// `SERVICE  GATE` table. Presents a membership badge (like `stop`), so it rides the reach path under
     /// the persisted identity when one exists. A bare `service ls` (your own node) splits to a local report.
     Service(service::ServiceLsCmd),
-    /// `swoosh fleet --pull`: pull the signed fleet roster from a coordination node and hydrate contacts.
+    /// `swoosh fleet <peer>`: pull the signed fleet roster from a coordination node and hydrate contacts.
     /// Presents a membership badge (like `ping`/`send`) and needs the persisted identity (adopt first).
     Fleet(fleet::FleetCmd),
     TunnelConnect(tunnel_connect::TunnelConnectCmd),
@@ -971,6 +971,36 @@ mod tests {
         );
     }
 
+    /// `fleet` takes its coordination node POSITIONALLY, by the same rule that took `--service` off the
+    /// generic dial: the slot is mandatory and sole, and the verb has no own-node form, so a long flag
+    /// was a positional wearing a costume. It shipped as `fleet --pull <peer>` through v0.11.2.
+    ///
+    /// Each assertion inverts, and the negatives come first so the failure names the regression. Put
+    /// `long` back on the peer slot and the first goes red (`--pull` starts parsing again); give the slot
+    /// a `default_value` (or make it `Option<Peer>`) and the second goes red (a bare `fleet` stops being
+    /// clap's own missing-argument error and becomes a verb with no object); either edit takes the third,
+    /// because the flagless form is the only thing both spellings cannot share.
+    #[test]
+    fn fleet_takes_its_coordination_node_as_a_positional() {
+        assert!(
+            Cli::try_parse_from(["swoosh", "fleet", "--pull", "me/hub"]).is_err(),
+            "the coordination node is a positional, not a flag: `--pull` is not a spelling of it"
+        );
+        assert!(
+            Cli::try_parse_from(["swoosh", "fleet"]).is_err(),
+            "the peer slot is required: a pull with no coordination node is clap's own error, never \
+             a verb that dials nothing"
+        );
+
+        let Some(Command::Fleet(cmd)) = Cli::try_parse_from(["swoosh", "fleet", "me/hub"])
+            .expect("the flagless form parses: the verb and its object, nothing else")
+            .command
+        else {
+            panic!("`fleet` parses to the fleet verb");
+        };
+        assert_eq!(cmd.peer.to_string(), "me/hub");
+    }
+
     /// The hidden `tunnel-connect` ABI (the `swoosh ssh` ProxyCommand bridge) is internal plumbing, not a
     /// user verb: its subcommand name is unchanged, so the ssh re-invocation `<self> tunnel-connect <peer>
     /// --to -` keeps resolving even though the user-facing `tunnel` noun is gone.
@@ -1112,7 +1142,7 @@ mod tests {
 
     /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `sheer:` link all
     /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`reach`/`send`/`stop --at`/
-    /// `service ls --at`/`fetch --via`/`ssh`/`fleet --pull`. `stop` and `service ls` carry the peer on `--at`
+    /// `service ls --at`/`fetch --via`/`ssh`/`fleet`. `stop` and `service ls` carry the peer on `--at`
     /// (bare acts on your own node); the rest carry it positionally.
     #[test]
     fn every_dialing_verb_takes_a_petname_a_key_and_a_link() {
@@ -1129,7 +1159,7 @@ mod tests {
                 &["swoosh", "service", "ls", "--at", peer],
                 &["swoosh", "fetch", "http://example.com/x", "--via", peer],
                 &["swoosh", "ssh", peer],
-                &["swoosh", "fleet", "--pull", peer],
+                &["swoosh", "fleet", peer],
             ];
             for argv in cases {
                 assert!(
@@ -1325,7 +1355,7 @@ mod tests {
                 vec!["swoosh", "service", "ls", "--at", &key],
                 IrohBind::Dialing,
             ),
-            (vec!["swoosh", "fleet", "--pull", &key], IrohBind::Dialing),
+            (vec!["swoosh", "fleet", &key], IrohBind::Dialing),
             (
                 vec![
                     "swoosh",
