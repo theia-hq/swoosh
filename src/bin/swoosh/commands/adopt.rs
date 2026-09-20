@@ -9,7 +9,8 @@
 //!   before anything is written.
 //! - A DERIVED invite (`invite:<seed>.<signet>.<badge>`) carries a child seed.
 //!   Adopting writes that seed as this machine's identity, so it comes up AS the derived device. The seed
-//!   is a device SECRET: hand this shape over a private channel only.
+//!   is a device SECRET: hand this shape over a private channel only. A machine that already HAS an
+//!   identity is refused here rather than re-identified, since nothing can re-issue the key it holds.
 //!
 //! Either way the write lands in swoosh's own store (the node home, the default `~/.config/swoosh/` or
 //! `--home`/`SWOOSH_HOME`) -- the SAME store `swoosh serve` binds under -- so the served node id matches
@@ -130,6 +131,11 @@ impl AdoptCmd {
                 admit_badge(home, &badge, node, self.force).await?;
                 // Become the derived device: write the child seed as SWOOSH's persisted identity -- the
                 // SAME store `swoosh serve` binds under -- so this node comes up AS the adopted device.
+                // This is the transaction's THIRD admission, and the only one that does not live beside
+                // its siblings above: the rule belongs to the key file, not to this verb, so it is
+                // enforced in `identity::write` for every caller (a machine already holding a different
+                // key is refused there, and `--force` does not reach it, because that key is the one
+                // thing here nobody can re-issue). Like the two above it, it fires before any write.
                 identity::write(&seed, home).await?;
                 // Trust the signet, exactly as the bound shape does.
                 config::write_signet(home, signet).await?;

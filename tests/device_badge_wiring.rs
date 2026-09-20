@@ -881,6 +881,94 @@ fn adopt_renews_without_a_flag_and_refuses_a_downgrade() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// The signet guard on the PRODUCT path: a derived invite adopted onto a machine that already has an
+/// identity is refused, and the key survives byte-identical.
+///
+/// `adopt`'s other two writes (the trusted signet, the stored badge) are `--force`-gated and both
+/// re-obtainable from the owner; the key is neither, so nothing in the CLI replaces it. `--force` is
+/// asserted NOT to get past this, which is the whole point of not overloading it: an operator reaching
+/// for the flag that re-roots a signet must not also destroy the key that roots the fleet. The escape
+/// is moving the file, which is also how the copy that makes the act survivable comes to exist.
+#[test]
+fn adopt_refuses_to_replace_an_identity_this_machine_already_has() {
+    let base = std::env::temp_dir().join(format!("swoosh-keep-identity-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let owner_dir = base.join("owner");
+    let device_dir = base.join("device");
+    std::fs::create_dir_all(&owner_dir).unwrap();
+    std::fs::create_dir_all(&device_dir).unwrap();
+    let device_key = device_dir.join("identity.key");
+
+    // The machine makes its own key first (`swoosh identity`), as an operator who served before being
+    // invited would have.
+    let identity = swoosh(&["identity", "--home", path_str(&device_dir)]);
+    assert!(identity.status.success(), "{}", stderr(&identity));
+    let held: NodeId = String::from_utf8(identity.stdout)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .parse()
+        .expect("identity prints the node id first");
+    let held_seed = std::fs::read(&device_key).unwrap();
+
+    // The owner cuts a DERIVED invite: it carries a child seed, so adopting it would re-identify this
+    // machine and write over the key above.
+    let create = swoosh(&["invite", "add", "ci-runner", "--home", path_str(&owner_dir)]);
+    assert!(create.status.success(), "{}", stderr(&create));
+    let token = first_invite(&String::from_utf8(create.stdout).unwrap()).expect("token");
+
+    for argv in [
+        vec!["adopt", &token, "--home", path_str(&device_dir)],
+        vec!["adopt", &token, "--force", "--home", path_str(&device_dir)],
+    ] {
+        let refused = swoosh(&argv);
+        // FIRST, because it is the assertion the guard exists for: with the guard gone the adopt
+        // succeeds and this is what goes red, rather than the exit-status check tripping first.
+        assert_eq!(
+            std::fs::read(&device_key).unwrap(),
+            held_seed,
+            "{argv:?} must leave the key nothing can re-issue exactly as it found it"
+        );
+        assert!(
+            !refused.status.success(),
+            "{argv:?} must refuse: {}",
+            stderr(&refused)
+        );
+        let message = stderr(&refused);
+        assert!(
+            message.contains(&held.to_string()),
+            "the refusal names the identity this machine already has: {message}"
+        );
+        assert!(
+            !device_dir.join("signet").exists() && !device_dir.join("badge").exists(),
+            "the refusal lands before any of the transaction's writes"
+        );
+    }
+
+    // The escape is the operator's own copy: move the key aside and the same invite lands, so the
+    // guard is a fork in the road and not a dead end.
+    std::fs::rename(&device_key, device_dir.join("identity.key.bak")).unwrap();
+    let adopted = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
+    assert!(adopted.status.success(), "{}", stderr(&adopted));
+    assert_ne!(
+        std::fs::read(&device_key).unwrap(),
+        held_seed,
+        "the moved-aside machine adopts the derived seed"
+    );
+
+    // And re-adopting the SAME invite is still the silent no-op it was: the seed already on disk is
+    // not a replacement of itself, so idempotence survives the guard.
+    let again = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
+    assert!(
+        again.status.success(),
+        "re-adopting the same invite must stay a no-op: {}",
+        stderr(&again)
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// Run the compiled `swoosh` binary with `args`, capturing its output. `CARGO_BIN_EXE_swoosh` is set by
 /// cargo for an integration test of a crate that builds a binary, so this drives the REAL product path.
 fn swoosh(args: &[&str]) -> std::process::Output {

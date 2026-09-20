@@ -90,13 +90,13 @@ impl Peer {
         }
     }
 
-    /// SINGLE-CONNECTOR resolution, for the single-target verbs (`reach`/`send`/`stop`/`service`/`fleet`,
-    /// and the `tunnel-connect` bridge). The resolver ALWAYS builds via [`Connector::to_node`] with the
-    /// slot-1/slot-2 the caller resolved; the [`Capability`](Self::Capability) arm differs ONLY in computing
-    /// the dial target from the link's root. It NEVER calls [`Connector::from_link`]: the link's credential
-    /// arrives as `slot1` from the ONE resolver (the peer's link is folded into `--present`), so slot 1 and
-    /// slot 2 stay owned by [`resolve`](crate::reaching::resolve) for every arm. A bare person resolves to
-    /// the FIRST device in label order (these verbs dial one node); an unknown petname is a loud error here.
+    /// SINGLE-CONNECTOR resolution, for the single-target verbs (`reach`/`send`/`stop`/`service`/`fleet`).
+    /// The resolver ALWAYS builds via [`Connector::to_node`] with the slot-1/slot-2 the caller resolved;
+    /// the [`Capability`](Self::Capability) arm differs ONLY in computing the dial target from the link's
+    /// root. It NEVER calls [`Connector::from_link`]: the link's credential arrives as `slot1` from the
+    /// ONE resolver (the peer's link is folded into `--present`), so slot 1 and slot 2 stay owned by
+    /// [`resolve`](crate::reaching::resolve) for every arm. A bare person resolves to the FIRST device in
+    /// label order (these verbs dial one node); an unknown petname is a loud error here.
     pub fn connector(
         &self,
         contacts: &Contacts,
@@ -197,7 +197,7 @@ mod tests {
 
     /// `me/qat` parses as a `Named` peer (not a raw key, not a link), then `connector` resolves it through
     /// the contact store to the saved key. A raw key parses `Raw` and needs no store; an unknown petname is
-    /// a loud `connector` error, never a silent nothing. Ported from the old `tunnel_connect` petname test.
+    /// a loud `connector` error, never a silent nothing.
     #[test]
     fn a_petname_peer_resolves_through_contacts_to_the_saved_key() {
         let qat = node(7);

@@ -74,8 +74,8 @@ impl Credential {
     /// The identity a verb with this credential must bind under. This is the ONLY place the
     /// identity/badge coupling lives, so a `Family` credential is always `PersistedIfPresent`: its badge
     /// roots at the dialing key, so the dial MUST bind that same key wherever it exists.
-    /// `serve`/`tunnel-connect` bind `Persisted` for a different reason (a stable address / dialing under
-    /// swoosh's own key) via a non-forgettable override, not this derivation.
+    /// `serve` binds `Persisted` for a different reason (one stable address across runs) via a
+    /// non-forgettable override, not this derivation.
     pub fn identity(&self) -> crate::identity::Identity {
         match self {
             Self::Family { .. } => crate::identity::Identity::PersistedIfPresent,

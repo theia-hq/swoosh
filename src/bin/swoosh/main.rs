@@ -35,7 +35,7 @@ use swoosh::{config, credential, reaching, transport};
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
     adopt, contact, fetch, fleet, grant, identity, invite, ping, reach, send, serve, service,
-    speed, ssh, status, stop, tree, tunnel_connect,
+    speed, ssh, status, stop, tree,
 };
 
 mod commands;
@@ -125,10 +125,6 @@ enum Command {
     Grant(grant::GrantCmd),
     /// Print this command tree (spec vs binary).
     Tree(tree::TreeCmd),
-    /// The in-process ProxyCommand behind `swoosh ssh`: self-invoked via `current_exe()`, never typed.
-    /// Hidden from help and `tree`: it is plumbing, not a user verb (see `commands::tunnel_connect`).
-    #[command(hide = true)]
-    TunnelConnect(tunnel_connect::TunnelConnectCmd),
 }
 
 /// The retired `mint` verb, kept hidden ONLY so a stale invocation gets a teaching error naming
@@ -187,7 +183,7 @@ macro_rules! reaching_verbs {
 
             /// The identity this verb binds under. For the reach-outward verbs it derives from the bind
             /// role's credential (`Family -> PersistedIfPresent`), so identity and badge cannot disagree;
-            /// `serve`/`tunnel-connect` declare `Persisted` explicitly.
+            /// `serve` declares `Persisted` explicitly, because a stable address is its whole job.
             fn identity(&self) -> Identity {
                 match self {
                     $(Self::$verb(cmd) => cmd.identity(),)+
@@ -249,7 +245,6 @@ reaching_verbs! {
     /// `swoosh fleet <peer>`: pull the signed fleet roster from a coordination node and hydrate contacts.
     /// Presents a membership badge (like `ping`/`send`) and needs the persisted identity (adopt first).
     Fleet(fleet::FleetCmd),
-    TunnelConnect(tunnel_connect::TunnelConnectCmd),
 }
 
 impl Command {
@@ -266,7 +261,6 @@ impl Command {
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Grant(cmd) => Verb::Grant(cmd),
-            Self::TunnelConnect(cmd) => Verb::Outward(Outward::TunnelConnect(cmd)),
             Self::Reach(cmd) => Verb::Outward(Outward::Reach(cmd)),
             Self::Send(cmd) => Verb::Outward(Outward::Send(cmd)),
             Self::Fleet(cmd) => Verb::Outward(Outward::Fleet(cmd)),
@@ -966,7 +960,7 @@ mod tests {
         assert_eq!(cmd.service.as_str(), "web");
         assert_eq!(
             cmd.to,
-            commands::tunnel_connect::To::Stdout,
+            commands::connect::To::Stdout,
             "the sink defaults to stdout, so the common case composes with the shell"
         );
     }
@@ -1001,33 +995,66 @@ mod tests {
         assert_eq!(cmd.peer.to_string(), "me/hub");
     }
 
-    /// The hidden `tunnel-connect` ABI (the `swoosh ssh` ProxyCommand bridge) is internal plumbing, not a
-    /// user verb: its subcommand name is unchanged, so the ssh re-invocation `<self> tunnel-connect <peer>
-    /// --to -` keeps resolving even though the user-facing `tunnel` noun is gone.
+    /// The `swoosh ssh` ProxyCommand ABI, which is now the PUBLIC `reach` verb: ssh re-invokes
+    /// `<self> reach <key> <service> --to -`, so the exact line that carries an ssh session is one an
+    /// operator can run by hand to debug a launch that fails. It was a hidden leaf whose argv nothing
+    /// else could type, and the leaf differed from `reach` in one observable: it declared
+    /// `Identity::Persisted`, so a FAILED dial from an unprovisioned home minted the key a later
+    /// `serve` would gate its whole fleet on.
     ///
-    /// `--service` is REQUIRED here, and the second half of this test fails the moment a default comes
-    /// back. It defaulted to `default`, a name no `serve` binds, so a bridge invoked without it dialed a
-    /// phantom and the far gate refused with a message that named nothing. `swoosh ssh` always writes the
-    /// flag (`ssh_argv`), so requiring it costs the ABI nothing and makes an omission a parse error at the
-    /// bridge instead.
+    /// This is the PARSING half of that ABI; `ssh_argv`'s tests are the writing half. Every token the
+    /// launcher may append rides one line, in the order it writes them: the global `--home`, the
+    /// `--present` slip, then one `--peer <key>=<addr>` per hint.
     #[test]
-    fn the_hidden_tunnel_connect_abi_is_intact_and_names_its_service() {
+    fn the_ssh_proxycommand_line_parses_as_a_public_reach() {
         let peer = NodeId::from_ed25519_secret(&[1u8; 32]).to_string();
+        let link = sheer_link();
+        let hint = format!("{peer}=127.0.0.1:9000");
         let cli = Cli::try_parse_from([
             "swoosh",
-            "tunnel-connect",
+            "reach",
             &peer,
-            "--service",
             "ssh",
             "--to",
             "-",
+            "--home",
+            "/tmp/yah",
+            "--present",
+            &link,
+            "--peer",
+            &hint,
         ])
-        .expect("the hidden tunnel-connect ABI still resolves");
-        assert!(matches!(cli.command, Some(Command::TunnelConnect(_))));
+        .expect("the ProxyCommand line parses as a reach");
+        assert_eq!(cli.home, Some(PathBuf::from("/tmp/yah")));
+        let Some(Command::Reach(cmd)) = cli.command else {
+            panic!("the ProxyCommand line is a `reach`");
+        };
+        assert_eq!(cmd.service.as_str(), "ssh");
+        assert_eq!(
+            cmd.to,
+            commands::connect::To::Stdout,
+            "the bridge streams the single service over stdin/stdout"
+        );
+        assert_eq!(
+            cmd.present.as_ref().map(nauthy::Link::as_str),
+            Some(link.as_str())
+        );
+        assert_eq!(cmd.reach.peer.len(), 1, "each `--peer` hint rides verbatim");
 
+        // The retired spelling is gone: a stale `swoosh ssh` launched from an older binary's config, or
+        // a hand-typed guess, gets clap's unknown-subcommand error rather than a hidden verb.
         assert!(
-            Cli::try_parse_from(["swoosh", "tunnel-connect", &peer, "--to", "-"]).is_err(),
-            "the bridge must name its service: no `default` ghost to fall back on"
+            Cli::try_parse_from([
+                "swoosh",
+                "tunnel-connect",
+                &peer,
+                "--service",
+                "ssh",
+                "--to",
+                "-"
+            ])
+            .is_err(),
+            "the hidden bridge leaf is gone; `reach` is the one spelling of this act"
         );
     }
 
@@ -1356,18 +1383,6 @@ mod tests {
                 IrohBind::Dialing,
             ),
             (vec!["swoosh", "fleet", &key], IrohBind::Dialing),
-            (
-                vec![
-                    "swoosh",
-                    "tunnel-connect",
-                    &key,
-                    "--service",
-                    "ssh",
-                    "--to",
-                    "-",
-                ],
-                IrohBind::Dialing,
-            ),
         ];
 
         for (argv, expected) in cases {

@@ -10,10 +10,10 @@
 //! positional in costume. `--to` is a SINK, not a mode: it says WHERE the bytes go (a local port, the
 //! default `-` for stdout, a reserved `unix:PATH`), never whether to dial.
 //!
-//! Drives tightbeam's tunnel [`Connector`] directly under swoosh's OWN identity. Distinct from the hidden
-//! `tunnel-connect` leaf (the `swoosh ssh` ProxyCommand ABI, which is `--to -`-only and never typed):
-//! this is the form a user reaches directly. Both surfaces share the one
-//! [`connect`](crate::commands::tunnel_connect::connect) runner, selected here by the single [`To`].
+//! Drives tightbeam's tunnel [`Connector`] under swoosh's OWN identity, through the one
+//! [`connect`](crate::commands::connect::connect) runner, selected here by the single [`To`]. It is also
+//! what `swoosh ssh` re-invokes as its `ProxyCommand` (`reach <key> <service> --to -`), so the bridge is
+//! a verb an operator can run by hand to debug a launch that fails.
 
 use bifrost::{Discovery, Node, Transport};
 use clap::Args;
@@ -21,7 +21,7 @@ use nauthy::{Link, Service};
 use swoosh::peer::Peer;
 use swoosh::transport::ReachArgs;
 
-use crate::commands::tunnel_connect::{self, To};
+use crate::commands::connect::{To, connect};
 
 /// Reach a peer's served service: stdout by default, or `--to <port>`.
 #[derive(Debug, Args)]
@@ -98,7 +98,7 @@ impl swoosh::reaching::Reaching for ReachCmd {
         // one silently dropped slot 2 (the resolver is the only code that computes it), which is what
         // capped this dial at bearer slips. The redundant-present conflict is rejected once at the root via
         // `Reaching::reject_redundant_present`, before this runs.
-        tunnel_connect::connect(
+        connect(
             node,
             ctx.contacts,
             &self.peer,

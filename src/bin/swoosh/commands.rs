@@ -3,6 +3,7 @@
 
 pub mod adopt;
 pub mod attenuate;
+pub mod connect;
 pub mod contact;
 pub mod fetch;
 pub mod fleet;
@@ -23,4 +24,3 @@ pub mod ssh;
 pub mod status;
 pub mod stop;
 pub mod tree;
-pub mod tunnel_connect;
