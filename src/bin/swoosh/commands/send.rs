@@ -23,10 +23,15 @@ use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::peer::Peer;
 use swoosh::transport::ReachArgs;
+use swoosh::unbound::Unbound;
 
-/// The service name a receiver publishes and `swoosh send` reaches: `swoosh serve recv=recv:` receives,
+/// The service name a receiver publishes and `swoosh send` reaches: a peer serving `recv:` receives,
 /// `swoosh send` pushes.
-pub const RECV_SERVICE: &str = "recv";
+///
+/// Taken FROM the table that knows a bare `swoosh serve` does not bind it (a receive service's sink
+/// directory is the operator's to name, so there is no default to inherit), so the name this verb
+/// dials and the name a failed push teaches the `serve` line for are one value.
+pub const RECV_SERVICE: &str = Unbound::RECV.name();
 
 /// Files send concurrently over separate streams, capped so one connection is not flooded. Matches iris's
 /// pipeline depth; a receiver's exposer accepts these streams concurrently too, so both sides fan out.
@@ -163,7 +168,15 @@ impl SendCmd {
 
         node.close().await;
         if failures > 0 {
-            eyre::bail!("{failures} item(s) could not be sent");
+            // A push that did not fully land names the `serve` line the receiver would need, when the
+            // service was the default one. Attached HERE, once, to the run's own failure: per file it
+            // would repeat itself once per item, and attaching it only to the items that failed at
+            // the GATE would mean reading the refusals to tell them apart, which is the branch that
+            // turns this client into an oracle. So it is said once and said blind.
+            return Err(Unbound::name_the_entry(
+                eyre::eyre!("{failures} item(s) could not be sent"),
+                &self.service,
+            ));
         }
         Ok(())
     }

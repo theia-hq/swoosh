@@ -33,10 +33,6 @@ use swoosh::transport::PeerHint;
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
-/// The ssh host-key seed the exposer's route table carries. Unused by this test (it exercises `ping`),
-/// but the shared `diagnostics` helper derives `sshd` from it, so a fixed value keeps the build stable.
-const HOST_SEED: [u8; 32] = [9u8; 32];
-
 /// Bind a quirk endpoint under `seed` and wrap it with the SAME seed, the composition
 /// `--transport quirk+noise` performs: one address, one identity, two layers.
 async fn sealed(seed: [u8; 32]) -> Noise<Endpoint> {
@@ -52,7 +48,7 @@ async fn gated_exposer(tag: &str, signet: NodeId) -> tightbeam::tunnel::Exposer 
     let _ = std::fs::remove_file(&path);
     let gate = tunnel::resolve_gate(Some(signet), FileDenylist::load(path).await.unwrap())
         .expect("the signet-rooted gate resolves");
-    swoosh::serve::diagnostics(Router::new(gate), HOST_SEED, &[])
+    swoosh::serve::diagnostics(Router::new(gate), &[])
         .expect("the diagnostics routes bind")
         .expose()
         .expect("the exposer assembles")

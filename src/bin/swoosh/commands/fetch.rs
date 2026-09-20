@@ -17,6 +17,7 @@ use swoosh::contacts::Contacts;
 use swoosh::peer::Peer;
 use swoosh::reach::{self, Reached};
 use swoosh::transport::{self, ReachArgs};
+use swoosh::unbound::Unbound;
 use tightbeam::protocol::{Request, Response};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
@@ -31,7 +32,11 @@ pub struct FetchCmd {
     #[arg(long, value_name = "peer")]
     pub via: Peer,
     /// which served service to reach
-    #[arg(long, value_name = "service", default_value = "fetch")]
+    // The default is taken FROM the table that knows a bare `swoosh serve` does not bind it (an
+    // unscoped relay egresses under the exit node's own IP, so there is no default to inherit), so
+    // the name this verb dials and the name a failed request teaches the `serve` line for are one
+    // value.
+    #[arg(long, value_name = "service", default_value = Unbound::FETCH.name())]
     pub service: String,
     /// present a `sheer:` capability link to reach a gated node
     #[arg(
@@ -168,7 +173,7 @@ impl FetchCmd {
                 let _ = respond_error(
                     &mut tcp,
                     Status::BadGateway,
-                    &format!("fetch failed: {error:#}"),
+                    &self.body(format!("fetch failed: {error:#}")),
                 )
                 .await;
             }
@@ -220,7 +225,12 @@ impl FetchCmd {
                     Status::BadGateway
                 }
             };
-            return respond_error(tcp, status, &format!("fetch service refused: {refusal}")).await;
+            return respond_error(
+                tcp,
+                status,
+                &self.body(format!("fetch service refused: {refusal}")),
+            )
+            .await;
         }
 
         FetchRequest {
@@ -244,6 +254,22 @@ impl FetchCmd {
             }
         }
         Ok(())
+    }
+
+    /// The body of a failure this proxy serves, with the `serve` line the exit node would need when
+    /// the service was the DEFAULT one. A downloader's 403 is where this verb's refusal is actually
+    /// read, so it is where the line has to land.
+    ///
+    /// Built from the service name THIS client requested and nothing else, and applied to every
+    /// failure body alike: the refusal that came back picks the STATUS (an authorization failure is a
+    /// 403, a bad day at the node or origin is a 502, which a downloader can already see), and it
+    /// picks no part of this. A sentence that appeared on one refusal and not another would leak the
+    /// distinction the uniform wire refusal exists to withhold.
+    fn body(&self, failure: String) -> String {
+        match Unbound::dialed(&self.service) {
+            Some(unbound) => format!("{failure}: {}", unbound.teaching()),
+            None => failure,
+        }
     }
 }
 
@@ -496,6 +522,67 @@ mod tests {
         }
 
         async fn wait_closed(&self) {}
+    }
+
+    /// The line the DOWNLOADER reads. A `fetch` request that fails serves an HTTP error body, and
+    /// that body is where this verb's refusal is actually read, so that is where the `serve` line the
+    /// exit node would need has to land. Driven through the same announced-session refusal as the
+    /// test below: this failure never reached the exit node at all and still carries the line, which
+    /// is the property being held. The line is owed to the name this client SENT, never to an answer,
+    /// so it can never report which refusal came back.
+    #[tokio::test]
+    async fn a_failed_request_names_the_serve_line_for_the_defaulted_service() {
+        let defaulted = failure_body(&[]).await;
+        assert!(
+            defaulted.contains("swoosh serve fetch=fetch:<origin>"),
+            "the defaulted service names the line that would bind it: {defaulted}"
+        );
+
+        // A service the operator NAMED is theirs; the client has nothing to teach about it and adds
+        // nothing.
+        let named = failure_body(&["--service", "news"]).await;
+        assert!(
+            !named.contains("swoosh serve"),
+            "a named service gets no serve line appended: {named}"
+        );
+    }
+
+    /// Drive one inbound request through `serve` over a session that refuses the credential write, and
+    /// return the whole HTTP response the local downloader reads. `extra` is appended to the verb's
+    /// argv, so a case can name its own `--service`.
+    async fn failure_body(extra: &[&str]) -> String {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .await
+            .unwrap();
+
+        let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
+        let mut argv = vec!["swoosh", "http://example.com/x", "--via", &key];
+        argv.extend_from_slice(extra);
+        let cmd = Wrap::try_parse_from(argv).expect("fetch parses").fetch;
+        let identity = Identity::from_secret(&[7u8; 32]).unwrap();
+        let link = identity
+            .mint_member(
+                identity.verifying_key(),
+                nauthy::Request::expires_in(Duration::from_secs(3600)),
+            )
+            .unwrap()
+            .link()
+            .unwrap();
+        assert!(
+            cmd.serve(server, &AnnouncedSession, Some(&link), None)
+                .await
+                .is_err(),
+            "the relay refuses the credential write"
+        );
+
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        String::from_utf8_lossy(&response).into_owned()
     }
 
     /// The fetch path bypasses `Connector`, so it carries the checked writer itself: presenting a

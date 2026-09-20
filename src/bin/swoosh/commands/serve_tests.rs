@@ -8,28 +8,31 @@
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use bifrost_mdns::{At, Dialable, Expiring, MdnsError, Missing, Scope};
+use clap::CommandFactory as _;
 use swoosh::home::Home;
+use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
     CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, FetchService, ServiceList, Stop,
     Stopped, bind_entry, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
+use swoosh::unbound::Unbound;
 use tightbeam::tunnel::{
     CancellationToken, ManifestEntry, Metering, Posture, RawSource, Router, ServiceCatalog,
     TargetKind,
 };
 
 use super::{
-    Group, ReachKind, describe, display_targets, reach_section, render_ready_banner,
-    serving_section,
+    DEFAULT_SERVICES, Group, ReachKind, describe, display_targets, reach_section,
+    render_ready_banner, serving_section,
 };
 
 /// n0's relay and n0's discovery: the bind every banner test but the reach-flag one is about, and the
@@ -1636,6 +1639,131 @@ fn resident_stop_classifies_from_its_source() {
     );
 }
 
+/// The route table a BARE `swoosh serve` builds, assembled from the product's own default set through
+/// the product's own bind edge, plus the two node-control routes every run adds by value. Not a list
+/// of names retyped here: a test that retyped them would keep passing the day the product set widened,
+/// which is the one thing the caller below exists to catch.
+fn bare_serve() -> BTreeSet<String> {
+    let mut router = Router::new(gated());
+    for entry in DEFAULT_SERVICES {
+        router = bind_entry(router, entry, [0u8; 32], None, &[]).expect("a default entry binds");
+    }
+    let exposer = router
+        .member_service(
+            CONTROL_STOP_SERVICE.parse().expect("a name"),
+            Stop::new(CancellationToken::new()),
+        )
+        .expect("control.stop binds")
+        .member_service(
+            CONTROL_SERVICES_SERVICE.parse().expect("a name"),
+            ServiceList::new(ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog")),
+        )
+        .expect("control.services binds")
+        .expose()
+        .expect("the bare service set assembles under the family gate");
+    exposer
+        .manifest()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect()
+}
+
+/// What a bare `swoosh serve` binds is EXACTLY `ping`, `speed`, and the two `control.*` routes.
+///
+/// The narrow posture had nothing holding it, so widening it was a silent edit. The rule it holds: a
+/// default service may cost a peer BANDWIDTH, and may never cost it code execution, a byte of its
+/// disk, a packet from its IP, or a name from its fleet. `ping` and `speed` pass that; a shell, a
+/// receive sink, an egress relay and the signed fleet roster each fail it, which is why a client that
+/// wants one of them says so itself instead of every node paying for it by default.
+///
+/// An EXACT set, not a membership check: membership is exactly what a widening walks through.
+#[test]
+fn a_bare_serve_binds_exactly_ping_speed_and_the_two_control_routes() {
+    let bound = bare_serve();
+
+    // NEGATIVE FIRST, and the order is the point: a widening fails the equality below as well, so an
+    // inversion run that stopped at the equality would report this loop as covered without ever
+    // having reached it. This is the assertion that NAMES what was let in, so it runs first.
+    for unbound in Unbound::all() {
+        assert!(
+            !bound.contains(unbound.name()),
+            "a bare serve must not bind `{}`: a peer that wants to offer it types `swoosh serve {}`, \
+             and typing it IS the consent",
+            unbound.name(),
+            unbound.entry(),
+        );
+    }
+
+    // Then the whole set, so a fifth route of any name (not just the four refused above) has to be
+    // defended here before it can ship.
+    let expected: BTreeSet<String> = [
+        reach::PING_SERVICE,
+        reach::SPEED_SERVICE,
+        CONTROL_STOP_SERVICE,
+        CONTROL_SERVICES_SERVICE,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(
+        bound, expected,
+        "the bare set is the two diagnostics the reach verbs dial plus the node's own control surface"
+    );
+}
+
+/// Every defaulted service name either names something a bare `serve` binds, or is a name the client
+/// itself teaches the `serve` entry for. Walked over the REAL parser, so a verb added later that
+/// defaults to a third kind of name (one nobody serves and nobody explains) fails HERE rather than
+/// against a stranger's zero-config node with a refusal that names nothing.
+#[test]
+fn every_defaulted_service_name_is_bound_by_a_bare_serve_or_teaches_its_serve_entry() {
+    let mut defaults = BTreeSet::new();
+    collect_service_defaults(&crate::Cli::command(), &mut defaults);
+
+    // The walk must be able to SEE the defaults it vets: a walk that matched nothing would pass this
+    // test for free, which is the shape of a test that reports a guard as covered without running it.
+    for named in ["ssh", "recv", "fetch"] {
+        assert!(
+            defaults.contains(named),
+            "the walk found no `--service` default `{named}`: either it is not looking where the \
+             verbs are, or that verb's default changed and this list has to be defended and updated \
+             with it. Found: {defaults:?}"
+        );
+    }
+
+    let bound = bare_serve();
+    for name in &defaults {
+        assert!(
+            bound.contains(name) || Unbound::dialed(name).is_some(),
+            "`{name}` is defaulted by a verb, is not bound by a bare serve, and has no serve entry to \
+             teach: the dial would fail against a fresh peer with a refusal that names nothing"
+        );
+    }
+}
+
+/// Collect every `--service` default the command tree carries, recursing into subcommands, so the walk
+/// reads the parser the binary actually runs rather than a list of verbs kept by hand. A slot with NO
+/// default (the required `reach <service>` positional, the `tunnel-connect` ABI flag) contributes
+/// nothing: the rule is about what a verb dials when the user named nothing.
+///
+/// Takes clap's own `Command`, qualified because this file also drives `std::process::Command` to
+/// spawn the real binary.
+fn collect_service_defaults(cmd: &clap::Command, into: &mut BTreeSet<String>) {
+    for arg in cmd.get_arguments() {
+        if arg.get_id() != "service" {
+            continue;
+        }
+        into.extend(
+            arg.get_default_values()
+                .iter()
+                .map(|value| value.to_string_lossy().into_owned()),
+        );
+    }
+    for sub in cmd.get_subcommands() {
+        collect_service_defaults(sub, into);
+    }
+}
+
 /// BLOCKER-2: the resident control socket adds no service. `--resident` adds only the local socket
 /// arm AFTER the route table and the manifest are cut, so the exposer's manifest is the plain-serve set
 /// exactly (`control.*` folds as always); and the control `Request` enum can express two reads and a
@@ -2408,8 +2536,50 @@ fn gated() -> nauthy::Gate {
 /// same open set the caller names: an open name binds the metered engine, a gated one the owner engine,
 /// through the same edges the product binds them.
 fn diagnostics(public: &[nauthy::Service]) -> Router {
-    swoosh::serve::diagnostics(Router::new(gated()), [0u8; 32], public)
-        .expect("the base diagnostics bind")
+    swoosh::serve::diagnostics(Router::new(gated()), public).expect("the base diagnostics bind")
+}
+
+/// The shared helper the integration proofs assemble their nodes from binds EXACTLY the diagnostics a
+/// bare `serve` binds, and nothing else.
+///
+/// Those proofs are what "a default node answers this" MEANS in this repo, so a route bound here that
+/// the product's bare set does not carry re-points every one of them at a node nobody runs. A shell is
+/// the sharpest case and the reason this is pinned: the bare set binds none, and no client requests
+/// the engine's own spelling `sshd` anyway (a `sshd:` target auto-names to `ssh`). A proof that wants
+/// a shell binds one itself, by name.
+#[test]
+fn the_shared_diagnostics_helper_binds_exactly_what_a_bare_serve_binds() {
+    let bound: BTreeSet<String> = diagnostics(&[])
+        .expose()
+        .expect("the base diagnostics assemble")
+        .manifest()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+
+    // NEGATIVE FIRST: an inversion that binds one of these fails the equality below too, and a run
+    // that stopped there would report these as covered without ever reaching them.
+    assert!(
+        !bound.contains("sshd"),
+        "the helper must not bind a shell: no client dials `sshd`, and no bare serve binds one"
+    );
+    for unbound in Unbound::all() {
+        assert!(
+            !bound.contains(unbound.name()),
+            "the helper must not bind `{}`: a bare serve does not, so a proof built on it would be \
+             a proof about a node nobody runs",
+            unbound.name()
+        );
+    }
+
+    let expected: BTreeSet<String> = [reach::PING_SERVICE, reach::SPEED_SERVICE]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        bound, expected,
+        "the helper binds the two diagnostics and leaves every other route to the caller that wants it"
+    );
 }
 
 /// `serve speed --public speed` BUILDS (the metered speed engine is OptIn, openable), and `--public

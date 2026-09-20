@@ -19,6 +19,7 @@ use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::roster;
 use swoosh::transport::ReachArgs;
+use swoosh::unbound::Unbound;
 use tightbeam::identity::AsVerifyKey as _;
 use tokio::io::AsyncReadExt as _;
 
@@ -118,17 +119,27 @@ impl FleetCmd {
         // node resolves like every other verb), presenting our membership badge so the family gate admits us.
         // Slot 2 (membership) rides along for a signet-bound coordination node; a no-op on the plain member
         // dial. The redundant-present conflict was rejected in the composition root before this runs.
+        //
+        // The name comes from the table that knows a bare `swoosh serve` does not bind it: `fleet` has
+        // no `--service` flag to drop, so naming the `serve` entry on a failed read is the only way it
+        // can satisfy the rule at all.
+        let roster_service = Unbound::ROSTER.name();
         let connector = self.peer.connector(
             contacts,
-            "roster".parse::<Service>()?,
+            roster_service.parse::<Service>()?,
             self_badge,
             membership,
         )?;
         let session = connector.open_service(node).await?;
+        // The read's one gated stream: a zero-config coordination node refuses here, and the refusal
+        // names nothing (it must not: a stranger never learns what a node serves), so the client adds
+        // what that node would have to run. Attached to EVERY failure of this stream, without reading
+        // any of them, so it can never report the difference between two refusals.
         let (send, recv) = session
             .open_bi()
             .await
-            .wrap_err("the coordination node refused the roster read")?;
+            .wrap_err("the coordination node refused the roster read")
+            .map_err(|error| Unbound::name_the_entry(error, roster_service))?;
         drop(send); // a roster is a read; we send nothing, so the handler's write half completes
         let mut bytes = Vec::new();
         recv.take(MAX_ROSTER_BLOB).read_to_end(&mut bytes).await?;

@@ -230,30 +230,29 @@ fn bind_speed(router: Router, name: Service, public: &[Service]) -> eyre::Result
     }
 }
 
-/// Bind the conventional diagnostic routes (`ping`, `speed`, and `sshd` under the `ssh` feature) onto
-/// `router`, one engine handler instance per name.
+/// Bind the conventional diagnostic routes (`ping` and `speed`) onto `router`, one engine handler
+/// instance per name.
 ///
 /// `public` is the SAME open overlay the caller wants, so the helper applies it here and the engine choice
 /// runs on the same input, through the same [`bind_ping`]/[`bind_speed`] edges the product `serve` path
 /// uses: the open decision and the bound profile cannot drift. The caller adds any extra member-only routes
 /// (e.g. `control.stop`) after.
 ///
+/// EXACTLY the diagnostics a bare `serve` binds, and nothing else. This helper is what the integration
+/// proofs assemble their nodes from, so a route here that the product's bare set does not carry makes
+/// every one of those proofs a proof about a node nobody runs. A shell is the sharpest case, and the
+/// reason this is written down: the bare set binds no shell at all, and no client ever requests the
+/// name `sshd` anyway (a `sshd:` target auto-names to `ssh`). A proof that wants a shell binds one
+/// itself, by name.
+///
 /// ping and speed are TWO independent services so a node may offer ping without speed (or the reverse),
 /// and each carries its own gate: `ping` answers only ping frames, `speed` only speed frames, refusing the
 /// other method at the wire (`ProtocolError::WrongService`), so a grant for one can never open the other.
-pub fn diagnostics(
-    router: Router,
-    host_seed: [u8; 32],
-    public: &[Service],
-) -> eyre::Result<Router> {
+pub fn diagnostics(router: Router, public: &[Service]) -> eyre::Result<Router> {
     let ping: Service = "ping".parse()?;
     let speed: Service = "speed".parse()?;
     let router = bind_ping(router, ping, public)?;
     let router = bind_speed(router, speed, public)?;
-    #[cfg(feature = "ssh")]
-    let router = router.service("sshd".parse()?, sshh::Sshd::new(host_seed))?;
-    #[cfg(not(feature = "ssh"))]
-    let _ = host_seed;
     Ok(router.public(public.iter().cloned()))
 }
 

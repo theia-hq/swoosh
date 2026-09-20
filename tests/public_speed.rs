@@ -27,10 +27,6 @@ use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 /// because the whole point is that a STRANGER (rooted nowhere the gate trusts) still reaches the OPEN service.
 const SIGNET_SECRET: [u8; 32] = [7u8; 32];
 
-/// The ssh host-key seed the shared `diagnostics` helper derives `sshd` from. Unused by this test (it exercises the
-/// measure services + control.stop), but a fixed value keeps the build stable with and without the feature.
-const HOST_SEED: [u8; 32] = [9u8; 32];
-
 /// Run the proof on a worker thread with a generous stack: over mem a bidir speedtest nests several 64 KiB
 /// chunk buffers on one LocalSet thread, which can exceed the default stack (see `gated_measure.rs`).
 #[test]
@@ -64,7 +60,7 @@ async fn proof() {
         // gated `ping` binds the owner engine.
         let public: Vec<nauthy::Service> = vec!["speed".parse().unwrap()];
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
-        let exposer = swoosh::serve::diagnostics(Router::new(gate), HOST_SEED, &public)
+        let exposer = swoosh::serve::diagnostics(Router::new(gate), &public)
             .unwrap()
             .member_service(
                 CONTROL_STOP_SERVICE.parse().unwrap(),
