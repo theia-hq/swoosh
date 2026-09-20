@@ -54,7 +54,7 @@ pub struct AdoptCmd {
                      meaning there, so it must be the invite itself, never a redirection."
     )]
     pub invite: Option<SecretSource>,
-    /// re-root this machine when the invite names a different signet, or replace a differing stored badge
+    /// re-root this machine at a different signet, or store a badge this invite does not outlive
     #[arg(long)]
     pub force: bool,
 }
@@ -96,9 +96,9 @@ impl AdoptCmd {
                 // actually roots at the named signet AND binds THIS machine, unexpired, before any write.
                 let badge = verify_badge(badge, node, signet)?;
                 admit_signet(home, signet, self.force).await?;
-                // The credential half of the same rule: a token is not authenticated, so an old or
-                // revoked badge replayed under the live signet must not silently overwrite this one.
-                admit_badge(home, &badge, self.force).await?;
+                // The credential half of the same rule: a token is not authenticated, so a badge that
+                // does not OUTLIVE the stored one (an old or revoked replay) must not overwrite it.
+                admit_badge(home, &badge, node, self.force).await?;
                 // Trust the signet: the default gate admits its members and delegates. The signet lands
                 // beside the identity, in the SAME home, which `swoosh serve` reads via `load_signet`.
                 config::write_signet(home, signet).await?;
@@ -123,9 +123,11 @@ impl AdoptCmd {
                 // root at the named signet and bind this device before the seed or badge is persisted.
                 let badge = verify_badge(badge, node, signet)?;
                 admit_signet(home, signet, self.force).await?;
-                // Same badge guard as the bound arm, before the seed write: a differing stored badge
-                // cannot be displaced by a replayed token without `--force`.
-                admit_badge(home, &badge, self.force).await?;
+                // Same badge guard as the bound arm, before the seed write: a stored badge cannot be
+                // displaced by a token that does not outlive it without `--force`. `node` is the seed's
+                // device, so a derived invite re-identifying this machine never reads as a renewal of
+                // the outgoing device's badge.
+                admit_badge(home, &badge, node, self.force).await?;
                 // Become the derived device: write the child seed as SWOOSH's persisted identity -- the
                 // SAME store `swoosh serve` binds under -- so this node comes up AS the adopted device.
                 identity::write(&seed, home).await?;
@@ -197,22 +199,82 @@ async fn admit_signet(home: &Home, signet: NodeId, force: bool) -> eyre::Result<
     Ok(())
 }
 
-/// Refuse to silently replace this machine's stored badge. A bound invite's token is not authenticated,
-/// and the carried badge passes verification without a revocation check, so a replayed old or revoked
-/// token under the SAME signet would otherwise overwrite the live credential (the signet compare cannot
-/// catch it). A differing stored badge takes the same explicit `--force` as a differing signet: an absent
-/// badge is first provisioning, and re-adopting the exact bytes already stored is a no-op.
-async fn admit_badge(home: &Home, badge: &Link, force: bool) -> eyre::Result<()> {
+/// Refuse to silently DOWNGRADE this machine's stored badge, while letting a routine renewal through.
+///
+/// A bound invite's token is not authenticated, and the carried badge passes verification without a
+/// revocation check, so a replayed old or revoked token under the SAME signet must not overwrite the
+/// live credential (the signet compare cannot catch it). But what makes a replay a replay is that it is
+/// OLDER, not that it DIFFERS. Refusing every differing badge made the quarterly renewal (the routine,
+/// strictly-safer act, since renewal IS re-enrolment and there is no renew verb) demand the very
+/// `--force` that also disables [`admit_signet`]'s re-root guard, so the safe act required the
+/// dangerous flag. The predicate is therefore "is this a downgrade", and `--force` keeps its real
+/// meaning: re-root, or accept a badge that is not an improvement.
+///
+/// Accepted with no flag: an absent stored badge (first provisioning), the exact bytes already on disk
+/// (a no-op re-adopt), and a RENEWAL as [`renews`] defines it. Everything else still takes `--force`.
+async fn admit_badge(home: &Home, badge: &Link, node: NodeId, force: bool) -> eyre::Result<()> {
     if force {
         return Ok(());
     }
-    if let Some(stored) = config::load_badge(home).await? {
-        if stored.as_str() != badge.as_str() {
-            eyre::bail!(
-                "this machine already stores a different membership badge than this invite carries; \
-                 adopting it would replace the stored badge. Re-run with --force if that is intended"
-            );
-        }
+    let Some(stored) = config::load_badge(home).await? else {
+        return Ok(());
+    };
+    if stored.as_str() == badge.as_str() || renews(&stored, badge, node)? {
+        return Ok(());
     }
-    Ok(())
+    eyre::bail!(
+        "this machine already stores a membership badge that this invite does not outlive; adopting it \
+         would replace the stored badge with one that is older, bound to another device, rooted at \
+         another signet, or carries no readable expiry. Re-run with --force if that is intended"
+    )
 }
+
+/// Whether `incoming` RENEWS the `stored` badge for the device `node`: the same signet, the same device,
+/// and a strictly LATER expiry. The one predicate [`admit_badge`] turns on, so "is this safe to store"
+/// has exactly one answer.
+///
+/// A replay is by construction not later, so the guard the byte-inequality check existed for is kept
+/// whole while the routine act passes. The two expiries come from nauthy's advisory `expires_at` fact,
+/// which is an UPPER BOUND (a narrowing an attenuation block added is invisible to the origin-0 read),
+/// and that cuts the safe way twice here: a badge carrying no fact reads `None` and falls back to the
+/// byte-inequality refusal rather than to acceptance, and an attenuated badge that reads longer than it
+/// truly is can only cost a stored credential that dies sooner than believed, which the dial-time
+/// refusal then names.
+fn renews(stored: &Link, incoming: &Link, node: NodeId) -> eyre::Result<bool> {
+    // Same signet, read off the badge itself rather than off the signet file: the file says what this
+    // machine trusts NOW, and the question here is whether the two credentials share a root.
+    if stored.root() != incoming.root() {
+        return Ok(false);
+    }
+    let Some(was) = superseded(stored.cap().expiry()?, incoming.cap().expiry()?) else {
+        return Ok(false);
+    };
+    // The stored badge must bind the SAME device, or a DERIVED invite (which adopts a whole new
+    // identity) would read as a renewal of the outgoing device's credential and quietly re-identify the
+    // machine. Asked at the last instant the stored badge was alive, so its own expiry check answers the
+    // binding question instead of masking it: a badge dead since yesterday still binds exactly the
+    // device it always bound.
+    Ok(stored
+        .cap()
+        .verify_member_at_root_without_revocation(was, node.verify_key(), stored.root())
+        .is_ok())
+}
+
+/// The stored expiry that `incoming` supersedes, when it does: `Some(was)` only when BOTH badges carry a
+/// readable expiry and the incoming one falls strictly later. Pure and total over the unreadable case,
+/// so every arm of the decision is testable without minting a badge nauthy alone can make.
+///
+/// Returning the instant rather than a bool hands [`renews`] the one moment at which the stored badge is
+/// known to have been alive, which is where its device binding must be asked.
+fn superseded(stored: Option<SystemTime>, incoming: Option<SystemTime>) -> Option<SystemTime> {
+    match (stored, incoming) {
+        // Strictly later, never equal: a token replayed verbatim under a re-mint that happened to land
+        // on the same second buys the holder nothing and must not pass as an improvement.
+        (Some(was), Some(now)) if now > was => Some(was),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "adopt_tests.rs"]
+mod adopt_tests;

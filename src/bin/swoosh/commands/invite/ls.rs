@@ -1,10 +1,16 @@
 //! `swoosh invite ls`: list the device invites this node has issued.
 //!
-//! A local, offline read of swoosh's own mint-log ledger, filtered to MEMBERSHIP rows: one row per badge
-//! this node signed (a derived invite and a bound invite record the same way), with the label it was
-//! recorded under. Columns are `label  bound-to  expires`, designed so a future fleet row (a signet, no
-//! token) fills the same second column as `fleet:<signet>` without a re-render. The ledger is
-//! issuer-side audit only; the gate never reads it.
+//! A local, offline read of swoosh's own mint-log ledger, filtered to MEMBERSHIP rows: one row per
+//! HOLDER (not per badge), with the label it was recorded under. Columns are `label  bound-to  expires`,
+//! designed so a future fleet row (a signet, no token) fills the same second column as `fleet:<signet>`
+//! without a re-render. The ledger is issuer-side audit only; the gate never reads it.
+//!
+//! One row per holder, because renewal is re-enrolment: re-running `invite add` for a key already on
+//! file APPENDS a badge row rather than editing one, so a five-device fleet renewed quarterly reads as
+//! twenty rows within a year, most of them `expired`, and the surface that is supposed to carry the
+//! expiry warning becomes the surface renewal ruins. Only the latest-expiring row describes the
+//! credential a device actually carries, so only that row shows. The superseded rows stay in the ledger
+//! and stay auditable: `grant ls` is the view that shows every one of them.
 
 use std::time::SystemTime;
 
@@ -24,9 +30,9 @@ const ME: &str = "me";
 pub struct LsCmd {}
 
 impl LsCmd {
-    /// Read the ledger in the home and print one line per membership row: the label it is addressable as
-    /// (or `-`), the key it admits, and the badge's remaining lifetime. An empty ledger prints a friendly
-    /// line, not a blank.
+    /// Read the ledger in the home and print one line per HOLDER: the label it is addressable as (or
+    /// `-`), the key it admits, and the remaining lifetime of the live badge it holds. An empty ledger
+    /// prints a friendly line, not a blank.
     pub async fn run(self, contacts: &Contacts, home: &Home) -> eyre::Result<()> {
         let records: Vec<GrantRecord> = Grants::at(home.grants())
             .load()
@@ -38,6 +44,7 @@ impl LsCmd {
             println!("no invites created yet");
             return Ok(());
         }
+        let records = live_per_holder(records);
         let now = SystemTime::now();
         // Materialize each row once, so the column widths and the printed cells read the same values.
         let rows: Vec<(String, String, String)> = records
@@ -67,6 +74,32 @@ impl LsCmd {
         }
         Ok(())
     }
+}
+
+/// Collapse the membership rows to the LIVE badge per holder: the latest-expiring row for each key, in
+/// the order each key first appears in the ledger.
+///
+/// Renewal APPENDS (it is re-enrolment, not an edit), so a device renewed on the quarterly cadence
+/// accumulates a row per renewal and only the last one describes the badge it presents. First-appearance
+/// order is kept rather than re-sorting by expiry, so a renewal does not reshuffle a fleet the operator
+/// has learned to read; the view changes only when a device joins or leaves.
+///
+/// A linear scan, deliberately: the collection is one row per device per renewal for one person's
+/// homelab, and a map would cost the stable order this view is built on.
+fn live_per_holder(records: Vec<GrantRecord>) -> Vec<GrantRecord> {
+    let mut live: Vec<GrantRecord> = Vec::with_capacity(records.len());
+    for record in records {
+        match live.iter().position(|kept| kept.holder == record.holder) {
+            // A later badge for a holder already listed supersedes the row kept for it: the last
+            // credential minted for a device is the one that device presents.
+            Some(kept) if live[kept].expiry < record.expiry => live[kept] = record,
+            // A row that does not outlive the one already kept IS a superseded row. It is not lost:
+            // `grant ls` reads every membership row the ledger holds.
+            Some(_) => {}
+            None => live.push(record),
+        }
+    }
+    live
 }
 
 /// The label this invite was recorded under: the `me/<label>` contact(s) whose node is the badge's
@@ -166,6 +199,52 @@ mod tests {
             ),
             "-"
         );
+    }
+
+    /// A renewal APPENDS a row, so the ledger holds one per mint. The view collapses to the
+    /// latest-expiring row per holder, which is the badge that device actually presents, and keeps the
+    /// order each holder first appeared in so a renewal does not reshuffle the fleet. Without the
+    /// collapse a five-device fleet renewed quarterly reads as twenty rows, most of them `expired`.
+    #[test]
+    fn a_renewed_device_reads_as_one_row_carrying_its_live_badge() {
+        let desk = NodeId::from_ed25519_secret(&[10u8; 32]);
+        let lappy = NodeId::from_ed25519_secret(&[11u8; 32]);
+        let at = |holder: NodeId, secs: u64| GrantRecord {
+            expiry: UNIX_EPOCH + Duration::from_secs(secs),
+            ..membership(holder)
+        };
+        // desk enrolled, then renewed twice; lappy enrolled between the two, and its row must not move.
+        let rows = live_per_holder(vec![
+            at(desk, 1_000),
+            at(lappy, 2_000),
+            at(desk, 3_000),
+            at(desk, 2_500),
+        ]);
+
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.holder.as_str())
+                .collect::<Vec<_>>(),
+            vec![desk.to_string().as_str(), lappy.to_string().as_str()],
+            "one row per holder, in first-appearance order"
+        );
+        assert_eq!(
+            rows[0].expiry,
+            UNIX_EPOCH + Duration::from_secs(3_000),
+            "the row shown for a renewed device is its LATEST-expiring badge, not its newest ledger \
+             row and not its first"
+        );
+    }
+
+    /// The collapse must key on the HOLDER, never on the label: two devices are two rows even when the
+    /// ledger interleaves them, and a fleet that never renewed reads exactly as it did before.
+    #[test]
+    fn distinct_holders_each_keep_their_row() {
+        let rows = live_per_holder(vec![
+            membership(NodeId::from_ed25519_secret(&[12u8; 32])),
+            membership(NodeId::from_ed25519_secret(&[13u8; 32])),
+        ]);
+        assert_eq!(rows.len(), 2, "two devices are two rows");
     }
 
     /// The second column: a device shows its short key; a fleet row (the parked arm) shows

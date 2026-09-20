@@ -18,11 +18,14 @@
 //!
 //! [`resolve`] is the ONE home of the `--present`-overrides-self-badge rule that used to be copy-pasted
 //! into six verbs: it turns a declared [`Credential`] into the concrete badge to present, once, in the
-//! composition root.
+//! composition root. Being that one home makes it the one home of the badge's EXPIRY rule too: a stored
+//! badge that is already dead is refused here, locally, before any dial, so the operator reads the cause
+//! and the fix instead of the far gate's deliberately uniform `not admitted`.
 
 use core::future::Future;
+use std::time::SystemTime;
 
-use bifrost::{Discovery, Node, Session, Transport};
+use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use nauthy::Link;
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -30,7 +33,7 @@ use crate::contacts::Contacts;
 use crate::credential::Credential;
 use crate::home::Home;
 use crate::identity::{Identity, Secret};
-use crate::{config, transport};
+use crate::{badge, config, transport};
 
 /// The uniform context every reaching verb runs against, so dispatch is ONE line (`self.run(node, ctx)`)
 /// instead of a per-verb argument-threading match with a different signature per arm.
@@ -189,7 +192,22 @@ impl Resolved {
 /// own self-sign (person-zero: it IS the root, so its self-sign admits). A fresh install with neither
 /// badge nor signet self-signs an ephemeral badge that the peer's gate correctly refuses. Reached only
 /// from a [`Dialing`](BindRole::Dialing) verb: a serving verb resolves no slots because it presents none.
+///
+/// A stored badge that is already dead REFUSES the dial here (see [`MemberBadge::into_slot`]), and one
+/// inside [`badge::RENEWAL_WINDOW`] warns on stderr and dials anyway.
 pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Result<Resolved> {
+    resolve_to(cred, secret, home, &mut std::io::stderr()).await
+}
+
+/// The body of [`resolve`], with the expiry warning routed to an injected `warn` sink so a test can
+/// drive it with its own writer and assert precisely when the line is (and is not) emitted, rather than
+/// trying to capture the process stderr. Mirrors [`SecretSource::resolve_to`](crate::secret::SecretSource).
+async fn resolve_to<W: std::io::Write>(
+    cred: Credential,
+    secret: &Secret,
+    home: &Home,
+    warn: &mut W,
+) -> eyre::Result<Resolved> {
     let Credential::Family { present } = cred;
     // The member badge rooted at the dialing key, AND the fleet key that badge roots under: a STORED
     // signet-signed device badge roots at the adopted signet; else the signet holder's self-sign
@@ -203,10 +221,14 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
             let signet = config::load_signet(home)
                 .await?
                 .unwrap_or_else(|| secret.node_id());
-            (stored, signet)
+            (MemberBadge::Stored(stored), signet)
         }
-        None => (secret.member_badge()?, secret.node_id()),
+        None => (
+            MemberBadge::SelfSigned(secret.member_badge()?),
+            secret.node_id(),
+        ),
     };
+    let node = secret.node_id();
     match present {
         // A `--present` (or link-as-peer) slip is slot 1. Attach the member badge in slot 2 ONLY when
         // the slip pins the SAME foreign fleet the dialer's own badge roots under: that is the only
@@ -221,7 +243,11 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
                 .ok()
                 .flatten()
                 .is_some_and(|pinned| pinned == own_fleet.verify_key());
-            let membership = pins_own_fleet.then_some(badge);
+            let membership = if pins_own_fleet {
+                Some(badge.into_slot(node, warn)?)
+            } else {
+                None
+            };
             Ok(Resolved {
                 grant: slip,
                 membership,
@@ -229,9 +255,74 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
         }
         // A plain member dial: the badge is slot 1, slot 2 empty (byte-parity, no over-share).
         None => Ok(Resolved {
-            grant: badge,
+            grant: badge.into_slot(node, warn)?,
             membership: None,
         }),
+    }
+}
+
+/// The member badge a dial roots at, tagged with where it came from, because only one of the two can be
+/// old.
+///
+/// A [`Stored`](Self::Stored) badge was signed by the signet up to a whole
+/// [`DEVICE_BADGE_TTL`](crate::identity::DEVICE_BADGE_TTL) ago and may already be dead; the signet
+/// holder's [`SelfSigned`](Self::SelfSigned) badge is minted in this process and lives five minutes, so
+/// reading its remaining life could only ever restate the line that minted it. That difference decides
+/// whether this resolver has anything to check, and it is a variant rather than a flag so the check site
+/// matches on it exhaustively.
+enum MemberBadge {
+    /// Written by `adopt` and read back off disk: the credential whose remaining life must be read
+    /// before it is presented.
+    Stored(Link),
+    /// Minted in this process by the signet holder for this one dial. Live by construction.
+    SelfSigned(Link),
+}
+
+impl MemberBadge {
+    /// Hand this badge over for the slot it will travel in, refusing the dial LOCALLY when a stored badge
+    /// is already dead and warning when it dies inside [`badge::RENEWAL_WINDOW`].
+    ///
+    /// Called at each site where the badge actually BECOMES a slot, and only there. That placement is the
+    /// guard, not an accident of structure: a dial whose slip pins a fleet this device is not in drops
+    /// the badge entirely, and refusing that dial over a credential it never sends would turn away a dial
+    /// the far gate would have admitted. It consumes the badge, so a slot cannot be filled around it.
+    ///
+    /// The refusal never reaches the wire, so the gate's uniform `not admitted` stays uniform and no peer
+    /// learns anything: this is the dialer telling itself what it already knows about its own credential.
+    fn into_slot<W: std::io::Write>(self, node: NodeId, warn: &mut W) -> eyre::Result<Link> {
+        let badge = match self {
+            // Minted seconds ago to live five minutes: there is no window to be inside and nothing a
+            // reading could tell the operator that the mint above did not.
+            Self::SelfSigned(badge) => return Ok(badge),
+            Self::Stored(badge) => badge,
+        };
+        // Exhaustive on purpose: a new standing is a compile error HERE, at the one site that decides
+        // whether a badge travels, rather than a silent fall-through to dialing.
+        match badge::Standing::read(&badge, SystemTime::now())? {
+            // Dead: the gate will refuse this, so say so now, with the cause and the fix, instead of
+            // spending a dial to be told `not admitted` by a message that cannot say which of five
+            // reasons applied.
+            standing @ badge::Standing::Expired { .. } => eyre::bail!(
+                "this device's membership badge {standing}, so a family-gated peer will refuse this \
+                 dial; {}",
+                badge::remedy(node)
+            ),
+            // Alive but inside the window: the dial goes ahead, and the operator is told once, on
+            // stderr, so the line never pollutes a piped result.
+            standing @ badge::Standing::Expiring { .. } => {
+                // The write is discarded on failure, like every other warning in the tree: a closed
+                // stderr must not fail the dial this line only annotates.
+                let _ = writeln!(
+                    warn,
+                    "swoosh: this device's membership badge {standing}; {}",
+                    badge::remedy(node)
+                );
+                Ok(badge)
+            }
+            // Outside the window, or minted before badges carried a readable expiry: nothing useful to
+            // say, so nothing is said.
+            badge::Standing::Live { .. } | badge::Standing::Unknown => Ok(badge),
+        }
     }
 }
 
@@ -292,10 +383,16 @@ mod tests {
         }
     }
 
-    /// The default home for a resolver test: no stored badge/signet, so a `Family` dial falls back to the
-    /// self-sign, exactly as an unprovisioned reach-outward verb does. Mirrors the old `None` key argument.
+    /// An UNPROVISIONED home for a resolver test: no stored badge and no signet, so a `Family` dial
+    /// falls back to the self-sign exactly as a fresh reach-outward verb does.
+    ///
+    /// A unique empty dir, never the default home: the default is the developer's own
+    /// `~/.config/swoosh`, so on any adopted machine these cases would read that machine's real badge
+    /// and the suite would pass or fail by whose laptop it ran on. That was invisible while the
+    /// resolver ignored the badge's expiry; now that it refuses a dead one, it would be a suite that
+    /// dies on the calendar.
     fn test_home() -> Home {
-        Home::resolve(None).expect("resolve the default home")
+        provisioned_home("unprovisioned")
     }
 
     /// A `Family` credential with no `--present` slip and no stored badge falls back to the signet
@@ -505,6 +602,205 @@ mod tests {
         assert!(
             membership.is_none(),
             "a non-signet link-as-peer attaches NO slot 2 (no signet-linkage over-share)"
+        );
+    }
+
+    /// A store dir unique to one case, resolved as an explicit [`Home`], so a resolver case can write a
+    /// real badge and signet the way `adopt` does instead of reading whatever the developer's own home
+    /// happens to hold.
+    fn provisioned_home(tag: &str) -> Home {
+        let dir = std::env::temp_dir().join(format!(
+            "swoosh-reaching-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        Home::resolve(Some(dir)).expect("resolve an explicit home")
+    }
+
+    /// Provision `home` the way `adopt` does: trust `signet`'s key and store the badge it signed for
+    /// `device`, expiring at `expiry`. The badge is really signed and really parses, so a case cannot
+    /// pass against a stand-in string the resolver would never see in the field.
+    async fn adopt_badge(home: &Home, device: &Secret, expiry: SystemTime) -> Secret {
+        let signet = Secret::ephemeral();
+        let badge = signet
+            .cap_identity()
+            .expect("the signet is a cap identity")
+            .mint_member(device.node_id().verify_key(), expiry)
+            .expect("mint a device badge")
+            .seal()
+            .expect("seal the badge")
+            .link()
+            .expect("the badge renders as a link");
+        config::write_signet(home, signet.node_id())
+            .await
+            .expect("write the signet");
+        config::write_badge(home, &badge)
+            .await
+            .expect("write the badge");
+        signet
+    }
+
+    /// A day, the unit the badge's life is measured in.
+    const DAY: core::time::Duration = core::time::Duration::from_secs(24 * 60 * 60);
+
+    /// THE dial-time refusal: a device whose stored badge has expired refuses LOCALLY and never dials.
+    /// The far gate's answer for this is the uniform `not admitted`, which is byte-identical to revoked,
+    /// wrong fleet, never adopted and wrong service, so the one machine that can tell the operator which
+    /// of the five it is has to do it before the dial. The message names the cause and the remedy.
+    #[tokio::test]
+    async fn an_expired_stored_badge_refuses_the_dial_locally() {
+        let home = provisioned_home("expired");
+        let device = Secret::ephemeral();
+        adopt_badge(&home, &device, SystemTime::now() - 6 * DAY).await;
+
+        let mut warned = Vec::new();
+        // `let ... else` rather than `expect_err`: that would need `Debug` on `Resolved`, and a
+        // credential-carrying type does not grow a derive that prints badge bytes for a test's sake.
+        let Err(error) = resolve_to(
+            Credential::Family { present: None },
+            &device,
+            &home,
+            &mut warned,
+        )
+        .await
+        else {
+            panic!("a dead badge cannot be presented");
+        };
+        let report = format!("{error:#}");
+        assert!(
+            report.contains("expired") && report.contains("swoosh invite add"),
+            "the refusal names the cause and the remedy, got: {report}"
+        );
+        assert!(
+            !report.contains("not admitted"),
+            "the gate's uniform refusal must never be spoken on this path: {report}"
+        );
+    }
+
+    /// The warning half: a badge alive but inside the 30-day window dials anyway, and says so ONCE on
+    /// the warn sink. The remedy needs a cold root and a second machine, so the line has to arrive while
+    /// there is still time to act on it.
+    #[tokio::test]
+    async fn a_badge_inside_the_window_warns_and_still_dials() {
+        let home = provisioned_home("inside-window");
+        let device = Secret::ephemeral();
+        adopt_badge(&home, &device, SystemTime::now() + 12 * DAY).await;
+
+        let mut warned = Vec::new();
+        let resolved = resolve_to(
+            Credential::Family { present: None },
+            &device,
+            &home,
+            &mut warned,
+        )
+        .await
+        .expect("a live badge still dials");
+        assert!(
+            resolved.grant.as_str().starts_with("sheer:"),
+            "the dial goes ahead carrying the stored badge"
+        );
+        let warned = String::from_utf8(warned).expect("the warning is utf-8");
+        assert_eq!(warned.lines().count(), 1, "one line, not a paragraph");
+        assert!(
+            warned.contains("expires in") && warned.contains("swoosh invite add"),
+            "the warning names the remaining life and the remedy, got: {warned}"
+        );
+    }
+
+    /// Outside the window there is nothing useful to say, so nothing is said: a warning that fires for
+    /// the badge's whole life is a warning an operator learns to skip past.
+    #[tokio::test]
+    async fn a_badge_outside_the_window_says_nothing() {
+        let home = provisioned_home("outside-window");
+        let device = Secret::ephemeral();
+        adopt_badge(&home, &device, SystemTime::now() + 89 * DAY).await;
+
+        let mut warned = Vec::new();
+        resolve_to(
+            Credential::Family { present: None },
+            &device,
+            &home,
+            &mut warned,
+        )
+        .await
+        .expect("a live badge dials");
+        assert!(
+            warned.is_empty(),
+            "a badge with 89 days to run warns about nothing, got: {}",
+            String::from_utf8_lossy(&warned)
+        );
+    }
+
+    /// The SAFE DIRECTION, and the reason the check sits where the badge becomes a slot rather than
+    /// where it is loaded: a slip pinning a fleet this device is not in drops the stored badge, so the
+    /// dial sends it nothing and the far gate never sees it. Refusing that dial over a dead credential
+    /// it does not carry would turn away a dial the gate would have admitted, which is exactly the
+    /// failure a local refusal must never introduce.
+    #[tokio::test]
+    async fn an_expired_badge_never_refuses_a_dial_that_does_not_carry_it() {
+        let home = provisioned_home("foreign-fleet");
+        let device = Secret::ephemeral();
+        adopt_badge(&home, &device, SystemTime::now() - 6 * DAY).await;
+        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
+        let foreign_fleet = nauthy::Identity::from_secret(&[2u8; 32])
+            .expect("valid fleet secret")
+            .verifying_key();
+        let slip = Link::mint_signet(
+            &work,
+            &"ssh".parse().expect("valid service"),
+            foreign_fleet,
+            core::time::Duration::from_secs(3600),
+        )
+        .expect("mint a signet-bound slip");
+        let slip_text = slip.to_string();
+
+        let mut warned = Vec::new();
+        let resolved = resolve_to(
+            Credential::Family {
+                present: Some(slip),
+            },
+            &device,
+            &home,
+            &mut warned,
+        )
+        .await
+        .expect("a dial that never sends the dead badge is not this device's to refuse");
+        assert_eq!(
+            resolved.grant.as_str(),
+            slip_text,
+            "the slip is still slot 1"
+        );
+        assert!(
+            resolved.membership.is_none(),
+            "the dead badge is dropped, as a foreign-fleet slip always drops it"
+        );
+        assert!(
+            warned.is_empty(),
+            "nothing is warned about a credential this dial does not carry"
+        );
+    }
+
+    /// The signet holder's OWN machine is the one the failure spares today, and it must stay spared: it
+    /// stores no badge and self-signs a five-minute one per dial, so there is no stored life to read and
+    /// no window to be inside. A check that reached this badge would fire on every dial.
+    #[tokio::test]
+    async fn the_signet_holders_self_sign_is_never_checked() {
+        let home = provisioned_home("self-sign");
+        let mut warned = Vec::new();
+        let resolved = resolve_to(
+            Credential::Family { present: None },
+            &Secret::ephemeral(),
+            &home,
+            &mut warned,
+        )
+        .await
+        .expect("a self-signed badge always resolves");
+        assert!(resolved.grant.as_str().starts_with("sheer:"));
+        assert!(
+            warned.is_empty(),
+            "a badge minted seconds ago for five minutes warns about nothing, got: {}",
+            String::from_utf8_lossy(&warned)
         );
     }
 
