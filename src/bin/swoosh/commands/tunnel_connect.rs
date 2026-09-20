@@ -135,18 +135,6 @@ impl swoosh::reaching::Reaching for TunnelConnectCmd {
         &self.reach
     }
 
-    /// `tunnel-connect` (the `swoosh ssh` bridge) reaches a family-gated host, so it presents the member
-    /// badge rooted at the dialing key. It binds `Persisted` for a different reason (dialing under
-    /// swoosh's OWN key so the gate proves the identity the badge was minted for): a non-forgettable
-    /// override, applied in the composition root, not this derivation. A `--present` slip is threaded INTO
-    /// the credential so the ONE resolver owns both slots (slot 1 present-or-badge, slot 2 the fleet badge
-    /// for a signet-bound slip).
-    fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.present.clone(),
-        }
-    }
-
     /// `tunnel-connect`'s peer is a raw key (`swoosh ssh` resolved any petname before re-invoking), never a
     /// self-addressing link, so a `--present` slip can never conflict with the peer. Vacuously satisfied.
     fn reject_redundant_present(&self) -> eyre::Result<()> {
@@ -160,11 +148,17 @@ impl swoosh::reaching::Reaching for TunnelConnectCmd {
         swoosh::identity::Identity::Persisted
     }
 
-    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
-    /// bind must not write the key's address record (0.9.0 F1). It binds `Persisted` to dial under
+    /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the home key,
+    /// so its bind must not write the key's address record (0.9.0 F1); it binds `Persisted` to dial under
     /// swoosh's own key, which is not a reachability claim.
+    ///
+    /// The bridge reaches a family-gated host, so it presents the member badge rooted at the dialing key.
+    /// A `--present` slip is threaded INTO the credential so the ONE resolver owns both slots (slot 1
+    /// present-or-badge, slot 2 the fleet badge for a signet-bound slip).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
+            present: self.present.clone(),
+        })
     }
 
     /// Uniform dispatch: unpack the reach context and run. `tunnel-connect` reads only the resolved

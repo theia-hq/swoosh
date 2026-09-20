@@ -4,25 +4,30 @@
 //! The CLI wiring, proven through the real verb: a reach VERB dialed with a signet-bound `--present` slip
 //! must put the fleet membership badge in wire slot 2, or the gate refuses "slip alone, no fleet badge".
 //!
-//! The 7 diagnostic/control verbs used to thread `--present` themselves and declare
-//! `credential() -> Family { present: None }`, so `resolve()` never saw the slip, never ran
-//! `is_authority_bound()`, and left slot 2 empty. This test drives the REAL verb (clap-parsed, exactly as the
-//! CLI builds it) through `credential() -> resolve() -> slots`, the chain the old `resolve()`-direct unit
-//! test bypassed by hand-constructing `Family { present: Some(slip) }` (a state the verbs never produced).
-//! It also proves the privacy rule survives the verb path: a NON-signet `--present` leaves slot 2 empty,
-//! so a bearer/device dial never leaks the dialer's device-to-signet linkage.
+//! The 7 diagnostic/control verbs used to thread `--present` themselves and declare a credential of
+//! `Family { present: None }`, so `resolve()` never saw the slip, never ran `is_authority_bound()`, and
+//! left slot 2 empty. This test drives the REAL verb (clap-parsed, exactly as the CLI builds it) through
+//! `bind_role() -> resolve() -> slots`, the chain the old `resolve()`-direct unit test bypassed by
+//! hand-constructing `Family { present: Some(slip) }` (a state the verbs never produced). It also proves
+//! the privacy rule survives the verb path: a NON-signet `--present` leaves slot 2 empty, so a
+//! bearer/device dial never leaks the dialer's device-to-signet linkage.
+//!
+//! `forward` rides the same chain: it used to derive slot 1 by hand inside its own `run`, which silently
+//! dropped slot 2 (the resolver is the only code that computes it), so a signet-bound dial through
+//! `forward` was capped at what slot 1 alone could open.
 
 use core::time::Duration;
 
 use bifrost::NodeId;
 use clap::Parser;
 use nauthy::{Identity, Link, Service};
+use swoosh::credential::LinkExt as _;
 use swoosh::home::Home;
 use swoosh::identity::Secret;
-use swoosh::reaching::{self, Reaching};
+use swoosh::reaching::{self, BindRole, Reaching};
 use tightbeam::identity::AsVerifyKey as _;
 
-use crate::commands::ping;
+use crate::commands::{forward, ping};
 
 /// Clap-parse a `ping` verb exactly as the CLI would, so `--present <link>` runs through
 /// [`Link`](nauthy::Link)'s `FromStr` and lands on the real command's field.
@@ -38,6 +43,20 @@ fn ping_with_present(peer: &str, present: &str) -> ping::PingCmd {
         .cmd
 }
 
+/// Clap-parse a `forward` verb exactly as the CLI would: `forward <peer> --to -`, the stdout sink, which
+/// is the shape with no local port to bind. The peer string carries the same three forms `ping`'s does.
+#[derive(Parser)]
+struct ForwardWrap {
+    #[command(flatten)]
+    cmd: forward::ForwardCmd,
+}
+
+fn forward_to_peer(peer: &str) -> forward::ForwardCmd {
+    ForwardWrap::try_parse_from(["forward", peer, "--to", "-"])
+        .expect("the verb parses with a peer")
+        .cmd
+}
+
 /// Clap-parse a `ping` verb whose PEER is the given string (a raw key, a petname, or a `sheer:` link), with
 /// no `--present`: the link-as-peer path, where the peer self-presents its own slip via the credential fold.
 fn ping_with_peer(peer: &str) -> ping::PingCmd {
@@ -48,12 +67,16 @@ fn ping_with_peer(peer: &str) -> ping::PingCmd {
 
 /// Drive the verb's declared credential through the ONE resolver under a caller-supplied `secret` (so the
 /// test controls the dialer's own fleet, which the fleet-match slot-2 rule compares against) and read the
-/// two wire slots, the exact path the composition root runs before dialing.
-async fn slots_for(cmd: &ping::PingCmd, secret: &Secret) -> (Option<Link>, Option<Link>) {
+/// two wire slots, the exact path the composition root runs before dialing. Takes any reaching verb, so
+/// `forward` is proven through the same chain as `ping`.
+async fn slots_for(cmd: &impl Reaching, secret: &Secret) -> (Option<Link>, Option<Link>) {
     // The default home (no stored badge), so a `Family` dial falls back to the self-sign, exactly as an
     // unprovisioned dialer does.
     let home = Home::resolve(None).expect("resolve the default home");
-    reaching::resolve(cmd.credential(), secret, &home)
+    let BindRole::Dialing(credential) = cmd.bind_role() else {
+        panic!("a reaching verb that dials states the credential it dials with");
+    };
+    reaching::resolve(credential, secret, &home)
         .await
         .expect("resolve the verb's credential into wire slots")
         .into_slots()
@@ -117,7 +140,7 @@ async fn a_verb_with_a_bearer_present_slip_leaves_slot_two_empty() {
 #[tokio::test]
 async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
     // Defect #1 at the VERB boundary: `ping sheer:<own-fleet-signet-link>` with NO `--present`. The link is
-    // the PEER; the credential fold self-presents it, so `credential() -> resolve() -> slots` fills slot 1
+    // the PEER; the credential fold self-presents it, so `bind_role() -> resolve() -> slots` fills slot 1
     // (the link) AND slot 2 (the dialer's own fleet badge), IDENTICAL to passing it via `--present`. The
     // slip pins the dialer's OWN fleet so the fleet-match rule attaches slot 2.
     let secret = Secret::ephemeral();
@@ -165,5 +188,71 @@ async fn a_verb_with_a_foreign_fleet_link_as_peer_leaves_slot_two_empty() {
     assert!(
         slot2.is_none(),
         "a link-as-peer pinning a foreign fleet attaches NO slot 2 (no fleet-signet over-share)"
+    );
+}
+
+#[tokio::test]
+async fn forward_presents_the_member_badge_like_its_siblings() {
+    // The shipped defect: `forward` declared no badge, so a member forwarding a port on their OWN gated
+    // node was refused by their own fleet while `ping`/`speed`/`ssh` to the same node worked. A plain
+    // `forward <key> --to -` must resolve slot 1 to the member badge, exactly as `ping <key>` does.
+    let secret = Secret::ephemeral();
+    let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
+
+    let (forward_slot1, forward_slot2) = slots_for(&forward_to_peer(&peer), &secret).await;
+    let badge = forward_slot1
+        .expect("REGRESSION: `forward` must present the member badge, not dial as a stranger");
+    assert!(
+        badge.as_str().starts_with("sheer:"),
+        "slot 1 is the member badge as a sheer: link, got {badge}"
+    );
+    assert_eq!(
+        badge.dial_node(),
+        secret.node_id(),
+        "the badge roots at the key the dial binds under, which is what the family gate proves"
+    );
+    assert!(
+        forward_slot2.is_none(),
+        "a plain member dial attaches NO slot 2 (no signet-linkage over-share)"
+    );
+
+    // The same slots its siblings resolve, which is the whole claim: one fold, one resolver, one wire
+    // shape, so a member is admitted (or refused) identically whichever verb they reach with.
+    let (ping_slot1, ping_slot2) = slots_for(&ping_with_peer(&peer), &secret).await;
+    assert_eq!(
+        ping_slot1.map(|grant| grant.dial_node()),
+        Some(secret.node_id()),
+        "`ping` presents the same self-signed member badge `forward` now does"
+    );
+    assert!(
+        ping_slot2.is_none(),
+        "neither plain member dial attaches slot 2"
+    );
+}
+
+#[tokio::test]
+async fn forward_with_a_signet_bound_link_as_peer_fills_slot_two() {
+    // `forward`'s bearer-only ceiling: it derived slot 1 by hand inside its own `run`, and the resolver is
+    // the ONLY code that computes slot 2, so a signet-bound link through `forward` arrived without the
+    // fleet badge its gate ANDs. Reading both slots off the shared resolver is what lifts the ceiling.
+    let secret = Secret::ephemeral();
+    let work = Identity::from_secret(&[1u8; 32]).unwrap();
+    let fleet = secret.node_id().verify_key();
+    let service: Service = "ssh".parse().unwrap();
+    let link = Link::mint_signet(&work, &service, fleet, Duration::from_secs(3600)).unwrap();
+
+    let (slot1, slot2) = slots_for(&forward_to_peer(link.as_str()), &secret).await;
+
+    assert_eq!(
+        slot1.as_ref().map(Link::as_str),
+        Some(link.as_str()),
+        "the link-as-peer is slot 1 (the grant)"
+    );
+    let badge = slot2.expect(
+        "REGRESSION: a signet-bound `forward` must fill slot 2 with the dialer's fleet badge",
+    );
+    assert!(
+        badge.as_str().starts_with("sheer:") && badge.as_str() != link.as_str(),
+        "slot 2 is the dialer's own member badge, not the link: {badge}"
     );
 }

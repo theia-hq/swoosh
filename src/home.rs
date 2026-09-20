@@ -17,9 +17,9 @@ use eyre::eyre;
 /// The node home: the directory every file this node owns lives in.
 ///
 /// Construct it once at the composition root from the `--home`/`SWOOSH_HOME` selection ([`Home::resolve`]),
-/// then thread it where a verb needs a node path. It also remembers whether the home was named EXPLICITLY:
-/// an explicit home pins the identity even for a reach-outward verb (which otherwise mints an ephemeral
-/// key), the override the retired explicit `--key` carried.
+/// then thread it where a verb needs a node path. It also remembers whether the home was named EXPLICITLY,
+/// which is what a surface that RE-INVOKES swoosh must know: the `ssh` bridge forwards a named home to its
+/// ProxyCommand so both halves read one node, and lets the default carry itself.
 #[derive(Debug, Clone)]
 pub struct Home {
     dir: PathBuf,
@@ -33,11 +33,14 @@ pub struct Home {
 /// widening a boolean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Selection {
-    /// The default home, when neither `--home` nor `SWOOSH_HOME` is given. A reach-outward verb keeps its
-    /// own intent (ephemeral by default), so a plain `swoosh ping` still mints a throwaway key.
+    /// The default home, when neither `--home` nor `SWOOSH_HOME` is given. It carries itself into a
+    /// re-invocation, so nothing has to forward it.
     Default,
-    /// A home named explicitly. Pins the identity for every verb, so an outward dial roots at this home's
-    /// key rather than a fresh ephemeral one.
+    /// A home named explicitly. A surface that re-invokes swoosh must forward it, or the second half
+    /// reads a different node than the first. It selects WHERE this node's files live and nothing more:
+    /// a verb's own intent still decides whether a key is written (see [`identity::resolve`]).
+    ///
+    /// [`identity::resolve`]: crate::identity::resolve
     Explicit,
 }
 
@@ -68,10 +71,8 @@ impl Home {
         &self.dir
     }
 
-    /// Whether the home was named explicitly (`--home`/`SWOOSH_HOME`) rather than defaulted. An explicit
-    /// home pins the identity even for a reach-outward verb; see [`Selection`] and [`identity::resolve`].
-    ///
-    /// [`identity::resolve`]: crate::identity::resolve
+    /// Whether the home was named explicitly (`--home`/`SWOOSH_HOME`) rather than defaulted, for a
+    /// surface that re-invokes swoosh and must forward the same home; see [`Selection`].
     pub fn is_explicit(&self) -> bool {
         self.selection == Selection::Explicit
     }

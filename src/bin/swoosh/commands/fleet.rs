@@ -51,28 +51,25 @@ impl swoosh::reaching::Reaching for FleetCmd {
         &self.reach
     }
 
-    /// `fleet --pull` reaches the coordination node's family-gated `roster:` service, so it presents the
-    /// member badge rooted at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The
-    /// effective slip is the FOLD of a self-addressing `sheer:` link in the `--pull` peer with an explicit
-    /// `--present`, threaded INTO the credential so the ONE resolver owns both slots.
-    fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.pull.self_present().or_else(|| self.present.clone()),
-        }
-    }
-
     fn reject_redundant_present(&self) -> eyre::Result<()> {
         self.pull.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> swoosh::identity::Identity {
-        self.credential().identity()
+        self.bind_role().identity()
     }
 
-    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
-    /// bind must not write the key's address record (0.9.0 F1).
+    /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
+    /// home key, so its bind must not write the key's address record (0.9.0 F1).
+    ///
+    /// `fleet --pull` reaches the coordination node's family-gated `roster:` service, so it presents the
+    /// member badge rooted at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The
+    /// effective slip is the FOLD of a self-addressing `sheer:` link in the `--pull` peer with an explicit
+    /// `--present`, threaded INTO the credential so the ONE resolver owns both slots.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
+            present: self.pull.self_present().or_else(|| self.present.clone()),
+        })
     }
 
     /// Uniform dispatch: unpack the reach context and run. `fleet` reads `contacts` (to resolve a petname in

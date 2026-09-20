@@ -70,9 +70,9 @@ impl ReachArgs {
     /// The relay and the resolver THIS run binds over: each flag if it was given, else the file `serve`
     /// wrote under this home, else n0's.
     ///
-    /// Read on a DEFAULT home too. A dial-only verb under the default home mints an ephemeral key and
-    /// otherwise never opens the home at all, so without this a `swoosh ping` would quietly go back to
-    /// n0's resolver and never find a fleet that publishes to its own.
+    /// Read on a DEFAULT home too. A dial-only verb reads its key from the home and otherwise barely
+    /// opens it, so without this a `swoosh ping` would quietly go back to n0's resolver and never find a
+    /// fleet that publishes to its own.
     pub async fn reach(&self, home: &Home) -> eyre::Result<Reach> {
         let relay = match Option::clone(&self.relay) {
             Some(url) => Some(url),

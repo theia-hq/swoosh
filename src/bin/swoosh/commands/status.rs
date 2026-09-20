@@ -59,20 +59,6 @@ impl swoosh::reaching::Reaching for StatusCmd {
         &self.reach
     }
 
-    /// `status` probes the peer's family-gated `ping` service, so it presents the member badge rooted at
-    /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. The
-    /// effective slip is the FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`,
-    /// threaded INTO the credential so the ONE resolver owns both slots.
-    fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self
-                .peer
-                .as_ref()
-                .and_then(Peer::self_present)
-                .or_else(|| self.present.clone()),
-        }
-    }
-
     fn reject_redundant_present(&self) -> eyre::Result<()> {
         match &self.peer {
             Some(peer) => peer.reject_redundant_present(self.present.as_ref()),
@@ -81,13 +67,24 @@ impl swoosh::reaching::Reaching for StatusCmd {
     }
 
     fn identity(&self) -> swoosh::identity::Identity {
-        self.credential().identity()
+        self.bind_role().identity()
     }
 
-    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
-    /// bind must not write the key's address record (0.9.0 F1).
+    /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
+    /// home key, so its bind must not write the key's address record (0.9.0 F1).
+    ///
+    /// `status` probes the peer's family-gated `ping` service, so it presents the member badge rooted at
+    /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. The
+    /// effective slip is the FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`,
+    /// threaded INTO the credential so the ONE resolver owns both slots.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
+            present: self
+                .peer
+                .as_ref()
+                .and_then(Peer::self_present)
+                .or_else(|| self.present.clone()),
+        })
     }
 
     /// Uniform dispatch: unpack the reach context and run. `status` reads `contacts`, the `transport`
@@ -130,7 +127,7 @@ impl StatusCmd {
         };
         let candidates = reach::candidates(&peer, contacts)?;
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
-        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
+        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, so the verb never threads `--present` itself.
 
         // Report each device, folding how far each one got: the exit code is green only if some device

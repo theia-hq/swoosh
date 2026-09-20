@@ -24,7 +24,6 @@ use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Transport};
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use nauthy::Link;
 use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::home::Home;
 use swoosh::identity::Identity;
@@ -178,15 +177,6 @@ macro_rules! reaching_verbs {
                 }
             }
 
-            /// How this verb authenticates: the ONE place a verb's auth need lives. There is no wildcard to
-            /// fall through, and [`credential`](Reaching::credential) is total, so a verb that reaches a
-            /// family-gated service without a badge is unrepresentable.
-            fn credential(&self) -> credential::Credential {
-                match self {
-                    $(Self::$verb(cmd) => cmd.credential(),)+
-                }
-            }
-
             /// Reject a redundant `--present` alongside a self-addressing `sheer:` link peer, ONCE for every
             /// reaching verb, so the guard can never be forgotten in a verb's own `run`.
             fn reject_redundant_present(&self) -> eyre::Result<()> {
@@ -195,19 +185,18 @@ macro_rules! reaching_verbs {
                 }
             }
 
-            /// The identity this verb binds under. For the reach-outward verbs it derives from the
-            /// credential (`Family -> PersistedIfPresent`, `Anonymous -> Ephemeral`), so identity and badge
-            /// cannot disagree; `serve`/`tunnel-connect` declare `Persisted` explicitly. An explicit
-            /// `--home` still overrides either (see [`swoosh::identity::resolve`]).
+            /// The identity this verb binds under. For the reach-outward verbs it derives from the bind
+            /// role's credential (`Family -> PersistedIfPresent`), so identity and badge cannot disagree;
+            /// `serve`/`tunnel-connect` declare `Persisted` explicitly.
             fn identity(&self) -> Identity {
                 match self {
                     $(Self::$verb(cmd) => cmd.identity(),)+
                 }
             }
 
-            /// Whether this verb's bind writes the home key's address record. Read BEFORE the bind, since it
-            /// selects the iroh constructor: only `serve` publishes, so a short-lived command cannot
-            /// overwrite the live record (0.9.0 F1).
+            /// What this verb's bind is for, and (when it dials) what it presents. Read BEFORE the bind,
+            /// since it selects the iroh constructor: only `serve` publishes, so a short-lived command
+            /// cannot overwrite the live record (0.9.0 F1), and only a dialing verb resolves slots.
             fn bind_role(&self) -> BindRole {
                 match self {
                     $(Self::$verb(cmd) => cmd.bind_role(),)+
@@ -242,8 +231,9 @@ reaching_verbs! {
     Speed(speed::SpeedCmd),
     Status(status::StatusCmd),
     Fetch(fetch::FetchCmd),
-    /// `swoosh forward`: bind a peer's served service to a local port. A dial-only client (it presents a
-    /// link, not swoosh's identity), so it rides the reach path like the other reach-outward verbs.
+    /// `swoosh forward`: bind a peer's served service to a local port. Presents a membership badge (like
+    /// `ping`/`send`), which a `--present` slip overrides, so it rides the reach path under the persisted
+    /// identity when one exists.
     Forward(forward::ForwardCmd),
     /// `swoosh send`: push files to a peer's gated `recv:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
@@ -390,26 +380,6 @@ impl Reach {
             Self::Serve(cmd) => Self::Serve(cmd.with_bound_reach(transport::Reach::clone(bound))),
             verb => verb,
         }
-    }
-
-    /// The two credential slots to present when dialing, DERIVED from [`credential`](Self::credential) via
-    /// the single [`resolve`](reaching::resolve) home of the `--present`-overrides-self-badge rule: slot 1
-    /// the grant, slot 2 a membership badge for a signet-bound slip's AND. There is no wildcard
-    /// `_ => Ok((None, None))`: a verb's badge is whatever its `Credential` resolves to, so a verb that
-    /// reaches a family-gated service without a badge is unrepresentable (the fleet/fetch bug class).
-    ///
-    /// Computed here, in the composition root, because it needs the resolved secret before the transport
-    /// consumes it. `Anonymous` resolves to no slots; `Family` resolves slot 2 to the STORED signet-signed
-    /// badge, else the signet holder's self-sign, and slot 1 to a `--present` slip if given, else the same
-    /// badge mirrored.
-    async fn present_slots(
-        &self,
-        secret: &swoosh::identity::Secret,
-        home: &Home,
-    ) -> eyre::Result<(Option<Link>, Option<Link>)> {
-        Ok(reaching::resolve(self.credential(), secret, home)
-            .await?
-            .into_slots())
     }
 
     /// The exposer context `serve` needs, resolved before the secret is consumed by the transport bind:
@@ -644,9 +614,9 @@ async fn run() -> eyre::Result<()> {
     // petname in its peer slot.
     let store = ContactsStore::open(home.contacts()).await?;
 
-    // The verb decides its identity: `serve` persists so it is reachable at one address, the reach-
-    // outward verbs mint a fresh ephemeral key, and an explicit `--home` pins either. Resolve it before
-    // binding, since the secret is what the transport is bound under.
+    // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward
+    // verb binds the home's key where one exists (its badge roots there) and a throwaway where none does,
+    // writing nothing. Resolve it before binding, since the secret is what the transport is bound under.
     let secret = swoosh::identity::resolve(reach.identity(), &home).await?;
     let contacts = Contacts::clone(store.contacts());
 
@@ -658,7 +628,8 @@ async fn run() -> eyre::Result<()> {
     let local = reach.reach_args().local;
     // The verb's bind role, read BEFORE the bind selects a constructor: only a `Serving` verb publishes
     // the home key's address record, so a dial-only command never overwrites the live `serve` record
-    // (0.9.0 F1). Read here, before `reach` is consumed by dispatch.
+    // (0.9.0 F1). It carries the dialing verb's credential too, so the one read below answers both what
+    // this bind publishes and what it presents. Read here, before `reach` is consumed by dispatch.
     let bind_role = reach.bind_role();
     let peers = reach.reach_args().peer.clone();
     // What this run bound, as ONE value: every consumer (a verb reporting its backend, a failed dial's
@@ -678,7 +649,7 @@ async fn run() -> eyre::Result<()> {
                 // A serving verb OWNS the home, so the two servers it was pointed at become the home's
                 // and every later verb under it reaches the same fleet with no flags repeated. A dialing
                 // verb's flag is this run only, so it writes nothing.
-                if bind_role == BindRole::Serving {
+                if matches!(bind_role, BindRole::Serving) {
                     reach.reach_args().persist_reach(&home).await?;
                 }
                 composed
@@ -694,7 +665,18 @@ async fn run() -> eyre::Result<()> {
     // under, so the far gate's device-binding matches); the signet holder self-signs one against the same
     // key for the same reason. The exposer context (`serve`) is resolved before the bind too: its ssh
     // host seed derives from the secret before the bind consumes it.
-    let (present, membership) = reach.present_slots(&secret, &home).await?;
+    //
+    // The SERVING verb resolves nothing: it is the gate, so it presents no credential and never mints or
+    // loads a badge it would not send. There is no wildcard here and no "present nothing" credential for a
+    // dialing verb to reach for: the role it declared decides, and only one of its arms carries slots.
+    let (present, membership) = match &bind_role {
+        BindRole::Serving => (None, None),
+        BindRole::Dialing(dial) => {
+            reaching::resolve(credential::Credential::clone(dial), &secret, &home)
+                .await?
+                .into_slots()
+        }
+    };
     let expose = reach
         .expose_context(&secret, store.contacts(), &home)
         .await?;
@@ -718,7 +700,7 @@ async fn run() -> eyre::Result<()> {
         // role picks the n0 constructor (serving publishes the address record, dialing does not);
         // `--local` keeps the same arm and swaps in the persisted key with no n0, no relays.
         transport::Transport::Iroh => {
-            let endpoint = match IrohBind::of(local, bind_role) {
+            let endpoint = match IrohBind::of(local, &bind_role) {
                 IrohBind::Reachable => {
                     bifrost_iroh::Endpoint::bind_reachable_with_secret_via(
                         secret.into_bytes(),
@@ -785,13 +767,13 @@ enum IrohBind {
 impl IrohBind {
     /// Map the `--local` bit and the verb's [`BindRole`] to the constructor they select. `--local` wins:
     /// it removes n0 entirely, so there is no discovery to resolve and no record to write either way.
-    fn of(local: bool, role: BindRole) -> Self {
+    fn of(local: bool, role: &BindRole) -> Self {
         if local {
             Self::Local
         } else {
             match role {
                 BindRole::Serving => Self::Reachable,
-                BindRole::Dialing => Self::Dialing,
+                BindRole::Dialing(_) => Self::Dialing,
             }
         }
     }
@@ -1191,39 +1173,41 @@ mod tests {
     /// and the composition root's match has an arm per mode with no wildcard.
     #[test]
     fn the_local_flag_and_bind_role_select_the_iroh_constructor() {
-        assert_eq!(IrohBind::of(false, BindRole::Serving), IrohBind::Reachable);
-        assert_eq!(IrohBind::of(false, BindRole::Dialing), IrohBind::Dialing);
-        assert_eq!(IrohBind::of(true, BindRole::Serving), IrohBind::Local);
-        assert_eq!(IrohBind::of(true, BindRole::Dialing), IrohBind::Local);
+        let dialing = || BindRole::Dialing(credential::Credential::Family { present: None });
+        assert_eq!(IrohBind::of(false, &BindRole::Serving), IrohBind::Reachable);
+        assert_eq!(IrohBind::of(false, &dialing()), IrohBind::Dialing);
+        assert_eq!(IrohBind::of(true, &BindRole::Serving), IrohBind::Local);
+        assert_eq!(IrohBind::of(true, &dialing()), IrohBind::Local);
     }
 
     /// F1 (0.9.1): only `serve` writes the home key's address record. A dialing verb on the serving
     /// machine must not touch what other machines resolve, and the table fails on the old switch (every
-    /// verb selected the publishing constructor). One parseable argv per reach verb, split to its
-    /// [`Verb::Reach`] arm.
+    /// verb selected the publishing constructor). Asserted through the constructor each role selects,
+    /// which is the observable consequence the bind acts on. One parseable argv per reach verb, split to
+    /// its [`Verb::Reach`] arm.
     #[test]
     fn only_serve_registers_the_node_record() {
         let key = NodeId::from_ed25519_secret(&[7u8; 32]).to_string();
-        let cases: Vec<(Vec<&str>, BindRole)> = vec![
-            (vec!["swoosh", "serve"], BindRole::Serving),
-            (vec!["swoosh", "ping", &key], BindRole::Dialing),
-            (vec!["swoosh", "speed", &key], BindRole::Dialing),
-            (vec!["swoosh", "status", &key], BindRole::Dialing),
+        let cases: Vec<(Vec<&str>, IrohBind)> = vec![
+            (vec!["swoosh", "serve"], IrohBind::Reachable),
+            (vec!["swoosh", "ping", &key], IrohBind::Dialing),
+            (vec!["swoosh", "speed", &key], IrohBind::Dialing),
+            (vec!["swoosh", "status", &key], IrohBind::Dialing),
             (
                 vec!["swoosh", "fetch", "https://example.com", "--via", &key],
-                BindRole::Dialing,
+                IrohBind::Dialing,
             ),
             (
                 vec!["swoosh", "forward", &key, "--to", "-"],
-                BindRole::Dialing,
+                IrohBind::Dialing,
             ),
-            (vec!["swoosh", "send", "notes.md", &key], BindRole::Dialing),
-            (vec!["swoosh", "stop", "--at", &key], BindRole::Dialing),
+            (vec!["swoosh", "send", "notes.md", &key], IrohBind::Dialing),
+            (vec!["swoosh", "stop", "--at", &key], IrohBind::Dialing),
             (
                 vec!["swoosh", "service", "ls", "--at", &key],
-                BindRole::Dialing,
+                IrohBind::Dialing,
             ),
-            (vec!["swoosh", "fleet", "--pull", &key], BindRole::Dialing),
+            (vec!["swoosh", "fleet", "--pull", &key], IrohBind::Dialing),
             (
                 vec![
                     "swoosh",
@@ -1234,7 +1218,7 @@ mod tests {
                     "--to",
                     "-",
                 ],
-                BindRole::Dialing,
+                IrohBind::Dialing,
             ),
         ];
 
@@ -1248,9 +1232,9 @@ mod tests {
                 panic!("{argv:?} must split to the reach path");
             };
             assert_eq!(
-                reach.bind_role(),
+                IrohBind::of(false, &reach.bind_role()),
                 expected,
-                "{argv:?} must declare {expected:?}"
+                "{argv:?} must select the {expected:?} constructor"
             );
         }
     }
@@ -1272,8 +1256,8 @@ mod tests {
             "--public names the same opened set"
         );
         assert!(
-            matches!(cmd.credential(), credential::Credential::Anonymous),
-            "serve still dials as no one"
+            matches!(cmd.bind_role(), BindRole::Serving),
+            "serve still serves, and states no dial credential"
         );
         assert_eq!(
             cmd.identity(),

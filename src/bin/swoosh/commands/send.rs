@@ -66,29 +66,26 @@ impl swoosh::reaching::Reaching for SendCmd {
         &self.reach
     }
 
-    /// `send` pushes to the peer's family-gated `recv:` service, so it presents the member badge rooted
-    /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The effective slip is the
-    /// FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded INTO the
-    /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
-    /// badge exactly as a `--present` link does).
-    fn credential(&self) -> swoosh::credential::Credential {
-        swoosh::credential::Credential::Family {
-            present: self.peer.self_present().or_else(|| self.present.clone()),
-        }
-    }
-
     fn reject_redundant_present(&self) -> eyre::Result<()> {
         self.peer.reject_redundant_present(self.present.as_ref())
     }
 
     fn identity(&self) -> swoosh::identity::Identity {
-        self.credential().identity()
+        self.bind_role().identity()
     }
 
-    /// Dialing only: this verb reaches a peer, it never accepts connections under the home key, so its
-    /// bind must not write the key's address record (0.9.0 F1).
+    /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
+    /// home key, so its bind must not write the key's address record (0.9.0 F1).
+    ///
+    /// `send` pushes to the peer's family-gated `recv:` service, so it presents the member badge rooted
+    /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The effective slip is the
+    /// FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded INTO the
+    /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
+    /// badge exactly as a `--present` link does).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
+            present: self.peer.self_present().or_else(|| self.present.clone()),
+        })
     }
 
     /// Uniform dispatch: unpack the reach context and run. `send` reads the resolved `present` badge and
@@ -120,7 +117,7 @@ impl SendCmd {
         membership: Option<Link>,
     ) -> eyre::Result<()> {
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
-        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `credential()` routed a
+        // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
         // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
         let service = self.service.parse::<Service>()?;
