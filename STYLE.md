@@ -63,6 +63,17 @@ The code should be beautiful to read and tell a story as you scroll._
 - **Bind behavior to types.** A free function is legitimate only as a pure helper over no receiver you own, a policy resolver at the right layer over foreign inputs, or a boundary adapter for a type that lives in a lower crate. Auth operations are methods on the credential type, never functions over link text.
 - **A layer touches only its own concern.** A byte-moving layer knows nothing of paths or files; naming and temp-then-rename belong to the application.
 - **A wire contract has one home,** the crate that writes it; a consumer imports the declaration or carries a typed error.
+- **Both ends of a wire you define, or neither.** The crate that defines a frame ships the writer, the reader, and the caps both of them enforce, in one place. Shipping one end and leaving the other to a consumer guarantees a second copy of the format in a crate that cannot see this one change, and the two drift on the first edit. If only one end is legitimately yours, you are speaking someone else's wire: import their codec rather than restating half of it.
+- **A wire magic is four bytes: an identity, then a version.** Identity is the maximal leading `[A-Z]` run, version is the trailing digits, and that one rule parses every magic (`TB04` is `TB` + `04`, `TBH1` is `TBH` + `1`), so a 2+2 and a 3+1 magic are the same pattern rather than two. The identity is frozen for the life of the wire and a mismatch means only "not our protocol"; the version names the grammar, and a mismatch is answered WHERE THERE IS ANYONE TO ANSWER. Three conditions, not two: an unknown identity is not our protocol, a known identity at an unserved version is a peer worth telling, and a transport failure is neither. Answering is the default because silence there sends an operator hunting a broken network instead of a version skew, but it is not unconditional and two of the wires below rightly refuse it. A codec whose caller is the one that can speak (an unframed blob wire, where the sender is still writing when the receiver reads) answers through its error, not on the wire. A codec reading SPOOFABLE datagrams must drop in silence: a reply to an unauthenticated packet whose source address is a claim makes the endpoint a reflector, and that outweighs the diagnostic every time. A new wire's identity MUST NOT be a prefix of an existing one, because a reader that compares a fixed-width prefix instead of parsing the run reads the neighbour as another version of itself. Const-assert the split beside the constant.
+
+  | magic | identity | version | the wire |
+  | ----- | -------- | ------- | -------- |
+  | `BFW1` | `BFW` | `1` | verified one-shot blob transfer |
+  | `DG02` | `DG` | `02` | the datagram round-trip probe |
+  | `QRK0` | `QRK` | `0` | the from-scratch QUIC packet codec |
+  | `SWC1` | `SWC` | `1` | the local control socket |
+  | `TB04` | `TB` | `04` | the service tunnel preamble |
+  | `TBH1` | `TBH` | `1` | the HTTP-shaped service request |
 
 ## Layout
 - **Top-down story.** A high-level item references helpers defined below it.

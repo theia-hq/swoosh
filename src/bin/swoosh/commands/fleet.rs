@@ -21,12 +21,8 @@ use swoosh::roster;
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
 use tightbeam::identity::AsVerifyKey as _;
+use tokio::io;
 use tokio::io::AsyncReadExt as _;
-
-/// The maximum roster blob a pull reads before refusing. A personal fleet's signed snapshot is far smaller;
-/// the bound stops a hostile coordination node from making the puller allocate unboundedly before the
-/// signature is even checked.
-const MAX_ROSTER_BLOB: u64 = 1 << 20;
 
 /// Learn your fleet from a coordination node: pull, verify, and fold its members into your contacts.
 #[derive(Debug, Args)]
@@ -141,8 +137,7 @@ impl FleetCmd {
             .wrap_err("the coordination node refused the roster read")
             .map_err(|error| Unbound::name_the_entry(error, roster_service))?;
         drop(send); // a roster is a read; we send nothing, so the handler's write half completes
-        let mut bytes = Vec::new();
-        recv.take(MAX_ROSTER_BLOB).read_to_end(&mut bytes).await?;
+        let bytes = read_roster(recv, &self.peer).await?;
 
         // VERIFY against the signet, then parse the payload, as ONE seam. A forged or foreign roster is
         // refused here, before any contact is touched. The EMPTY case is split out: a node that has cut
@@ -221,3 +216,38 @@ impl FleetCmd {
         Ok(())
     }
 }
+
+/// Read the coordination node's signed roster blob under the wire's own bound.
+///
+/// The untrusted end here is the SERVER: these bytes are a remote node's, and an unbounded `read_to_end`
+/// lets that node grow this client's buffer for as long as it cares to stream, at 1:1 cost to itself. The
+/// parse-side caps in [`roster`] cannot help, because by the time they run the buffer already holds
+/// everything the peer sent. So the bound goes on the READ, before the first byte lands, and it is the
+/// roster wire's own [`MAX_ROSTER_BLOB`](roster::MAX_ROSTER_BLOB), derived from the very limits the parser
+/// enforces, rather than a number chosen at this call site.
+///
+/// It reads exactly ONE byte past that bound, purely to tell a roster sitting at the ceiling (legitimate,
+/// and verifies) from a node still streaming (not). Without that byte a maximal roster is silently cut
+/// short by the read, and its short bytes then fail the signature check: the operator is told their own
+/// coordination node is serving an unverifiable roster, which sends them hunting a forgery when all that
+/// happened is that the read stopped early.
+async fn read_roster(reader: impl io::AsyncRead + Unpin, peer: &Peer) -> eyre::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(roster::MAX_ROSTER_BLOB + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() as u64 > roster::MAX_ROSTER_BLOB {
+        eyre::bail!(
+            "{peer} sent more than a roster can be, so the read stopped at {} bytes rather than \
+             buffering whatever the peer streams. No fleet this build can sign is that large, so check \
+             that {peer} is the node you meant",
+            roster::MAX_ROSTER_BLOB
+        );
+    }
+    Ok(bytes)
+}
+
+#[cfg(test)]
+#[path = "fleet_tests.rs"]
+mod fleet_tests;

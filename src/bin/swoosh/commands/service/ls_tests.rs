@@ -1,15 +1,19 @@
 //! S4 tests: the bare `service ls` read renders the live menu table with disabled markers and
 //! teaches when no resident is addressable under the home.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::pin::Pin;
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::task::{Context, Poll};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::Parser as _;
 use swoosh::home::Home;
 use swoosh::serve::control_codec::DisabledList;
-use tightbeam::tunnel::ServiceCatalog;
+use tightbeam::tunnel::{MAX_CATALOG_BLOB, ServiceCatalog};
+use tokio::io;
 
-use super::{ServiceLsCmd, disabled_warning, render_catalog};
+use super::{ServiceLsCmd, disabled_warning, read_catalog, render_catalog};
 
 /// Serializes scratch names within this test process; the pid keeps two concurrent runs apart.
 static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -223,4 +227,102 @@ async fn bare_ls_rejects_present() {
     );
 
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// How many times the wire's own cap the flooding fixture offers. Comfortably past the cap so a bounded
+/// read is visibly bounded, and finite so that REMOVING the cap fails the assertions below instead of
+/// hanging the suite on an endless peer, which reports nothing.
+const FLOOD_MULTIPLE: u64 = 4;
+
+/// The byte the flood is made of: any non-zero value, so a capless read decodes as a wildly over-count
+/// catalog rather than as the empty one a zero count would spell.
+const FLOOD_BYTE: u8 = 0xAA;
+
+/// A hostile peer on the serving end of `control.services`: it answers the read with `remaining` bytes of
+/// noise and counts what it actually handed over.
+///
+/// What the counter proves and does not prove. It CANNOT see allocations: this workspace denies `unsafe`,
+/// so a test cannot install an allocator probe and assert a `Vec`'s capacity from outside. What it can see
+/// is how many bytes the peer got to deliver, and `read_to_end` cannot buffer bytes it was never given, so
+/// a delivery bounded at the cap is a buffer bounded at the cap. That is the property the guard exists for,
+/// measured at the only seam a safe test can observe it from.
+struct FloodingPeer {
+    /// Bytes still on offer; the fixture reports EOF once it reaches zero.
+    remaining: u64,
+    /// Bytes actually handed to the reader, shared so the test can read it after the refusal.
+    delivered: Arc<AtomicU64>,
+}
+
+impl io::AsyncRead for FloodingPeer {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let want = usize::try_from(self.remaining)
+            .unwrap_or(usize::MAX)
+            .min(buf.remaining());
+        // Filling nothing is how this fixture spells EOF: the peer has streamed all it offered.
+        if want > 0 {
+            buf.initialize_unfilled_to(want).fill(FLOOD_BYTE);
+            buf.advance(want);
+            self.remaining -= want as u64;
+            self.delivered.fetch_add(want as u64, Ordering::Relaxed);
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+/// An honest peer's menu still reads: the bound admits everything a real catalog is, so the guard costs
+/// the normal path nothing (zero, one, many).
+#[tokio::test]
+async fn a_peer_under_the_cap_reads_its_menu() {
+    let dial = bifrost::NodeId::from_ed25519_secret(&[4u8; 32]);
+    for entries in [&[][..], &[("ping", 0)][..], &[("ping", 0), ("logs", 1)][..]] {
+        let menu = catalog(entries);
+        let blob = menu.encode().expect("a real menu is under the wire bound");
+        let read = read_catalog(&blob[..], dial)
+            .await
+            .expect("an honest peer's menu reads");
+        assert_eq!(read, menu, "the menu survives the bounded read");
+    }
+}
+
+/// `service ls --at <peer>` reads bytes a REMOTE node chooses, so the peer is the attacker here: without a
+/// bound on the READ it can grow this client's buffer for as long as it cares to stream, and the decoder's
+/// own caps cannot help because the buffer is already full by the time decode is called.
+///
+/// The fixture offers FLOOD_MULTIPLE times the wire's cap and the client must refuse, having accepted no
+/// more than the cap plus the one byte that tells at-the-ceiling from over-it. See [`FloodingPeer`] for
+/// what the byte counter does and does not prove.
+#[tokio::test]
+async fn a_flooding_peer_is_refused_before_it_fills_the_buffer() {
+    let delivered = Arc::new(AtomicU64::new(0));
+    let peer = FloodingPeer {
+        remaining: MAX_CATALOG_BLOB * FLOOD_MULTIPLE,
+        delivered: Arc::clone(&delivered),
+    };
+    let dial = bifrost::NodeId::from_ed25519_secret(&[9u8; 32]);
+
+    let Err(error) = read_catalog(peer, dial).await else {
+        panic!("a peer streaming past the cap must be refused, never buffered");
+    };
+    // The negative assertion FIRST, and on the TEXT rather than merely on the error: with the cap removed
+    // this read still fails, in the DECODER, on a blob four times the size. A test that asked only for an
+    // error would stay green with the guard gone and report the protection as covered.
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("sent more than a service menu can be"),
+        "the refusal says the peer overran the read, not that its menu is malformed: {message}"
+    );
+    assert!(
+        message.contains(&dial.to_string()),
+        "the refusal names which peer did it: {message}"
+    );
+    assert!(
+        delivered.load(Ordering::Relaxed) <= MAX_CATALOG_BLOB + 1,
+        "the client took {} bytes of the {} the peer offered; the read is not bounded",
+        delivered.load(Ordering::Relaxed),
+        MAX_CATALOG_BLOB * FLOOD_MULTIPLE
+    );
 }

@@ -8,7 +8,9 @@ use core::str::FromStr as _;
 
 use nauthy::{Identity, SignError, VerifyKey};
 
-use super::{Epoch, Member, RosterDoc, RosterError, RosterVerifyError};
+use super::{
+    Epoch, MAX_MEMBERS, MAX_ROSTER_BLOB, Member, RosterDoc, RosterError, RosterVerifyError,
+};
 use crate::contacts::DeviceLabel;
 
 /// A deterministic signing identity for the sign/verify tests.
@@ -206,5 +208,44 @@ fn parse_rejects_too_many_members() {
     assert_eq!(
         RosterDoc::parse_canonical(&bytes),
         Err(RosterError::TooManyMembers)
+    );
+}
+
+/// The largest roster the parser accepts, cut for real: [`MAX_MEMBERS`] members, each label at
+/// [`DeviceLabel::MAX_LEN`], signed into the envelope a courier serves.
+fn maximal_blob(id: &Identity) -> Vec<u8> {
+    let members = (0..MAX_MEMBERS)
+        .map(|nth| Member {
+            // Distinct and non-colliding: the first two bytes carry the index, which MAX_MEMBERS fits.
+            node: VerifyKey::new({
+                let mut bytes = [0u8; VerifyKey::LEN];
+                bytes[..2].copy_from_slice(&(nth as u16).to_be_bytes());
+                bytes
+            }),
+            label: DeviceLabel::from_str(&"n".repeat(DeviceLabel::MAX_LEN)).unwrap(),
+        })
+        .collect();
+    super::cut(id, &RosterDoc::new(Epoch(u64::MAX), members).unwrap())
+}
+
+#[test]
+fn the_largest_roster_the_parser_accepts_is_exactly_the_blob_bound() {
+    // The blob bound is DERIVED, so this pins the derivation to the wire it describes: a roster at every
+    // field bound the parser enforces, in the envelope `cut` writes, is EXACTLY MAX_ROSTER_BLOB bytes. A
+    // framing change the expression does not follow fails here rather than as a reader's cap that quietly
+    // admits less, or more, than the parser does. It also holds the one term the derivation cannot name,
+    // nauthy's private signature length: an envelope change over there lands on this assertion.
+    let id = identity(7);
+    let blob = maximal_blob(&id);
+    assert_eq!(
+        blob.len() as u64,
+        MAX_ROSTER_BLOB,
+        "a reader's cap derived from these bounds must be attainable to the byte"
+    );
+    // And the blob at the ceiling is one the whole seam takes: a cap that admits bytes the verifier
+    // refuses would be a bound on nothing.
+    assert!(
+        super::verify(&blob, id.verifying_key()).is_ok(),
+        "the largest blob a reader will accept is one that verifies and parses"
     );
 }

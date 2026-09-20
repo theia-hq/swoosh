@@ -13,7 +13,7 @@
 //! stranger is refused LOUDLY here (a typed error, non-zero exit), never a silent empty table: a refusal is not
 //! "the peer serves nothing".
 
-use bifrost::{Discovery, Node, Session as _, Transport};
+use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
@@ -24,6 +24,7 @@ use swoosh::serve::CONTROL_SERVICES_SERVICE;
 use swoosh::serve::control_codec::DisabledList;
 use swoosh::transport::ReachArgs;
 use tightbeam::tunnel;
+use tokio::io;
 use tokio::io::AsyncReadExt as _;
 
 /// List the served menu: your own node, or a peer's with `--at`
@@ -158,12 +159,13 @@ impl ServiceLsCmd {
         let dial = connector.dial();
 
         // A service-scoped session whose one `open_bi` speaks the `control.services` request and presents the
-        // badge. On admission the peer writes the self-delimiting catalog blob and closes; a refusal surfaces
+        // badge. On admission the peer writes the self-delimiting catalog blob and closes, and
+        // [`read_catalog`] bounds how much of it this client will take; a refusal surfaces
         // as the typed `bifrost::Error::Refused` here, rendered as the SAME teaching line the ping/status
         // ladder gives rather than the bare transport word. A refusal is not "the peer serves nothing"; a
         // genuine i/o failure keeps its own message.
         let session = connector.open_service(node).await?;
-        let (writer, mut reader) = match session.open_bi().await {
+        let (writer, reader) = match session.open_bi().await {
             Ok(halves) => halves,
             Err(bifrost::Error::Refused(refusal)) => {
                 eyre::bail!("{dial}: reached, but refused ({refusal})")
@@ -174,13 +176,43 @@ impl ServiceLsCmd {
         // the roster read uses).
         drop(writer);
 
-        let mut bytes = Vec::new();
-        reader.read_to_end(&mut bytes).await?;
-        let catalog = tunnel::ServiceCatalog::decode(&bytes)?;
-
-        print_catalog(&catalog);
+        print_catalog(&read_catalog(reader, dial).await?);
         Ok(())
     }
+}
+
+/// Read the peer's catalog blob under the wire's own bound, then decode it.
+///
+/// The untrusted end here is the SERVER, which is the direction we do not usually face: these bytes are a
+/// remote node's, and an unbounded `read_to_end` lets that node grow this client's buffer for as long as it
+/// cares to stream, at 1:1 cost to itself. [`decode`](tunnel::ServiceCatalog::decode)'s own caps cannot
+/// help, because by the time it is called the buffer already holds everything the peer sent. So the bound
+/// goes on the READ, before the first byte lands, and it is the wire's own
+/// [`MAX_CATALOG_BLOB`](tunnel::MAX_CATALOG_BLOB) rather than a number chosen here: the serving end refuses
+/// to encode past the same bound, so one number holds both ends of this wire.
+///
+/// It reads exactly ONE byte past that bound, purely to tell a catalog sitting at the ceiling (legitimate,
+/// and decodes) from a peer still streaming (not). Without that byte an over-cap peer would arrive as a
+/// truncated-blob decode error, which tells an operator that the menu is malformed when what actually
+/// happened is that the peer would not stop.
+async fn read_catalog(
+    reader: impl io::AsyncRead + Unpin,
+    dial: NodeId,
+) -> eyre::Result<tunnel::ServiceCatalog> {
+    let mut bytes = Vec::new();
+    reader
+        .take(tunnel::MAX_CATALOG_BLOB + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() as u64 > tunnel::MAX_CATALOG_BLOB {
+        eyre::bail!(
+            "{dial} sent more than a service menu can be, so the read stopped at {} bytes rather than \
+             buffering whatever the peer streams. No node this build serves publishes a menu that large, \
+             so check that {dial} is the node you meant",
+            tunnel::MAX_CATALOG_BLOB
+        );
+    }
+    tunnel::ServiceCatalog::decode(&bytes)
 }
 
 /// Print the catalog as a terse `SERVICE  GATE` table (the remote `--at` read's shape): header then
