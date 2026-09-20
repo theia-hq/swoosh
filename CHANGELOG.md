@@ -2,6 +2,26 @@
 
 All notable changes to swoosh, newest first.
 
+## v0.11.4
+
+A refusal this build cannot read is not an answer about you.
+
+### Changed
+- **Advances to bifrost v0.3.0, tightbeam v0.9.0 and services v0.2.0**, where the refusal type
+  stopped being a closed set. Nothing on the wire moved, and nothing you run behaves differently
+  today.
+
+  One place had to decide something new. When an exit node refuses a fetch, swoosh turns that
+  refusal into an HTTP status, and the split is between a ruling about YOU and a failure of
+  THEIRS: not admitted serves `403`, and the node's own failures serve `502`, so a downloader can
+  tell "you are not allowed through this node" from "the node or origin is having a bad day"
+  without reading a log. A refusal from a newer node, of a class this build has no name for,
+  carries no ruling this build can read. It serves `502`, because `502` claims nothing about the
+  caller, and says so in the log rather than guessing: `403` would invent an authorization answer
+  out of a message that carried none.
+
+  You will only ever see that line if this binary is older than the node it dialed.
+
 ## v0.11.3
 
 Ten changes, no new capability. The thing gets more honest, not bigger.
