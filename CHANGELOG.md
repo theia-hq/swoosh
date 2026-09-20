@@ -2,6 +2,39 @@
 
 All notable changes to swoosh, newest first.
 
+## v0.12.0
+
+A peer cannot decide how much of your memory to spend, and a size problem stops posing as a forgery.
+
+### Fixed
+- **`swoosh service ls --at <peer>` let the node you asked exhaust your own machine.** The reply was
+  read with no bound at all, so a hostile node could stream until the client died, at one byte of
+  its bandwidth per byte of your memory. This is the server attacking the client, which is the
+  direction nobody looks. The serving side had no bound either, so an honest host did not even
+  provide an accidental ceiling.
+
+  Both ends now hold one bound, derived from what the decoder already accepts rather than chosen, so
+  the reader's cap cannot drift away from the format. The encoder enforces the two field limits
+  rather than a byte total, because a menu can sit far under any byte ceiling and still be refused
+  by its own decoder, and an encoder that can emit a frame it cannot read is a defect in itself.
+
+- **A full fleet's roster was reported as a forgery.** The read cap sat below the largest roster the
+  parser accepts, so a legitimate roster at that size was truncated in transit and then failed its
+  signature check. `swoosh fleet <peer>` answered "roster is not signed by your signet; refusing to
+  hydrate": a size problem wearing a forgery's clothes, and an operator reading it would go looking
+  for an attack that never happened.
+
+  The cap is now derived from the same limits the parser enforces, including the signature envelope
+  the first estimate of this missed, and a test pins the largest admissible roster to exactly that
+  size so a framing change cannot quietly loosen it. A node that streams past the cap is now named
+  as the thing that overran, in a sentence that tells you to check which node you meant.
+
+### Changed
+- Advances to bifrost v0.4.0, nauthy v0.4.0, tightbeam v0.11.0 and services v0.3.0, which between
+  them close two remote CPU-exhaustion classes in capability verification, cap a framed read a peer
+  could size to four gigabytes, and teach three wires to say which version they speak instead of
+  closing the stream without a word.
+
 ## v0.11.4
 
 A refusal this build cannot read is not an answer about you.
