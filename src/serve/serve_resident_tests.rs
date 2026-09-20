@@ -185,7 +185,9 @@ fn status_prefix(has_addr: u8) -> Vec<u8> {
 fn status_frame_with_disabled(disabled: &[u8]) -> Vec<u8> {
     let mut bytes = status_prefix(0);
     bytes.extend_from_slice(&0u64.to_be_bytes());
-    let catalog = empty_catalog().encode();
+    let catalog = empty_catalog()
+        .encode()
+        .expect("an empty catalog is under the wire bound");
     bytes.extend_from_slice(&(catalog.len() as u32).to_be_bytes());
     bytes.extend_from_slice(&catalog);
     bytes.extend_from_slice(disabled);

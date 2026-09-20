@@ -35,6 +35,62 @@ const VERSION: u8 = 1;
 /// before the signature is even checked.
 const MAX_MEMBERS: usize = 4096;
 
+/// The fixed header a roster payload opens with: [`MAGIC`], the [`VERSION`] byte, the `u64` epoch, and the
+/// `u32` member count. Named rather than spelled, because the encoder's buffer sizing and
+/// [`MAX_ROSTER_BLOB`] are both written in terms of it.
+const HEADER_LEN: usize = MAGIC.len() + size_of::<u8>() + size_of::<u64>() + size_of::<u32>();
+
+/// The fixed framing each member carries beside its label: the node key and the `u16` label length.
+const MEMBER_OVERHEAD_LEN: usize = VerifyKey::LEN + size_of::<u16>();
+
+/// The detached ed25519 signature in the envelope [`cut`] writes: 64 bytes, fixed by the scheme.
+const SIGNATURE_LEN: usize = 64;
+
+/// What [`cut`] wraps the payload in: nauthy's signed envelope is the signer key then the signature, both
+/// fixed-width ahead of the payload bytes ([`Signed::encode`]). Restated here because nauthy keeps its
+/// signature length private, so [`MAX_ROSTER_BLOB`] cannot name it; the exactness test signs a maximal
+/// roster and asserts the encoded blob is that bound to the byte, so an envelope change over there fails
+/// here rather than silently reshaping this cap.
+const ENVELOPE_LEN: usize = VerifyKey::LEN + SIGNATURE_LEN;
+
+/// The largest roster blob a reader admits, in bytes: the signed envelope around the biggest payload
+/// [`RosterDoc::parse_canonical`] accepts, and not one byte more. A puller bounds its read by this BEFORE
+/// the first byte lands, so a hostile courier cannot grow the puller's buffer by streaming; the parse-side
+/// caps cannot help there, because by the time one runs the buffer already holds everything sent.
+///
+/// DERIVED from the parser's own field bounds and framing, never chosen, so it cannot drift away from what
+/// the parser accepts the way an independent constant can:
+///
+/// ```text
+///     ENVELOPE_LEN                                                  the signer key + signature
+///   + HEADER_LEN                                                    MAGIC + VERSION + epoch + count
+///   + MAX_MEMBERS * (MEMBER_OVERHEAD_LEN + DeviceLabel::MAX_LEN)    node key + u16 len + the label
+///   = (32 + 64) + (12 + 1 + 8 + 4) + 4096 * (32 + 2 + 255)
+///   = 1_183_865 bytes
+/// ```
+///
+/// Exact rather than round: a rounded bound is one somebody has to justify separately, and this one is just
+/// the arithmetic. A test cuts the largest roster this parser accepts and asserts the blob is exactly this
+/// many bytes, so a framing change the expression does not follow fails there rather than quietly loosening
+/// or tightening a reader's cap.
+///
+/// It lives HERE, beside the codec that writes and reads this wire, not at the call site that reads it: a
+/// cap in a command file is derived from limits it cannot see, and one that lands BELOW the largest roster
+/// the parser accepts truncates a legitimate maximal roster, whose short bytes then fail the signature
+/// check. That reports a size problem as a forgery and sends an operator hunting a key compromise that
+/// never happened, which is why the number is the parser's own and not a nearby round one.
+pub const MAX_ROSTER_BLOB: u64 =
+    (ENVELOPE_LEN + HEADER_LEN + MAX_MEMBERS * (MEMBER_OVERHEAD_LEN + DeviceLabel::MAX_LEN)) as u64;
+
+/// The bound above is only attainable if the framing can express the field bounds it is built from: a
+/// label at [`DeviceLabel::MAX_LEN`] must fit the `u16` length prefix, and [`MAX_MEMBERS`] the `u32`
+/// count. Held at build time, because a field bound the wire cannot spell makes the derivation a
+/// number no encoder can reach, and the casts in [`RosterDoc::canonical_bytes`] lossy.
+const _: () = assert!(
+    DeviceLabel::MAX_LEN <= u16::MAX as usize && MAX_MEMBERS <= u32::MAX as usize,
+    "the roster framing must be able to express its own field bounds"
+);
+
 /// Take `n` bytes from `bytes` at `*cur`, advancing the cursor, or [`RosterError::Truncated`] if the input
 /// runs out. Bounds-checked so untrusted input is a clean error, never a panic. The fixed-width readers
 /// ([`take_u64`], [`take_u32`], [`take_u16`], [`take_array`]) build on it.
@@ -144,7 +200,16 @@ impl RosterDoc {
     ///     label        [u8; label_len]    (UTF-8, no slash/whitespace/control)
     /// ```
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(MAGIC.len() + 13 + self.members.len() * 40);
+        // Size the buffer from the framing constants MAX_ROSTER_BLOB is derived from, so the encoder and
+        // the reader's cap are written in the same terms and a field added to one is missing from the
+        // other at the next edit rather than several releases later.
+        let size = HEADER_LEN
+            + self
+                .members
+                .iter()
+                .map(|member| MEMBER_OVERHEAD_LEN + member.label.as_str().len())
+                .sum::<usize>();
+        let mut out = Vec::with_capacity(size);
         out.extend_from_slice(MAGIC);
         out.push(VERSION);
         out.extend_from_slice(&self.epoch.0.to_be_bytes());

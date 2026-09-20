@@ -166,7 +166,10 @@ impl ServiceMenu {
     /// Write the menu into `out` at its current end: the nested writer [`StatusReply::encode`] uses
     /// so the menu sits inline with the fields that follow it.
     fn encode_into(&self, out: &mut Vec<u8>) -> io::Result<()> {
-        let catalog = self.catalog.encode();
+        // The catalog carries its OWN wire bound (the one the remote `control.services` read holds); this
+        // local socket's frame cap is a second, tighter one. Both apply, and each reports itself: a catalog
+        // past its own bound says which service is at fault, which "over the frame cap" cannot.
+        let catalog = self.catalog.encode().map_err(io::Error::other)?;
         if catalog.len() > MAX_FRAME {
             return Err(io::Error::other("catalog over the frame cap"));
         }

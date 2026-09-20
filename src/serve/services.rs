@@ -1,5 +1,6 @@
 use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{BoxRead, BoxWrite, Handler, ServeError, Served, ServiceCatalog};
+use tokio::io;
 use tokio::io::AsyncWriteExt as _;
 
 /// The `control.services` handler swoosh injects: the node-lifecycle READ. It holds a pre-cut
@@ -40,7 +41,12 @@ impl Handler for ServiceList {
         mut writer: BoxWrite,
         _reader: BoxRead,
     ) -> Result<(), ServeError> {
-        writer.write_all(&self.catalog.encode()).await?;
+        // The encode is bounded by the catalog wire's own cap, which the reader also holds: a node whose
+        // route table outgrew the wire fails HERE, naming what to shorten, rather than writing a blob the
+        // reader will cut short and report as a malformed menu. It is this node's own configuration, so
+        // the reason belongs on this side of the wire.
+        let blob = self.catalog.encode().map_err(io::Error::other)?;
+        writer.write_all(&blob).await?;
         writer.shutdown().await?;
         Ok(())
     }
