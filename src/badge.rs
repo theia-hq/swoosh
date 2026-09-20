@@ -45,6 +45,11 @@ pub const RENEWAL_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// [`Expiring`](Self::Expiring), and says nothing on [`Live`](Self::Live) or [`Unknown`](Self::Unknown).
 /// The window is applied once, here, at construction, so no caller re-derives "is it close" from a
 /// duration and no two callers can pick different windows.
+///
+/// This answers EXPIRY, never validity. A badge revoked through the denylist reads `Live` here,
+/// because revocation is checked at the gate and the holder's own machine has no copy of the
+/// list. So a surface built on this states how long a badge has LEFT, and must not claim the
+/// badge still works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
     /// The badge carries no `expires_at` fact, so this device cannot say when it dies. A badge minted

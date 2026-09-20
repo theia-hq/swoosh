@@ -225,7 +225,10 @@ async fn admit_badge(home: &Home, badge: &Link, node: NodeId, force: bool) -> ey
     eyre::bail!(
         "this machine already stores a membership badge that this invite does not outlive; adopting it \
          would replace the stored badge with one that is older, bound to another device, rooted at \
-         another signet, or carries no readable expiry. Re-run with --force if that is intended"
+         another signet, or carries no readable expiry. To narrow a device's window, cut the old \
+         badge first with `swoosh invite rm <label>`, then mint the shorter one: re-issuing short \
+         over a live longer badge does not narrow anything, because the longer one stays signed and \
+         admitted. Re-run with --force if replacing it is what you meant"
     )
 }
 
@@ -233,8 +236,14 @@ async fn admit_badge(home: &Home, badge: &Link, node: NodeId, force: bool) -> ey
 /// and a strictly LATER expiry. The one predicate [`admit_badge`] turns on, so "is this safe to store"
 /// has exactly one answer.
 ///
-/// A replay is by construction not later, so the guard the byte-inequality check existed for is kept
-/// whole while the routine act passes. The two expiries come from nauthy's advisory `expires_at` fact,
+/// A replay is not later than the badge it replaced, so the guard the byte-inequality check existed
+/// for is kept whole while the routine act passes. ONE case escapes that and it is recorded rather
+/// than closed: if the owner re-issues a SHORTER badge over a live longer one, the longer token is
+/// still signed, unexpired and admitted everywhere, so replaying it afterwards reads as a renewal.
+/// Expiry is the only ordering fact a badge carries, so no comparison here can tell "newer" from
+/// "longer". It costs nothing, because re-issuing short never narrowed the window in the first
+/// place: the correct act is `invite rm <label>` and then the shorter mint, which the refusal text
+/// below now teaches. Ruled an accepted cost. The two expiries come from nauthy's advisory `expires_at` fact,
 /// which is an UPPER BOUND (a narrowing an attenuation block added is invisible to the origin-0 read),
 /// and that cuts the safe way twice here: a badge carrying no fact reads `None` and falls back to the
 /// byte-inequality refusal rather than to acceptance, and an attenuated badge that reads longer than it
