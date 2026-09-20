@@ -2,7 +2,7 @@
 publish = false  # git-only for now, not published to crates.io
 name = "swoosh"
 description = "Reach a machine by its public key and grant one person one service: ssh, files, ports, fetch. No account."
-version = "0.11.4"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
