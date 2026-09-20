@@ -12,9 +12,9 @@
 //! the privacy rule survives the verb path: a NON-signet `--present` leaves slot 2 empty, so a
 //! bearer/device dial never leaks the dialer's device-to-signet linkage.
 //!
-//! `forward` rides the same chain: it used to derive slot 1 by hand inside its own `run`, which silently
-//! dropped slot 2 (the resolver is the only code that computes it), so a signet-bound dial through
-//! `forward` was capped at what slot 1 alone could open.
+//! `reach` (the generic dial, spelled `forward` when this defect shipped) rides the same chain: it used
+//! to derive slot 1 by hand inside its own `run`, which silently dropped slot 2 (the resolver is the only
+//! code that computes it), so a signet-bound dial through it was capped at what slot 1 alone could open.
 
 use core::time::Duration;
 
@@ -27,7 +27,7 @@ use swoosh::identity::Secret;
 use swoosh::reaching::{self, BindRole, Reaching};
 use tightbeam::identity::AsVerifyKey as _;
 
-use crate::commands::{forward, ping};
+use crate::commands::{ping, reach};
 
 /// Clap-parse a `ping` verb exactly as the CLI would, so `--present <link>` runs through
 /// [`Link`](nauthy::Link)'s `FromStr` and lands on the real command's field.
@@ -43,17 +43,17 @@ fn ping_with_present(peer: &str, present: &str) -> ping::PingCmd {
         .cmd
 }
 
-/// Clap-parse a `forward` verb exactly as the CLI would: `forward <peer> --to -`, the stdout sink, which
-/// is the shape with no local port to bind. The peer string carries the same three forms `ping`'s does.
+/// Clap-parse a `reach` verb exactly as the CLI would: `reach <peer> <service>`, whose default sink is
+/// stdout, the shape with no local port to bind. The peer string carries the same three forms `ping`'s does.
 #[derive(Parser)]
-struct ForwardWrap {
+struct ReachWrap {
     #[command(flatten)]
-    cmd: forward::ForwardCmd,
+    cmd: reach::ReachCmd,
 }
 
-fn forward_to_peer(peer: &str) -> forward::ForwardCmd {
-    ForwardWrap::try_parse_from(["forward", peer, "--to", "-"])
-        .expect("the verb parses with a peer")
+fn reach_to_peer(peer: &str) -> reach::ReachCmd {
+    ReachWrap::try_parse_from(["reach", peer, "ssh"])
+        .expect("the verb parses with a peer and a service")
         .cmd
 }
 
@@ -68,7 +68,7 @@ fn ping_with_peer(peer: &str) -> ping::PingCmd {
 /// Drive the verb's declared credential through the ONE resolver under a caller-supplied `secret` (so the
 /// test controls the dialer's own fleet, which the fleet-match slot-2 rule compares against) and read the
 /// two wire slots, the exact path the composition root runs before dialing. Takes any reaching verb, so
-/// `forward` is proven through the same chain as `ping`.
+/// `reach` is proven through the same chain as `ping`.
 async fn slots_for(cmd: &impl Reaching, secret: &Secret) -> (Option<Link>, Option<Link>) {
     // The default home (no stored badge), so a `Family` dial falls back to the self-sign, exactly as an
     // unprovisioned dialer does.
@@ -192,16 +192,16 @@ async fn a_verb_with_a_foreign_fleet_link_as_peer_leaves_slot_two_empty() {
 }
 
 #[tokio::test]
-async fn forward_presents_the_member_badge_like_its_siblings() {
-    // The shipped defect: `forward` declared no badge, so a member forwarding a port on their OWN gated
-    // node was refused by their own fleet while `ping`/`speed`/`ssh` to the same node worked. A plain
-    // `forward <key> --to -` must resolve slot 1 to the member badge, exactly as `ping <key>` does.
+async fn reach_presents_the_member_badge_like_its_siblings() {
+    // The shipped defect: the generic dial declared no badge, so a member reaching a service on their OWN
+    // gated node was refused by their own fleet while `ping`/`speed`/`ssh` to the same node worked. A plain
+    // `reach <key> <service>` must resolve slot 1 to the member badge, exactly as `ping <key>` does.
     let secret = Secret::ephemeral();
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
 
-    let (forward_slot1, forward_slot2) = slots_for(&forward_to_peer(&peer), &secret).await;
-    let badge = forward_slot1
-        .expect("REGRESSION: `forward` must present the member badge, not dial as a stranger");
+    let (reach_slot1, reach_slot2) = slots_for(&reach_to_peer(&peer), &secret).await;
+    let badge = reach_slot1
+        .expect("REGRESSION: `reach` must present the member badge, not dial as a stranger");
     assert!(
         badge.as_str().starts_with("sheer:"),
         "slot 1 is the member badge as a sheer: link, got {badge}"
@@ -212,7 +212,7 @@ async fn forward_presents_the_member_badge_like_its_siblings() {
         "the badge roots at the key the dial binds under, which is what the family gate proves"
     );
     assert!(
-        forward_slot2.is_none(),
+        reach_slot2.is_none(),
         "a plain member dial attaches NO slot 2 (no signet-linkage over-share)"
     );
 
@@ -222,7 +222,7 @@ async fn forward_presents_the_member_badge_like_its_siblings() {
     assert_eq!(
         ping_slot1.map(|grant| grant.dial_node()),
         Some(secret.node_id()),
-        "`ping` presents the same self-signed member badge `forward` now does"
+        "`ping` presents the same self-signed member badge `reach` now does"
     );
     assert!(
         ping_slot2.is_none(),
@@ -231,9 +231,9 @@ async fn forward_presents_the_member_badge_like_its_siblings() {
 }
 
 #[tokio::test]
-async fn forward_with_a_signet_bound_link_as_peer_fills_slot_two() {
-    // `forward`'s bearer-only ceiling: it derived slot 1 by hand inside its own `run`, and the resolver is
-    // the ONLY code that computes slot 2, so a signet-bound link through `forward` arrived without the
+async fn reach_with_a_signet_bound_link_as_peer_fills_slot_two() {
+    // The generic dial's bearer-only ceiling: it derived slot 1 by hand inside its own `run`, and the
+    // resolver is the ONLY code that computes slot 2, so a signet-bound link through it arrived without the
     // fleet badge its gate ANDs. Reading both slots off the shared resolver is what lifts the ceiling.
     let secret = Secret::ephemeral();
     let work = Identity::from_secret(&[1u8; 32]).unwrap();
@@ -241,7 +241,7 @@ async fn forward_with_a_signet_bound_link_as_peer_fills_slot_two() {
     let service: Service = "ssh".parse().unwrap();
     let link = Link::mint_signet(&work, &service, fleet, Duration::from_secs(3600)).unwrap();
 
-    let (slot1, slot2) = slots_for(&forward_to_peer(link.as_str()), &secret).await;
+    let (slot1, slot2) = slots_for(&reach_to_peer(link.as_str()), &secret).await;
 
     assert_eq!(
         slot1.as_ref().map(Link::as_str),
@@ -249,7 +249,7 @@ async fn forward_with_a_signet_bound_link_as_peer_fills_slot_two() {
         "the link-as-peer is slot 1 (the grant)"
     );
     let badge = slot2.expect(
-        "REGRESSION: a signet-bound `forward` must fill slot 2 with the dialer's fleet badge",
+        "REGRESSION: a signet-bound `reach` must fill slot 2 with the dialer's fleet badge",
     );
     assert!(
         badge.as_str().starts_with("sheer:") && badge.as_str() != link.as_str(),

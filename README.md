@@ -1,7 +1,8 @@
 # swoosh
 
 swoosh reaches a machine by its public key instead of its IP address: ping it, measure the link, ssh
-in, send files, forward ports, fetch through it, and share access. You give it a peer's key (a short
+in, send files, reach any service it serves, fetch through it, and share access. You give it a peer's
+key (a short
 base32 string) and it dials that peer directly, wherever the peer is, across home routers and NATs. No
 address to look up and no account.
 

@@ -1,8 +1,8 @@
 //! The one swoosh connect runner over tightbeam's tunnel [`Connector`], plus the hidden `tunnel-connect`
 //! leaf behind `swoosh ssh`.
 //!
-//! Both of swoosh's connect surfaces -- the public `forward <peer> --to <port | - | unix:PATH>`
-//! (port-forward or stdout) and this hidden `tunnel-connect --to -` (the `swoosh ssh` ProxyCommand bridge)
+//! Both of swoosh's connect surfaces -- the public `reach <peer> <service> [--to <port | - | unix:PATH>]`
+//! (stdout or port-forward) and this hidden `tunnel-connect --to -` (the `swoosh ssh` ProxyCommand bridge)
 //! -- are the SAME concept: dial a peer's served service, optionally presenting a cap, then drive it. They
 //! differ only in surface (a user verb vs an ABI ssh re-invokes) and in how the sink is chosen. So they
 //! share ONE [`connect`] runner over the library `Connector`, parameterized by the single [`To`] selector:
@@ -116,14 +116,19 @@ pub struct TunnelConnectCmd {
     #[arg(value_name = "peer")]
     pub node: NodeId,
     /// the exposed service name to reach on the host
-    #[arg(long, value_name = "service", default_value = "default")]
-    pub service: String,
+    // REQUIRED, with no default. It defaulted to `default`, a name nothing serves (tightbeam dropped the
+    // default service name, and a bare `swoosh serve` binds TWO services, so the single-service leniency
+    // cannot cover for it). This is an ABI no user types and `swoosh ssh` always writes the flag, so the
+    // name stays a flag here and only the phantom default goes: an omission is now a parse error at the
+    // bridge, not a refusal the far gate cannot explain. The public `reach` takes it positionally instead.
+    #[arg(long, value_name = "service")]
+    pub service: Service,
     /// present a membership badge or capability link to a gated host (a `sheer:` link, parsed
     /// at the boundary)
     #[arg(long, value_name = "link")]
     pub present: Option<Link>,
     /// where to put the stream: the `swoosh ssh` ProxyCommand ABI always passes `-` (stdout). Accepted as
-    /// the shared `--to` selector so the bridge speaks the same flag as `forward`; hidden, never typed.
+    /// the shared `--to` selector so the bridge speaks the same flag as `reach`; hidden, never typed.
     #[arg(long, value_name = "port | - | unix:PATH", hide = true)]
     pub to: To,
     #[command(flatten)]
@@ -195,12 +200,11 @@ impl TunnelConnectCmd {
     ) -> eyre::Result<()> {
         // The bridge's peer is a raw key (`swoosh ssh` resolved any petname before re-invoking), so it wraps
         // as `Peer::Raw` and rides the same `connector` path as every other single-target verb.
-        let service = self.service.parse::<Service>()?;
         connect(
             node,
             contacts,
             &Peer::Raw(self.node),
-            service,
+            self.service,
             present,
             membership,
             self.to,

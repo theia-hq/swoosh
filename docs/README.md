@@ -1,7 +1,8 @@
 # swoosh docs
 
-swoosh reaches a machine by its public key: ping it, measure it, ssh in, send files, forward ports,
-fetch through it, and share access, across any network with no address to look up and no account.
+swoosh reaches a machine by its public key: ping it, measure it, ssh in, send files, reach any service
+it serves, fetch through it, and share access, across any network with no address to look up and no
+account.
 These docs take you from your first reach to every command.
 
 These pages describe the default branch; the released docs are at the newest tag.

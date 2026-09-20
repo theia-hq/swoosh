@@ -110,4 +110,4 @@ not cut a session already in progress; the held connection drains. See
 
 - [Keys](../keys.md#device) what a device and membership are.
 - [Family media center](family-media-center.md) a box the whole household reaches, owned by no one.
-- [Commands](../reference/commands.md#ssh) ssh, forward, and send over the overlay.
+- [Commands](../reference/commands.md#ssh) ssh, reach, and send over the overlay.

@@ -176,7 +176,7 @@ async fn a_group_or_world_readable_key_is_refused_with_a_chmod_hint() {
 
 /// An outward dial never CREATES the key, and an explicit home does not change that: `--home`/`SWOOSH_HOME`
 /// says where this node's files live, not that a dial should provision one. The home a caller names for
-/// one `swoosh forward` is left exactly as it was found, because the key that would appear there is the
+/// one `swoosh reach` is left exactly as it was found, because the key that would appear there is the
 /// root a later `serve` gates its whole fleet on. The loading half still holds: once a key exists, the
 /// same outward dial binds it, which is what makes a member's badge admit at their own node.
 #[tokio::test]

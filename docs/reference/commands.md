@@ -37,7 +37,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="speed"></a>[`swoosh speed`](commands/speed.md): measure throughput to a peer, addressed by key
 - <a id="status"></a>[`swoosh status`](commands/status.md): show the connection path to a peer (direct or relayed)
 - <a id="fetch"></a>[`swoosh fetch`](commands/fetch.md): mint a local URL that fetches an origin through a named node
-- <a id="forward"></a>[`swoosh forward`](commands/forward.md): put a peer's served service on a local port, stdout, or unix socket
+- <a id="reach"></a>[`swoosh reach`](commands/reach.md): reach any service a peer serves, on stdout or a local port
 - <a id="send"></a>[`swoosh send`](commands/send.md): push a file or directory to a peer, verified end to end
 - <a id="fleet"></a>[`swoosh fleet`](commands/fleet.md): pull the signed roster from a coordination node into your contacts
 - <a id="contact"></a>[`swoosh contact`](commands/contact.md): manage local petnames for peers (yours alone, plain TOML)

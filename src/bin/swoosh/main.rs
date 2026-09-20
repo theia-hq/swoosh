@@ -34,7 +34,7 @@ use swoosh::{config, credential, reaching, transport};
 // The verb modules this binary dispatches to, each its own tree beside the composition root. The
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
-    adopt, contact, fetch, fleet, forward, grant, identity, invite, ping, send, serve, service,
+    adopt, contact, fetch, fleet, grant, identity, invite, ping, reach, send, serve, service,
     speed, ssh, status, stop, tree, tunnel_connect,
 };
 
@@ -97,8 +97,8 @@ enum Command {
     Status(status::StatusCmd),
     /// Mint a local URL that fetches an origin through a node you name.
     Fetch(fetch::FetchCmd),
-    /// Put a peer's served service on a local port, stdout (`-`), or a unix socket (ssh's `-L`, keyed).
-    Forward(forward::ForwardCmd),
+    /// Reach a peer's served service: stdout by default, or `--to <port>`.
+    Reach(reach::ReachCmd),
     /// Push a file or directory to a peer, verified end to end.
     #[command(name = "send")]
     Send(send::SendCmd),
@@ -162,11 +162,11 @@ macro_rules! reaching_verbs {
     ($($(#[$note:meta])* $verb:ident($cmd:ty)),+ $(,)?) => {
         /// A verb that reaches a peer: it binds a transport and dials. Split from the local `contact` group,
         /// which touches only the address book and never composes a transport.
-        enum Reach {
+        enum Outward {
             $($(#[$note])* $verb($cmd),)+
         }
 
-        impl Reaching for Reach {
+        impl Reaching for Outward {
             /// The reach-family flags this verb carries (`--transport`, `--local`, `--peer`). Shared by every
             /// reaching verb and no local one, so they are flattened into each reach command rather than made
             /// a root global; the composition root reads them here to pick the backend, the bind mode, and
@@ -231,10 +231,10 @@ reaching_verbs! {
     Speed(speed::SpeedCmd),
     Status(status::StatusCmd),
     Fetch(fetch::FetchCmd),
-    /// `swoosh forward`: bind a peer's served service to a local port. Presents a membership badge (like
+    /// `swoosh reach`: the generic dial, any service, any sink. Presents a membership badge (like
     /// `ping`/`send`), which a `--present` slip overrides, so it rides the reach path under the persisted
     /// identity when one exists.
-    Forward(forward::ForwardCmd),
+    Reach(reach::ReachCmd),
     /// `swoosh send`: push files to a peer's gated `recv:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
     Send(send::SendCmd),
@@ -266,15 +266,15 @@ impl Command {
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Grant(cmd) => Verb::Grant(cmd),
-            Self::TunnelConnect(cmd) => Verb::Reach(Reach::TunnelConnect(cmd)),
-            Self::Forward(cmd) => Verb::Reach(Reach::Forward(cmd)),
-            Self::Send(cmd) => Verb::Reach(Reach::Send(cmd)),
-            Self::Fleet(cmd) => Verb::Reach(Reach::Fleet(cmd)),
+            Self::TunnelConnect(cmd) => Verb::Outward(Outward::TunnelConnect(cmd)),
+            Self::Reach(cmd) => Verb::Outward(Outward::Reach(cmd)),
+            Self::Send(cmd) => Verb::Outward(Outward::Send(cmd)),
+            Self::Fleet(cmd) => Verb::Outward(Outward::Fleet(cmd)),
             // `stop --at <peer>` reaches a peer's `control.stop`; a bare `stop` stops YOUR OWN node over
             // the local control socket. Split on `--at` here so the bare case runs WITHOUT composing a
             // transport it would never use, the same local dispatch `ssh`/`grant` take.
             Self::Stop(cmd) => match cmd.at {
-                Some(_) => Verb::Reach(Reach::Stop(cmd)),
+                Some(_) => Verb::Outward(Outward::Stop(cmd)),
                 None => Verb::Stop(cmd),
             },
             // The `service` group: `ls --at <peer>` reaches a peer's `control.services`; bare `ls` reads your
@@ -282,23 +282,23 @@ impl Command {
             // `<home>/disabled`. Split each here so the local arms never compose a transport they would not use.
             Self::Service(cmd) => match cmd {
                 service::ServiceCmd::Ls(ls) => match ls.at {
-                    Some(_) => Verb::Reach(Reach::Service(*ls)),
+                    Some(_) => Verb::Outward(Outward::Service(*ls)),
                     None => Verb::ServiceLs(*ls),
                 },
                 service::ServiceCmd::Enable(toggle) => Verb::ServiceEnable(toggle),
                 service::ServiceCmd::Disable(toggle) => Verb::ServiceDisable(toggle),
             },
-            Self::Serve(cmd) => Verb::Reach(Reach::Serve(cmd)),
-            Self::Ping(cmd) => Verb::Reach(Reach::Ping(cmd)),
-            Self::Speed(cmd) => Verb::Reach(Reach::Speed(cmd)),
+            Self::Serve(cmd) => Verb::Outward(Outward::Serve(cmd)),
+            Self::Ping(cmd) => Verb::Outward(Outward::Ping(cmd)),
+            Self::Speed(cmd) => Verb::Outward(Outward::Speed(cmd)),
             // A bare `status` (no peer) queries YOUR OWN node over the control socket, the same local
             // grammar as bare `stop`/`service ls`; with a peer it reaches out and reports its path.
             // Split here so the bare case never composes a transport it would not use.
             Self::Status(cmd) => match cmd.peer {
-                Some(_) => Verb::Reach(Reach::Status(cmd)),
+                Some(_) => Verb::Outward(Outward::Status(cmd)),
                 None => Verb::Status(cmd),
             },
-            Self::Fetch(cmd) => Verb::Reach(Reach::Fetch(cmd)),
+            Self::Fetch(cmd) => Verb::Outward(Outward::Fetch(cmd)),
         }
     }
 }
@@ -341,10 +341,10 @@ enum Verb {
     /// `attenuate` and `revoke` are wholly offline. No leaf binds a transport or reads the address book.
     Grant(grant::GrantCmd),
     /// Reaches a peer; binds a transport.
-    Reach(Reach),
+    Outward(Outward),
 }
 
-impl Reach {
+impl Outward {
     /// Attach the resolved [`serve::ExposeContext`] to the `serve` verb (a no-op for every other verb, which
     /// carries no expose context), so `serve` reads its OWN context at run time. Called once in the root
     /// after the context is cut (while the secret is still live), before dispatch. This is why the reach
@@ -601,12 +601,12 @@ async fn run() -> eyre::Result<()> {
             let store = ContactsStore::open(home.contacts()).await?;
             return cmd.run(store.contacts(), &home);
         }
-        Verb::Reach(reach) => {
+        Verb::Outward(outward) => {
             // Before anything is opened or minted: a flag the selected bind would never read is refused
             // here, not after the store is loaded and a key provisioned, so a refused
             // `serve --local --relay` on a fresh home leaves that home exactly as it found it.
-            reach.reach_args().reject_unused_reach()?;
-            reach
+            outward.reach_args().reject_unused_reach()?;
+            outward
         }
     };
 
@@ -786,7 +786,7 @@ impl IrohBind {
 /// a no-op). One owner of teardown, so no verb re-implements it; `serve`'s own graceful-drain still returns
 /// first, and this is the single close that follows it.
 async fn run_and_close<T: Transport, D: Discovery>(
-    reach: Reach,
+    outward: Outward,
     node: &Node<T, D>,
     ctx: reaching::ReachCtx<'_>,
 ) -> eyre::Result<()>
@@ -794,7 +794,7 @@ where
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
-    let result = reach.run(node, ctx).await;
+    let result = outward.run(node, ctx).await;
     node.close().await;
     result
 }
@@ -868,16 +868,21 @@ mod tests {
     }
 
     /// The `tunnel` noun is retired: its two leaves are now the flat top-level verbs `serve` (publish
-    /// services) and `forward` (bind a peer's service to a local port). `swoosh tunnel ...` no longer
-    /// resolves; `serve` and `forward` do.
+    /// services) and `reach` (the generic dial). `swoosh tunnel ...` no longer resolves; `serve` and
+    /// `reach` do, and the `forward` spelling `reach` replaced is gone with the noun.
     #[test]
-    fn tunnel_is_gone_and_serve_and_forward_are_flat() {
+    fn tunnel_and_forward_are_gone_and_serve_and_reach_are_flat() {
         let peer = NodeId::from_ed25519_secret(&[2u8; 32]).to_string();
 
         // The retired noun and both old paths are unknown commands now.
         assert!(Cli::try_parse_from(["swoosh", "tunnel"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "tunnel", "expose", "ping=ping:"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "tunnel", "connect", &peer, "--to", "22"]).is_err());
+        // `forward` is retired as a word: one spelling per act, and the act is `reach`.
+        assert!(
+            Cli::try_parse_from(["swoosh", "forward", &peer, "--to", "5432"]).is_err(),
+            "the retired `forward` spelling must not resolve, not even as a hidden alias"
+        );
 
         // `serve` is the primary publish verb: bare (default `ping` + `speed`) and with an
         // explicit service set.
@@ -894,41 +899,84 @@ mod tests {
             Some(Command::Serve(_))
         ));
 
-        // `forward` is the flat forward verb; `--to` takes a port, `-` (stdout), or `unix:<path>`.
+        // `reach` is the flat generic dial; `--to` takes a port, `-` (stdout), or `unix:<path>`.
         for to in ["5432", "-", "unix:/run/x.sock"] {
             assert!(
                 matches!(
-                    Cli::try_parse_from(["swoosh", "forward", &peer, "--to", to])
-                        .expect("forward parses each --to form")
+                    Cli::try_parse_from(["swoosh", "reach", &peer, "web", "--to", to])
+                        .expect("reach parses each --to form")
                         .command,
-                    Some(Command::Forward(_))
+                    Some(Command::Reach(_))
                 ),
-                "forward --to {to} should parse"
+                "reach --to {to} should parse"
             );
         }
         // A bare path or a source-only scheme is a hard parse error, never a silent misparse.
         for bad in ["/tmp/out", "fifo:/tmp/x", "0"] {
             assert!(
-                Cli::try_parse_from(["swoosh", "forward", &peer, "--to", bad]).is_err(),
-                "forward --to {bad} must be rejected"
+                Cli::try_parse_from(["swoosh", "reach", &peer, "web", "--to", bad]).is_err(),
+                "reach --to {bad} must be rejected"
             );
         }
         // `--stdio` is gone: the old boolean no longer parses.
         assert!(
-            Cli::try_parse_from(["swoosh", "forward", &peer, "--stdio"]).is_err(),
+            Cli::try_parse_from(["swoosh", "reach", &peer, "web", "--stdio"]).is_err(),
             "the retired --stdio boolean must not resolve"
+        );
+    }
+
+    /// The generic dial's two defaults, pinned: the SINK defaults to stdout, and the SERVICE has no
+    /// default at all.
+    ///
+    /// Both halves fail if the guard is dropped. Re-add `default_value` to the service slot (the
+    /// `default` ghost that shipped through v0.11.1, a name no `serve` binds) and the first assertion
+    /// stops erroring; drop `default_value = "-"` from `--to` and the flagless form stops parsing. The
+    /// pair is the whole shape ruled for `reach`: the common case takes no flags, and the slot the user
+    /// must always fill is a positional clap refuses to invent.
+    #[test]
+    fn reach_requires_a_service_and_defaults_its_sink_to_stdout() {
+        let peer = NodeId::from_ed25519_secret(&[2u8; 32]).to_string();
+
+        assert!(
+            Cli::try_parse_from(["swoosh", "reach", &peer]).is_err(),
+            "the service slot is required: a dial with no service must be clap's own error here, \
+             never a default name the far gate refuses without saying why"
+        );
+        assert!(
+            Cli::try_parse_from(["swoosh", "reach", &peer, "--service", "web"]).is_err(),
+            "the service is a positional, not a flag: `--service` is not a spelling of it"
+        );
+
+        let Some(Command::Reach(cmd)) = Cli::try_parse_from(["swoosh", "reach", &peer, "web"])
+            .expect("the flagless form parses: peer, service, nothing else")
+            .command
+        else {
+            panic!("`reach` parses to the reach verb");
+        };
+        assert_eq!(cmd.service.as_str(), "web");
+        assert_eq!(
+            cmd.to,
+            commands::tunnel_connect::To::Stdout,
+            "the sink defaults to stdout, so the common case composes with the shell"
         );
     }
 
     /// The hidden `tunnel-connect` ABI (the `swoosh ssh` ProxyCommand bridge) is internal plumbing, not a
     /// user verb: its subcommand name is unchanged, so the ssh re-invocation `<self> tunnel-connect <peer>
     /// --to -` keeps resolving even though the user-facing `tunnel` noun is gone.
+    ///
+    /// `--service` is REQUIRED here, and the second half of this test fails the moment a default comes
+    /// back. It defaulted to `default`, a name no `serve` binds, so a bridge invoked without it dialed a
+    /// phantom and the far gate refused with a message that named nothing. `swoosh ssh` always writes the
+    /// flag (`ssh_argv`), so requiring it costs the ABI nothing and makes an omission a parse error at the
+    /// bridge instead.
     #[test]
-    fn the_hidden_tunnel_connect_abi_is_intact() {
+    fn the_hidden_tunnel_connect_abi_is_intact_and_names_its_service() {
+        let peer = NodeId::from_ed25519_secret(&[1u8; 32]).to_string();
         let cli = Cli::try_parse_from([
             "swoosh",
             "tunnel-connect",
-            &NodeId::from_ed25519_secret(&[1u8; 32]).to_string(),
+            &peer,
             "--service",
             "ssh",
             "--to",
@@ -936,6 +984,11 @@ mod tests {
         ])
         .expect("the hidden tunnel-connect ABI still resolves");
         assert!(matches!(cli.command, Some(Command::TunnelConnect(_))));
+
+        assert!(
+            Cli::try_parse_from(["swoosh", "tunnel-connect", &peer, "--to", "-"]).is_err(),
+            "the bridge must name its service: no `default` ghost to fall back on"
+        );
     }
 
     /// Person-zero self-signet: `serve` on a node with its OWN key but NO provisioned signet (an empty
@@ -951,17 +1004,17 @@ mod tests {
 
         // An in-memory secret standing in for the persisted identity; the home it points at has no signet.
         let secret = swoosh::identity::Secret::ephemeral();
-        let reach = match Cli::try_parse_from(["swoosh", "serve"])
+        let outward = match Cli::try_parse_from(["swoosh", "serve"])
             .expect("bare serve parses")
             .command
             .expect("serve is a command")
             .split()
         {
-            Verb::Reach(reach) => reach,
+            Verb::Outward(outward) => outward,
             _ => panic!("serve splits to a reaching verb"),
         };
 
-        let expose = reach
+        let expose = outward
             .expose_context(&secret, &Contacts::default(), &home)
             .await
             .expect("expose context resolves")
@@ -993,7 +1046,7 @@ mod tests {
     }
 
     /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `sheer:` link all
-    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/`send`/`stop --at`/
+    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`reach`/`send`/`stop --at`/
     /// `service ls --at`/`fetch --via`/`ssh`/`fleet --pull`. `stop` and `service ls` carry the peer on `--at`
     /// (bare acts on your own node); the rest carry it positionally.
     #[test]
@@ -1005,7 +1058,7 @@ mod tests {
                 &["swoosh", "ping", peer],
                 &["swoosh", "speed", peer],
                 &["swoosh", "status", peer],
-                &["swoosh", "forward", peer, "--to", "5432"],
+                &["swoosh", "reach", peer, "web", "--to", "5432"],
                 &["swoosh", "send", "afile", peer],
                 &["swoosh", "stop", "--at", peer],
                 &["swoosh", "service", "ls", "--at", peer],
@@ -1184,7 +1237,7 @@ mod tests {
     /// machine must not touch what other machines resolve, and the table fails on the old switch (every
     /// verb selected the publishing constructor). Asserted through the constructor each role selects,
     /// which is the observable consequence the bind acts on. One parseable argv per reach verb, split to
-    /// its [`Verb::Reach`] arm.
+    /// its [`Verb::Outward`] arm.
     #[test]
     fn only_serve_registers_the_node_record() {
         let key = NodeId::from_ed25519_secret(&[7u8; 32]).to_string();
@@ -1198,7 +1251,7 @@ mod tests {
                 IrohBind::Dialing,
             ),
             (
-                vec!["swoosh", "forward", &key, "--to", "-"],
+                vec!["swoosh", "reach", &key, "web", "--to", "-"],
                 IrohBind::Dialing,
             ),
             (vec!["swoosh", "send", "notes.md", &key], IrohBind::Dialing),
@@ -1228,11 +1281,11 @@ mod tests {
             let Some(command) = cli.command else {
                 panic!("{argv:?} selects a verb");
             };
-            let Verb::Reach(reach) = command.split() else {
+            let Verb::Outward(outward) = command.split() else {
                 panic!("{argv:?} must split to the reach path");
             };
             assert_eq!(
-                IrohBind::of(false, &reach.bind_role()),
+                IrohBind::of(false, &outward.bind_role()),
                 expected,
                 "{argv:?} must select the {expected:?} constructor"
             );
@@ -1283,7 +1336,7 @@ mod tests {
         let at = Cli::try_parse_from(["swoosh", "stop", "--at", &key]).expect("stop --at parses");
         assert!(matches!(
             at.command.expect("a command").split(),
-            Verb::Reach(Reach::Stop(_))
+            Verb::Outward(Outward::Stop(_))
         ));
 
         // The retired positional form no longer resolves (pre-1.0 clean break).
@@ -1309,7 +1362,7 @@ mod tests {
             .expect("service ls --at parses");
         assert!(matches!(
             at_ls.command.expect("a command").split(),
-            Verb::Reach(Reach::Service(_))
+            Verb::Outward(Outward::Service(_))
         ));
 
         let enable = Cli::try_parse_from(["swoosh", "service", "enable", "speed"])

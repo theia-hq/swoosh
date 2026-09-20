@@ -3,7 +3,7 @@
 //! Identity is chosen by intent, and exactly one intent CREATES a key. A verb that must be *reachable at
 //! a stable address* (`serve`), or that must dial under this node's own key (the `swoosh ssh` bridge),
 //! persists its secret at `<home>/identity.key`: it loads that key and writes one on first use, so
-//! restarting the node keeps its address. A verb that only *reaches outward* (`ping`, `speed`, `forward`)
+//! restarting the node keeps its address. A verb that only *reaches outward* (`ping`, `speed`, `reach`)
 //! LOADS that key when it already exists, because the membership badge it presents must root at the key
 //! the dial binds under, and mints a throwaway in-memory key when it does not. It never writes one: a
 //! dial does not provision a node, and the file it would write is the very key a later `serve` roots its
@@ -184,7 +184,7 @@ pub enum Identity {
 /// verb's [`Identity`] ALONE decides whether one is written.
 ///
 /// The home names the directory, default or explicit alike. A `--home`/`SWOOSH_HOME` run does not turn an
-/// outward dial into a provisioning step: the home the caller named for one `swoosh forward` must be left
+/// outward dial into a provisioning step: the home the caller named for one `swoosh reach` must be left
 /// as it was found, because the key that would appear there is the root a later `serve` gates its fleet
 /// on, and nothing asked for a fleet.
 pub async fn resolve(intent: Identity, home: &Home) -> eyre::Result<Secret> {
