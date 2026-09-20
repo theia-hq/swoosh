@@ -214,14 +214,33 @@ impl FetchCmd {
         .await?;
         if let Response::Refused(refusal) = Response::read(&mut reader).await? {
             *responded = true;
-            // `NotAdmitted` is an AUTHORIZATION failure (the exit node refused YOU): serve `403`. The
-            // post-admission refusals (`BadRequest` / `Unavailable`) are the node's own failure to serve
-            // the request, so they keep `502`, like a genuine origin error below. A downloader can then
-            // tell "you are not allowed through this node" from "the node or origin is having a bad day"
-            // by status alone, instead of reading two different failures as an indistinguishable `502`.
-            let status = match refusal {
+            // `NotAdmitted` is an AUTHORIZATION failure (the exit node refused YOU): serve `403`.
+            // `BadRequest` and `Unavailable` are the node's own failure to serve the request and rule on
+            // nothing about this caller, so they keep `502`, like a genuine origin error below. A
+            // downloader can then tell "you are not allowed through this node" from "the node or origin
+            // is having a bad day" by status alone, instead of reading two different failures as an
+            // indistinguishable `502`.
+            let status = match &refusal {
                 bifrost::Refusal::NotAdmitted => Status::Forbidden,
                 bifrost::Refusal::BadRequest { .. } | bifrost::Refusal::Unavailable { .. } => {
+                    Status::BadGateway
+                }
+                // A node built on a newer bifrost can refuse with a class this build has no name for,
+                // and `Refusal` is non-exhaustive precisely so that is not a build break, which makes
+                // THIS the arm that has to be right. The split above is "a ruling about you" against
+                // "something about them", and a refusal this build cannot read carries no ruling it can
+                // read: serving `403` would invent one, and inventing an authorization answer out of a
+                // message that carried none is the shape of bug the uniform refusal exists to prevent.
+                // `502` claims nothing about the caller, which is the whole of what is honest here, so
+                // the arm DECLINES the claim rather than guessing it and says so at `error`, the level
+                // a stock `swoosh serve` filter shows, with the class text. Reaching it means this
+                // binary's own pins moved past its classification, never anything a peer can drive.
+                unreadable => {
+                    tracing::error!(
+                        refusal = %unreadable,
+                        "the fetch node refused with a class this build cannot read; serving 502 \
+                         rather than guessing an authorization answer"
+                    );
                     Status::BadGateway
                 }
             };
@@ -380,7 +399,8 @@ async fn write_response_head(
 enum Status {
     /// The exit node did not admit YOU: an authorization failure, not a bad gateway.
     Forbidden,
-    /// The node admitted the dial but could not serve the request, or the origin failed: a gateway error.
+    /// The node could not serve the request, the origin failed, or the node's refusal is one this build
+    /// cannot read: a gateway failure, and never a claim about the caller's authority.
     BadGateway,
 }
 
