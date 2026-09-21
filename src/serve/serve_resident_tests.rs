@@ -14,9 +14,13 @@ use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use super::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident};
 use crate::serve::control::ControlError;
 use crate::serve::control_codec::{
-    DisabledList, MAGIC, MAX_DISABLED_NAMES, MAX_FRAME, MAX_STATUS_STRING, Request, Response,
-    ServiceMenu, StatusReply,
+    DisabledList, MAX_DISABLED_NAMES, MAX_FRAME, MAX_STATUS_STRING, Request, Response, ServiceMenu,
+    StatusReply,
 };
+
+/// The four magic bytes a well-formed control frame opens with, spelled out rather than imported, so
+/// a test cannot agree with the codec by sharing its constant.
+const MAGIC: [u8; 4] = *b"SWC1";
 
 /// Serializes scratch dir names within this test process; the pid keeps two concurrent runs of the
 /// binary apart. Names stay short on purpose: the control socket path must fit `sun_path` (104
@@ -88,6 +92,87 @@ async fn requests_round_trip() {
     }
 }
 
+/// One well-formed `Status` request frame with the byte at `at` replaced. The three tests below
+/// differ only in WHICH half of the magic they corrupt, because that single difference is the whole
+/// claim.
+async fn request_frame_with(at: usize, byte: u8) -> Vec<u8> {
+    let mut buf = Vec::new();
+    Request::Status
+        .write(&mut buf)
+        .await
+        .expect("a request frame fits a vec");
+    buf[at] = byte;
+    buf
+}
+
+/// A connection whose IDENTITY is not ours is not a control stream, and that is all it is. Make the
+/// version arm fire for a foreign identity too and the first assertion goes red.
+#[tokio::test]
+async fn a_foreign_identity_is_not_a_version_mismatch() {
+    // `XWC1`: one byte of the identity changed, and nothing else.
+    let buf = request_frame_with(0, b'X').await;
+
+    let error = Request::read(&mut &buf[..])
+        .await
+        .expect_err("a foreign identity is not a control stream");
+    assert!(
+        !matches!(error, ControlError::Version { .. }),
+        "whatever wrote XWC1 is not a control peer on another build: {error}"
+    );
+    assert!(matches!(error, ControlError::Foreign), "{error}");
+}
+
+/// The version half of the magic is PARSED, so a control peer on another build is a distinguishable
+/// condition rather than a foreign stream. Revert the parse to a four-byte comparison and this goes
+/// red at the first assertion.
+#[tokio::test]
+async fn a_version_mismatch_is_not_a_foreign_control_stream() {
+    // `SWC2`: one byte of the version changed, and nothing else.
+    let buf = request_frame_with(3, b'2').await;
+
+    let error = Request::read(&mut &buf[..])
+        .await
+        .expect_err("SWC2 is not this build's grammar");
+    assert!(
+        !matches!(error, ControlError::Foreign),
+        "a control peer on another build is not a foreign stream: {error}"
+    );
+    assert!(matches!(error, ControlError::Version { .. }), "{error}");
+}
+
+/// The resident ANSWERS a version-skewed request instead of closing on it, and the answer names both
+/// versions, so the peer learns what it wrote AND what this build speaks; one of them alone leaves it
+/// guessing at the other. This is what separates this wire from `bifrost-wire`, which is
+/// write-then-read and has nobody listening when it finds the mismatch.
+#[tokio::test]
+async fn a_version_skewed_request_is_answered_naming_both_versions() {
+    let resident = Arc::new(test_resident());
+    let (mut client, server) = tokio::net::UnixStream::pair().expect("socketpair");
+    let task = tokio::spawn({
+        let this = Arc::clone(&resident);
+        async move {
+            this.serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT)
+                .await;
+        }
+    });
+
+    client
+        .write_all(&request_frame_with(3, b'2').await)
+        .await
+        .expect("the skewed frame writes");
+    let reply = tokio::time::timeout(READ_TIMEOUT, Response::read(&mut client))
+        .await
+        .expect("the resident answers rather than closing on the peer")
+        .expect("the answer is a control frame");
+
+    let Response::Error(message) = reply else {
+        panic!("a version mismatch is answered on the wire: {reply:?}")
+    };
+    assert!(message.contains("SWC2"), "{message}");
+    assert!(message.contains("SWC1"), "{message}");
+    task.await.expect("the serve task joins");
+}
+
 /// Every response shape round-trips, including the public-shape status, both with a known disabled
 /// list and with an explicit unknown.
 #[tokio::test]
@@ -124,22 +209,6 @@ async fn responses_round_trip() {
         let back = Response::read(&mut &buf[..]).await.expect("response reads");
         assert_eq!(back, response, "a response round-trips");
     }
-}
-
-/// Foreign magic is a loud protocol error typed as such, never a misparse.
-#[tokio::test]
-async fn version_skew_is_loud() {
-    let mut buf = Vec::new();
-    buf.extend_from_slice(b"SWC0");
-    buf.push(1);
-    buf.extend_from_slice(&0u16.to_be_bytes());
-    let error = Request::read(&mut &buf[..])
-        .await
-        .expect_err("SWC0 must fail");
-    assert!(
-        matches!(error, ControlError::Protocol(ref message) if message.contains("SWC1")),
-        "the skew error is a protocol error naming the expected magic: {error}"
-    );
 }
 
 /// A declared length over the 8 KiB cap refuses the frame before a byte of it is read, typed
