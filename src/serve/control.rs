@@ -12,8 +12,105 @@ use bifrost::NodeId;
 use tightbeam::tunnel::ServiceCatalog;
 use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
-/// The magic prefixing every control frame. A foreign magic is a loud `Error`, never a misparse.
-pub const MAGIC: [u8; 4] = *b"SWC1";
+/// The control wire's identity: the bytes every control frame opens with, at every version, forever.
+/// A frame that does not open with these is not a control frame, and that is the only thing an
+/// identity mismatch is allowed to mean.
+const IDENTITY: [u8; 3] = *b"SWC";
+
+/// The frame grammar THIS build speaks, written after [`IDENTITY`] and parsed (never compared whole)
+/// on read: together they are the four magic bytes `SWC1`.
+const VERSION: WireVersion = WireVersion(*b"1");
+
+/// The magic splits by RULE, not by a remembered offset: the identity is the leading run of capitals,
+/// the version is the digits after it, four bytes in all. Held at build time so a magic that breaks the
+/// rule fails to compile rather than splitting somewhere the next reader would not look. A digit is
+/// never a capital, so "all capitals, then all digits" is exactly "the maximal leading capital run".
+const _: () = assert!(
+    all_between(&IDENTITY, b'A', b'Z')
+        && all_between(VERSION.as_bytes(), b'0', b'9')
+        && IDENTITY.len() + VERSION.as_bytes().len() == 4,
+    "the magic must be four bytes: a run of capitals (the identity) then digits (the version)"
+);
+
+/// Whether `bytes` is non-empty and every byte falls in `lo..=hi`. `const` because its one caller is a
+/// build-time claim about the magic.
+const fn all_between(bytes: &[u8], lo: u8, hi: u8) -> bool {
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] < lo || bytes[at] > hi {
+            return false;
+        }
+        at += 1;
+    }
+    !bytes.is_empty()
+}
+
+/// The version half of a control frame's magic: the byte after [`IDENTITY`], naming which frame
+/// grammar the peer that wrote it speaks.
+///
+/// Parsed as a value rather than folded into one four-byte comparison, because the two halves of the
+/// magic answer different questions. An IDENTITY mismatch says the connection is not a control
+/// stream, and there is nothing true we could say to whatever is on the other end. A VERSION mismatch
+/// says a swoosh control peer on another build, which is a fact both ends can act on, so the resident
+/// answers it ([`ControlError::Version`] reaches the client as a `Response::Error`) instead of
+/// dropping the connection on a peer that cannot see why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WireVersion([u8; 1]);
+
+impl WireVersion {
+    /// Read the version half, after the identity. The width of the field lives here, in the type that
+    /// owns it, so the reader and the writer cannot drift apart.
+    async fn read<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self, ControlError> {
+        let mut bytes = [0u8; 1];
+        reader
+            .read_exact(&mut bytes)
+            .await
+            .map_err(ControlError::Io)?;
+        Ok(Self(bytes))
+    }
+
+    /// The bytes as they go on the wire.
+    const fn as_bytes(&self) -> &[u8; 1] {
+        &self.0
+    }
+}
+
+impl core::fmt::Display for WireVersion {
+    /// Renders the WHOLE four-byte tag (`SWC1`), because that is the form the source and the changelog
+    /// use, so a peer handed one in an error can match it against what it reads. A peer's version byte
+    /// is arbitrary and need not be printable, so it is escaped rather than trusted: this string
+    /// reaches a terminal.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}{}", IDENTITY.escape_ascii(), self.0.escape_ascii())
+    }
+}
+
+/// Write the four magic bytes that open every control frame, as [`IDENTITY`] then [`VERSION`]. The
+/// two writers and the two readers share one pair of helpers so a request and a response can never
+/// disagree about what opens a frame.
+async fn write_magic<W: io::AsyncWrite + Unpin>(writer: &mut W) -> io::Result<()> {
+    writer.write_all(&IDENTITY).await?;
+    writer.write_all(VERSION.as_bytes()).await
+}
+
+/// Read the four magic bytes and check them, parsed as [`IDENTITY`] plus a [`WireVersion`] and never
+/// compared as four bytes, so that "not a control stream" and "a control stream from another build"
+/// stay two facts instead of one. Only the second is something the peer can act on.
+async fn read_magic<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<(), ControlError> {
+    let mut identity = [0u8; IDENTITY.len()];
+    reader
+        .read_exact(&mut identity)
+        .await
+        .map_err(ControlError::Io)?;
+    if identity != IDENTITY {
+        return Err(ControlError::Foreign);
+    }
+    let version = WireVersion::read(reader).await?;
+    if version != VERSION {
+        return Err(ControlError::Version { peer: version });
+    }
+    Ok(())
+}
 
 /// The largest frame payload the socket admits: 8 KiB. A longer DECLARED length is refused and the
 /// connection closed, before a byte of it is read.
@@ -70,24 +167,14 @@ impl Request {
 
     /// Write one request frame: magic, tag, then the (empty) length-prefixed payload.
     pub async fn write<W: io::AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
-        writer.write_all(&MAGIC).await?;
+        write_magic(writer).await?;
         writer.write_all(&[self.tag()]).await?;
         writer.write_all(&0u16.to_be_bytes()).await
     }
 
     /// Read one request frame, enforcing the magic and the frame cap.
     pub async fn read<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self, ControlError> {
-        let mut magic = [0u8; 4];
-        reader
-            .read_exact(&mut magic)
-            .await
-            .map_err(ControlError::Io)?;
-        if magic != MAGIC {
-            return Err(ControlError::Protocol(format!(
-                "not a control stream (want SWC1, got {})",
-                String::from_utf8_lossy(&magic)
-            )));
-        }
+        read_magic(reader).await?;
         let mut tag = [0u8; 1];
         reader
             .read_exact(&mut tag)
@@ -385,7 +472,7 @@ impl Response {
         }
         let len =
             u16::try_from(payload.len()).map_err(|_| io::Error::other("response too long"))?;
-        writer.write_all(&MAGIC).await?;
+        write_magic(writer).await?;
         writer.write_all(&[self.tag()]).await?;
         writer.write_all(&len.to_be_bytes()).await?;
         writer.write_all(&payload).await
@@ -393,17 +480,7 @@ impl Response {
 
     /// Read one response frame, enforcing the magic and the frame cap.
     pub async fn read<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self, ControlError> {
-        let mut magic = [0u8; 4];
-        reader
-            .read_exact(&mut magic)
-            .await
-            .map_err(ControlError::Io)?;
-        if magic != MAGIC {
-            return Err(ControlError::Protocol(format!(
-                "not a control stream (want SWC1, got {})",
-                String::from_utf8_lossy(&magic)
-            )));
-        }
+        read_magic(reader).await?;
         let mut tag = [0u8; 1];
         reader
             .read_exact(&mut tag)
@@ -473,7 +550,27 @@ pub enum ControlError {
     /// A declared length over the 8 KiB cap.
     #[error("control frame too large ({0} bytes over the cap)")]
     TooLarge(usize),
-    /// Version skew, a bad tag, a bad string, trailing bytes: loud, never silent.
+    /// The connection did not open with [`IDENTITY`], so it is not a control stream. The wording is
+    /// now exactly true: it used to cover a control peer on another version as well, which it never
+    /// was.
+    #[error("not a control stream")]
+    Foreign,
+    /// A control frame from a build that speaks a different frame grammar.
+    ///
+    /// This message goes ON THE WIRE (the resident answers an unreadable request with a
+    /// `Response::Error` carrying it), so it is FIXED text plus the two version tags and nothing
+    /// else. Never interpolate host state here. The socket is uid-gated, so the peer is already this
+    /// user and there is nobody to fingerprint, but the rule holds anyway: an answer written for a
+    /// peer on another build is not the place to spend facts.
+    #[error(
+        "control wire version mismatch: the frame is {peer}, this build speaks {VERSION}; run one \
+         swoosh build at both ends"
+    )]
+    Version {
+        /// The version the peer's frame named.
+        peer: WireVersion,
+    },
+    /// A bad tag, a bad string, trailing bytes: loud, never silent.
     #[error("control protocol error: {0}")]
     Protocol(String),
     /// The embedded catalog blob did not decode.
