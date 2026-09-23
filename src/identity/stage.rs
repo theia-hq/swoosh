@@ -246,12 +246,12 @@ fn occupied(path: &Path) -> eyre::Report {
 }
 
 /// Whether a hard link failed because the filesystem has none, rather than for a reason worth reporting.
-/// FAT and exFAT answer `ENOTSUP` on macOS and `EPERM` on Linux.
+/// FAT and exFAT answer `ENOTSUP` on macOS and `EPERM` on Linux. The codes are compared, not matched as
+/// patterns, because `ENOTSUP` and `EOPNOTSUPP` are the same number on Linux and differ on macOS.
 fn no_hard_links(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(libc::ENOTSUP | libc::EOPNOTSUPP | libc::EPERM)
-    )
+    error
+        .raw_os_error()
+        .is_some_and(|code| [libc::ENOTSUP, libc::EOPNOTSUPP, libc::EPERM].contains(&code))
 }
 
 /// A stage name beside `target`, unique to this process and this call.
