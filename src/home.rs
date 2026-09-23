@@ -83,6 +83,12 @@ impl Home {
         self.dir.join("identity.key")
     }
 
+    /// `<home>/identity.lock`: the lock that keeps a running node and a restore apart. Separate from
+    /// `identity.key`, because a restore replaces the key's inode, and a lock on a moving inode holds nothing.
+    pub fn identity_lock(&self) -> PathBuf {
+        self.dir.join("identity.lock")
+    }
+
     /// `<home>/signet`: the public [`NodeId`](bifrost::NodeId) of the signet this node trusts, written by
     /// `adopt`, read by the `serve` gate.
     pub fn signet(&self) -> PathBuf {

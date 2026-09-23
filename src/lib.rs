@@ -15,6 +15,7 @@ pub mod home;
 pub mod identity;
 pub mod invite;
 pub mod node_client;
+pub mod passphrase;
 pub mod peer;
 pub mod reach;
 pub mod reaching;

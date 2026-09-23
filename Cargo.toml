@@ -33,6 +33,8 @@ bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6
 bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
 bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
+# The key file store, in bifrost's repo beside the identity it stores.
+keystore = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "ed96225584372e22ddf3e0d92e1fdaacd886efd5" }
 tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "ddfd91620c7e8371cd536cf7cec9c90f01e4e101" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
