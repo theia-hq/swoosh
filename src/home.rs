@@ -126,6 +126,15 @@ impl Home {
         self.dir.join("revoked")
     }
 
+    /// `<home>/disabled_roots`: the root keys this node no longer trusts, one `bf01` key per line, which
+    /// the `serve` gate refuses every cap rooted at and `fleet` and `adopt` refuse to follow. It only ever
+    /// grows, and nothing here removes a key. Deliberately NOT [`disabled`](Self::disabled), the service
+    /// toggle, whose list a re-enable shrinks: a root disable is terminal, and the two must never share a
+    /// file or a reader.
+    pub fn disabled_roots(&self) -> PathBuf {
+        self.dir.join("disabled_roots")
+    }
+
     /// `<home>/disabled`: the newline list of DISABLED service names a running `serve` honors live (an
     /// mtime-watched oracle, the exact shape as [`revoked`](Self::revoked)). `service disable <svc>` adds a
     /// name and `service enable <svc>` removes one; a disable persists (fail-closed across a restart) and a

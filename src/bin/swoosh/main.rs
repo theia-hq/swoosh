@@ -409,7 +409,14 @@ impl Outward {
                         .await?
                         .unwrap_or_else(|| secret.node_id()),
                 ),
-                denylist: nauthy::FileDenylist::load(home.revoked()).await?,
+                // The gate's whole revocation policy, composed here: the denylist of revoked grants,
+                // behind the latch of root keys this node disabled, so a cap rooted at a disabled key is
+                // refused whatever the denylist says. Shared, because the gate and the live cut must
+                // read the one instance.
+                revocations: std::sync::Arc::new(nauthy::Latch::new(
+                    nauthy::DisabledRoots::load(home.disabled_roots()).await?,
+                    nauthy::FileDenylist::load(home.revoked()).await?,
+                )),
                 // The live enable/disable oracle: the running exposer consults it per stream, so a
                 // `service disable`/`enable` written to `<home>/disabled` is honored with no restart. Loaded
                 // here beside the denylist because both are home files the gate reads.
@@ -1156,6 +1163,64 @@ mod tests {
         assert!(
             expose.roster.is_none(),
             "a member device must not advertise a roster it cannot sign"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The gate `serve` resolves refuses every cap rooted at a key this home disabled, and the context
+    /// fails to resolve at all over a latch it cannot read, rather than serving as if nothing were
+    /// disabled.
+    #[tokio::test]
+    async fn the_serve_gate_honors_the_homes_disabled_roots() {
+        use nauthy::Revocations as _;
+        use tightbeam::identity::AsVerifyKey as _;
+
+        let dir = std::env::temp_dir().join(format!("swoosh-latch-ctx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create an empty config dir");
+        let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
+        let secret = swoosh::identity::Secret::ephemeral();
+        let serve_verb = || match Cli::try_parse_from(["swoosh", "serve"])
+            .expect("bare serve parses")
+            .command
+            .expect("serve is a command")
+            .split()
+        {
+            Verb::Outward(outward) => outward,
+            _ => panic!("serve splits to a reaching verb"),
+        };
+        let disabled = nauthy::Identity::from_secret(&[41u8; 32]).expect("valid secret");
+        let live = nauthy::Identity::from_secret(&[42u8; 32]).expect("valid secret");
+        let hour = nauthy::Request::expires_in(core::time::Duration::from_secs(3600));
+        let service: nauthy::Service = "ssh".parse().expect("valid service");
+        nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
+            .disable(bifrost::NodeId::from_ed25519_secret(&[41u8; 32]).verify_key())
+            .await
+            .expect("disable a root");
+
+        let expose = serve_verb()
+            .expose_context(&secret, &home)
+            .await
+            .expect("expose context resolves")
+            .expect("serve carries an expose context");
+        assert!(
+            expose
+                .revocations
+                .is_revoked(&disabled.mint(&service, hour).expect("mint")),
+            "a cap rooted at the disabled key is refused"
+        );
+        assert!(
+            !expose
+                .revocations
+                .is_revoked(&live.mint(&service, hour).expect("mint")),
+            "a cap rooted anywhere else is not"
+        );
+
+        std::fs::write(home.disabled_roots(), "not a key\n").expect("corrupt the latch");
+        assert!(
+            serve_verb().expose_context(&secret, &home).await.is_err(),
+            "an unreadable latch stops the serve rather than trusting every root"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

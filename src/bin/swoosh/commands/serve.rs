@@ -31,7 +31,7 @@ use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use bifrost_mdns::{At, Dialable, Expiring, Missing, ScopeClass};
 use clap::Args;
 use eyre::WrapErr as _;
-use nauthy::{FileDenylist, Service};
+use nauthy::{FileDenylist, Latch, Service};
 use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
@@ -161,8 +161,9 @@ pub struct ExposeContext {
     /// The signet the default gate trusts: a provisioned signet if one was adopted, else this node's OWN
     /// key (person-zero self-trusts).
     pub signet: Option<NodeId>,
-    /// The revocation denylist the gate honors.
-    pub denylist: FileDenylist,
+    /// The revocation policy the gate honors: the denylist of revoked grants behind the latch of disabled
+    /// root keys. One shared instance, read by the gate at admission and by the live cut after it.
+    pub revocations: Arc<Latch<FileDenylist>>,
     /// The live enable/disable oracle the exposer's per-stream gate consults: a `service disable`
     /// written to `<home>/disabled` refuses the service live, and a `service enable` restores it, both with no
     /// restart. The exact mtime-watch shape as the denylist, loaded beside it in the composition root.
@@ -246,12 +247,12 @@ impl Reaching for ServeCmd {
         let ExposeContext {
             host_seed,
             signet,
-            denylist,
+            revocations,
             enabled,
             roster,
             home,
         } = *expose;
-        self.run_serve(node, host_seed, signet, denylist, enabled, roster, home)
+        self.run_serve(node, host_seed, signet, revocations, enabled, roster, home)
             .await
     }
 }
@@ -303,7 +304,7 @@ impl ServeCmd {
         node: &Node<T, D>,
         host_seed: [u8; 32],
         signet: Option<NodeId>,
-        denylist: FileDenylist,
+        revocations: Arc<Latch<FileDenylist>>,
         enabled: FileDisabledList,
         roster: Option<Arc<swoosh::roster::Artifact>>,
         home: Home,
@@ -348,7 +349,7 @@ impl ServeCmd {
         // the ONE shared policy point, rather than ever serving on a permissive default. Opening individual
         // services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
         //
-        let gate = tunnel::resolve_gate(signet, denylist)?;
+        let gate = tunnel::resolve_gate(signet, Arc::clone(&revocations))?;
         // One `Router`: each route binds a handler VALUE (the engine handlers, roster, stop, the fetch and
         // recv instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector)
         // through the `name=addr` grammar. The public overlays prove at `.expose()` below, so
@@ -413,7 +414,14 @@ impl ServeCmd {
         // Wire the live enable/disable oracle alongside the proven public overlay: a stream for a
         // service named in `<home>/disabled` is refused at the gate seam, live, and a re-enable restores it
         // with no restart. `with_enabled` cannot fail (it only stores the oracle), so it tails the chain.
-        let exposer = router.expose()?.with_enabled(enabled);
+        //
+        // The live cut reads the one revocation instance the gate was resolved over: a session admitted
+        // on a cap since revoked, or rooted at a key since disabled, ends itself within a sweep rather
+        // than running on.
+        let exposer = router
+            .expose()?
+            .with_enabled(enabled)
+            .with_live_cuts(revocations);
         // Prove the transport can carry this gate BEFORE announcing readiness or binding the resident
         // socket: a rooted gate over a transport that does not prove the peer refuses here with the
         // teaching error, never after a "ready" banner the node cannot honor (and never with a lock or

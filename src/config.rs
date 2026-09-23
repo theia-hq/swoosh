@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
 use eyre::WrapErr as _;
-use nauthy::Link;
+use nauthy::{DisabledRoots, Link};
+use tightbeam::identity::AsVerifyKey as _;
 
 use crate::home::Home;
 
@@ -41,6 +42,15 @@ pub async fn holds_signet(home: &Home, node: NodeId) -> eyre::Result<bool> {
     Ok(load_signet(home)
         .await?
         .is_none_or(|configured| configured == node))
+}
+
+/// Whether this home has disabled `root`: the question a verb asks before it follows a key it did not
+/// sign itself, read from the same latch the `serve` gate refuses every cap rooted there on. Fails
+/// closed: a latch that cannot be read, or that lost keys it once held, is an error, never "nothing is
+/// disabled".
+pub async fn is_disabled(home: &Home, root: NodeId) -> eyre::Result<bool> {
+    let disabled = DisabledRoots::load(home.disabled_roots()).await?;
+    Ok(disabled.is_disabled(root.verify_key()))
 }
 
 /// Write this node's signet: the public [`NodeId`] its default gate will trust, as `adopt` sets it from an
