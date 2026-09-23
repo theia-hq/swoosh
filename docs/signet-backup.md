@@ -1,57 +1,87 @@
 # Backing up your signet
 
-Your [signet](keys.md#signet) is one file of 32 bytes. It is the key that means "me": it signs every
-device you enrol and roots every grant your gates admit. Nothing else holds a copy, and there is nobody
-to issue you another. Copy it somewhere that outlives the machine it is on.
+Your [signet](keys.md#signet) is the key that means "me": it signs every device you enrol and roots every
+grant your gates admit. Nothing else holds a copy, and there is nobody to issue you another. Back it up
+somewhere that outlives the machine it is on.
 
-## Copy it
+## Seal it first
 
-`swoosh identity` prints the key and the file it lives in. Copy that file:
+On the machine that will hold your signet, create the key sealed under a passphrase before anything else:
+
+<!-- manual: the passphrase is typed at the terminal -->
+```console
+$ swoosh identity protect passphrase
+new passphrase for ~/.config/swoosh/identity.key:
+repeat the new passphrase:
+bf012xdjkuwbokai5brwac6varo7xsvuxba6wmfkottpronrhjavyp4q
+protection: passphrase
+```
+
+Doing this first means the key never sits on the disk in the clear. A key that is already there is sealed
+the same way, but copies made while it was plain (old backups, snapshots) stay plain.
+
+The passphrase is asked for at the terminal, every time the key is used: by `swoosh serve`, by a dial, by
+`invite add`. A machine that must start with nobody at the keyboard keeps a plain key: there is no
+unlock agent, and a sealed key started by a service manager exits asking for a terminal. Start a sealed
+node in the foreground; `swoosh serve &` stops at the prompt until you bring it back with `fg`.
+
+## Back it up
+
+`swoosh identity export` writes a sealed copy to a file:
 
 <!-- manual: the backup destination is a path only the operator knows -->
 ```console
-$ swoosh identity
-bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-key: ~/.config/swoosh/identity.key
-$ cp ~/.config/swoosh/identity.key /Volumes/backup/swoosh-signet.key
+$ swoosh identity export /Volumes/backup/signet.key
+passphrase for ~/.config/swoosh/identity.key:
+new passphrase for /Volumes/backup/signet.key:
+repeat the new passphrase:
+exported to /Volumes/backup/signet.key
+restore with `swoosh identity restore /Volumes/backup/signet.key`
 ```
 
-Run the command on the machine that holds the signet: on a [device](keys.md#device) you adopted,
-`swoosh identity` prints that device's key instead.
+The backup is always sealed, under a passphrase you choose as you export it. A sealed key is unlocked
+first, and its backup still gets a passphrase of its own: the stick is likelier to be lost than the
+machine, so do not reuse the one you type every day. The file and its passphrase together are you, so keep them apart: the file
+on a stick or in an archive, the passphrase in your head or your password manager.
 
-The file is the raw key with nothing wrapped around it, so whoever holds the copy is you. Put it where
-you would put a password, not in a shared folder and not in a repository.
+Run the command on the machine that holds the signet: on a [device](keys.md#device) you adopted, it backs
+up that device's key instead. A device does not need a backup; its owner can enrol it again.
 
 ## Restore it
 
-Copy it back, make it owner-only, and read the key:
+On a new machine, restore the backup into the home:
 
 <!-- manual: the backup source is a path only the operator knows -->
 ```console
-$ mkdir -p ~/.config/swoosh
-$ cp /Volumes/backup/swoosh-signet.key ~/.config/swoosh/identity.key
-$ chmod 600 ~/.config/swoosh/identity.key
-$ swoosh identity
-bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-key: ~/.config/swoosh/identity.key
+$ swoosh identity restore /Volumes/backup/signet.key
+passphrase for /Volumes/backup/signet.key:
+restored bf012xdjkuwbokai5brwac6varo7xsvuxba6wmfkottpronrhjavyp4q
+only the key came back; this home has no revocation list, so grants you revoked work again
 ```
 
-The same key printing back is the restore working. Your devices already trust that key, so they admit
-you again with nothing to re-run on them.
+The same key printing back is the restore working. Your devices already trust that key, so they admit you
+again with nothing to re-run on them. The restored key stays sealed under the backup's passphrase.
 
-swoosh refuses a key file it cannot trust and names the fix. A copy pulled off a USB stick or out of an
-archive usually lands readable by everyone:
-
-```
-Error: permissions 0644 for the identity key ~/.config/swoosh/identity.key are too open: group or other can read it. run `chmod 600 ~/.config/swoosh/identity.key`
-```
-
-Any length but 32 bytes is a truncated or foreign file. swoosh stops rather than minting a fresh key
-over it, so the bad copy is still there to replace:
+A wrong passphrase changes nothing:
 
 ```
-Error: identity key ~/.config/swoosh/identity.key is 31 bytes; an ed25519 key is exactly 32. refusing to overwrite it: restore a valid key or move the file aside
+Error: could not unlock the backup /Volumes/backup/signet.key: wrong passphrase, or the file is damaged
 ```
+
+A home that already holds a different key keeps it unless you pass `--force`, because that key may be the
+only copy of another identity: export it first. A sealed key at home needs `--force` even when it claims to
+be the same identity, since only its passphrase could prove that. Stop any `swoosh serve` on the home first: a restore refuses to run under a
+node that is serving.
+
+## A restore brings back the key, nothing else
+
+Revocations are a separate file. `revoked` sits beside `identity.key` in the home, one line per recalled
+grant, and the backup carries none of it. Restore into an empty home and that node starts with no denylist,
+so every grant you had revoked is admitted again until it expires. Copy `revoked` from your old home, or
+revoke those grants again.
+
+A restore is for a lost key. If the key may have been stolen, restoring it gives you back the key the thief
+also holds; make a new signet and enrol your devices again instead.
 
 ## If you lose it
 
@@ -73,18 +103,8 @@ You cannot renew a badge either. A membership badge lasts 90 days unless the inv
 and only the signet can sign the next one. So a fleet that loses its signet keeps running and then ages
 out, one device at a time, as each badge expires.
 
-## A restored signet forgets what you revoked
-
-Revocations are a separate file. `revoked` sits beside `identity.key` in the same directory, one line
-per recalled grant, and the key carries none of it. Restore the key alone into an empty directory and
-that node starts with no denylist, so every grant you had revoked is admitted again. Restore a copy of
-the whole directory and you get the revocations that existed when you took the copy, not the ones you
-wrote after it.
-
-Copy the directory rather than the key alone, and take a fresh copy each time you revoke.
-
 ## Next
 
 - [Keys](keys.md) the model your signet sits at the root of.
-- [`swoosh identity`](reference/commands/identity.md) the verb that prints the key and its path.
+- [`swoosh identity`](reference/commands/identity.md) the verb that prints the key, backs it up, and restores it.
 - [`swoosh invite`](reference/commands.md#invite) enrolling a device.

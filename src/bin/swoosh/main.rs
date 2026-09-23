@@ -616,6 +616,12 @@ async fn run() -> eyre::Result<()> {
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward
     // verb binds the home's key where one exists (its badge roots there) and a throwaway where none does,
     // writing nothing. Resolve it before binding, since the secret is what the transport is bound under.
+    // A serving node holds the home lock for its whole life, taken before its key is read, so a restore
+    // can never replace the key it is serving as.
+    let _home_lock = match reach.identity() {
+        Identity::Persisted => Some(swoosh::identity::HomeLock::serving(&home)?),
+        Identity::Ephemeral | Identity::PersistedIfPresent => None,
+    };
     let secret = swoosh::identity::resolve(reach.identity(), &home).await?;
     let contacts = Contacts::clone(store.contacts());
 

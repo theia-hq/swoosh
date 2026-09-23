@@ -4848,6 +4848,7 @@ dependencies = [
  "fetch",
  "futures",
  "httparse",
+ "keystore",
  "libc",
  "measure",
  "nauthy",

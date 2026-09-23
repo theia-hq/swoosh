@@ -120,14 +120,12 @@ pub fn create_store_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Write `contents` to `path` owner-only, through a unique temp sibling renamed over the target.
 ///
-/// The one atomic private write in the tree: the identity key ([`identity::write`]) and the two reach
-/// files (`<home>/relay`, `<home>/resolver`) all land this way. Each is read by a later run and each is
+/// The two reach files (`<home>/relay`, `<home>/resolver`) land this way; the identity key has its own
+/// store ([`keystore`]), which writes the same way. Each is read by a later run and each is
 /// unrecoverable if it is torn, so the bytes are durable (`sync_all`) before the rename makes them
 /// visible, and the temp is opened `create_new` at mode `0600` so the file is never world-readable for
 /// an instant and the rename carries that mode onto the target. A failed write or rename removes the
 /// temp, leaving the previous contents intact and no litter behind.
-///
-/// [`identity::write`]: crate::identity::write
 pub async fn write_private_atomic(path: &Path, contents: &[u8]) -> eyre::Result<()> {
     use tokio::io::AsyncWriteExt as _;
 

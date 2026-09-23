@@ -23,14 +23,15 @@ fn an_adopted_device_reports_its_signet_and_its_badge_life() {
     let out = render(
         node(),
         Path::new("/home/me/.config/swoosh/identity.key"),
+        Method::Passphrase,
         Some(signet),
         Some(badge::Standing::Live { left: 34 * DAY }),
     );
     assert_eq!(
         out,
         format!(
-            "{}\nkey: /home/me/.config/swoosh/identity.key\nsignet: {signet}\nbadge: expires in \
-             34d\n",
+            "{}\nkey: /home/me/.config/swoosh/identity.key\nprotection: passphrase\nsignet: \
+             {signet}\nbadge: expires in 34d\n",
             node()
         )
     );
@@ -43,6 +44,7 @@ fn a_dead_badge_says_so_and_says_when() {
     let out = render(
         node(),
         Path::new("/k"),
+        Method::Plain,
         Some(NodeId::from_ed25519_secret(&[8u8; 32])),
         Some(badge::Standing::Expired { ago: 6 * DAY }),
     );
@@ -57,7 +59,7 @@ fn a_dead_badge_says_so_and_says_when() {
 /// the same to the operator who came here to find out which they have.
 #[test]
 fn the_signet_holder_reads_both_absences_as_states() {
-    let out = render(node(), Path::new("/k"), None, None);
+    let out = render(node(), Path::new("/k"), Method::Plain, None, None);
     assert!(
         out.contains("signet: none") && out.contains("badge: none"),
         "neither absence may render as a blank line, got:\n{out}"
@@ -71,6 +73,7 @@ fn an_unreadable_expiry_renders_as_unknown() {
     let out = render(
         node(),
         Path::new("/k"),
+        Method::Plain,
         Some(NodeId::from_ed25519_secret(&[8u8; 32])),
         Some(badge::Standing::Unknown),
     );
