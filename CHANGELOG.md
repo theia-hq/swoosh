@@ -2,6 +2,12 @@
 
 All notable changes to swoosh, newest first.
 
+## Unreleased
+
+### Fixed
+- **A live session ends when its earliest grant expires, and a refused stream no longer extends a
+  session.** Picks up tightbeam v0.14.1.
+
 ## v0.14.0
 
 ### Changed
