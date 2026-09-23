@@ -2,7 +2,7 @@
 
 All notable changes to swoosh, newest first.
 
-## Unreleased
+## v0.14.1
 
 ### Fixed
 - **A live session ends when its earliest grant expires, and a refused stream no longer extends a
