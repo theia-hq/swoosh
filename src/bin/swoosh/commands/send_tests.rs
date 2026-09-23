@@ -1,6 +1,6 @@
 //! The sender's own lines render a hostile file name the same way the receiver renders a
 //! peer-supplied path, so a newline in a name cannot forge a second line on this terminal and an ESC
-//! cannot drive it. The rule mirrors `services/crates/transfer/src/handler.rs` (`render_path`).
+//! cannot drive it. The rule mirrors `services/crates/transfer/src/serve.rs` (`render_path`).
 //!
 //! The name is not the only surface: the skip line prints the whole error chain beside the escaped
 //! prefix, so a path-bearing context built with a raw `Path::display` (the `stat`/`read` walk and the

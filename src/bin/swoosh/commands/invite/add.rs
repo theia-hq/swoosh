@@ -25,7 +25,6 @@ use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
 use swoosh::invite::Invite;
 use tightbeam::duration::Lifetime;
-use zeroize::Zeroize as _;
 
 use crate::commands::share::{GrantFor, resolve_one_device};
 
@@ -135,14 +134,13 @@ impl AddCmd {
                 // Derive the child identity and sign its badge, the derived cell. The token then carries
                 // the child seed, the signet's public id, and the public badge; the signet secret never
                 // leaves this process.
-                let mut seed = signet.derive_child_seed(device.as_str());
+                let seed = signet.derive_child_seed(device.as_str());
                 let node = NodeId::from_ed25519_secret(&seed);
                 // The derived cell always re-derives the same child for one label, but a label previously
                 // used with `--for` would still be shadowed: refuse on the same rule.
                 refuse_shadowed(store.contacts(), &device, node)?;
                 let badge = signet.sign_device_badge(node, ttl)?;
-                let token = Invite::derived(seed, signet_id, Link::clone(&badge));
-                seed.zeroize();
+                let token = Invite::derived(*seed, signet_id, Link::clone(&badge));
                 record(&mut store, home, &device, node, ttl, &badge).await?;
                 println!("{token}\n");
                 println!("recorded me/{device} -> {node}  [derived]");

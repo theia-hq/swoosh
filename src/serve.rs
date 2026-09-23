@@ -5,7 +5,8 @@
 //!
 //! `bind_entry`/`diagnostics` bind the named routes (the diagnostics engines, the roster the signet
 //! signed, tightbeam's own primitives), and the `control.*` handlers plus `Resident`/`InstanceLock`
-//! carry the node's local control surface. Nothing here SIGNS: `serve` relays a roster its operator's
+//! carry the node's local control surface. [`Activity`] is where an engine's reported fact becomes a
+//! line, and the only place one does. Nothing here SIGNS: `serve` relays a roster its operator's
 //! signet cut elsewhere, so the long-lived process never holds a signing identity.
 
 use std::path::{Path, PathBuf};
@@ -13,10 +14,11 @@ use std::sync::Arc;
 
 use ::fetch::OriginAllowlist;
 use nauthy::Service;
-use tightbeam::tunnel::Router;
+use tightbeam::tunnel::{Router, Serve};
 
 use crate::roster::Artifact;
 
+mod activity;
 mod control;
 mod resident;
 mod roster;
@@ -29,6 +31,7 @@ pub mod control_codec {
         MAX_WARM_ENTRIES, PeerEntry, Request, Response, ServiceMenu, StatusReply, WireVersion,
     };
 }
+pub use activity::{Activity, RecvLines};
 pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};
 pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_single};
 // `roster` shadows `crate::roster`, reached in full above. The general engines (`fetch`, `measure`,
@@ -213,7 +216,7 @@ fn bind_ping(router: Router, name: Service, public: &[Service]) -> eyre::Result<
     } else {
         router.service(
             name,
-            measure::server::Ping::new(&measure::server::Limits::owner()),
+            Serve(measure::server::Ping::new(&measure::server::Limits::owner())),
         )
     }
 }
@@ -225,7 +228,9 @@ fn bind_speed(router: Router, name: Service, public: &[Service]) -> eyre::Result
     } else {
         router.service(
             name,
-            measure::server::Speed::new(&measure::server::Limits::owner()),
+            Serve(measure::server::Speed::new(
+                &measure::server::Limits::owner(),
+            )),
         )
     }
 }
@@ -261,7 +266,7 @@ pub fn diagnostics(router: Router, public: &[Service]) -> eyre::Result<Router> {
 pub const RECV_SCHEME: &str = "recv";
 
 /// One de-merged receive service: its served NAME (the wire name `swoosh send --service` requests, e.g. the
-/// default `recv`) and ONLY its own sink directory. Because each receive service holds its own [`Recv`]
+/// default `recv`) and ONLY its own output directory. Because each receive service holds its own [`Recv`]
 /// instance, `a=recv:/x b=recv:/y` writes alice's pushes into /x and bob's into /y: a node-wide sink cannot
 /// say which of two receive services saves where, so the dir rides the per-service instance, the same
 /// de-merge `fetch:` uses.
@@ -276,15 +281,33 @@ impl RecvService {
         &self.name
     }
 
-    /// This service's own sink directory (only its own; never shared with another receive service).
+    /// This service's own output directory (only its own; never shared with another receive service).
     pub fn out(&self) -> &Path {
         &self.out
     }
 }
 
+/// Bind one receive route: a [`Recv`] that lands files in `out`, under `name`. With a renderer the engine
+/// is handed that route's sink, so every landed file becomes one activity line naming the route; with
+/// none (a `--quiet` node) it gets no sink and stays silent. This is the only place a receive engine is
+/// built for a serving node, so the product and the integration proofs bind it the same way.
+pub fn bind_recv(
+    router: Router,
+    name: Service,
+    out: PathBuf,
+    activity: Option<&Activity>,
+) -> eyre::Result<Router> {
+    let engine = Recv::new(out);
+    let engine = match activity {
+        Some(activity) => engine.with_sink(activity.recv(name.clone())),
+        None => engine,
+    };
+    router.service(name, engine)
+}
+
 /// De-merges the receive services out of the requested set: a `name=recv:<dir>` entry hands the router a
-/// sink directory its addr grammar cannot carry, so swoosh separates each into its OWN [`RecvService`]
-/// (name + its own sink dir) here, then binds one `Recv` instance per name by value. A `name=recv:` (no dir)
+/// output directory its addr grammar cannot carry, so swoosh separates each into its OWN [`RecvService`]
+/// (name + its own output dir) here, then binds one `Recv` instance per name by value. A `name=recv:` (no dir)
 /// saves into `.`. An entry without `=` is a teaching error, mirroring tightbeam's grammar. Non-recv entries
 /// are left in place, in order.
 pub fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<RecvService>> {
@@ -308,7 +331,7 @@ pub fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<Re
             continue;
         };
         // A `name=recv:` (no dir) saves into `.`; `name=recv:<dir>` into <dir>. The dir is this service's
-        // OWN, on its OWN instance, so two receive services never share one sink.
+        // OWN, on its OWN instance, so two receive services never share one output directory.
         let out = if dir.is_empty() {
             PathBuf::from(".")
         } else {

@@ -32,7 +32,7 @@ use bifrost::NodeId;
 use eyre::WrapErr as _;
 use nauthy::Link;
 use tightbeam::identity::AsVerifyKey as _;
-use zeroize::{Zeroize as _, ZeroizeOnDrop};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::home::Home;
 
@@ -59,8 +59,8 @@ pub const DEVICE_BADGE_TTL: core::time::Duration =
     core::time::Duration::from_secs(90 * 24 * 60 * 60);
 
 /// The ed25519 secret key a verb binds under. Wraps the raw bytes so they zeroize on drop and never
-/// cross a boundary as a bare array; unwrap only at the transport bind, the one place the key must be
-/// raw.
+/// cross a boundary as a bare array; they are lent out only at the transport bind, the one place the
+/// key must be raw.
 #[derive(ZeroizeOnDrop)]
 pub struct Secret([u8; 32]);
 
@@ -70,13 +70,10 @@ impl Secret {
         Self(rand::random())
     }
 
-    /// Consume the secret into its raw bytes for the transport bind. This is the single boundary where
-    /// the key leaves the zeroizing wrapper; the transport crate owns the key type downstream.
-    pub fn into_bytes(mut self) -> [u8; 32] {
-        let bytes = self.0;
-        // Wipe our copy; the returned array is the caller's to own (and, ideally, zeroize) from here.
-        self.0.zeroize();
-        bytes
+    /// Lend the raw seed to `lend` for the length of the call: for the transport bind, which borrows
+    /// the seed and returns a future that no longer does, so no copy of it leaves this wrapper.
+    pub fn with_bytes<R>(&self, lend: impl FnOnce(&[u8; 32]) -> R) -> R {
+        lend(&self.0)
     }
 
     /// The node id this secret binds under: the identity a peer reaches when it dials this key. Derived
@@ -159,8 +156,8 @@ impl Secret {
     /// machine ADOPTS to become that device, and the payload of a derived invite. Borrows, so this root
     /// stays owned here and zeroizes on drop; the raw root never leaves the wrapper, only the derived
     /// child does. Hardened (only the holder of this root can compute a child), so a leaked device seed
-    /// cannot recover the root or a sibling.
-    pub fn derive_child_seed(&self, label: &str) -> [u8; 32] {
+    /// cannot recover the root or a sibling. The child is secret too, so it arrives in a wiping owner.
+    pub fn derive_child_seed(&self, label: &str) -> Zeroizing<[u8; 32]> {
         bifrost_core::derive_ed25519_child_secret(&self.0, label)
     }
 }
@@ -259,7 +256,7 @@ async fn read_key(path: &Path) -> eyre::Result<Option<Secret>> {
     // Read one byte past the key so an oversized file is DETECTED rather than silently truncated to its
     // first 32 bytes: any other length is corrupt or foreign, and fail-closed keeps a fresh key from
     // silently replacing it. The buffer zeroizes on drop, so a partial read leaves no key material behind.
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
+    let mut bytes = Zeroizing::new(Vec::new());
     file.take((KEY_LEN + 1) as u64)
         .read_to_end(&mut bytes)
         .await

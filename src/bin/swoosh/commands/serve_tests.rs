@@ -480,7 +480,7 @@ fn a_public_route_cannot_arm_an_uncapped_diagnostic() {
     let Err(error) = Router::new(gated())
         .service(
             ping.clone(),
-            measure::server::Ping::new(&measure::server::Limits::owner()),
+            tightbeam::tunnel::Serve(measure::server::Ping::new(&measure::server::Limits::owner())),
         )
         .expect("the owner engine binds")
         .public([ping.clone()])
@@ -2455,7 +2455,7 @@ fn a_gated_bare_fetch_is_allowed() {
 }
 
 /// Two `name=recv:<dir>` services de-merge into TWO separate `RecvService`s, each with its own served name
-/// and ONLY its own sink dir. `extract` removes them from the requested set (leaving the non-recv entries
+/// and ONLY its own output dir. `extract` removes them from the requested set (leaving the non-recv entries
 /// for the router's grammar), so `a=recv:/x b=recv:/y` writes each peer's pushes into its OWN directory
 /// rather than the first-named one (the single-sink bug this fix removes).
 #[test]
@@ -2477,7 +2477,7 @@ fn named_recv_dirs_de_merge_into_per_service_instances() {
     assert_eq!(
         a.out(),
         std::path::Path::new("/tmp/x"),
-        "service a keeps its OWN sink dir"
+        "service a keeps its OWN output dir"
     );
     assert_eq!(
         b.out(),
@@ -2802,5 +2802,72 @@ fn serve_duration_is_expires_not_for() {
     assert!(
         wrap.serve.expires.is_none(),
         "no --expires means run until stopped"
+    );
+}
+
+/// `--quiet` withholds the whole activity class at its one gate: a quiet serve builds no renderer, so no
+/// engine is handed a sink and nothing can render, whatever `RUST_LOG` says. A plain serve builds one,
+/// and a fact through it reaches the writer.
+#[test]
+fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
+    use std::sync::{Arc, Mutex};
+
+    use clap::Parser as _;
+    use transfer::{Received, ReceivedSink as _};
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        serve: super::ServeCmd,
+    }
+
+    /// A writer the test reads back after the renderer has drained.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .expect("the capture lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let quiet = Wrap::try_parse_from(["x", "--quiet"]).expect("--quiet parses");
+    assert!(
+        quiet
+            .serve
+            .activity(Shared::default())
+            .expect("a quiet serve starts")
+            .is_none(),
+        "a quiet serve builds no renderer, so no engine gets a sink"
+    );
+
+    let plain = Wrap::try_parse_from(["x"]).expect("plain serve parses");
+    let out = Shared::default();
+    let activity = plain
+        .serve
+        .activity(out.clone())
+        .expect("a plain serve starts")
+        .expect("a plain serve renders activity");
+    activity.recv(svc("recv")).received(Received {
+        path: "notes.txt".into(),
+        bytes: 5,
+    });
+    drop(activity);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while out.0.lock().expect("the capture lock").is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        *out.0.lock().expect("the capture lock"),
+        b"recv: received notes.txt (5 bytes)\n",
+        "a plain serve's renderer carries the line"
     );
 }
