@@ -35,15 +35,15 @@ bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
 # The key file store, in bifrost's repo beside the identity it stores.
 keystore = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
-nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "ed96225584372e22ddf3e0d92e1fdaacd886efd5" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "ddfd91620c7e8371cd536cf7cec9c90f01e4e101" }
+nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "cd76786de5dba4db295c43aac5a1e931ddb67429" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "ec65947a2f038c65d68ea09d8dcb7a4a2576a679" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "4b5e5e1643b199825450a3c1268c89a10b5843b4" }
-measure = { git = "https://github.com/theia-hq/services", rev = "4b5e5e1643b199825450a3c1268c89a10b5843b4" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "4b5e5e1643b199825450a3c1268c89a10b5843b4", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "4b5e5e1643b199825450a3c1268c89a10b5843b4" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "423ac8cf360aa6278b52fad5474a4e6e02395dbc" }
+measure = { git = "https://github.com/theia-hq/services", rev = "423ac8cf360aa6278b52fad5474a4e6e02395dbc" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "423ac8cf360aa6278b52fad5474a4e6e02395dbc", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "423ac8cf360aa6278b52fad5474a4e6e02395dbc" }
 
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
