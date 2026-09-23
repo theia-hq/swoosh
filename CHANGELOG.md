@@ -2,7 +2,26 @@
 
 All notable changes to swoosh, newest first.
 
-## Unreleased
+## v0.13.0
+
+### New
+- **A key can be sealed under a passphrase, backed up and restored.** `swoosh identity` gains three
+  leaves:
+  - `protect plain|passphrase` rewrites the key file under that method without changing the key; on an
+    empty home it creates the key already sealed.
+  - `export <path> [--force]` writes a backup, always sealed under a passphrase chosen for it, to a file
+    and never to the terminal. It works on filesystems without hard links or permission modes, such as
+    FAT sticks.
+  - `restore <path> [--force]` puts a backup's key into the home. A wrong passphrase changes nothing, a
+    different key already at home needs `--force`, and the command says that revocations do not come back
+    with the key.
+
+  Passphrases are read only from the terminal (`/dev/tty`), never from arguments, the environment or
+  stdin, and the terminal is restored on any exit, Ctrl-C included. Bare `swoosh identity` prints a
+  `protection:` line and never asks for a passphrase. A sealed home with no terminal to ask on (a
+  service, `serve &`) refuses cleanly and says to use `protect plain` for unattended nodes.
+- **A running node holds `<home>/identity.lock`,** so a restore cannot replace the key a node is serving
+  with.
 
 ### Changed
 - **A received file prints as one plain line, and `--quiet` turns it off.** Each file a receive service
