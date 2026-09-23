@@ -50,7 +50,9 @@ bf01hcq6balrlxwa via iroh: mixed (direct to 135.129.x.x:56141 and relayed)
   or inspect the node.
 - **Public streams share a node-wide pool of four.** Four connected public streams fill it, on any mix
   of public services; each holds its slot until its stream ends, even if idle. A fifth public dial is
-  refused until a slot frees, and gated services are outside the pool.
+  refused until a slot frees, and gated services are outside the pool. A raw stream opened with
+  `--public-unsafe` frees its slot as soon as its viewer disconnects; a viewer that closed its sending
+  side first is noticed only at the source's next write, so on an idle source it keeps the slot.
 
 ## The limit
 

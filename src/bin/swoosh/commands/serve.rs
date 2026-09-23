@@ -36,9 +36,9 @@ use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::serve::{
-    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, InstanceLock, RECV_SCHEME, Recv,
-    Resident, ServiceList, Stop, StopKind, Stopped, acquire_single, bind_entry, classify_stop,
-    extract_recv_services,
+    Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, InstanceLock,
+    RECV_SCHEME, Resident, ServiceList, Stop, StopKind, Stopped, acquire_single, bind_entry,
+    bind_recv, classify_stop, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
@@ -102,7 +102,7 @@ pub struct ServeCmd {
         long_help = "A raw stream has no auth of its own; `--public` refuses it and points here."
     )]
     pub public_unsafe: Vec<String>,
-    /// suppress the readiness banner (for unattended/CI use)
+    /// suppress the readiness banner and activity lines
     #[arg(long)]
     pub quiet: bool,
     /// serve for a bounded time, then stop (`30m`, `2h`, `1d`)
@@ -333,7 +333,7 @@ impl ServeCmd {
         // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention.
         let fetch = FetchScope::extract(&mut requested)?;
         // De-merge the receive services the SAME way: every `name=recv:<dir>` becomes its OWN
-        // `Recv` instance bound to ONLY its own sink directory, so `a=recv:/x b=recv:/y` writes alice's
+        // `Recv` instance bound to ONLY its own output directory, so `a=recv:/x b=recv:/y` writes alice's
         // pushes into /x and bob's into /y, each scoped to its own service and grant. A public fetch's
         // SSRF-pivot argument does not apply (recv is always gated), so this is the plain per-instance
         // de-merge without an open-relay wall. A `name=recv:` (no dir) saves into `.`.
@@ -374,11 +374,16 @@ impl ServeCmd {
                 router.service(name, scoped_fetch)?
             };
         }
+        // The node's activity renderer, or none at all under `--quiet`: with no renderer no engine gets a
+        // sink, so quiet silences every activity line by construction and no log directive can bring one
+        // back. Activity rides stderr beside the diagnostics, keeping stdout to the banner.
+        let activity = self.activity(std::io::stderr())?;
         for service in &recv {
-            // One `Recv` instance per receive service, holding ONLY its own sink dir, so a push to one
-            // receive service can never land in another's directory.
-            router =
-                router.service(service.name().parse()?, Recv::new(service.out().to_owned()))?;
+            // One `Recv` instance per receive service, holding ONLY its own output dir, so a push to one
+            // receive service can never land in another's directory. Its sink carries the route's own
+            // name, so the line says which receive service a file landed through.
+            let name: Service = service.name().parse()?;
+            router = bind_recv(router, name, service.out().to_owned(), activity.as_ref())?;
         }
         // The two node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the
         // route's access class after the gate admits and before any `Response::Ok`, so a delegated slip
@@ -654,6 +659,19 @@ impl ServeCmd {
             }
         };
         Ok(stopped)
+    }
+
+    /// The activity renderer this serve writes onto `out`, or `None` under `--quiet`. The one gate for the
+    /// whole activity class: a line exists only if an engine was handed a sink from this renderer.
+    fn activity(
+        &self,
+        out: impl std::io::Write + Send + 'static,
+    ) -> eyre::Result<Option<Activity>> {
+        if self.quiet {
+            return Ok(None);
+        }
+        let activity = Activity::spawn(out).wrap_err("could not start the activity renderer")?;
+        Ok(Some(activity))
     }
 
     /// The resident control line for the banner, under `--resident` only: `control <socket path>

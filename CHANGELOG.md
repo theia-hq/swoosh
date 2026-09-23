@@ -2,6 +2,21 @@
 
 All notable changes to swoosh, newest first.
 
+## Unreleased
+
+### Changed
+- **A received file prints as one plain line, and `--quiet` turns it off.** Each file a receive service
+  lands now prints `<service>: received <path> (<bytes> bytes)` on stderr, for example
+  `inbox: received notes.txt (1500 bytes)`. The sender chooses the path, so control characters in it and
+  letters that print as blank space are shown escaped, and a long path is cut short.
+
+  This replaces the log event v0.12.0 added (`error,transfer=info`). The default log filter is back to
+  `error`, and `RUST_LOG` no longer controls these lines.
+
+  If stderr falls behind, swoosh drops lines rather than slowing a transfer down. The file still lands.
+  Once stderr catches up, one line says how many were dropped. Lines still waiting when swoosh exits are
+  lost.
+
 ## v0.12.0
 
 A peer cannot decide how much of your memory to spend, and a size problem stops posing as a forgery.

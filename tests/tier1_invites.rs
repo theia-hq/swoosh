@@ -36,10 +36,10 @@ use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 /// Bind a quirk endpoint under `seed` and wrap it with the SAME seed, the composition
 /// `--transport quirk+noise` performs: one address, one identity, two layers.
 async fn sealed(seed: [u8; 32]) -> Noise<Endpoint> {
-    let inner = Endpoint::bind_with_secret(seed)
+    let inner = Endpoint::bind_with_secret(&seed)
         .await
         .expect("bind quirk on loopback");
-    Noise::new(inner, seed).expect("wrap quirk under its own identity")
+    Noise::new(inner, &seed).expect("wrap quirk under its own identity")
 }
 
 /// The rooted gate `serve` arms for a node: the signet it trusts plus an empty denylist.

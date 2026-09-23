@@ -542,6 +542,9 @@ mod tests {
         }
 
         async fn wait_closed(&self) {}
+
+        /// A double that carries nothing has nothing to end.
+        fn close(&self) {}
     }
 
     /// The line the DOWNLOADER reads. A `fetch` request that fails serves an HTTP error body, and
