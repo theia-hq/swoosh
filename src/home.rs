@@ -83,6 +83,12 @@ impl Home {
         self.dir.join("identity.key")
     }
 
+    /// `<home>/identity.lock`: the lock that keeps a running node and a restore apart. Separate from
+    /// `identity.key`, because a restore replaces the key's inode, and a lock on a moving inode holds nothing.
+    pub fn identity_lock(&self) -> PathBuf {
+        self.dir.join("identity.lock")
+    }
+
     /// `<home>/signet`: the public [`NodeId`](bifrost::NodeId) of the signet this node trusts, written by
     /// `adopt`, read by the `serve` gate.
     pub fn signet(&self) -> PathBuf {
@@ -118,6 +124,15 @@ impl Home {
     /// `<home>/revoked`: the revocation denylist the expose gate honors, the next `serve` reads.
     pub fn revoked(&self) -> PathBuf {
         self.dir.join("revoked")
+    }
+
+    /// `<home>/disabled_roots`: the root keys this node no longer trusts, one `bf01` key per line, which
+    /// the `serve` gate refuses every cap rooted at and `fleet` and `adopt` refuse to follow. It only ever
+    /// grows, and nothing here removes a key. Deliberately NOT [`disabled`](Self::disabled), the service
+    /// toggle, whose list a re-enable shrinks: a root disable is terminal, and the two must never share a
+    /// file or a reader.
+    pub fn disabled_roots(&self) -> PathBuf {
+        self.dir.join("disabled_roots")
     }
 
     /// `<home>/disabled`: the newline list of DISABLED service names a running `serve` honors live (an

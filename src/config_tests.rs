@@ -174,3 +174,51 @@ async fn a_corrupt_badge_file_fails_closed_and_names_the_fix() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Disable `key` in `home`'s latch the way a writer on this machine would.
+async fn disable(home: &Home, dir: &std::path::Path, key: bifrost::NodeId) {
+    use tightbeam::identity::AsVerifyKey as _;
+
+    super::create_store_dir(dir).expect("create the store dir");
+    nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
+        .disable(key.verify_key())
+        .await
+        .expect("disable the key");
+}
+
+#[tokio::test]
+async fn a_disabled_key_reads_disabled_and_no_other_does() {
+    let (home, dir) = store("disabled-roots");
+    let (disabled, other) = (Secret::ephemeral().node_id(), Secret::ephemeral().node_id());
+    assert!(
+        !super::is_disabled(&home, disabled)
+            .await
+            .expect("no latch reads"),
+        "a home that never disabled anything disables nothing"
+    );
+    disable(&home, &dir, disabled).await;
+    assert!(
+        super::is_disabled(&home, disabled).await.expect("read"),
+        "the disabled key"
+    );
+    assert!(
+        !super::is_disabled(&home, other).await.expect("read"),
+        "and only that key"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_unreadable_latch_is_an_error_not_an_empty_set() {
+    // Fail closed: a verb that cannot tell whether a key is disabled must not follow it.
+    let (home, dir) = store("disabled-roots-bad");
+    super::create_store_dir(&dir).expect("create the store dir");
+    std::fs::write(home.disabled_roots(), "not a key\n").expect("write a bad latch");
+    assert!(
+        super::is_disabled(&home, Secret::ephemeral().node_id())
+            .await
+            .is_err(),
+        "a malformed latch refuses rather than reading as nothing disabled"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

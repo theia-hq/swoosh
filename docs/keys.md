@@ -25,8 +25,8 @@ Two nouns cover who you are.
 Your **signet** is your root identity: one key that means "me." It is the key on the machine where you
 first ran swoosh. Everything else you own is signed by it. You keep it; you do not hand it out.
 
-It is one file, and nothing else holds a copy: see [signet backup](signet-backup.md) for the copy to
-take and what you lose without it.
+It is one file, and nothing else holds a copy: see [signet backup](signet-backup.md) for the sealed
+backup to take and what you lose without it.
 
 ### Device
 

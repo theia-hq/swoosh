@@ -649,6 +649,9 @@ mod tests {
 
         async fn wait_closed(&self) {}
 
+        /// A double that carries nothing has nothing to end.
+        fn close(&self) {}
+
         fn conn_info(&self) -> ConnInfo {
             ConnInfo {
                 path: Path::Direct,
@@ -691,6 +694,9 @@ mod tests {
         }
 
         async fn wait_closed(&self) {}
+
+        /// A double that carries nothing has nothing to end.
+        fn close(&self) {}
 
         fn conn_info(&self) -> ConnInfo {
             ConnInfo {

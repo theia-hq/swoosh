@@ -15,7 +15,7 @@
 //! root is rejected by the receiver's BLAKE3 check, so a tampered transfer leaves no file behind.
 //!
 //! A second proof (`two_receive_services_each_save_into_their_own_dir`) exercises the per-service de-merge
-//! end to end: two receive services, each its OWN `Recv` instance bound to ONLY its own sink directory, so a
+//! end to end: two receive services, each its OWN `Recv` instance bound to ONLY its own output directory, so a
 //! push to one lands in its dir and NEVER in the other's (the single-sink bug this fix removes).
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a badge must bind to whatever id the
@@ -23,14 +23,16 @@
 //! here rather than run through `mint`/`adopt`.
 
 use core::time::Duration;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use bifrost::wire::{Blob, Transfer};
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::{FileDenylist, Identity};
-use swoosh::serve::Recv;
+use swoosh::serve::{Activity, Recv, bind_recv};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
+use transfer::{Received, ReceivedSink};
 
 /// The signet's fixed secret. Its ed25519 public half is the signet the family gate trusts, and it roots
 /// every membership badge minted here.
@@ -38,6 +40,7 @@ const SIGNET_SECRET: [u8; 32] = [7u8; 32];
 
 #[test]
 fn a_member_sends_a_file_a_stranger_is_refused_and_a_tampered_blob_is_rejected() {
+    let _serial = one_receiver_at_a_time();
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -155,6 +158,7 @@ async fn proof() {
 /// This is the proof the single-sink bug (both services writing to the first-named dir) is gone.
 #[test]
 fn two_receive_services_each_save_into_their_own_dir() {
+    let _serial = one_receiver_at_a_time();
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(|| {
@@ -230,6 +234,230 @@ async fn two_dirs_proof() {
 
     let _ = std::fs::remove_dir_all(&dir_a);
     let _ = std::fs::remove_dir_all(&dir_b);
+}
+
+/// The engine's invariant, end to end over a real gated push: a `Recv` with a sink hands the landed file
+/// to that sink as a value, exactly once, with the peer's raw name and the verified length, and prints
+/// nothing itself. Its whole log target is captured for the run and must stay empty; a control event
+/// proves the capture is live first, so an empty capture is a real observation and not a dead writer.
+#[test]
+fn an_engine_with_a_sink_reports_the_fact_and_prints_nothing() {
+    let _serial = one_receiver_at_a_time();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(sink_proof()));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// The proof body: capture the engine's log target on this thread (the host runs on it too), expose a
+/// sink-carrying `Recv`, push one hostile-named file, and read what the sink and the log each received.
+async fn sink_proof() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&log);
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("transfer=trace")
+        .with_writer(move || LogCapture(Arc::clone(&writer)))
+        .finish();
+    let _capturing = tracing::subscriber::set_default(subscriber);
+    tracing::info!(target: "transfer", "control");
+    assert!(
+        !log.lock().unwrap().is_empty(),
+        "the capture sees the engine's target"
+    );
+    log.lock().unwrap().clear();
+
+    let out = out_dir_tagged("sink");
+    let host = Node::new(MemTransport::bind(), NoDiscovery);
+    let host_id = host.node_id();
+    let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let reported = Recorder::default();
+    let engine = Recv::new(out.clone()).with_sink(reported.clone());
+    tokio::task::spawn_local(async move {
+        let gate =
+            tunnel::resolve_gate(Some(signet), empty_denylist("sink-denylist").await).unwrap();
+        Router::new(gate)
+            .service("recv".parse().unwrap(), engine)
+            .unwrap()
+            .expose()
+            .unwrap()
+            .run(&host, CancellationToken::new())
+            .await
+            .unwrap();
+    });
+
+    let member = Node::new(MemTransport::bind(), NoDiscovery);
+    let badge = signet_badge(&SIGNET_SECRET, member.node_id());
+    let hostile = "evil\nname\u{1b}[31m\r.txt";
+    let payload = b"hostile payload".repeat(100);
+    push_file(
+        &member,
+        host_id,
+        "recv",
+        &badge,
+        hostile.as_bytes(),
+        &payload,
+    )
+    .await;
+    assert_eq!(wait_for_file(&out.join(hostile)).await, payload);
+
+    let facts = reported.settled().await;
+    assert!(
+        log.lock().unwrap().is_empty(),
+        "the engine printed on its own: {:?}",
+        String::from_utf8_lossy(&log.lock().unwrap())
+    );
+    assert_eq!(facts.len(), 1, "one landed file is one fact: {facts:?}");
+    assert_eq!(
+        facts[0].path,
+        std::path::Path::new(hostile),
+        "the fact carries the raw name"
+    );
+    assert_eq!(facts[0].bytes, payload.len() as u64);
+
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// The product's receive binding, both ways, over real gated pushes: `bind_recv` with the node's
+/// renderer hands the engine its route's sink, so a landed file becomes one escaped line on the
+/// renderer's writer; with no renderer (a `--quiet` node) the route gets no sink. Both routes serve on
+/// one node, so the one line on the writer is also proof the quiet route added none.
+#[test]
+fn the_product_binding_renders_a_line_only_when_given_a_renderer() {
+    let _serial = one_receiver_at_a_time();
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(binding_proof()));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+/// The proof body: bind `loud` with a renderer and `hush` without one, push a hostile-named file to
+/// each, and read the renderer's writer.
+async fn binding_proof() {
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let activity = Activity::spawn(LogCapture(Arc::clone(&written))).unwrap();
+    let loud_dir = out_dir_tagged("bind-loud");
+    let hush_dir = out_dir_tagged("bind-hush");
+    let host = Node::new(MemTransport::bind(), NoDiscovery);
+    let host_id = host.node_id();
+    let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let gate = tunnel::resolve_gate(Some(signet), empty_denylist("bind-denylist").await).unwrap();
+    let router = Router::new(gate);
+    let router = bind_recv(
+        router,
+        "loud".parse().unwrap(),
+        loud_dir.clone(),
+        Some(&activity),
+    )
+    .unwrap();
+    let router = bind_recv(router, "hush".parse().unwrap(), hush_dir.clone(), None).unwrap();
+    tokio::task::spawn_local(async move {
+        router
+            .expose()
+            .unwrap()
+            .run(&host, CancellationToken::new())
+            .await
+            .unwrap();
+    });
+
+    let member = Node::new(MemTransport::bind(), NoDiscovery);
+    let badge = signet_badge(&SIGNET_SECRET, member.node_id());
+    let hostile = "evil\nname\u{1b}[31m\r.txt";
+    let payload = b"hostile payload".repeat(100);
+    for (route, dir) in [("hush", &hush_dir), ("loud", &loud_dir)] {
+        push_file(
+            &member,
+            host_id,
+            route,
+            &badge,
+            hostile.as_bytes(),
+            &payload,
+        )
+        .await;
+        assert_eq!(wait_for_file(&dir.join(hostile)).await, payload);
+    }
+
+    let expected = "loud: received evil\\nname\\u{1b}[31m\\r.txt (1500 bytes)\n";
+    for _ in 0..200 {
+        if !written.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Held long enough for a second line, had the quiet route produced one, to reach the writer too.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        String::from_utf8_lossy(&written.lock().unwrap()),
+        expected,
+        "the route bound with the renderer prints one escaped line, and the quiet route none"
+    );
+
+    let _ = std::fs::remove_dir_all(&loud_dir);
+    let _ = std::fs::remove_dir_all(&hush_dir);
+}
+
+/// Every test here that serves a `Recv` holds this for its whole run. tracing caches, per call site,
+/// whether any subscriber wants an event, and a receiver running on another test's thread with no
+/// subscriber can settle that cache while the no-print proof's capture is live, so an engine event
+/// would slip past it and the proof would pass on a mutant. One receiver at a time closes that race.
+fn one_receiver_at_a_time() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A sink that keeps every fact it is handed.
+#[derive(Clone, Default)]
+struct Recorder(Arc<Mutex<Vec<Received>>>);
+
+impl ReceivedSink for Recorder {
+    fn received(&self, file: Received) {
+        self.0.lock().unwrap().push(file);
+    }
+}
+
+impl Recorder {
+    /// The facts so far, once the first has arrived: the engine reports just after its rename, so a test
+    /// that saw the file land may still be a poll ahead of the report.
+    async fn settled(&self) -> Vec<Received> {
+        for _ in 0..200 {
+            if !self.0.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// A log writer into a shared buffer.
+struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Push one named file to a receiver `service` exactly as `swoosh send` does: open the gated service with the

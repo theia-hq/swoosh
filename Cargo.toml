@@ -33,8 +33,11 @@ bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "b295a7d2d23
 bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "b295a7d2d23c2bafd70f7c3b5a93d9bb6810e174" }
 bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "b295a7d2d23c2bafd70f7c3b5a93d9bb6810e174" }
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "b295a7d2d23c2bafd70f7c3b5a93d9bb6810e174" }
+# The key file store, in bifrost's repo beside the identity it stores. No released rev carries it yet, so
+# this rev resolves only through the local path patch until the cascade publishes one.
+keystore = { git = "https://github.com/theia-hq/bifrost", rev = "b295a7d2d23c2bafd70f7c3b5a93d9bb6810e174" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "e148cb899dc8752a2403564ccbd8228e2b246dd0" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "b85d9ff956bf621d70369f9c6fa941a1f2573a02" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "3751551ba99e17ebae75cb9a6dd0c96d6c372e11" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.

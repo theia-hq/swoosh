@@ -110,6 +110,10 @@ impl FleetCmd {
         let signet = swoosh::config::load_signet(home).await?.ok_or_else(|| {
             eyre::eyre!("this node has no signet; run `swoosh adopt <invite>` first")
         })?;
+        // A signet this node disabled signs nothing it will follow: refuse before the dial, so no session
+        // is opened, no badge is presented, and no contact is touched. It refuses the pull only; contacts
+        // an earlier pull already wrote stay as they are.
+        refuse_disabled(home, signet).await?;
 
         // Dial the GATED roster: service through the unified peer resolver (so a petname/link coordination
         // node resolves like every other verb), presenting our membership badge so the family gate admits us.
@@ -181,6 +185,8 @@ impl FleetCmd {
             }
             Hydrated::Applied(applied) => applied,
         };
+        // Asked again at the write: a disable that landed while the pull was on the wire is still honored.
+        refuse_disabled(home, signet).await?;
         store.save().await?;
         // The DESTRUCTIVE half, named first because it is the surprising one: a roster is a whole
         // snapshot, so a member the owner removed disappears here. Silently dropping devices under the
@@ -215,6 +221,16 @@ impl FleetCmd {
         }
         Ok(())
     }
+}
+
+/// Refuse a signet this node has disabled: it signs nothing this node will follow.
+async fn refuse_disabled(home: &Home, signet: bifrost::NodeId) -> eyre::Result<()> {
+    if swoosh::config::is_disabled(home, signet).await? {
+        eyre::bail!(
+            "your signet {signet} is disabled at this node, so it will not pull a roster that key signed"
+        );
+    }
+    Ok(())
 }
 
 /// Read the coordination node's signed roster blob under the wire's own bound.

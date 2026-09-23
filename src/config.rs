@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
 use eyre::WrapErr as _;
-use nauthy::Link;
+use nauthy::{DisabledRoots, Link};
+use tightbeam::identity::AsVerifyKey as _;
 
 use crate::home::Home;
 
@@ -41,6 +42,15 @@ pub async fn holds_signet(home: &Home, node: NodeId) -> eyre::Result<bool> {
     Ok(load_signet(home)
         .await?
         .is_none_or(|configured| configured == node))
+}
+
+/// Whether this home has disabled `root`: the question a verb asks before it follows a key it did not
+/// sign itself, read from the same latch the `serve` gate refuses every cap rooted there on. Fails
+/// closed: a latch that cannot be read, or that lost keys it once held, is an error, never "nothing is
+/// disabled".
+pub async fn is_disabled(home: &Home, root: NodeId) -> eyre::Result<bool> {
+    let disabled = DisabledRoots::load(home.disabled_roots()).await?;
+    Ok(disabled.is_disabled(root.verify_key()))
 }
 
 /// Write this node's signet: the public [`NodeId`] its default gate will trust, as `adopt` sets it from an
@@ -120,14 +130,12 @@ pub fn create_store_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Write `contents` to `path` owner-only, through a unique temp sibling renamed over the target.
 ///
-/// The one atomic private write in the tree: the identity key ([`identity::write`]) and the two reach
-/// files (`<home>/relay`, `<home>/resolver`) all land this way. Each is read by a later run and each is
+/// The two reach files (`<home>/relay`, `<home>/resolver`) land this way; the identity key has its own
+/// store ([`keystore`]), which writes the same way. Each is read by a later run and each is
 /// unrecoverable if it is torn, so the bytes are durable (`sync_all`) before the rename makes them
 /// visible, and the temp is opened `create_new` at mode `0600` so the file is never world-readable for
 /// an instant and the rename carries that mode onto the target. A failed write or rename removes the
 /// temp, leaving the previous contents intact and no litter behind.
-///
-/// [`identity::write`]: crate::identity::write
 pub async fn write_private_atomic(path: &Path, contents: &[u8]) -> eyre::Result<()> {
     use tokio::io::AsyncWriteExt as _;
 

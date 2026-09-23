@@ -1,13 +1,17 @@
 //! The persisted identity file's failure modes: a corrupt, too-open, or ALREADY-PROVISIONED
-//! `identity.key` is refused, never silently replaced, and a write is atomic (a failed one leaves the
-//! store exactly as it was).
+//! `identity.key` is refused, never silently replaced, a write is atomic (a failed one leaves the store
+//! exactly as it was), and a sealed key opens only under its passphrase and never becomes a new identity.
 
 use std::path::PathBuf;
 
-use crate::home::Home;
+use keystore::{Method, Stored};
 
-/// A unique home under the temp dir, created empty on entry. Returns `(home, dir)`.
-fn home(tag: &str) -> (Home, PathBuf) {
+use crate::home::Home;
+use crate::passphrase::Scripted;
+
+/// A unique home under the temp dir, created empty on entry. Returns `(home, dir)`. Shared with the
+/// `backup` and `protect` tests beneath this module.
+pub(super) fn home(tag: &str) -> (Home, PathBuf) {
     let dir = std::env::temp_dir().join(format!(
         "swoosh-identity-{tag}-{}-{:?}",
         std::process::id(),
@@ -206,7 +210,7 @@ async fn a_group_or_world_readable_key_is_refused_with_a_chmod_hint() {
         .expect("a group/world-readable key must be refused");
     let message = format!("{error:#}");
     assert!(
-        message.contains("too open"),
+        message.contains("group or other"),
         "the refusal explains why: {message}"
     );
     assert!(
@@ -257,6 +261,107 @@ async fn an_outward_dial_never_creates_the_key_under_an_explicit_home() {
         reached.node_id(),
         served.node_id(),
         "with a key on disk the outward dial binds it, so the badge it presents roots there"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Seal a fresh key into `home` under `passphrase`, the way `protect passphrase` creates one.
+pub(super) fn sealed(home: &Home, passphrase: &'static str) -> bifrost::NodeId {
+    match super::protect(home, Method::Passphrase, &mut Scripted::new([passphrase]))
+        .expect("seal a fresh key")
+    {
+        super::Protected::Created(node) => node,
+        other => panic!("an empty home is created, got {other:?}"),
+    }
+}
+
+/// A sealed key opens under its passphrase, for a serving verb and an outward dial alike, as the node it
+/// was sealed as.
+#[tokio::test]
+async fn a_sealed_key_opens_under_its_passphrase() {
+    let (home, dir) = home("sealed-opens");
+    let node = sealed(&home, "correct horse");
+
+    for intent in [
+        super::Identity::Persisted,
+        super::Identity::PersistedIfPresent,
+    ] {
+        let secret = super::resolve_with(intent, &home, &mut Scripted::new(["correct horse"]))
+            .expect("the passphrase opens it");
+        assert_eq!(secret.node_id(), node, "{intent:?} binds the sealed key");
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A wrong passphrase is an error, never a new identity: not a fresh key minted over the sealed one for a
+/// serving verb, and not a throwaway for an outward dial. The file survives byte for byte.
+#[tokio::test]
+async fn a_wrong_passphrase_is_never_a_new_identity() {
+    let (home, dir) = home("sealed-wrong");
+    sealed(&home, "correct horse");
+    let before = std::fs::read(home.identity_key()).expect("read the sealed key");
+
+    for intent in [
+        super::Identity::Persisted,
+        super::Identity::PersistedIfPresent,
+    ] {
+        let refused = super::resolve_with(intent, &home, &mut Scripted::new(["battery staple"]));
+        let Err(error) = refused else {
+            panic!("a wrong passphrase refuses");
+        };
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("wrong passphrase"),
+            "{intent:?} names the refusal: {message}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(home.identity_key()).expect("read it back"),
+        before,
+        "the sealed key survives a failed unlock untouched"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Printing an identity never asks for a passphrase: a sealed file names its node and its protection
+/// in its header. The script is empty, so any question would fail the call.
+#[tokio::test]
+async fn inspecting_a_sealed_key_asks_for_nothing() {
+    let (home, dir) = home("sealed-inspect");
+    let node = sealed(&home, "correct horse");
+
+    let stored = super::inspect(&home).expect("inspect a sealed home");
+    assert!(matches!(stored, Stored::Locked(_)), "the key stays locked");
+    assert_eq!(stored.method(), Method::Passphrase);
+    assert_eq!(stored.node_id(), node);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Re-adopting the key a home already holds is a no-op even when its owner sealed it: the passphrase
+/// proves the sealed file is that key, and the file stays sealed.
+#[tokio::test]
+async fn re_adopting_a_sealed_key_proves_it_and_keeps_it_sealed() {
+    let (home, dir) = home("sealed-readopt");
+    sealed(&home, "correct horse");
+    let seed = super::resolve_with(
+        super::Identity::Persisted,
+        &home,
+        &mut Scripted::new(["correct horse"]),
+    )
+    .expect("open the sealed key")
+    .with_bytes(|seed| *seed);
+    let before = std::fs::read(home.identity_key()).expect("read the sealed key");
+
+    super::write_with(&seed, &home, &mut Scripted::new(["correct horse"]))
+        .expect("the same key, proven, is a no-op");
+    assert_eq!(
+        std::fs::read(home.identity_key()).expect("read it back"),
+        before,
+        "the sealed file is left exactly as it was"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

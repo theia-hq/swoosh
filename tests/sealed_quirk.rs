@@ -39,10 +39,10 @@ fn seed(byte: u8) -> [u8; 32] {
 /// Bind a quirk endpoint under `byte`'s seed and wrap it with the SAME seed, the composition
 /// `--transport quirk+noise` performs: one address, one identity, two layers.
 async fn sealed(byte: u8) -> Noise<Endpoint> {
-    let inner = Endpoint::bind_with_secret(seed(byte))
+    let inner = Endpoint::bind_with_secret(&seed(byte))
         .await
         .expect("bind quirk on loopback");
-    Noise::new(inner, seed(byte)).expect("wrap quirk under its own identity")
+    Noise::new(inner, &seed(byte)).expect("wrap quirk under its own identity")
 }
 
 /// A membership badge the signet signed and bound to `bound`, the shape `swoosh mint` mints for a device

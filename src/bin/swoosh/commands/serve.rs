@@ -31,14 +31,14 @@ use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use bifrost_mdns::{At, Dialable, Expiring, Missing, ScopeClass};
 use clap::Args;
 use eyre::WrapErr as _;
-use nauthy::{FileDenylist, Service};
+use nauthy::{FileDenylist, Latch, Service};
 use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::serve::{
-    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, InstanceLock, RECV_SCHEME, Recv,
-    Resident, ServiceList, Stop, StopKind, Stopped, acquire_single, bind_entry, classify_stop,
-    extract_recv_services,
+    Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, InstanceLock,
+    RECV_SCHEME, Resident, ServiceList, Stop, StopKind, Stopped, acquire_single, bind_entry,
+    bind_recv, classify_stop, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
@@ -102,7 +102,7 @@ pub struct ServeCmd {
         long_help = "A raw stream has no auth of its own; `--public` refuses it and points here."
     )]
     pub public_unsafe: Vec<String>,
-    /// suppress the readiness banner (for unattended/CI use)
+    /// suppress the readiness banner and activity lines
     #[arg(long)]
     pub quiet: bool,
     /// serve for a bounded time, then stop (`30m`, `2h`, `1d`)
@@ -161,8 +161,9 @@ pub struct ExposeContext {
     /// The signet the default gate trusts: a provisioned signet if one was adopted, else this node's OWN
     /// key (person-zero self-trusts).
     pub signet: Option<NodeId>,
-    /// The revocation denylist the gate honors.
-    pub denylist: FileDenylist,
+    /// The revocation policy the gate honors: the denylist of revoked grants behind the latch of disabled
+    /// root keys. One shared instance, read by the gate at admission and by the live cut after it.
+    pub revocations: Arc<Latch<FileDenylist>>,
     /// The live enable/disable oracle the exposer's per-stream gate consults: a `service disable`
     /// written to `<home>/disabled` refuses the service live, and a `service enable` restores it, both with no
     /// restart. The exact mtime-watch shape as the denylist, loaded beside it in the composition root.
@@ -246,12 +247,12 @@ impl Reaching for ServeCmd {
         let ExposeContext {
             host_seed,
             signet,
-            denylist,
+            revocations,
             enabled,
             roster,
             home,
         } = *expose;
-        self.run_serve(node, host_seed, signet, denylist, enabled, roster, home)
+        self.run_serve(node, host_seed, signet, revocations, enabled, roster, home)
             .await
     }
 }
@@ -303,7 +304,7 @@ impl ServeCmd {
         node: &Node<T, D>,
         host_seed: [u8; 32],
         signet: Option<NodeId>,
-        denylist: FileDenylist,
+        revocations: Arc<Latch<FileDenylist>>,
         enabled: FileDisabledList,
         roster: Option<Arc<swoosh::roster::Artifact>>,
         home: Home,
@@ -333,7 +334,7 @@ impl ServeCmd {
         // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention.
         let fetch = FetchScope::extract(&mut requested)?;
         // De-merge the receive services the SAME way: every `name=recv:<dir>` becomes its OWN
-        // `Recv` instance bound to ONLY its own sink directory, so `a=recv:/x b=recv:/y` writes alice's
+        // `Recv` instance bound to ONLY its own output directory, so `a=recv:/x b=recv:/y` writes alice's
         // pushes into /x and bob's into /y, each scoped to its own service and grant. A public fetch's
         // SSRF-pivot argument does not apply (recv is always gated), so this is the plain per-instance
         // de-merge without an open-relay wall. A `name=recv:` (no dir) saves into `.`.
@@ -348,7 +349,7 @@ impl ServeCmd {
         // the ONE shared policy point, rather than ever serving on a permissive default. Opening individual
         // services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
         //
-        let gate = tunnel::resolve_gate(signet, denylist)?;
+        let gate = tunnel::resolve_gate(signet, Arc::clone(&revocations))?;
         // One `Router`: each route binds a handler VALUE (the engine handlers, roster, stop, the fetch and
         // recv instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector)
         // through the `name=addr` grammar. The public overlays prove at `.expose()` below, so
@@ -374,11 +375,16 @@ impl ServeCmd {
                 router.service(name, scoped_fetch)?
             };
         }
+        // The node's activity renderer, or none at all under `--quiet`: with no renderer no engine gets a
+        // sink, so quiet silences every activity line by construction and no log directive can bring one
+        // back. Activity rides stderr beside the diagnostics, keeping stdout to the banner.
+        let activity = self.activity(std::io::stderr())?;
         for service in &recv {
-            // One `Recv` instance per receive service, holding ONLY its own sink dir, so a push to one
-            // receive service can never land in another's directory.
-            router =
-                router.service(service.name().parse()?, Recv::new(service.out().to_owned()))?;
+            // One `Recv` instance per receive service, holding ONLY its own output dir, so a push to one
+            // receive service can never land in another's directory. Its sink carries the route's own
+            // name, so the line says which receive service a file landed through.
+            let name: Service = service.name().parse()?;
+            router = bind_recv(router, name, service.out().to_owned(), activity.as_ref())?;
         }
         // The two node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the
         // route's access class after the gate admits and before any `Response::Ok`, so a delegated slip
@@ -408,7 +414,14 @@ impl ServeCmd {
         // Wire the live enable/disable oracle alongside the proven public overlay: a stream for a
         // service named in `<home>/disabled` is refused at the gate seam, live, and a re-enable restores it
         // with no restart. `with_enabled` cannot fail (it only stores the oracle), so it tails the chain.
-        let exposer = router.expose()?.with_enabled(enabled);
+        //
+        // The live cut reads the one revocation instance the gate was resolved over: a session admitted
+        // on a cap since revoked, or rooted at a key since disabled, ends itself within a sweep rather
+        // than running on.
+        let exposer = router
+            .expose()?
+            .with_enabled(enabled)
+            .with_live_cuts(revocations);
         // Prove the transport can carry this gate BEFORE announcing readiness or binding the resident
         // socket: a rooted gate over a transport that does not prove the peer refuses here with the
         // teaching error, never after a "ready" banner the node cannot honor (and never with a lock or
@@ -654,6 +667,19 @@ impl ServeCmd {
             }
         };
         Ok(stopped)
+    }
+
+    /// The activity renderer this serve writes onto `out`, or `None` under `--quiet`. The one gate for the
+    /// whole activity class: a line exists only if an engine was handed a sink from this renderer.
+    fn activity(
+        &self,
+        out: impl std::io::Write + Send + 'static,
+    ) -> eyre::Result<Option<Activity>> {
+        if self.quiet {
+            return Ok(None);
+        }
+        let activity = Activity::spawn(out).wrap_err("could not start the activity renderer")?;
+        Ok(Some(activity))
     }
 
     /// The resident control line for the banner, under `--resident` only: `control <socket path>

@@ -38,7 +38,7 @@ pub const RECV_SERVICE: &str = Unbound::RECV.name();
 const MAX_INFLIGHT: usize = 16;
 
 /// The longest a pushed file's name may render on the sender's own `sent` line, in characters. Mirrors
-/// the receiver's cap for a peer-supplied path (`services/crates/transfer/src/handler.rs`,
+/// the receiver's cap for a peer-supplied path (`services/crates/transfer/src/serve.rs`,
 /// `MAX_RENDERED_PATH`), so both ends of one transfer render a hostile name in the same bounded shape.
 const MAX_RENDERED_NAME: usize = 256;
 
@@ -206,7 +206,7 @@ async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre:
 
 /// Render a pushed file's name for the sender's own `sent` line: escape control characters and cap the
 /// rendered length, the same rule the receive engine applies to a peer-supplied path
-/// (`services/crates/transfer/src/handler.rs`, `render_path`). A raw newline forges a line, a carriage
+/// (`services/crates/transfer/src/serve.rs`, `render_path`). A raw newline forges a line, a carriage
 /// return rewrites one, and ESC drives a terminal, so a directory holding a hostile name must not echo
 /// it raw. That helper is crate-private to the services repo's transfer engine, so the rule is stated
 /// here in the same shape and the two ends of one transfer render a name alike.

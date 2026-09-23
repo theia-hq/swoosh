@@ -163,3 +163,26 @@ async fn for_fleet_with_an_unknown_petname_teaches_the_hand_add_recipe() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn a_member_device_refuses_to_issue_a_grant_no_fleet_node_would_admit() {
+    let dir = std::env::temp_dir().join(format!("swoosh-grant-member-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let home = Home::resolve(Some(dir.clone())).unwrap();
+
+    // An adopted device: its home pins a signet that is not its own key.
+    let signet = NodeId::from_ed25519_secret(&[3u8; 32]);
+    swoosh::config::write_signet(&home, signet).await.unwrap();
+
+    let error = share("ssh", None, false)
+        .run(store_at(&dir).await, &home)
+        .await
+        .expect_err("a member's own-key grant roots nowhere the fleet gates, so it is refused");
+    assert!(
+        error.to_string().contains("admitted nowhere"),
+        "the refusal says why: {error}"
+    );
+    let records = Grants::at(home.grants()).load().await.unwrap();
+    assert!(records.is_empty(), "a refused issue records nothing");
+}

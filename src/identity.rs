@@ -12,33 +12,41 @@
 //! created. The verb's intent alone decides that, so a home named for one outward dial is left exactly as
 //! it was found.
 //!
-//! Nothing here ever writes OVER a key that is already there, and that one rule is enforced in three
-//! places: [`load_or_create`] mints only into the absence of one, [`read_key`] refuses a file that is not
-//! exactly [`KEY_LEN`] bytes rather than minting over it, and [`write`] (the `adopt` path) refuses a home
-//! that already holds a different identity. The key is the one file in the store with no issuer and no
-//! second copy: a signet roots every badge its owner ever signed, and there is nobody to cut another. So
-//! it is replaced by the operator moving it aside, which is also how a copy of it comes to exist, never
-//! by a command doing it for them.
+//! Nothing here ever writes OVER a key that is already there. The file is a [`keystore`] key file, and
+//! that crate enforces the rule for every write: a key is minted only into the absence of one, a file
+//! that is not a key this build reads is refused rather than minted over, and [`write`] (the `adopt`
+//! path) refuses a home that already holds a different identity. The key is the one file in the store
+//! with no issuer and no second copy: a signet roots every badge its owner ever signed, and there is
+//! nobody to cut another. So it is replaced only by a restore the operator asks for by name
+//! ([`restore`]), which checks the identity it replaces, never as a side effect of another verb.
+//!
+//! How the file protects the key is a property of the FILE, read from its own bytes: `plain` by default,
+//! or sealed under a passphrase once its owner asks for that with [`protect`]. A sealed key opens only
+//! under a passphrase typed at the terminal ([`crate::passphrase`]); a failed unlock is an error, never a
+//! fresh identity.
 //!
 //! The secret is a [`Secret`] newtype, never a bare `[u8; 32]`: it zeroizes its bytes on drop so the
-//! key does not linger in freed memory, and it is only unwrapped at the single boundary where the
-//! transport consumes it.
+//! key does not linger in freed memory, and it lends them out only at the boundaries that need them raw.
 //!
 //! The persisted default lives at `~/.config/swoosh/identity.key`, mode 0600.
 
-use std::path::Path;
-
 use bifrost::NodeId;
-use eyre::WrapErr as _;
+use keystore::{KeyFile, Protection, Stored};
 use nauthy::Link;
 use tightbeam::identity::AsVerifyKey as _;
-use zeroize::{Zeroize as _, ZeroizeOnDrop};
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::home::Home;
+use crate::passphrase::{Prompt, Terminal};
 
-/// The exact byte length of a persisted ed25519 seed. An `identity.key` of any other length is corrupt or
-/// foreign: reading it fails closed and [`write`] never mints a fresh key over it.
-const KEY_LEN: usize = 32;
+mod backup;
+mod lock;
+mod protect;
+mod stage;
+
+pub use backup::{Existing, Restored, export, restore};
+pub use lock::HomeLock;
+pub use protect::{Protected, protect};
 
 /// The DEFAULT lifetime a signet-signed, STORED device membership badge stands before it must be
 /// re-minted, applied by `swoosh invite add` only when the operator passes no `--expires`. A default, not a
@@ -58,31 +66,31 @@ const KEY_LEN: usize = 32;
 pub const DEVICE_BADGE_TTL: core::time::Duration =
     core::time::Duration::from_secs(90 * 24 * 60 * 60);
 
-/// The ed25519 secret key a verb binds under. Wraps the raw bytes so they zeroize on drop and never
-/// cross a boundary as a bare array; unwrap only at the transport bind, the one place the key must be
-/// raw.
-#[derive(ZeroizeOnDrop)]
-pub struct Secret([u8; 32]);
+/// The ed25519 secret key a verb binds under: a [`keystore::Secret`], which wipes itself on drop and never
+/// hands its bytes out by value.
+pub struct Secret(keystore::Secret);
+
+/// The inner secret wipes itself on drop, so this one does.
+impl ZeroizeOnDrop for Secret {}
 
 impl Secret {
-    /// A fresh random secret, kept only in memory. The identity of a reach-outward run.
+    /// A fresh random secret, kept only in memory. The identity of a reach-outward run. The stack copy
+    /// is wiped as it is taken in.
     pub fn ephemeral() -> Self {
-        Self(rand::random())
+        let mut seed: [u8; 32] = rand::random();
+        Self(keystore::Secret::take(&mut seed))
     }
 
-    /// Consume the secret into its raw bytes for the transport bind. This is the single boundary where
-    /// the key leaves the zeroizing wrapper; the transport crate owns the key type downstream.
-    pub fn into_bytes(mut self) -> [u8; 32] {
-        let bytes = self.0;
-        // Wipe our copy; the returned array is the caller's to own (and, ideally, zeroize) from here.
-        self.0.zeroize();
-        bytes
+    /// Lend the raw seed to `lend` for the length of the call: for the transport bind, which borrows
+    /// the seed and returns a future that no longer does, so no copy of it leaves this wrapper.
+    pub fn with_bytes<R>(&self, lend: impl FnOnce(&[u8; 32]) -> R) -> R {
+        self.0.with_bytes(lend)
     }
 
     /// The node id this secret binds under: the identity a peer reaches when it dials this key. Derived
     /// offline (no transport stood up), so `swoosh identity` can print it without serving.
     pub fn node_id(&self) -> NodeId {
-        NodeId::from_ed25519_secret(&self.0)
+        self.0.node_id()
     }
 
     /// The cap-signing identity rooted at this secret: the same key, read as a nauthy [`Identity`] that
@@ -93,7 +101,7 @@ impl Secret {
     /// same key the dial binds under, so the gate's device-binding matches. Mirrors tightbeam's
     /// `Secret::cap_identity`, the exposer side of the same seam.
     pub fn cap_identity(&self) -> eyre::Result<nauthy::Identity> {
-        Ok(nauthy::Identity::from_secret(&self.0)?)
+        Ok(self.0.with_bytes(nauthy::Identity::from_secret)?)
     }
 
     /// Self-sign a membership badge for THIS identity: a short-lived cap carrying a `member(true)` fact in
@@ -125,7 +133,7 @@ impl Secret {
     /// built without `ssh` neither serves a shell nor needs a host key.
     #[cfg(feature = "ssh")]
     pub fn ssh_host_seed(&self) -> [u8; 32] {
-        sshh::host_seed(&self.0)
+        self.0.with_bytes(sshh::host_seed)
     }
 
     /// Sign a membership badge FOR a device, rooted at THIS key (the signet) and bound to `device`.
@@ -159,9 +167,10 @@ impl Secret {
     /// machine ADOPTS to become that device, and the payload of a derived invite. Borrows, so this root
     /// stays owned here and zeroizes on drop; the raw root never leaves the wrapper, only the derived
     /// child does. Hardened (only the holder of this root can compute a child), so a leaked device seed
-    /// cannot recover the root or a sibling.
-    pub fn derive_child_seed(&self, label: &str) -> [u8; 32] {
-        bifrost_core::derive_ed25519_child_secret(&self.0, label)
+    /// cannot recover the root or a sibling. The child is secret too, so it arrives in a wiping owner.
+    pub fn derive_child_seed(&self, label: &str) -> Zeroizing<[u8; 32]> {
+        self.0
+            .with_bytes(|root| bifrost_core::derive_ed25519_child_secret(root, label))
     }
 }
 
@@ -193,19 +202,30 @@ pub enum Identity {
 /// The home names the directory, default or explicit alike. A `--home`/`SWOOSH_HOME` run does not turn an
 /// outward dial into a provisioning step: the home the caller named for one `swoosh reach` must be left
 /// as it was found, because the key that would appear there is the root a later `serve` gates its fleet
-/// on, and nothing asked for a fleet.
+/// on, and nothing asked for a fleet. A sealed key is unlocked at the terminal.
 pub async fn resolve(intent: Identity, home: &Home) -> eyre::Result<Secret> {
-    let key = home.identity_key();
+    resolve_with(intent, home, &mut Terminal)
+}
+
+/// [`resolve`], asking `prompt` for the passphrase of a sealed key.
+///
+/// The key file store is synchronous: it runs once per verb, before any transport is bound.
+pub fn resolve_with(
+    intent: Identity,
+    home: &Home,
+    prompt: &mut impl Prompt,
+) -> eyre::Result<Secret> {
+    let file = key_file(home);
     match intent {
-        Identity::Persisted => load_or_create(&key).await,
+        Identity::Persisted => match open(&file, prompt)? {
+            Some(secret) => Ok(secret),
+            None => mint(&file),
+        },
         Identity::Ephemeral => Ok(Secret::ephemeral()),
         // Load the persisted key only if it already exists; never create it. So a provisioned operator's
         // outward dial roots at their own key (their badge admits at their gated node) while a fresh
         // install dials out ephemerally, with nothing written to disk.
-        Identity::PersistedIfPresent => match load_existing(&key).await? {
-            Some(secret) => Ok(secret),
-            None => Ok(Secret::ephemeral()),
-        },
+        Identity::PersistedIfPresent => Ok(open(&file, prompt)?.unwrap_or_else(Secret::ephemeral)),
     }
 }
 
@@ -214,100 +234,60 @@ pub async fn resolve(intent: Identity, home: &Home) -> eyre::Result<Secret> {
 /// badge was signed for; a home with no identity gets a teaching error, never a fresh key minted over
 /// the invite's binding.
 pub async fn load(home: &Home) -> eyre::Result<Option<Secret>> {
-    load_existing(&home.identity_key()).await
+    open(&key_file(home), &mut Terminal)
 }
 
-/// Load the secret at `path` if the file exists and holds a 32-byte key, else `None`. Unlike
-/// [`load_or_create`], never writes: an outward dial reads a provisioned identity but does not mint one.
-/// A file that exists but is the wrong size fails closed (a corrupt or foreign key file is a loud error,
-/// never a silent fall-through to a fresh ephemeral identity).
-// `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
-#[allow(clippy::std_instead_of_core)]
-async fn load_existing(path: &Path) -> eyre::Result<Option<Secret>> {
-    read_key(path).await
-}
-
-/// Load the secret at `path`, creating and saving a fresh one on first use.
-async fn load_or_create(path: &Path) -> eyre::Result<Secret> {
-    if let Some(secret) = read_key(path).await? {
-        return Ok(secret);
+/// What the home's key file is, WITHOUT unlocking it, minting a plain key first when the home has none.
+///
+/// This is the offline look `swoosh identity` prints: which node the file is for and how it is protected.
+/// For a sealed file the node is what its header claims (see [`keystore::Locked::node_id`]); nothing here
+/// asks for a passphrase, so printing an identity never blocks on a prompt.
+pub fn inspect(home: &Home) -> eyre::Result<Stored> {
+    let file = key_file(home);
+    match file.load()? {
+        Some(stored) => Ok(stored),
+        None => mint(&file).map(|secret| Stored::Plain(secret.0)),
     }
-
-    let secret = Secret::ephemeral();
-    crate::config::write_private_atomic(path, &secret.0).await?;
-    Ok(secret)
 }
 
-/// Read the persisted key at `path`: `Ok(None)` only when the file is absent, the key otherwise. A file
-/// that exists but holds anything other than exactly [`KEY_LEN`] bytes is refused with the size named, so
-/// a corrupt key file is never silently discarded and [`load_or_create`] never mints over it.
-///
-/// The mode is read from the OPEN handle and the bytes are read from that SAME handle, so a symlink swap
-/// between the check and the read cannot slip a different file past the guard (TOCTOU-safe), mirroring the
-/// `@<path>` secret reader in [`crate::secret`].
-// `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
-#[allow(clippy::std_instead_of_core)]
-async fn read_key(path: &Path) -> eyre::Result<Option<Secret>> {
-    use tokio::io::AsyncReadExt as _;
-
-    let file = match tokio::fs::File::open(path).await {
-        Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    guard_mode(&file, path).await?;
-    // Read one byte past the key so an oversized file is DETECTED rather than silently truncated to its
-    // first 32 bytes: any other length is corrupt or foreign, and fail-closed keeps a fresh key from
-    // silently replacing it. The buffer zeroizes on drop, so a partial read leaves no key material behind.
-    let mut bytes = zeroize::Zeroizing::new(Vec::new());
-    file.take((KEY_LEN + 1) as u64)
-        .read_to_end(&mut bytes)
-        .await
-        .wrap_err_with(|| format!("failed to read the identity key {}", path.display()))?;
-    let secret = <[u8; KEY_LEN]>::try_from(bytes.as_slice()).map_err(|_| {
-        eyre::eyre!(
-            "identity key {} is {} bytes; an ed25519 key is exactly {KEY_LEN}. refusing to \
-             overwrite it: restore a valid key or move the file aside",
-            path.display(),
-            bytes.len(),
-        )
-    })?;
-    Ok(Some(Secret(secret)))
+/// The home's key file.
+fn key_file(home: &Home) -> KeyFile {
+    KeyFile::from(home.identity_key())
 }
 
-/// Refuse a group- or world-accessible identity key, mirroring the `@<path>` secret reader: the key IS a
-/// full node identity, so silently reading a file others can read defeats the point. Owner-only means no
-/// group/other bits (`mode & 0o077 == 0`); the error names the file and hints `chmod 600`.
+/// The key the file holds, unlocked, or `None` only when nothing is at the path.
 ///
-/// The mode is read from the OPEN handle the caller also reads from, so this is TOCTOU-safe.
-#[cfg(unix)]
-async fn guard_mode(file: &tokio::fs::File, path: &Path) -> eyre::Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
-    let mode = file
-        .metadata()
-        .await
-        .wrap_err_with(|| format!("failed to stat the identity key {}", path.display()))?
-        .mode();
-    if mode & 0o077 != 0 {
-        return Err(eyre::eyre!(
-            "permissions {:04o} for the identity key {} are too open: group or other can read it. \
-             run `chmod 600 {}`",
-            mode & 0o7777,
-            path.display(),
-            path.display(),
-        ));
+/// A file that is present but refuses (corrupt, foreign, readable by others, a wrong passphrase) is an
+/// error naming the file, never a fall-through to a fresh ephemeral identity.
+fn open(file: &KeyFile, prompt: &mut impl Prompt) -> eyre::Result<Option<Secret>> {
+    Ok(match file.load()? {
+        None => None,
+        Some(Stored::Plain(secret)) => Some(Secret(secret)),
+        Some(Stored::Locked(locked)) => {
+            let passphrase = prompt.unlock(file.path())?;
+            Some(Secret(locked.unlock(&passphrase)?))
+        }
+    })
+}
+
+/// Mint a fresh key into the empty key file, plain: the default a home is created with.
+fn mint(file: &KeyFile) -> eyre::Result<Secret> {
+    let secret = keystore::Secret::generate()?;
+    create_dir(file)?;
+    file.write(&secret, Protection::Plain)?;
+    Ok(Secret(secret))
+}
+
+/// Create the directory the key file lives in, owner-only, as every store file's directory is.
+fn create_dir(file: &KeyFile) -> eyre::Result<()> {
+    if let Some(dir) = file.path().parent() {
+        crate::config::create_store_dir(dir)?;
     }
     Ok(())
 }
 
-/// Non-unix has no portable file-mode equivalent, so the guarantee is unix-only: read the file as given.
-#[cfg(not(unix))]
-async fn guard_mode(_file: &tokio::fs::File, _path: &Path) -> eyre::Result<()> {
-    Ok(())
-}
-
-/// Write `seed` as the persisted identity at `<home>/identity.key`, mode 0600, creating the store dir,
-/// REFUSING a home that already holds a different one.
+/// Write `seed` as the persisted identity at `<home>/identity.key`, plain, mode 0600, creating the store
+/// dir, REFUSING a home that already holds a different one.
 ///
 /// This is how `adopt` provisions the device identity a later `serve` binds: it MUST land in the same
 /// store [`resolve`] reads, so the node comes up AS the adopted device. (Writing tightbeam's separate
@@ -315,36 +295,49 @@ async fn guard_mode(_file: &tokio::fs::File, _path: &Path) -> eyre::Result<()> {
 /// one, so the exposed node had a different id than the contact pointed at.)
 ///
 /// The refusal is here, in the module that owns the file, and not at the one call site, because it is
-/// the FILE's rule: the same one [`read_key`] already enforces for a corrupt key, in the same terms.
-/// What is at stake is not recoverable. Its siblings in `adopt`'s transaction (the trusted signet, the
-/// stored badge) are both `--force`-gated and both re-obtainable from the owner, so the flag that waves
-/// those through deliberately does not reach this one: the way past it is the operator moving the file,
-/// which is also how the copy that makes the act survivable comes to exist. Writing the seed ALREADY on
-/// disk is not a replacement, so re-adopting the same invite stays the silent no-op it should be.
-///
-/// The write is ATOMIC (a unique temp sibling in the same directory, then one rename over the target), so
-/// a crash or a failed write can never truncate the key: the old file stays intact until the rename lands.
+/// the FILE's rule. What is at stake is not recoverable. Its siblings in `adopt`'s transaction (the
+/// trusted signet, the stored badge) are both `--force`-gated and both re-obtainable from the owner, so
+/// the flag that waves those through deliberately does not reach this one. Writing the key ALREADY on
+/// disk is not a replacement, so re-adopting the same invite stays the silent no-op it should be; if its
+/// owner sealed that key, the passphrase proves it is the same one.
 pub async fn write(seed: &[u8; 32], home: &Home) -> eyre::Result<()> {
-    let path = home.identity_key();
-    // Read through the guarded reader every load uses, so a corrupt or too-open file refuses for its own
-    // named reason rather than reading as "no key here" and being replaced by this write.
-    if let Some(existing) = read_key(&path).await? {
-        // Compare the public node ids, never the seeds: the ids are what the refusal must name, and the
-        // secret bytes never need to meet each other for this question to be answered.
-        let (existing, incoming) = (existing.node_id(), NodeId::from_ed25519_secret(seed));
-        if existing == incoming {
-            return Ok(());
+    write_with(seed, home, &mut Terminal)
+}
+
+/// [`write`], asking `prompt` for the passphrase of a sealed key that claims to be this same one.
+fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::Result<()> {
+    let file = key_file(home);
+    let mut copy = Zeroizing::new(*seed);
+    let secret = keystore::Secret::take(&mut copy);
+    let incoming = secret.node_id();
+    // A sealed file's header only CLAIMS its node; the unlock is what proves it holds this key.
+    let passphrase = match file.load()? {
+        Some(Stored::Locked(locked)) if locked.node_id() == incoming => {
+            Some(prompt.unlock(file.path())?)
         }
-        eyre::bail!(
+        _ => None,
+    };
+    let protection = match &passphrase {
+        Some(passphrase) => Protection::Passphrase(passphrase),
+        None => Protection::Plain,
+    };
+    create_dir(&file)?;
+    match file.adopt(&secret, protection) {
+        Ok(()) => Ok(()),
+        Err(keystore::Error::Different {
+            path,
+            existing,
+            incoming,
+        }) => eyre::bail!(
             "this machine is already {existing}; adopting this would replace it with {incoming}. {} \
              holds the only copy of that key: nobody can issue another, and if it is the signet your \
              fleet roots at, every device you enrolled roots there too. --force will not do it either, \
              because what it waves through is a credential the owner can re-issue. copy the file \
              somewhere safe and move it aside, if becoming a different device is what you meant",
             path.display(),
-        );
+        ),
+        Err(error) => Err(error.into()),
     }
-    crate::config::write_private_atomic(&path, seed).await
 }
 
 #[cfg(test)]

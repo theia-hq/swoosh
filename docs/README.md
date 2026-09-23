@@ -15,8 +15,8 @@ These pages describe the default branch; the released docs are at the newest tag
 - [Capabilities](capabilities.md) hand someone one service, then let it expire or revoke it.
 - [Keys](keys.md) the whole model on one page: five nouns, one gate, one trade. Read it early;
   everything else assumes it.
-- [Signet backup](signet-backup.md) copy the one file you cannot regenerate, and what still works if
-  you lose it.
+- [Signet backup](signet-backup.md) seal and back up the one key you cannot regenerate, restore it, and
+  what still works if you lose it.
 - [Use cases](use-cases/README.md) pick the real situation that matches yours, from reaching your own
   laptop to admitting a whole household.
 - [Commands](reference/commands.md) every verb, with an example and the one thing to know.

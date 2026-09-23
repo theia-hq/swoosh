@@ -409,7 +409,14 @@ impl Outward {
                         .await?
                         .unwrap_or_else(|| secret.node_id()),
                 ),
-                denylist: nauthy::FileDenylist::load(home.revoked()).await?,
+                // The gate's whole revocation policy, composed here: the denylist of revoked grants,
+                // behind the latch of root keys this node disabled, so a cap rooted at a disabled key is
+                // refused whatever the denylist says. Shared, because the gate and the live cut must
+                // read the one instance.
+                revocations: std::sync::Arc::new(nauthy::Latch::new(
+                    nauthy::DisabledRoots::load(home.disabled_roots()).await?,
+                    nauthy::FileDenylist::load(home.revoked()).await?,
+                )),
                 // The live enable/disable oracle: the running exposer consults it per stream, so a
                 // `service disable`/`enable` written to `<home>/disabled` is honored with no restart. Loaded
                 // here beside the denylist because both are home files the gate reads.
@@ -474,17 +481,10 @@ fn reject_retired_key_env(present: bool) -> eyre::Result<()> {
     Ok(())
 }
 
-/// The default `RUST_LOG` directives: ERROR everywhere, INFO for the receive engine, so a stock
-/// `swoosh serve` surfaces the structured event a pushed file emits when it lands (the 0.9 workaround
-/// for the receiver line the engine consumption dropped: the line stays default-on for 0.9, and gating
-/// the activity class quiet waits for the post-0.9 reporting contract).
-///
-/// The ERROR baseline is SPELLED OUT, not left to the builder's default directive: once any directive
-/// parses, `with_default_directive` is not applied, so a bare `transfer=info` would drop every error on
-/// every other target (verified against tracing-subscriber 0.3.23). Deliberately a narrow per-target
-/// directive, not a global INFO default: a global bump would put every dependency's info events on
-/// default stderr, including a serving node's log.
-const DEFAULT_LOG: &str = "error,transfer=info";
+/// The default `RUST_LOG` directive: ERROR everywhere. Activity lines do not ride the log at all (a
+/// serving node renders them itself, and `--quiet` withholds them), so no target needs a raised default,
+/// and a dependency's info events never reach a stock node's stderr.
+const DEFAULT_LOG: &str = "error";
 
 /// The subscriber filter: `RUST_LOG` when set, else the default directives. The ERROR default
 /// directive still covers an empty or all-invalid `RUST_LOG`, where no directive parses. `parse_lossy`
@@ -623,6 +623,12 @@ async fn run() -> eyre::Result<()> {
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward
     // verb binds the home's key where one exists (its badge roots there) and a throwaway where none does,
     // writing nothing. Resolve it before binding, since the secret is what the transport is bound under.
+    // A serving node holds the home lock for its whole life, taken before its key is read, so a restore
+    // can never replace the key it is serving as.
+    let _home_lock = match reach.identity() {
+        Identity::Persisted => Some(swoosh::identity::HomeLock::serving(&home)?),
+        Identity::Ephemeral | Identity::PersistedIfPresent => None,
+    };
     let secret = swoosh::identity::resolve(reach.identity(), &home).await?;
     let contacts = Contacts::clone(store.contacts());
 
@@ -696,6 +702,8 @@ async fn run() -> eyre::Result<()> {
         membership,
         home: &home,
     };
+    // Each transport bind borrows the seed through `with_bytes` and returns a future that holds only
+    // what it derived, so the seed never leaves its wiping owner.
     match transport {
         // iroh self-discovers (n0 pkarr/DNS + relays) AND honors explicit hints: the composed
         // discovery feeds it the `--peer` addresses and any LAN peer heard over mDNS as direct
@@ -706,21 +714,29 @@ async fn run() -> eyre::Result<()> {
         transport::Transport::Iroh => {
             let endpoint = match IrohBind::of(local, &bind_role) {
                 IrohBind::Reachable => {
-                    bifrost_iroh::Endpoint::bind_reachable_with_secret_via(
-                        secret.into_bytes(),
-                        transport::Reach::clone(&bound.reach),
-                    )
-                    .await?
+                    secret
+                        .with_bytes(|seed| {
+                            bifrost_iroh::Endpoint::bind_reachable_with_secret_via(
+                                seed,
+                                transport::Reach::clone(&bound.reach),
+                            )
+                        })
+                        .await?
                 }
                 IrohBind::Dialing => {
-                    bifrost_iroh::Endpoint::bind_dialing_with_secret_via(
-                        secret.into_bytes(),
-                        transport::Reach::clone(&bound.reach),
-                    )
-                    .await?
+                    secret
+                        .with_bytes(|seed| {
+                            bifrost_iroh::Endpoint::bind_dialing_with_secret_via(
+                                seed,
+                                transport::Reach::clone(&bound.reach),
+                            )
+                        })
+                        .await?
                 }
                 IrohBind::Local => {
-                    bifrost_iroh::Endpoint::bind_local_with_secret(secret.into_bytes()).await?
+                    secret
+                        .with_bytes(bifrost_iroh::Endpoint::bind_local_with_secret)
+                        .await?
                 }
             };
             let composed = PeerHint::discovery(&endpoint, peers);
@@ -731,7 +747,9 @@ async fn run() -> eyre::Result<()> {
         // quirk is direct-only with no internal discovery, so the composed discovery is its only way
         // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
         transport::Transport::Quirk => {
-            let endpoint = bifrost_quirk::Endpoint::bind_with_secret(secret.into_bytes()).await?;
+            let endpoint = secret
+                .with_bytes(bifrost_quirk::Endpoint::bind_with_secret)
+                .await?;
             let composed = PeerHint::discovery(&endpoint, peers);
             let node = Node::new(endpoint, composed.discovery);
             run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
@@ -741,11 +759,11 @@ async fn run() -> eyre::Result<()> {
         // signet-rooted gate arms (where bare quirk refuses); both ends must spell `quirk+noise`, and a
         // bare quirk peer fails the wrapper tag with no fallback. One seed binds both layers, and
         // `Noise::new` refuses an inner bound under any other identity, so the two can never disagree.
-        // The seed stays in a zeroizing wrapper until the constructor has taken its copy.
         transport::Transport::QuirkNoise => {
-            let seed = zeroize::Zeroizing::new(secret.into_bytes());
-            let endpoint = bifrost_quirk::Endpoint::bind_with_secret(*seed).await?;
-            let endpoint = bifrost_noise::Noise::new(endpoint, *seed)?;
+            let endpoint = secret
+                .with_bytes(bifrost_quirk::Endpoint::bind_with_secret)
+                .await?;
+            let endpoint = secret.with_bytes(|seed| bifrost_noise::Noise::new(endpoint, seed))?;
             let composed = PeerHint::discovery(&endpoint, peers);
             let node = Node::new(endpoint, composed.discovery);
             run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
@@ -1150,6 +1168,64 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The gate `serve` resolves refuses every cap rooted at a key this home disabled, and the context
+    /// fails to resolve at all over a latch it cannot read, rather than serving as if nothing were
+    /// disabled.
+    #[tokio::test]
+    async fn the_serve_gate_honors_the_homes_disabled_roots() {
+        use nauthy::Revocations as _;
+        use tightbeam::identity::AsVerifyKey as _;
+
+        let dir = std::env::temp_dir().join(format!("swoosh-latch-ctx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create an empty config dir");
+        let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
+        let secret = swoosh::identity::Secret::ephemeral();
+        let serve_verb = || match Cli::try_parse_from(["swoosh", "serve"])
+            .expect("bare serve parses")
+            .command
+            .expect("serve is a command")
+            .split()
+        {
+            Verb::Outward(outward) => outward,
+            _ => panic!("serve splits to a reaching verb"),
+        };
+        let disabled = nauthy::Identity::from_secret(&[41u8; 32]).expect("valid secret");
+        let live = nauthy::Identity::from_secret(&[42u8; 32]).expect("valid secret");
+        let hour = nauthy::Request::expires_in(core::time::Duration::from_secs(3600));
+        let service: nauthy::Service = "ssh".parse().expect("valid service");
+        nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
+            .disable(bifrost::NodeId::from_ed25519_secret(&[41u8; 32]).verify_key())
+            .await
+            .expect("disable a root");
+
+        let expose = serve_verb()
+            .expose_context(&secret, &home)
+            .await
+            .expect("expose context resolves")
+            .expect("serve carries an expose context");
+        assert!(
+            expose
+                .revocations
+                .is_revoked(&disabled.mint(&service, hour).expect("mint")),
+            "a cap rooted at the disabled key is refused"
+        );
+        assert!(
+            !expose
+                .revocations
+                .is_revoked(&live.mint(&service, hour).expect("mint")),
+            "a cap rooted anywhere else is not"
+        );
+
+        std::fs::write(home.disabled_roots(), "not a key\n").expect("corrupt the latch");
+        assert!(
+            serve_verb().expose_context(&secret, &home).await.is_err(),
+            "an unreadable latch stops the serve rather than trusting every root"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A real `sheer:` capability link, minted through the library so a parse test exercises the true
     /// boundary (a `Peer::Capability` arm), not a fake token a lenient parser would wave through.
     fn sheer_link() -> String {
@@ -1528,9 +1604,8 @@ mod tests {
 
     static PROBE_CALLSITE: ProbeCallsite = ProbeCallsite;
 
-    /// Synthetic event metadata for the filter probes: the receive engine's target at the INFO level it
-    /// raises to, plus a NON-transfer target at INFO and at ERROR for the scoping proof. `Metadata::new`
-    /// is const, so each probe is a static.
+    /// Synthetic event metadata for the filter probes: the receive engine's target at INFO, plus a
+    /// NON-transfer target at INFO and at ERROR. `Metadata::new` is const, so each probe is a static.
     static PROBE_TRANSFER_INFO: tracing::Metadata<'static> =
         probe_meta("transfer", tracing::Level::INFO);
     static PROBE_OTHER_INFO: tracing::Metadata<'static> =
@@ -1563,44 +1638,25 @@ mod tests {
         !Layer::<tracing_subscriber::Registry>::register_callsite(filter, meta).is_never()
     }
 
-    /// The default filter SCOPES per target, not just by level: `transfer=info` surfaces the receive
-    /// engine's arrival INFO while a NON-transfer INFO stays filtered and a non-transfer ERROR still
-    /// passes (the scoping a level hint alone cannot prove). An explicit `RUST_LOG` replaces the
-    /// default. Quiet gating the activity class is the post-0.9 reporting contract, not wired here.
+    /// The default filter shows errors and nothing below them, for every target: the receive engine's
+    /// target gets no raised default, because an arrival is an activity line the serving root renders,
+    /// never a log event. An explicit `RUST_LOG` replaces the default.
     #[test]
-    fn the_log_filter_scopes_by_target() {
+    fn the_default_log_filter_is_errors_only() {
         use tracing_subscriber::filter::LevelFilter;
 
-        // The stock posture (arm A): the arrival line is on, and the ERROR baseline still admits a
-        // non-transfer ERROR while a non-transfer INFO never rides in on the raised ceiling.
         let default = log_filter(None);
-        assert!(filter_enables(&default, &PROBE_TRANSFER_INFO));
+        assert!(!filter_enables(&default, &PROBE_TRANSFER_INFO));
         assert!(!filter_enables(&default, &PROBE_OTHER_INFO));
         assert!(filter_enables(&default, &PROBE_OTHER_ERROR));
+        assert_eq!(default.max_level_hint(), Some(LevelFilter::ERROR));
 
-        // The rendered default still SPELLS the ERROR baseline beside the transfer directive:
-        // `with_default_directive` is not applied once the parse yields a directive, so `transfer=info`
-        // alone would drop every other target's ERROR events.
-        let rendered = default.to_string();
-        assert!(
-            rendered.contains("error") && rendered.contains("transfer=info"),
-            "the default keeps the ERROR baseline beside the transfer directive: {rendered}"
-        );
-        assert_eq!(
-            default.max_level_hint(),
-            Some(LevelFilter::INFO),
-            "the transfer directive raises the ceiling so the receive event is shown"
-        );
-
-        // `RUST_LOG` wins: `warn` silences the arrival line; an explicit transfer directive restores it.
+        // `RUST_LOG` wins, in both directions.
+        let info = log_filter(Some("transfer=info".to_owned()));
+        assert!(filter_enables(&info, &PROBE_TRANSFER_INFO));
         let warn = log_filter(Some("warn".to_owned()));
         assert_eq!(warn.max_level_hint(), Some(LevelFilter::WARN));
-        assert!(!filter_enables(&warn, &PROBE_TRANSFER_INFO));
         assert!(filter_enables(&warn, &PROBE_OTHER_ERROR));
-        assert!(filter_enables(
-            &log_filter(Some(DEFAULT_LOG.to_owned())),
-            &PROBE_TRANSFER_INFO
-        ));
     }
 
     /// The `invite` group resolves its three leaves, and `--for` is the SHARED `GrantFor` grammar: a raw
