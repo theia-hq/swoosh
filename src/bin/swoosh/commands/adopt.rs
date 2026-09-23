@@ -100,6 +100,7 @@ impl AdoptCmd {
                 // The credential half of the same rule: a token is not authenticated, so a badge that
                 // does not OUTLIVE the stored one (an old or revoked replay) must not overwrite it.
                 admit_badge(home, &badge, node, self.force).await?;
+                admit_live_signet(home, signet).await?;
                 // Trust the signet: the default gate admits its members and delegates. The signet lands
                 // beside the identity, in the SAME home, which `swoosh serve` reads via `load_signet`.
                 config::write_signet(home, signet).await?;
@@ -129,6 +130,7 @@ impl AdoptCmd {
                 // device, so a derived invite re-identifying this machine never reads as a renewal of
                 // the outgoing device's badge.
                 admit_badge(home, &badge, node, self.force).await?;
+                admit_live_signet(home, signet).await?;
                 // Become the derived device: write the child seed as SWOOSH's persisted identity -- the
                 // SAME store `swoosh serve` binds under -- so this node comes up AS the adopted device.
                 // This is the transaction's THIRD admission, and the only one that does not live beside
@@ -185,6 +187,19 @@ fn verify_badge(badge: Link, node: NodeId, signet: NodeId) -> eyre::Result<Link>
             )
         })?;
     Ok(badge)
+}
+
+/// Refuse to trust a signet this node has disabled. A disable is terminal and `--force` does not reach
+/// it: the gate would refuse every badge that key signs, so adopting it would store a credential that
+/// admits nowhere here and a signet this node has already said it no longer trusts. Asked last, right
+/// before the first write, so a disable that lands while the invite is being checked is still seen.
+async fn admit_live_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
+    if config::is_disabled(home, signet).await? {
+        eyre::bail!(
+            "signet {signet} is disabled at this node, so it will not adopt an invite that key signed"
+        );
+    }
+    Ok(())
 }
 
 /// Refuse to silently re-root this machine: when the home already trusts a DIFFERENT signet than the

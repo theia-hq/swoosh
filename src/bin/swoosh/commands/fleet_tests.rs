@@ -167,3 +167,76 @@ async fn a_flooding_coordination_node_is_refused_before_it_fills_the_buffer() {
         MAX_ROSTER_BLOB * FLOOD_MULTIPLE
     );
 }
+
+/// A fresh home that trusts `signet`, with `disabled` written to its latch.
+async fn home_trusting(tag: &str, signet: NodeId, disabled: &[NodeId]) -> swoosh::home::Home {
+    use tightbeam::identity::AsVerifyKey as _;
+
+    let dir = std::env::temp_dir().join(format!("swoosh-fleet-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = swoosh::home::Home::resolve(Some(dir)).expect("resolve the home");
+    swoosh::config::write_signet(&home, signet)
+        .await
+        .expect("trust the signet");
+    for key in disabled {
+        nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
+            .disable(key.verify_key())
+            .await
+            .expect("disable");
+    }
+    home
+}
+
+/// Pull from a coordination node that does not exist, so any dial fails: the error says whether the
+/// pull got as far as dialing.
+async fn pull(home: &swoosh::home::Home) -> eyre::Report {
+    let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+    let cmd = super::FleetCmd {
+        peer: peer(9),
+        present: None,
+        reach: swoosh::transport::ReachArgs {
+            transport: swoosh::transport::Transport::default(),
+            local: false,
+            peer: Vec::new(),
+            relay: None,
+            resolver: None,
+        },
+    };
+    cmd.run_fleet(
+        &node,
+        &swoosh::contacts::Contacts::default(),
+        None,
+        None,
+        home,
+    )
+    .await
+    .expect_err("there is no coordination node to pull from")
+}
+
+#[tokio::test]
+async fn a_disabled_signet_refuses_the_pull_before_dialing() {
+    let signet = NodeId::from_ed25519_secret(&[21u8; 32]);
+    let home = home_trusting("disabled", signet, &[signet]).await;
+    let refusal = format!("{:#}", pull(&home).await);
+    assert!(
+        refusal.contains("disabled at this node"),
+        "the pull is refused for the disabled signet, before any dial: {refusal}"
+    );
+    assert!(
+        !home.contacts().exists(),
+        "a refused pull writes no contact"
+    );
+}
+
+#[tokio::test]
+async fn a_live_signet_goes_on_to_dial() {
+    // Another key disabled, this one not: the pull proceeds to the dial, which fails for its own reason.
+    let signet = NodeId::from_ed25519_secret(&[22u8; 32]);
+    let other = NodeId::from_ed25519_secret(&[23u8; 32]);
+    let home = home_trusting("live", signet, &[other]).await;
+    let failure = format!("{:#}", pull(&home).await);
+    assert!(
+        !failure.contains("disabled"),
+        "a signet that is not disabled is not refused as one: {failure}"
+    );
+}

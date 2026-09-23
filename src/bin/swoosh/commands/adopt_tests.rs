@@ -148,3 +148,67 @@ fn only_a_strictly_later_readable_expiry_supersedes() {
     );
     assert_eq!(superseded(None, None), None);
 }
+
+/// A derived invite from `signet` for a fresh device seed, valid and unexpired: without the latch it
+/// adopts cleanly, so a refusal can only be the latch's.
+fn derived_invite(signet: &Secret, seed: [u8; 32]) -> String {
+    let device = NodeId::from_ed25519_secret(&seed);
+    let expiry = SystemTime::now() + DAY;
+    Invite::derived(seed, signet.node_id(), badge_for(signet, device, expiry)).to_string()
+}
+
+#[tokio::test]
+async fn a_disabled_signet_is_refused_even_with_force() {
+    let dir = std::env::temp_dir().join(format!("swoosh-adopt-disabled-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = Home::resolve(Some(dir.clone())).expect("resolve the home");
+    let signet = Secret::ephemeral();
+    swoosh::config::create_store_dir(&dir).expect("create the store dir");
+    nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
+        .disable(signet.node_id().verify_key())
+        .await
+        .expect("disable the signet");
+
+    let refused = AdoptCmd {
+        invite: Some(SecretSource::Literal(derived_invite(&signet, [31u8; 32]))),
+        force: true,
+    }
+    .run(&home)
+    .await
+    .expect_err("a disabled signet is not adopted");
+    assert!(
+        format!("{refused:#}").contains("disabled at this node"),
+        "refused for the disabled signet: {refused:#}"
+    );
+    assert!(!home.signet().exists(), "no signet was written");
+    assert!(!home.identity_key().exists(), "no identity was written");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_signet_this_node_never_disabled_adopts() {
+    // The control: the same invite shape into a home whose latch names another key.
+    let dir = std::env::temp_dir().join(format!("swoosh-adopt-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = Home::resolve(Some(dir.clone())).expect("resolve the home");
+    let signet = Secret::ephemeral();
+    swoosh::config::create_store_dir(&dir).expect("create the store dir");
+    nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
+        .disable(Secret::ephemeral().node_id().verify_key())
+        .await
+        .expect("disable another key");
+
+    AdoptCmd {
+        invite: Some(SecretSource::Literal(derived_invite(&signet, [32u8; 32]))),
+        force: false,
+    }
+    .run(&home)
+    .await
+    .expect("a signet this node never disabled adopts");
+    assert_eq!(
+        swoosh::config::load_signet(&home).await.expect("read"),
+        Some(signet.node_id()),
+        "the signet was trusted"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
