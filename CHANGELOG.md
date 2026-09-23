@@ -2,6 +2,24 @@
 
 All notable changes to swoosh, newest first.
 
+## v0.14.0
+
+### Changed
+- **A disabled root key is honoured by every verb, not only at admission.** A key listed in
+  `<home>/disabled_roots` is refused everywhere:
+  - `serve` refuses any capability rooted there, whatever the revocation list says. A list it cannot
+    read stops the node rather than trusting every root.
+  - `fleet --pull` refuses a disabled signet before it dials and again before it writes, so no roster
+    that key signed is followed.
+  - `adopt` refuses an invite signed by a disabled signet, even with `--force`, and writes nothing.
+- **A running `serve` ends live sessions whose access has ended.** About once a second it re-checks
+  every session, and one whose capability has since been revoked, whose root has since been disabled,
+  or whose every grant has expired is closed. Before, such a session ran until its peer left. A shell
+  on a cut ssh session is hung up.
+- **`grant issue` refuses on an adopted device.** A grant signed there roots at the device's own key,
+  which no node in the fleet admits, not even the device itself. It now says so and points to the
+  machine that holds the signet, or to `grant attenuate` to pass on a narrower copy of a link you hold.
+
 ## v0.13.0
 
 ### New
