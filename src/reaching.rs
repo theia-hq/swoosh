@@ -23,6 +23,7 @@
 //! and the fix instead of the far gate's deliberately uniform `not admitted`.
 
 use core::future::Future;
+use core::net::SocketAddr;
 use std::time::SystemTime;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
@@ -135,12 +136,15 @@ pub trait Reaching {
 #[derive(Debug, Clone)]
 pub enum BindRole {
     /// The bind accepts connections under the key, so it publishes the key's address record (n0
-    /// pkarr/DNS) and peers reach it by key. Only `serve` is `Serving`, and it declares no credential:
-    /// it is the gate, so it verifies badges rather than presenting one.
+    /// pkarr/DNS) and advertises its bind over LAN mDNS, and peers reach it by key. Only `serve` is
+    /// `Serving`, and it declares no credential: it is the gate, so it verifies badges rather than
+    /// presenting one.
     Serving,
     /// The bind only dials peers, as the [`Credential`] it carries: n0 resolution and relays, no address
-    /// record. A dialing process is not reachable at its key, so publishing here overwrites the live
-    /// `serve` under the same key with a relay that dies when the command exits (0.9.0 F1).
+    /// record, and no mDNS record (it browses the LAN, never advertises). A dialing process is not
+    /// reachable at its key, so publishing here overwrites the live `serve` under the same key with a
+    /// relay that dies when the command exits (0.9.0 F1), and an mDNS record would tell every host on
+    /// the LAN which key is running here while nobody needs to find it.
     Dialing(Credential),
 }
 
@@ -154,6 +158,20 @@ impl BindRole {
         match self {
             Self::Serving => Identity::Persisted,
             Self::Dialing(credential) => credential.identity(),
+        }
+    }
+
+    /// The sockets this role hands to the LAN mDNS advertisement.
+    ///
+    /// Bind truth for a serving node, never `local_addr`'s hints: the hints rewrite an unspecified bind
+    /// to loopback, so handing them over would advertise `127.0.0.1` for a node bound to every interface
+    /// and point every dialer at its own machine. Discovery owns what of the bind is publishable. A
+    /// dialing node hands over nothing and reads nothing off the transport, so no record on the wire
+    /// names its key; it still browses.
+    pub fn advertised<T: Transport>(&self, transport: &T) -> Vec<SocketAddr> {
+        match self {
+            Self::Serving => transport.bound_sockets(),
+            Self::Dialing(_) => Vec::new(),
         }
     }
 }

@@ -739,7 +739,7 @@ async fn run() -> eyre::Result<()> {
                         .await?
                 }
             };
-            let composed = PeerHint::discovery(&endpoint, peers);
+            let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
             let node = Node::new(endpoint, composed.discovery);
             let reach = reach.attach_bound_reach(&bound.reach);
             run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
@@ -750,7 +750,7 @@ async fn run() -> eyre::Result<()> {
             let endpoint = secret
                 .with_bytes(bifrost_quirk::Endpoint::bind_with_secret)
                 .await?;
-            let composed = PeerHint::discovery(&endpoint, peers);
+            let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
             let node = Node::new(endpoint, composed.discovery);
             run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
         }
@@ -764,7 +764,7 @@ async fn run() -> eyre::Result<()> {
                 .with_bytes(bifrost_quirk::Endpoint::bind_with_secret)
                 .await?;
             let endpoint = secret.with_bytes(|seed| bifrost_noise::Noise::new(endpoint, seed))?;
-            let composed = PeerHint::discovery(&endpoint, peers);
+            let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
             let node = Node::new(endpoint, composed.discovery);
             run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
         }

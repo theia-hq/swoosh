@@ -29,6 +29,7 @@ use eyre::WrapErr as _;
 
 use crate::config;
 use crate::home::Home;
+use crate::reaching::BindRole;
 
 /// The flags every reaching verb shares and no local verb has: which backend to bind, whether the
 /// bind stays off n0, any direct address hints, and the relay and resolver the bind leans on.
@@ -324,32 +325,42 @@ impl PeerHint {
     }
 
     /// Compose the discovery for a freshly bound `transport`: the `--peer` hints layered over an mDNS
-    /// resolver that advertises this node at the sockets it bound and browses the LAN for peers, plus
-    /// how far that advertisement reaches.
+    /// resolver that browses the LAN for peers and, for a [`Serving`](BindRole::Serving) bind, advertises
+    /// this node at the sockets it bound, plus how far that advertisement reaches.
     ///
-    /// Called once per run, at the seam, after the transport binds (so its bind is known). If mDNS
-    /// cannot start at all (multicast blocked), discovery degrades to the static hints alone rather
-    /// than failing the whole command, since a hinted or self-discovering dial still works; the
-    /// returned [`MdnsState`] carries that, and every lesser degradation, so a surface can say so.
+    /// Called once per run, at the seam, after the transport binds (so its bind is known). A
+    /// [`Dialing`](BindRole::Dialing) bind hands the advertisement no address, so it browses and puts no
+    /// record naming its key on the wire; its [`MdnsState::BrowseOnly`] is the intended outcome, not a
+    /// degraded one. If mDNS cannot start at all (multicast blocked), discovery degrades to the static
+    /// hints alone rather than failing the whole command, since a hinted or self-discovering dial still
+    /// works; the returned [`MdnsState`] carries that, and every lesser degradation, so a surface can say
+    /// so.
     pub fn discovery<T: bifrost::Transport>(
         transport: &T,
         peers: impl IntoIterator<Item = Self>,
+        role: &BindRole,
     ) -> ComposedDiscovery {
         let mut hints = StaticDiscovery::new();
         for Self { node, addrs, .. } in peers {
             hints.insert(node, addrs);
         }
-        // Bind truth, never `local_addr`'s hints: the hints rewrite an unspecified bind to loopback, so
-        // handing them over would advertise `127.0.0.1` for a node bound to every interface and point
-        // every dialer at its own machine. Discovery owns what of the bind is publishable.
         let (mdns, state) = match MdnsDiscovery::advertise(
             transport.node_id(),
-            transport.bound_sockets(),
+            role.advertised(transport),
         ) {
             Ok(Started {
                 discovery,
                 advertising,
-            }) => (discovery, MdnsState::from(advertising)),
+            }) => {
+                if let (BindRole::Dialing(_), Advertising::BrowseOnly(MdnsError::NoAddrs)) =
+                    (role, &advertising)
+                {
+                    tracing::debug!(
+                        "browsing the LAN over mDNS; a dialing node advertises nothing, so no record names its key"
+                    );
+                }
+                (discovery, MdnsState::from(advertising))
+            }
             Err(err) => {
                 tracing::warn!(error = %err, "mDNS discovery unavailable; using --peer hints only");
                 (MdnsDiscovery::disabled(), MdnsState::Blocked)

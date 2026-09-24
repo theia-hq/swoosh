@@ -11,10 +11,13 @@ use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use bifrost::{Addr, Error, InProcess, NodeId};
+use bifrost_mdns::MdnsError;
 use bifrost_mem::{MemSession, MemTransport};
 
 use super::{MdnsState, PeerHint, Reach, ReachArgs, RelayHome, Resolver, Transport};
+use crate::credential::Credential;
 use crate::home::Home;
+use crate::reaching::BindRole;
 
 /// A wildcard bind on a fixed port: the shape the rewrite destroys, since `local_addr` reports it as
 /// loopback and a publisher cannot then tell it from a node that deliberately bound `127.0.0.1`.
@@ -80,20 +83,17 @@ impl Recording {
     }
 }
 
-/// Composing the discovery hands mDNS the transport's bound sockets, and never asks for the hints.
+/// Composing the discovery for a serving bind hands mDNS the transport's bound sockets, and never asks
+/// for the hints.
 ///
 /// The advertisement itself may or may not reach the network here (a sandbox blocks multicast, which is
 /// the honest degraded path), so the assertion is on what the composition root read, which holds either
 /// way.
 #[tokio::test]
 async fn composing_discovery_advertises_the_bound_sockets() {
-    let reads = Arc::new(Mutex::new(Vec::new()));
-    let transport = Recording {
-        inner: MemTransport::bind(),
-        reads: Arc::clone(&reads),
-    };
+    let (transport, reads) = recording();
 
-    let _composed = PeerHint::discovery(&transport, []);
+    let _composed = PeerHint::discovery(&transport, [], &BindRole::Serving);
 
     assert_eq!(
         *reads.lock().unwrap(),
@@ -109,10 +109,79 @@ async fn composing_discovery_advertises_the_bound_sockets() {
 #[tokio::test]
 async fn a_bind_without_advertisable_addresses_reports_mdns_unavailable() {
     let transport = MemTransport::bind();
-    let composed = PeerHint::discovery(&transport, []);
+    let composed = PeerHint::discovery(&transport, [], &BindRole::Serving);
     assert!(
         matches!(composed.mdns, MdnsState::BrowseOnly(_) | MdnsState::Blocked),
         "no addresses to advertise never reads as advertised, got {:?}",
+        composed.mdns
+    );
+}
+
+/// A dialing role, as every verb but `serve` declares it.
+fn dialing() -> BindRole {
+    BindRole::Dialing(Credential::Family { present: None })
+}
+
+/// A [`Recording`] transport and the log of what was read off it.
+fn recording() -> (Recording, Arc<Mutex<Vec<Read>>>) {
+    let reads = Arc::new(Mutex::new(Vec::new()));
+    let transport = Recording {
+        inner: MemTransport::bind(),
+        reads: Arc::clone(&reads),
+    };
+    (transport, reads)
+}
+
+/// A serving bind hands its bound sockets to the advertisement: a dialer finds it by its key.
+#[test]
+fn a_serving_bind_advertises_its_bind() {
+    let (transport, _reads) = recording();
+
+    assert_eq!(
+        BindRole::Serving.advertised(&transport),
+        vec![WILDCARD],
+        "a serving node must still publish its bind"
+    );
+}
+
+/// A dialing bind hands the advertisement no address, and reads none off the transport: there is
+/// nothing to publish, so no record on the LAN names this node's key.
+#[test]
+fn a_dialing_bind_advertises_no_address() {
+    let (transport, reads) = recording();
+
+    assert_eq!(
+        dialing().advertised(&transport),
+        Vec::<SocketAddr>::new(),
+        "a dialing node must publish no address"
+    );
+    assert_eq!(
+        *reads.lock().unwrap(),
+        Vec::new(),
+        "a dialing node reads no address to publish"
+    );
+}
+
+/// Composing discovery for a dialing bind still starts mDNS (it browses) but advertises nothing: the
+/// composition root never reads the bind, and the state is browse-only for want of an address, or
+/// blocked where multicast cannot start at all. It never reads as a node another host can hear.
+#[tokio::test]
+async fn composing_discovery_for_a_dialing_bind_advertises_nothing() {
+    let (transport, reads) = recording();
+
+    let composed = PeerHint::discovery(&transport, [], &dialing());
+
+    assert_eq!(
+        *reads.lock().unwrap(),
+        Vec::new(),
+        "a dialing bind must hand the advertisement nothing"
+    );
+    assert!(
+        matches!(
+            composed.mdns,
+            MdnsState::BrowseOnly(MdnsError::NoAddrs) | MdnsState::Blocked
+        ),
+        "a dialing bind browses without advertising, got {:?}",
         composed.mdns
     );
 }
