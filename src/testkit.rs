@@ -161,6 +161,42 @@ impl Keys {
     }
 }
 
+/// Device badges no mint here can sign, for a reader that must refuse them. Each was signed once, by
+/// hand, by the root seeded [`ROOT_SEED`](hand_signed::ROOT_SEED) for the node seeded
+/// [`DEVICE_SEED`](hand_signed::DEVICE_SEED), and is kept as its text. Each is a sealed membership badge
+/// bound to that node, like one [`Keys::device_badge`] signs, except for its end date.
+pub mod hand_signed {
+    use nauthy::Link;
+
+    /// The root that signed every badge here.
+    pub const ROOT_SEED: u8 = 0x21;
+    /// The node every badge here is bound to.
+    pub const DEVICE_SEED: u8 = 0x11;
+
+    /// A badge signed the way roots did before a badge carried its end date as a fact: the date lives
+    /// only in its check (2100-01-01), so `Cap::expiry` reads `None`.
+    pub fn without_end_date() -> Link {
+        parse(WITHOUT_END_DATE)
+    }
+
+    /// A badge whose signed end date is past what the clock can hold, so `Cap::expiry` reads an error.
+    pub fn unreadable_end_date() -> Link {
+        parse(UNREADABLE_END_DATE)
+    }
+
+    fn parse(text: &str) -> Link {
+        #[expect(
+            clippy::expect_used,
+            reason = "each text here is a link, checked by the testkit's own tests"
+        )]
+        text.parse().expect("a hand-signed badge is a link")
+    }
+
+    const WITHOUT_END_DATE: &str = "sheer:bf01rbfyqv7u5kqwcpdbkbg3gtkl5lzumul2byy54pg52tm3iia5tufq.ckmqecvmaefac5akbrrg65lomrpwizlwnfrwkcqbmqfdqytggayteytgnrsw25dvmzxte23xn5yxi3tdgz2w2ztqmu2dg2ldmvzxm6denfqxo6dmgrtgky3sorthg3dyoe2dg4iyayraqcqgbaibearqaezcqcrgbibaqgysa4eakeqdbcaaqgqxbicquayiqaeaucakayqibluzuqhquba2aieaemrgbisauaqidmjaqcebbajagcecbanbicqfbibqraqibicquayyqmeauba2aiebkerebaabeidics2cybl3uqb2ckqukyjrontkxxjotne7not3lmec4oaqjxxxaqnebs3ugomtcxtze6mvx4pao6loz5pm6axicnxjc7hinkimbrv3vu4rrijacsh2mhbltviponw2oq7csbnkqer5zbi36zeoi6go4zcpryfcqajciijeakzvut3k4wfw7lsslv3t6ymbvzobj6w36x7bccnu3v5sur6quinjsgik7b3ws4ljlwnbutgh7mlbtmtknoj5pln53zu25v645govh4fq";
+
+    const UNREADABLE_END_DATE: &str = "sheer:bf01rbfyqv7u5kqwcpdbkbg3gtkl5lzumul2byy54pg52tm3iia5tufq.ck7aecwraefauzlyobuxezltl5qxicqboqfayytpovxgix3emv3gsy3fbiawicrymjtdamjsmjtgyzlnor2wm3zsnn3w64lunzrtm5lnmzygknbtnfrwk43wpbsgsylxpbwdiztfmnzhizttnr4hcnbtoemamiqibidaqeasaiyaciqsbiiaraaicifsb77777777777777qcmrnbivquaqidmjaocafcibqraiidioaubikameiccakbufawih77777777777776aikaqnaecacgitaujakaiebweqibcbaqeqdbcbqqgqubicquayiqmeaubikammiicakaqnaecavcisaqaasedzdx3pp7edoopslsqsufukjn4wdriolupmhnk32cxoq6w4a6uj54gsaownkgbsje73qksoq2snqtfnjdlloec4fwa6ao2ntuve3rkla2lx2qqv6w4s33gcki6enfduaun46szq76rwy5bpgbx42ekvipkzjocbiaereeesa7vmuilbk4pgnowil3thekfz23jjzl5e6giuvrcxonj234vhhheuqiknt6ibfuywdm5zfec7dtekeq3krqjskmcljjlww4ul44mtm6ca";
+}
+
 /// A [`Prompt`] that counts prompt events and answers from a script.
 ///
 /// One event is one call to `unlock` or `choose`, whatever the terminal behind it would read: `choose`

@@ -121,6 +121,43 @@ impl Home {
         self.dir.join("roster")
     }
 
+    /// `<home>/roster.synced`: when a sync last reached another device, in unix seconds.
+    pub fn roster_synced(&self) -> PathBuf {
+        self.dir.join("roster.synced")
+    }
+
+    /// `<home>/roster.seed`: the key of the machine that made this machine's invite, the first device a
+    /// sync asks.
+    pub fn roster_seed(&self) -> PathBuf {
+        self.dir.join("roster.seed")
+    }
+
+    /// `<home>/roster.fork`: a second update seen at the number of the one in `roster`, kept as evidence
+    /// that two copies of the root signed.
+    pub fn roster_fork(&self) -> PathBuf {
+        self.dir.join("roster.fork")
+    }
+
+    /// `<home>/root/`: the root, held here only by a machine that holds it.
+    pub fn root(&self) -> PathBuf {
+        self.dir.join("root")
+    }
+
+    /// `<home>/root.new/`: a root being written, before it is renamed to [`root`](Self::root).
+    pub fn root_new(&self) -> PathBuf {
+        self.dir.join("root.new")
+    }
+
+    /// `<home>/root.moving/`: a root renamed away by a move off this machine, before it is deleted.
+    pub fn root_moving(&self) -> PathBuf {
+        self.dir.join("root.moving")
+    }
+
+    /// `<home>/root.revoking/`: a root renamed away by its retirement here, before it is deleted.
+    pub fn root_revoking(&self) -> PathBuf {
+        self.dir.join("root.revoking")
+    }
+
     /// `<home>/revoked`: the revocation denylist the expose gate honors, the next `serve` reads.
     pub fn revoked(&self) -> PathBuf {
         self.dir.join("revoked")
