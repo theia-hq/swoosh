@@ -162,8 +162,14 @@ fn encode_seed(seed: &[u8; 32]) -> Zeroizing<String> {
 
 /// Decode a base32 seed of exactly 32 bytes. The uppercase copy and the decoded buffer both zeroize on
 /// drop, so neither lingers in freed memory.
+///
+/// Only ASCII is folded to uppercase. Unicode folding maps `ſ` to `S` and `ı` to `I`, which would give
+/// one seed a second spelling.
 fn parse_seed(text: &str) -> Result<Zeroizing<[u8; 32]>, InviteError> {
-    let upper = Zeroizing::new(text.to_uppercase());
+    if !text.is_ascii() {
+        return Err(InviteError::Encoding);
+    }
+    let upper = Zeroizing::new(text.to_ascii_uppercase());
     let mut bytes = Zeroizing::new(
         BASE32_NOPAD
             .decode(upper.as_bytes())
@@ -294,6 +300,30 @@ mod tests {
             !shown.contains(&BASE32_NOPAD.encode(&seed).to_lowercase()),
             "the seed's base32 form never renders: {shown}"
         );
+    }
+
+    /// A seed has one spelling. `ſ` and `ı` uppercase to `S` and `I` under Unicode rules, so standing in
+    /// for `s` or `i` they would decode to the same seed; they are refused instead.
+    #[test]
+    fn a_seed_with_a_unicode_look_alike_is_refused() {
+        for (letter, look_alike) in [('s', "\u{17f}"), ('i', "\u{131}")] {
+            let seed = (0..=u8::MAX)
+                .map(|byte| [byte; 32])
+                .find(|seed| encode_seed(seed).contains(letter))
+                .expect("some seed spells the letter");
+            let token = Invite::derived(seed, signet(), badge()).to_string();
+            assert!(Invite::parse(&token).is_ok(), "the seed as sent parses");
+            let encoded = encode_seed(&seed);
+            let spelled = token.replacen(
+                encoded.as_str(),
+                &encoded.replacen(letter, look_alike, 1),
+                1,
+            );
+            assert!(
+                matches!(Invite::parse(&spelled), Err(InviteError::Encoding)),
+                "{look_alike} for {letter} is not the same seed"
+            );
+        }
     }
 
     /// A pre-rename `authkey:` token is REFUSED, both shapes: `invite:` is the one scheme, with no
