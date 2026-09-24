@@ -371,18 +371,14 @@ mod tests {
     /// A real `sheer:` link (work issues a signet-bound slip for a foreign fleet), so a link-as-peer test
     /// exercises the true parse/self-address path rather than a fake token.
     fn signet_link() -> String {
-        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
-        let fleet = nauthy::Identity::from_secret(&[2u8; 32])
-            .expect("valid fleet secret")
-            .verifying_key();
-        nauthy::Link::mint_signet(
-            &work,
-            &"ssh".parse().expect("valid service"),
-            fleet,
-            core::time::Duration::from_secs(3600),
-        )
-        .expect("mint a signet-bound slip")
-        .to_string()
+        swoosh::testkit::TestNode::seeded(1)
+            .fleet_slip(
+                &"ssh".parse().expect("valid service"),
+                swoosh::testkit::TestRoot::seeded(2).verify_key(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
+            )
+            .expect("mint a signet-bound slip")
+            .to_string()
     }
 
     /// A direct-address hint parsed through the real boundary, keyed on `KEY` and an IP:port (no DNS).

@@ -232,8 +232,11 @@ fn bare_stop_stops_the_resident() {
 
     // A bare `--present` is refused, never silently dropped (I.3, MAJOR-1): exit non-zero with the
     // exact teaching line, and the resident is untouched (the later real stop still finds it).
-    let link = swoosh::identity::Secret::ephemeral()
-        .member_badge()
+    let link = swoosh::testkit::TestRoot::seeded(0xb0)
+        .device_badge(
+            swoosh::testkit::TestNode::seeded(0xb1).node_id(),
+            nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
+        )
         .expect("mint a stand-in slip")
         .to_string();
     let cases: [&[&str]; 3] = [

@@ -10,10 +10,11 @@ use core::task::{Context, Poll};
 use std::sync::Arc;
 
 use bifrost::NodeId;
-use nauthy::{Identity, VerifyKey};
+use nauthy::VerifyKey;
 use swoosh::contacts::DeviceLabel;
 use swoosh::peer::Peer;
 use swoosh::roster::{Epoch, MAX_ROSTER_BLOB, Member, RosterDoc};
+use swoosh::testkit::TestRoot;
 use tokio::io;
 
 use super::read_roster;
@@ -33,12 +34,12 @@ fn peer(seed: u8) -> Peer {
 }
 
 /// A deterministic signet for the cut/verify path.
-fn signet(seed: u8) -> Identity {
-    Identity::from_secret(&[seed; 32]).unwrap()
+fn signet(seed: u8) -> TestRoot {
+    TestRoot::seeded(seed)
 }
 
 /// A roster of `count` members signed by `signet`: the blob a real coordination node serves.
-fn cut_roster(signet: &Identity, count: usize) -> Vec<u8> {
+fn cut_roster(signet: &TestRoot, count: usize) -> Vec<u8> {
     let members = (0..count)
         .map(|nth| Member {
             // Distinct and non-colliding: the first two bytes carry the index.
@@ -50,7 +51,10 @@ fn cut_roster(signet: &Identity, count: usize) -> Vec<u8> {
             label: format!("device-{nth}").parse::<DeviceLabel>().unwrap(),
         })
         .collect();
-    swoosh::roster::cut(signet, &RosterDoc::new(Epoch(9), members).unwrap())
+    swoosh::roster::cut(
+        signet.identity(),
+        &RosterDoc::new(Epoch(9), members).unwrap(),
+    )
 }
 
 /// A coordination node on the serving end of `roster:` that streams forever: it answers the read with

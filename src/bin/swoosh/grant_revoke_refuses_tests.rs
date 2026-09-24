@@ -14,14 +14,17 @@
 use core::time::Duration;
 
 use bifrost::NodeId;
-use nauthy::{Cap, FileDenylist, Link, Request, Service};
+use nauthy::{Cap, FileDenylist, Request, Service};
 use swoosh::contacts::ContactsStore;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
-use swoosh::identity::{self, Identity};
+use swoosh::testkit::TestRoot;
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::commands::revoke;
+
+/// How long every grant here lives.
+const HOUR: Duration = Duration::from_secs(3600);
 
 #[tokio::test]
 async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
@@ -30,9 +33,8 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     std::fs::create_dir_all(&dir).unwrap();
     let home = Home::resolve(Some(dir.clone())).unwrap();
 
-    // The issuer identity, persisted in `home` exactly as `grant issue` resolves it.
-    let secret = identity::resolve(Identity::Persisted, &home).await.unwrap();
-    let cap_identity = secret.cap_identity().unwrap();
+    // The issuer's key.
+    let issuer = TestRoot::seeded(3);
     let service: Service = "ssh".parse().unwrap();
 
     // The device the grant binds to; its canonical node id is the holder the ledger records.
@@ -40,13 +42,9 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     let holder = device.to_string();
 
     // Mint the device-bound link the issuer hands off, then recover the cap and its root revocation id.
-    let link = Link::mint_bound(
-        &cap_identity,
-        &service,
-        device.verify_key(),
-        Duration::from_secs(3600),
-    )
-    .unwrap();
+    let link = issuer
+        .bound_slip(&service, device.verify_key(), Request::expires_in(HOUR))
+        .unwrap();
     let cap = Cap::parse(link.as_str()).unwrap();
     let root_id = cap.root_revocation_id().unwrap();
 
@@ -64,7 +62,8 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     // Before revocation: the cap is a valid grant for the bound device, and nothing revokes it.
     let request = Request::now(service.clone()).bound_to(device.verify_key());
     assert!(
-        cap_identity.verify(&cap, &request).is_ok(),
+        cap.verify_at_root_without_revocation(&request, issuer.verify_key())
+            .is_ok(),
         "the freshly minted device-bound cap grants its service to its device"
     );
     let denylist = FileDenylist::load(home.revoked()).await.unwrap();
@@ -104,26 +103,21 @@ async fn revoking_a_holder_with_a_badge_plus_a_service_grant_cuts_both() {
     std::fs::create_dir_all(&dir).unwrap();
     let home = Home::resolve(Some(dir.clone())).unwrap();
 
-    let secret = identity::resolve(Identity::Persisted, &home).await.unwrap();
-    let cap_identity = secret.cap_identity().unwrap();
+    let issuer = TestRoot::seeded(3);
     let service: Service = "ssh".parse().unwrap();
     let device = NodeId::from_ed25519_secret(&[9u8; 32]);
     let holder = device.to_string();
 
     // A membership badge, minted the way `mint` does (device-bound, signet-rooted).
-    let badge_link = secret
-        .sign_device_badge(device, Duration::from_secs(3600))
+    let badge_link = issuer
+        .device_badge(device, Request::expires_in(HOUR))
         .unwrap();
     let badge = Cap::parse(badge_link.as_str()).unwrap();
     let badge_root = badge.root_revocation_id().unwrap();
     // A service grant, minted the way `grant issue --for` does.
-    let link = Link::mint_bound(
-        &cap_identity,
-        &service,
-        device.verify_key(),
-        Duration::from_secs(3600),
-    )
-    .unwrap();
+    let link = issuer
+        .bound_slip(&service, device.verify_key(), Request::expires_in(HOUR))
+        .unwrap();
     let cap = Cap::parse(link.as_str()).unwrap();
     let root_id = cap.root_revocation_id().unwrap();
 

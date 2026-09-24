@@ -9,6 +9,7 @@ use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use swoosh::identity::Secret;
+use swoosh::testkit::TestRoot;
 
 use super::*;
 
@@ -22,16 +23,10 @@ fn base() -> SystemTime {
 
 /// A real signet-signed membership badge for `device`, expiring at `expiry`. Really signed and really
 /// parsed, so a case cannot pass against a stand-in the predicate would never meet in the field.
-fn badge_for(signet: &Secret, device: NodeId, expiry: SystemTime) -> Link {
+fn badge_for(signet: &TestRoot, device: NodeId, expiry: SystemTime) -> Link {
     signet
-        .cap_identity()
-        .expect("the signet is a cap identity")
-        .mint_member(device.verify_key(), expiry)
+        .device_badge(device, expiry)
         .expect("mint a device badge")
-        .seal()
-        .expect("seal the badge")
-        .link()
-        .expect("the badge renders as a link")
 }
 
 /// THE renewal: the same signet re-signs the same device for a later date, and it is accepted with no
@@ -39,7 +34,7 @@ fn badge_for(signet: &Secret, device: NodeId, expiry: SystemTime) -> Link {
 /// four times a year and disables the re-root guard each time.
 #[test]
 fn a_later_badge_from_the_same_signet_for_the_same_device_renews() {
-    let signet = Secret::ephemeral();
+    let signet = TestRoot::seeded(1);
     let device = Secret::ephemeral().node_id();
     let stored = badge_for(&signet, device, base() + 10 * DAY);
     let fresh = badge_for(&signet, device, base() + 100 * DAY);
@@ -54,7 +49,7 @@ fn a_later_badge_from_the_same_signet_for_the_same_device_renews() {
 /// construction not later, so it is refused, and `--force` stays the only way to store it.
 #[test]
 fn an_older_badge_replayed_under_the_same_signet_is_not_a_renewal() {
-    let signet = Secret::ephemeral();
+    let signet = TestRoot::seeded(1);
     let device = Secret::ephemeral().node_id();
     let stored = badge_for(&signet, device, base() + 100 * DAY);
     let replay = badge_for(&signet, device, base() + 10 * DAY);
@@ -70,8 +65,8 @@ fn an_older_badge_replayed_under_the_same_signet_is_not_a_renewal() {
 #[test]
 fn a_badge_from_another_signet_is_not_a_renewal() {
     let device = Secret::ephemeral().node_id();
-    let stored = badge_for(&Secret::ephemeral(), device, base() + 10 * DAY);
-    let foreign = badge_for(&Secret::ephemeral(), device, base() + 100 * DAY);
+    let stored = badge_for(&TestRoot::seeded(1), device, base() + 10 * DAY);
+    let foreign = badge_for(&TestRoot::seeded(2), device, base() + 100 * DAY);
 
     assert!(
         !renews(&stored, &foreign, device).expect("the predicate reads both badges"),
@@ -84,7 +79,7 @@ fn a_badge_from_another_signet_is_not_a_renewal() {
 /// identity, and that must not slip through as routine maintenance of the outgoing device's credential.
 #[test]
 fn a_badge_bound_to_another_device_is_not_a_renewal() {
-    let signet = Secret::ephemeral();
+    let signet = TestRoot::seeded(1);
     let stored_device = Secret::ephemeral().node_id();
     let other_device = Secret::ephemeral().node_id();
     let stored = badge_for(&signet, stored_device, base() + 10 * DAY);
@@ -102,7 +97,7 @@ fn a_badge_bound_to_another_device_is_not_a_renewal() {
 /// badge still answer it. Without that, the quarterly cadence would work only if never missed.
 #[test]
 fn an_expired_stored_badge_is_still_renewed_without_a_flag() {
-    let signet = Secret::ephemeral();
+    let signet = TestRoot::seeded(1);
     let device = Secret::ephemeral().node_id();
     let stored = badge_for(&signet, device, SystemTime::now() - 6 * DAY);
     let fresh = badge_for(&signet, device, SystemTime::now() + 90 * DAY);
@@ -151,7 +146,7 @@ fn only_a_strictly_later_readable_expiry_supersedes() {
 
 /// A derived invite from `signet` for a fresh device seed, valid and unexpired: without the latch it
 /// adopts cleanly, so a refusal can only be the latch's.
-fn derived_invite(signet: &Secret, seed: [u8; 32]) -> String {
+fn derived_invite(signet: &TestRoot, seed: [u8; 32]) -> String {
     let device = NodeId::from_ed25519_secret(&seed);
     let expiry = SystemTime::now() + DAY;
     Invite::derived(seed, signet.node_id(), badge_for(signet, device, expiry)).to_string()
@@ -162,7 +157,7 @@ async fn a_disabled_signet_is_refused_even_with_force() {
     let dir = std::env::temp_dir().join(format!("swoosh-adopt-disabled-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let home = Home::resolve(Some(dir.clone())).expect("resolve the home");
-    let signet = Secret::ephemeral();
+    let signet = TestRoot::seeded(1);
     swoosh::config::create_store_dir(&dir).expect("create the store dir");
     nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
         .disable(signet.node_id().verify_key())
@@ -191,7 +186,7 @@ async fn a_signet_this_node_never_disabled_adopts() {
     let dir = std::env::temp_dir().join(format!("swoosh-adopt-live-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let home = Home::resolve(Some(dir.clone())).expect("resolve the home");
-    let signet = Secret::ephemeral();
+    let signet = TestRoot::seeded(1);
     swoosh::config::create_store_dir(&dir).expect("create the store dir");
     nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
         .disable(Secret::ephemeral().node_id().verify_key())

@@ -451,9 +451,9 @@ mod tests {
 
     use bifrost::{Announced, Session};
     use clap::Parser as _;
-    use nauthy::Identity;
     use swoosh::credential::Credential;
     use swoosh::reaching::{BindRole, Reaching as _};
+    use swoosh::testkit::TestNode;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -587,10 +587,10 @@ mod tests {
         let mut argv = vec!["swoosh", "http://example.com/x", "--via", &key];
         argv.extend_from_slice(extra);
         let cmd = Wrap::try_parse_from(argv).expect("fetch parses").fetch;
-        let identity = Identity::from_secret(&[7u8; 32]).unwrap();
-        let link = identity
-            .mint_member(
-                identity.verifying_key(),
+        let node = TestNode::seeded(7);
+        let link = node
+            .member_badge(
+                node.verify_key(),
                 nauthy::Request::expires_in(Duration::from_secs(3600)),
             )
             .unwrap()
@@ -626,10 +626,10 @@ mod tests {
         let cmd = Wrap::try_parse_from(["swoosh", "http://example.com/x", "--via", &key])
             .expect("fetch parses")
             .fetch;
-        let identity = Identity::from_secret(&[7u8; 32]).unwrap();
-        let link = identity
-            .mint_member(
-                identity.verifying_key(),
+        let node = TestNode::seeded(7);
+        let link = node
+            .member_badge(
+                node.verify_key(),
                 nauthy::Request::expires_in(Duration::from_secs(3600)),
             )
             .unwrap()

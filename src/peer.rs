@@ -181,18 +181,14 @@ mod tests {
     /// A real signet-bound `sheer:` link (work issues it for a foreign fleet), so a test can assert a
     /// `Capability` peer self-addresses to the cap ROOT and folds its slip like an explicit `--present`.
     fn signet_link() -> String {
-        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
-        let fleet = nauthy::Identity::from_secret(&[2u8; 32])
-            .expect("valid fleet secret")
-            .verifying_key();
-        Link::mint_signet(
-            &work,
-            &"ssh".parse().expect("valid service"),
-            fleet,
-            core::time::Duration::from_secs(3600),
-        )
-        .expect("mint a signet-bound slip")
-        .to_string()
+        crate::testkit::TestNode::seeded(1)
+            .fleet_slip(
+                &"ssh".parse().expect("valid service"),
+                crate::testkit::TestRoot::seeded(2).verify_key(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
+            )
+            .expect("mint a signet-bound slip")
+            .to_string()
     }
 
     /// `me/qat` parses as a `Named` peer (not a raw key, not a link), then `connector` resolves it through

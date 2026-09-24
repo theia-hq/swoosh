@@ -18,6 +18,9 @@ license = "MIT OR Apache-2.0"
 # one binary either way.
 default = ["ssh"]
 ssh = ["dep:sshh"]
+# `swoosh::testkit`: keys and prompts for tests. Never on in a build; the package turns it on for itself
+# as a dev-dependency below, so the bin's unit tests and `tests/` see it.
+test-support = []
 
 [dependencies]
 # theia. Each sibling git-dep is pinned to an EXACT rev so a `swoosh vX` tag records exactly which
@@ -63,6 +66,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+# This package, with `test-support`: the bin and `tests/` are their own crates and see the lib without
+# `cfg(test)`, so this is how they reach `swoosh::testkit`.
+swoosh = { path = ".", features = ["test-support"] }
+
 # The in-process transport the `gated_measure` proof drives: two mem nodes share a global registry, so a
 # client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
 bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "31107a0e7122bd25372c8c74ae8565f9e84f6827" }

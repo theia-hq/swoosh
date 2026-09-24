@@ -812,7 +812,7 @@ fn a_refreshed_member_is_not_reported_as_removed() {
 /// epoch 0 forever and a device could learn its fleet exactly once, restart included.
 #[tokio::test]
 async fn a_device_keeps_learning_the_fleet_after_every_edit() {
-    let signet = nauthy::Identity::from_secret(&[5u8; 32]).expect("a valid signet secret");
+    let signet = crate::testkit::TestRoot::seeded(5);
 
     // The owner's book: it CUTS and never pulls, so its floor stays None for the whole test.
     let mut owner = Contacts::default();
@@ -823,12 +823,12 @@ async fn a_device_keeps_learning_the_fleet_after_every_edit() {
             .cut_roster()
             .expect("a well-formed cut")
             .expect("a versioned book has something to cut");
-        crate::roster::cut(&signet, &doc)
+        crate::roster::cut(signet.identity(), &doc)
     };
 
     // Pull 1: the fresh device learns the fleet.
     let mut device_zero = Contacts::default();
-    let doc = crate::roster::verify(&cut(&owner), signet.verifying_key()).expect("verify");
+    let doc = crate::roster::verify(&cut(&owner), signet.verify_key()).expect("verify");
     assert!(matches!(
         device_zero.hydrate(&doc),
         Hydrated::Applied(ref applied) if applied.bound() == 1
@@ -843,7 +843,7 @@ async fn a_device_keeps_learning_the_fleet_after_every_edit() {
     );
 
     // Pull 2: it applies, which is the whole fix.
-    let doc = crate::roster::verify(&cut(&owner), signet.verifying_key()).expect("verify");
+    let doc = crate::roster::verify(&cut(&owner), signet.verify_key()).expect("verify");
     let Hydrated::Applied(applied) = device_zero.hydrate(&doc) else {
         panic!("the second pull must apply: a device learns its fleet more than once");
     };
@@ -856,10 +856,10 @@ async fn a_device_keeps_learning_the_fleet_after_every_edit() {
     // And the floor still refuses a genuine replay of the earlier cut, so freshness did not cost safety.
     let stale = crate::roster::verify(
         &crate::roster::cut(
-            &signet,
+            signet.identity(),
             &RosterDoc::new(Epoch(1), vec![roster_member(1, "desk")]).expect("doc"),
         ),
-        signet.verifying_key(),
+        signet.verify_key(),
     )
     .expect("verify");
     assert_eq!(

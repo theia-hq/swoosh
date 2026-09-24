@@ -41,13 +41,13 @@ use core::time::Duration;
 use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_mem::MemTransport;
 use measure::{Limit, MethodRefusal, Mode, Ping, ProtocolError, Refusal, Speedtest};
-use nauthy::{FileDenylist, Identity};
-use tightbeam::identity::AsVerifyKey as _;
+use nauthy::FileDenylist;
+use swoosh::testkit::TestRoot;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
-/// The signet's fixed secret. Its ed25519 public half is the signet the family gate trusts, and it roots
-/// every membership badge minted here.
-const SIGNET_SECRET: [u8; 32] = [7u8; 32];
+/// The byte the signet's fixed key is seeded with. Its ed25519 public half is the signet the family gate
+/// trusts, and it roots every membership badge minted here.
+const SIGNET: u8 = 7;
 
 /// Run the proof on a worker thread with a generous stack. measure's transfer engine holds a 64 KiB chunk
 /// buffer on the stack per direction (`payload::CHUNK`); over mem, client and responder run on ONE
@@ -78,7 +78,7 @@ async fn proof() {
         // the SAME `diagnostics` assembly the product `serve` path binds for these names.
         let host = Node::new(MemTransport::bind(), NoDiscovery);
         let host_id = host.node_id();
-        let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+        let signet = TestRoot::seeded(SIGNET).node_id();
         tokio::task::spawn_local(async move {
             let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
             swoosh::serve::diagnostics(Router::new(gate), &[])
@@ -98,7 +98,7 @@ async fn proof() {
         // equal a mem proven id; see the module note). `device_badge_wiring.rs` proves `mint`/`adopt`
         // actually produce and store this credential; here we prove the GATE admits it.
         let member = Node::new(MemTransport::bind(), NoDiscovery);
-        let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
+        let member_badge = signet_badge(SIGNET, member.node_id());
 
         // Ping over the gated `ping` service: the round trip proves the whole diagnostic rides the gate
         // unchanged, one admitted stream at a time.
@@ -206,7 +206,7 @@ async fn proof() {
         // bound to its own proven id. It roots at a non-signet key, so the family gate rejects it no
         // matter the binding: a stranger's self-signed badge is correctly useless.
         let stranger = Node::new(MemTransport::bind(), NoDiscovery);
-        let stranger_badge = signet_badge(&[3u8; 32], stranger.node_id());
+        let stranger_badge = signet_badge(3, stranger.node_id());
 
         // Refused at ping: the ping ERRORS (the gate refuses the stream), it does not hang or succeed.
         // This is the security proof: a stranger cannot ping a gated node.
@@ -259,24 +259,16 @@ async fn proof() {
     }
 }
 
-/// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven node id). This is the
-/// shape the signet mints for a device (`identity::Secret::sign_device_badge`, delivered by `mint` and
-/// stored by `adopt`) and the shape a signet holder self-signs (`member_badge`): a `member(true)` badge
-/// rooted at the signing key and bound to the dialer. A badge rooted at the signet admits (the gate trusts
-/// that key AND its binding matches the proven dialer); one rooted at a stranger key is refused, because
-/// the gate trusts only the signet's key. Signed here (not via `mint`/`adopt`) so it binds to the mem
+/// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id).
+/// This is the shape the signet mints for a device (`identity::Secret::sign_device_badge`, delivered by
+/// `mint` and stored by `adopt`) and the shape a signet holder self-signs (`member_badge`): a `member(true)`
+/// badge rooted at the signing key and bound to the dialer. A badge rooted at the signet admits (the gate
+/// trusts that key AND its binding matches the proven dialer); one rooted at a stranger key is refused,
+/// because the gate trusts only the signet's key. Signed here (not via `mint`/`adopt`) so it binds to the mem
 /// transport's synthetic proven id; `device_badge_wiring.rs` covers the real mint/adopt production.
-fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
-    Identity::from_secret(secret)
-        .unwrap()
-        .mint_member(
-            bound.verify_key(),
-            nauthy::Request::expires_in(Duration::from_secs(300)),
-        )
-        .unwrap()
-        .seal()
-        .unwrap()
-        .link()
+fn signet_badge(signer: u8, bound: NodeId) -> String {
+    TestRoot::seeded(signer)
+        .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .unwrap()
         .to_string()
 }

@@ -22,5 +22,7 @@ pub mod reaching;
 pub mod roster;
 pub mod secret;
 pub mod serve;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testkit;
 pub mod transport;
 pub mod unbound;

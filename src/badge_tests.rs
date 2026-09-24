@@ -6,7 +6,8 @@ use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{DEVICE_WARN_WINDOW, Expiry};
-use crate::identity::{DEVICE_BADGE_TTL, Secret};
+use crate::identity::DEVICE_BADGE_TTL;
+use crate::testkit::{TestNode, TestRoot};
 
 /// A day, the unit the window and the TTL are both expressed in.
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -111,10 +112,11 @@ fn an_expiry_renders_as_a_span_in_the_ledger_vocabulary() {
 /// being consulted, so the whole module cannot pass on a stubbed expiry.
 #[test]
 fn a_real_signed_badge_reads_its_own_minted_expiry() {
-    let signet = Secret::ephemeral();
-    let device = Secret::ephemeral();
-    let badge = signet
-        .sign_device_badge(device.node_id(), DEVICE_BADGE_TTL)
+    let badge = TestRoot::seeded(1)
+        .device_badge(
+            TestNode::seeded(2).node_id(),
+            SystemTime::now() + DEVICE_BADGE_TTL,
+        )
         .expect("sign a device badge");
     let expiry = Expiry::read(&badge, SystemTime::now()).expect("read the badge's own expiry");
     let Expiry::Live { left } = expiry else {

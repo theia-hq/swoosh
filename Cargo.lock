@@ -4854,6 +4854,7 @@ dependencies = [
  "nauthy",
  "rand 0.8.8",
  "sshh",
+ "swoosh",
  "thiserror 2.0.20",
  "tightbeam",
  "tokio",

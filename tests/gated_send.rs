@@ -28,15 +28,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use bifrost::wire::{Blob, Transfer};
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{FileDenylist, Identity};
+use nauthy::FileDenylist;
 use swoosh::serve::{Activity, Recv, bind_recv};
-use tightbeam::identity::AsVerifyKey as _;
+use swoosh::testkit::TestRoot;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 use transfer::{Received, ReceivedSink};
 
-/// The signet's fixed secret. Its ed25519 public half is the signet the family gate trusts, and it roots
-/// every membership badge minted here.
-const SIGNET_SECRET: [u8; 32] = [7u8; 32];
+/// The byte the signet's fixed key is seeded with. Its ed25519 public half is the signet the family gate
+/// trusts, and it roots every membership badge minted here.
+const SIGNET: u8 = 7;
 
 #[test]
 fn a_member_sends_a_file_a_stranger_is_refused_and_a_tampered_blob_is_rejected() {
@@ -62,7 +62,7 @@ async fn proof() {
     let out = out_dir();
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
-    let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let signet = TestRoot::seeded(SIGNET).node_id();
     let out_for_host = out.clone();
     tokio::task::spawn_local(async move {
         let gate = tunnel::resolve_gate(Some(signet), empty_denylist("host").await).unwrap();
@@ -81,7 +81,7 @@ async fn proof() {
     // A MEMBER: a badge the signet signed, rooted at the signet and bound to the member's proven mem id, so
     // the gate's `bound_device` check matches. See `gated_measure.rs` for why it is signed here.
     let member = Node::new(MemTransport::bind(), NoDiscovery);
-    let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
+    let member_badge = signet_badge(SIGNET, member.node_id());
 
     // Send a file exactly as `swoosh send` does: open the gated `recv` service, then drive `bifrost-wire`'s
     // verified `Transfer` over one admitted stream, naming the file so the receiver saves it under that name.
@@ -108,7 +108,7 @@ async fn proof() {
     // A STRANGER: a self-signed badge rooted at a random key the gate never trusts. Its push is refused at
     // the gate, so opening the recv stream fails; no file is written.
     let stranger = Node::new(MemTransport::bind(), NoDiscovery);
-    let stranger_badge = signet_badge(&[3u8; 32], stranger.node_id());
+    let stranger_badge = signet_badge(3, stranger.node_id());
     let refused = Connector::to_node(
         host_id,
         "recv".parse().unwrap(),
@@ -181,7 +181,7 @@ async fn two_dirs_proof() {
     let dir_b = out_dir_tagged("dir-b");
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
-    let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let signet = TestRoot::seeded(SIGNET).node_id();
     let (a, b) = (dir_a.clone(), dir_b.clone());
     tokio::task::spawn_local(async move {
         // Two receive services, each its OWN `Recv` instance bound to ONLY its own dir, wired the way the
@@ -202,7 +202,7 @@ async fn two_dirs_proof() {
     });
 
     let member = Node::new(MemTransport::bind(), NoDiscovery);
-    let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
+    let member_badge = signet_badge(SIGNET, member.node_id());
 
     // Push a distinct file to each service. The payloads differ so a crossed sink would be caught by content,
     // not just presence.
@@ -278,7 +278,7 @@ async fn sink_proof() {
     let out = out_dir_tagged("sink");
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
-    let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let signet = TestRoot::seeded(SIGNET).node_id();
     let reported = Recorder::default();
     let engine = Recv::new(out.clone()).with_sink(reported.clone());
     tokio::task::spawn_local(async move {
@@ -295,7 +295,7 @@ async fn sink_proof() {
     });
 
     let member = Node::new(MemTransport::bind(), NoDiscovery);
-    let badge = signet_badge(&SIGNET_SECRET, member.node_id());
+    let badge = signet_badge(SIGNET, member.node_id());
     let hostile = "evil\nname\u{1b}[31m\r.txt";
     let payload = b"hostile payload".repeat(100);
     push_file(
@@ -357,7 +357,7 @@ async fn binding_proof() {
     let hush_dir = out_dir_tagged("bind-hush");
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
-    let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let signet = TestRoot::seeded(SIGNET).node_id();
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist("bind-denylist").await).unwrap();
     let router = Router::new(gate);
     let router = bind_recv(
@@ -378,7 +378,7 @@ async fn binding_proof() {
     });
 
     let member = Node::new(MemTransport::bind(), NoDiscovery);
-    let badge = signet_badge(&SIGNET_SECRET, member.node_id());
+    let badge = signet_badge(SIGNET, member.node_id());
     let hostile = "evil\nname\u{1b}[31m\r.txt";
     let payload = b"hostile payload".repeat(100);
     for (route, dir) in [("hush", &hush_dir), ("loud", &loud_dir)] {
@@ -516,19 +516,11 @@ async fn wait_for_file(path: &std::path::Path) -> Vec<u8> {
     panic!("sent file never landed at {}", path.display());
 }
 
-/// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven node id). See
-/// `gated_measure.rs` for the full rationale.
-fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
-    Identity::from_secret(secret)
-        .unwrap()
-        .mint_member(
-            bound.verify_key(),
-            nauthy::Request::expires_in(Duration::from_secs(300)),
-        )
-        .unwrap()
-        .seal()
-        .unwrap()
-        .link()
+/// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id).
+/// See `gated_measure.rs` for the full rationale.
+fn signet_badge(signer: u8, bound: NodeId) -> String {
+    TestRoot::seeded(signer)
+        .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .unwrap()
         .to_string()
 }

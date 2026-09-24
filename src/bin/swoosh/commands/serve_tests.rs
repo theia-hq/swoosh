@@ -395,7 +395,7 @@ async fn a_node_without_the_signet_refuses_to_serve_a_roster() {
     let dir = std::env::temp_dir().join(format!("swoosh-serve-roster-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let path = dir.join("roster");
-    let signet = nauthy::Identity::from_secret(&[9u8; 32]).expect("a valid secret");
+    let signet = swoosh::testkit::TestRoot::seeded(9);
     let doc = swoosh::roster::RosterDoc::new(
         swoosh::roster::Epoch(1),
         vec![swoosh::roster::Member {
@@ -404,7 +404,7 @@ async fn a_node_without_the_signet_refuses_to_serve_a_roster() {
         }],
     )
     .expect("a well-formed doc");
-    swoosh::roster::Artifact::write(&path, &signet, &doc)
+    swoosh::roster::Artifact::write(&path, signet.identity(), &doc)
         .await
         .expect("cut");
     let artifact = std::sync::Arc::new(swoosh::roster::Artifact::open(path).await.expect("load"));

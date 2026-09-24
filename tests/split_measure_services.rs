@@ -22,13 +22,14 @@ use core::time::Duration;
 use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_mem::MemTransport;
 use measure::{Limit, MethodRefusal, Mode, Ping, ProtocolError, Refusal, Speedtest};
-use nauthy::{FileDenylist, Identity};
-use tightbeam::identity::AsVerifyKey as _;
+use nauthy::FileDenylist;
+use swoosh::testkit::TestRoot;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
-/// The node's OWN secret: its ed25519 public half is both its identity key and the self-signet its gate
-/// roots at (a person-zero node is its own signet root), so a member badge rooted here is admitted.
-const SELF_SECRET: [u8; 32] = [21u8; 32];
+/// The byte the node's OWN key is seeded with: its ed25519 public half is both its identity key and the
+/// self-signet its gate roots at (a person-zero node is its own signet root), so a member badge rooted here
+/// is admitted.
+const SELF: u8 = 21;
 
 /// The ssh host-key seed the `diagnostics` assembly carries. Unused here (this exercises the measure halves), but
 /// a fixed value keeps the build stable with and without the `ssh` feature.
@@ -74,7 +75,7 @@ async fn proof_ping_only() {
 
     // A member reaches the OFFERED ping service and measures it.
     let member = Node::new(MemTransport::bind(), NoDiscovery);
-    let member_badge = self_badge(&SELF_SECRET, member.node_id());
+    let member_badge = self_badge(SELF, member.node_id());
     let ping = Connector::to_node(
         host,
         "ping".parse().unwrap(),
@@ -136,7 +137,7 @@ async fn proof_speed_only() {
 
     // A member reaches the OFFERED speed service and moves bytes.
     let member = Node::new(MemTransport::bind(), NoDiscovery);
-    let member_badge = self_badge(&SELF_SECRET, member.node_id());
+    let member_badge = self_badge(SELF, member.node_id());
     let speed = Connector::to_node(
         host,
         "speed".parse().unwrap(),
@@ -194,7 +195,7 @@ async fn proof_speed_only() {
 async fn expose(entries: &[String]) -> NodeId {
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
-    let self_signet = NodeId::from_ed25519_secret(&SELF_SECRET);
+    let self_signet = TestRoot::seeded(SELF).node_id();
     let entries = entries.to_vec();
     tokio::task::spawn_local(async move {
         let gate = tunnel::resolve_gate(Some(self_signet), empty_denylist("offer").await).unwrap();
@@ -216,7 +217,7 @@ async fn expose(entries: &[String]) -> NodeId {
 /// per-service member-admitted / stranger-refused invariant. Its probes error at the gate, never answered.
 async fn assert_stranger_refused(host: NodeId) {
     let stranger = Node::new(MemTransport::bind(), NoDiscovery);
-    let stranger_badge = self_badge(&[3u8; 32], stranger.node_id());
+    let stranger_badge = self_badge(3, stranger.node_id());
 
     let ping = Connector::to_node(
         host,
@@ -264,21 +265,13 @@ async fn assert_stranger_refused(host: NodeId) {
     );
 }
 
-/// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven mem node id): a
-/// `member(true)` badge rooted at the signing key. A badge rooted at the node's OWN key admits at its
+/// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven mem node
+/// id): a `member(true)` badge rooted at the signing key. A badge rooted at the node's OWN key admits at its
 /// self-gate; one rooted at a stranger key is refused. Signed here (not via mint/adopt) so it binds to the
 /// mem transport's synthetic proven id; see the module note and `gated_measure.rs`.
-fn self_badge(secret: &[u8; 32], bound: NodeId) -> String {
-    Identity::from_secret(secret)
-        .unwrap()
-        .mint_member(
-            bound.verify_key(),
-            nauthy::Request::expires_in(Duration::from_secs(300)),
-        )
-        .unwrap()
-        .seal()
-        .unwrap()
-        .link()
+fn self_badge(signer: u8, bound: NodeId) -> String {
+    TestRoot::seeded(signer)
+        .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .unwrap()
         .to_string()
 }

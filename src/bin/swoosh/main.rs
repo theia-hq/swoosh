@@ -1174,7 +1174,6 @@ mod tests {
     #[tokio::test]
     async fn the_serve_gate_honors_the_homes_disabled_roots() {
         use nauthy::Revocations as _;
-        use tightbeam::identity::AsVerifyKey as _;
 
         let dir = std::env::temp_dir().join(format!("swoosh-latch-ctx-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1190,12 +1189,12 @@ mod tests {
             Verb::Outward(outward) => outward,
             _ => panic!("serve splits to a reaching verb"),
         };
-        let disabled = nauthy::Identity::from_secret(&[41u8; 32]).expect("valid secret");
-        let live = nauthy::Identity::from_secret(&[42u8; 32]).expect("valid secret");
+        let disabled = swoosh::testkit::TestNode::seeded(41);
+        let live = swoosh::testkit::TestNode::seeded(42);
         let hour = nauthy::Request::expires_in(core::time::Duration::from_secs(3600));
         let service: nauthy::Service = "ssh".parse().expect("valid service");
         nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
-            .disable(bifrost::NodeId::from_ed25519_secret(&[41u8; 32]).verify_key())
+            .disable(disabled.verify_key())
             .await
             .expect("disable a root");
 
@@ -1207,13 +1206,13 @@ mod tests {
         assert!(
             expose
                 .revocations
-                .is_revoked(&disabled.mint(&service, hour).expect("mint")),
+                .is_revoked(&disabled.slip(&service, hour).expect("mint")),
             "a cap rooted at the disabled key is refused"
         );
         assert!(
             !expose
                 .revocations
-                .is_revoked(&live.mint(&service, hour).expect("mint")),
+                .is_revoked(&live.slip(&service, hour).expect("mint")),
             "a cap rooted anywhere else is not"
         );
 
@@ -1229,18 +1228,14 @@ mod tests {
     /// A real `sheer:` capability link, minted through the library so a parse test exercises the true
     /// boundary (a `Peer::Capability` arm), not a fake token a lenient parser would wave through.
     fn sheer_link() -> String {
-        let work = nauthy::Identity::from_secret(&[3u8; 32]).expect("valid work secret");
-        let fleet = nauthy::Identity::from_secret(&[4u8; 32])
-            .expect("valid fleet secret")
-            .verifying_key();
-        nauthy::Link::mint_signet(
-            &work,
-            &"ssh".parse().expect("valid service"),
-            fleet,
-            core::time::Duration::from_secs(3600),
-        )
-        .expect("mint a sheer: link")
-        .to_string()
+        swoosh::testkit::TestNode::seeded(3)
+            .fleet_slip(
+                &"ssh".parse().expect("valid service"),
+                swoosh::testkit::TestRoot::seeded(4).verify_key(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
+            )
+            .expect("mint a sheer: link")
+            .to_string()
     }
 
     /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `sheer:` link all

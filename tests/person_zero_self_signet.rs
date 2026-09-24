@@ -29,14 +29,15 @@ use core::time::Duration;
 use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, Speedtest};
-use nauthy::{FileDenylist, Identity};
-use tightbeam::identity::AsVerifyKey as _;
+use nauthy::FileDenylist;
+use swoosh::testkit::TestRoot;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
-/// The person-zero node's OWN secret. Its ed25519 public half is BOTH the node's identity key AND the signet
-/// root its self-gate trusts, because a person-zero node IS its own signet root. This is the value the
-/// composition root derives from `secret.node_id()` when no signet file was ever written.
-const SELF_SECRET: [u8; 32] = [11u8; 32];
+/// The byte the person-zero node's OWN key is seeded with. Its ed25519 public half is BOTH the node's
+/// identity key AND the signet root its self-gate trusts, because a person-zero node IS its own signet root.
+/// This is the value the composition root derives from `secret.node_id()` when no signet file was ever
+/// written.
+const SELF: u8 = 11;
 
 /// Run the proof on a worker thread with a generous stack, for the same reason as `gated_measure.rs`: measure's
 /// transfer engine holds a 64 KiB chunk buffer per direction on the stack, and over mem both sides run on
@@ -68,7 +69,7 @@ async fn proof() {
         // supplies from `secret.node_id()` when `load_signet` returns `None`.
         let host = Node::new(MemTransport::bind(), NoDiscovery);
         let host_id = host.node_id();
-        let self_signet = NodeId::from_ed25519_secret(&SELF_SECRET);
+        let self_signet = TestRoot::seeded(SELF).node_id();
         tokio::task::spawn_local(async move {
             // Person-zero self-signet: the gate roots at the node's OWN key, exactly as
             // `resolve_gate(Some(secret.node_id()), ...)` builds it when nothing was adopted.
@@ -88,7 +89,7 @@ async fn proof() {
         // member(true), bound to the dialer -- and the shape a device K adopts carries. Because the gate
         // trusts K and the binding matches the proven dialer, it admits.
         let member = Node::new(MemTransport::bind(), NoDiscovery);
-        let member_badge = self_badge(&SELF_SECRET, member.node_id());
+        let member_badge = self_badge(SELF, member.node_id());
 
         // Ping over the gated `ping` service: the round trip proves the self-gate admits a member.
         let measure = Connector::to_node(
@@ -141,7 +142,7 @@ async fn proof() {
         // stranger cannot reach a self-gating node. THIS is the load-bearing proof that self-gating is not
         // an open door.
         let stranger = Node::new(MemTransport::bind(), NoDiscovery);
-        let stranger_badge = self_badge(&[3u8; 32], stranger.node_id());
+        let stranger_badge = self_badge(3, stranger.node_id());
 
         // Refused at ping: the ping ERRORS (the gate refuses the stream), it does not hang or succeed.
         let measure = Connector::to_node(
@@ -182,22 +183,14 @@ async fn proof() {
     }
 }
 
-/// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven node id): a
-/// `member(true)` badge rooted at the signing key. When `secret` is the node's OWN key K, this is the
+/// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id):
+/// a `member(true)` badge rooted at the signing key. When `signer` seeds the node's OWN key K, this is the
 /// self-sign the signet holder produces (`identity::Secret::member_badge`); a badge rooted at K admits at a
 /// K-rooted gate, and one rooted at a stranger key is refused. Signed here (not via the real self-sign path)
 /// so it binds to the mem transport's synthetic proven id; see the module note.
-fn self_badge(secret: &[u8; 32], bound: NodeId) -> String {
-    Identity::from_secret(secret)
-        .unwrap()
-        .mint_member(
-            bound.verify_key(),
-            nauthy::Request::expires_in(Duration::from_secs(300)),
-        )
-        .unwrap()
-        .seal()
-        .unwrap()
-        .link()
+fn self_badge(signer: u8, bound: NodeId) -> String {
+    TestRoot::seeded(signer)
+        .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .unwrap()
         .to_string()
 }
