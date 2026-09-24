@@ -9,7 +9,8 @@
 //! and a root's retirement each rename the root's directory away before they delete anything, so a crash
 //! leaves a directory whose name says what was under way. The read completes it, and says so through
 //! [`Read::finished`]. A finisher never races the command still doing the work: it takes the directory's
-//! `lock` without waiting first, and leaves a held directory alone.
+//! `lock` without waiting first, leaves a held directory alone, and checks under the lock that the
+//! directory is still the one it read.
 //!
 //! **Any other disagreement is refused** as [`StandingError::Damaged`], naming what disagrees. Among them
 //! is a home made before a root had its own key: its badge was signed by this machine's own key, with no
@@ -179,6 +180,12 @@ pub enum Disagreement {
         /// The standing file.
         path: PathBuf,
     },
+    /// The device standing names a key other than this machine's: copied from another device, or left
+    /// from a key this machine has since replaced.
+    StandingForAnotherKey {
+        /// The standing file.
+        path: PathBuf,
+    },
     /// The root's directory holds no key file whose header can be read.
     UnreadableRoot {
         /// The key file.
@@ -224,6 +231,11 @@ impl fmt::Display for Disagreement {
                 "{} is not a device record with an end date",
                 path.display()
             ),
+            Self::StandingForAnotherKey { path } => write!(
+                formatter,
+                "{} is a device record for a key other than this machine's",
+                path.display()
+            ),
             Self::UnreadableRoot { path } => {
                 write!(formatter, "{} is not a readable root key", path.display())
             }
@@ -255,7 +267,7 @@ impl Standing {
             finished.push(Finished::Moved);
         }
         if let Some(lock) = DirLock::try_take(&home.root_revoking()) {
-            finished.push(finish_retirement(home, lock).await?);
+            finished.push(finish_retirement(home, &revoked, lock).await?);
         }
         if let Some(retired) = retire_revoked_root(home, &revoked).await? {
             finished.push(retired);
@@ -273,7 +285,7 @@ impl Standing {
             }
         }
 
-        let standing = classify(home, pin, held_root(home, &revoked).await?).await?;
+        let standing = classify(home, own, pin, held_root(home, &revoked).await?).await?;
         Ok(Read { standing, finished })
     }
 }
@@ -284,6 +296,7 @@ impl Standing {
 /// it decides something: a torn badge beside an interrupted mint is the mint's to replace.
 async fn classify(
     home: &Home,
+    own: Option<NodeId>,
     pin: Option<NodeId>,
     root: Option<NodeId>,
 ) -> Result<Standing, StandingError> {
@@ -293,7 +306,7 @@ async fn classify(
         (Some(root), Some(pin)) if root != pin => {
             damaged(Disagreement::RootNotPinned { root, pin })
         }
-        (Some(root), Some(pin)) => match read_badge(home, pin).await? {
+        (Some(root), Some(pin)) => match read_badge(home, own, pin).await? {
             None => damaged(Disagreement::RootWithoutStanding { root }),
             Some(until) => Ok(Standing::HoldsRoot { pin, until }),
         },
@@ -303,7 +316,7 @@ async fn classify(
                 standing_root: badge.root().node_id(),
             }),
         },
-        (None, Some(pin)) => match read_badge(home, pin).await? {
+        (None, Some(pin)) => match read_badge(home, own, pin).await? {
             None => Ok(Standing::PinOnly { pin }),
             Some(until) => Ok(Standing::Device { pin, until }),
         },
@@ -383,20 +396,44 @@ async fn retire_revoked_root(
     let Some(lock) = DirLock::try_take(&dir) else {
         return Ok(None);
     };
-    rename(&dir, &home.root_revoking()).await?;
+    // Checked again under the lock: the directory read above may have been retired since, and a new
+    // root made in its place, which is no retirement's to touch.
+    match root_key(&dir) {
+        Ok(held) if revoked.is_disabled(held.verify_key()) => {}
+        Ok(_) | Err(_) => return Ok(None),
+    }
+    seam(Seam::BeforeRetireRename, &dir);
+    if !rename(&dir, &home.root_revoking()).await? {
+        return Ok(None);
+    }
     sync_dir(home.dir())?;
-    finish_retirement(home, lock).await.map(Some)
+    finish_retirement(home, revoked, lock).await.map(Some)
 }
 
 /// Finish a retirement: remove this machine's standing under the retired root, then `root.revoking/`.
 ///
-/// The standing is removed only when the pin names the retired root, or names none: a pin to another
-/// root is a standing this machine took since, and a leftover directory is no reason to drop it.
-async fn finish_retirement(home: &Home, _lock: DirLock) -> Result<Finished, StandingError> {
+/// A key is retired when `root.revoking/` names it or it is revoked here: a retirement records the
+/// revocation before it renames anything, so a key file too torn to read still leaves its root
+/// revoked. The standing is removed only when it is under a retired key: a pin naming one, or no pin and
+/// a badge from one, or no pin and no badge. Anything else is a standing this machine took since, or a
+/// damage the read must still report, and a leftover directory is no reason to drop either.
+async fn finish_retirement(
+    home: &Home,
+    revoked: &DisabledRoots,
+    _lock: DirLock,
+) -> Result<Finished, StandingError> {
     let root = root_key(&home.root_revoking()).ok();
-    let pin = read_pin(home).await.ok().flatten();
-    let other_root = matches!((root, pin), (Some(root), Some(pin)) if root != pin);
-    if !other_root {
+    let retired = |key: NodeId| root == Some(key) || revoked.is_disabled(key.verify_key());
+    let (under_retired, pin) = match read_pin(home).await {
+        Ok(Some(pin)) => (retired(pin), retired(pin).then_some(pin)),
+        Ok(None) => match load_badge(home).await {
+            Ok(None) => (true, None),
+            Ok(Some(badge)) => (retired(badge.root().node_id()), None),
+            Err(_) => (false, None),
+        },
+        Err(_) => (false, None),
+    };
+    if under_retired {
         strip(home).await?;
     }
     remove_dir(home.root_revoking()).await?;
@@ -434,8 +471,13 @@ async fn read_pin(home: &Home) -> Result<Option<NodeId>, StandingError> {
     }
 }
 
-/// The device standing, rooted at `pin`: its end date, or `None` when there is none.
-async fn read_badge(home: &Home, pin: NodeId) -> Result<Option<SystemTime>, StandingError> {
+/// The device standing, rooted at `pin` and naming this machine's key `own`: its end date, or `None`
+/// when there is none.
+async fn read_badge(
+    home: &Home,
+    own: Option<NodeId>,
+    pin: NodeId,
+) -> Result<Option<SystemTime>, StandingError> {
     let Some(badge) = load_badge(home).await? else {
         return Ok(None);
     };
@@ -445,10 +487,23 @@ async fn read_badge(home: &Home, pin: NodeId) -> Result<Option<SystemTime>, Stan
             Disagreement::StandingFromAnotherRoot { standing_root, pin },
         ));
     }
-    match badge.cap().expiry() {
-        Ok(Some(until)) => Ok(Some(until)),
-        Ok(None) | Err(_) => Err(unreadable_badge(home)),
+    let until = match badge.cap().expiry() {
+        Ok(Some(until)) => until,
+        Ok(None) | Err(_) => return Err(unreadable_badge(home)),
+    };
+    // Checked at the standing's own end date, so a lapsed standing still reads as this machine's.
+    let ours = own.is_some_and(|own| {
+        badge
+            .cap()
+            .verify_member_at_root_without_revocation(until, own.verify_key(), pin.verify_key())
+            .is_ok()
+    });
+    if !ours {
+        return Err(StandingError::Damaged(
+            Disagreement::StandingForAnotherKey { path: home.badge() },
+        ));
     }
+    Ok(Some(until))
 }
 
 /// The device standing as a verified link, or `None` when there is none. A file that is not one is
@@ -516,13 +571,19 @@ async fn remove_dir(path: PathBuf) -> Result<(), StandingError> {
     }
 }
 
-async fn rename(from: &Path, to: &Path) -> Result<(), StandingError> {
-    tokio::fs::rename(from, to)
-        .await
-        .map_err(|source| StandingError::Finish {
+/// Rename `from` to `to`: `false` when `from` is already gone, which a command racing this one may have
+/// done first.
+// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+async fn rename(from: &Path, to: &Path) -> Result<bool, StandingError> {
+    match tokio::fs::rename(from, to).await {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(StandingError::Finish {
             path: from.to_owned(),
             source,
-        })
+        }),
+    }
 }
 
 /// Make a rename in `dir` durable, so a power cut cannot bring the old name back.
@@ -545,8 +606,12 @@ impl DirLock {
     /// Take `<dir>/lock` without waiting, creating it if it is not there. `None` when the directory is
     /// not here, when another command holds the lock, or when it cannot be taken at all: in each case
     /// the directory is not the read's to touch.
+    ///
+    /// The lock taken is checked to still be `<dir>/lock` once held. Opening and locking are two steps,
+    /// and between them the directory can be removed and another made at its name, whose lock this
+    /// open file is not.
     fn try_take(dir: &Path) -> Option<Self> {
-        use std::os::unix::fs::OpenOptionsExt as _;
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
         if !dir.is_dir() {
             return None;
@@ -557,13 +622,47 @@ impl DirLock {
             .mode(0o600)
             .open(dir.join("lock"))
             .ok()?;
+        seam(Seam::LockOpened, dir);
         // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory lock to
         // it. `LOCK_NB` makes a held lock an error rather than a wait.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             return None;
         }
-        Some(Self { _held: file })
+        let held = file.metadata().ok()?;
+        let named = std::fs::metadata(dir.join("lock")).ok()?;
+        (held.dev() == named.dev() && held.ino() == named.ino()).then_some(Self { _held: file })
     }
+}
+
+/// A point in the read where a test steps in, to change the home between two of the read's steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seam {
+    /// `<dir>/lock` is open and not yet locked.
+    LockOpened,
+    /// A revoked `root/` is locked and checked, and not yet renamed.
+    BeforeRetireRename,
+}
+
+/// A test's step at a [`Seam`].
+#[cfg(test)]
+type SeamStep = Box<dyn FnMut(Seam, &Path)>;
+
+#[cfg(test)]
+thread_local! {
+    /// The test's step at each [`Seam`], on the thread the read runs on.
+    static SEAM: core::cell::RefCell<Option<SeamStep>> = const { core::cell::RefCell::new(None) };
+}
+
+/// Run the test's step at `at`, on `path`. Nothing outside tests.
+fn seam(at: Seam, path: &Path) {
+    #[cfg(test)]
+    SEAM.with_borrow_mut(|step| {
+        if let Some(step) = step.as_mut() {
+            step(at, path);
+        }
+    });
+    #[cfg(not(test))]
+    let _ = (at, path);
 }
 
 #[cfg(test)]

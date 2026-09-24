@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use nauthy::{Request, Service};
 use tightbeam::identity::AsVerifyKey as _;
 
-use super::{Counting, TestNode, TestRoot};
+use super::{Counting, TestNode, TestRoot, hand_signed};
 use crate::passphrase::Prompt as _;
 
 fn hour() -> SystemTime {
@@ -139,4 +139,38 @@ fn a_signed_document_verifies_under_its_signer_only() {
         b"roster"
     );
     assert!(signed.verify(TestRoot::seeded(10).verify_key()).is_err());
+}
+
+/// Each hand-signed badge is the root's, bound to its node, and differs from a minted one only in its end
+/// date.
+#[test]
+fn each_hand_signed_badge_is_a_badge_with_only_its_end_date_off() {
+    let root = TestRoot::seeded(hand_signed::ROOT_SEED);
+    let device = TestNode::seeded(hand_signed::DEVICE_SEED);
+    let now = SystemTime::now();
+    let without = hand_signed::without_end_date();
+    assert_eq!(
+        without.cap().expiry().expect("no end date is no error"),
+        None
+    );
+    let unreadable = hand_signed::unreadable_end_date();
+    assert!(unreadable.cap().expiry().is_err());
+    for badge in [without, unreadable] {
+        assert_eq!(badge.root(), root.verify_key());
+        badge
+            .cap()
+            .verify_member_at_root_without_revocation(now, device.verify_key(), root.verify_key())
+            .expect("admits its device");
+        assert!(
+            badge
+                .cap()
+                .verify_member_at_root_without_revocation(
+                    now,
+                    TestNode::seeded(0x42).verify_key(),
+                    root.verify_key()
+                )
+                .is_err(),
+            "admits no other"
+        );
+    }
 }
