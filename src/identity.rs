@@ -252,7 +252,7 @@ pub fn inspect(home: &Home) -> eyre::Result<Stored> {
 
 /// The home's key file.
 fn key_file(home: &Home) -> KeyFile {
-    KeyFile::from(home.identity_key())
+    KeyFile::device(home.identity_key())
 }
 
 /// The key the file holds, unlocked, or `None` only when nothing is at the path.

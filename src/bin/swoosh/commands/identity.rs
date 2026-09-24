@@ -67,8 +67,8 @@ async fn print(home: &Home) -> eyre::Result<()> {
     let signet = config::load_signet(home).await?;
     // Read the badge's remaining life, never its bytes: this is a local look at a credential this
     // machine already holds, so it discloses nothing it did not already have.
-    let standing = match config::load_badge(home).await? {
-        Some(stored) => Some(badge::Standing::read(&stored, SystemTime::now())?),
+    let expiry = match config::load_badge(home).await? {
+        Some(stored) => Some(badge::Expiry::read(&stored, SystemTime::now())?),
         None => None,
     };
     print!(
@@ -78,7 +78,7 @@ async fn print(home: &Home) -> eyre::Result<()> {
             &home.identity_key(),
             stored.method(),
             signet,
-            standing
+            expiry
         )
     );
     Ok(())
@@ -96,7 +96,7 @@ fn render(
     key: &Path,
     protection: Method,
     signet: Option<NodeId>,
-    badge: Option<badge::Standing>,
+    badge: Option<badge::Expiry>,
 ) -> String {
     let mut out = format!("{node}\nkey: {}\nprotection: {protection}\n", key.display());
     match signet {
@@ -106,7 +106,7 @@ fn render(
         None => out.push_str("signet: none (this machine is its own root)\n"),
     }
     match badge {
-        Some(standing) => out.push_str(&format!("badge: {standing}\n")),
+        Some(expiry) => out.push_str(&format!("badge: {expiry}\n")),
         // No stored badge is the signet holder's normal state: it self-signs a fresh badge per dial, so
         // it has nothing to store and nothing to renew.
         None => out.push_str("badge: none (this machine self-signs when it dials)\n"),

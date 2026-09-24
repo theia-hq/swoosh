@@ -13,7 +13,7 @@
 //! than this module believes, never longer. That asymmetry is the whole reason a LOCAL refusal is sound:
 //! it can let through a dial the gate will refuse (which costs what it costs today), and it can never
 //! turn away a dial the gate would have admitted. Nothing here admits anything. The CHECK remains the
-//! sole enforcement, and no admission path may read a [`Standing`].
+//! sole enforcement, and no admission path may read a [`Expiry`].
 //!
 //! [`DEVICE_BADGE_TTL`]: crate::identity::DEVICE_BADGE_TTL
 
@@ -26,17 +26,16 @@ use nauthy::Link;
 
 use crate::grants;
 
-/// How long before a stored badge dies this device starts saying so, on every surface that renders a
-/// [`Standing`].
+/// How long before a stored badge dies this device starts saying so, on every surface that renders an
+/// [`Expiry`].
 ///
-/// 30 days against a 90-day [`DEVICE_BADGE_TTL`], so a device warns for its last third. Sized for the
-/// human logistics rather than for the credential: the remedy is not local and not quick, because
-/// renewal requires the root signet, which is held deliberately cold, so the operator needs time to warm
-/// it and get to a second machine. A missed renewal costs the uniform `not admitted` at the far gate,
-/// which is the least actionable error in the system; a warning costs one line on stderr.
+/// 14 days against a 90-day [`DEVICE_BADGE_TTL`]: the device's own last warning, so it speaks for the
+/// final fortnight rather than for a third of the badge's life, and still leaves the operator time to
+/// reach the machine that holds the root. A missed renewal costs the uniform `not admitted` at the far
+/// gate, which is the least actionable error in the system; a warning costs one line on stderr.
 ///
 /// [`DEVICE_BADGE_TTL`]: crate::identity::DEVICE_BADGE_TTL
-pub const RENEWAL_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+pub const DEVICE_WARN_WINDOW: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 /// What a membership badge's own `expires_at` fact says about its remaining life at one instant.
 ///
@@ -51,7 +50,7 @@ pub const RENEWAL_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// list. So a surface built on this states how long a badge has LEFT, and must not claim the
 /// badge still works.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Standing {
+pub enum Expiry {
     /// The badge carries no `expires_at` fact, so this device cannot say when it dies. A badge minted
     /// before the fact existed, whose expiry lives only in the unreadable check. NOT "it never expires":
     /// every surface renders it as unknown, and every guard falls back to what it did before the fact.
@@ -62,20 +61,20 @@ pub enum Standing {
         /// How long ago the expiry passed.
         ago: Duration,
     },
-    /// The badge still stands, with `left` to run, and `left` is inside [`RENEWAL_WINDOW`]: the operator
+    /// The badge still stands, with `left` to run, and `left` is inside [`DEVICE_WARN_WINDOW`]: the operator
     /// is told, and the dial goes ahead.
     Expiring {
         /// How long the badge has left.
         left: Duration,
     },
-    /// The badge still stands with more than [`RENEWAL_WINDOW`] to run. Nothing is said.
+    /// The badge still stands with more than [`DEVICE_WARN_WINDOW`] to run. Nothing is said.
     Live {
         /// How long the badge has left.
         left: Duration,
     },
 }
 
-impl Standing {
+impl Expiry {
     /// Read `badge`'s remaining life as of `now`.
     ///
     /// Fails only when the datalog read itself fails, which is not "unexpired" and not "expired": the
@@ -93,7 +92,7 @@ impl Standing {
             return Self::Unknown;
         };
         match expiry.duration_since(now) {
-            Ok(left) if left <= RENEWAL_WINDOW => Self::Expiring { left },
+            Ok(left) if left <= DEVICE_WARN_WINDOW => Self::Expiring { left },
             Ok(left) => Self::Live { left },
             // `duration_since` reports the gap the other way round when the instant is in the past, so
             // the error's payload is exactly how long the badge has been dead.
@@ -107,7 +106,7 @@ impl Standing {
 /// The fragment every expiry surface prints about the badge itself: `expires in 34d`, `expired 6d ago`,
 /// or the unreadable case. The span is [`grants::humanize`]d, the same rendering `invite ls` and
 /// `grant ls` give the issuer side, so one badge reads the same on both machines.
-impl fmt::Display for Standing {
+impl fmt::Display for Expiry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unknown => write!(formatter, "expiry unknown (this badge does not carry one)"),

@@ -195,7 +195,7 @@ impl Resolved {
 /// from a [`Dialing`](BindRole::Dialing) verb: a serving verb resolves no slots because it presents none.
 ///
 /// A stored badge that is already dead REFUSES the dial here (see [`MemberBadge::into_slot`]), and one
-/// inside [`badge::RENEWAL_WINDOW`] warns on stderr and dials anyway.
+/// inside [`badge::DEVICE_WARN_WINDOW`] warns on stderr and dials anyway.
 pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Result<Resolved> {
     resolve_to(cred, secret, home, &mut std::io::stderr()).await
 }
@@ -281,7 +281,7 @@ enum MemberBadge {
 
 impl MemberBadge {
     /// Hand this badge over for the slot it will travel in, refusing the dial LOCALLY when a stored badge
-    /// is already dead and warning when it dies inside [`badge::RENEWAL_WINDOW`].
+    /// is already dead and warning when it dies inside [`badge::DEVICE_WARN_WINDOW`].
     ///
     /// Called at each site where the badge actually BECOMES a slot, and only there. That placement is the
     /// guard, not an accident of structure: a dial whose slip pins a fleet this device is not in drops
@@ -297,32 +297,32 @@ impl MemberBadge {
             Self::SelfSigned(badge) => return Ok(badge),
             Self::Stored(badge) => badge,
         };
-        // Exhaustive on purpose: a new standing is a compile error HERE, at the one site that decides
+        // Exhaustive on purpose: a new reading is a compile error HERE, at the one site that decides
         // whether a badge travels, rather than a silent fall-through to dialing.
-        match badge::Standing::read(&badge, SystemTime::now())? {
+        match badge::Expiry::read(&badge, SystemTime::now())? {
             // Dead: the gate will refuse this, so say so now, with the cause and the fix, instead of
             // spending a dial to be told `not admitted` by a message that cannot say which of five
             // reasons applied.
-            standing @ badge::Standing::Expired { .. } => eyre::bail!(
-                "this device's membership badge {standing}, so a family-gated peer will refuse this \
+            expiry @ badge::Expiry::Expired { .. } => eyre::bail!(
+                "this device's membership badge {expiry}, so a family-gated peer will refuse this \
                  dial; {}",
                 badge::remedy(node)
             ),
             // Alive but inside the window: the dial goes ahead, and the operator is told once, on
             // stderr, so the line never pollutes a piped result.
-            standing @ badge::Standing::Expiring { .. } => {
+            expiry @ badge::Expiry::Expiring { .. } => {
                 // The write is discarded on failure, like every other warning in the tree: a closed
                 // stderr must not fail the dial this line only annotates.
                 let _ = writeln!(
                     warn,
-                    "swoosh: this device's membership badge {standing}; {}",
+                    "swoosh: this device's membership badge {expiry}; {}",
                     badge::remedy(node)
                 );
                 Ok(badge)
             }
             // Outside the window, or minted before badges carried a readable expiry: nothing useful to
             // say, so nothing is said.
-            badge::Standing::Live { .. } | badge::Standing::Unknown => Ok(badge),
+            badge::Expiry::Live { .. } | badge::Expiry::Unknown => Ok(badge),
         }
     }
 }
@@ -679,8 +679,8 @@ mod tests {
         );
     }
 
-    /// The warning half: a badge alive but inside the 30-day window dials anyway, and says so ONCE on
-    /// the warn sink. The remedy needs a cold root and a second machine, so the line has to arrive while
+    /// The warning half: a badge alive but inside the 14-day window dials anyway, and says so ONCE on
+    /// the warn sink. The remedy needs the machine that holds the root, so the line has to arrive while
     /// there is still time to act on it.
     #[tokio::test]
     async fn a_badge_inside_the_window_warns_and_still_dials() {

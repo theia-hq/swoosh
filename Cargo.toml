@@ -27,23 +27,23 @@ ssh = ["dep:sshh"]
 # locally regardless of the rev; CI (no parent config) resolves the rev from GitHub. All bifrost-* crates
 # live in one repo, so they share one rev. Bump these deliberately each release (see the reproducible-build
 # gate in .github/workflows/release.yml and the lock-regen step in notes/02-DECISIONS.md).
-bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
-bifrost-core = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
-bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
-bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
-bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
-bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
+bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "31107a0e7122bd25372c8c74ae8565f9e84f6827" }
+bifrost-core = { git = "https://github.com/theia-hq/bifrost", rev = "31107a0e7122bd25372c8c74ae8565f9e84f6827" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "31107a0e7122bd25372c8c74ae8565f9e84f6827" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "31107a0e7122bd25372c8c74ae8565f9e84f6827" }
+bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "31107a0e7122bd25372c8c74ae8565f9e84f6827" }
+bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "31107a0e7122bd25372c8c74ae8565f9e84f6827" }
 # The key file store, in bifrost's repo beside the identity it stores.
-keystore = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
-nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "cd76786de5dba4db295c43aac5a1e931ddb67429" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "2fff523bce8775aa7ec90092f4749a338b9a06b3" }
+keystore = { git = "https://github.com/theia-hq/bifrost", rev = "31107a0e7122bd25372c8c74ae8565f9e84f6827" }
+nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "9bb8a267148bb90cc6b87435d850991ccdf8257e" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "bd7670b1b35ff3b028f80d770f9d494b4e24b022" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "70fce32cf93d02775e7e1237ab3afe28db0ca56b" }
-measure = { git = "https://github.com/theia-hq/services", rev = "70fce32cf93d02775e7e1237ab3afe28db0ca56b" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "70fce32cf93d02775e7e1237ab3afe28db0ca56b", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "70fce32cf93d02775e7e1237ab3afe28db0ca56b" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "9540281587b77dd6da66fdb01f39b20cc485f49e" }
+measure = { git = "https://github.com/theia-hq/services", rev = "9540281587b77dd6da66fdb01f39b20cc485f49e" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "9540281587b77dd6da66fdb01f39b20cc485f49e", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "9540281587b77dd6da66fdb01f39b20cc485f49e" }
 
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
@@ -65,7 +65,7 @@ zeroize = { version = "1", features = ["derive"] }
 [dev-dependencies]
 # The in-process transport the `gated_measure` proof drives: two mem nodes share a global registry, so a
 # client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "7e2702af2c6b7a8986c60f492042bcc7f6107438" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "31107a0e7122bd25372c8c74ae8565f9e84f6827" }
 
 # `test-util` gives the control-client deadline test tokio's paused clock, so the 5 s read bound is
 # asserted without a wall-clock wait. Dev-only: the shipped binary never compiles it in.
