@@ -38,7 +38,12 @@ pub async fn after_membership_change(home: &Home, contacts: &Contacts) -> eyre::
     if !config::holds_signet(home, secret.node_id()).await? {
         return Ok(());
     }
-    Artifact::write(&home.roster(), &secret.cap_identity()?, &doc).await?;
+    Artifact::write(
+        &home.roster(),
+        &secret.with_bytes(nauthy::Identity::from_secret)?,
+        &doc,
+    )
+    .await?;
     Ok(())
 }
 

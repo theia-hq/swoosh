@@ -15,12 +15,13 @@ use core::str::FromStr;
 
 use bifrost::NodeId;
 use clap::Args;
-use nauthy::{Cap, Link, Service};
+use nauthy::{Cap, Service};
 use swoosh::config;
 use swoosh::contacts::{ContactRef, ContactRefParseError, Contacts, ContactsStore, Petname};
 use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
+use swoosh::node_signer::{Bind, NodeSigner};
 use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -90,24 +91,22 @@ impl ShareCmd {
                  pass on a narrower copy of a link you hold with `grant attenuate`."
             );
         }
-        let cap_identity = secret.cap_identity()?;
+        let signer = NodeSigner::from(&secret);
         let lifetime = self.expires.duration();
-        // The absolute expiry recorded in the ledger. `mint_*_link` recomputes its own from the same lifetime,
+        // The absolute expiry recorded in the ledger. `mint_slip` recomputes its own from the same lifetime,
         // so the two agree to within the sub-millisecond between these calls, which is expiry enough for an
         // audit record.
         let expiry = nauthy::Request::expires_in(lifetime);
         // One `--for` token, kind carried in its typed prefix: a device bind, a fleet bind, or (no `--for`) a
-        // bearer slip. The shape of the grant (its link, kind, delegability, and recorded holder) follows from
+        // bearer slip. The shape of the grant (its kind, delegability, and recorded holder) follows from
         // which. One `Option` cannot hold two binds, so a device-AND-fleet state is unrepresentable here.
-        let (link, kind, delegation, holder) = match &self.bind {
+        let (bind, kind, delegation, holder) = match &self.bind {
             Some(GrantFor::Device(target)) => {
                 let node = resolve_one_device(target, store.contacts())?;
-                let link =
-                    Link::mint_bound(&cap_identity, &self.service, node.verify_key(), lifetime)?;
                 // Record the RESOLVED device node id (canonical), so revoke-by-holder matches whether the
                 // issuer named a petname or the raw key.
                 (
-                    link,
+                    Bind::Device(node.verify_key()),
                     GrantKind::Device,
                     Delegation::Sealed,
                     node.to_string(),
@@ -115,21 +114,18 @@ impl ShareCmd {
             }
             Some(GrantFor::Fleet(target)) => {
                 let fleet = resolve_fleet_root(target, store.contacts())?;
-                let link = Link::mint_signet(&cap_identity, &self.service, fleet, lifetime)?;
                 // Record the RESOLVED signet key (canonical), so `grant revoke <holder>` matches a pasted
                 // signet key. Revoking the slip cuts the WHOLE fleet's access at once.
                 (
-                    link,
+                    Bind::Fleet(fleet),
                     GrantKind::Fleet,
                     Delegation::Sealed,
                     fleet.to_string(),
                 )
             }
             None => {
-                let link = Link::mint(&cap_identity, &self.service, lifetime)?;
                 // A non-delegable link is sealed so no holder can append a narrower block; a delegable one
                 // is left open.
-                let link = if self.delegable { link } else { link.seal()? };
                 let delegation = if self.delegable {
                     Delegation::Delegable
                 } else {
@@ -137,13 +133,14 @@ impl ShareCmd {
                 };
                 // A bearer slip names no one, so it records the ANYONE placeholder as its holder.
                 (
-                    link,
+                    Bind::Anyone,
                     GrantKind::Bearer,
                     delegation,
                     grants::ANYONE.to_owned(),
                 )
             }
         };
+        let link = signer.mint_slip(&self.service, bind, lifetime, delegation)?;
         // Record the grant in the mint-log ledger BEFORE printing, so the issuer's index of who can reach
         // what is durable the instant the link exists. The ROOT revocation id is a pure function of the
         // minted token's bytes, recovered by re-parsing the link we just produced (the ledger stores this
