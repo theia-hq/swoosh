@@ -12,10 +12,11 @@ use super::{
     Epoch, MAX_MEMBERS, MAX_ROSTER_BLOB, Member, RosterDoc, RosterError, RosterVerifyError,
 };
 use crate::contacts::DeviceLabel;
+use crate::testkit::TestRoot;
 
 /// A deterministic signing identity for the sign/verify tests.
-fn identity(seed: u8) -> Identity {
-    Identity::from_secret(&[seed; 32]).unwrap()
+fn identity(seed: u8) -> TestRoot {
+    TestRoot::seeded(seed)
 }
 
 fn sample_doc() -> RosterDoc {
@@ -108,14 +109,14 @@ fn a_cut_roster_verifies_against_its_signet() {
     // through that verify path (a caller cannot get a trusted doc any other way).
     let id = identity(7);
     let doc = sample_doc();
-    let blob = super::cut(&id, &doc);
-    assert_eq!(super::verify(&blob, id.verifying_key()), Ok(doc));
+    let blob = super::cut(id.identity(), &doc);
+    assert_eq!(super::verify(&blob, id.verify_key()), Ok(doc));
 }
 
 #[test]
 fn verify_rejects_a_foreign_signet() {
-    let blob = super::cut(&identity(7), &sample_doc());
-    let stranger = identity(8).verifying_key();
+    let blob = super::cut(identity(7).identity(), &sample_doc());
+    let stranger = identity(8).verify_key();
     assert_eq!(
         super::verify(&blob, stranger),
         Err(RosterVerifyError::Signature(SignError::ForeignSigner))
@@ -127,11 +128,11 @@ fn verify_rejects_a_tampered_payload() {
     // Flip a payload byte after signing: the envelope still decodes, but the signature no longer covers
     // these bytes, so verify fails at the signature seam before any parse.
     let id = identity(7);
-    let mut blob = super::cut(&id, &sample_doc());
+    let mut blob = super::cut(id.identity(), &sample_doc());
     let last = blob.len() - 1;
     blob[last] ^= 0xff;
     assert_eq!(
-        super::verify(&blob, id.verifying_key()),
+        super::verify(&blob, id.verify_key()),
         Err(RosterVerifyError::Signature(SignError::BadSignature))
     );
 }
@@ -236,7 +237,7 @@ fn the_largest_roster_the_parser_accepts_is_exactly_the_blob_bound() {
     // admits less, or more, than the parser does. It also holds the one term the derivation cannot name,
     // nauthy's private signature length: an envelope change over there lands on this assertion.
     let id = identity(7);
-    let blob = maximal_blob(&id);
+    let blob = maximal_blob(id.identity());
     assert_eq!(
         blob.len() as u64,
         MAX_ROSTER_BLOB,
@@ -245,7 +246,7 @@ fn the_largest_roster_the_parser_accepts_is_exactly_the_blob_bound() {
     // And the blob at the ceiling is one the whole seam takes: a cap that admits bytes the verifier
     // refuses would be a bound on nothing.
     assert!(
-        super::verify(&blob, id.verifying_key()).is_ok(),
+        super::verify(&blob, id.verify_key()).is_ok(),
         "the largest blob a reader will accept is one that verifies and parses"
     );
 }

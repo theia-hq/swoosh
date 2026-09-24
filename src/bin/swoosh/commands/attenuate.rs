@@ -63,23 +63,26 @@ fn narrow_failure(error: CapError) -> eyre::Report {
 #[cfg(test)]
 mod tests {
     use clap::{Args as _, Command};
+    use swoosh::testkit::TestNode;
 
     use super::*;
+
+    fn hour() -> std::time::SystemTime {
+        nauthy::Request::expires_in(core::time::Duration::from_secs(3600))
+    }
 
     /// A sealed link (the default from `swoosh grant issue`, and every bound slip by construction)
     /// is refused with a line naming the state and the fix, never the token library's internal
     /// "tried to seal an already sealed token".
     #[test]
     fn a_sealed_link_is_refused_with_a_teaching_line() {
-        let identity = nauthy::Identity::from_secret(&[7u8; 32]).expect("valid secret");
-        let link = Link::mint(
-            &identity,
-            &"ssh".parse().expect("valid service"),
-            core::time::Duration::from_secs(3600),
-        )
-        .expect("mint a link")
-        .seal()
-        .expect("seal the link");
+        let link = TestNode::seeded(7)
+            .slip(&"ssh".parse().expect("valid service"), hour())
+            .expect("mint a link")
+            .seal()
+            .expect("seal the link")
+            .link()
+            .expect("render the link");
         let cmd = AttenuateCmd {
             link: link.to_string(),
             service: None,
@@ -105,10 +108,12 @@ mod tests {
     /// offline.
     #[test]
     fn a_delegable_link_still_narrows() {
-        let identity = nauthy::Identity::from_secret(&[8u8; 32]).expect("valid secret");
         let service: Service = "ssh".parse().expect("valid service");
-        let link = Link::mint(&identity, &service, core::time::Duration::from_secs(3600))
-            .expect("mint a delegable link");
+        let link = TestNode::seeded(8)
+            .slip(&service, hour())
+            .expect("mint a delegable link")
+            .link()
+            .expect("render the link");
         let cmd = AttenuateCmd {
             link: link.to_string(),
             service: Some(service),

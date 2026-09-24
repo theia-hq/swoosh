@@ -1,0 +1,216 @@
+//! Keys and prompts for tests, and the only place test code signs anything.
+//!
+//! A test that needs a signed badge, slip or document asks a [`TestRoot`] or a [`TestNode`] for it rather
+//! than building a `nauthy::Identity` and minting with it. So signing stays in a few named places: the
+//! product's own signers, and this module for tests.
+//!
+//! Compiled for the lib's own tests and under the `test-support` feature, which the package turns on for
+//! itself as a dev-dependency, so the bin's unit tests and `tests/` reach it as `swoosh::testkit`. A plain
+//! `cargo build` never compiles it.
+//!
+//! Keys are seeded by one byte, the secret being that byte 32 times, so a fixture names its key the same
+//! way in every test and every run.
+
+use core::ops::Deref;
+use std::collections::VecDeque;
+use std::path::Path;
+use std::time::SystemTime;
+
+use bifrost::NodeId;
+use keystore::Passphrase;
+use nauthy::{Cap, CapError, Identity, Link, Service, Signed, VerifyKey};
+use tightbeam::identity::AsVerifyKey as _;
+use zeroize::Zeroizing;
+
+use crate::passphrase::Prompt;
+
+/// A root's key: what signs device badges, a fleet's documents, and the slips a root holder issues.
+pub struct TestRoot(Keys);
+
+/// A device's or a server's own key: what signs the slips a node issues, and a badge it signs for itself.
+pub struct TestNode(Keys);
+
+impl TestRoot {
+    /// The root whose secret is `byte`, 32 times.
+    pub fn seeded(byte: u8) -> Self {
+        Self(Keys::from_seed([byte; 32]))
+    }
+
+    /// The root whose secret is `seed`: a key a test read off disk, where the product wrote it.
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        Self(Keys::from_seed(seed))
+    }
+}
+
+impl TestNode {
+    /// The node whose secret is `byte`, 32 times.
+    pub fn seeded(byte: u8) -> Self {
+        Self(Keys::from_seed([byte; 32]))
+    }
+
+    /// The node whose secret is `seed`: a key a test read off disk, where the product wrote it.
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        Self(Keys::from_seed(seed))
+    }
+}
+
+impl Deref for TestRoot {
+    type Target = Keys;
+
+    fn deref(&self) -> &Keys {
+        &self.0
+    }
+}
+
+impl Deref for TestNode {
+    type Target = Keys;
+
+    fn deref(&self) -> &Keys {
+        &self.0
+    }
+}
+
+/// One seeded key and everything a test signs with it. Reached through a [`TestRoot`] or a
+/// [`TestNode`], which say which role the key plays in the test.
+pub struct Keys {
+    seed: [u8; 32],
+    identity: Identity,
+}
+
+impl Keys {
+    fn from_seed(seed: [u8; 32]) -> Self {
+        #[expect(
+            clippy::expect_used,
+            reason = "every 32 bytes are an ed25519 secret, so this cannot fail"
+        )]
+        let identity = Identity::from_secret(&seed).expect("32 bytes are an ed25519 secret");
+        Self { seed, identity }
+    }
+
+    /// The secret, for a test that binds a transport or writes a key file under this same key.
+    pub fn seed(&self) -> [u8; 32] {
+        self.seed
+    }
+
+    /// The public key: what a badge or slip signed here roots at.
+    pub fn verify_key(&self) -> VerifyKey {
+        self.identity.verifying_key()
+    }
+
+    /// The node id a transport bound under this key answers at.
+    pub fn node_id(&self) -> NodeId {
+        NodeId::from_ed25519_secret(&self.seed)
+    }
+
+    /// The signing identity, for a product call that takes one (a roster write, say). A test signs
+    /// through the methods here, never through this.
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    /// A membership badge for `bound`, until `until`: the cap a gate reads as "one of my devices" when
+    /// the dialer proves it is `bound`.
+    pub fn member_badge(&self, bound: VerifyKey, until: SystemTime) -> Result<Cap, CapError> {
+        self.identity.mint_member(bound, until)
+    }
+
+    /// A membership badge for `device`, until `until`, sealed and in the `sheer:` form a device stores
+    /// and presents.
+    pub fn device_badge(&self, device: NodeId, until: SystemTime) -> Result<Link, CapError> {
+        self.member_badge(device.verify_key(), until)?
+            .seal()?
+            .link()
+    }
+
+    /// A slip for `service`, until `until`, that anyone holding it may present or narrow.
+    pub fn slip(&self, service: &Service, until: SystemTime) -> Result<Cap, CapError> {
+        self.identity.mint(service, until)
+    }
+
+    /// A slip for `service`, until `until`, that grants only when the dialer proves it is `peer`. Sealed,
+    /// as every bound slip is issued.
+    pub fn bound_slip(
+        &self,
+        service: &Service,
+        peer: VerifyKey,
+        until: SystemTime,
+    ) -> Result<Link, CapError> {
+        self.identity
+            .mint_bound(service, peer, until)?
+            .seal()?
+            .link()
+    }
+
+    /// A slip for `service`, until `until`, that grants any device the root `authority` vouches for.
+    /// Sealed, as every fleet slip is issued.
+    pub fn fleet_slip(
+        &self,
+        service: &Service,
+        authority: VerifyKey,
+        until: SystemTime,
+    ) -> Result<Link, CapError> {
+        self.identity
+            .mint_authority_slip(service, authority, until)?
+            .seal()?
+            .link()
+    }
+
+    /// `bytes`, signed by this key.
+    pub fn sign(&self, bytes: &[u8]) -> Signed {
+        self.identity.sign_document(bytes)
+    }
+}
+
+/// A [`Prompt`] that counts prompt events and answers from a script.
+///
+/// One event is one call to `unlock` or `choose`, whatever the terminal behind it would read: `choose`
+/// asks for the passphrase twice, and is still one event. A call with no answer left is still an event:
+/// it refuses the way a missing terminal does, after being asked. So a test that scripts nothing and
+/// reads a count of zero proves nothing was asked.
+pub struct Counting {
+    answers: VecDeque<&'static str>,
+    events: usize,
+}
+
+impl Counting {
+    /// A prompt that answers each event with the next of `answers`, in order.
+    pub fn new(answers: impl IntoIterator<Item = &'static str>) -> Self {
+        Self {
+            answers: answers.into_iter().collect(),
+            events: 0,
+        }
+    }
+
+    /// A prompt with no answers: every event refuses.
+    pub fn refusing() -> Self {
+        Self::new([])
+    }
+
+    /// How many prompt events there have been.
+    pub fn events(&self) -> usize {
+        self.events
+    }
+
+    fn answer(&mut self) -> eyre::Result<Passphrase> {
+        self.events += 1;
+        let answer = self
+            .answers
+            .pop_front()
+            .ok_or_else(|| eyre::eyre!("no scripted answer left"))?;
+        crate::passphrase::passphrase(Zeroizing::new(answer.to_owned()))
+    }
+}
+
+impl Prompt for Counting {
+    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        self.answer()
+    }
+
+    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        self.answer()
+    }
+}
+
+#[cfg(test)]
+#[path = "testkit_tests.rs"]
+mod tests;

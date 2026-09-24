@@ -561,8 +561,11 @@ mod tests {
             std::env::temp_dir().join(format!("sw4-status-present-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(base.join("home")).expect("scratch home");
         let home = Home::resolve(Some(base.join("home"))).expect("the scratch home resolves");
-        let link = swoosh::identity::Secret::ephemeral()
-            .member_badge()
+        let link = swoosh::testkit::TestRoot::seeded(0xb0)
+            .device_badge(
+                swoosh::testkit::TestNode::seeded(0xb1).node_id(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
+            )
             .expect("mint a stand-in slip")
             .to_string();
         let status = Wrap::try_parse_from(["x", "--present", &link])

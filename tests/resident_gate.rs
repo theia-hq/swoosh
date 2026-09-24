@@ -14,15 +14,16 @@ use std::sync::Arc;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{Cap, FileDenylist, Identity};
+use nauthy::{Cap, FileDenylist};
 use swoosh::home::Home;
 use swoosh::serve::{CONTROL_SERVICES_SERVICE, Resident, ServiceList};
+use swoosh::testkit::TestRoot;
 use tightbeam::enabled::FileDisabledList;
-use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router, ServiceCatalog};
 
-/// The signet's fixed secret; its ed25519 public half is the signet the family gate trusts.
-const SIGNET_SECRET: [u8; 32] = [7u8; 32];
+/// The byte the signet's fixed key is seeded with; its ed25519 public half is the signet the family gate
+/// trusts.
+const SIGNET: u8 = 7;
 
 /// A short scratch home under the temp dir. Drop removes exactly the base it created.
 struct Scratch {
@@ -50,7 +51,7 @@ impl Drop for Scratch {
 /// `<home>/disabled`, and the revocation denylist on `<home>/revoked`. Built through the same
 /// `resolve_gate` + handler the product path injects.
 async fn build_exposer(home: &Home) -> Exposer {
-    let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let signet = TestRoot::seeded(SIGNET).node_id();
     let denylist = FileDenylist::load(home.revoked())
         .await
         .expect("the revocation denylist loads");
@@ -72,17 +73,9 @@ async fn build_exposer(home: &Home) -> Exposer {
 /// A membership badge the signet signed, bound to the dialer's proven mem id: the shape `swoosh mint`
 /// mints for a device, and the cap `swoosh grant revoke` cuts at its root.
 fn signet_badge(bound: NodeId) -> String {
-    Identity::from_secret(&SIGNET_SECRET)
-        .expect("the signet identity")
-        .mint_member(
-            bound.verify_key(),
-            nauthy::Request::expires_in(Duration::from_secs(300)),
-        )
+    TestRoot::seeded(SIGNET)
+        .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .expect("mint a member badge")
-        .seal()
-        .expect("seal the badge")
-        .link()
-        .expect("render the badge link")
         .to_string()
 }
 

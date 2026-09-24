@@ -389,6 +389,7 @@ mod tests {
 
     use super::*;
     use crate::peer::Peer;
+    use crate::testkit::TestRoot;
 
     /// The parsed reach-family defaults: what clap hands a bare verb that named none of the flags. Each
     /// case below overrides exactly the one flag it is about, so a new flag joins the guard in one line.
@@ -445,8 +446,11 @@ mod tests {
     async fn family_with_a_plain_slip_attaches_no_membership_badge() {
         let secret = Secret::ephemeral();
         // A member badge stands in for a plain (non-signet-bound) `--present` slip.
-        let slip = Secret::ephemeral()
-            .member_badge()
+        let slip = crate::testkit::TestRoot::seeded(0xb0)
+            .device_badge(
+                crate::testkit::TestNode::seeded(0xb1).node_id(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
+            )
             .expect("mint a stand-in plain slip");
         let slip_text = slip.to_string();
         let resolved = resolve(
@@ -479,15 +483,15 @@ mod tests {
         // A real signet-bound slip pinning the DIALER'S OWN fleet (the default home has no stored badge, so
         // the self-signed badge
         // roots at `secret.node_id()`, so that is the fleet slot 2 can help admit at). Work issues it.
-        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
+        let work = crate::testkit::TestNode::seeded(1);
         let fleet = secret.node_id().verify_key();
-        let slip = Link::mint_signet(
-            &work,
-            &"ssh".parse().expect("valid service"),
-            fleet,
-            core::time::Duration::from_secs(3600),
-        )
-        .expect("mint a signet-bound slip");
+        let slip = work
+            .fleet_slip(
+                &"ssh".parse().expect("valid service"),
+                fleet,
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
+            )
+            .expect("mint a signet-bound slip");
         let slip_text = slip.to_string();
         let resolved = resolve(
             Credential::Family {
@@ -518,18 +522,16 @@ mod tests {
     #[tokio::test]
     async fn family_with_a_foreign_fleet_slip_attaches_no_membership_badge() {
         let secret = Secret::ephemeral();
-        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
+        let work = crate::testkit::TestNode::seeded(1);
         // A fleet that is NOT the dialer's own (the dialer self-signs at `secret.node_id()`, default home).
-        let foreign_fleet = nauthy::Identity::from_secret(&[2u8; 32])
-            .expect("valid fleet secret")
-            .verifying_key();
-        let slip = Link::mint_signet(
-            &work,
-            &"ssh".parse().expect("valid service"),
-            foreign_fleet,
-            core::time::Duration::from_secs(3600),
-        )
-        .expect("mint a signet-bound slip");
+        let foreign_fleet = crate::testkit::TestRoot::seeded(2).verify_key();
+        let slip = work
+            .fleet_slip(
+                &"ssh".parse().expect("valid service"),
+                foreign_fleet,
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
+            )
+            .expect("mint a signet-bound slip");
         let slip_text = slip.to_string();
         let (grant, membership) = resolve(
             Credential::Family {
@@ -560,17 +562,17 @@ mod tests {
     #[tokio::test]
     async fn a_signet_bound_link_as_peer_attaches_slot_two() {
         let secret = Secret::ephemeral();
-        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
+        let work = crate::testkit::TestNode::seeded(1);
         // Pin the DIALER'S OWN fleet, so the fleet-match slot-2 rule (ADV1) attaches the badge.
         let fleet = secret.node_id().verify_key();
-        let link_text = Link::mint_signet(
-            &work,
-            &"ssh".parse().expect("valid service"),
-            fleet,
-            core::time::Duration::from_secs(3600),
-        )
-        .expect("mint a signet-bound slip")
-        .to_string();
+        let link_text = work
+            .fleet_slip(
+                &"ssh".parse().expect("valid service"),
+                fleet,
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
+            )
+            .expect("mint a signet-bound slip")
+            .to_string();
 
         // The slip arrives AS THE PEER: a `Capability` peer self-presents its own link, which the verb's
         // the credential fold puts it in `present` exactly as an explicit `--present` slip would be.
@@ -601,8 +603,11 @@ mod tests {
     async fn a_plain_link_as_peer_attaches_only_slot_one() {
         let secret = Secret::ephemeral();
         // A member badge stands in for a plain (non-signet-bound) `sheer:` link passed as the peer.
-        let link_text = Secret::ephemeral()
-            .member_badge()
+        let link_text = crate::testkit::TestRoot::seeded(0xb0)
+            .device_badge(
+                crate::testkit::TestNode::seeded(0xb1).node_id(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
+            )
             .expect("mint a stand-in plain slip")
             .to_string();
         let peer: Peer = link_text.parse().expect("a sheer: link is a peer");
@@ -640,17 +645,11 @@ mod tests {
     /// Provision `home` the way `adopt` does: trust `signet`'s key and store the badge it signed for
     /// `device`, expiring at `expiry`. The badge is really signed and really parses, so a case cannot
     /// pass against a stand-in string the resolver would never see in the field.
-    async fn adopt_badge(home: &Home, device: &Secret, expiry: SystemTime) -> Secret {
-        let signet = Secret::ephemeral();
+    async fn adopt_badge(home: &Home, device: &Secret, expiry: SystemTime) -> TestRoot {
+        let signet = TestRoot::seeded(0x51);
         let badge = signet
-            .cap_identity()
-            .expect("the signet is a cap identity")
-            .mint_member(device.node_id().verify_key(), expiry)
-            .expect("mint a device badge")
-            .seal()
-            .expect("seal the badge")
-            .link()
-            .expect("the badge renders as a link");
+            .device_badge(device.node_id(), expiry)
+            .expect("mint a device badge");
         config::write_signet(home, signet.node_id())
             .await
             .expect("write the signet");
@@ -761,17 +760,15 @@ mod tests {
         let home = provisioned_home("foreign-fleet");
         let device = Secret::ephemeral();
         adopt_badge(&home, &device, SystemTime::now() - 6 * DAY).await;
-        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
-        let foreign_fleet = nauthy::Identity::from_secret(&[2u8; 32])
-            .expect("valid fleet secret")
-            .verifying_key();
-        let slip = Link::mint_signet(
-            &work,
-            &"ssh".parse().expect("valid service"),
-            foreign_fleet,
-            core::time::Duration::from_secs(3600),
-        )
-        .expect("mint a signet-bound slip");
+        let work = crate::testkit::TestNode::seeded(1);
+        let foreign_fleet = crate::testkit::TestRoot::seeded(2).verify_key();
+        let slip = work
+            .fleet_slip(
+                &"ssh".parse().expect("valid service"),
+                foreign_fleet,
+                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
+            )
+            .expect("mint a signet-bound slip");
         let slip_text = slip.to_string();
 
         let mut warned = Vec::new();

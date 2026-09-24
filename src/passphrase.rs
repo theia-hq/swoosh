@@ -50,7 +50,7 @@ impl Prompt for Terminal {
 }
 
 /// Typed text as a passphrase: put in the one byte form every sealed file uses, and never empty.
-fn passphrase(text: Zeroizing<String>) -> eyre::Result<Passphrase> {
+pub(crate) fn passphrase(text: Zeroizing<String>) -> eyre::Result<Passphrase> {
     Passphrase::try_from(text).map_err(|_| eyre::eyre!("the passphrase cannot be empty"))
 }
 

@@ -1,13 +1,14 @@
 use core::time::Duration;
 
-use nauthy::{Identity, VerifyKey};
+use nauthy::VerifyKey;
 
 use super::{Artifact, STAT_DEBOUNCE};
 use crate::contacts::DeviceLabel;
 use crate::roster::{Epoch, Member, RosterDoc};
+use crate::testkit::TestRoot;
 
-/// The signet's fixed secret, so a test's cut is reproducible and verifiable.
-const SIGNET: [u8; 32] = [11u8; 32];
+/// The byte the signet's fixed key is seeded with, so a test's cut is reproducible and verifiable.
+const SIGNET: u8 = 11;
 
 fn scratch(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
@@ -30,8 +31,8 @@ fn doc(epoch: u64, labels: &[&str]) -> RosterDoc {
     RosterDoc::new(Epoch(epoch), members).expect("a well-formed doc")
 }
 
-fn signet() -> Identity {
-    Identity::from_secret(&SIGNET).expect("a valid signet secret")
+fn signet() -> TestRoot {
+    TestRoot::seeded(SIGNET)
 }
 
 /// An absent file opens as an EMPTY artifact, and the file APPEARING is picked up with no reload. This is
@@ -48,11 +49,11 @@ async fn an_absent_artifact_opens_empty_and_fills_in_when_the_signet_cuts() {
         "there is nothing to serve until the signet cuts"
     );
 
-    Artifact::write(&path, &signet(), &doc(1, &["desk"]))
+    Artifact::write(&path, signet().identity(), &doc(1, &["desk"]))
         .await
         .expect("the first membership edit cuts one");
     tokio::time::sleep(STAT_DEBOUNCE + Duration::from_millis(50)).await;
-    let served = crate::roster::verify(&artifact.bytes(), signet().verifying_key())
+    let served = crate::roster::verify(&artifact.bytes(), signet().verify_key())
         .expect("a roster cut after serve started is served without a restart");
     assert_eq!(served.epoch(), Epoch(1));
 }
@@ -60,11 +61,11 @@ async fn an_absent_artifact_opens_empty_and_fills_in_when_the_signet_cuts() {
 #[tokio::test]
 async fn a_written_artifact_verifies_against_the_signet_that_cut_it() {
     let path = scratch("verifies");
-    Artifact::write(&path, &signet(), &doc(1, &["desk"]))
+    Artifact::write(&path, signet().identity(), &doc(1, &["desk"]))
         .await
         .expect("write");
     let artifact = Artifact::open(path).await.expect("load");
-    let parsed = crate::roster::verify(&artifact.bytes(), signet().verifying_key())
+    let parsed = crate::roster::verify(&artifact.bytes(), signet().verify_key())
         .expect("the served bytes verify against the signet");
     assert_eq!(parsed.epoch(), Epoch(1));
     assert_eq!(parsed.members().len(), 1);
@@ -77,23 +78,22 @@ async fn a_written_artifact_verifies_against_the_signet_that_cut_it() {
 #[tokio::test]
 async fn a_re_cut_is_picked_up_without_a_reload() {
     let path = scratch("recut");
-    Artifact::write(&path, &signet(), &doc(1, &["desk"]))
+    Artifact::write(&path, signet().identity(), &doc(1, &["desk"]))
         .await
         .expect("write");
     let artifact = Artifact::open(path.clone()).await.expect("load");
-    let first = crate::roster::verify(&artifact.bytes(), signet().verifying_key()).expect("verify");
+    let first = crate::roster::verify(&artifact.bytes(), signet().verify_key()).expect("verify");
     assert_eq!(first.members().len(), 1);
 
     // Another process (an `invite add`) re-cuts at the next version with one more member.
-    Artifact::write(&path, &signet(), &doc(2, &["desk", "phone"]))
+    Artifact::write(&path, signet().identity(), &doc(2, &["desk", "phone"]))
         .await
         .expect("re-cut");
     // Past the debounce, so the next read stats and sees the change; inside it, the oracle is allowed to
     // serve what it last read, exactly as its two siblings are.
     tokio::time::sleep(STAT_DEBOUNCE + Duration::from_millis(50)).await;
 
-    let second =
-        crate::roster::verify(&artifact.bytes(), signet().verifying_key()).expect("verify");
+    let second = crate::roster::verify(&artifact.bytes(), signet().verify_key()).expect("verify");
     assert_eq!(
         second.epoch(),
         Epoch(2),
@@ -108,7 +108,7 @@ async fn a_re_cut_is_picked_up_without_a_reload() {
 #[tokio::test]
 async fn a_deleted_artifact_keeps_serving_the_last_cut() {
     let path = scratch("deleted");
-    Artifact::write(&path, &signet(), &doc(1, &["desk"]))
+    Artifact::write(&path, signet().identity(), &doc(1, &["desk"]))
         .await
         .expect("write");
     let artifact = Artifact::open(path.clone()).await.expect("load");

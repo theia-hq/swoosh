@@ -393,15 +393,16 @@ mod tests {
 
         // Mint a signet slip for the resolved root and record it exactly as `run` does; the holder is the
         // resolved signet key, so revoke-by-holder cuts the whole fleet.
-        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
+        let work = swoosh::testkit::TestNode::seeded(1);
         let service: Service = "ssh".parse().expect("valid service");
-        let cap = work
-            .mint_authority_slip(
+        let slip = work
+            .fleet_slip(
                 &service,
                 resolved,
                 nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
             )
             .expect("mint signet slip");
+        let cap = slip.cap();
         let record = GrantRecord {
             target: GrantTarget::Service(Service::clone(&service)),
             kind: GrantKind::Fleet,
@@ -518,18 +519,17 @@ mod tests {
     /// paste), names the fleet posture, and gives the `grant revoke <signet>` recipe keyed by that key.
     #[test]
     fn frame_for_a_fleet_grant_echoes_the_signet_key_and_the_revoke_recipe() {
-        let work = nauthy::Identity::from_secret(&[1u8; 32]).expect("valid work secret");
-        let fleet = nauthy::Identity::from_secret(&[2u8; 32])
-            .expect("valid fleet secret")
-            .verifying_key();
+        let work = swoosh::testkit::TestNode::seeded(1);
+        let fleet = swoosh::testkit::TestRoot::seeded(2).verify_key();
         let service: Service = "ssh".parse().expect("valid service");
-        let cap = work
-            .mint_authority_slip(
+        let slip = work
+            .fleet_slip(
                 &service,
                 fleet,
                 nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
             )
             .expect("mint signet slip");
+        let cap = slip.cap();
         let record = GrantRecord {
             target: GrantTarget::Service(Service::clone(&service)),
             kind: GrantKind::Fleet,

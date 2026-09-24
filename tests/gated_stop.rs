@@ -27,14 +27,16 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{FileDenylist, Identity, Link};
+use nauthy::FileDenylist;
 use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop, Stopped};
+use swoosh::testkit::TestRoot;
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router};
 use tokio::io::AsyncReadExt as _;
 
-/// The signet's fixed secret; its ed25519 public half is the signet the family gate trusts.
-const SIGNET_SECRET: [u8; 32] = [7u8; 32];
+/// The byte the signet's fixed key is seeded with; its ed25519 public half is the signet the family gate
+/// trusts.
+const SIGNET: u8 = 7;
 
 /// A local `serve --for` deadline stops the exposer by itself: a timer cancels the node's teardown token,
 /// and `run` returns gracefully. This is the mechanism `serve --for <duration>` drives (a `sleep` then a
@@ -83,7 +85,7 @@ async fn a_member_stops_a_gated_node_over_control_stop() {
             // proven mem id, so the gate admits it (the shape `mint` mints for a device; see `gated_measure`
             // for why it is signed here rather than run through mint/adopt over mem).
             let member = Node::new(MemTransport::bind(), NoDiscovery);
-            let badge = signet_badge(&SIGNET_SECRET, member.node_id());
+            let badge = signet_badge(SIGNET, member.node_id());
             let session = Connector::to_node(
                 host_id,
                 CONTROL_STOP_SERVICE.parse().unwrap(),
@@ -144,7 +146,7 @@ async fn a_stranger_is_refused_at_control_stop_and_the_node_keeps_running() {
 
             // A stranger: a self-signed badge rooted at a RANDOM key the gate never trusts.
             let stranger = Node::new(MemTransport::bind(), NoDiscovery);
-            let badge = signet_badge(&[3u8; 32], stranger.node_id());
+            let badge = signet_badge(3, stranger.node_id());
             let session = Connector::to_node(
                 host_id,
                 CONTROL_STOP_SERVICE.parse().unwrap(),
@@ -200,13 +202,13 @@ async fn a_control_stop_slip_is_refused_before_ok_and_the_node_keeps_running() {
             // A delegate: a slip the signet signed for `control.stop`, bound to the delegate's proven mem
             // id, so the GATE grants it. (A wrong-service or unbound slip would need no floor to refuse.)
             let delegate = Node::new(MemTransport::bind(), NoDiscovery);
-            let slip = Link::mint_bound(
-                &Identity::from_secret(&SIGNET_SECRET).unwrap(),
-                &CONTROL_STOP_SERVICE.parse().unwrap(),
-                delegate.node_id().verify_key(),
-                Duration::from_secs(300),
-            )
-            .unwrap();
+            let slip = TestRoot::seeded(SIGNET)
+                .bound_slip(
+                    &CONTROL_STOP_SERVICE.parse().unwrap(),
+                    delegate.node_id().verify_key(),
+                    nauthy::Request::expires_in(Duration::from_secs(300)),
+                )
+                .unwrap();
             let session =
                 Connector::to_node(host_id, CONTROL_STOP_SERVICE.parse().unwrap(), Some(slip))
                     .open_service(&delegate)
@@ -246,7 +248,7 @@ async fn a_control_stop_slip_is_refused_before_ok_and_the_node_keeps_running() {
 /// declaration `serve` makes. The exposer owns `cancel`; the injected handler holds a clone as the
 /// node-control capability.
 async fn build_exposer(cancel: CancellationToken) -> Exposer {
-    let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let signet = TestRoot::seeded(SIGNET).node_id();
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
     Router::new(gate)
         .member_service(CONTROL_STOP_SERVICE.parse().unwrap(), Stop::new(cancel))
@@ -255,20 +257,12 @@ async fn build_exposer(cancel: CancellationToken) -> Exposer {
         .unwrap()
 }
 
-/// Mint a membership badge signed by `secret`, bound to `bound` (the dialer's proven node id): the shape a
-/// signet holder self-signs and `mint` mints for a device. Rooted at the signet it admits; rooted at a
-/// stranger key it is refused. Signed here (not via mint/adopt) so it binds to the mem proven id.
-fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
-    Identity::from_secret(secret)
-        .unwrap()
-        .mint_member(
-            bound.verify_key(),
-            nauthy::Request::expires_in(Duration::from_secs(300)),
-        )
-        .unwrap()
-        .seal()
-        .unwrap()
-        .link()
+/// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id):
+/// the shape a signet holder self-signs and `mint` mints for a device. Rooted at the signet it admits; rooted
+/// at a stranger key it is refused. Signed here (not via mint/adopt) so it binds to the mem proven id.
+fn signet_badge(signer: u8, bound: NodeId) -> String {
+    TestRoot::seeded(signer)
+        .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .unwrap()
         .to_string()
 }

@@ -20,11 +20,12 @@ use core::time::Duration;
 
 use bifrost::NodeId;
 use clap::Parser;
-use nauthy::{Identity, Link, Service};
+use nauthy::{Link, Request, Service};
 use swoosh::credential::LinkExt as _;
 use swoosh::home::Home;
 use swoosh::identity::Secret;
 use swoosh::reaching::{self, BindRole, Reaching};
+use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::commands::{ping, reach};
@@ -88,10 +89,16 @@ async fn a_verb_with_a_signet_bound_present_slip_fills_slot_two() {
     // <slip>`. On the default home, the dialer self-signs its badge at `secret.node_id()`, so the slip must pin
     // that fleet for slot 2 to help admission (and thus be attached) under the fleet-match rule.
     let secret = Secret::ephemeral();
-    let work = Identity::from_secret(&[1u8; 32]).unwrap();
+    let work = TestNode::seeded(1);
     let fleet = secret.node_id().verify_key();
     let service: Service = "ping".parse().unwrap();
-    let slip = Link::mint_signet(&work, &service, fleet, Duration::from_secs(3600)).unwrap();
+    let slip = work
+        .fleet_slip(
+            &service,
+            fleet,
+            Request::expires_in(Duration::from_secs(3600)),
+        )
+        .unwrap();
 
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
     let cmd = ping_with_present(&peer, slip.as_str());
@@ -115,11 +122,14 @@ async fn a_verb_with_a_bearer_present_slip_leaves_slot_two_empty() {
     // A plain bearer slip is NOT signet-bound, so no fleet badge is attached: a dial that does not already
     // prove fleet membership must not leak the dialer's device-to-signet linkage.
     let secret = Secret::ephemeral();
-    let work = Identity::from_secret(&[1u8; 32]).unwrap();
+    let work = TestNode::seeded(1);
     let service: Service = "ping".parse().unwrap();
-    let bearer = Link::mint(&work, &service, Duration::from_secs(3600))
+    let bearer = work
+        .slip(&service, Request::expires_in(Duration::from_secs(3600)))
         .unwrap()
         .seal()
+        .unwrap()
+        .link()
         .unwrap();
 
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
@@ -144,10 +154,16 @@ async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
     // (the link) AND slot 2 (the dialer's own fleet badge), IDENTICAL to passing it via `--present`. The
     // slip pins the dialer's OWN fleet so the fleet-match rule attaches slot 2.
     let secret = Secret::ephemeral();
-    let work = Identity::from_secret(&[1u8; 32]).unwrap();
+    let work = TestNode::seeded(1);
     let fleet = secret.node_id().verify_key();
     let service: Service = "ping".parse().unwrap();
-    let link = Link::mint_signet(&work, &service, fleet, Duration::from_secs(3600)).unwrap();
+    let link = work
+        .fleet_slip(
+            &service,
+            fleet,
+            Request::expires_in(Duration::from_secs(3600)),
+        )
+        .unwrap();
 
     let cmd = ping_with_peer(link.as_str());
     let (slot1, slot2) = slots_for(&cmd, &secret).await;
@@ -171,11 +187,16 @@ async fn a_verb_with_a_foreign_fleet_link_as_peer_leaves_slot_two_empty() {
     // ADV1 at the verb boundary: a link-as-peer pinning a fleet the dialer is NOT in attaches no slot 2, so
     // pasting an attacker's signet-bound link as the peer never leaks the dialer's own fleet-signet badge.
     let secret = Secret::ephemeral();
-    let work = Identity::from_secret(&[1u8; 32]).unwrap();
-    let foreign_fleet = Identity::from_secret(&[2u8; 32]).unwrap().verifying_key();
+    let work = TestNode::seeded(1);
+    let foreign_fleet = TestRoot::seeded(2).verify_key();
     let service: Service = "ping".parse().unwrap();
-    let link =
-        Link::mint_signet(&work, &service, foreign_fleet, Duration::from_secs(3600)).unwrap();
+    let link = work
+        .fleet_slip(
+            &service,
+            foreign_fleet,
+            Request::expires_in(Duration::from_secs(3600)),
+        )
+        .unwrap();
 
     let cmd = ping_with_peer(link.as_str());
     let (slot1, slot2) = slots_for(&cmd, &secret).await;
@@ -236,10 +257,16 @@ async fn reach_with_a_signet_bound_link_as_peer_fills_slot_two() {
     // resolver is the ONLY code that computes slot 2, so a signet-bound link through it arrived without the
     // fleet badge its gate ANDs. Reading both slots off the shared resolver is what lifts the ceiling.
     let secret = Secret::ephemeral();
-    let work = Identity::from_secret(&[1u8; 32]).unwrap();
+    let work = TestNode::seeded(1);
     let fleet = secret.node_id().verify_key();
     let service: Service = "ssh".parse().unwrap();
-    let link = Link::mint_signet(&work, &service, fleet, Duration::from_secs(3600)).unwrap();
+    let link = work
+        .fleet_slip(
+            &service,
+            fleet,
+            Request::expires_in(Duration::from_secs(3600)),
+        )
+        .unwrap();
 
     let (slot1, slot2) = slots_for(&reach_to_peer(link.as_str()), &secret).await;
 

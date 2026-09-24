@@ -18,16 +18,17 @@ use std::sync::Arc;
 
 use bifrost::{CryptoKind, NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{FileDenylist, Identity, VerifyKey};
+use nauthy::{FileDenylist, VerifyKey};
 use swoosh::contacts::{Contacts, DeviceLabel};
 use swoosh::roster::{self, Epoch, Member, RosterDoc};
-use tightbeam::identity::AsVerifyKey as _;
+use swoosh::testkit::TestRoot;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 use tokio::io::AsyncReadExt as _;
 
-/// The signet's fixed secret: its ed25519 public half is the signet the gate trusts and the key that signs
-/// the roster, so a puller that trusts this signet accepts the served roster and refuses any other.
-const SIGNET_SECRET: [u8; 32] = [7u8; 32];
+/// The byte the signet's fixed key is seeded with: its ed25519 public half is the signet the gate trusts and
+/// the key that signs the roster, so a puller that trusts this signet accepts the served roster and refuses
+/// any other.
+const SIGNET: u8 = 7;
 
 #[test]
 fn a_member_pulls_and_verifies_the_roster_a_stranger_is_refused() {
@@ -49,7 +50,7 @@ fn a_member_pulls_and_verifies_the_roster_a_stranger_is_refused() {
 async fn proof() {
     // The fleet the operator's signet vouches for: two devices under `me`, keyed by fixed ed25519 keys so
     // the puller's hydrated node ids are assertable.
-    let signet = Identity::from_secret(&SIGNET_SECRET).unwrap();
+    let signet = TestRoot::seeded(SIGNET);
     let doc = RosterDoc::new(
         Epoch(1),
         vec![
@@ -71,7 +72,7 @@ async fn proof() {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(artifact_path.parent().unwrap());
-    roster::Artifact::write(&artifact_path, &signet, &doc)
+    roster::Artifact::write(&artifact_path, signet.identity(), &doc)
         .await
         .unwrap();
     let artifact = Arc::new(roster::Artifact::open(artifact_path.clone()).await.unwrap());
@@ -80,7 +81,7 @@ async fn proof() {
     // handler the product `serve` path adds.
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
-    let signet_id = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let signet_id = TestRoot::seeded(SIGNET).node_id();
     tokio::task::spawn_local(async move {
         // The gate plus the `roster` route, bound by value through the same per-entry edge the product
         // `serve` path uses for `roster=roster:`.
@@ -102,7 +103,7 @@ async fn proof() {
     // A MEMBER pulls the roster: open the gated service, read the blob to EOF, decode, and VERIFY against the
     // signet it trusts. The blob is self-delimiting + signature-checked, so a valid pull yields the doc.
     let member = Node::new(MemTransport::bind(), NoDiscovery);
-    let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
+    let member_badge = signet_badge(SIGNET, member.node_id());
     let session = Connector::to_node(
         host_id,
         "roster".parse().unwrap(),
@@ -121,7 +122,7 @@ async fn proof() {
         .await
         .expect("read the roster blob");
 
-    let verified = roster::verify(&bytes, signet.verifying_key())
+    let verified = roster::verify(&bytes, signet.verify_key())
         .expect("the roster is signed by the signet we trust");
 
     // Hydrate contacts from the VERIFIED doc and see the whole fleet under `me`, with no id copied by hand.
@@ -157,7 +158,7 @@ async fn proof() {
             .await
             .unwrap();
     });
-    let member_badge = signet_badge(&SIGNET_SECRET, member.node_id());
+    let member_badge = signet_badge(SIGNET, member.node_id());
     let session = Connector::to_node(
         bare_id,
         "roster".parse().unwrap(),
@@ -171,7 +172,7 @@ async fn proof() {
     let mut bytes = Vec::new();
     recv.read_to_end(&mut bytes).await.expect("the read lands");
     assert_eq!(
-        roster::verify(&bytes, signet.verifying_key()),
+        roster::verify(&bytes, signet.verify_key()),
         Err(roster::RosterVerifyError::Empty),
         "a node that has cut nothing is its OWN condition; reporting it as a signature failure sends \
          the operator hunting a forgery that is not there"
@@ -180,7 +181,7 @@ async fn proof() {
     // A STRANGER (a badge rooted at a key the gate never trusts) is refused at the gated roster service, so
     // it never reads the member set (delib-28 containment).
     let stranger = Node::new(MemTransport::bind(), NoDiscovery);
-    let stranger_badge = signet_badge(&[3u8; 32], stranger.node_id());
+    let stranger_badge = signet_badge(3, stranger.node_id());
     let refused = Connector::to_node(
         host_id,
         "roster".parse().unwrap(),
@@ -205,17 +206,9 @@ fn resolve(contacts: &Contacts, addr: &str) -> Vec<NodeId> {
         .collect()
 }
 
-fn signet_badge(secret: &[u8; 32], bound: NodeId) -> String {
-    Identity::from_secret(secret)
-        .unwrap()
-        .mint_member(
-            bound.verify_key(),
-            nauthy::Request::expires_in(Duration::from_secs(300)),
-        )
-        .unwrap()
-        .seal()
-        .unwrap()
-        .link()
+fn signet_badge(signer: u8, bound: NodeId) -> String {
+    TestRoot::seeded(signer)
+        .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .unwrap()
         .to_string()
 }

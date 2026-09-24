@@ -222,8 +222,11 @@ mod tests {
     /// A real signet-signed membership badge, so a token test carries what the product carries: the badge
     /// field is a parsed `sheer:` link now, and a stand-in string would only prove the parser is lenient.
     fn badge() -> Link {
-        crate::identity::Secret::ephemeral()
-            .member_badge()
+        crate::testkit::TestRoot::seeded(0xb0)
+            .device_badge(
+                crate::testkit::TestNode::seeded(0xb1).node_id(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
+            )
             .expect("mint a membership badge")
     }
 

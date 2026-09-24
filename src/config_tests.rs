@@ -28,11 +28,14 @@ fn store(tag: &str) -> (Home, PathBuf) {
     (home, dir)
 }
 
-/// A real self-signed membership badge: the store parses what it reads now, so a stand-in string would
+/// A real signed membership badge: the store parses what it reads now, so a stand-in string would
 /// only prove the reader is lenient.
 fn minted_badge() -> Link {
-    Secret::ephemeral()
-        .member_badge()
+    crate::testkit::TestRoot::seeded(0xb0)
+        .device_badge(
+            crate::testkit::TestNode::seeded(0xb1).node_id(),
+            nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
+        )
         .expect("mint a membership badge")
 }
 

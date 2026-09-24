@@ -31,6 +31,7 @@ use swoosh::config;
 use swoosh::credential::Credential;
 use swoosh::home::Home;
 use swoosh::reaching::BindRole;
+use swoosh::testkit::TestRoot;
 use swoosh::transport::PeerHint;
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
@@ -250,16 +251,11 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .expect("the direct hint parses");
     let owner_discovery = PeerHint::discovery(&owner_transport, [owner_hint], &DIALING).discovery;
     let owner = Node::new(owner_transport, owner_discovery);
-    let owner_badge = nauthy::Identity::from_secret(&owner_seed)
-        .unwrap()
-        .mint_member(
-            owner_id.verify_key(),
+    let owner_badge = TestRoot::from_seed(owner_seed)
+        .device_badge(
+            owner_id,
             nauthy::Request::expires_in(Duration::from_secs(300)),
         )
-        .unwrap()
-        .seal()
-        .unwrap()
-        .link()
         .unwrap();
 
     let cancel = CancellationToken::new();

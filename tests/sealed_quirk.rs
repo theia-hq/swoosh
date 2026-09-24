@@ -22,19 +22,19 @@ use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_noise::Noise;
 use bifrost_quirk::Endpoint;
 use measure::Ping;
-use nauthy::{FileDenylist, Identity};
+use nauthy::FileDenylist;
 use swoosh::credential::Credential;
 use swoosh::reaching::BindRole;
+use swoosh::testkit::TestRoot;
 use swoosh::transport::PeerHint;
-use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
 /// The role every node that dials here binds under: it browses the LAN and advertises nothing.
 const DIALING: BindRole = BindRole::Dialing(Credential::Family { present: None });
 
-/// The signet's fixed secret; its ed25519 public half is the signet the family gate trusts, and it roots
-/// every membership badge minted here.
-const SIGNET_SECRET: [u8; 32] = [7u8; 32];
+/// The byte the signet's fixed key is seeded with; its ed25519 public half is the signet the family gate
+/// trusts, and it roots every membership badge minted here.
+const SIGNET: u8 = 7;
 
 /// A fixed 32-byte identity seed, so each end binds and wraps under one deterministic `NodeId`.
 fn seed(byte: u8) -> [u8; 32] {
@@ -54,17 +54,9 @@ async fn sealed(byte: u8) -> Noise<Endpoint> {
 /// and the signet holder self-signs. The gate trusts the signet root and checks the binding against the
 /// session's proven peer, so over the wrapper this is the real device-badge path.
 fn signet_badge(bound: NodeId) -> String {
-    Identity::from_secret(&SIGNET_SECRET)
-        .expect("the signet identity")
-        .mint_member(
-            bound.verify_key(),
-            nauthy::Request::expires_in(Duration::from_secs(300)),
-        )
+    TestRoot::seeded(SIGNET)
+        .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
         .expect("mint a member badge")
-        .seal()
-        .expect("seal the badge")
-        .link()
-        .expect("render the badge link")
         .to_string()
 }
 
@@ -82,7 +74,7 @@ async fn empty_denylist(tag: &str) -> FileDenylist {
 
 /// The rooted gate both cases share: the same assembly `swoosh serve` binds for its diagnostics.
 async fn gated_exposer(tag: &str) -> tightbeam::tunnel::Exposer {
-    let signet = NodeId::from_ed25519_secret(&SIGNET_SECRET);
+    let signet = TestRoot::seeded(SIGNET).node_id();
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist(tag).await)
         .expect("the signet-rooted gate resolves");
     swoosh::serve::diagnostics(Router::new(gate), &[])
