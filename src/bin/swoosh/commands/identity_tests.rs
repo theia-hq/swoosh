@@ -25,7 +25,7 @@ fn an_adopted_device_reports_its_signet_and_its_badge_life() {
         Path::new("/home/me/.config/swoosh/identity.key"),
         Method::Passphrase,
         Some(signet),
-        Some(badge::Standing::Live { left: 34 * DAY }),
+        Some(badge::Expiry::Live { left: 34 * DAY }),
     );
     assert_eq!(
         out,
@@ -46,7 +46,7 @@ fn a_dead_badge_says_so_and_says_when() {
         Path::new("/k"),
         Method::Plain,
         Some(NodeId::from_ed25519_secret(&[8u8; 32])),
-        Some(badge::Standing::Expired { ago: 6 * DAY }),
+        Some(badge::Expiry::Expired { ago: 6 * DAY }),
     );
     assert!(
         out.contains("badge: expired 6d ago\n"),
@@ -75,7 +75,7 @@ fn an_unreadable_expiry_renders_as_unknown() {
         Path::new("/k"),
         Method::Plain,
         Some(NodeId::from_ed25519_secret(&[8u8; 32])),
-        Some(badge::Standing::Unknown),
+        Some(badge::Expiry::Unknown),
     );
     assert!(
         out.contains("badge: expiry unknown"),

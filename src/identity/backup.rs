@@ -137,7 +137,7 @@ pub fn restore(
     let file = key_file(home);
     let staged = Stage::write(file.path(), &backup.bytes)?;
     // The copy is read at its stage, so a refusal names the backup the user gave, not the stage.
-    let locked = match KeyFile::from(staged.path())
+    let locked = match KeyFile::device(staged.path())
         .load()
         .wrap_err_with(|| format!("{} is not a backup this build can read", from.display()))?
     {
