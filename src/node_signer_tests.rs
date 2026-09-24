@@ -50,22 +50,27 @@ fn every_slip_lasts_the_lifetime_it_is_given() {
     let key = TestNode::seeded(7).verify_key();
     let week = Duration::from_secs(7 * 24 * 3600);
     let seven_hours = Duration::from_secs(7 * 3600);
-    for bind in [Bind::Anyone, Bind::Device(key), Bind::Fleet(key)] {
+    for (bind, delegation) in [
+        (Bind::Anyone, Delegation::Sealed),
+        (Bind::Anyone, Delegation::Delegable),
+        (Bind::Device(key), Delegation::Sealed),
+        (Bind::Fleet(key), Delegation::Sealed),
+    ] {
         let mut expiries = Vec::new();
         for lifetime in [seven_hours, week] {
             let before = SystemTime::now();
-            let link = mint_for(&secret, bind, lifetime, Delegation::Sealed).expect("mint");
+            let link = mint_for(&secret, bind, lifetime, delegation).expect("mint");
             let after = SystemTime::now();
             let expiry = expiry_of(&link);
             assert!(
                 expiry + Duration::from_secs(1) >= before + lifetime && expiry <= after + lifetime,
-                "{bind:?} slip asked for {lifetime:?} expires at {expiry:?}"
+                "{bind:?} {delegation:?} slip asked for {lifetime:?} expires at {expiry:?}"
             );
             expiries.push(expiry);
         }
         assert_ne!(
             expiries[0], expiries[1],
-            "{bind:?} slips with different lifetimes expire apart"
+            "{bind:?} {delegation:?} slips with different lifetimes expire apart"
         );
     }
 }
