@@ -5,8 +5,14 @@
 //! sign one with no one's leave, and why it may sign nothing wider: no membership badge, no device
 //! standing, no fleet document.
 //!
-//! Reading a [`Secret`] as a signing `nauthy::Identity` is private to this module, so a slip is minted
-//! through [`NodeSigner::mint_slip`] and nowhere else.
+//! A slip is minted only through [`NodeSigner::mint_slip`]. The helper here that reads a [`Secret`] as a
+//! signing `nauthy::Identity`, `cap_identity`, is private to this module.
+//!
+//! That is not yet a guarantee that the key cannot be read as a signer elsewhere: [`Secret::with_bytes`]
+//! is public, so `secret.with_bytes(nauthy::Identity::from_secret)` still compiles anywhere until the
+//! `disallowed-methods` ban on `from_secret` lands (U22). Its interim callers are
+//! [`Secret::member_badge`] (removed in U13), [`Secret::sign_device_badge`] (U17) and the `recut`
+//! command (U13).
 //!
 //! ```
 //! use swoosh::grants::Delegation;
@@ -25,7 +31,7 @@
 //! # Ok::<(), Box<dyn core::error::Error>>(())
 //! ```
 //!
-//! The same secret cannot be read as a signing identity from outside:
+//! The helper is not callable from outside:
 //!
 //! ```compile_fail,E0624
 //! let secret = swoosh::identity::Secret::ephemeral();

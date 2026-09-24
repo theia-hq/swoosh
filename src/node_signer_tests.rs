@@ -23,7 +23,51 @@ fn key_of(secret: &Secret) -> VerifyKey {
 }
 
 fn mint(secret: &Secret, bind: Bind, delegation: Delegation) -> Result<Link, SlipError> {
-    NodeSigner::from(secret).mint_slip(&ssh(), bind, HOUR, delegation)
+    mint_for(secret, bind, HOUR, delegation)
+}
+
+fn mint_for(
+    secret: &Secret,
+    bind: Bind,
+    lifetime: Duration,
+    delegation: Delegation,
+) -> Result<Link, SlipError> {
+    NodeSigner::from(secret).mint_slip(&ssh(), bind, lifetime, delegation)
+}
+
+fn expiry_of(link: &Link) -> SystemTime {
+    link.cap()
+        .expiry()
+        .expect("reads")
+        .expect("the slip carries its expiry")
+}
+
+/// Every kind of slip lasts the lifetime it is asked for, not a default: two lifetimes, neither an hour,
+/// give each its own expiry, to the second it is recorded in.
+#[test]
+fn every_slip_lasts_the_lifetime_it_is_given() {
+    let secret = Secret::ephemeral();
+    let key = TestNode::seeded(7).verify_key();
+    let week = Duration::from_secs(7 * 24 * 3600);
+    let seven_hours = Duration::from_secs(7 * 3600);
+    for bind in [Bind::Anyone, Bind::Device(key), Bind::Fleet(key)] {
+        let mut expiries = Vec::new();
+        for lifetime in [seven_hours, week] {
+            let before = SystemTime::now();
+            let link = mint_for(&secret, bind, lifetime, Delegation::Sealed).expect("mint");
+            let after = SystemTime::now();
+            let expiry = expiry_of(&link);
+            assert!(
+                expiry + Duration::from_secs(1) >= before + lifetime && expiry <= after + lifetime,
+                "{bind:?} slip asked for {lifetime:?} expires at {expiry:?}"
+            );
+            expiries.push(expiry);
+        }
+        assert_ne!(
+            expiries[0], expiries[1],
+            "{bind:?} slips with different lifetimes expire apart"
+        );
+    }
 }
 
 /// A sealed bearer slip grants its service to anyone at this machine's key, for its lifetime, and cannot
