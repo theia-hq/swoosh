@@ -12,7 +12,7 @@ use crate::passphrase::Scripted;
 
 /// The node a sealed file at `path` opens as under `passphrase`.
 fn opens_as(path: &Path, passphrase: &'static str) -> bifrost::NodeId {
-    let Some(Stored::Locked(locked)) = KeyFile::from(path).load().expect("load") else {
+    let Some(Stored::Locked(locked)) = KeyFile::device(path).load().expect("load") else {
         panic!("{} is not sealed", path.display());
     };
     let passphrase =

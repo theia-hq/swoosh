@@ -47,7 +47,7 @@ impl Stage {
             path: sibling(target),
             published: false,
         };
-        KeyFile::from(stage.path.as_path()).write(secret, Protection::Passphrase(passphrase))?;
+        KeyFile::device(stage.path.as_path()).write(secret, Protection::Passphrase(passphrase))?;
         let bytes = Zeroizing::new(fs::read(&stage.path)?);
         Ok((stage, bytes))
     }

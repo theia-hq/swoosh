@@ -5,7 +5,7 @@
 use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{RENEWAL_WINDOW, Standing};
+use super::{DEVICE_WARN_WINDOW, Expiry};
 use crate::identity::{DEVICE_BADGE_TTL, Secret};
 
 /// A day, the unit the window and the TTL are both expressed in.
@@ -17,15 +17,14 @@ fn now() -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(1_788_400_000)
 }
 
-/// The warning window is the LAST THIRD of the badge's life, not a fortnight: the remedy needs a cold
-/// root warmed and a second machine, so the operator is told with time to do it. A fresh badge is
-/// therefore `Live`, and the day it enters the window it starts saying so.
+/// The warning window is the last fortnight of the badge's life, well short of the whole of it: a
+/// fresh badge is therefore `Live`, and the day it enters the window it starts saying so.
 #[test]
-fn the_window_is_thirty_days_of_a_ninety_day_badge() {
-    assert_eq!(RENEWAL_WINDOW, 30 * DAY);
+fn the_window_is_fourteen_days_of_a_ninety_day_badge() {
+    assert_eq!(DEVICE_WARN_WINDOW, 14 * DAY);
     assert_eq!(DEVICE_BADGE_TTL, 90 * DAY);
     assert!(
-        RENEWAL_WINDOW < DEVICE_BADGE_TTL,
+        DEVICE_WARN_WINDOW < DEVICE_BADGE_TTL,
         "a window at or past the TTL would warn from the moment the badge is minted, which warns about \
          nothing"
     );
@@ -37,22 +36,25 @@ fn the_window_is_thirty_days_of_a_ninety_day_badge() {
 #[test]
 fn the_window_edge_is_inside_the_warning() {
     assert_eq!(
-        Standing::at(Some(now() + RENEWAL_WINDOW + Duration::from_secs(1)), now()),
-        Standing::Live {
-            left: RENEWAL_WINDOW + Duration::from_secs(1)
+        Expiry::at(
+            Some(now() + DEVICE_WARN_WINDOW + Duration::from_secs(1)),
+            now()
+        ),
+        Expiry::Live {
+            left: DEVICE_WARN_WINDOW + Duration::from_secs(1)
         },
         "a badge outside the window says nothing"
     );
     assert_eq!(
-        Standing::at(Some(now() + RENEWAL_WINDOW), now()),
-        Standing::Expiring {
-            left: RENEWAL_WINDOW
+        Expiry::at(Some(now() + DEVICE_WARN_WINDOW), now()),
+        Expiry::Expiring {
+            left: DEVICE_WARN_WINDOW
         },
         "the boundary day warns: rounding it the other way silently costs the operator a day"
     );
     assert_eq!(
-        Standing::at(Some(now() + DAY), now()),
-        Standing::Expiring { left: DAY }
+        Expiry::at(Some(now() + DAY), now()),
+        Expiry::Expiring { left: DAY }
     );
 }
 
@@ -62,14 +64,14 @@ fn the_window_edge_is_inside_the_warning() {
 #[test]
 fn an_expired_badge_still_reports_when_it_died() {
     assert_eq!(
-        Standing::at(Some(now() - 6 * DAY), now()),
-        Standing::Expired { ago: 6 * DAY }
+        Expiry::at(Some(now() - 6 * DAY), now()),
+        Expiry::Expired { ago: 6 * DAY }
     );
     // The instant of expiry itself is not yet past: the datalog check is `$t <= expiry`, so the badge is
     // still admissible at exactly that moment and this must not call it dead.
     assert_eq!(
-        Standing::at(Some(now()), now()),
-        Standing::Expiring {
+        Expiry::at(Some(now()), now()),
+        Expiry::Expiring {
             left: Duration::ZERO
         }
     );
@@ -79,27 +81,27 @@ fn an_expired_badge_still_reports_when_it_died() {
 /// `Live` would silently disarm every surface for exactly the badges minted before the fact existed.
 #[test]
 fn an_unreadable_expiry_is_its_own_state() {
-    assert_eq!(Standing::at(None, now()), Standing::Unknown);
+    assert_eq!(Expiry::at(None, now()), Expiry::Unknown);
 }
 
 /// The rendered fragment every surface prints, in the same span vocabulary the issuer side already uses
 /// (`grant ls` / `invite ls`), so one badge reads the same on the device and on the signet machine.
 #[test]
-fn a_standing_renders_as_a_span_in_the_ledger_vocabulary() {
+fn an_expiry_renders_as_a_span_in_the_ledger_vocabulary() {
     assert_eq!(
-        Standing::Live { left: 34 * DAY }.to_string(),
+        Expiry::Live { left: 34 * DAY }.to_string(),
         "expires in 34d"
     );
     assert_eq!(
-        Standing::Expiring { left: 12 * DAY }.to_string(),
+        Expiry::Expiring { left: 12 * DAY }.to_string(),
         "expires in 12d"
     );
     assert_eq!(
-        Standing::Expired { ago: 6 * DAY }.to_string(),
+        Expiry::Expired { ago: 6 * DAY }.to_string(),
         "expired 6d ago"
     );
     assert!(
-        Standing::Unknown.to_string().contains("unknown"),
+        Expiry::Unknown.to_string().contains("unknown"),
         "the unreadable case must read as unknown, never as a span"
     );
 }
@@ -114,9 +116,9 @@ fn a_real_signed_badge_reads_its_own_minted_expiry() {
     let badge = signet
         .sign_device_badge(device.node_id(), DEVICE_BADGE_TTL)
         .expect("sign a device badge");
-    let standing = Standing::read(&badge, SystemTime::now()).expect("read the badge's own expiry");
-    let Standing::Live { left } = standing else {
-        panic!("a freshly minted 90-day badge is live, got {standing:?}");
+    let expiry = Expiry::read(&badge, SystemTime::now()).expect("read the badge's own expiry");
+    let Expiry::Live { left } = expiry else {
+        panic!("a freshly minted 90-day badge is live, got {expiry:?}");
     };
     assert!(
         left > DEVICE_BADGE_TTL - DAY && left <= DEVICE_BADGE_TTL,
