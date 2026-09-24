@@ -93,17 +93,6 @@ impl Secret {
         self.0.node_id()
     }
 
-    /// The cap-signing identity rooted at this secret: the same key, read as a nauthy [`Identity`] that
-    /// can mint and verify capabilities. Borrows, so the secret stays owned here and zeroizes on drop.
-    ///
-    /// This is what lets the signet holder SELF-SIGN a membership badge when it dials a family-gated node
-    /// (`invite add` signs a device's badge; `swoosh ssh` self-signs its own): the badge roots at this key, the
-    /// same key the dial binds under, so the gate's device-binding matches. Mirrors tightbeam's
-    /// `Secret::cap_identity`, the exposer side of the same seam.
-    pub fn cap_identity(&self) -> eyre::Result<nauthy::Identity> {
-        Ok(self.0.with_bytes(nauthy::Identity::from_secret)?)
-    }
-
     /// Self-sign a membership badge for THIS identity: a short-lived cap carrying a `member(true)` fact in
     /// its authority block, rooted at this key and bound to this key's own node id. The `member(true)` fact
     /// is what a family gate reads as membership; because biscuit trusts only authority-block facts, it
@@ -117,7 +106,7 @@ impl Secret {
         // Minted fresh each dial, so a few minutes is ample and bounds a leaked in-flight badge.
         let ttl = Duration::from_secs(5 * 60);
         Ok(self
-            .cap_identity()?
+            .with_bytes(nauthy::Identity::from_secret)?
             .mint_member(
                 self.node_id().verify_key(),
                 nauthy::Request::expires_in(ttl),
@@ -157,7 +146,7 @@ impl Secret {
         ttl: core::time::Duration,
     ) -> eyre::Result<Link> {
         Ok(self
-            .cap_identity()?
+            .with_bytes(nauthy::Identity::from_secret)?
             .mint_member(device.verify_key(), nauthy::Request::expires_in(ttl))?
             .seal()?
             .link()?)
