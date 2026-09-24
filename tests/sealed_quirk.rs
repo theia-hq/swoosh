@@ -23,9 +23,14 @@ use bifrost_noise::Noise;
 use bifrost_quirk::Endpoint;
 use measure::Ping;
 use nauthy::{FileDenylist, Identity};
+use swoosh::credential::Credential;
+use swoosh::reaching::BindRole;
 use swoosh::transport::PeerHint;
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
+
+/// The role every node that dials here binds under: it browses the LAN and advertises nothing.
+const DIALING: BindRole = BindRole::Dialing(Credential::Family { present: None });
 
 /// The signet's fixed secret; its ed25519 public half is the signet the family gate trusts, and it roots
 /// every membership badge minted here.
@@ -102,7 +107,7 @@ async fn a_gated_dial_rides_the_sealed_wrapper_over_loopback_quirk() {
     let hint: PeerHint = format!("{host_id}={}", addr.hints[0])
         .parse()
         .expect("the direct hint parses");
-    let discovery = PeerHint::discovery(&member_transport, [hint]).discovery;
+    let discovery = PeerHint::discovery(&member_transport, [hint], &DIALING).discovery;
     let member = Node::new(member_transport, discovery);
     let badge = signet_badge(member.node_id());
 
