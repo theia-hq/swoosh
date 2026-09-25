@@ -243,8 +243,8 @@ pub enum RootError {
     },
     /// A new key was asked for a device that made its own.
     #[error(
-        "me/{name} keeps its own key; renew it without --new-key. For a new key, on that machine: swoosh \
-        leave --new-key, then invite the new key."
+        "me/{name} keeps its own key; renew it without --new-key. For a new key: on it, swoosh leave \
+        --new-key; then here, swoosh revoke me/{name} and invite the new key."
     )]
     KeepsOwnKey {
         /// The device.
@@ -456,12 +456,41 @@ pub struct Inspected {
     pub state: State,
     /// The crash states the standing read finished on the way, for the command to print.
     pub finished: Vec<Finished>,
+    /// The rows as the next act that cuts would find them before its prompt, read-only: brought forward
+    /// from the update held here and any fork of it, with this machine's own revocations, and every row
+    /// whose key is revoked marked.
+    forward: Vec<Row>,
 }
 
 impl Inspected {
+    /// The rows as the next act that cuts would sign from them: the records brought forward, read-only.
+    pub fn rows(&self) -> &[Row] {
+        &self.forward
+    }
+
     /// The rows due to renew at `now`: what the next act that cuts renews on its own.
     pub fn due(&self, now: u64) -> impl Iterator<Item = &Row> {
-        self.state.rows().iter().filter(move |row| due(row, now))
+        self.forward.iter().filter(move |row| due(row, now))
+    }
+}
+
+/// The records of a root whose making or restore was interrupted, as [`Root::mint`] finds them before it
+/// finishes: read with no lock, no prompt and no write, for a check that must refuse before either.
+#[derive(Debug)]
+pub struct HalfMade {
+    book: Book,
+    own: Option<VerifyKey>,
+    now: u64,
+}
+
+impl HalfMade {
+    /// The records, for a check before the prompt.
+    pub fn records(&self) -> Records<'_> {
+        Records {
+            book: &self.book,
+            own: self.own,
+            now: self.now,
+        }
     }
 }
 
@@ -690,18 +719,12 @@ impl Root {
         let pin = found.header.verify_key()?;
         let book = Book::from(state::load(&found.dir, pin)?);
         let now = unix_now();
-        let Some((held, _)) = read_held(&home.roster(), pin) else {
+        let (forward, held) = book.read_forward(home, pin, now)?;
+        let Some(held) = held else {
             return Ok(None);
         };
-        let fork = read_held(&home.roster_fork(), pin);
-        let mut forward = book.clone();
-        let mut brought = Brought::default();
-        for update in core::iter::once(&held).chain(fork.iter().map(|(fork, _)| fork)) {
-            forward.bring_forward(update, now, &mut brought);
-        }
-        forward.carry_forward(home, Some(&held))?;
-        forward.follow_keys(now);
-        if forward != book || book.lacks(&held, now) || book.rows.iter().any(|row| due(row, now)) {
+        if forward != book || book.lacks(&held, now) || forward.rows.iter().any(|row| due(row, now))
+        {
             return Ok(None);
         }
         let Some(row) = book.live().find(|row| &row.label == name) else {
@@ -717,10 +740,24 @@ impl Root {
     /// staged `state.new` is read, never promoted.
     pub async fn inspect(home: &Home, place: RootPlace) -> Result<Inspected, RootError> {
         let found = find(home, &place, None).await?;
+        let pin = found.header.verify_key()?;
+        let state = state::load(&found.dir, pin)?;
+        let (forward, _) = Book::from(state.clone()).read_forward(home, pin, unix_now())?;
         Ok(Inspected {
             root: found.header,
-            state: state::load(&found.dir, found.header.verify_key()?)?,
+            state,
             finished: found.finished,
+            forward: forward.rows,
+        })
+    }
+
+    /// The records of the root whose making or restore was interrupted here, the one `root_key` names.
+    pub fn half_made(home: &Home, root_key: NodeId) -> Result<HalfMade, RootError> {
+        let state = state::load(&home.root(), root_key.verify_key()?)?;
+        Ok(HalfMade {
+            book: Book::from(state),
+            own: own_key(home)?,
+            now: unix_now(),
         })
     }
 
@@ -1120,25 +1157,9 @@ impl Act {
         let pin = self.key.verify_key()?;
         self.held = read_held(&self.home.roster(), pin);
         let fork = read_held(&self.home.roster_fork(), pin);
-        let behind = self
-            .held
-            .as_ref()
-            .is_some_and(|(held, _)| held.epoch() > self.book.last_update);
-        let applies = behind || fork.is_some();
-        let mut brought = Brought::default();
-        if applies {
-            let updates = self
-                .held
-                .iter()
-                .chain(fork.iter())
-                .map(|(update, _)| update);
-            for update in updates {
-                self.book.bring_forward(update, self.now, &mut brought);
-            }
-        }
         let held = self.held.as_ref().map(|(held, _)| held);
-        self.book.carry_forward(&self.home, held)?;
-        brought.marked += self.book.follow_keys(self.now);
+        let fork_doc = fork.as_ref().map(|(fork, _)| fork);
+        let (brought, behind) = self.book.forward(&self.home, held, fork_doc, self.now)?;
         // A fork that adds nothing is no news; a copy behind the held update always says so.
         if behind || (fork.is_some() && brought.any()) {
             brought.print(out);
@@ -1150,16 +1171,13 @@ impl Act {
     fn list_renewals(&mut self, out: &mut impl Write) {
         let mut skipped = Vec::new();
         for row in &self.book.rows {
-            if !Book::renews_on_its_own(row, self.now) {
-                continue;
-            }
-            let live = row.ids.iter().filter(|id| id.expires > self.now);
-            if live.clone().count() >= MAX_IDS {
+            if due(row, self.now) {
+                self.due.push(row.key);
+            } else if Book::renews_on_its_own(row, self.now) {
+                let live = row.ids.iter().filter(|id| id.expires > self.now);
                 let newest = live.map(|id| id.expires).max().unwrap_or(row.until);
                 skipped.push((row.label.clone(), newest));
-                continue;
             }
-            self.due.push(row.key);
         }
         let names: Vec<String> = self
             .book
@@ -1722,6 +1740,43 @@ impl Book {
                 }
             }
         }
+    }
+
+    /// Bring these records forward as an act that cuts does before its prompt: from `held` and `fork` when
+    /// they are behind `held` or a fork is held, then this machine's own revocations, then every row whose
+    /// key is revoked marked. What it brought, and whether the records were behind `held`.
+    fn forward(
+        &mut self,
+        home: &Home,
+        held: Option<&RosterDoc>,
+        fork: Option<&RosterDoc>,
+        now: u64,
+    ) -> Result<(Brought, bool), RootError> {
+        let behind = held.is_some_and(|held| held.epoch() > self.last_update);
+        let mut brought = Brought::default();
+        if behind || fork.is_some() {
+            for update in held.into_iter().chain(fork) {
+                self.bring_forward(update, now, &mut brought);
+            }
+        }
+        self.carry_forward(home, held)?;
+        brought.marked += self.follow_keys(now);
+        Ok((brought, behind))
+    }
+
+    /// A copy of these records brought [`forward`](Self::forward) from what `home` holds of the root
+    /// `pin`, read with no lock and no write; and the update held, if any.
+    fn read_forward(
+        &self,
+        home: &Home,
+        pin: VerifyKey,
+        now: u64,
+    ) -> Result<(Self, Option<RosterDoc>), RootError> {
+        let held = read_held(&home.roster(), pin).map(|(held, _)| held);
+        let fork = read_held(&home.roster_fork(), pin).map(|(fork, _)| fork);
+        let mut forward = self.clone();
+        forward.forward(home, held.as_ref(), fork.as_ref(), now)?;
+        Ok((forward, held))
     }
 
     /// Add to these records' revocations the ids in `home`'s `revoked` that are the root's own (a row's,

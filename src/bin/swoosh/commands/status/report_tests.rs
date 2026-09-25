@@ -343,7 +343,7 @@ fn use_your_root_now_counts_devices_as_quoted() {
         revoked_on: 0,
     };
     assert_eq!(
-        super::use_your_root(&[due], now).as_deref(),
+        super::use_your_root(&[due], now, 1).as_deref(),
         Some("use your root now: swoosh invite (1 devices due)")
     );
 }
@@ -473,6 +473,44 @@ async fn status_warns_before_a_key_carrying_invite_ends() {
              runner summoned from a secret): swoosh invite ci --new-key, then set its secret again.",
             Date(now + 10 * DAY)
         )],
+        "{out}"
+    );
+}
+
+/// Where the root is kept, "use your root now" counts what the renewal renews: a device in its window with
+/// four renewals in force is skipped by the renewal, so it is not counted.
+#[tokio::test]
+async fn status_counts_only_what_the_renewal_renews() {
+    let now = unix_now();
+    let id = |byte: u8, expires| swoosh::roster::Id {
+        expires,
+        id: RevocationId::from_bytes(vec![byte; 64]),
+    };
+    let home = home("due-count");
+    holds_rows(
+        &home,
+        vec![
+            Row {
+                until: now + 20 * DAY,
+                ids: vec![
+                    id(1, now + 5 * DAY),
+                    id(2, now + 10 * DAY),
+                    id(3, now + 15 * DAY),
+                    id(4, now + 20 * DAY),
+                ],
+                ..row(LAPTOP, "laptop")
+            },
+            Row {
+                until: now + 20 * DAY,
+                ..row(0x43, "nas")
+            },
+        ],
+    )
+    .await;
+    let out = status(&home).await;
+    assert!(
+        out.lines()
+            .any(|line| line == "use your root now: swoosh invite (1 devices due)"),
         "{out}"
     );
 }

@@ -143,6 +143,7 @@ impl Report {
         now: u64,
     ) -> eyre::Result<()> {
         let mut carrying = Vec::new();
+        let due;
         let (rows, until) = match standing {
             Standing::Unpinned => {
                 self.root = vec![
@@ -169,13 +170,14 @@ impl Report {
                      or serves."
                         .to_owned(),
                 ];
-                // Another copy of the root may have revoked a device since the last act here: the update this
-                // machine holds says so before the records do.
-                let held = pin
-                    .verify_key()
-                    .ok()
-                    .and_then(|root| roster::held(home, root));
-                let revoked_elsewhere = held.as_ref().map_or(&[][..], |held| held.revoked_keys());
+                // Another copy of the root, or this machine, may have revoked a device since the last act
+                // here: the records as the next act would bring them forward say so before the stored ones do.
+                let revoked_forward = |key: VerifyKey| {
+                    inspected
+                        .rows()
+                        .iter()
+                        .any(|row| row.key == key && row.is_revoked())
+                };
                 let rows: Vec<DeviceRow> = inspected
                     .state
                     .rows()
@@ -188,11 +190,12 @@ impl Report {
                         seeded: row.seeded,
                         revoked: row.revoked_on != 0
                             || inspected.state.revoked_keys().contains(&row.key)
-                            || revoked_elsewhere.contains(&row.key),
+                            || revoked_forward(row.key),
                         revoked_on: row.revoked_on,
                     })
                     .collect();
                 self.devices("devices:".to_owned(), &rows, now);
+                due = inspected.due(now).count();
                 carrying = rows
                     .iter()
                     .zip(inspected.state.rows())
@@ -233,6 +236,12 @@ impl Report {
                     .unwrap_or_default();
                 let title = format!("devices (as of the last sync, {}):", sync::ago(home));
                 self.devices(title, &rows, now);
+                due = rows
+                    .iter()
+                    .filter(|row| !row.revoked && row.until > now)
+                    .filter_map(|row| swoosh::root::renew_by(row.until, row.duration, row.seeded))
+                    .filter(|by| *by <= now)
+                    .count();
                 (rows, until)
             }
         };
@@ -249,7 +258,7 @@ impl Report {
             "this machine: {me}, your device until {}",
             Date(until)
         ));
-        self.nags.extend(use_your_root(&rows, now));
+        self.nags.extend(use_your_root(&rows, now, due));
         let name = name.map_or_else(|| "<name>".to_owned(), |name| name.to_string());
         if until <= now {
             self.nags.push(format!(
@@ -437,24 +446,24 @@ fn not_here(home: &Home, root: NodeId) -> String {
     }
 }
 
-/// "use your root by <date>", the earliest day a device of the root falls due to renew, or, once that
-/// day has passed, how many are due. Nothing when no device renews on its own.
-fn use_your_root(rows: &[DeviceRow], now: u64) -> Option<String> {
-    let due: Vec<u64> = rows
+/// "use your root by <date>", the earliest day a device of the root falls due to renew; or, while `due`
+/// devices are due, how many. Nothing when no device renews on its own. `due` is counted by the caller:
+/// where the root is kept, by the same test the renewal runs.
+fn use_your_root(rows: &[DeviceRow], now: u64, due: usize) -> Option<String> {
+    if due > 0 {
+        return Some(format!(
+            "use your root now: swoosh invite ({due} devices due)"
+        ));
+    }
+    let earliest = rows
         .iter()
         .filter(|row| !row.revoked && row.until > now)
         .filter_map(|row| swoosh::root::renew_by(row.until, row.duration, row.seeded))
-        .collect();
-    let earliest = due.iter().min()?;
-    if now < *earliest {
-        return Some(format!(
-            "use your root by {}: swoosh invite (it lists what is due)",
-            Date(*earliest)
-        ));
-    }
-    let count = due.iter().filter(|by| **by <= now).count();
+        .filter(|by| *by > now)
+        .min()?;
     Some(format!(
-        "use your root now: swoosh invite ({count} devices due)"
+        "use your root by {}: swoosh invite (it lists what is due)",
+        Date(earliest)
     ))
 }
 

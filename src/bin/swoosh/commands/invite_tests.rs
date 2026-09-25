@@ -47,6 +47,10 @@ const TV: u8 = 0x44;
 const CI: u8 = 0x45;
 /// A device the root revoked.
 const OLD: u8 = 0x46;
+/// A device another copy of the root revoked.
+const PAD: u8 = 0x47;
+/// A device revoked on this machine only.
+const WATCH: u8 = 0x48;
 /// A person in the address book.
 const ALICE: u8 = 0x51;
 
@@ -536,7 +540,13 @@ async fn invite_new_key_on_a_self_keyed_device_refuses() {
     .await;
     let before = snapshot(home.dir());
     let ran = invite(&home, &["laptop", "--new-key"]).await;
-    refused_before_writing(&ran, "swoosh leave --new-key", &home, &before);
+    refused_before_writing(
+        &ran,
+        "me/laptop keeps its own key; renew it without --new-key. For a new key: on it, swoosh leave \
+         --new-key; then here, swoosh revoke me/laptop and invite the new key.",
+        &home,
+        &before,
+    );
 }
 
 #[tokio::test]
@@ -565,7 +575,64 @@ fn invite_refuses_a_name_outside_the_rule() {
         let error = Cli::try_parse_from(["invite", bad, key.as_str()])
             .expect_err("a name outside the rule is refused");
         assert_eq!(error.exit_code(), 2, "{bad}: a usage error");
+        let rule = bad.parse::<DeviceLabel>().unwrap_err().to_string();
+        assert!(
+            error.to_string().contains(&rule),
+            "{bad}: the rule's line: {error}"
+        );
     }
+    let error = Cli::try_parse_from(["invite", "bad.name", key.as_str()]).unwrap_err();
+    assert!(
+        error.to_string().contains(
+            "bad.name is not a name: a name uses a-z, 0-9 and -, and starts with a letter or digit."
+        ),
+        "{error}"
+    );
+}
+
+/// Text that is a key is never a name: typed where the name goes, it is refused, naming the form that
+/// takes a key; one nobody can hold is refused with the line every typed key refuses with.
+#[test]
+fn invite_refuses_a_key_typed_as_the_name() {
+    let key = node(TV).to_string();
+    for args in [vec![key.as_str()], vec![key.as_str(), "--new-key"]] {
+        let error = Cli::try_parse_from(core::iter::once("invite").chain(args))
+            .expect_err("a key is not a name");
+        assert_eq!(error.exit_code(), 2, "a usage error");
+        assert!(
+            error.to_string().contains(&format!(
+                "{key} is a key, not a name: swoosh invite <name> {key}"
+            )),
+            "{error}"
+        );
+    }
+    let torsioned = swoosh::testkit::torsioned_text();
+    let error = Cli::try_parse_from(["invite", torsioned.as_str()]).unwrap_err();
+    assert_eq!(error.exit_code(), 2);
+    assert!(
+        error.to_string().contains(&format!(
+            "{torsioned} is not a usable key: carries a torsion component"
+        )),
+        "{error}"
+    );
+}
+
+/// A torsioned key is refused as the key an invite admits, naming the check it failed, never read as a
+/// name to renew.
+#[test]
+fn a_torsioned_key_is_refused_as_an_invite_key() {
+    let key = swoosh::testkit::torsioned_text();
+    let error = Cli::try_parse_from(["invite", "tv", key.as_str()])
+        .expect_err("a torsioned key is refused");
+    assert_eq!(error.exit_code(), 2, "a typed bad key is a usage error");
+    let error = error.to_string();
+    assert!(
+        error.contains(&format!(
+            "{key} is not a usable key: carries a torsion component"
+        )),
+        "the refusal names the key and the check: {error}"
+    );
+    assert!(!error.contains("to renew"), "{error}");
 }
 
 #[test]
@@ -606,6 +673,29 @@ async fn invite_refuses_on_a_device_without_the_root() {
         &home,
         &before,
     );
+}
+
+/// A root whose making or restore stopped before its pin: what its records refuse is refused before the
+/// passphrase, and nothing is finished or written.
+#[tokio::test]
+async fn invite_refuses_on_a_half_made_root_before_the_prompt() {
+    let home = scratch("half-made");
+    copy(
+        &home.root(),
+        &records(0, &[live(OWN, "desk"), live(LAPTOP, "laptop")], Vec::new()),
+    );
+    let before = snapshot(home.dir());
+    let ran = invite(&home, &["phone"]).await;
+    refused_before_writing(&ran, "you have no device phone.", &home, &before);
+    let ran = invite(&home, &["tv", &node(OWN).to_string()]).await;
+    refused_before_writing(
+        &ran,
+        "that is this machine's key; it is already your device me/desk",
+        &home,
+        &before,
+    );
+    let ran = invite(&home, &["laptop", &node(PHONE).to_string()]).await;
+    refused_before_writing(&ran, "me/laptop is ", &home, &before);
 }
 
 #[tokio::test]
@@ -682,8 +772,25 @@ async fn bare_invite_lists_only_due_devices() {
         lapsed(TV, "tv"),
         carrying(due(CI, "ci")),
         revoked(OLD, "old"),
+        // Due in the records, but revoked by another copy of the root: the update held here says so.
+        due(PAD, "pad"),
+        // Due in the records, but its key revoked on this machine only.
+        due(WATCH, "watch"),
     ];
     holds(&home, &rows, Vec::new()).await;
+    let state = records(1, &rows, Vec::new());
+    let mut keys = state.revoked_keys().to_vec();
+    keys.push(key(PAD));
+    let members = rows
+        .iter()
+        .filter(|row| !row.is_revoked() && row.key != key(PAD))
+        .map(member)
+        .collect();
+    held(
+        &home,
+        &RosterDoc::with_revocations(Epoch(2), members, Vec::new(), keys).unwrap(),
+    );
+    std::fs::write(home.revoked_keys(), format!("{}\n", key(WATCH))).unwrap();
     let ran = invite(&home, &[]).await;
     assert!(ran.result.is_ok(), "{:?}", ran.result);
     assert_eq!(ran.out, "swoosh invite laptop\n");
@@ -1077,6 +1184,55 @@ async fn invite_new_key_refuses_a_row_that_keeps_its_key() {
         "me/laptop keeps its own key; renew it without --new-key.",
         &home,
         &before,
+    );
+}
+
+#[tokio::test]
+async fn invite_new_key_refuses_a_row_at_four_renewals() {
+    let now = now();
+    let home = scratch("new-key-four");
+    let ends = [
+        now + 50 * DAY,
+        now + 55 * DAY,
+        now + 60 * DAY,
+        now + 65 * DAY,
+    ];
+    holds(
+        &home,
+        &[live(OWN, "desk"), carrying(signed(CI, "ci", NINETY, &ends))],
+        Vec::new(),
+    )
+    .await;
+    let before = snapshot(home.dir());
+    let ran = invite(&home, &["ci", "--new-key"]).await;
+    refused_before_writing(
+        &ran,
+        &format!(
+            "me/ci has 4 renewals in force until {}. To hand it a new key now: swoosh revoke me/ci, then \
+             swoosh invite ci --new-key.",
+            Date(ends[0])
+        ),
+        &home,
+        &before,
+    );
+}
+
+#[tokio::test]
+async fn a_key_carrying_invite_says_who_holding_it_becomes() {
+    let home = scratch("keyed-lines");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let ran = invite(&home, &["tv", "--new-key"]).await;
+    assert!(ran.invite().seed.is_some(), "a key-carrying invite");
+    let until = row_of(&kept(&home).await, "tv").until;
+    let date = Date(until);
+    assert_eq!(
+        ran.err,
+        format!(
+            "me/tv will be one of your own devices: it reaches everything your devices serve.\n\
+             me/tv runs 90d from now, until {date} (the default; --expires sets 1h to 365d).\n\
+             anyone holding this invite becomes me/tv until {date}: send it privately.\n\
+             it ends on {date} and is not renewed on its own\n"
+        )
     );
 }
 

@@ -677,8 +677,8 @@ async fn a_signet_only_person_survives_tidy_up_and_reload() {
 
 /// The version counts CHANGES to the `me/*` member set, and nothing else.
 ///
-/// The renewal case is the load-bearing one: `invite add` re-run for a device already on file at the same
-/// key is a quarterly badge renewal, it leaves the member set byte-identical, and bumping there would weld
+/// The renewal case is the load-bearing one: an add re-run for a device already on file at the same key
+/// is a quarterly badge renewal, it leaves the member set byte-identical, and bumping there would weld
 /// credential churn to the membership version and drive every device through a full re-pull four times a
 /// year for no delta.
 #[test]

@@ -24,6 +24,7 @@ use swoosh::contacts::{ContactsStore, DeviceLabel, ME};
 use swoosh::home::Home;
 use swoosh::invite::Invite;
 use swoosh::passphrase::{Prompt, Terminal};
+use swoosh::peer::KeyTextError;
 use swoosh::root::{self, Date, Minted, Records, Root, RootError, RootPlace, RootVerb};
 use swoosh::standing::{Standing, StandingError};
 use swoosh::state::Row;
@@ -47,10 +48,10 @@ const SHORT_LIVED: u64 = 30 * DAY;
 #[derive(Debug, Args)]
 pub struct InviteCmd {
     /// the device, as it is named among your devices (me/<name>)
-    #[arg(value_name = "name")]
+    #[arg(value_name = "name", value_parser = device_name)]
     pub name: Option<DeviceLabel>,
     /// the key the device made (`swoosh join` on it shows it)
-    #[arg(value_name = "key", requires = "name")]
+    #[arg(value_name = "key", requires = "name", value_parser = typed_key)]
     pub key: Option<String>,
     /// Make a new key: inside the invite, or for this machine.
     #[arg(long = "new-key", requires = "name", conflicts_with = "key")]
@@ -58,11 +59,34 @@ pub struct InviteCmd {
     /// How long: `2h`, `90d`.
     #[arg(long, value_name = "d", requires = "name", value_parser = device_expiry)]
     pub expires: Option<Duration>,
-    /// where your root is, when it is not kept on this machine
+    /// Act on your root, or on the root kept in `<dir>`.
     #[arg(long = "root", value_name = "dir")]
     pub root: Option<PathBuf>,
     #[command(flatten)]
     pub reach: ReachArgs,
+}
+
+/// The first positional: a name under the one name rule, and never text that is a key. A key typed where
+/// the name goes is refused, naming the form that takes it.
+fn device_name(text: &str) -> Result<DeviceLabel, String> {
+    match swoosh::peer::raw_key(text) {
+        Ok(Some(_)) => Err(format!(
+            "{text} is a key, not a name: swoosh invite <name> {text}"
+        )),
+        Err(unusable) => Err(unusable.to_string()),
+        Ok(None) => text
+            .parse()
+            .map_err(|error: swoosh::names::NameError| error.to_string()),
+    }
+}
+
+/// The second positional as typed: a key nobody can hold is refused here, with the line every typed key
+/// refuses with. Text that is no key at all is refused later, naming the renewal it may have meant.
+fn typed_key(text: &str) -> Result<String, String> {
+    match swoosh::peer::parse_key(text) {
+        Err(KeyTextError::Unusable(unusable)) => Err(unusable.to_string()),
+        Ok(_) | Err(KeyTextError::NotAKey(_)) => Ok(text.to_owned()),
+    }
 }
 
 /// A device's `--expires`: a duration from 1h to 365d.
@@ -184,9 +208,7 @@ impl InviteCmd {
         }
 
         let (mut root, plan) = if mints {
-            if let Standing::Unpinned = standing {
-                refuse_before_the_first_root(home, &name, ask)?;
-            }
+            refuse_before_the_first_root(home, &standing, &name, ask)?;
             match Root::mint_to(home, prompt, err).await? {
                 Minted::Made(root) => {
                     let plan = plan(&root.records(), &name, ask, err)?;
@@ -266,8 +288,8 @@ impl InviteCmd {
         let until = row.as_ref().map_or(0, |row| row.until);
 
         // After the commit, and before the offer: the invite alone on stdout, then what it means.
-        let invite = match &issued.seed {
-            Some(seed) => Invite::keyed(**seed, from, name.clone(), issued.standing.clone()),
+        let invite = match issued.seed.clone() {
+            Some(seed) => Invite::keyed(seed, from, name.clone(), issued.standing.clone()),
             None => Invite::bound(from, name.clone(), issued.standing.clone()),
         };
         writeln!(out, "{invite}")?;
@@ -425,17 +447,29 @@ fn plan(
     Ok(plan)
 }
 
-/// Before a root is made here, refuse what the new root's records would: this machine's own key, which
-/// becomes its first device, and a renewal, since the root has no device yet.
-fn refuse_before_the_first_root(home: &Home, name: &DeviceLabel, ask: Ask) -> eyre::Result<()> {
-    match ask {
-        Ask::Add(key) if own_key(home)?.verify_key().ok() == Some(key) => {
-            let own = swoosh::names::suggest().as_str().parse()?;
-            Err(RootError::OwnKey { name: own }.into())
-        }
-        Ask::Renew => Err(RootError::NoDeviceToRenew { name: name.clone() }.into()),
-        Ask::Add(_) | Ask::NewKey => Ok(()),
+/// Before a root is made or finished here, refuse what its records would once it is, so the refusal
+/// costs no prompt and writes nothing: this machine's own key, which becomes its first device; and for a
+/// root whose making or restore was interrupted, whatever its records refuse, or, for a new root, a
+/// renewal, since it has no device yet.
+fn refuse_before_the_first_root(
+    home: &Home,
+    standing: &Standing,
+    name: &DeviceLabel,
+    ask: Ask,
+) -> eyre::Result<()> {
+    if let Standing::InterruptedMint { root_key } = standing {
+        let half = Root::half_made(home, *root_key)?;
+        plan(&half.records(), name, ask, &mut io::sink())?;
+    } else if let Ask::Renew = ask {
+        return Err(RootError::NoDeviceToRenew { name: name.clone() }.into());
     }
+    if let Ask::Add(key) = ask
+        && own_key(home)?.verify_key().ok() == Some(key)
+    {
+        let own = swoosh::names::suggest().as_str().parse()?;
+        return Err(RootError::OwnKey { name: own }.into());
+    }
+    Ok(())
 }
 
 /// Refuse a name that is a contact's: a person is shared with, never made one of your devices.
@@ -453,12 +487,15 @@ async fn refuse_a_contact(home: &Home, name: &DeviceLabel) -> eyre::Result<()> {
     Ok(())
 }
 
-/// The second positional, which is always a key.
+/// The second positional, which is always a key, read by the parser every typed key goes through.
 fn parse_key(text: &str) -> eyre::Result<VerifyKey> {
-    text.parse::<NodeId>()
-        .ok()
-        .and_then(|key| key.verify_key().ok())
-        .ok_or_else(|| eyre::eyre!("{text} is not a key: to renew {text}, swoosh invite {text}"))
+    match swoosh::peer::parse_key(text) {
+        Ok(key) => Ok(key.verify_key()?),
+        Err(KeyTextError::Unusable(unusable)) => Err(unusable.into()),
+        Err(KeyTextError::NotAKey(_)) => {
+            eyre::bail!("{text} is not a key: to renew {text}, swoosh invite {text}")
+        }
+    }
 }
 
 /// This machine's key, made if the home has none.
