@@ -24,7 +24,7 @@ use nauthy::VerifyKey;
 use swoosh::contacts::{Contacts, DeviceLabel};
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
-use swoosh::roster::{self, Epoch, Member, RosterDoc};
+use swoosh::roster::{self, Epoch, RosterDoc};
 use swoosh::serve::ROSTER_SERVICE;
 use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::tunnel::{CancellationToken, Connector, Router};
@@ -62,14 +62,18 @@ async fn proof() {
     let doc = RosterDoc::new(
         Epoch(1),
         vec![
-            Member {
-                node: VerifyKey::new([1u8; 32]),
-                label: "desk".parse::<DeviceLabel>().unwrap(),
-            },
-            Member {
-                node: VerifyKey::new([2u8; 32]),
-                label: "ci-runner".parse::<DeviceLabel>().unwrap(),
-            },
+            signet
+                .member(
+                    VerifyKey::new([1u8; 32]),
+                    "desk".parse::<DeviceLabel>().unwrap(),
+                )
+                .unwrap(),
+            signet
+                .member(
+                    VerifyKey::new([2u8; 32]),
+                    "ci-runner".parse::<DeviceLabel>().unwrap(),
+                )
+                .unwrap(),
         ],
     )
     .unwrap();

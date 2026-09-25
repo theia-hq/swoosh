@@ -7,6 +7,7 @@
 //! `serve::bind_entry` edges the `gated_measure` proof builds its exposer from).
 
 pub mod badge;
+mod codec;
 pub mod config;
 pub mod contacts;
 pub mod credential;
@@ -27,6 +28,7 @@ pub mod roster;
 pub mod secret;
 pub mod serve;
 pub mod standing;
+pub mod state;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;
 pub mod transport;

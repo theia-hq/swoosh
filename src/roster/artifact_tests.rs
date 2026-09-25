@@ -4,7 +4,7 @@ use nauthy::VerifyKey;
 
 use super::{Artifact, STAT_DEBOUNCE};
 use crate::contacts::DeviceLabel;
-use crate::roster::{Epoch, Member, RosterDoc};
+use crate::roster::{Epoch, RosterDoc};
 use crate::testkit::TestRoot;
 
 /// The byte the signet's fixed key is seeded with, so a test's cut is reproducible and verifiable.
@@ -23,9 +23,13 @@ fn doc(epoch: u64, labels: &[&str]) -> RosterDoc {
     let members = labels
         .iter()
         .enumerate()
-        .map(|(index, label)| Member {
-            node: VerifyKey::new([u8::try_from(index).expect("small") + 1; 32]),
-            label: label.parse::<DeviceLabel>().expect("a valid label"),
+        .map(|(index, label)| {
+            signet()
+                .member(
+                    VerifyKey::new([u8::try_from(index).expect("small") + 1; 32]),
+                    label.parse::<DeviceLabel>().expect("a valid label"),
+                )
+                .expect("a member")
         })
         .collect();
     RosterDoc::new(Epoch(epoch), members).expect("a well-formed doc")

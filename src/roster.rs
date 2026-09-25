@@ -1,128 +1,68 @@
-//! The membership snapshot an operator's signet vouches for: the payload of a signed roster.
+//! The update: the root's signed list of its live devices and its revocations, and its canonical encoding.
 //!
-//! Roster-sync bootstraps a fresh device: one member node serves the operator's fleet membership to it,
-//! SIGNED by the signet so a courier that merely relays the blob cannot forge it. This module is the payload and its canonical encoding; the SIGNING is nauthy's generic
-//! [`sign_document`](nauthy::Identity::sign_document) / [`Signed`](nauthy::Signed) primitive, which roots a
-//! blob at the same ed25519 key the signet mints caps with. The payload schema lives HERE, in swoosh, next
-//! to the [`Contacts`](crate::contacts::Contacts) it is cut from and hydrated into: the whole roster story
-//! (build a doc from contacts, canonicalize, sign, serve, verify, parse, fold) reads in one crate, and
-//! nauthy carries only the generic verb, no fleet-directory concept.
-//!
-//! A member entry is (who, what the operator calls it) and NOTHING else: no last-seen (that would make the
-//! roster a pattern-of-life oracle for anyone who reads it) and no capability (a roster that grants is a
-//! coordinator, not a directory). Both are TYPE properties here, unrepresentable rather than merely
-//! omitted. A member's label is a
-//! [`DeviceLabel`], the SAME type local contacts use: one label type, no lossy seam to cross.
+//! Any device may serve an update, but only the root signs one, so a courier that relays the blob cannot
+//! forge it. This module is the payload, its bounds and its codec; the signing is nauthy's generic
+//! [`sign_document`](nauthy::Identity::sign_document) and [`Signed`](nauthy::Signed). Each live device
+//! carries its name, the end and length of its standing, the ids of its live standings, and its newest
+//! standing (bare), so a device can pick up its own renewal from any peer. No last-seen is carried.
 
-use nauthy::{SignError, Signed, VerifyKey};
+use nauthy::{Link, SignError, Signed, VerifyKey};
 
+pub use crate::codec::{
+    FormatError, Id, MAX_BADGE, MAX_IDS, MAX_MEMBERS, MAX_REVOCATION_ID, MAX_REVOKED,
+    MAX_REVOKED_KEYS,
+};
+use crate::codec::{Put as _, Reader, bound, canonicalize, check_device, check_ids, unique_labels};
 use crate::contacts::DeviceLabel;
 
 mod artifact;
 
 pub use artifact::{Artifact, ArtifactError};
 
-/// The domain-separating prefix over the signed bytes: a `MAGIC`-prefixed message this key signs can never
-/// be confused with a cap or anything else it signs.
-const MAGIC: &[u8] = b"theia-roster";
+/// The magic the update's payload opens with: `swoosh-` and the file it heads. A payload this key signs
+/// under another magic is never read as an update.
+pub(crate) const MAGIC: &[u8] = b"swoosh-roster";
 
-/// The canonical-encoding version, appended after [`MAGIC`]. Bump to force an old verifier to refuse
-/// ([`RosterError::BadMagic`]) rather than misread a layout it does not know.
+/// The layout version, after [`MAGIC`].
 const VERSION: u8 = 1;
 
-/// The maximum number of members [`RosterDoc::parse_canonical`] will parse from an untrusted blob. A DoS
-/// bound: a personal fleet is tiny, and a hostile courier must not make a puller allocate for a huge count
-/// before the signature is even checked.
-const MAX_MEMBERS: usize = 4096;
+/// The fixed header: [`MAGIC`], [`VERSION`], the `u64` epoch and the `u32` member count.
+const HEADER_LEN: usize = MAGIC.len() + 1 + 8 + 4;
 
-/// The fixed header a roster payload opens with: [`MAGIC`], the [`VERSION`] byte, the `u64` epoch, and the
-/// `u32` member count. Named rather than spelled, because the encoder's buffer sizing and
-/// [`MAX_ROSTER_BLOB`] are both written in terms of it.
-const HEADER_LEN: usize = MAGIC.len() + size_of::<u8>() + size_of::<u64>() + size_of::<u32>();
+/// One id on the wire: its `u64` expiry, `u16` length and bytes, at the bound.
+pub(crate) const MAX_ID_LEN: usize = 8 + 2 + MAX_REVOCATION_ID;
 
-/// The fixed framing each member carries beside its label: the node key and the `u16` label length.
-const MEMBER_OVERHEAD_LEN: usize = VerifyKey::LEN + size_of::<u16>();
+/// One member on the wire at every bound: node key, name, `until`, `duration`, its ids, and its standing.
+pub(crate) const MAX_MEMBER_LEN: usize =
+    VerifyKey::LEN + 2 + DeviceLabel::MAX_LEN + 8 + 8 + 1 + MAX_IDS * MAX_ID_LEN + 2 + MAX_BADGE;
 
-/// The detached ed25519 signature in the envelope [`cut`] writes: 64 bytes, fixed by the scheme.
+/// The detached ed25519 signature in the envelope [`cut`] writes.
 const SIGNATURE_LEN: usize = 64;
 
-/// What [`cut`] wraps the payload in: nauthy's signed envelope is the signer key then the signature, both
-/// fixed-width ahead of the payload bytes ([`Signed::encode`]). Restated here because nauthy keeps its
-/// signature length private, so [`MAX_ROSTER_BLOB`] cannot name it; the exactness test signs a maximal
-/// roster and asserts the encoded blob is that bound to the byte, so an envelope change over there fails
-/// here rather than silently reshaping this cap.
-const ENVELOPE_LEN: usize = VerifyKey::LEN + SIGNATURE_LEN;
+/// nauthy's signed envelope: the signer key and the signature ahead of the payload ([`Signed::encode`]).
+/// Restated because nauthy keeps its signature length private; the exactness test cuts a maximal update
+/// and holds this to the byte.
+pub(crate) const ENVELOPE_LEN: usize = VerifyKey::LEN + SIGNATURE_LEN;
 
-/// The largest roster blob a reader admits, in bytes: the signed envelope around the biggest payload
-/// [`RosterDoc::parse_canonical`] accepts, and not one byte more. A puller bounds its read by this BEFORE
-/// the first byte lands, so a hostile courier cannot grow the puller's buffer by streaming; the parse-side
-/// caps cannot help there, because by the time one runs the buffer already holds everything sent.
-///
-/// DERIVED from the parser's own field bounds and framing, never chosen, so it cannot drift away from what
-/// the parser accepts the way an independent constant can:
+/// The largest update blob a reader admits, in bytes: the envelope around the biggest payload
+/// [`RosterDoc::parse_canonical`] accepts. A fold reads no more. Computed from the bounds, never chosen:
 ///
 /// ```text
-///     ENVELOPE_LEN                                                  the signer key + signature
-///   + HEADER_LEN                                                    MAGIC + VERSION + epoch + count
-///   + MAX_MEMBERS * (MEMBER_OVERHEAD_LEN + DeviceLabel::MAX_LEN)    node key + u16 len + the label
-///   = (32 + 64) + (12 + 1 + 8 + 4) + 4096 * (32 + 2 + 255)
-///   = 1_183_865 bytes
+///     ENVELOPE_LEN                               signer key + signature
+///   + HEADER_LEN                                 MAGIC + VERSION + epoch + member count
+///   + MAX_MEMBERS * MAX_MEMBER_LEN               every member at every bound
+///   + 4 + MAX_REVOKED * MAX_ID_LEN               the revoked ids
+///   + 4 + MAX_REVOKED_KEYS * 32                  the revoked keys
+///   = 96 + 26 + 4096 * 1436 + 4 + 16384 * 74 + 4 + 4096 * 32
+///   = 7_225_474 bytes
 /// ```
-///
-/// Exact rather than round: a rounded bound is one somebody has to justify separately, and this one is just
-/// the arithmetic. A test cuts the largest roster this parser accepts and asserts the blob is exactly this
-/// many bytes, so a framing change the expression does not follow fails there rather than quietly loosening
-/// or tightening a reader's cap.
-///
-/// It lives HERE, beside the codec that writes and reads this wire, not at the call site that reads it: a
-/// cap in a command file is derived from limits it cannot see, and one that lands BELOW the largest roster
-/// the parser accepts truncates a legitimate maximal roster, whose short bytes then fail the signature
-/// check. That reports a size problem as a forgery and sends an operator hunting a key compromise that
-/// never happened, which is why the number is the parser's own and not a nearby round one.
-pub const MAX_ROSTER_BLOB: u64 =
-    (ENVELOPE_LEN + HEADER_LEN + MAX_MEMBERS * (MEMBER_OVERHEAD_LEN + DeviceLabel::MAX_LEN)) as u64;
-
-/// The bound above is only attainable if the framing can express the field bounds it is built from: a
-/// label at [`DeviceLabel::MAX_LEN`] must fit the `u16` length prefix, and [`MAX_MEMBERS`] the `u32`
-/// count. Held at build time, because a field bound the wire cannot spell makes the derivation a
-/// number no encoder can reach, and the casts in [`RosterDoc::canonical_bytes`] lossy.
-const _: () = assert!(
-    DeviceLabel::MAX_LEN <= u16::MAX as usize && MAX_MEMBERS <= u32::MAX as usize,
-    "the roster framing must be able to express its own field bounds"
-);
-
-/// Take `n` bytes from `bytes` at `*cur`, advancing the cursor, or [`RosterError::Truncated`] if the input
-/// runs out. Bounds-checked so untrusted input is a clean error, never a panic. The fixed-width readers
-/// ([`take_u64`], [`take_u32`], [`take_u16`], [`take_array`]) build on it.
-fn take<'a>(bytes: &'a [u8], cur: &mut usize, n: usize) -> Result<&'a [u8], RosterError> {
-    let end = cur.checked_add(n).ok_or(RosterError::Truncated)?;
-    let slice = bytes.get(*cur..end).ok_or(RosterError::Truncated)?;
-    *cur = end;
-    Ok(slice)
-}
-
-/// Read a big-endian `u64` off the cursor. `take` already returns exactly 8 bytes, so the `try_into` is
-/// infallible; it stays a clean error rather than an `expect`.
-fn take_u64(bytes: &[u8], cur: &mut usize) -> Result<u64, RosterError> {
-    Ok(u64::from_be_bytes(take_array::<8>(bytes, cur)?))
-}
-
-/// Read a big-endian `u32` off the cursor.
-fn take_u32(bytes: &[u8], cur: &mut usize) -> Result<u32, RosterError> {
-    Ok(u32::from_be_bytes(take_array::<4>(bytes, cur)?))
-}
-
-/// Read a big-endian `u16` off the cursor.
-fn take_u16(bytes: &[u8], cur: &mut usize) -> Result<u16, RosterError> {
-    Ok(u16::from_be_bytes(take_array::<2>(bytes, cur)?))
-}
-
-/// Read a fixed `N`-byte array off the cursor.
-fn take_array<const N: usize>(bytes: &[u8], cur: &mut usize) -> Result<[u8; N], RosterError> {
-    take(bytes, cur, N)?
-        .try_into()
-        .map_err(|_| RosterError::Truncated)
-}
+pub const MAX_ROSTER_BLOB: u64 = (ENVELOPE_LEN
+    + HEADER_LEN
+    + MAX_MEMBERS * MAX_MEMBER_LEN
+    + 4
+    + MAX_REVOKED * MAX_ID_LEN
+    + 4
+    + MAX_REVOKED_KEYS * VerifyKey::LEN) as u64;
 
 /// A monotonically-increasing version of an operator's roster, carrying the cutter's own
 /// [`RosterVersion`](crate::contacts::RosterVersion) onto the wire: it advances when the MEMBER SET
@@ -133,44 +73,86 @@ fn take_array<const N: usize>(bytes: &[u8], cur: &mut usize) -> Result<[u8; N], 
 pub struct Epoch(pub u64);
 
 impl Epoch {
-    /// The reserved zero: a doc cut before membership versioning existed. Every roster in the field today
-    /// carries it, because the only writer of the old counter was the PULL path and a signet holder never
-    /// pulls. It is parsed like any other epoch (an old blob is well-formed, not corrupt) and refused at
-    /// the FOLD, so "not versioned" stays a distinct condition from "not newer".
+    /// The reserved zero: no update cut yet. It parses like any other epoch and is refused at the fold,
+    /// so "not versioned" stays a distinct condition from "not newer".
     pub const UNVERSIONED: Self = Self(0);
 }
 
-/// One member advertisement: a fleet node's identity and the operator's own label for it, and nothing else.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One live device in an update.
+#[derive(Debug, Clone)]
 pub struct Member {
-    /// The member node's identity: the key it is dialed at and its badge is bound to.
+    /// The device's key: the key it is dialed at and its standing is bound to.
     pub node: VerifyKey,
-    /// The operator's device label for this member (`ci-runner`, `desk`). A display/suggestion string, not
-    /// authority: the puller keeps its OWN petnames (names are local). The same [`DeviceLabel`] local
-    /// contacts use, so hydrating a member into contacts needs no re-parse.
+    /// The device's name. A suggestion, not authority: a puller keeps its own names.
     pub label: DeviceLabel,
+    /// When the device's standing ends, in unix seconds.
+    pub until: u64,
+    /// How long each renewal runs, in seconds; 0 means never renewed on its own.
+    pub duration: u64,
+    /// The ids of its live standings, at most [`MAX_IDS`], each carried only until it expires.
+    pub ids: Vec<Id>,
+    /// Its newest standing, bare.
+    pub standing: Link,
 }
 
-/// The membership snapshot an operator's signet vouches for: a set of members at an epoch. This is the
-/// payload that gets signed. Sorted and de-duplicated at construction so its canonical bytes are a pure
-/// function of its logical content (two docs with the same members in any input order sign identically).
+impl PartialEq for Member {
+    fn eq(&self, other: &Self) -> bool {
+        self.node == other.node
+            && self.label == other.label
+            && self.until == other.until
+            && self.duration == other.duration
+            && self.ids == other.ids
+            && self.standing.as_str() == other.standing.as_str()
+    }
+}
+
+impl Eq for Member {}
+
+/// The update: the live devices, the revoked ids and the revoked keys at one epoch. Canonical at
+/// construction (every list sorted, every bound held), so its bytes are a pure function of its content
+/// and every doc that builds also parses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterDoc {
     epoch: Epoch,
-    // invariant: sorted by node bytes, unique by node (upheld by `new`).
+    // invariant: every list sorted and unique, every bound held (upheld by `with_revocations`).
     members: Vec<Member>,
+    revoked: Vec<Id>,
+    revoked_keys: Vec<VerifyKey>,
 }
 
 impl RosterDoc {
-    /// Build a doc from an epoch and members. Sorts by `node` bytes and rejects a duplicate node (two labels
-    /// for one key is operator error, not a merge case), so the stored order is canonical and
-    /// [`canonical_bytes`](Self::canonical_bytes) is deterministic regardless of caller insertion order.
-    pub fn new(epoch: Epoch, mut members: Vec<Member>) -> Result<Self, RosterError> {
+    /// An update listing `members` and no revocations.
+    pub fn new(epoch: Epoch, members: Vec<Member>) -> Result<Self, FormatError> {
+        Self::with_revocations(epoch, members, Vec::new(), Vec::new())
+    }
+
+    /// An update listing `members`, the revoked ids and the revoked keys. Sorts every list, and refuses a
+    /// repeated key, name or id and anything over its bound.
+    pub fn with_revocations(
+        epoch: Epoch,
+        mut members: Vec<Member>,
+        mut revoked: Vec<Id>,
+        mut revoked_keys: Vec<VerifyKey>,
+    ) -> Result<Self, FormatError> {
+        bound(members.len(), MAX_MEMBERS, "members")?;
+        bound(revoked.len(), MAX_REVOKED, "revoked ids")?;
+        bound(revoked_keys.len(), MAX_REVOKED_KEYS, "revoked keys")?;
+        for member in &mut members {
+            check_device(&mut member.ids, &member.standing)?;
+        }
         members.sort_by(|a, b| a.node.bytes().cmp(b.node.bytes()));
         if let Some(pair) = members.windows(2).find(|pair| pair[0].node == pair[1].node) {
-            return Err(RosterError::DuplicateNode(pair[0].node));
+            return Err(FormatError::DuplicateNode(pair[0].node));
         }
-        Ok(Self { epoch, members })
+        unique_labels(members.iter().map(|member| &member.label))?;
+        check_ids(&mut revoked)?;
+        canonicalize(&mut revoked_keys, |key| *key.bytes())?;
+        Ok(Self {
+            epoch,
+            members,
+            revoked,
+            revoked_keys,
+        })
     }
 
     /// The roster's epoch.
@@ -183,91 +165,95 @@ impl RosterDoc {
         &self.members
     }
 
-    /// The exact bytes that get signed and verified: a pure function of the doc's content, so the same
-    /// logical doc yields the same bytes yields the same signature. Fixed field order, fixed-width keys,
-    /// sorted members, and a length prefix on the only variable field (the label) mean no delimiter can be
-    /// spoofed and no insertion order can change the signature. The wire LAYOUT (shared by the parser):
+    /// The revoked ids, sorted.
+    pub fn revoked(&self) -> &[Id] {
+        &self.revoked
+    }
+
+    /// The revoked device keys, sorted.
+    pub fn revoked_keys(&self) -> &[VerifyKey] {
+        &self.revoked_keys
+    }
+
+    /// The exact bytes that get signed and verified, a pure function of the doc's content:
     ///
     /// ```text
-    /// wire layout (all ints big-endian), a pure function of doc content:
-    ///   MAGIC          b"theia-roster"
-    ///   VERSION        u8
-    ///   epoch          u64
-    ///   count          u32                (<= MAX_MEMBERS on parse)
-    ///   per member x count, ascending by node:
-    ///     node         [u8; 32]
-    ///     label_len    u16                (<= DeviceLabel::MAX_LEN)
-    ///     label        [u8; label_len]    (UTF-8, no slash/whitespace/control)
+    /// all ints big-endian
+    ///   MAGIC            b"swoosh-roster"
+    ///   VERSION          u8 (1)
+    ///   epoch            u64
+    ///   member_count     u32                     (<= MAX_MEMBERS)
+    ///   per member, ascending by node:
+    ///     node           [u8; 32]
+    ///     label          u16 length, bytes       (<= DeviceLabel::MAX_LEN)
+    ///     until          u64
+    ///     duration       u64
+    ///     id_count       u8                      (<= MAX_IDS)
+    ///     per id, ascending by id:
+    ///       expires      u64
+    ///       id           u16 length, bytes       (<= MAX_REVOCATION_ID)
+    ///     standing       u16 length, bare link   (<= MAX_BADGE)
+    ///   revoked_count    u32                     (<= MAX_REVOKED), then each id as above
+    ///   revoked_key_count u32                    (<= MAX_REVOKED_KEYS), then each key, 32 bytes
     /// ```
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        // Size the buffer from the framing constants MAX_ROSTER_BLOB is derived from, so the encoder and
-        // the reader's cap are written in the same terms and a field added to one is missing from the
-        // other at the next edit rather than several releases later.
-        let size = HEADER_LEN
-            + self
-                .members
-                .iter()
-                .map(|member| MEMBER_OVERHEAD_LEN + member.label.as_str().len())
-                .sum::<usize>();
-        let mut out = Vec::with_capacity(size);
+        let mut out = Vec::with_capacity(HEADER_LEN);
         out.extend_from_slice(MAGIC);
-        out.push(VERSION);
-        out.extend_from_slice(&self.epoch.0.to_be_bytes());
-        // A fleet is small; the count never approaches u32::MAX, and the cast is deterministic.
-        out.extend_from_slice(&(self.members.len() as u32).to_be_bytes());
+        out.put_u8(VERSION);
+        out.put_u64(self.epoch.0);
+        out.put_u32(self.members.len());
         for member in &self.members {
             out.extend_from_slice(member.node.bytes());
-            let label = member.label.as_str().as_bytes();
-            // DeviceLabel bounds the length to MAX_LEN (< u16::MAX), so this cast never truncates.
-            out.extend_from_slice(&(label.len() as u16).to_be_bytes());
-            out.extend_from_slice(label);
+            out.put_bytes16(member.label.as_str().as_bytes());
+            out.put_u64(member.until);
+            out.put_u64(member.duration);
+            out.put_u8(member.ids.len() as u8);
+            for id in &member.ids {
+                out.put_id(id);
+            }
+            out.put_bytes16(member.standing.as_str().as_bytes());
         }
+        out.put_ids32(&self.revoked);
+        out.put_keys32(&self.revoked_keys);
         out
     }
 
-    /// Parse canonical bytes back into a doc. The inverse of [`canonical_bytes`](Self::canonical_bytes) over
-    /// the layout table documented there, bounds-checked so untrusted input is a clean error. The whole blob
-    /// must be consumed (no trailing bytes) and the member list must already be strictly-ascending-by-node:
-    /// a non-canonical or duplicate order is REJECTED, not silently re-sorted, so the wire is non-malleable
-    /// (one byte-string per doc).
-    pub fn parse_canonical(bytes: &[u8]) -> Result<Self, RosterError> {
-        let mut cur = 0;
-        if take(bytes, &mut cur, MAGIC.len())? != MAGIC
-            || take_array::<1>(bytes, &mut cur)?[0] != VERSION
-        {
-            return Err(RosterError::BadMagic);
-        }
-        let epoch = Epoch(take_u64(bytes, &mut cur)?);
-        let count = take_u32(bytes, &mut cur)? as usize;
-        if count > MAX_MEMBERS {
-            return Err(RosterError::TooManyMembers);
-        }
-        let mut members = Vec::with_capacity(count);
+    /// Parse canonical bytes back into a doc: the inverse of [`canonical_bytes`](Self::canonical_bytes),
+    /// bounds-checked before every allocation. Every list must already be strictly ascending (a permuted
+    /// or repeated list is refused, not re-sorted) and every byte consumed, so the wire is one byte-string
+    /// per doc.
+    pub fn parse_canonical(bytes: &[u8]) -> Result<Self, FormatError> {
+        let mut reader = Reader::open(bytes, MAGIC, VERSION)?;
+        let epoch = Epoch(reader.u64()?);
+        let count = reader.count32(MAX_MEMBERS, "members")?;
+        let mut members: Vec<Member> = Vec::with_capacity(count);
         for _ in 0..count {
-            let node = VerifyKey::new(take_array::<{ VerifyKey::LEN }>(bytes, &mut cur)?);
-            let label_len = usize::from(take_u16(bytes, &mut cur)?);
-            let text = core::str::from_utf8(take(bytes, &mut cur, label_len)?)
-                .map_err(|_| RosterError::BadLabel("not valid UTF-8"))?;
-            let label = DeviceLabel::stored(text)
-                .map_err(|_| RosterError::BadLabel("not a device name"))?;
-            // Reject rather than re-sort: the members must arrive strictly-ascending-by-node, so a permuted
-            // or duplicated wire (which would decode to the same logical doc under a re-sort) is refused and
-            // the wire stays canonical, one byte-string per doc. `new`'s sort is the CUT-side canonicalizer;
-            // the parse side proves the bytes were already canonical.
+            let node = reader.key()?;
             if members
                 .last()
-                .is_some_and(|previous: &Member| node.bytes() <= previous.node.bytes())
+                .is_some_and(|previous| node.bytes() <= previous.node.bytes())
             {
-                return Err(RosterError::NonCanonicalOrder);
+                return Err(FormatError::NonCanonicalOrder);
             }
-            members.push(Member { node, label });
+            members.push(Member {
+                node,
+                label: reader.label()?,
+                until: reader.u64()?,
+                duration: reader.u64()?,
+                ids: reader.device_ids()?,
+                standing: reader.standing()?,
+            });
         }
-        if cur != bytes.len() {
-            return Err(RosterError::Truncated);
-        }
-        // The strict-ascending check above already proved sort + uniqueness, so `new` re-derives the same
-        // (canonical) doc without a second reordering.
-        Self::new(epoch, members)
+        unique_labels(members.iter().map(|member| &member.label))?;
+        let revoked = reader.revoked()?;
+        let revoked_keys = reader.revoked_keys()?;
+        reader.finish()?;
+        Ok(Self {
+            epoch,
+            members,
+            revoked,
+            revoked_keys,
+        })
     }
 }
 
@@ -316,33 +302,7 @@ pub enum RosterVerifyError {
     Signature(#[from] SignError),
     /// The verified payload was not a well-formed roster.
     #[error("roster payload is malformed")]
-    Payload(#[from] RosterError),
-}
-
-/// Why a roster could not be built or parsed.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum RosterError {
-    /// A member label was not a valid device label (empty, too long, or held a slash/whitespace/control
-    /// byte, or was not valid UTF-8). One variant carrying the reason: a caller never branches on WHICH
-    /// label rule failed, only that one did.
-    #[error("invalid roster label: {0}")]
-    BadLabel(&'static str),
-    /// Two members shared one node identity.
-    #[error("roster lists node {0} twice")]
-    DuplicateNode(VerifyKey),
-    /// The members were not strictly ascending by node on the wire (a non-canonical or duplicate order).
-    #[error("roster members are not in canonical order")]
-    NonCanonicalOrder,
-    /// The blob's leading magic or version did not match: not a roster, or a version this build does not
-    /// know.
-    #[error("not a roster (bad magic or version)")]
-    BadMagic,
-    /// The blob ended before a field was complete, or carried trailing bytes.
-    #[error("roster blob is truncated or malformed")]
-    Truncated,
-    /// The blob claimed more members than the parse bound allows.
-    #[error("roster lists too many members")]
-    TooManyMembers,
+    Payload(#[from] FormatError),
 }
 
 #[cfg(test)]

@@ -255,16 +255,21 @@ async fn a_saved_book_is_owner_only_in_an_owner_only_store() {
 
 use nauthy::VerifyKey;
 
-use crate::roster::{Epoch, Member, RosterDoc, RosterError};
+use crate::roster::{Epoch, FormatError, Member, RosterDoc};
 
 /// A roster member whose node id is the all-`seed`-byte key, so it hydrates to the same [`node`] fixture,
 /// which doubles as a check that the `VerifyKey -> NodeId` conversion preserves the bytes.
 fn roster_member(seed: u8, label: &str) -> Member {
-    Member {
-        node: VerifyKey::new([seed; 32]),
-        label: label.parse::<DeviceLabel>().expect("valid device label"),
-    }
+    crate::testkit::TestRoot::seeded(SIGNET_SEED)
+        .member(
+            VerifyKey::new([seed; 32]),
+            label.parse::<DeviceLabel>().expect("valid device label"),
+        )
+        .expect("a member")
 }
+
+/// The root the roster members' standings are signed by.
+const SIGNET_SEED: u8 = 0x5e;
 
 fn roster(epoch: u64, members: Vec<Member>) -> RosterDoc {
     RosterDoc::new(Epoch(epoch), members).expect("valid roster")
@@ -968,7 +973,7 @@ async fn a_pre_versioning_book_unsticks_itself_on_the_next_edit() {
 
 /// The `me/*` member set as a roster doc stamped with the book's version, or `None` for an unversioned
 /// book: the cut a signer makes from this book, which these tests pull through `hydrate`.
-fn cut_roster(contacts: &Contacts) -> Result<Option<RosterDoc>, RosterError> {
+fn cut_roster(contacts: &Contacts) -> Result<Option<RosterDoc>, FormatError> {
     let Some(epoch) = contacts.roster_version.epoch() else {
         return Ok(None);
     };
@@ -977,9 +982,10 @@ fn cut_roster(contacts: &Contacts) -> Result<Option<RosterDoc>, RosterError> {
         .get(&Petname(ME.to_owned()))
         .into_iter()
         .flat_map(|person| person.devices.iter())
-        .map(|(label, binding)| Member {
-            node: VerifyKey::new(*binding.node.key()),
-            label: label.clone(),
+        .map(|(label, binding)| {
+            crate::testkit::TestRoot::seeded(SIGNET_SEED)
+                .member(VerifyKey::new(*binding.node.key()), label.clone())
+                .expect("a member")
         })
         .collect();
     RosterDoc::new(epoch, members).map(Some)

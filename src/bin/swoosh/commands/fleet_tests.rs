@@ -40,6 +40,7 @@ fn signet(seed: u8) -> TestRoot {
 
 /// A roster of `count` members signed by `signet`: the blob a real coordination node serves.
 fn cut_roster(signet: &TestRoot, count: usize) -> Vec<u8> {
+    let standing = signet.standing(VerifyKey::new([0; 32])).unwrap();
     let members = (0..count)
         .map(|nth| Member {
             // Distinct and non-colliding: the first two bytes carry the index.
@@ -49,6 +50,10 @@ fn cut_roster(signet: &TestRoot, count: usize) -> Vec<u8> {
                 bytes
             }),
             label: format!("device-{nth}").parse::<DeviceLabel>().unwrap(),
+            until: 0,
+            duration: 0,
+            ids: Vec::new(),
+            standing: standing.clone(),
         })
         .collect();
     swoosh::roster::cut(
