@@ -23,6 +23,7 @@ pub mod node_signer;
 pub mod passphrase;
 pub mod peer;
 pub mod reach;
+pub mod reach_report;
 pub mod reaching;
 pub mod root;
 pub mod roster;

@@ -15,6 +15,14 @@ use std::os::fd::AsRawFd as _;
 
 use crate::home::Home;
 
+/// How many times a holder tries a lock someone else holds before refusing.
+const TRIES: u32 = 4;
+
+/// How long a holder waits between tries: long enough to outlast an [`HomeLock::is_held`] probe, short
+/// enough that the refusal beside a real holder (a node or a restore, held for its whole run) still comes
+/// at once.
+const RETRY: core::time::Duration = core::time::Duration::from_millis(25);
+
 /// A held home lock. The lock is released when this drops, or when the process ends however it ends.
 #[derive(Debug)]
 #[must_use = "the home lock is held only while this value lives"]
@@ -65,8 +73,22 @@ impl HomeLock {
         })
     }
 
-    /// Open (creating) the lock file owner-only and take the lock without waiting. `Err` means someone
-    /// holds it in a way that excludes `hold`, or the lock itself failed; either way the caller refuses.
+    /// Whether a node serves this home now: something holds its lock. Asked without waiting, and the
+    /// answer can be stale by the time it is read, so it only chooses what a line says. The probe holds
+    /// the lock for an instant, which [`take`](Self::take) outlasts, so it never makes a holder refuse.
+    pub fn is_held(home: &Home) -> bool {
+        let Ok(file) = std::fs::File::open(home.identity_lock()) else {
+            return false;
+        };
+        // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory lock to
+        // it, released when `file` drops at the end of this function. `LOCK_NB` makes a held lock an error.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
+    }
+
+    /// Open (creating) the lock file owner-only and take the lock, trying again a few times over a moment
+    /// so that [`is_held`](Self::is_held)'s brief probe never makes a holder refuse. `Err` means someone
+    /// holds it in a way that excludes `hold` for longer than that, or the lock itself failed; either way
+    /// the caller refuses.
     fn take(home: &Home, hold: Hold) -> io::Result<Self> {
         use std::os::unix::fs::OpenOptionsExt as _;
 
@@ -80,12 +102,20 @@ impl HomeLock {
             Hold::Shared => libc::LOCK_SH,
             Hold::Exclusive => libc::LOCK_EX,
         };
-        // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory lock to
-        // it. `LOCK_NB` makes a contended lock an error rather than a wait.
-        if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } != 0 {
-            return Err(io::Error::last_os_error());
+        let mut tries = TRIES;
+        loop {
+            // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory lock
+            // to it. `LOCK_NB` makes a contended lock an error rather than a wait.
+            if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
+                return Ok(Self { _held: file });
+            }
+            let error = io::Error::last_os_error();
+            tries -= 1;
+            if tries == 0 || error.kind() != io::ErrorKind::WouldBlock {
+                return Err(error);
+            }
+            std::thread::sleep(RETRY);
         }
-        Ok(Self { _held: file })
     }
 }
 

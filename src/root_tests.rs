@@ -16,8 +16,9 @@ use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
+use bifrost::NodeId;
 use keystore::{KeyFile, Passphrase, Protection, Stored};
-use nauthy::{DisabledRoots, RevocationId, VerifyKey};
+use nauthy::{DisabledRoots, RevocationId, Revocations as _, VerifyKey};
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
@@ -27,11 +28,12 @@ use crate::config;
 use crate::contacts::DeviceLabel;
 use crate::home::Home;
 use crate::passphrase::Prompt;
+use crate::reach_report::{Missed, Reach, Why};
 use crate::roster::{Epoch, Member, RosterDoc};
 use crate::standing::Standing;
 use crate::state::{self, Row, State};
-use crate::sync::Answer;
-use crate::testkit::{Answering, Counting, STANDING_UNTIL, TestNode, TestRoot};
+use crate::sync::{Answer, Dial, ExchangeError};
+use crate::testkit::{Answering, Counting, Loopback, STANDING_UNTIL, TestNode, TestRoot};
 
 /// This machine's key.
 const OWN: u8 = 0x11;
@@ -43,6 +45,10 @@ const OTHER: u8 = 0x31;
 const LAPTOP: u8 = 0x41;
 /// A third.
 const PHONE: u8 = 0x42;
+/// A fourth.
+const NAS: u8 = 0x43;
+/// A device an act adds.
+const TV: u8 = 0x44;
 
 /// The passphrase every sealed root here opens under.
 const PASS: &str = "correct horse battery staple";
@@ -222,6 +228,31 @@ async fn commit(mut root: Root) -> (Committed, RosterDoc) {
     let update =
         crate::roster::verify(&committed.bytes, TestRoot::seeded(ROOT).verify_key()).unwrap();
     (committed, update)
+}
+
+/// A device `seed` of the root seeded `ROOT` beside `home`, standing until `until` and holding `update`.
+async fn sibling(home: &Home, seed: u8, until: u64, update: &RosterDoc) -> Home {
+    let dir = beside(home, &format!("device-{seed}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    config::create_store_dir(&dir).unwrap();
+    let device = Home::resolve(Some(dir)).unwrap();
+    let mut secret = TestNode::seeded(seed).seed();
+    KeyFile::device(device.identity_key())
+        .write(&keystore::Secret::take(&mut secret), Protection::Plain)
+        .unwrap();
+    let root = TestRoot::seeded(ROOT);
+    config::write_signet(&device, root.node_id()).await.unwrap();
+    let badge = root
+        .device_badge(
+            TestNode::seeded(seed).node_id(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(until),
+        )
+        .unwrap();
+    config::write_badge(&device, &badge).await.unwrap();
+    crate::roster::fold(&device, &root.sign_update(update))
+        .await
+        .unwrap();
+    device
 }
 
 async fn standing(home: &Home) -> Standing {
@@ -1068,7 +1099,14 @@ async fn a_commit_publishes_a_row_the_held_update_lacks() {
             .iter()
             .any(|member| member.node == key(LAPTOP))
     );
-    assert_eq!(committed.targets, vec![key(LAPTOP)]);
+    assert_eq!(
+        committed
+            .targets
+            .iter()
+            .map(|device| device.key)
+            .collect::<Vec<_>>(),
+        vec![TestNode::seeded(LAPTOP).node_id()]
+    );
     assert_eq!(
         crate::roster::verify(
             &std::fs::read(home.roster()).unwrap(),
@@ -1567,29 +1605,7 @@ async fn a_device_that_missed_its_renewal_update_gets_it_from_the_next() {
     held(&home, &first);
 
     // me/laptop, a device of the same root holding the first update and its standing.
-    let device = {
-        let dir = beside(&home, "laptop");
-        let _ = std::fs::remove_dir_all(&dir);
-        config::create_store_dir(&dir).unwrap();
-        let device = Home::resolve(Some(dir)).unwrap();
-        let mut seed = TestNode::seeded(LAPTOP).seed();
-        KeyFile::device(device.identity_key())
-            .write(&keystore::Secret::take(&mut seed), Protection::Plain)
-            .unwrap();
-        let root = TestRoot::seeded(ROOT);
-        config::write_signet(&device, root.node_id()).await.unwrap();
-        let badge = root
-            .device_badge(
-                TestNode::seeded(LAPTOP).node_id(),
-                SystemTime::UNIX_EPOCH + Duration::from_secs(ends),
-            )
-            .unwrap();
-        config::write_badge(&device, &badge).await.unwrap();
-        crate::roster::fold(&device, &TestRoot::seeded(ROOT).sign_update(&first))
-            .await
-            .unwrap();
-        device
-    };
+    let device = sibling(&home, LAPTOP, ends, &first).await;
 
     // One act renews me/laptop; its update never reaches it.
     let (root, _) = present(
@@ -1625,5 +1641,294 @@ async fn a_device_that_missed_its_renewal_update_gets_it_from_the_next() {
         badge.cap().expiry().unwrap(),
         Some(SystemTime::UNIX_EPOCH + Duration::from_secs(renewed_until)),
         "me/laptop takes its renewed standing from the next update"
+    );
+}
+
+// --- the offer ---
+
+/// Each device answers as scripted, by key; any other does not answer.
+struct Scripted(Vec<(u8, Answer)>);
+
+impl Dial for Scripted {
+    async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
+        self.0
+            .iter()
+            .find(|(seed, _)| TestNode::seeded(*seed).node_id() == peer)
+            .map(|(_, answer)| *answer)
+            .ok_or_else(|| eyre::eyre!("no device answers").into())
+    }
+    async fn offer(
+        &self,
+        peer: NodeId,
+        _number: Epoch,
+        _bytes: &[u8],
+    ) -> Result<Answer, ExchangeError> {
+        self.exchange(peer).await
+    }
+}
+
+/// This home holding the root with this machine and the devices `others` (seed, name) at update 1: the
+/// update it holds, and the root presented to revoke.
+async fn revoking(tag: &str, others: &[(u8, &str)]) -> (Home, RosterDoc, Root) {
+    let home = home(tag);
+    let mut rows = vec![own_row()];
+    rows.extend(
+        others
+            .iter()
+            .map(|(seed, label)| row(*seed, label, vec![id(*seed, STANDING_UNTIL)])),
+    );
+    holds(&home, &records(1, rows.clone(), Vec::new(), Vec::new())).await;
+    let first = RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap();
+    held(&home, &first);
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Revoke,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    (home, first, root.unwrap())
+}
+
+fn silent(label: &str) -> Missed {
+    Missed {
+        name: format!("me/{label}"),
+        why: Why::Silent,
+    }
+}
+
+#[tokio::test]
+async fn a_cut_from_a_non_serving_device_is_offered() {
+    let (home, first, mut root) = revoking("offered", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
+    let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, _) = commit(root).await;
+    assert!(
+        !crate::gate::KeyedDenylist::load(&nas)
+            .await
+            .unwrap()
+            .is_revoked_peer(&key(LAPTOP)),
+        "before the offer, me/nas still admits me/laptop"
+    );
+
+    let dial = Loopback::new(
+        home.clone(),
+        [(TestNode::seeded(NAS).node_id(), nas.clone())],
+    );
+    let reach = committed.offer(&dial).await;
+
+    assert!(
+        crate::gate::KeyedDenylist::load(&nas)
+            .await
+            .unwrap()
+            .is_revoked_peer(&key(LAPTOP)),
+        "me/nas blocks the revoked device"
+    );
+    assert_eq!(
+        reach,
+        Reach::Published {
+            took: vec!["me/nas".to_owned()],
+            missed: Vec::new(),
+            until: Some(STANDING_UNTIL),
+        }
+    );
+}
+
+#[tokio::test]
+async fn reach_says_held_when_no_device_took_it_and_nothing_serves() {
+    let (_home, _, mut root) = revoking("held", &[(LAPTOP, "laptop"), (PHONE, "phone")]).await;
+    root.revoke_device(&name("phone")).unwrap();
+    let (committed, _) = commit(root).await;
+
+    let reach = committed.offer(&Answering::nobody()).await;
+
+    assert_eq!(
+        reach,
+        Reach::Held {
+            missed: vec![silent("laptop")],
+            until: Some(STANDING_UNTIL),
+        }
+    );
+}
+
+#[tokio::test]
+async fn reach_says_published_while_this_machine_serves() {
+    let (home, _, mut root) = revoking("serving", &[(LAPTOP, "laptop"), (PHONE, "phone")]).await;
+    root.revoke_device(&name("phone")).unwrap();
+    let (committed, _) = commit(root).await;
+    let _serving = crate::identity::HomeLock::serving(&home).unwrap();
+
+    let reach = committed.offer(&Answering::nobody()).await;
+
+    assert_eq!(
+        reach,
+        Reach::Published {
+            took: Vec::new(),
+            missed: vec![silent("laptop")],
+            until: Some(STANDING_UNTIL),
+        },
+        "this machine serves the cut to a device that asks"
+    );
+}
+
+#[tokio::test]
+async fn a_cut_below_the_fleet_floor_reports_behind() {
+    let (home, first, mut root) = revoking("behind", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
+    // me/nas already holds a later list than the one this copy of the root cuts.
+    let later = RosterDoc::new(Epoch(5), first.members().to_vec()).unwrap();
+    let nas = sibling(&home, NAS, STANDING_UNTIL, &later).await;
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, _) = commit(root).await;
+    assert_eq!(committed.number, Epoch(2));
+
+    let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
+    assert_eq!(committed.offer(&dial).await, Reach::Behind);
+}
+
+#[tokio::test]
+async fn the_offer_skips_revoked_keys_and_new_devices() {
+    let home = home("skips");
+    let phone = Row {
+        revoked_on: now() - DAY,
+        ..row(PHONE, "phone", vec![id(PHONE, STANDING_UNTIL)])
+    };
+    let rows = vec![
+        own_row(),
+        row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
+        phone,
+    ];
+    holds(
+        &home,
+        &records(1, rows.clone(), Vec::new(), vec![key(PHONE)]),
+    )
+    .await;
+    held(
+        &home,
+        &RosterDoc::with_revocations(
+            Epoch(1),
+            rows[..2].iter().map(member).collect(),
+            Vec::new(),
+            vec![key(PHONE)],
+        )
+        .unwrap(),
+    );
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Invite,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    let mut root = root.unwrap();
+    root.sign_standing(key(TV), name("tv"), Duration::from_secs(90 * DAY))
+        .unwrap();
+    let (committed, _) = commit(root).await;
+
+    let dial = Loopback::new(home.clone(), []);
+    let _reach = committed.offer(&dial).await;
+
+    assert_eq!(
+        dial.dialed(),
+        vec![TestNode::seeded(LAPTOP).node_id()],
+        "only me/laptop: never the revoked me/phone, the new me/tv, or this machine"
+    );
+}
+
+#[tokio::test]
+async fn an_offer_to_a_machine_that_is_not_a_device_is_not_taken() {
+    let (home, first, mut root) =
+        revoking("not-a-device", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
+    // me/nas left: it holds no pin and no standing, and takes nothing.
+    let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
+    std::fs::remove_file(nas.badge()).unwrap();
+    std::fs::remove_file(nas.signet()).unwrap();
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, _) = commit(root).await;
+
+    let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
+    assert_eq!(
+        committed.offer(&dial).await,
+        Reach::Held {
+            missed: vec![silent("nas")],
+            until: Some(STANDING_UNTIL),
+        },
+        "a machine that took nothing is never counted as having it"
+    );
+}
+
+#[tokio::test]
+async fn an_offer_after_a_newer_fold_reports_behind() {
+    let (home, first, mut root) = revoking("newer-fold", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
+    let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, _) = commit(root).await;
+    assert_eq!(committed.number, Epoch(2));
+
+    // Before the offer runs, this machine folds a later list from another copy of the root, one that does
+    // not carry this act's revocation, and me/nas holds it too.
+    let later = TestRoot::seeded(ROOT)
+        .sign_update(&RosterDoc::new(Epoch(3), first.members().to_vec()).unwrap());
+    crate::roster::fold(&home, &later).await.unwrap();
+    crate::roster::fold(&nas, &later).await.unwrap();
+
+    let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
+    assert_eq!(
+        committed.offer(&dial).await,
+        Reach::Behind,
+        "me/nas holding the later list does not hold this cut"
+    );
+}
+
+#[tokio::test]
+async fn a_forked_offer_reports_behind() {
+    // me/nas recorded the cut as a fork of its own list at that number.
+    let (_home, _, mut root) = revoking("fork-recorded", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, _) = commit(root).await;
+    let dial = Scripted(vec![(NAS, Answer::ForkRecorded { floor: Epoch(2) })]);
+    assert_eq!(committed.offer(&dial).await, Reach::Behind);
+
+    // me/nas holds another list at the cut's number, and sends it back.
+    let (home, first, mut root) = revoking("forked", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
+    let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
+    let other = RosterDoc::with_revocations(
+        Epoch(2),
+        first.members().to_vec(),
+        vec![id(OTHER, STANDING_UNTIL)],
+        Vec::new(),
+    )
+    .unwrap();
+    crate::roster::fold(&nas, &TestRoot::seeded(ROOT).sign_update(&other))
+        .await
+        .unwrap();
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, _) = commit(root).await;
+    let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
+    assert_eq!(committed.offer(&dial).await, Reach::Behind);
+}
+
+#[tokio::test]
+async fn a_refused_offer_is_never_counted_as_taken() {
+    let (_home, _, mut root) = revoking(
+        "refused",
+        &[(LAPTOP, "laptop"), (NAS, "nas"), (PHONE, "phone")],
+    )
+    .await;
+    root.revoke_device(&name("phone")).unwrap();
+    let (committed, _) = commit(root).await;
+
+    let dial = Scripted(vec![(NAS, Answer::Gave), (LAPTOP, Answer::Refused)]);
+    let reach = committed.offer(&dial).await;
+
+    assert_eq!(
+        reach,
+        Reach::Published {
+            took: vec!["me/nas".to_owned()],
+            missed: vec![Missed {
+                name: "me/laptop".to_owned(),
+                why: Why::Refused,
+            }],
+            until: Some(STANDING_UNTIL),
+        }
     );
 }

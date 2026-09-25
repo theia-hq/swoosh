@@ -347,8 +347,14 @@ impl Loopback {
     }
 }
 
-impl Dial for Loopback {
-    async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
+impl Loopback {
+    /// Run one exchange with `peer`, this side offering `offered` (the update at a number, and its bytes)
+    /// or, on `None`, the update the home holds.
+    async fn run(
+        &self,
+        peer: NodeId,
+        offered: Option<(crate::roster::Epoch, &[u8])>,
+    ) -> Result<Answer, ExchangeError> {
         self.dialed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -359,12 +365,34 @@ impl Dial for Loopback {
         let (near, far) = tokio::io::duplex(64 * 1024);
         let (near_read, near_write) = tokio::io::split(near);
         let (far_read, far_write) = tokio::io::split(far);
-        let (dialed, answered) = tokio::join!(
-            crate::sync::exchange(&self.home, near_read, near_write),
-            crate::sync::answer(server, far_read, far_write),
-        );
+        let dialer = async {
+            match offered {
+                Some((number, bytes)) => {
+                    crate::sync::offer(&self.home, number, bytes, near_read, near_write).await
+                }
+                None => crate::sync::exchange(&self.home, near_read, near_write).await,
+            }
+        };
+        let (dialed, answered) =
+            tokio::join!(dialer, crate::sync::answer(server, far_read, far_write));
+        // A server that closes without answering is, to the dialer, one that did not answer.
         answered?;
         dialed
+    }
+}
+
+impl Dial for Loopback {
+    async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
+        self.run(peer, None).await
+    }
+
+    async fn offer(
+        &self,
+        peer: NodeId,
+        number: crate::roster::Epoch,
+        bytes: &[u8],
+    ) -> Result<Answer, ExchangeError> {
+        self.run(peer, Some((number, bytes))).await
     }
 }
 
@@ -403,6 +431,15 @@ impl Dial for Answering {
             .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
         self.answer
             .ok_or_else(|| eyre::eyre!("no device answers").into())
+    }
+
+    async fn offer(
+        &self,
+        peer: NodeId,
+        _number: crate::roster::Epoch,
+        _bytes: &[u8],
+    ) -> Result<Answer, ExchangeError> {
+        self.exchange(peer).await
     }
 }
 

@@ -16,7 +16,7 @@ use keystore::{KeyFile, Protection};
 use nauthy::{RevocationId, Revocations as _, VerifyKey};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
-use super::{Answer, Device, Until, answer, digest, exchange, round};
+use super::{Answer, Device, ExchangeError, Until, answer, digest, exchange, round};
 use crate::codec::Id;
 use crate::config;
 use crate::contacts::DeviceLabel;
@@ -303,8 +303,8 @@ async fn an_exchange_between_equals_sends_no_update_bytes() {
     );
     answered.unwrap();
     assert_eq!(dialed.unwrap(), Answer::Same);
-    // The request is a byte, a number and a digest; the answer is one byte. Nothing else crossed.
-    let update_bytes = count.load(Ordering::SeqCst) - (1 + 8 + 32) - 1;
+    // The request is a byte, a number and a digest; the answer is a byte and a digest. Nothing else crossed.
+    let update_bytes = count.load(Ordering::SeqCst) - (1 + 8 + 32) - (1 + 32);
     assert_eq!(update_bytes, 0, "equals send no update");
 }
 
@@ -358,10 +358,9 @@ async fn an_unpinned_server_never_asks_for_an_update() {
         answer(&bare, far_read, far_write)
     );
     answered.unwrap();
-    assert_eq!(
-        dialed.unwrap(),
-        Answer::Same,
-        "a machine with no pin asks for nothing"
+    assert!(
+        matches!(dialed, Err(ExchangeError::NotHeld)),
+        "a machine with no pin asks for nothing, and never reads as holding the dialer's update"
     );
     assert!(!bare.roster().exists(), "and takes nothing");
 }
@@ -407,6 +406,7 @@ async fn a_none_yet_exchange_carries_digest_zero() {
         let mut request = [0xff_u8; 1 + 8 + 32];
         far_read.read_exact(&mut request).await.unwrap();
         far_write.write_all(&[0x00]).await.unwrap();
+        far_write.write_all(&[0; 32]).await.unwrap();
         far_write.shutdown().await.unwrap();
         request
     };
