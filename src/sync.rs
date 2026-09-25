@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! dialer  -> 0x01 exchange, number (u64), digest (32 bytes, BLAKE3 of the update's bytes; zero for none yet)
-//! server  -> 0x00 same            (equal number, equal digest)
+//! server  -> 0x00 same, digest     (equal number, equal digest; the server's digest, zero off a device)
 //!            0x01 mine, <bytes>    (server's number is higher, or equal with a different digest: a fork)
 //!            0x02 send yours       (dialer's number is higher, or server has none yet)
 //! dialer  -> <bytes>               (only after 0x02)
@@ -19,7 +19,8 @@
 //! only thing that sends an update to more than one device.
 //!
 //! Only a device of a root, one that holds it or not, takes an update. Any other machine answers `same`
-//! and never asks for one.
+//! with digest zero and never asks for one, so a dialer holding an update never reads that answer as
+//! "holds it". A device that cannot read its own standing closes the stream without answering.
 
 use core::future::Future;
 use core::time::Duration;
@@ -97,6 +98,9 @@ pub enum ExchangeError {
     /// The other side said something the exchange does not.
     #[error("the other device answered out of turn")]
     Protocol,
+    /// The other side answered `same` for an update it does not hold: it is not a device of this root.
+    #[error("the other machine does not hold this list of your devices")]
+    NotHeld,
     /// The other side sent more than any update can be.
     #[error("the other device sent more than any update can be")]
     TooLarge,
@@ -137,30 +141,63 @@ fn held(home: &Home, pin: VerifyKey) -> (Epoch, Vec<u8>) {
 /// Run one exchange as the dialer, over a stream already open to the other device's `control.sync`.
 pub async fn exchange(
     home: &Home,
-    mut reader: impl AsyncRead + Unpin,
-    mut writer: impl AsyncWrite + Unpin,
+    reader: impl AsyncRead + Unpin,
+    writer: impl AsyncWrite + Unpin,
 ) -> Result<Answer, ExchangeError> {
     let pin = device_pin(home).await?.ok_or(ExchangeError::NotADevice)?;
     let (number, bytes) = held(home, pin);
+    dial_with(home, number, &bytes, reader, writer).await
+}
+
+/// Run one exchange as the dialer naming and sending `bytes`, the update at `number`, rather than the one
+/// this machine holds when it dials: a root act offers the update it cut, even if this machine has folded
+/// a later one since.
+pub async fn offer(
+    home: &Home,
+    number: Epoch,
+    bytes: &[u8],
+    reader: impl AsyncRead + Unpin,
+    writer: impl AsyncWrite + Unpin,
+) -> Result<Answer, ExchangeError> {
+    device_pin(home).await?.ok_or(ExchangeError::NotADevice)?;
+    dial_with(home, number, bytes, reader, writer).await
+}
+
+/// The dialer's side of one exchange, naming and sending `bytes`, the update at `number`.
+async fn dial_with(
+    home: &Home,
+    number: Epoch,
+    bytes: &[u8],
+    mut reader: impl AsyncRead + Unpin,
+    mut writer: impl AsyncWrite + Unpin,
+) -> Result<Answer, ExchangeError> {
     let mut request = Vec::with_capacity(1 + 8 + 32);
     request.push(EXCHANGE);
     request.extend_from_slice(&number.0.to_be_bytes());
-    request.extend_from_slice(&digest(&bytes));
+    request.extend_from_slice(&digest(bytes));
     writer.write_all(&request).await?;
     writer.flush().await?;
     let answer = match reader.read_u8().await? {
-        SAME => Answer::Same,
+        SAME => {
+            let mut theirs = [0_u8; 32];
+            reader.read_exact(&mut theirs).await?;
+            if theirs != digest(bytes) {
+                return Err(ExchangeError::NotHeld);
+            }
+            Answer::Same
+        }
         MINE => {
             let theirs = read_update(&mut reader).await?;
             match fold(home, &theirs).await? {
-                Folded::Newer => Answer::Took,
+                // `mine` means the other device holds another update than the one named; this machine
+                // holding it too (folded since it dialed) is still a take, never `same`.
+                Folded::Newer | Folded::Same => Answer::Took,
                 Folded::Fork { .. } => Answer::Forked,
-                Folded::Same => Answer::Same,
                 Folded::NotNewer => return Err(ExchangeError::Protocol),
             }
         }
         SEND_YOURS => {
-            writer.write_all(&bytes).await?;
+            writer.write_all(bytes).await?;
             writer.shutdown().await?;
             match reader.read_u8().await? {
                 FOLDED => Answer::Gave,
@@ -189,15 +226,19 @@ pub async fn answer(
     let theirs = Epoch(reader.read_u64().await?);
     let mut their_digest = [0_u8; 32];
     reader.read_exact(&mut their_digest).await?;
-    // A machine that is not a device takes nothing and gives nothing.
-    let Some(pin) = device_pin(home).await.ok().flatten() else {
+    // A machine that is not a device takes nothing and gives nothing, and says so with digest zero. One
+    // that cannot read its standing says nothing: the dialer reads the closed stream as no answer.
+    let Some(pin) = device_pin(home).await? else {
         writer.write_all(&[SAME]).await?;
+        writer.write_all(&NONE_YET).await?;
         writer.shutdown().await?;
         return Ok(());
     };
     let (mine, bytes) = held(home, pin);
-    if theirs == mine && their_digest == digest(&bytes) {
+    let my_digest = digest(&bytes);
+    if theirs == mine && their_digest == my_digest {
         writer.write_all(&[SAME]).await?;
+        writer.write_all(&my_digest).await?;
     } else if mine > theirs || (mine == theirs && !bytes.is_empty()) {
         writer.write_all(&[MINE]).await?;
         writer.write_all(&bytes).await?;
@@ -282,6 +323,15 @@ pub fn ago(home: &Home) -> String {
 pub trait Dial {
     /// Dial `peer`'s `control.sync` and run one exchange as the dialer.
     fn exchange(&self, peer: NodeId) -> impl Future<Output = Result<Answer, ExchangeError>>;
+
+    /// Dial `peer`'s `control.sync` and run one exchange as the dialer, offering `bytes`, the update at
+    /// `number` ([`offer`]).
+    fn offer(
+        &self,
+        peer: NodeId,
+        number: Epoch,
+        bytes: &[u8],
+    ) -> impl Future<Output = Result<Answer, ExchangeError>>;
 }
 
 /// The [`Dial`] over a bound node: each exchange opens `control.sync` on the device, presenting this
@@ -298,15 +348,36 @@ impl<'a, T: Transport, D: Discovery> NodeDial<'a, T, D> {
     }
 }
 
-impl<T: Transport, D: Discovery> Dial for NodeDial<'_, T, D> {
-    async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
+impl<T: Transport, D: Discovery> NodeDial<'_, T, D> {
+    /// Open a stream on `peer`'s `control.sync`, presenting this machine's standing as it reads now.
+    async fn open(
+        &self,
+        peer: NodeId,
+    ) -> Result<(impl AsyncRead + Unpin, impl AsyncWrite + Unpin), ExchangeError> {
         let badge = crate::config::load_badge(self.home).await?;
         let session = connector(peer, badge)?.open_service(self.node).await?;
         let (writer, reader) = session
             .open_bi()
             .await
             .map_err(|error| eyre::eyre!(error))?;
+        Ok((reader, writer))
+    }
+}
+
+impl<T: Transport, D: Discovery> Dial for NodeDial<'_, T, D> {
+    async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
+        let (reader, writer) = self.open(peer).await?;
         exchange(self.home, reader, writer).await
+    }
+
+    async fn offer(
+        &self,
+        peer: NodeId,
+        number: Epoch,
+        bytes: &[u8],
+    ) -> Result<Answer, ExchangeError> {
+        let (reader, writer) = self.open(peer).await?;
+        offer(self.home, number, bytes, reader, writer).await
     }
 }
 

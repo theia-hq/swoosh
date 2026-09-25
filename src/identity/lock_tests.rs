@@ -26,3 +26,31 @@ fn replacing_excludes_and_sharing_coexists() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The serving check holds the lock exclusive for an instant; a node that starts inside that instant waits
+/// it out instead of reporting a restore that is not running.
+#[test]
+fn a_serve_starting_during_the_serving_check_is_not_refused() {
+    let (home, dir) = home("home-lock-probe");
+
+    let (held, taken) = std::sync::mpsc::channel();
+    let probe = {
+        let home = home.clone();
+        std::thread::spawn(move || {
+            let probe = HomeLock::replacing(&home).unwrap();
+            held.send(()).unwrap();
+            std::thread::sleep(core::time::Duration::from_millis(20));
+            drop(probe);
+        })
+    };
+    taken.recv().unwrap();
+    let serving = HomeLock::serving(&home);
+    probe.join().unwrap();
+    assert!(
+        serving.is_ok(),
+        "a node starting during the check is not refused"
+    );
+    drop(serving);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -421,8 +421,8 @@ pub struct Committed {
     pub bytes: Vec<u8>,
     /// Its number.
     pub number: Epoch,
-    /// The devices to offer it to: every live device but this machine, a revoked key, and the ones this
-    /// act added.
+    /// The devices to offer it to: every live device (never a revoked key) but this machine and the ones
+    /// this act added.
     pub targets: Vec<Device>,
     /// The latest date a row this act revoked would have lasted to, if it revoked one.
     pub until: Option<u64>,
@@ -432,7 +432,8 @@ pub struct Committed {
 
 impl Committed {
     /// Offer the cut to every target at once, each within [`EACH`] and all within [`OFFER_BOUND`], and say
-    /// which of them have it. Runs after the command has printed what it made.
+    /// which of them have it. Runs after the command has printed what it made. Each exchange names and
+    /// sends this cut, never a later list this machine folded since it was made.
     ///
     /// A device that answers that it holds this cut, or that it folded it, has it. One that holds a newer
     /// list, or another list at this number, makes the whole act [`Reach::Behind`]. One that refused it,
@@ -440,9 +441,13 @@ impl Committed {
     pub async fn offer(self, dial: &impl Dial) -> Reach {
         let started = tokio::time::Instant::now();
         let each = EACH.min(OFFER_BOUND);
+        let (number, bytes) = (self.number, self.bytes.as_slice());
         let answers = futures::future::join_all(self.targets.iter().map(|device| async move {
-            let answer = tokio::time::timeout_at(started + each, dial.exchange(device.key)).await;
-            (device, answer)
+            let offered = dial.offer(device.key, number, bytes);
+            (
+                device,
+                tokio::time::timeout_at(started + each, offered).await,
+            )
         }))
         .await;
         let mut took = Vec::new();
@@ -842,11 +847,9 @@ impl Root {
         let targets = act
             .book
             .live()
-            .filter(|row| {
-                Some(row.key) != act.own
-                    && !act.added.contains(&row.key)
-                    && !act.book.revoked_keys.contains_key(row.key.bytes())
-            })
+            // A revoked key's row is always revoked (the records just written refuse a live row with a
+            // revoked key), so `live` already leaves every revoked key out.
+            .filter(|row| Some(row.key) != act.own && !act.added.contains(&row.key))
             // A key nobody can hold cannot be dialed, so it is left out.
             .filter_map(|row| {
                 Some(Device {

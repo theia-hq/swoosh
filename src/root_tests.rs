@@ -1657,6 +1657,14 @@ impl Dial for Scripted {
             .map(|(_, answer)| *answer)
             .ok_or_else(|| eyre::eyre!("no device answers").into())
     }
+    async fn offer(
+        &self,
+        peer: NodeId,
+        _number: Epoch,
+        _bytes: &[u8],
+    ) -> Result<Answer, ExchangeError> {
+        self.exchange(peer).await
+    }
 }
 
 /// This home holding the root with this machine and the devices `others` (seed, name) at update 1: the
@@ -1823,6 +1831,51 @@ async fn the_offer_skips_revoked_keys_and_new_devices() {
         dial.dialed(),
         vec![TestNode::seeded(LAPTOP).node_id()],
         "only me/laptop: never the revoked me/phone, the new me/tv, or this machine"
+    );
+}
+
+#[tokio::test]
+async fn an_offer_to_a_machine_that_is_not_a_device_is_not_taken() {
+    let (home, first, mut root) =
+        revoking("not-a-device", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
+    // me/nas left: it holds no pin and no standing, and takes nothing.
+    let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
+    std::fs::remove_file(nas.badge()).unwrap();
+    std::fs::remove_file(nas.signet()).unwrap();
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, _) = commit(root).await;
+
+    let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
+    assert_eq!(
+        committed.offer(&dial).await,
+        Reach::Held {
+            missed: vec![silent("nas")],
+            until: Some(STANDING_UNTIL),
+        },
+        "a machine that took nothing is never counted as having it"
+    );
+}
+
+#[tokio::test]
+async fn an_offer_after_a_newer_fold_reports_behind() {
+    let (home, first, mut root) = revoking("newer-fold", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
+    let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, _) = commit(root).await;
+    assert_eq!(committed.number, Epoch(2));
+
+    // Before the offer runs, this machine folds a later list from another copy of the root, one that does
+    // not carry this act's revocation, and me/nas holds it too.
+    let later = TestRoot::seeded(ROOT)
+        .sign_update(&RosterDoc::new(Epoch(3), first.members().to_vec()).unwrap());
+    crate::roster::fold(&home, &later).await.unwrap();
+    crate::roster::fold(&nas, &later).await.unwrap();
+
+    let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
+    assert_eq!(
+        committed.offer(&dial).await,
+        Reach::Behind,
+        "me/nas holding the later list does not hold this cut"
     );
 }
 
