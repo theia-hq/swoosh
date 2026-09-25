@@ -185,13 +185,28 @@ async fn the_gate_and_the_cut_read_one_pin() {
     let scratch = Scratch::new("one-pin");
     scratch.pin(ROOT).await;
     let (gate, cut) = scratch.gate().await;
-    assert!(admits(&gate, &badge(ROOT)), "admitted under the first root");
+    let other = format!("{}\n", TestRoot::seeded(OTHER_ROOT).node_id());
 
-    scratch.pin(OTHER_ROOT).await;
-    assert!(
-        cut.trusts(&TestRoot::seeded(ROOT).verify_key()),
-        "inside the debounce the cut reads the pin the admission read"
-    );
+    // The check means something only while the admission's read is inside the debounce, so a slow
+    // machine that lets it lapse retries rather than asserting on a window it missed.
+    let mut checked = false;
+    for _ in 0..20 {
+        scratch.pin(ROOT).await;
+        past_the_debounce();
+        let read_at = std::time::Instant::now();
+        assert!(admits(&gate, &badge(ROOT)), "admitted under the first root");
+        std::fs::write(scratch.home.signet(), &other).expect("move the pin");
+        let trusted = cut.trusts(&TestRoot::seeded(ROOT).verify_key());
+        if read_at.elapsed() < STAT_DEBOUNCE {
+            assert!(
+                trusted,
+                "inside the debounce the cut reads the pin the admission read"
+            );
+            checked = true;
+            break;
+        }
+    }
+    assert!(checked, "one attempt stayed inside the debounce");
 
     past_the_debounce();
     assert!(
