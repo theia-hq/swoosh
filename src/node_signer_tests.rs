@@ -19,7 +19,7 @@ fn ssh() -> Service {
 }
 
 fn key_of(secret: &Secret) -> VerifyKey {
-    secret.node_id().verify_key()
+    secret.node_id().verify_key().expect("a usable key")
 }
 
 fn mint(secret: &Secret, bind: Bind, delegation: Delegation) -> Result<Link, SlipError> {

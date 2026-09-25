@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use keystore::{KeyFile, Passphrase, Protection, Stored};
 use nauthy::{DisabledRoots, RevocationId, VerifyKey};
-use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
+use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
 use super::{Committed, Minted, Root, RootError, RootPlace, RootVerb, STOP, Seam};
@@ -267,7 +267,7 @@ async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
     let badge = config::load_badge(&home).await.unwrap().unwrap();
     assert_eq!(
         badge.root(),
-        root_key.verify_key(),
+        root_key.verify_key().expect("a usable key"),
         "the standing roots at the new root"
     );
     assert!(matches!(standing(&home).await, Standing::HoldsRoot { pin, .. } if pin == root_key));
@@ -279,7 +279,11 @@ async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
     root.sign_standing(key(LAPTOP), name("laptop"), Duration::from_secs(90 * DAY))
         .unwrap();
     let committed = root.commit_to(&mut io::sink()).await.unwrap();
-    let update = crate::roster::verify(&committed.bytes, root_key.verify_key()).unwrap();
+    let update = crate::roster::verify(
+        &committed.bytes,
+        root_key.verify_key().expect("a usable key"),
+    )
+    .unwrap();
     assert_eq!(update.epoch(), Epoch(1));
     assert_eq!(
         update.members().len(),
@@ -387,7 +391,7 @@ async fn an_interrupted_mint_takes_no_standing_that_is_not_its_own() {
     let badge = config::load_badge(&home).await.unwrap().unwrap();
     assert_eq!(
         badge.root(),
-        pin.verify_key(),
+        pin.verify_key().expect("a usable key"),
         "the badge roots at this root"
     );
 }
@@ -692,9 +696,9 @@ async fn a_cut_at_max_revoked_keys_refuses_before_the_prompt() {
     let home = home("max-keys");
     let full: Vec<VerifyKey> = (0..MAX_REVOKED_KEYS)
         .map(|nth| {
-            let mut bytes = [0xee_u8; 32];
-            bytes[..8].copy_from_slice(&(nth as u64).to_be_bytes());
-            VerifyKey::new(bytes)
+            let mut seed = [0xee_u8; 32];
+            seed[..8].copy_from_slice(&(nth as u64).to_be_bytes());
+            TestNode::from_seed(seed).verify_key()
         })
         .collect();
     holds(&home, &records(0, vec![own_row()], Vec::new(), full)).await;
@@ -1331,7 +1335,7 @@ async fn the_device_refusals_print_their_lines() {
     )
     .await;
     let mut root = root.unwrap();
-    let short = |seed: u8| key(seed).node_id().short();
+    let short = |seed: u8| crate::credential::short(&key(seed));
     let days = Duration::from_secs(90 * DAY);
 
     let line = root.renew(&[name("nas")], None).unwrap_err().to_string();

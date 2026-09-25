@@ -371,7 +371,8 @@ impl StatusReply {
     pub fn decode(bytes: &[u8]) -> Result<Self, ControlError> {
         let mut cursor = 0;
         let key: [u8; 32] = take_array(bytes, &mut cursor)?;
-        let node_id = NodeId::new(bifrost::CryptoKind::Ed25519, key);
+        let node_id = NodeId::try_new(bifrost::CryptoKind::Ed25519, key)
+            .map_err(|error| ControlError::Protocol(format!("status key: {error}")))?;
         let pid = u32::from_be_bytes(take_array(bytes, &mut cursor)?);
         let has_addr = take_byte(bytes, &mut cursor)?;
         let addr = match has_addr {
@@ -406,7 +407,8 @@ impl StatusReply {
         let mut warm = Vec::with_capacity(warm_count);
         for _ in 0..warm_count {
             let key: [u8; 32] = take_array(bytes, &mut cursor)?;
-            let peer = NodeId::new(bifrost::CryptoKind::Ed25519, key);
+            let peer = NodeId::try_new(bifrost::CryptoKind::Ed25519, key)
+                .map_err(|error| ControlError::Protocol(format!("warm peer key: {error}")))?;
             let idle_secs = u64::from_be_bytes(take_array(bytes, &mut cursor)?);
             warm.push(PeerEntry { peer, idle_secs });
         }

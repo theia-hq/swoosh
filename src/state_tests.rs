@@ -14,7 +14,7 @@ use super::{
 use crate::codec::{FormatError, Id};
 use crate::contacts::DeviceLabel;
 use crate::roster::{self, Epoch, RosterDoc};
-use crate::testkit::TestRoot;
+use crate::testkit::{TestNode, TestRoot};
 
 const ROOT: u8 = 7;
 
@@ -23,7 +23,7 @@ fn root() -> TestRoot {
 }
 
 fn key(n: u8) -> VerifyKey {
-    VerifyKey::new([n; 32])
+    TestNode::seeded(n).verify_key()
 }
 
 fn row(n: u8, label: &str) -> Row {
@@ -105,15 +105,10 @@ fn state_rows_are_unique_by_key_and_by_live_name() {
     )
     .unwrap()
     .canonical_bytes();
-    let header = super::MAGIC.len() + 1 + 8 + 4;
-    let first_row = State::new(Epoch(1), vec![row(1, "desk")], vec![], vec![])
-        .unwrap()
-        .canonical_bytes()
-        .len()
-        - header
-        - 8;
-    let dusk = header + first_row + 32 + 2;
-    assert_eq!(&bytes[dusk..dusk + 4], b"dusk");
+    let dusk = bytes
+        .windows(4)
+        .position(|window| window == b"dusk")
+        .expect("the second name is on the wire");
     let mut twice = bytes.clone();
     twice[dusk..dusk + 4].copy_from_slice(b"desk");
     assert_eq!(
@@ -364,7 +359,8 @@ fn a_row_is_revoked_exactly_when_its_key_is() {
 fn state_holds_at_most_max_members_live_rows() {
     let standing = row(1, "desk").standing;
     let live = |n: usize| Row {
-        key: VerifyKey::new(core::array::from_fn(|at| (n >> (8 * (at % 2))) as u8)),
+        key: TestNode::from_seed(core::array::from_fn(|at| (n >> (8 * (at % 2))) as u8))
+            .verify_key(),
         label: DeviceLabel::from_str(&format!("d{n}")).unwrap(),
         ids: vec![],
         standing: standing.clone(),

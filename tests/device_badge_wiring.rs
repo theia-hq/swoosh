@@ -129,8 +129,8 @@ fn invite_add_derives_signs_adopt_stores_and_it_verifies_at_the_signet_root() {
     //    as a member when the proven dialer is the DEVICE (bound_device matches); (d) it does NOT verify
     //    when the proven dialer is some other key (the binding holds).
     let cap = Cap::parse(&stored_badge).expect("the stored badge parses as a cap");
-    let signet_vk: VerifyKey = signet.verify_key();
-    let device_vk: VerifyKey = device.verify_key();
+    let signet_vk: VerifyKey = signet.verify_key().expect("a usable key");
+    let device_vk: VerifyKey = device.verify_key().expect("a usable key");
 
     // (b) signet-ROOTED, never self-rooted.
     assert_eq!(cap.root(), signet_vk, "the badge roots at the SIGNET");
@@ -146,7 +146,9 @@ fn invite_add_derives_signs_adopt_stores_and_it_verifies_at_the_signet_root() {
         .expect("the badge admits the bound device as a member at the signet root");
 
     // (d) an intercepted badge replayed from ANOTHER key fails the bound_device binding.
-    let stranger = NodeId::from_ed25519_secret(&[0x5a; 32]).verify_key();
+    let stranger = NodeId::from_ed25519_secret(&[0x5a; 32])
+        .verify_key()
+        .expect("a usable key");
     assert!(
         cap.verify_member_at_root_without_revocation(now, stranger, signet_vk)
             .is_err(),
@@ -274,10 +276,10 @@ async fn invite_add_for_binds_a_device_made_key_and_adopt_keeps_that_identity() 
 
     // 4. VERIFY: the stored badge roots at the signet and admits exactly this device.
     let cap = Cap::parse(&stored_badge).expect("the stored badge parses");
-    let signet_vk: VerifyKey = signet.verify_key();
+    let signet_vk: VerifyKey = signet.verify_key().expect("a usable key");
     cap.verify_member_at_root_without_revocation(
         std::time::SystemTime::now(),
-        device.verify_key(),
+        device.verify_key().expect("a usable key"),
         signet_vk,
     )
     .expect("the bound badge admits the device at the signet root");

@@ -22,6 +22,7 @@ use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
 use swoosh::names::NameError;
 use swoosh::node_signer::{Bind, NodeSigner};
+use swoosh::peer::{UnusableKey, raw_key};
 use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -97,7 +98,7 @@ impl ShareCmd {
                 // Record the RESOLVED device node id (canonical), so revoke-by-holder matches whether the
                 // issuer named a petname or the raw key.
                 (
-                    Bind::Device(node.verify_key()),
+                    Bind::Device(node.verify_key()?),
                     GrantKind::Device,
                     Delegation::Sealed,
                     node.to_string(),
@@ -229,7 +230,7 @@ impl FromStr for GrantFor {
         // Typed prefix first: the kind is in the token, so widening is explicit.
         if let Some(body) = text.strip_prefix("fleet:") {
             // A fleet is a whole PERSON: a raw signet key, or a bare petname. NOT a device address.
-            if let Ok(node) = body.parse::<NodeId>() {
+            if let Some(node) = raw_key(body)? {
                 return Ok(Self::Fleet(FleetTarget::Raw(node)));
             }
             let petname = body
@@ -245,7 +246,7 @@ impl FromStr for GrantFor {
             return Err(GrantForParseError::UnknownKind(kind.to_owned()));
         }
         // No prefix. A raw key is one device; a `petname/device` is one device; a BARE person is refused.
-        if let Ok(node) = text.parse::<NodeId>() {
+        if let Some(node) = raw_key(text)? {
             return Ok(Self::Device(DeviceTarget::Raw(node)));
         }
         let reference: ContactRef = text.parse()?;
@@ -288,6 +289,9 @@ pub enum GrantForParseError {
          `<key>` for one device"
     )]
     UnknownKind(String),
+    /// The token spells a key, but not one anyone can hold.
+    #[error(transparent)]
+    Key(#[from] UnusableKey),
 }
 
 /// Resolve a `--for fleet:<who>` token to the SIGNET root it binds. A raw signet key resolves to itself; a
@@ -298,7 +302,7 @@ fn resolve_fleet_root(
     contacts: &Contacts,
 ) -> eyre::Result<nauthy::VerifyKey> {
     match target {
-        FleetTarget::Raw(node) => Ok(node.verify_key()),
+        FleetTarget::Raw(node) => Ok(node.verify_key()?),
         FleetTarget::Named(petname) => {
             let binding = contacts.signet(petname).ok_or_else(|| {
                 eyre::eyre!(
@@ -306,7 +310,7 @@ fn resolve_fleet_root(
                      and record it with `swoosh contact signet {petname} <key>`, then retry `--for fleet:{petname}`"
                 )
             })?;
-            Ok(binding.node.verify_key())
+            Ok(binding.node.verify_key()?)
         }
     }
 }
@@ -357,7 +361,7 @@ mod tests {
             resolve_fleet_root(&FleetTarget::Raw(signet), &contacts).expect("a raw key resolves");
         assert_eq!(
             resolved,
-            signet.verify_key(),
+            signet.verify_key().expect("a usable key"),
             "the resolved fleet root is the key the token named"
         );
     }
@@ -375,7 +379,7 @@ mod tests {
             .expect("alice's stored signet resolves");
         assert_eq!(
             resolved,
-            signet.verify_key(),
+            signet.verify_key().expect("a usable key"),
             "the fleet root is alice's stored signet"
         );
 
@@ -402,7 +406,7 @@ mod tests {
         assert_eq!(record.kind, GrantKind::Fleet);
         assert_eq!(
             record.holder,
-            signet.verify_key().to_string(),
+            signet.verify_key().expect("a usable key").to_string(),
             "the recorded holder is the resolved signet key"
         );
     }

@@ -140,3 +140,23 @@ fn a_reserved_name_refuses() {
         Err(NameError::Reserved("root".to_owned()))
     );
 }
+
+/// A torsioned key is refused as a contact's key at parse, with the line every typed key refuses with,
+/// naming the check it failed.
+#[test]
+fn a_torsioned_key_is_refused_as_a_contact_key() {
+    let key = swoosh::testkit::torsioned_text();
+    let error = Cli::try_parse_from(["swoosh", "contact", "add", "alice", key.as_str()])
+        .expect_err("a torsioned key is refused");
+    assert_eq!(
+        error.exit_code(),
+        2,
+        "a key that is not a key is a usage error"
+    );
+    assert!(
+        error.to_string().contains(&format!(
+            "{key} is not a usable key: carries a torsion component"
+        )),
+        "the refusal names the key and the check: {error}"
+    );
+}

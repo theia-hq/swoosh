@@ -5,18 +5,15 @@ use bifrost::NodeId;
 use super::*;
 use crate::names::NameError;
 
-/// A deterministic node id from a seed, so tests can assert on distinct identities. Each seed maps to a
-/// valid `ed01` base32 string (an all-`seed`-byte key), parsed through the real boundary rather than
-/// constructed, so the tests exercise the same path a user's pasted key takes.
+/// A deterministic node id from a seed, so tests can assert on distinct identities: the key the all-`seed`
+/// secret binds, printed and parsed back through the real boundary rather than constructed, so the tests
+/// exercise the same path a user's pasted key takes.
 fn node(seed: u8) -> NodeId {
-    let encoded = match seed {
-        1 => "ed01aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq",
-        2 => "ed01aibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaiba",
-        3 => "ed01ambqgaydambqgaydambqgaydambqgaydambqgaydambqgaydambq",
-        7 => "ed01a4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dq",
-        other => panic!("no fixture node id for seed {other}"),
-    };
-    encoded.parse().expect("fixture node id parses")
+    crate::testkit::TestNode::seeded(seed)
+        .node_id()
+        .to_string()
+        .parse()
+        .expect("fixture node id parses")
 }
 
 fn petname(name: &str) -> Petname {
@@ -253,16 +250,16 @@ async fn a_saved_book_is_owner_only_in_an_owner_only_store() {
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
 
-use nauthy::VerifyKey;
+use tightbeam::identity::AsVerifyKey as _;
 
 use crate::roster::{Epoch, FormatError, Member, RosterDoc};
 
-/// A roster member whose node id is the all-`seed`-byte key, so it hydrates to the same [`node`] fixture,
+/// A roster member whose key is the one the all-`seed` secret binds, so it hydrates to the same [`node`] fixture,
 /// which doubles as a check that the `VerifyKey -> NodeId` conversion preserves the bytes.
 fn roster_member(seed: u8, label: &str) -> Member {
     crate::testkit::TestRoot::seeded(SIGNET_SEED)
         .member(
-            VerifyKey::new([seed; 32]),
+            crate::testkit::TestNode::seeded(seed).verify_key(),
             label.parse::<DeviceLabel>().expect("valid device label"),
         )
         .expect("a member")
@@ -982,7 +979,10 @@ fn cut_roster(contacts: &Contacts) -> Result<Option<RosterDoc>, FormatError> {
         .flat_map(|person| person.devices.iter())
         .map(|(label, binding)| {
             crate::testkit::TestRoot::seeded(SIGNET_SEED)
-                .member(VerifyKey::new(*binding.node.key()), label.clone())
+                .member(
+                    binding.node.verify_key().expect("a usable key"),
+                    label.clone(),
+                )
                 .expect("a member")
         })
         .collect();

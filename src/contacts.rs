@@ -22,7 +22,8 @@ use core::str::FromStr;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use bifrost::{CryptoKind, NodeId};
+use bifrost::NodeId;
+use tightbeam::identity::AsNodeId as _;
 
 use crate::names::{Name, NameError};
 use crate::roster::{Epoch, RosterDoc};
@@ -497,10 +498,15 @@ impl Contacts {
                 applied.skipped += 1;
                 continue;
             }
+            // The update's decode refused any key that is not a usable key, and bifrost runs the same
+            // check, so this conversion does not fail; a key that did would not be dialable anyway.
+            let Ok(node) = member.node.node_id() else {
+                continue;
+            };
             person.devices.insert(
                 member.label.clone(),
                 Binding {
-                    node: NodeId::new(CryptoKind::Ed25519, *member.node.bytes()),
+                    node,
                     source: Source::Roster { epoch: epoch.0 },
                 },
             );

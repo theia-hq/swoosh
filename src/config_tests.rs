@@ -184,7 +184,7 @@ async fn disable(home: &Home, dir: &std::path::Path, key: bifrost::NodeId) {
 
     super::create_store_dir(dir).expect("create the store dir");
     nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
-        .disable(key.verify_key())
+        .disable(key.verify_key().expect("a usable key"))
         .await
         .expect("disable the key");
 }

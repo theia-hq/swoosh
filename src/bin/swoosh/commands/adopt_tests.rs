@@ -166,7 +166,7 @@ async fn a_disabled_signet_is_refused_even_with_force() {
     let signet = TestRoot::seeded(1);
     swoosh::config::create_store_dir(&dir).expect("create the store dir");
     nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
-        .disable(signet.node_id().verify_key())
+        .disable(signet.node_id().verify_key().expect("a usable key"))
         .await
         .expect("disable the signet");
 
@@ -195,7 +195,12 @@ async fn a_signet_this_node_never_disabled_adopts() {
     let signet = TestRoot::seeded(1);
     swoosh::config::create_store_dir(&dir).expect("create the store dir");
     nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
-        .disable(Secret::ephemeral().node_id().verify_key())
+        .disable(
+            Secret::ephemeral()
+                .node_id()
+                .verify_key()
+                .expect("a usable key"),
+        )
         .await
         .expect("disable another key");
 

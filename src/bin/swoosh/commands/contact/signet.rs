@@ -16,7 +16,7 @@ pub struct SignetCmd {
     #[arg(value_name = "petname", value_parser = super::new_person)]
     pub petname: Petname,
     /// The person's signet public key (from their `swoosh identity`).
-    #[arg(value_name = "key")]
+    #[arg(value_name = "key", value_parser = swoosh::peer::parse_key)]
     pub key: NodeId,
 }
 

@@ -24,7 +24,7 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use keystore::KeyFile;
-use nauthy::{DisabledRoots, DisabledRootsError, Link};
+use nauthy::{DisabledRoots, DisabledRootsError, Link, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 
 use crate::home::Home;
@@ -296,7 +296,7 @@ impl Standing {
             if own == Some(key) {
                 return Err(StandingError::Damaged(Disagreement::OwnKeyPinned { key }));
             }
-            if revoked.is_disabled(key.verify_key()) {
+            if is_revoked(&revoked, key) {
                 strip(home).await?;
                 finished.push(Finished::Retired { root: Some(key) });
                 pin = None;
@@ -330,15 +330,31 @@ async fn classify(
         },
         (None, None) => match load_badge(home).await? {
             None => Ok(Standing::Unpinned),
-            Some(badge) => damaged(Disagreement::StandingWithoutPin {
-                standing_root: badge.root().node_id(),
-            }),
+            Some(badge) => match badge.root().node_id() {
+                Ok(standing_root) => damaged(Disagreement::StandingWithoutPin { standing_root }),
+                Err(_) => Err(unreadable_badge(home)),
+            },
         },
         (None, Some(pin)) => match read_badge(home, own, pin).await? {
             None => Ok(Standing::PinOnly { pin }),
             Some(until) => Ok(Standing::Device { pin, until }),
         },
     }
+}
+
+/// The pin as the key a standing roots at. A pin that is not a usable key reads as damaged.
+pub fn pin_key(home: &Home, pin: NodeId) -> Result<VerifyKey, StandingError> {
+    pin.verify_key().map_err(|_| {
+        StandingError::Damaged(Disagreement::UnreadablePin {
+            path: home.signet(),
+        })
+    })
+}
+
+/// Whether `revoked` holds `key`. A key that is not a usable key is no root's, so it is not revoked here;
+/// every use of it refuses on its own.
+fn is_revoked(revoked: &DisabledRoots, key: NodeId) -> bool {
+    key.verify_key().is_ok_and(|key| revoked.is_disabled(key))
 }
 
 /// This machine's own key, from its key file's header. `None` when the home has no key yet.
@@ -358,7 +374,7 @@ async fn held_root(home: &Home, revoked: &DisabledRoots) -> Result<Option<NodeId
         return Ok(None);
     }
     let root = root_key(&dir).map_err(StandingError::Damaged)?;
-    Ok((!revoked.is_disabled(root.verify_key())).then_some(root))
+    Ok((!is_revoked(revoked, root)).then_some(root))
 }
 
 /// The key a root directory's `root.key` header names, read without unlocking it.
@@ -407,7 +423,7 @@ async fn retire_revoked_root(
     let Ok(root) = root_key(&dir) else {
         return Ok(None);
     };
-    if !revoked.is_disabled(root.verify_key()) {
+    if !is_revoked(revoked, root) {
         return Ok(None);
     }
     // The lock is on the file inside the directory, so it moves with the rename and stays held.
@@ -417,7 +433,7 @@ async fn retire_revoked_root(
     // Checked again under the lock: the directory read above may have been retired since, and a new
     // root made in its place, which is no retirement's to touch.
     match root_key(&dir) {
-        Ok(held) if revoked.is_disabled(held.verify_key()) => {}
+        Ok(held) if is_revoked(revoked, held) => {}
         Ok(_) | Err(_) => return Ok(None),
     }
     seam(Seam::BeforeRetireRename, &dir);
@@ -441,12 +457,12 @@ async fn finish_retirement(
     _lock: DirLock,
 ) -> Result<Finished, StandingError> {
     let root = root_key(&home.root_revoking()).ok();
-    let retired = |key: NodeId| root == Some(key) || revoked.is_disabled(key.verify_key());
+    let retired = |key: NodeId| root == Some(key) || is_revoked(revoked, key);
     let (under_retired, pin) = match read_pin(home).await {
         Ok(Some(pin)) => (retired(pin), retired(pin).then_some(pin)),
         Ok(None) => match load_badge(home).await {
             Ok(None) => (true, None),
-            Ok(Some(badge)) => (retired(badge.root().node_id()), None),
+            Ok(Some(badge)) => (badge.root().node_id().is_ok_and(retired), None),
             Err(_) => (false, None),
         },
         Err(_) => (false, None),
@@ -499,7 +515,9 @@ async fn read_badge(
     let Some(badge) = load_badge(home).await? else {
         return Ok(None);
     };
-    let standing_root = badge.root().node_id();
+    let Ok(standing_root) = badge.root().node_id() else {
+        return Err(unreadable_badge(home));
+    };
     if standing_root != pin {
         return Err(StandingError::Damaged(
             Disagreement::StandingFromAnotherRoot { standing_root, pin },
@@ -510,12 +528,13 @@ async fn read_badge(
         Ok(None) | Err(_) => return Err(unreadable_badge(home)),
     };
     // Checked at the standing's own end date, so a lapsed standing still reads as this machine's.
-    let ours = own.is_some_and(|own| {
-        badge
+    let ours = match (own.map(|own| own.verify_key()), pin.verify_key()) {
+        (Some(Ok(own)), Ok(pin)) => badge
             .cap()
-            .verify_member_at_root_without_revocation(until, own.verify_key(), pin.verify_key())
-            .is_ok()
-    });
+            .verify_member_at_root_without_revocation(until, own, pin)
+            .is_ok(),
+        _ => false,
+    };
     if !ours {
         return Err(StandingError::Damaged(
             Disagreement::StandingForAnotherKey { path: home.badge() },

@@ -93,6 +93,9 @@ pub enum FormatError {
     /// A flag byte was neither 0 nor 1.
     #[error("a flag is neither 0 nor 1")]
     BadFlag,
+    /// A device key is not a key anyone can hold.
+    #[error("a device key is not a usable key: {0}")]
+    BadKey(nauthy::KeyError),
     /// Two devices share one key.
     #[error("the document lists device {0} twice")]
     DuplicateNode(VerifyKey),
@@ -292,7 +295,7 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn key(&mut self) -> Result<VerifyKey, FormatError> {
-        Ok(VerifyKey::new(self.array()?))
+        VerifyKey::try_new(self.array()?).map_err(FormatError::BadKey)
     }
 
     /// A `u16`-prefixed device name, read as stored: a capital refuses rather than folding, so two

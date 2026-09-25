@@ -10,7 +10,7 @@
 
 use core::str::FromStr;
 
-use bifrost::NodeId;
+use bifrost::{KeyError, NodeId, NodeIdParseError};
 use nauthy::{Link, Service};
 use tightbeam::tunnel::Connector;
 
@@ -50,13 +50,62 @@ impl FromStr for Peer {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if crate::link::is_prefixed(text) {
             Ok(Self::Capability(crate::link::parse(text)?))
-        } else if let Ok(node) = text.parse::<NodeId>() {
-            Ok(Self::Raw(node))
-        } else if crate::link::looks_bare(text) {
-            Err(PeerParseError::Capability(LinkError::Prefix))
         } else {
-            Ok(Self::Named(text.parse::<ContactRef>()?))
+            if let Some(node) = raw_key(text)? {
+                return Ok(Self::Raw(node));
+            }
+            if crate::link::looks_bare(text) {
+                Err(PeerParseError::Capability(LinkError::Prefix))
+            } else {
+                Ok(Self::Named(text.parse::<ContactRef>()?))
+            }
         }
+    }
+}
+
+/// A typed key that spells a key, but not one anyone can hold: the one line every typed key refuses with,
+/// naming the check it failed.
+#[derive(Debug, thiserror::Error)]
+#[error("{text} is not a usable key: {error}")]
+pub struct UnusableKey {
+    /// The text as typed.
+    pub text: String,
+    /// Which check the key failed.
+    pub error: KeyError,
+}
+
+/// Why typed text is not a key.
+#[derive(Debug, thiserror::Error)]
+pub enum KeyTextError {
+    /// It spells a key nobody can hold.
+    #[error(transparent)]
+    Unusable(#[from] UnusableKey),
+    /// It does not spell a key at all.
+    #[error(transparent)]
+    NotAKey(NodeIdParseError),
+}
+
+/// Typed text as a key: the parser every typed key goes through, so a key nobody can hold refuses with
+/// the same line wherever it is typed.
+pub fn parse_key(text: &str) -> Result<NodeId, KeyTextError> {
+    match text.parse::<NodeId>() {
+        Ok(node) => Ok(node),
+        Err(NodeIdParseError::Key(error)) => Err(UnusableKey {
+            text: text.to_owned(),
+            error,
+        }
+        .into()),
+        Err(other) => Err(KeyTextError::NotAKey(other)),
+    }
+}
+
+/// Typed text as a key where a name may stand instead: `None` when it does not spell a key, the refusal
+/// when it spells one nobody can hold (that text is a key, never a name).
+pub fn raw_key(text: &str) -> Result<Option<NodeId>, UnusableKey> {
+    match parse_key(text) {
+        Ok(node) => Ok(Some(node)),
+        Err(KeyTextError::Unusable(unusable)) => Err(unusable),
+        Err(KeyTextError::NotAKey(_)) => Ok(None),
     }
 }
 
@@ -69,6 +118,9 @@ pub enum PeerParseError {
     /// The text was neither a link nor a raw key, and a part of it was not a name: the name rule's own line.
     #[error(transparent)]
     Contact(#[from] NameError),
+    /// The text spells a key, but not one anyone can hold.
+    #[error(transparent)]
+    Key(#[from] UnusableKey),
 }
 
 impl Peer {
@@ -90,7 +142,7 @@ impl Peer {
             }]),
             Self::Capability(link) => Ok(vec![Candidate {
                 label: link.short(),
-                node: link.dial_node(),
+                node: link.dial_node()?,
             }]),
         }
     }
@@ -111,7 +163,7 @@ impl Peer {
     ) -> eyre::Result<Connector> {
         let dial = match self {
             Self::Raw(id) => *id,
-            Self::Capability(link) => link.dial_node(),
+            Self::Capability(link) => link.dial_node()?,
             Self::Named(reference) => {
                 contacts
                     .resolve_candidates(reference)?
@@ -266,7 +318,7 @@ mod tests {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a swoosh: link parses");
         let root = match &peer {
-            Peer::Capability(link) => link.dial_node(),
+            Peer::Capability(link) => link.dial_node().expect("a link root is a key"),
             _ => panic!("a swoosh: link parses as a Capability peer"),
         };
 
@@ -356,7 +408,7 @@ mod tests {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a link peer");
         let root = match &peer {
-            Peer::Capability(link) => link.dial_node(),
+            Peer::Capability(link) => link.dial_node().expect("a link root is a key"),
             _ => panic!("a swoosh: link parses as a Capability peer"),
         };
         // The two slots come from the resolver, not from the peer link: distinct valid links prove the

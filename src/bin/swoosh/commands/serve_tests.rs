@@ -2629,7 +2629,7 @@ fn non_recv_services_pass_through_and_only_recv_is_removed() {
 /// proof's per-service check runs without standing up a signet.
 fn gated() -> nauthy::Gate {
     nauthy::Gate::rooted(
-        nauthy::VerifyKey::new([1u8; 32]),
+        swoosh::testkit::TestRoot::seeded(7).verify_key(),
         nauthy::FileDenylist::empty(std::path::PathBuf::new()),
     )
 }

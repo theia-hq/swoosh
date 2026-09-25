@@ -161,7 +161,7 @@ async fn a_control_services_slip_is_refused_before_ok() {
             let slip = TestRoot::seeded(SIGNET)
                 .bound_slip(
                     &CONTROL_SERVICES_SERVICE.parse().unwrap(),
-                    delegate.node_id().verify_key(),
+                    delegate.node_id().verify_key().expect("a usable key"),
                     nauthy::Request::expires_in(Duration::from_secs(300)),
                 )
                 .unwrap();

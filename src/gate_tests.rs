@@ -283,7 +283,7 @@ async fn a_key_in_revoked_keys_is_refused_whatever_it_presents() {
 #[test]
 fn a_pin_is_exactly_one_key() {
     let key = TestRoot::seeded(ROOT).node_id();
-    assert_eq!(super::one_key(&format!("{key}\n")), Some(key.verify_key()));
+    assert_eq!(super::one_key(&format!("{key}\n")), key.verify_key().ok());
     assert_eq!(super::one_key(&format!("{key}\n{key}\n")), None);
     assert_eq!(super::one_key(""), None);
 }

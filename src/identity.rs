@@ -121,7 +121,7 @@ impl Secret {
     ) -> eyre::Result<Link> {
         Ok(self
             .with_bytes(nauthy::Identity::from_secret)?
-            .mint_member(device.verify_key(), nauthy::Request::expires_in(ttl))?
+            .mint_member(device.verify_key()?, nauthy::Request::expires_in(ttl))?
             .seal()?
             .link()?)
     }

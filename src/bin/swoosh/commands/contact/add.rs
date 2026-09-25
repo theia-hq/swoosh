@@ -11,7 +11,7 @@ pub struct AddCmd {
     #[arg(value_name = "name", value_parser = super::new_contact)]
     pub name: ContactRef,
     /// The peer's identity, as a bifrost node id.
-    #[arg(value_name = "key")]
+    #[arg(value_name = "key", value_parser = swoosh::peer::parse_key)]
     pub key: NodeId,
 }
 

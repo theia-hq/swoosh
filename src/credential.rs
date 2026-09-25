@@ -14,7 +14,7 @@
 //! two reads swoosh needs of a link that nauthy does not owe a consumer.
 
 use bifrost::NodeId;
-use nauthy::Link;
+use nauthy::{Link, VerifyKey};
 use tightbeam::identity::AsNodeId as _;
 
 /// The reads swoosh takes of a [`Link`]: the node it self-addresses and its short form for output.
@@ -28,8 +28,9 @@ use tightbeam::identity::AsNodeId as _;
 pub trait LinkExt {
     /// The node this link self-addresses: the cap's ROOT key as a bifrost [`NodeId`], the node a connector
     /// dials when the link IS the peer. The same target
-    /// [`Connector::from_link`](tightbeam::tunnel::Connector::from_link) computes (`link.root().node_id()`).
-    fn dial_node(&self) -> NodeId;
+    /// [`Connector::from_link`](tightbeam::tunnel::Connector::from_link) computes (`link.root().node_id()`),
+    /// or bifrost's reason the root is not a key it can dial.
+    fn dial_node(&self) -> Result<NodeId, bifrost::KeyError>;
 
     /// The short form for output: the root key's short id, uniform with a raw key's short form, so a link
     /// peer and a key peer print the same way.
@@ -37,13 +38,19 @@ pub trait LinkExt {
 }
 
 impl LinkExt for Link {
-    fn dial_node(&self) -> NodeId {
+    fn dial_node(&self) -> Result<NodeId, bifrost::KeyError> {
         self.root().node_id()
     }
 
     fn short(&self) -> String {
-        self.dial_node().short()
+        short(&self.root())
     }
+}
+
+/// The short form of a key for output: the first 16 characters of its text, as [`NodeId::short`] prints
+/// the same key.
+pub fn short(key: &VerifyKey) -> String {
+    key.to_string().chars().take(16).collect()
 }
 
 /// How a reaching verb authenticates to the service it dials.

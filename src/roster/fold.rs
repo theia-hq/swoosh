@@ -97,7 +97,7 @@ pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
             return Err(FoldError::NotADevice);
         }
     };
-    let pin = pin.verify_key();
+    let pin = crate::standing::pin_key(home, pin)?;
     if bytes.len() as u64 > MAX_ROSTER_BLOB {
         return Err(FoldError::TooLarge);
     }
@@ -174,7 +174,7 @@ async fn pick_up(
         .load()
         .map_err(|error| eyre::eyre!(error))?
         .map(|stored| stored.node_id().verify_key());
-    let Some(own) = own else {
+    let Some(Ok(own)) = own else {
         return Ok(());
     };
     let Some(member) = doc.members().iter().find(|member| member.node == own) else {

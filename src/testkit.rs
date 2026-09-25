@@ -29,6 +29,23 @@ use crate::roster::{Member, RosterDoc};
 use crate::state::State;
 use crate::sync::{Answer, Dial, ExchangeError};
 
+/// The key the seed `[7; 32]` binds plus a point of order 8: the torsioned twin of a real key, which
+/// the holder of that key's secret can sign for. nauthy's and bifrost's own tests use these bytes.
+pub const TORSIONED: [u8; 32] = [
+    0x1f, 0x4f, 0x58, 0x0e, 0x73, 0xac, 0x20, 0x8f, 0x06, 0x76, 0x01, 0x90, 0xe9, 0xed, 0xc6, 0xf5,
+    0x91, 0x67, 0x75, 0xda, 0xbd, 0x9c, 0x1c, 0xdc, 0xa3, 0x93, 0x17, 0x5c, 0x2d, 0x6d, 0x10, 0x83,
+];
+
+/// [`TORSIONED`] as key text, the way a person would paste it.
+pub fn torsioned_text() -> String {
+    format!(
+        "ed01{}",
+        data_encoding::BASE32_NOPAD
+            .encode(&TORSIONED)
+            .to_ascii_lowercase()
+    )
+}
+
 /// When a test standing ends, in unix seconds: far enough out that no test outlives it.
 pub const STANDING_UNTIL: u64 = 4_000_000_000;
 
@@ -125,9 +142,12 @@ impl Keys {
     /// A membership badge for `device`, until `until`, sealed and in the bare form a device stores
     /// and presents.
     pub fn device_badge(&self, device: NodeId, until: SystemTime) -> Result<Link, CapError> {
-        self.member_badge(device.verify_key(), until)?
-            .seal()?
-            .link()
+        #[expect(
+            clippy::expect_used,
+            reason = "a test key is a key its own secret binds, so it is a usable key"
+        )]
+        let device = device.verify_key().expect("a test key is a usable key");
+        self.member_badge(device, until)?.seal()?.link()
     }
 
     /// A live device for an update: `node`, named `label`, carrying this root's sealed badge for it as its

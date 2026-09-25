@@ -109,7 +109,7 @@ async fn revoke(home: &Home, key: NodeId) {
         .await
         .expect("load the latch");
     latch
-        .disable(key.verify_key())
+        .disable(key.verify_key().expect("a usable key"))
         .await
         .expect("revoke the root here");
 }
@@ -282,6 +282,23 @@ async fn a_home_whose_badge_is_self_signed_with_no_pin_reads_damaged() {
         damaged(&home).await,
         Disagreement::StandingWithoutPin {
             standing_root: own()
+        }
+    );
+}
+
+/// A pin file holding a torsioned key is a stored key that is not a key: the home reads as damaged.
+#[tokio::test]
+async fn a_torsioned_pin_reads_damaged() {
+    let home = home("torsioned-pin");
+    std::fs::write(
+        home.signet(),
+        format!("{}\n", crate::testkit::torsioned_text()),
+    )
+    .expect("write the pin");
+    assert_eq!(
+        damaged(&home).await,
+        Disagreement::UnreadablePin {
+            path: home.signet()
         }
     );
 }

@@ -50,7 +50,7 @@ fn a_seed_names_one_key() {
     let root = TestRoot::seeded(7);
     assert_eq!(root.seed(), [7; 32]);
     assert_eq!(root.verify_key(), TestNode::seeded(7).verify_key());
-    assert_eq!(root.node_id().verify_key(), root.verify_key());
+    assert_eq!(root.node_id().verify_key(), Ok(root.verify_key()));
     assert_ne!(root.verify_key(), TestRoot::seeded(8).verify_key());
 }
 

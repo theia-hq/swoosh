@@ -247,7 +247,9 @@ async fn resolve_to<W: std::io::Write>(
         Some(slip) => {
             let pinned = slip.cap().authority_bound_root().ok().flatten();
             let membership = match badge {
-                Some((stored, own_fleet)) if pinned == Some(own_fleet.verify_key()) => {
+                Some((stored, own_fleet))
+                    if pinned.is_some_and(|pin| own_fleet.verify_key() == Ok(pin)) =>
+                {
                     Some(into_slot(stored, node, warn)?)
                 }
                 _ => None,
