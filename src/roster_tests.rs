@@ -145,13 +145,13 @@ fn a_cut_roster_verifies_against_its_signet() {
     // through that verify path (a caller cannot get a trusted doc any other way).
     let id = identity(7);
     let doc = sample_doc();
-    let blob = super::cut(id.identity(), &doc);
+    let blob = id.sign_update(&doc);
     assert_eq!(super::verify(&blob, id.verify_key()), Ok(doc));
 }
 
 #[test]
 fn verify_rejects_a_foreign_signet() {
-    let blob = super::cut(identity(7).identity(), &sample_doc());
+    let blob = identity(7).sign_update(&sample_doc());
     let stranger = identity(8).verify_key();
     assert_eq!(
         super::verify(&blob, stranger),
@@ -164,7 +164,7 @@ fn verify_rejects_a_tampered_payload() {
     // Flip a payload byte after signing: the envelope still decodes, but the signature no longer covers
     // these bytes, so verify fails at the signature seam before any parse.
     let id = identity(7);
-    let mut blob = super::cut(id.identity(), &sample_doc());
+    let mut blob = id.sign_update(&sample_doc());
     let last = blob.len() - 1;
     blob[last] ^= 0xff;
     assert_eq!(
@@ -422,16 +422,13 @@ fn maximal_blob(id: &TestRoot, standing: &Link) -> Vec<u8> {
     let keys = (0..MAX_REVOKED_KEYS)
         .map(|nth| VerifyKey::new(index_key(nth)))
         .collect();
-    super::cut(
-        id.identity(),
-        &RosterDoc::with_revocations(Epoch(u64::MAX), members, revoked, keys).unwrap(),
-    )
+    id.sign_update(&RosterDoc::with_revocations(Epoch(u64::MAX), members, revoked, keys).unwrap())
 }
 
 #[test]
 fn the_largest_update_the_parser_accepts_is_exactly_the_blob_bound() {
     // The bound is computed, so this pins the computation to the wire it describes: an update at every
-    // bound, in the envelope `cut` writes, is MAX_ROSTER_BLOB bytes less only what its real standings fall
+    // bound, in the envelope a cut writes, is MAX_ROSTER_BLOB bytes less only what its real standings fall
     // short of MAX_BADGE. It also holds ENVELOPE_LEN, the one term nauthy keeps private.
     let id = identity(ROOT);
     let standing = real_standing();

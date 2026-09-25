@@ -56,10 +56,7 @@ fn cut_roster(signet: &TestRoot, count: usize) -> Vec<u8> {
             standing: standing.clone(),
         })
         .collect();
-    swoosh::roster::cut(
-        signet.identity(),
-        &RosterDoc::new(Epoch(9), members).unwrap(),
-    )
+    signet.sign_update(&RosterDoc::new(Epoch(9), members).unwrap())
 }
 
 /// A coordination node on the serving end of `roster:` that streams forever: it answers the read with

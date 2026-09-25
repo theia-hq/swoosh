@@ -853,7 +853,7 @@ async fn a_device_keeps_learning_the_fleet_after_every_edit() {
         let doc = cut_roster(owner)
             .expect("a well-formed cut")
             .expect("a versioned book has something to cut");
-        crate::roster::cut(signet.identity(), &doc)
+        signet.sign_update(&doc)
     };
 
     // Pull 1: the fresh device learns the fleet.
@@ -885,10 +885,8 @@ async fn a_device_keeps_learning_the_fleet_after_every_edit() {
 
     // And the floor still refuses a genuine replay of the earlier cut, so freshness did not cost safety.
     let stale = crate::roster::verify(
-        &crate::roster::cut(
-            signet.identity(),
-            &RosterDoc::new(Epoch(1), vec![roster_member(1, "desk")]).expect("doc"),
-        ),
+        &signet
+            .sign_update(&RosterDoc::new(Epoch(1), vec![roster_member(1, "desk")]).expect("doc")),
         signet.verify_key(),
     )
     .expect("verify");

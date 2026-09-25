@@ -597,40 +597,61 @@ fn sync_dir(dir: &Path) -> Result<(), StandingError> {
 }
 
 /// A held `<dir>/lock`, the lock every command that works on a root's directory takes. Released on drop.
-struct DirLock {
+pub(crate) struct DirLock {
     /// Held, never read: the lock lives exactly as long as this open file does.
     _held: std::fs::File,
+}
+
+/// Why `<dir>/lock` was not taken.
+#[derive(Debug)]
+pub(crate) enum LockError {
+    /// Another command holds it, or the directory was replaced while it was being taken.
+    Held,
+    /// It could not be opened or created.
+    Io(io::Error),
 }
 
 impl DirLock {
     /// Take `<dir>/lock` without waiting, creating it if it is not there. `None` when the directory is
     /// not here, when another command holds the lock, or when it cannot be taken at all: in each case
     /// the directory is not the read's to touch.
+    fn try_take(dir: &Path) -> Option<Self> {
+        if !dir.is_dir() {
+            return None;
+        }
+        Self::take(dir).ok()
+    }
+
+    /// Take `<dir>/lock` without waiting, creating it if it is not there.
     ///
     /// The lock taken is checked to still be `<dir>/lock` once held. Opening and locking are two steps,
     /// and between them the directory can be removed and another made at its name, whose lock this
     /// open file is not.
-    fn try_take(dir: &Path) -> Option<Self> {
+    pub(crate) fn take(dir: &Path) -> Result<Self, LockError> {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 
-        if !dir.is_dir() {
-            return None;
-        }
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
             .open(dir.join("lock"))
-            .ok()?;
+            .map_err(LockError::Io)?;
         seam(Seam::LockOpened, dir);
         // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory lock to
         // it. `LOCK_NB` makes a held lock an error rather than a wait.
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return None;
+            let error = io::Error::last_os_error();
+            return Err(match error.raw_os_error() {
+                Some(libc::EWOULDBLOCK) => LockError::Held,
+                _ => LockError::Io(error),
+            });
         }
-        let held = file.metadata().ok()?;
-        let named = std::fs::metadata(dir.join("lock")).ok()?;
-        (held.dev() == named.dev() && held.ino() == named.ino()).then_some(Self { _held: file })
+        let held = file.metadata().map_err(LockError::Io)?;
+        let named = std::fs::metadata(dir.join("lock")).map_err(LockError::Io)?;
+        if held.dev() != named.dev() || held.ino() != named.ino() {
+            return Err(LockError::Held);
+        }
+        Ok(Self { _held: file })
     }
 }
 

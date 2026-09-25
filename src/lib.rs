@@ -24,6 +24,7 @@ pub mod passphrase;
 pub mod peer;
 pub mod reach;
 pub mod reaching;
+pub mod root;
 pub mod roster;
 pub mod secret;
 pub mod serve;

@@ -84,7 +84,7 @@ async fn proof() {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(artifact_path.parent().unwrap());
-    roster::Artifact::write(&artifact_path, signet.identity(), &doc)
+    roster::Artifact::write(&artifact_path, &signet.sign_update(&doc))
         .await
         .unwrap();
     let artifact = Arc::new(roster::Artifact::open(artifact_path.clone()).await.unwrap());
