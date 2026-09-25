@@ -24,9 +24,8 @@ impl SignetCmd {
     /// Record the signet and persist. Idempotent, mirroring `add`: re-setting the same key is a no-op that
     /// says so; a different key warns on the clobber rather than silently losing the previous signet.
     pub async fn run(self, mut store: ContactsStore) -> eyre::Result<()> {
-        let outcome = store
-            .contacts_mut()
-            .set_signet(self.petname.clone(), self.key);
+        let petname = self.petname.clone().unreserved()?;
+        let outcome = store.contacts_mut().set_signet(petname, self.key);
         match outcome {
             Added::Created => {
                 println!("recorded {}'s signet -> {}", self.petname, self.key.short())

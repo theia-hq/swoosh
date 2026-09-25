@@ -3,6 +3,7 @@
 use bifrost::NodeId;
 
 use super::*;
+use crate::names::NameError;
 
 /// A deterministic node id from a seed, so tests can assert on distinct identities. Each seed maps to a
 /// valid `bf01` base32 string (an all-`seed`-byte key), parsed through the real boundary rather than
@@ -34,18 +35,21 @@ fn resolve(contacts: &Contacts, target: &ContactRef) -> Result<Vec<NodeId>, Reso
         .map(|candidates| candidates.into_iter().map(|c| c.node).collect())
 }
 
+/// A petname follows the one name rule, and may be reserved: `me` addresses this person's own devices.
 #[test]
-fn petname_rejects_slash_whitespace_and_empty() {
-    assert_eq!("".parse::<Petname>(), Err(PetnameParseError::Empty));
+fn a_petname_is_a_name_and_may_be_reserved() {
+    for text in ["", "alice/macbook", "al ice", "fleet:alice"] {
+        assert_eq!(
+            text.parse::<Petname>(),
+            Err(NameError::NotAName(text.to_owned()))
+        );
+    }
+    assert_eq!(petname("Alice").as_str(), "alice");
+    assert_eq!(petname("me").as_str(), "me");
     assert_eq!(
-        "alice/macbook".parse::<Petname>(),
-        Err(PetnameParseError::Slash)
+        petname("root").unreserved(),
+        Err(NameError::Reserved("root".to_owned()))
     );
-    assert_eq!(
-        "al ice".parse::<Petname>(),
-        Err(PetnameParseError::Whitespace)
-    );
-    assert_eq!(petname("alice").as_str(), "alice");
 }
 
 #[test]
@@ -125,52 +129,24 @@ fn resolve_unknown_name_is_a_clean_error_not_an_empty_dial() {
     );
 }
 
+/// A device label follows the one name rule and is never reserved: no device is `me`, `root` or `anyone`.
 #[test]
-fn device_label_rejects_length_and_control_bytes() {
-    // The unified label type gains the length bound and control-byte reject the roster codec requires, so
-    // these hold for local contacts and roster members alike.
-    assert_eq!("".parse::<DeviceLabel>(), Err(DeviceLabelParseError::Empty));
-    assert_eq!(
-        "a/b".parse::<DeviceLabel>(),
-        Err(DeviceLabelParseError::Slash)
-    );
-    assert_eq!(
-        "a b".parse::<DeviceLabel>(),
-        Err(DeviceLabelParseError::BadByte)
-    );
-    assert_eq!(
-        "a\nb".parse::<DeviceLabel>(),
-        Err(DeviceLabelParseError::BadByte)
-    );
-    assert_eq!(
-        "x".repeat(DeviceLabel::MAX_LEN + 1).parse::<DeviceLabel>(),
-        Err(DeviceLabelParseError::TooLong)
-    );
-    assert!("ci-runner".parse::<DeviceLabel>().is_ok());
-}
-
-/// The `--for` widening prefixes are reserved out of the device-label namespace: a label that looked
-/// like `fleet:<person>` (or `cluster:`) would collide with a bind, so the parse refuses it and names
-/// the flag it belongs on. A bare `fleet` (no colon) and a PETNAME carrying a colon are unaffected.
-#[test]
-fn device_label_rejects_the_for_widening_prefixes() {
-    for text in ["fleet:alice", "cluster:home"] {
+fn a_device_label_is_an_unreserved_name() {
+    let too_long = "x".repeat(DeviceLabel::MAX_LEN + 1);
+    for text in ["", "a/b", "a b", "a\nb", too_long.as_str(), "fleet:alice"] {
         assert_eq!(
             text.parse::<DeviceLabel>(),
-            Err(DeviceLabelParseError::Widening),
-            "{text} must not parse as a device label"
+            Err(NameError::NotAName(text.to_owned()))
         );
     }
-    // The prefix must be exact: a plain name containing the word is still a label.
+    for text in ["me", "root", "anyone"] {
+        assert_eq!(
+            text.parse::<DeviceLabel>(),
+            Err(NameError::Reserved(text.to_owned()))
+        );
+    }
+    assert!("ci-runner".parse::<DeviceLabel>().is_ok());
     assert!("fleet".parse::<DeviceLabel>().is_ok());
-    // A petname is a different slot (no device position), so the reservation does not apply there.
-    assert!("fleet:alice".parse::<Petname>().is_ok());
-    // The teaching error names `--for` and an example that uses it.
-    let message = DeviceLabelParseError::Widening.to_string();
-    assert!(
-        message.contains("--for") && message.contains("fleet:"),
-        "the refusal teaches where a widening token goes: {message}"
-    );
 }
 
 #[test]
@@ -523,16 +499,36 @@ async fn store_round_trips_roster_provenance() {
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
 
-#[test]
-fn signet_is_a_reserved_device_label() {
-    // `signet` is the reserved per-person key for a signet root, so it can never be a device label. This is
-    // what makes the device/signet collision unrepresentable: a device labelled `signet` cannot be parsed.
+/// A device may be named `signet`: the signet is stored under a key that is not a name, so the two never
+/// collide on save.
+#[tokio::test]
+async fn a_device_named_signet_keeps_its_own_row_beside_the_signet() {
+    let dir =
+        std::env::temp_dir().join(format!("swoosh-contacts-signet-row-{}", std::process::id()));
+    let path = dir.join("contacts.toml");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+
+    let mut store = ContactsStore::open(path.clone()).await.expect("open");
+    store
+        .contacts_mut()
+        .add(petname("alice"), Some(device("signet")), node(1));
+    let _ = store.contacts_mut().set_signet(petname("alice"), node(2));
+    store.save().await.expect("save");
+
+    let reloaded = ContactsStore::open(path.clone()).await.expect("reopen");
     assert_eq!(
-        "signet".parse::<DeviceLabel>(),
-        Err(DeviceLabelParseError::Reserved)
+        resolve(reloaded.contacts(), &"alice/signet".parse().expect("addr")),
+        Ok(vec![node(1)])
     );
-    // And it cannot slip in as the device part of a contact address.
-    assert!("alice/signet".parse::<ContactRef>().is_err());
+    assert_eq!(
+        reloaded
+            .contacts()
+            .signet(&petname("alice"))
+            .map(|binding| binding.node),
+        Some(node(2))
+    );
+
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
 
 #[test]
@@ -575,11 +571,11 @@ async fn store_round_trips_a_signet_and_keeps_the_device_map() {
         .add(petname("alice"), Some(device("laptop")), node(1));
     store.save().await.expect("save");
 
-    // The signet persists as a reserved `signet` key co-located in alice's own block.
+    // The signet persists under a key that is not a name, co-located in alice's own block.
     let text = tokio::fs::read_to_string(&path).await.expect("read file");
     assert!(
-        text.contains("signet = "),
-        "the signet round-trips as a reserved key in the person's table: {text}"
+        text.contains("signet_root = "),
+        "the signet round-trips as its own key in the person's table: {text}"
     );
 
     // Reload: the signet comes back HandTyped, and the device map is unaffected.

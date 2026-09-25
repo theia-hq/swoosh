@@ -95,8 +95,10 @@ fn print_names(contacts: &Contacts) {
 /// Print a person's block: the signet (if recorded) as the FIRST line, then the device lines, as an
 /// aligned `  label  key` table. Each key renders with `key` (short in the overview, full in the detail);
 /// the label column is padded to the widest label, signet included, so the keys line up down the block.
-/// The `signet` pseudo-label is unambiguous by construction: the label is reserved
-/// ([`DeviceLabel::SIGNET_RESERVED`]), so a device can never occupy that row.
+/// The signet row prints first, so a device that happens to be named `signet` is still told apart by order.
+/// The row label a person's signet prints under.
+const SIGNET: &str = "signet";
+
 fn print_block(
     signet: Option<&NodeId>,
     devices: &[(&DeviceLabel, &NodeId)],
@@ -105,11 +107,11 @@ fn print_block(
     let width = devices
         .iter()
         .map(|(label, _)| label.as_str().len())
-        .chain(signet.map(|_| DeviceLabel::SIGNET_RESERVED.len()))
+        .chain(signet.map(|_| SIGNET.len()))
         .max()
         .unwrap_or(0);
     if let Some(node) = signet {
-        println!("  {:<width$}  {}", DeviceLabel::SIGNET_RESERVED, key(node));
+        println!("  {:<width$}  {}", SIGNET, key(node));
     }
     for (label, node) in devices {
         println!("  {:<width$}  {}", label.as_str(), key(node));

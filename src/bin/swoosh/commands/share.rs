@@ -16,10 +16,11 @@ use core::str::FromStr;
 use bifrost::NodeId;
 use clap::Args;
 use nauthy::{Cap, Service};
-use swoosh::contacts::{ContactRef, ContactRefParseError, Contacts, ContactsStore, Petname};
+use swoosh::contacts::{ContactRef, Contacts, ContactsStore, Petname};
 use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
+use swoosh::names::NameError;
 use swoosh::node_signer::{Bind, NodeSigner};
 use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
@@ -262,7 +263,7 @@ impl FromStr for GrantFor {
 pub enum GrantForParseError {
     /// The token was a `petname/device` address whose parts were invalid.
     #[error("invalid `--for` target")]
-    Contact(#[from] ContactRefParseError),
+    Contact(#[from] NameError),
     /// A bare person: the widening guardrail. You must type `fleet:` to bind a whole fleet, or name a device.
     #[error(
         "`--for {0}` is a whole person; type `--for fleet:{0}` to bind their fleet, or `--for {0}/laptop` \

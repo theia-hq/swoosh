@@ -248,9 +248,9 @@ impl RosterDoc {
             let label_len = usize::from(take_u16(bytes, &mut cur)?);
             let text = core::str::from_utf8(take(bytes, &mut cur, label_len)?)
                 .map_err(|_| RosterError::BadLabel("not valid UTF-8"))?;
-            let label = text.parse::<DeviceLabel>().map_err(|_| {
-                RosterError::BadLabel("empty, too long, or held a slash/whitespace/control byte")
-            })?;
+            let label = text
+                .parse::<DeviceLabel>()
+                .map_err(|_| RosterError::BadLabel("not a device name"))?;
             // Reject rather than re-sort: the members must arrive strictly-ascending-by-node, so a permuted
             // or duplicated wire (which would decode to the same logical doc under a re-sort) is refused and
             // the wire stays canonical, one byte-string per doc. `new`'s sort is the CUT-side canonicalizer;

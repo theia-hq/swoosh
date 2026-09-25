@@ -65,6 +65,7 @@ pub struct ServeCmd {
     // mistyped scheme is sent to and it has to be complete.
     #[arg(
         value_name = "name=target",
+        value_parser = swoosh::serve::service_entry,
         long_help = "publish services as `name=target` (bare: `ping` and `speed`)\n\
                      \n\
                      Every target carries a scheme. swoosh serves:\n\

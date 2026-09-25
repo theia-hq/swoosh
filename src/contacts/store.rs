@@ -12,10 +12,8 @@ use std::path::PathBuf;
 
 use bifrost::NodeIdParseError;
 
-use super::{
-    Binding, Contacts, DeviceLabel, DeviceLabelParseError, Petname, PetnameParseError,
-    RosterVersion, Source,
-};
+use super::{Binding, Contacts, DeviceLabel, Petname, RosterVersion, Source};
+use crate::names::NameError;
 use crate::roster::Epoch;
 
 /// A contacts file at a known path, loaded into a mutable [`Contacts`] and saved back atomically.
@@ -100,13 +98,12 @@ const ROSTER_EPOCH_KEY: &str = "roster_epoch";
 /// loads correctly and the operator's next membership edit writes `1`.
 const ROSTER_VERSION_KEY: &str = "roster_version";
 
-/// The reserved per-person key carrying that person's SIGNET root. A person table's other keys are device
-/// labels; [`decode`] dispatches on this key FIRST (like [`ROSTER_EPOCH_KEY`] at the top level) so it never
-/// reaches the device parser, and [`encode`] writes it FIRST. The value reuses the device wire form: a bare
-/// string is a hand-typed signet, an inline `{ key, roster }` table is a (future) roster-vouched signet, so
-/// [`decode_binding`]/[`encode_binding`] handle both. Bound to the ONE reserved string on [`DeviceLabel`], so
-/// the on-disk key and the device-label reject can never drift apart.
-const SIGNET_KEY: &str = DeviceLabel::SIGNET_RESERVED;
+/// The per-person key carrying that person's SIGNET root. A person table's other keys are device labels;
+/// [`decode`] dispatches on this key FIRST (like [`ROSTER_EPOCH_KEY`] at the top level) and [`encode`]
+/// writes it FIRST. The value reuses the device wire form: a bare string is a hand-typed signet, an inline
+/// `{ key, roster }` table is a (future) roster-vouched signet, so [`decode_binding`]/[`encode_binding`]
+/// handle both. The `_` puts it outside the name rule, so no device label can ever collide with it.
+const SIGNET_KEY: &str = "signet_root";
 
 /// The on-disk shape: a top-level table whose keys are petnames (each mapping to a device table) plus the
 /// one reserved [`ROSTER_EPOCH_KEY`] integer. A separate wire type so no serde derive touches the domain,
@@ -141,7 +138,7 @@ fn decode(text: &str) -> Result<Contacts, StoreError> {
         let group = value.as_table().ok_or(StoreError::BadEntry)?;
         for (label, value) in group {
             // The reserved signet key holds the person's signet root, not a device; dispatch on it first so
-            // it never reaches the device parser (which would reject `signet` as a reserved label anyway).
+            // it never reaches the device parser (which would refuse it: `_` is outside the name rule).
             if label == SIGNET_KEY {
                 contacts.set_signet_binding(petname.clone(), decode_binding(value)?);
                 continue;
@@ -195,8 +192,8 @@ fn encode(contacts: &Contacts) -> Result<String, StoreError> {
             .collect();
         // The signet persists under the reserved key inside the person's OWN table, so alice's whole record
         // (devices + signet) stays one `[alice]` block; a person with a signet but no devices still writes a
-        // block, so a signet-only contact round-trips. `signet` can never collide with a device key (it is a
-        // reserved device label), so this insert never clobbers one.
+        // block, so a signet-only contact round-trips. The key can never collide with a device label (it is
+        // not a name), so this insert never clobbers one.
         if let Some(binding) = contacts.signet(petname) {
             group.insert(SIGNET_KEY.to_owned(), encode_binding(binding));
         }
@@ -265,12 +262,9 @@ pub enum StoreError {
     /// The contacts could not be serialized to TOML.
     #[error("encoding the contacts file")]
     Encode(#[source] toml::ser::Error),
-    /// A stored petname was not a valid petname.
-    #[error("the contacts file holds an invalid petname")]
-    Petname(#[from] PetnameParseError),
-    /// A stored device label was not valid.
-    #[error("the contacts file holds an invalid device label")]
-    Device(#[from] DeviceLabelParseError),
+    /// A stored petname or device label was not a name.
+    #[error("the contacts file holds an invalid name")]
+    Name(#[from] NameError),
     /// A stored identity string was not a valid node id. A plain `#[from]`: the bifrost umbrella
     /// re-exports the concrete [`NodeIdParseError`], so the source chain is preserved with no projection
     /// or manual `map_err`.

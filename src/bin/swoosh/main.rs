@@ -1637,4 +1637,27 @@ mod tests {
             "the hidden catch-all still parses, so a stale invocation reaches the forward error"
         );
     }
+
+    /// A typed service name follows the one name rule, so a dotted internal route (`control.stop`) can never
+    /// be typed: the entry refuses at parse, exit 2, before anything binds. A capital folds.
+    #[test]
+    fn a_typed_service_name_cannot_be_an_internal_route() {
+        let error = Cli::try_parse_from(["swoosh", "serve", "control.stop=tcp:localhost:1"])
+            .expect_err("a dotted service name refuses");
+        assert_eq!(error.exit_code(), 2, "a bad name is a usage error");
+        assert!(
+            error.to_string().contains(
+                "control.stop is not a name: a name uses a-z, 0-9 and -, and starts with a letter or digit."
+            ),
+            "the refusal states the rule: {error}"
+        );
+        let Some(Command::Serve(cmd)) =
+            Cli::try_parse_from(["swoosh", "serve", "Web=tcp:localhost:1"])
+                .expect("a capital name parses")
+                .command
+        else {
+            panic!("serve parses to the serve verb");
+        };
+        assert_eq!(cmd.services, ["web=tcp:localhost:1"]);
+    }
 }

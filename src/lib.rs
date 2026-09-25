@@ -15,6 +15,7 @@ pub mod grants;
 pub mod home;
 pub mod identity;
 pub mod invite;
+pub mod names;
 pub mod node_client;
 pub mod node_signer;
 pub mod passphrase;

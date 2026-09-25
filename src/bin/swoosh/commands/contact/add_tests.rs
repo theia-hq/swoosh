@@ -1,6 +1,7 @@
 use bifrost::NodeId;
-use swoosh::contacts::ContactsStore;
+use swoosh::contacts::{ContactRef, ContactsStore};
 use swoosh::home::Home;
+use swoosh::names::NameError;
 
 use super::AddCmd;
 
@@ -72,5 +73,64 @@ async fn an_add_outside_me_is_saved() {
             .any(|petname| petname.as_str() == "alice"),
         "alice is in the book"
     );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A capital folds on input, so `contact add Alice <key>` saves `alice`, the one stored spelling.
+#[tokio::test]
+async fn a_capital_name_folds_to_lowercase() {
+    let home = home_with_book("fold").await;
+    add(
+        &home,
+        "Alice/MacBook",
+        NodeId::from_ed25519_secret(&[6u8; 32]),
+    )
+    .await
+    .expect("a capital name is saved");
+    let store = ContactsStore::open(home.contacts()).await.expect("open");
+    let names: Vec<_> = store
+        .contacts()
+        .petnames()
+        .map(|petname| petname.as_str().to_owned())
+        .collect();
+    assert_eq!(names, ["alice", "me"], "saved folded");
+    let devices: Vec<_> = store
+        .contacts()
+        .devices(&"alice".parse().expect("petname"))
+        .expect("alice is saved")
+        .map(|(label, _)| label.as_str().to_owned())
+        .collect();
+    assert_eq!(devices, ["macbook"]);
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// `me`, `root` and `anyone` never name a person or a device: an add under one refuses and writes nothing,
+/// and a device part that is one refuses at parse.
+#[tokio::test]
+async fn a_reserved_name_refuses() {
+    let home = home_with_book("reserved").await;
+    let before = std::fs::read(home.contacts()).expect("read the book");
+    for person in ["me", "root", "anyone"] {
+        let error = add(&home, person, NodeId::from_ed25519_secret(&[7u8; 32]))
+            .await
+            .expect_err("a reserved person refuses");
+        assert!(
+            person == "me"
+                || format!("{error:#}") == format!("{person} is reserved: pick another name"),
+            "the refusal names the reserved word: {error:#}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(home.contacts()).expect("read the book"),
+        before,
+        "nothing is written"
+    );
+    for device in ["me", "root", "anyone"] {
+        assert_eq!(
+            format!("alice/{device}").parse::<ContactRef>(),
+            Err(NameError::Reserved(device.to_owned())),
+            "a reserved device refuses"
+        );
+    }
     let _ = std::fs::remove_dir_all(home.dir());
 }

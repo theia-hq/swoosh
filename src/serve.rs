@@ -15,6 +15,8 @@ use ::fetch::OriginAllowlist;
 use nauthy::Service;
 use tightbeam::tunnel::{Router, Serve};
 
+use crate::names::{Name, NameError};
+
 mod activity;
 mod control;
 mod resident;
@@ -107,6 +109,17 @@ pub fn classify_stop(source: Option<StopKind>) -> Stopped {
         Some(StopKind::Interrupted) => Stopped::Interrupted,
         Some(StopKind::Expires | StopKind::Wire) | None => Stopped::Requested,
     }
+}
+
+/// Parse one typed `name=target` service entry: the name follows the one name rule and is folded, the target
+/// passes through for [`bind_entry`] to read. A typed name is never dotted, so it can never be an internal
+/// route (`control.stop`). An entry with no `=` passes through too: the tunnel grammar teaches that shape.
+pub fn service_entry(entry: &str) -> Result<String, NameError> {
+    let Some((name, target)) = entry.split_once('=') else {
+        return Ok(entry.to_owned());
+    };
+    let name: Name = name.parse()?;
+    Ok(format!("{name}={target}"))
 }
 
 /// Bind one operator `name=addr` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
