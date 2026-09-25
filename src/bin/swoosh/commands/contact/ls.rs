@@ -92,32 +92,48 @@ fn print_names(contacts: &Contacts) {
     }
 }
 
-/// Print a person's block: the signet (if recorded) as the FIRST line, then the device lines, as an
-/// aligned `  label  key` table. Each key renders with `key` (short in the overview, full in the detail);
-/// the label column is padded to the widest label, signet included, so the keys line up down the block.
-/// The signet row prints first, so a device that happens to be named `signet` is still told apart by order.
-/// The row label a person's signet prints under.
-const SIGNET: &str = "signet";
+/// The row label a person's signet prints under: `root`, a reserved word no device can take, so no device
+/// row can ever read as a person's signet.
+const SIGNET_ROW: &str = "root";
 
+/// Print a person's block: the signet (if recorded) as the FIRST line, then the device lines, as an
+/// aligned `  label  key` table. Each key renders with `key` (short in the overview, full in the detail).
 fn print_block(
     signet: Option<&NodeId>,
     devices: &[(&DeviceLabel, &NodeId)],
     key: impl Fn(&NodeId) -> String,
 ) {
+    for line in block_lines(signet, devices, key) {
+        println!("{line}");
+    }
+}
+
+/// The lines of a person's block. The label column is padded to the widest label, the signet's included,
+/// so the keys line up down the block. The signet prints under [`SIGNET_ROW`], which no device name can
+/// be, so a device named `signet` keeps its own label and never reads as the person's root.
+fn block_lines(
+    signet: Option<&NodeId>,
+    devices: &[(&DeviceLabel, &NodeId)],
+    key: impl Fn(&NodeId) -> String,
+) -> Vec<String> {
     let width = devices
         .iter()
         .map(|(label, _)| label.as_str().len())
-        .chain(signet.map(|_| SIGNET.len()))
+        .chain(signet.map(|_| SIGNET_ROW.len()))
         .max()
         .unwrap_or(0);
-    if let Some(node) = signet {
-        println!("  {:<width$}  {}", SIGNET, key(node));
-    }
-    for (label, node) in devices {
-        println!("  {:<width$}  {}", label.as_str(), key(node));
-    }
+    signet
+        .map(|node| (SIGNET_ROW, node))
+        .into_iter()
+        .chain(devices.iter().map(|(label, node)| (label.as_str(), *node)))
+        .map(|(label, node)| format!("  {label:<width$}  {}", key(node)))
+        .collect()
 }
 
 /// The column a device-less contact's key starts at in the overview, so single-line and header rows read
 /// as one table.
 const NAME_COL: usize = 10;
+
+#[cfg(test)]
+#[path = "ls_tests.rs"]
+mod ls_tests;

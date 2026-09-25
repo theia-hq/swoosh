@@ -248,8 +248,7 @@ impl RosterDoc {
             let label_len = usize::from(take_u16(bytes, &mut cur)?);
             let text = core::str::from_utf8(take(bytes, &mut cur, label_len)?)
                 .map_err(|_| RosterError::BadLabel("not valid UTF-8"))?;
-            let label = text
-                .parse::<DeviceLabel>()
+            let label = DeviceLabel::stored(text)
                 .map_err(|_| RosterError::BadLabel("not a device name"))?;
             // Reject rather than re-sort: the members must arrive strictly-ascending-by-node, so a permuted
             // or duplicated wire (which would decode to the same logical doc under a re-sort) is refused and

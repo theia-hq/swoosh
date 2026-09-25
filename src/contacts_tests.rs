@@ -531,6 +531,36 @@ async fn a_device_named_signet_keeps_its_own_row_beside_the_signet() {
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
 
+/// The contacts file is read as stored: a capital in a person or a device key refuses rather than folding, so
+/// `[Alice]` and `[alice]` can never merge into one person without a word.
+#[tokio::test]
+async fn a_stored_capital_name_refuses_on_load() {
+    let dir =
+        std::env::temp_dir().join(format!("swoosh-contacts-stored-cap-{}", std::process::id()));
+    let path = dir.join("contacts.toml");
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    tokio::fs::create_dir_all(&dir).await.expect("mkdir");
+    let key = node(1).to_string();
+    for text in [
+        format!("[Alice]\nlaptop = \"{key}\"\n"),
+        format!("[alice]\nLaptop = \"{key}\"\n"),
+    ] {
+        tokio::fs::write(&path, &text).await.expect("write");
+        assert!(
+            ContactsStore::open(path.clone()).await.is_err(),
+            "a capital on disk refuses: {text}"
+        );
+    }
+    tokio::fs::write(&path, format!("[alice]\nlaptop = \"{key}\"\n"))
+        .await
+        .expect("write");
+    assert!(
+        ContactsStore::open(path.clone()).await.is_ok(),
+        "the stored spelling loads"
+    );
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+}
+
 #[test]
 fn hydrate_keeps_a_hand_typed_signet_and_touches_only_devices() {
     // The write-fence: `hydrate` folds a roster's DEVICES under `me` and never reads or writes the signet, so

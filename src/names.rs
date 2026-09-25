@@ -9,6 +9,8 @@
 
 use core::str::FromStr;
 
+use nauthy::Service;
+
 /// A name a person typed, already known to follow the rule and already folded to lowercase.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Name(String);
@@ -39,6 +41,28 @@ impl Name {
         }
         Ok(self)
     }
+
+    /// A name read back from disk or the wire, where it was stored folded. Nothing folds here: text that is
+    /// not already its one spelling refuses, so each stored name has exactly one byte-string.
+    pub fn stored(text: &str) -> Result<Self, NameError> {
+        let name: Self = text.parse()?;
+        if name.as_str() != text {
+            return Err(NameError::NotAName(text.to_owned()));
+        }
+        Ok(name)
+    }
+}
+
+/// Parse a service name a person typed (`serve --public <service>`, `grant issue <service>`, `reach <peer>
+/// <service>`, ...): the one name rule, folded, as the [`Service`] the router and the grant carry. A dotted
+/// internal route (`control.stop`) is never a name, so it can never be typed.
+pub fn service(text: &str) -> Result<Service, NameError> {
+    let name: Name = text.parse()?;
+    // Every name is a service (the service alphabet is wider); the fallback keeps this total without a
+    // panic path.
+    name.as_str()
+        .parse()
+        .map_err(|_| NameError::NotAName(text.to_owned()))
 }
 
 impl FromStr for Name {
@@ -89,7 +113,7 @@ pub fn suggest() -> Name {
 
 /// The suggested name for a given hostname: cut at its first `.`, lowercased, every character outside the
 /// alphabet made `-`, runs of `-` collapsed, the ends trimmed of `-`, cut to [`Name::MAX_LEN`]. A hostname
-/// that leaves nothing suggests `this`.
+/// that leaves nothing, or leaves a reserved word (`root.local`), suggests `this`.
 pub fn suggest_from(hostname: &str) -> Name {
     let head = hostname.split('.').next().unwrap_or_default();
     let mut name = String::with_capacity(head.len());
@@ -108,8 +132,11 @@ pub fn suggest_from(hostname: &str) -> Name {
     let name = name.trim_end_matches('-');
     let name = &name[..name.len().min(Name::MAX_LEN)];
     // Built from the alphabet, starting with a letter or digit, and no longer than the bound: always a name.
-    // An empty result (a hostname of only dots or symbols) falls to `this`.
-    name.parse().unwrap_or_else(|_| Name("this".to_owned()))
+    // An empty result (a hostname of only dots or symbols) or a reserved word falls to `this`, so the
+    // suggestion can always name a device.
+    name.parse()
+        .and_then(Name::unreserved)
+        .unwrap_or_else(|_| Name("this".to_owned()))
 }
 
 /// This machine's hostname, or the empty string when the system will not say.

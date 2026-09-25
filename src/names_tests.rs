@@ -1,4 +1,4 @@
-use super::{Name, NameError, suggest_from};
+use super::{Name, NameError, service, suggest_from};
 
 /// Every character outside `a-z`, `0-9` and `-`, a leading `-`, and a 64th character each break the rule,
 /// so no name can hold the invite's `.`, a marker's `:`, a path, or whitespace.
@@ -70,8 +70,43 @@ fn the_suggested_name_is_the_hostname_before_its_first_dot() {
         ("", "this"),
         ("--My  Laptop's--", "my-laptop-s"),
         ("caf\u{e9}-box.lan", "caf-box"),
+        ("root.local", "this"),
+        ("Me", "this"),
+        ("anyone.lan", "this"),
     ] {
         assert_eq!(suggest_from(hostname).as_str(), suggested, "{hostname:?}");
     }
     assert_eq!(suggest_from(&"x".repeat(100)).as_str().len(), Name::MAX_LEN);
+}
+
+/// A name read back from disk or the wire is taken as stored: a capital there is not folded but refused, so
+/// one stored name has one byte-string.
+#[test]
+fn a_stored_name_never_folds() {
+    assert_eq!(
+        Name::stored("laptop").map(String::from),
+        Ok("laptop".to_owned())
+    );
+    assert_eq!(
+        Name::stored("Laptop"),
+        Err(NameError::NotAName("Laptop".to_owned())),
+        "a stored capital refuses"
+    );
+    assert_eq!(
+        Name::stored("a.b"),
+        Err(NameError::NotAName("a.b".to_owned()))
+    );
+}
+
+/// A typed service name follows the rule: a dotted internal route refuses, a capital folds.
+#[test]
+fn a_typed_service_name_follows_the_rule() {
+    assert_eq!(
+        service("control.stop"),
+        Err(NameError::NotAName("control.stop".to_owned()))
+    );
+    assert_eq!(
+        service("Web").map(|name| name.as_str().to_owned()),
+        Ok("web".to_owned())
+    );
 }

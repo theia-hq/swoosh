@@ -200,6 +200,30 @@ fn parse_rejects_a_duplicate_node_on_the_wire() {
     );
 }
 
+/// A signed label is read as stored: `Laptop` refuses rather than folding to `laptop`, so two byte-strings
+/// can never decode to one doc and the signed wire stays one byte-string per doc.
+#[test]
+fn parse_rejects_a_capital_label() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"theia-roster\x01");
+    bytes.extend_from_slice(&7u64.to_be_bytes());
+    bytes.extend_from_slice(&1u32.to_be_bytes());
+    bytes.extend_from_slice(&[1u8; 32]);
+    bytes.extend_from_slice(&6u16.to_be_bytes());
+    bytes.extend_from_slice(b"Laptop");
+    assert!(
+        matches!(
+            RosterDoc::parse_canonical(&bytes),
+            Err(RosterError::BadLabel(_))
+        ),
+        "a capital label refuses on the wire"
+    );
+    let lower = bytes.len() - 6;
+    bytes[lower..].copy_from_slice(b"laptop");
+    let parsed = RosterDoc::parse_canonical(&bytes).expect("the folded label parses");
+    assert_eq!(parsed.canonical_bytes(), bytes, "one byte-string per doc");
+}
+
 #[test]
 fn parse_rejects_too_many_members() {
     let mut bytes = Vec::new();

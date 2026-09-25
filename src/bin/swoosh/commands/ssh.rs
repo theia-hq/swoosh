@@ -45,7 +45,7 @@
 use std::path::Path;
 
 use clap::Args;
-use nauthy::Link;
+use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::home::Home;
 use swoosh::peer::Peer;
@@ -72,8 +72,8 @@ pub struct SshCmd {
     #[arg(value_name = "peer")]
     pub peer: Peer,
     /// The exposed service name to reach on the host.
-    #[arg(long, value_name = "service", default_value = DEFAULT_SERVICE)]
-    pub service: String,
+    #[arg(long, value_name = "service", default_value = DEFAULT_SERVICE, value_parser = swoosh::names::service)]
+    pub service: Service,
     /// present a `sheer:` capability link to reach a gated peer
     #[arg(
         long,
@@ -149,7 +149,7 @@ impl SshCmd {
         let argv = ssh_argv(
             &proxy,
             &key,
-            &self.service,
+            self.service.as_str(),
             present.as_ref().map(Link::as_str),
             &host,
             &known_hosts,
@@ -714,7 +714,7 @@ mod tests {
             "-p",
             "2222",
         ]);
-        assert_eq!(cmd.service, "web");
+        assert_eq!(cmd.service.as_str(), "web");
         assert_eq!(cmd.peer_hint.len(), 1);
         assert_eq!(cmd.args, ["-p", "2222"]);
 

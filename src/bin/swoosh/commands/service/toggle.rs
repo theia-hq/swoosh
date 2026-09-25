@@ -21,6 +21,7 @@ use std::os::unix::io::AsRawFd as _;
 use std::path::Path;
 
 use clap::Args;
+use nauthy::Service;
 use swoosh::home::Home;
 
 /// Turn a service off (`disable`) or back on (`enable`); the leaf carries only the service name, the verb
@@ -28,8 +29,8 @@ use swoosh::home::Home;
 #[derive(Debug, Args)]
 pub struct ServiceToggleCmd {
     /// the service to toggle (a name this node serves, e.g. `speed`)
-    #[arg(value_name = "service")]
-    pub service: String,
+    #[arg(value_name = "service", value_parser = swoosh::names::service)]
+    pub service: Service,
 }
 
 impl ServiceToggleCmd {
@@ -37,7 +38,7 @@ impl ServiceToggleCmd {
     /// restart keeps it off. Idempotent: disabling an already-disabled service just reports the state.
     pub fn run_disable(self, home: &Home) -> eyre::Result<()> {
         edit(home, |disabled| {
-            disabled.insert(self.service.clone());
+            disabled.insert(self.service.to_string());
         })?;
         println!("{}: disabled (persisted)", self.service);
         Ok(())
@@ -48,7 +49,7 @@ impl ServiceToggleCmd {
     /// name, so it returns a declared service to its baseline and never opens a new one.
     pub fn run_enable(self, home: &Home) -> eyre::Result<()> {
         edit(home, |disabled| {
-            disabled.remove(&self.service);
+            disabled.remove(self.service.as_str());
         })?;
         println!("{}: enabled", self.service);
         Ok(())

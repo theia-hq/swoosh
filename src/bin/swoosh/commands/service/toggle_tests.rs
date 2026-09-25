@@ -28,7 +28,7 @@ fn disable_then_enable_round_trips() {
     let home = temp_home("round-trip");
 
     ServiceToggleCmd {
-        service: "speed".to_owned(),
+        service: "speed".parse().expect("a service"),
     }
     .run_disable(&home)
     .expect("disable speed");
@@ -38,7 +38,7 @@ fn disable_then_enable_round_trips() {
     );
 
     ServiceToggleCmd {
-        service: "speed".to_owned(),
+        service: "speed".parse().expect("a service"),
     }
     .run_enable(&home)
     .expect("enable speed");
@@ -57,7 +57,7 @@ fn disables_accumulate_sorted_and_idempotent() {
 
     for name in ["speed", "ping", "speed"] {
         ServiceToggleCmd {
-            service: name.to_owned(),
+            service: name.parse().expect("a service"),
         }
         .run_disable(&home)
         .expect("disable");
@@ -82,7 +82,7 @@ fn disables_accumulate_sorted_and_idempotent() {
 fn enable_of_an_untouched_service_is_a_noop() {
     let home = temp_home("enable-noop");
     ServiceToggleCmd {
-        service: "ping".to_owned(),
+        service: "ping".parse().expect("a service"),
     }
     .run_enable(&home)
     .expect("enable a never-disabled service succeeds");

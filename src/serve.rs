@@ -111,15 +111,16 @@ pub fn classify_stop(source: Option<StopKind>) -> Stopped {
     }
 }
 
-/// Parse one typed `name=target` service entry: the name follows the one name rule and is folded, the target
-/// passes through for [`bind_entry`] to read. A typed name is never dotted, so it can never be an internal
-/// route (`control.stop`). An entry with no `=` passes through too: the tunnel grammar teaches that shape.
+/// Parse one typed `serve` entry: the name follows the one name rule and is folded, the target passes
+/// through for [`bind_entry`] to read. A typed name is never dotted, so it can never be an internal route
+/// (`control.stop`). A bare `<service>` (no `=`) is a name too, folded the same way; a bare target
+/// (`fetch:`, holding the scheme's `:`) passes through, so the tunnel grammar teaches the `name=target` shape.
 pub fn service_entry(entry: &str) -> Result<String, NameError> {
-    let Some((name, target)) = entry.split_once('=') else {
-        return Ok(entry.to_owned());
-    };
-    let name: Name = name.parse()?;
-    Ok(format!("{name}={target}"))
+    match entry.split_once('=') {
+        Some((name, target)) => Ok(format!("{}={target}", name.parse::<Name>()?)),
+        None if entry.contains(':') => Ok(entry.to_owned()),
+        None => Ok(entry.parse::<Name>()?.into()),
+    }
 }
 
 /// Bind one operator `name=addr` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
@@ -436,9 +437,11 @@ impl FetchExposure {
     /// fetch, so a second origin-scoped fetch can no longer mask a bare public one. Refused at build time,
     /// before any banner or accepted stream, mirroring the sshd-cannot-be-public wall. A GATED fetch (not in
     /// `--public`) stays legal unconstrained: the family gate is the terminator there.
-    pub fn refuse_open_relay(&self, public: &[String]) -> eyre::Result<()> {
+    pub fn refuse_open_relay(&self, public: &[Service]) -> eyre::Result<()> {
         for service in &self.services {
-            if public.iter().any(|name| name == &service.name) && service.allow.is_unconstrained() {
+            if public.iter().any(|name| name.as_str() == service.name)
+                && service.allow.is_unconstrained()
+            {
                 eyre::bail!(
                     "a public fetch service must be origin-scoped \
                      (`serve {name}=fetch:https://origin --public {name}`); an unconstrained public fetch \

@@ -55,6 +55,12 @@ impl Petname {
         let Self(name) = self;
         Ok(Self(Name::from_str(&name)?.unreserved()?.into()))
     }
+
+    /// A petname read back from the contacts file, taken as stored: a capital there refuses rather than
+    /// folds ([`Name::stored`]), so one person has one spelling on disk.
+    pub fn stored(text: &str) -> Result<Self, NameError> {
+        Ok(Self(Name::stored(text)?.into()))
+    }
 }
 
 impl FromStr for Petname {
@@ -92,6 +98,12 @@ impl DeviceLabel {
     pub fn as_str(&self) -> &str {
         let Self(label) = self;
         label
+    }
+
+    /// A label read back from disk or a signed roster, taken as stored: a capital there refuses rather than
+    /// folds ([`Name::stored`]), so one label has one byte-string and a signed roster stays non-malleable.
+    pub fn stored(text: &str) -> Result<Self, NameError> {
+        Ok(Self(Name::stored(text)?.unreserved()?.into()))
     }
 }
 

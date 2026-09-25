@@ -8,7 +8,7 @@ use swoosh::contacts::{Added, ContactRef, ContactsStore};
 #[derive(Debug, Args)]
 pub struct AddCmd {
     /// The name to save, `alice` for a person or `alice/macbook` to group a device under one.
-    #[arg(value_name = "name")]
+    #[arg(value_name = "name", value_parser = super::new_contact)]
     pub name: ContactRef,
     /// The peer's identity, as a bifrost node id.
     #[arg(value_name = "key")]
@@ -17,12 +17,10 @@ pub struct AddCmd {
 
 impl AddCmd {
     /// Add the binding and persist. Idempotent: re-adding the same name updates in place and warns on a
-    /// clobber rather than silently replacing a key the user may not mean to lose. A name under `me/`, or
-    /// under another reserved name, is refused and nothing is written.
+    /// clobber rather than silently replacing a key the user may not mean to lose. A reserved person
+    /// (`me`, `root`, `anyone`) never reaches here: [`new_contact`](super::new_contact) refuses it at parse.
     pub async fn run(self, mut store: ContactsStore) -> eyre::Result<()> {
-        super::refuse_me(&self.name)?;
-        let petname = self.name.petname().clone().unreserved()?;
-        let device = self.name.device().cloned();
+        let (petname, device) = (self.name.petname().clone(), self.name.device().cloned());
         let outcome = store.contacts_mut().add(petname, device, self.key);
 
         match outcome {

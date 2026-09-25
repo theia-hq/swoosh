@@ -62,8 +62,8 @@ pub enum PeerParseError {
     /// The `sheer:`-prefixed text was not a valid capability link.
     #[error("invalid capability link")]
     Capability(#[from] nauthy::CapError),
-    /// The text was neither a link nor a raw key, and did not parse as a petname address.
-    #[error("invalid peer address")]
+    /// The text was neither a link nor a raw key, and a part of it was not a name: the name rule's own line.
+    #[error(transparent)]
     Contact(#[from] NameError),
 }
 

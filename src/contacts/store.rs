@@ -134,7 +134,7 @@ fn decode(text: &str) -> Result<Contacts, StoreError> {
             ));
             continue;
         }
-        let petname: Petname = key.parse()?;
+        let petname = Petname::stored(&key)?;
         let group = value.as_table().ok_or(StoreError::BadEntry)?;
         for (label, value) in group {
             // The reserved signet key holds the person's signet root, not a device; dispatch on it first so
@@ -143,7 +143,7 @@ fn decode(text: &str) -> Result<Contacts, StoreError> {
                 contacts.set_signet_binding(petname.clone(), decode_binding(value)?);
                 continue;
             }
-            let device: DeviceLabel = label.parse()?;
+            let device = DeviceLabel::stored(label)?;
             contacts.insert_binding(petname.clone(), device, decode_binding(value)?);
         }
     }

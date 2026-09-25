@@ -91,18 +91,20 @@ pub struct ServeCmd {
         long,
         value_name = "svc",
         value_delimiter = ',',
+        value_parser = swoosh::names::service,
         long_help = "A keyless shell is refused; a raw stream goes to `--public-unsafe`."
     )]
-    pub public: Vec<String>,
+    pub public: Vec<Service>,
     /// open named raw-stream services (file:, fifo:, stdin:) to anyone
     // A raw stream opens only through this flag, and only when named: no bang suffix, no whole-node form.
     #[arg(
         long,
         value_name = "svc",
         value_delimiter = ',',
+        value_parser = swoosh::names::service,
         long_help = "A raw stream has no auth of its own; `--public` refuses it and points here."
     )]
-    pub public_unsafe: Vec<String>,
+    pub public_unsafe: Vec<Service>,
     /// suppress the readiness banner and activity lines
     #[arg(long)]
     pub quiet: bool,
@@ -344,10 +346,10 @@ impl ServeCmd {
         // One `Router`: each route binds a handler VALUE (the engine handlers, roster, stop, the fetch and
         // recv instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector)
         // through the `name=addr` grammar. The public overlays prove at `.expose()` below, so
-        // prove-before-announce holds. The operator's `--public` set is parsed ONCE here, before the bind,
-        // and drives the overlay, the per-route diagnostic engine (the metered engine for an open name,
+        // prove-before-announce holds. The operator's `--public` set was parsed at the clap boundary, under
+        // the same name rule and fold as the entries, and drives the overlay, the per-route diagnostic engine (the metered engine for an open name,
         // the owner engine otherwise), and the per-service fetch posture (one source of truth).
-        let public = parse_services(&self.public)?;
+        let public = self.public.clone();
         let mut router = Router::new(gate);
         for entry in &requested {
             router = bind_entry(router, entry, host_seed, &public)?;
@@ -394,8 +396,9 @@ impl ServeCmd {
         // distinct, louder `--public-unsafe` raw-stream set. The proof (an unknown name, a `Never` handler,
         // a raw stream in the safe set, a handler in the unsafe set) runs at `.expose()` below, before any
         // banner advertises a service it will not serve.
-        let public_unsafe = parse_services(&self.public_unsafe)?;
-        router = router.public(public).public_unsafe(public_unsafe);
+        router = router
+            .public(public)
+            .public_unsafe(self.public_unsafe.clone());
         // Snapshot the served catalog (names + effective PER-SERVICE posture: open iff opened by an
         // overlay, else gated) ONCE, here, for the `control.services` read handler AND the resident socket
         // read to serve. Both serve the same snapshot. `self_listing` renders the one row being built:
@@ -1331,15 +1334,6 @@ pub(crate) fn humanize_secs(mut secs: u64) -> String {
     } else {
         parts.join(" ")
     }
-}
-
-/// Parse the operator's raw `--public`/`--public-unsafe` names into typed [`Service`]s: the Router's overlays
-/// take the domain type, so a malformed name fails at the serve edge with its own parse error.
-fn parse_services(names: &[String]) -> eyre::Result<Vec<Service>> {
-    names
-        .iter()
-        .map(|name| name.parse::<Service>().map_err(Into::into))
-        .collect()
 }
 
 #[cfg(test)]

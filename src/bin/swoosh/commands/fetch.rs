@@ -12,7 +12,7 @@ use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
-use nauthy::Link;
+use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::peer::Peer;
 use swoosh::reach::{self, Reached};
@@ -36,8 +36,8 @@ pub struct FetchCmd {
     // unscoped relay egresses under the exit node's own IP, so there is no default to inherit), so
     // the name this verb dials and the name a failed request teaches the `serve` line for are one
     // value.
-    #[arg(long, value_name = "service", default_value = Unbound::FETCH.name())]
-    pub service: String,
+    #[arg(long, value_name = "service", default_value = Unbound::FETCH.name(), value_parser = swoosh::names::service)]
+    pub service: Service,
     /// present a `sheer:` capability link to reach a gated node
     #[arg(
         long,
@@ -206,7 +206,7 @@ impl FetchCmd {
         // prove the peer. This fetch path dials a raw session and bypasses `Connector`, so it carries
         // the check itself; the refusal surfaces here as the local 502 cause.
         Request {
-            service: self.service.clone(),
+            service: self.service.to_string(),
             capability: present.map(ToString::to_string),
             membership: membership.map(ToString::to_string),
         }
@@ -285,7 +285,7 @@ impl FetchCmd {
     /// picks no part of this. A sentence that appeared on one refusal and not another would leak the
     /// distinction the uniform wire refusal exists to withhold.
     fn body(&self, failure: String) -> String {
-        match Unbound::dialed(&self.service) {
+        match Unbound::dialed(self.service.as_str()) {
             Some(unbound) => format!("{failure}: {}", unbound.teaching()),
             None => failure,
         }

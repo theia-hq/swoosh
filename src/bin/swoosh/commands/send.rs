@@ -52,8 +52,8 @@ pub struct SendCmd {
     #[arg(value_name = "peer")]
     pub peer: Peer,
     /// the peer's file-receiving service
-    #[arg(long, value_name = "service", default_value = RECV_SERVICE)]
-    pub service: String,
+    #[arg(long, value_name = "service", default_value = RECV_SERVICE, value_parser = swoosh::names::service)]
+    pub service: Service,
     /// present a `sheer:` capability link to reach a gated peer
     #[arg(
         long,
@@ -125,7 +125,7 @@ impl SendCmd {
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
         // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
-        let service = self.service.parse::<Service>()?;
+        let service = self.service.clone();
         let connector = self
             .peer
             .connector(contacts, service, present, membership)?;
@@ -175,7 +175,7 @@ impl SendCmd {
             // turns this client into an oracle. So it is said once and said blind.
             return Err(Unbound::name_the_entry(
                 eyre::eyre!("{failures} item(s) could not be sent"),
-                &self.service,
+                self.service.as_str(),
             ));
         }
         Ok(())

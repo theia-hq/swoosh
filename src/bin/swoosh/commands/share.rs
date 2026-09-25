@@ -34,7 +34,7 @@ use tightbeam::identity::AsVerifyKey as _;
 #[derive(Debug, Args)]
 pub struct ShareCmd {
     /// The service the link grants (as named in `serve`, e.g. `ssh`).
-    #[arg(value_name = "service")]
+    #[arg(value_name = "service", value_parser = swoosh::names::service)]
     pub service: Service,
     /// How long the link is valid, e.g. `2h`, `30m`, `90s`. Short-expiry is the bearer revocation story.
     #[arg(long, value_name = "duration", default_value = "1h")]
@@ -261,8 +261,8 @@ impl FromStr for GrantFor {
 /// too-wide target is refused at parse with the fix, never a silent misbind.
 #[derive(Debug, thiserror::Error)]
 pub enum GrantForParseError {
-    /// The token was a `petname/device` address whose parts were invalid.
-    #[error("invalid `--for` target")]
+    /// The token was a `petname/device` address with a part that is not a name: the name rule's own line.
+    #[error(transparent)]
     Contact(#[from] NameError),
     /// A bare person: the widening guardrail. You must type `fleet:` to bind a whole fleet, or name a device.
     #[error(

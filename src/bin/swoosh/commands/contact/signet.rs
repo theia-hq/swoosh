@@ -13,7 +13,7 @@ use swoosh::contacts::{Added, ContactsStore, Petname};
 #[derive(Debug, Args)]
 pub struct SignetCmd {
     /// The person whose signet this is (a bare petname; a device address `alice/x` is rejected).
-    #[arg(value_name = "petname")]
+    #[arg(value_name = "petname", value_parser = super::new_person)]
     pub petname: Petname,
     /// The person's signet public key (from their `swoosh identity`).
     #[arg(value_name = "key")]
@@ -24,8 +24,9 @@ impl SignetCmd {
     /// Record the signet and persist. Idempotent, mirroring `add`: re-setting the same key is a no-op that
     /// says so; a different key warns on the clobber rather than silently losing the previous signet.
     pub async fn run(self, mut store: ContactsStore) -> eyre::Result<()> {
-        let petname = self.petname.clone().unreserved()?;
-        let outcome = store.contacts_mut().set_signet(petname, self.key);
+        let outcome = store
+            .contacts_mut()
+            .set_signet(self.petname.clone(), self.key);
         match outcome {
             Added::Created => {
                 println!("recorded {}'s signet -> {}", self.petname, self.key.short())
