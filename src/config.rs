@@ -16,15 +16,24 @@ use nauthy::{DisabledRoots, Link};
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::home::Home;
+use crate::standing::{Disagreement, damaged_line};
 
 /// Load this node's signet: the [`NodeId`] it was provisioned to trust, or `None` if it was never
 /// provisioned. The file is a single public node id; an absent file means this machine trusts no root,
-/// and `serve`'s gate then admits no member at all.
+/// and `serve`'s gate then admits no member at all. A file that is not exactly one usable key refuses with
+/// the damaged-home line [`Standing`](crate::standing::Standing) reads it as, naming the file.
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
     match tokio::fs::read_to_string(home.signet()).await {
-        Ok(text) => Ok(Some(text.trim().parse::<NodeId>()?)),
+        Ok(text) => text.trim().parse::<NodeId>().map(Some).map_err(|_| {
+            eyre::eyre!(
+                "{}",
+                damaged_line(&Disagreement::UnreadablePin {
+                    path: home.signet()
+                })
+            )
+        }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }

@@ -22,6 +22,7 @@ use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
 use swoosh::names::NameError;
 use swoosh::node_signer::{Bind, NodeSigner};
+use swoosh::peer::{UnusableKey, raw_key};
 use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -289,26 +290,8 @@ pub enum GrantForParseError {
     )]
     UnknownKind(String),
     /// The token spells a key, but not one anyone can hold.
-    #[error("{text} is not a usable key: {error}")]
-    Key {
-        /// The token as typed.
-        text: String,
-        /// Which check the key failed.
-        error: bifrost::KeyError,
-    },
-}
-
-/// `text` as a raw key, `None` when it does not spell one, or the refusal when it spells a key nobody can
-/// hold: that text is a key, never a name.
-fn raw_key(text: &str) -> Result<Option<NodeId>, GrantForParseError> {
-    match text.parse::<NodeId>() {
-        Ok(node) => Ok(Some(node)),
-        Err(bifrost::NodeIdParseError::Key(error)) => Err(GrantForParseError::Key {
-            text: text.to_owned(),
-            error,
-        }),
-        Err(_) => Ok(None),
-    }
+    #[error(transparent)]
+    Key(#[from] UnusableKey),
 }
 
 /// Resolve a `--for fleet:<who>` token to the SIGNET root it binds. A raw signet key resolves to itself; a

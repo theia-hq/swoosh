@@ -10,7 +10,7 @@
 
 use core::str::FromStr;
 
-use bifrost::{NodeId, NodeIdParseError};
+use bifrost::{KeyError, NodeId, NodeIdParseError};
 use nauthy::{Link, Service};
 use tightbeam::tunnel::Connector;
 
@@ -51,15 +51,8 @@ impl FromStr for Peer {
         if crate::link::is_prefixed(text) {
             Ok(Self::Capability(crate::link::parse(text)?))
         } else {
-            match text.parse::<NodeId>() {
-                Ok(node) => return Ok(Self::Raw(node)),
-                Err(NodeIdParseError::Key(error)) => {
-                    return Err(PeerParseError::Key {
-                        text: text.to_owned(),
-                        error,
-                    });
-                }
-                Err(_) => {}
+            if let Some(node) = raw_key(text)? {
+                return Ok(Self::Raw(node));
             }
             if crate::link::looks_bare(text) {
                 Err(PeerParseError::Capability(LinkError::Prefix))
@@ -67,6 +60,52 @@ impl FromStr for Peer {
                 Ok(Self::Named(text.parse::<ContactRef>()?))
             }
         }
+    }
+}
+
+/// A typed key that spells a key, but not one anyone can hold: the one line every typed key refuses with,
+/// naming the check it failed.
+#[derive(Debug, thiserror::Error)]
+#[error("{text} is not a usable key: {error}")]
+pub struct UnusableKey {
+    /// The text as typed.
+    pub text: String,
+    /// Which check the key failed.
+    pub error: KeyError,
+}
+
+/// Why typed text is not a key.
+#[derive(Debug, thiserror::Error)]
+pub enum KeyTextError {
+    /// It spells a key nobody can hold.
+    #[error(transparent)]
+    Unusable(#[from] UnusableKey),
+    /// It does not spell a key at all.
+    #[error(transparent)]
+    NotAKey(NodeIdParseError),
+}
+
+/// Typed text as a key: the parser every typed key goes through, so a key nobody can hold refuses with
+/// the same line wherever it is typed.
+pub fn parse_key(text: &str) -> Result<NodeId, KeyTextError> {
+    match text.parse::<NodeId>() {
+        Ok(node) => Ok(node),
+        Err(NodeIdParseError::Key(error)) => Err(UnusableKey {
+            text: text.to_owned(),
+            error,
+        }
+        .into()),
+        Err(other) => Err(KeyTextError::NotAKey(other)),
+    }
+}
+
+/// Typed text as a key where a name may stand instead: `None` when it does not spell a key, the refusal
+/// when it spells one nobody can hold (that text is a key, never a name).
+pub fn raw_key(text: &str) -> Result<Option<NodeId>, UnusableKey> {
+    match parse_key(text) {
+        Ok(node) => Ok(Some(node)),
+        Err(KeyTextError::Unusable(unusable)) => Err(unusable),
+        Err(KeyTextError::NotAKey(_)) => Ok(None),
     }
 }
 
@@ -80,13 +119,8 @@ pub enum PeerParseError {
     #[error(transparent)]
     Contact(#[from] NameError),
     /// The text spells a key, but not one anyone can hold.
-    #[error("{text} is not a usable key: {error}")]
-    Key {
-        /// The text as typed.
-        text: String,
-        /// Which check the key failed.
-        error: bifrost::KeyError,
-    },
+    #[error(transparent)]
+    Key(#[from] UnusableKey),
 }
 
 impl Peer {

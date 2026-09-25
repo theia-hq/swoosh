@@ -1576,6 +1576,43 @@ mod tests {
         assert!(filter_enables(&warn, &PROBE_OTHER_ERROR));
     }
 
+    /// A key nobody can hold is refused where it enters: typed (as a contact's key or signet) with the
+    /// one line that names the check it failed, and stored (as the pin) as the damaged home, naming the
+    /// file, from the read every verb that loads the pin goes through.
+    #[tokio::test]
+    async fn a_malformed_key_is_refused_where_it_enters() {
+        let key = swoosh::testkit::torsioned_text();
+        let line = format!("{key} is not a usable key: carries a torsion component");
+        for typed in [
+            ["swoosh", "contact", "add", "alice", key.as_str()],
+            ["swoosh", "contact", "signet", "alice", key.as_str()],
+        ] {
+            let error = Cli::try_parse_from(typed).expect_err("a torsioned key is refused");
+            assert_eq!(error.exit_code(), 2, "a typed bad key is a usage error");
+            assert!(
+                error.to_string().contains(&line),
+                "the typed refusal names the check: {error}"
+            );
+        }
+
+        let dir = std::env::temp_dir().join(format!("swoosh-malformed-pin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        swoosh::config::create_store_dir(&dir).expect("create the home");
+        let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
+        std::fs::write(home.signet(), format!("{key}\n")).expect("write the pin");
+        let error = swoosh::config::load_signet(&home)
+            .await
+            .expect_err("a torsioned pin is refused");
+        assert_eq!(
+            error.to_string(),
+            swoosh::standing::damaged_line(&swoosh::standing::Disagreement::UnreadablePin {
+                path: home.signet()
+            }),
+            "the stored bad key reads as the damaged home"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A torsioned key is refused as the key an invite admits, at parse, naming the check it failed,
     /// never read as a person's name.
     #[test]

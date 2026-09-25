@@ -141,7 +141,8 @@ fn a_reserved_name_refuses() {
     );
 }
 
-/// A torsioned key is refused as a contact's key at parse, with a plain line and no panic.
+/// A torsioned key is refused as a contact's key at parse, with the line every typed key refuses with,
+/// naming the check it failed.
 #[test]
 fn a_torsioned_key_is_refused_as_a_contact_key() {
     let key = swoosh::testkit::torsioned_text();
@@ -153,7 +154,9 @@ fn a_torsioned_key_is_refused_as_a_contact_key() {
         "a key that is not a key is a usage error"
     );
     assert!(
-        error.to_string().contains("not a usable identity"),
-        "the refusal says the key is not usable: {error}"
+        error.to_string().contains(&format!(
+            "{key} is not a usable key: carries a torsion component"
+        )),
+        "the refusal names the key and the check: {error}"
     );
 }
