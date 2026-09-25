@@ -4,16 +4,12 @@ use swoosh::home::Home;
 
 use super::AddCmd;
 
-/// A scratch home holding an identity key (so it is its own signet) and a contacts book that is already
-/// versioned, with NO roster artifact on disk. Any cut after this point is visible as the file appearing.
-async fn versioned_home(tag: &str) -> Home {
+/// A scratch home with a contacts book holding `me/desk`, as a fold of this person's devices leaves it.
+async fn home_with_book(tag: &str) -> Home {
     let dir = std::env::temp_dir().join(format!("swoosh-contact-add-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let home = Home::resolve(Some(dir)).expect("resolve");
-    swoosh::identity::write(&[31u8; 32], &home)
-        .await
-        .expect("write the key");
     let mut store = ContactsStore::open(home.contacts()).await.expect("open");
     store.contacts_mut().add(
         "me".parse().expect("me"),
@@ -24,59 +20,57 @@ async fn versioned_home(tag: &str) -> Home {
     home
 }
 
-async fn add(home: &Home, name: &str, key: NodeId) {
+async fn add(home: &Home, name: &str, key: NodeId) -> eyre::Result<()> {
     let store = ContactsStore::open(home.contacts()).await.expect("open");
     AddCmd {
         name: name.parse().expect("a valid contact ref"),
         key,
     }
-    .run(store, home)
+    .run(store)
     .await
-    .expect("add");
 }
 
-/// Adding a device under `me/` re-cuts the signed roster there and then, so the next pull sees the new
-/// member with no restart and no second verb. This is the founder's exact loop: invite (or record) a
-/// device from another terminal while a node is serving.
+/// `me/` is decided by this person's root, so a typed add under it refuses, names the verbs that do add
+/// and remove a device, and leaves the book byte-identical.
 #[tokio::test]
-async fn an_add_under_me_re_cuts_the_signed_roster() {
-    let home = versioned_home("me").await;
-    assert!(!home.roster().exists(), "nothing is cut yet");
-    add(&home, "me/phone", NodeId::from_ed25519_secret(&[5u8; 32])).await;
+async fn contact_add_me_is_refused_and_writes_nothing() {
+    let home = home_with_book("me").await;
+    let before = std::fs::read(home.contacts()).expect("read the book");
+    let error = add(&home, "me/phone", NodeId::from_ed25519_secret(&[5u8; 32]))
+        .await
+        .expect_err("an add under me/ refuses");
+    let message = format!("{error:#}");
     assert!(
-        home.roster().exists(),
-        "a fleet edit must publish a fresh signed roster"
+        message.contains("swoosh invite <name> <key>")
+            && message.contains("swoosh revoke me/<name>"),
+        "the refusal names both verbs: {message}"
+    );
+    assert_eq!(
+        std::fs::read(home.contacts()).expect("read the book"),
+        before,
+        "nothing is written"
     );
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// Adding anyone ELSE is a purely local name and cuts nothing. Signing is bound to a CHANGE in the
-/// member set, not to the verb that ran, so a book full of peers never re-publishes a fleet.
+/// Every other name is the address book's to keep.
 #[tokio::test]
-async fn an_add_outside_me_cuts_nothing() {
-    let home = versioned_home("other").await;
+async fn an_add_outside_me_is_saved() {
+    let home = home_with_book("other").await;
     add(
         &home,
         "alice/macbook",
         NodeId::from_ed25519_secret(&[6u8; 32]),
     )
-    .await;
+    .await
+    .expect("an add outside me/ is saved");
+    let store = ContactsStore::open(home.contacts()).await.expect("open");
     assert!(
-        !home.roster().exists(),
-        "a contact who is not in your fleet is not a membership change"
-    );
-    let _ = std::fs::remove_dir_all(home.dir());
-}
-
-/// Re-recording a `me/` device at the SAME key changes no member, so it publishes nothing. This is the
-/// renewal shape at the verb level: the set is byte-identical, so the fleet is not asked to re-pull.
-#[tokio::test]
-async fn re_adding_me_at_the_same_key_cuts_nothing() {
-    let home = versioned_home("same").await;
-    add(&home, "me/desk", NodeId::from_ed25519_secret(&[4u8; 32])).await;
-    assert!(
-        !home.roster().exists(),
-        "an unchanged member set must not publish a new roster"
+        store
+            .contacts()
+            .petnames()
+            .any(|petname| petname.as_str() == "alice"),
+        "alice is in the book"
     );
     let _ = std::fs::remove_dir_all(home.dir());
 }

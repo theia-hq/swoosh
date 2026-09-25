@@ -8,7 +8,7 @@
 //! whether reaching it needs a member badge, or is open to anyone). A pure READ, the client twin of the node's
 //! `control.services` handler.
 //!
-//! `control.services` is family-gated like `ping`/`speed`/`stop`, so `service ls` presents the same self-signed
+//! `control.services` is family-gated like `ping`/`speed`/`stop`, so `service ls` presents the same
 //! membership badge (or an explicit `--present` link) to prove membership before the peer admits the read. A
 //! stranger is refused LOUDLY here (a typed error, non-zero exit), never a silent empty table: a refusal is not
 //! "the peer serves nothing".
@@ -43,8 +43,8 @@ pub struct ServiceLsCmd {
     #[arg(
         long,
         value_name = "link",
-        long_help = "Optional: your own devices need no link, the dial presents the self-signed \
-                     membership badge under this identity. Pass a `sheer:` link only to reach as a delegate."
+        long_help = "Optional: your own devices need no link, the dial presents this \
+                     device's membership badge. Pass a `sheer:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     #[command(flatten)]
@@ -128,7 +128,7 @@ impl ServiceLsCmd {
     }
 
     /// Reach the peer's gated `control.services` read and print its `SERVICE  GATE` table. Presents the
-    /// resolved `present` (the self-signed membership badge, or an explicit `--present` link) so the peer's
+    /// resolved `present` (this device's membership badge, or an explicit `--present` link) so the peer's
     /// family gate admits the read; a peer that does not admit this caller refuses LOUDLY here, never a
     /// silent empty table. `--at` is required to reach this path (a bare `service ls` split to
     /// [`run_local`](Self::run_local)), so a missing target is a root-dispatch bug, surfaced as an internal

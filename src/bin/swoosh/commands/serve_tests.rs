@@ -20,8 +20,8 @@ use swoosh::home::Home;
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
-    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, FetchService, ServiceList, Stop,
-    Stopped, bind_entry, extract_recv_services,
+    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, FetchService, ROSTER_SERVICE,
+    Roster, ServiceList, Stop, Stopped, bind_entry, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
@@ -192,8 +192,27 @@ fn default_manifest() -> Vec<ManifestEntry> {
             Some(Metering::Unmetered),
         ),
         entry_gated("ping", TargetKind::Handler, Some(Metering::Unmetered)),
+        entry_gated("roster", TargetKind::Handler, Some(Metering::Unmetered)),
         entry_gated("speed", TargetKind::Handler, Some(Metering::Unmetered)),
     ]
+}
+
+/// The update route every serve binds, over an artifact that is not on disk: what a machine with no
+/// update yet serves.
+fn update_route(router: Router) -> Router {
+    let artifact = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime")
+        .block_on(swoosh::roster::Artifact::open(
+            std::env::temp_dir().join(format!("swoosh-no-roster-{}", std::process::id())),
+        ))
+        .expect("a missing artifact opens as none");
+    router
+        .member_service(
+            ROSTER_SERVICE.parse().expect("a name"),
+            Roster::new(std::sync::Arc::new(artifact)),
+        )
+        .expect("the update route binds")
 }
 
 /// The display map the default serve builds (control.* + ping + speed point at their own schemes).
@@ -331,7 +350,7 @@ fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
 #[test]
 fn an_unknown_scheme_is_pointed_at_the_list_that_holds_both_halves() {
     for entry in ["x=png:", "x=nonsense", "x=tcp:nope"] {
-        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], None, &[]) else {
+        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], &[]) else {
             panic!("`{entry}` is not a target either half of the grammar routes");
         };
         let message = format!("{error:#}");
@@ -348,12 +367,8 @@ fn an_unknown_scheme_is_pointed_at_the_list_that_holds_both_halves() {
 /// swoosh serves takes no argument, so a tail is refused here, by name, with the rule stated.
 #[test]
 fn ping_with_an_argument_is_refused_rather_than_read_as_a_forward() {
-    for (entry, scheme) in [
-        ("ping=ping:80", "ping"),
-        ("speed=speed:80", "speed"),
-        ("members=roster:80", "roster"),
-    ] {
-        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], None, &[]) else {
+    for (entry, scheme) in [("ping=ping:80", "ping"), ("speed=speed:80", "speed")] {
+        let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], &[]) else {
             panic!("`{entry}` gives an argument to an engine that takes none and must be refused");
         };
         let message = format!("{error:#}");
@@ -368,58 +383,22 @@ fn ping_with_an_argument_is_refused_rather_than_read_as_a_forward() {
     }
     // The zero-argument spelling still binds, so the refusal is about the tail and nothing else.
     assert!(
-        bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], None, &[]).is_ok(),
+        bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], &[]).is_ok(),
         "`ping=ping:` is the spelling that binds the probe"
     );
 }
 
-/// A node that does not hold the signet REFUSES `roster:` at serve start, instead of coming up and
-/// advertising a service every puller must reject.
-///
-/// Before sign-on-change, `serve` cut and signed a snapshot with whatever local key it held, so a member
-/// node served a roster nobody could verify with no warning on this side: the operator learned about it
-/// from the far end, as "roster is not signed by your signet". The composition root resolves the signet
-/// predicate once and expresses it in the TYPE, so this arm cannot re-derive it wrongly.
-#[tokio::test]
-async fn a_node_without_the_signet_refuses_to_serve_a_roster() {
-    let Err(error) = bind_entry(Router::new(gated()), "hub=roster:", [0u8; 32], None, &[]) else {
-        panic!("a node with no cut roster must not bind `roster:`");
+/// The update route is bound by the node, never by an entry: a typed `roster:` is a scheme nobody
+/// serves, refused like any other unknown target.
+#[test]
+fn a_typed_roster_entry_is_an_unknown_form() {
+    let Err(error) = bind_entry(Router::new(gated()), "hub=roster:", [0u8; 32], &[]) else {
+        panic!("`roster:` is not a target an entry can name");
     };
-    let message = format!("{error:#}");
     assert!(
-        message.contains("does not hold your signet") && message.contains("swoosh identity"),
-        "the refusal names the missing signet and the machine to serve from: {message}"
+        format!("{error:#}").contains("`swoosh serve --help` lists every target this node accepts"),
+        "it is refused as an unknown target: {error:#}"
     );
-
-    // With the signet's own oracle it binds, so the refusal is about the signet and nothing else.
-    let dir = std::env::temp_dir().join(format!("swoosh-serve-roster-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let path = dir.join("roster");
-    let signet = swoosh::testkit::TestRoot::seeded(9);
-    let doc = swoosh::roster::RosterDoc::new(
-        swoosh::roster::Epoch(1),
-        vec![swoosh::roster::Member {
-            node: nauthy::VerifyKey::new([1u8; 32]),
-            label: "desk".parse().expect("a valid label"),
-        }],
-    )
-    .expect("a well-formed doc");
-    swoosh::roster::Artifact::write(&path, signet.identity(), &doc)
-        .await
-        .expect("cut");
-    let artifact = std::sync::Arc::new(swoosh::roster::Artifact::open(path).await.expect("load"));
-    assert!(
-        bind_entry(
-            Router::new(gated()),
-            "hub=roster:",
-            [0u8; 32],
-            Some(&artifact),
-            &[]
-        )
-        .is_ok(),
-        "the signet's own machine serves its fleet's roster"
-    );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The exposure coupling on the product path: a diagnostic route binds the METERED engine when the operator
@@ -434,7 +413,6 @@ fn an_open_diagnostic_binds_the_metered_engine_and_a_gated_one_the_owner_engine(
         Router::new(gated()),
         "speed=speed:",
         [0u8; 32],
-        None,
         core::slice::from_ref(&speed),
     )
     .expect("speed binds")
@@ -453,7 +431,7 @@ fn an_open_diagnostic_binds_the_metered_engine_and_a_gated_one_the_owner_engine(
     );
     assert_eq!(entry.posture, Posture::Open);
 
-    let gated = bind_entry(Router::new(gated()), "speed=speed:", [0u8; 32], None, &[])
+    let gated = bind_entry(Router::new(gated()), "speed=speed:", [0u8; 32], &[])
         .expect("speed binds")
         .expose()
         .expect("a member-only speed route assembles");
@@ -1646,9 +1624,9 @@ fn resident_stop_classifies_from_its_source() {
 fn bare_serve() -> BTreeSet<String> {
     let mut router = Router::new(gated());
     for entry in DEFAULT_SERVICES {
-        router = bind_entry(router, entry, [0u8; 32], None, &[]).expect("a default entry binds");
+        router = bind_entry(router, entry, [0u8; 32], &[]).expect("a default entry binds");
     }
-    let exposer = router
+    let exposer = update_route(router)
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
             Stop::new(CancellationToken::new()),
@@ -1668,17 +1646,18 @@ fn bare_serve() -> BTreeSet<String> {
         .collect()
 }
 
-/// What a bare `swoosh serve` binds is EXACTLY `ping`, `speed`, and the two `control.*` routes.
+/// What a bare `swoosh serve` binds is EXACTLY `ping`, `speed`, the two `control.*` routes and the
+/// member-gated update route.
 ///
 /// The narrow posture had nothing holding it, so widening it was a silent edit. The rule it holds: a
 /// default service may cost a peer BANDWIDTH, and may never cost it code execution, a byte of its
-/// disk, a packet from its IP, or a name from its fleet. `ping` and `speed` pass that; a shell, a
-/// receive sink, an egress relay and the signed fleet roster each fail it, which is why a client that
-/// wants one of them says so itself instead of every node paying for it by default.
+/// disk, or a packet from its IP. `ping` and `speed` pass that, and the update route is read only by
+/// this root's own devices; a shell, a receive sink and an egress relay each fail it, which is why a
+/// client that wants one of them says so itself instead of every node paying for it by default.
 ///
 /// An EXACT set, not a membership check: membership is exactly what a widening walks through.
 #[test]
-fn a_bare_serve_binds_exactly_ping_speed_and_the_two_control_routes() {
+fn a_bare_serve_binds_exactly_ping_speed_the_control_routes_and_the_update_route() {
     let bound = bare_serve();
 
     // NEGATIVE FIRST, and the order is the point: a widening fails the equality below as well, so an
@@ -1701,13 +1680,15 @@ fn a_bare_serve_binds_exactly_ping_speed_and_the_two_control_routes() {
         reach::SPEED_SERVICE,
         CONTROL_STOP_SERVICE,
         CONTROL_SERVICES_SERVICE,
+        ROSTER_SERVICE,
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
     assert_eq!(
         bound, expected,
-        "the bare set is the two diagnostics the reach verbs dial plus the node's own control surface"
+        "the bare set is the two diagnostics the reach verbs dial plus the node's own control surface \
+         and its update route"
     );
 }
 
@@ -1777,9 +1758,9 @@ fn resident_manifest_equals_plain_manifest() {
     // handlers, one handler value per route (the Router's bind-by-value shape). `bind_entry` binds only the
     // named routes, so `sshd` is absent here exactly as it is from the plain default set.
     let router =
-        bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], None, &[]).expect("ping binds");
-    let router = bind_entry(router, "speed=speed:", [0u8; 32], None, &[]).expect("speed binds");
-    let router = router
+        bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], &[]).expect("ping binds");
+    let router = bind_entry(router, "speed=speed:", [0u8; 32], &[]).expect("speed binds");
+    let router = update_route(router)
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
             Stop::new(cancel),
@@ -2150,6 +2131,94 @@ fn no_self_daemonize() {
     let status = child.0.wait().expect("reap the resident");
     assert!(status.success(), "a socket stop exits 0: {status}");
     assert!(!socket.exists(), "the released socket is unlinked");
+}
+
+/// The update route is bound on every `serve`, whatever the standing and with no entry naming it: the
+/// real binary serves a home as `Unpinned`, as a `Device`, and as a damaged home, and each run's catalog,
+/// read over the resident control socket, carries it.
+#[test]
+fn a_bare_serve_serves_the_update_route() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let device = swoosh::testkit::TestNode::seeded(0x5d);
+    let root = swoosh::testkit::TestRoot::seeded(0x5e);
+    for standing in ["unpinned", "device", "damaged"] {
+        let scratch = ProcessScratch::new(standing);
+        let home =
+            Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+        runtime.block_on(async {
+            swoosh::identity::write(&device.seed(), &home)
+                .await
+                .expect("this machine's key");
+            match standing {
+                "device" => {
+                    swoosh::config::write_signet(&home, root.node_id())
+                        .await
+                        .expect("the pin");
+                    let badge = root
+                        .device_badge(
+                            device.node_id(),
+                            nauthy::Request::expires_in(Duration::from_secs(3600)),
+                        )
+                        .expect("a badge");
+                    swoosh::config::write_badge(&home, &badge)
+                        .await
+                        .expect("the badge");
+                }
+                // A pin naming this machine's own key, as a home from before roots had their own keys.
+                "damaged" => swoosh::config::write_signet(&home, device.node_id())
+                    .await
+                    .expect("the pin"),
+                _ => {}
+            }
+        });
+        let socket = runtime_leaf(&home, &scratch.xdg).join("control.sock");
+        let mut command = Command::new(swoosh_binary());
+        command
+            .arg("--home")
+            .arg(&scratch.home_dir)
+            .args(["serve", "--resident", "--quiet"])
+            .env("XDG_RUNTIME_DIR", &scratch.xdg)
+            .env_remove("SWOOSH_HOME")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = KillOnDrop(command.spawn().expect("the resident serve spawns"));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !socket.exists() {
+            if let Some(status) = child.0.try_wait().expect("poll the resident") {
+                panic!("the {standing} serve exited before binding its socket: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the {standing} serve never bound its socket"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let reply = runtime
+            .block_on(async {
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    control_round_trip(&socket, Request::Services),
+                )
+                .await
+            })
+            .expect("the catalog round-trip is bounded")
+            .expect("the catalog round-trip answers");
+        let Response::Catalog(menu) = reply else {
+            panic!("a Services request answers a catalog");
+        };
+        assert!(
+            menu.catalog
+                .entries()
+                .any(|entry| entry.name == ROSTER_SERVICE && entry.posture == Posture::Gated),
+            "a {standing} serve binds the update route, gated"
+        );
+        let _ = runtime.block_on(control_round_trip(&socket, Request::Stop));
+        let _ = child.0.wait();
+    }
 }
 
 /// A scratch dir for the spawned-binary tests: a home, a 0700 `XDG_RUNTIME_DIR` stand-in, and one

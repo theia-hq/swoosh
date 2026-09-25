@@ -163,6 +163,26 @@ impl Home {
         self.dir.join("revoked")
     }
 
+    /// `<home>/revoked_keys`: the device keys this machine no longer admits, one key per line, which the
+    /// `serve` gate refuses whatever the device presents and whose open sessions the live cut ends. It
+    /// only ever grows, like [`revoked`](Self::revoked), and is written on the same rules: under
+    /// [`revoked_keys_lock`](Self::revoked_keys_lock), with the count of keys it holds in
+    /// [`revoked_keys_written`](Self::revoked_keys_written).
+    pub fn revoked_keys(&self) -> PathBuf {
+        self.dir.join("revoked_keys")
+    }
+
+    /// `<home>/revoked_keys.written`: how many keys [`revoked_keys`](Self::revoked_keys) held after its
+    /// last write, so a file that lost keys reads as lost rather than as fewer revocations.
+    pub fn revoked_keys_written(&self) -> PathBuf {
+        self.dir.join("revoked_keys.written")
+    }
+
+    /// `<home>/revoked_keys.lock`: the flock every writer of [`revoked_keys`](Self::revoked_keys) takes.
+    pub fn revoked_keys_lock(&self) -> PathBuf {
+        self.dir.join("revoked_keys.lock")
+    }
+
     /// `<home>/disabled_roots`: the root keys this node no longer trusts, one `bf01` key per line, which
     /// the `serve` gate refuses every cap rooted at and `fleet` and `adopt` refuse to follow. It only ever
     /// grows, and nothing here removes a key. Deliberately NOT [`disabled`](Self::disabled), the service
@@ -187,10 +207,17 @@ impl Home {
         self.dir.join("disabled.lock")
     }
 
-    /// `<home>/grants`: the issuer-side mint-log ledger (0600) that makes revoke-by-holder and `grant ls`
-    /// possible.
+    /// `<home>/grants`: the ledger (0600) of every link this machine signed. The `serve` gate admits a
+    /// link signed by this machine's own key only when its row is here, and revoke-by-holder and `grant
+    /// ls` read it too.
     pub fn grants(&self) -> PathBuf {
         self.dir.join("grants")
+    }
+
+    /// `<home>/grants.lock`: the flock every writer of [`grants`](Self::grants) takes, on a stable inode
+    /// because a prune replaces `grants` by rename.
+    pub fn grants_lock(&self) -> PathBuf {
+        self.dir.join("grants.lock")
     }
 
     /// `<home>/contacts.toml`: the address book of petnames this node resolves.

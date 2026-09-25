@@ -13,7 +13,6 @@ pub mod identity;
 pub mod invite;
 pub mod ping;
 pub mod reach;
-pub mod recut;
 pub mod revoke;
 pub mod send;
 pub mod serve;

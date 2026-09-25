@@ -37,8 +37,8 @@ pub struct PingCmd {
     #[arg(
         long,
         value_name = "link",
-        long_help = "Optional: your own devices need no link, the dial presents the self-signed \
-                     membership badge under this identity. Pass a `sheer:` link only to reach as a delegate."
+        long_help = "Optional: your own devices need no link, the dial presents this \
+                     device's membership badge. Pass a `sheer:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     /// Print a line per probe as it lands, showing the path at that moment (watch iroh punch to direct).

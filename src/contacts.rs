@@ -23,9 +23,8 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
 use bifrost::{CryptoKind, NodeId};
-use nauthy::VerifyKey;
 
-use crate::roster::{Epoch, Member, RosterDoc, RosterError};
+use crate::roster::{Epoch, RosterDoc};
 
 /// The reserved petname for the operator's own devices: the signet is person-zero, each device it derives
 /// lives under `me/<label>`. A signet-verified roster hydrates into exactly this partition.
@@ -508,31 +507,6 @@ impl Contacts {
     /// defect, so no code outside this crate can obtain it and stamp a doc with it.
     pub(crate) fn roster_floor(&self) -> Option<Epoch> {
         self.roster_floor
-    }
-
-    /// Cut the `me/*` member set as a roster doc stamped with this book's current
-    /// [`RosterVersion`], or `None` when the book is [`Unversioned`](RosterVersion::Unversioned) and
-    /// therefore has nothing a puller may accept.
-    ///
-    /// The domain-to-wire half of the pair [`hydrate`](Self::hydrate) completes, and it lives here for the
-    /// same reason: the member set and the version that describes it are one object, so a cut can never
-    /// pair one book's members with another number. A member's label IS a [`DeviceLabel`], the same type
-    /// held locally, so nothing is re-parsed across the seam.
-    pub fn cut_roster(&self) -> Result<Option<RosterDoc>, RosterError> {
-        let Some(epoch) = self.roster_version.epoch() else {
-            return Ok(None);
-        };
-        let members: Vec<Member> = self
-            .people
-            .get(&Petname(ME.to_owned()))
-            .into_iter()
-            .flat_map(|person| person.devices.iter())
-            .map(|(label, binding)| Member {
-                node: VerifyKey::new(*binding.node.key()),
-                label: label.clone(),
-            })
-            .collect();
-        RosterDoc::new(epoch, members).map(Some)
     }
 
     /// Fold a signet-verified roster into the `me` partition (the operator's own fleet) as a FLOORED

@@ -1,9 +1,9 @@
 //! The `serve` entry a peer would have to run for a verb's DEFAULTED service name to answer, said by
 //! the CLIENT when its dial fails.
 //!
-//! A bare `swoosh serve` binds `ping`, `speed` and the two `control.*` routes, and nothing else: a
-//! default service may cost a peer bandwidth, but never code execution, a byte of its disk, a packet
-//! from its IP, or a name from its fleet. Four verbs (`ssh`, `send`, `fetch`, `fleet`) therefore
+//! A bare `swoosh serve` binds `ping`, `speed`, the two `control.*` routes and the member-gated update
+//! route, and nothing else: a default service may cost a peer bandwidth, but never code execution, a
+//! byte of its disk, or a packet from its IP. Three verbs (`ssh`, `send`, `fetch`) therefore
 //! default to names a zero-config peer does not serve, and the refusal that comes back names nothing,
 //! deliberately: the wire refusal is uniform so a stranger never learns what a node serves or does not.
 //! So the client says it instead, out of the table below, which pairs each of those names with the
@@ -59,12 +59,6 @@ impl Unbound {
         name: "fetch",
         entry: "fetch=fetch:<origin>",
     };
-    /// `swoosh fleet`'s service. `fleet` has no `--service` flag to drop, so naming the entry on a
-    /// failed pull is its only way to satisfy the rule at all.
-    pub const ROSTER: Self = Self {
-        name: "roster",
-        entry: "roster=roster:",
-    };
 
     /// The wire name the verb dials when the user names no service.
     pub const fn name(&self) -> &'static str {
@@ -116,10 +110,10 @@ impl Unbound {
     }
 }
 
-/// The table, in the order a reader meets the verbs: reach a shell, push a file, relay a fetch, learn
-/// the fleet. A `static` (not a `const`) so a row can be handed out as `&'static`, which is what lets
+/// The table, in the order a reader meets the verbs: reach a shell, push a file, relay a fetch. A
+/// `static` (not a `const`) so a row can be handed out as `&'static`, which is what lets
 /// [`Unbound::dialed`] return a borrow rather than a copy of a row the caller then has to own.
-static UNBOUND: [Unbound; 4] = [Unbound::SSH, Unbound::RECV, Unbound::FETCH, Unbound::ROSTER];
+static UNBOUND: [Unbound; 3] = [Unbound::SSH, Unbound::RECV, Unbound::FETCH];
 
 #[cfg(test)]
 #[path = "unbound_tests.rs"]

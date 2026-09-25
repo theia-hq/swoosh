@@ -279,7 +279,7 @@ async fn a_saved_book_is_owner_only_in_an_owner_only_store() {
 
 use nauthy::VerifyKey;
 
-use crate::roster::{Epoch, Member, RosterDoc};
+use crate::roster::{Epoch, Member, RosterDoc, RosterError};
 
 /// A roster member whose node id is the all-`seed`-byte key, so it hydrates to the same [`node`] fixture,
 /// which doubles as a check that the `VerifyKey -> NodeId` conversion preserves the bytes.
@@ -819,8 +819,7 @@ async fn a_device_keeps_learning_the_fleet_after_every_edit() {
     owner.add(petname("me"), Some(device("desk")), node(1));
 
     let cut = |owner: &Contacts| {
-        let doc = owner
-            .cut_roster()
+        let doc = cut_roster(owner)
             .expect("a well-formed cut")
             .expect("a versioned book has something to cut");
         crate::roster::cut(signet.identity(), &doc)
@@ -921,16 +920,14 @@ async fn a_pre_versioning_book_unsticks_itself_on_the_next_edit() {
         RosterVersion::Unversioned
     );
     assert!(
-        store.contacts().cut_roster().expect("cut").is_none(),
+        cut_roster(store.contacts()).expect("cut").is_none(),
         "an unversioned book has nothing a puller may accept, so it cuts nothing"
     );
 
     store
         .contacts_mut()
         .add(petname("me"), Some(device("phone")), node(2));
-    let doc = store
-        .contacts()
-        .cut_roster()
+    let doc = cut_roster(store.contacts())
         .expect("cut")
         .expect("the edit made it versioned");
     assert_eq!(doc.epoch(), Epoch(1));
@@ -941,4 +938,23 @@ async fn a_pre_versioning_book_unsticks_itself_on_the_next_edit() {
     assert!(matches!(stuck.hydrate(&doc), Hydrated::Applied(_)));
 
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+}
+
+/// The `me/*` member set as a roster doc stamped with the book's version, or `None` for an unversioned
+/// book: the cut a signer makes from this book, which these tests pull through `hydrate`.
+fn cut_roster(contacts: &Contacts) -> Result<Option<RosterDoc>, RosterError> {
+    let Some(epoch) = contacts.roster_version.epoch() else {
+        return Ok(None);
+    };
+    let members: Vec<Member> = contacts
+        .people
+        .get(&Petname(ME.to_owned()))
+        .into_iter()
+        .flat_map(|person| person.devices.iter())
+        .map(|(label, binding)| Member {
+            node: VerifyKey::new(*binding.node.key()),
+            label: label.clone(),
+        })
+        .collect();
+    RosterDoc::new(epoch, members).map(Some)
 }

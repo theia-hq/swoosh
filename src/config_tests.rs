@@ -225,3 +225,22 @@ async fn an_unreadable_latch_is_an_error_not_an_empty_set() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A pin write is durable in its directory, not only in its bytes: after the rename the parent is
+/// synced, so the pin (the commit point) can never be on disk while a file ordered before it is not.
+/// Counted through the sync seam, on a current-thread runtime so every sync lands on this thread.
+#[tokio::test(flavor = "current_thread")]
+async fn the_atomic_write_fsyncs_its_directory() {
+    let (home, dir) = store("dir-fsync");
+    super::SYNCS.with_borrow_mut(Vec::clear);
+    super::write_signet(&home, crate::testkit::TestRoot::seeded(0xd1).node_id())
+        .await
+        .expect("write the pin");
+    let syncs = super::SYNCS.with_borrow(Clone::clone);
+    assert_eq!(
+        syncs,
+        vec![super::Synced::File, super::Synced::Dir],
+        "the bytes, then the directory that names them"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

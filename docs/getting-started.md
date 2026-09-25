@@ -86,7 +86,7 @@ You just did the zero-auth version. Each step from here adds exactly one thing:
   one identity, so they all reach each other with no per-service step. See
   [Reach your own devices](use-cases/reach-your-own-devices.md).
 - **Add a gate.** Drop `--public` and the same services admit only your own devices, refusing strangers.
-  A machine is its own root of trust. See [Keys: the gate](keys.md#the-gate).
+  See [Keys: the gate](keys.md#the-gate).
 - **Reach by name.** Save a key under a petname once, then use the name everywhere:
   `swoosh contact add desk <key>`, then `swoosh ping desk`. See [contact](reference/commands.md#contact).
 - **Let other people in.** Issue a `sheer:` capability link to one service, for one person or their

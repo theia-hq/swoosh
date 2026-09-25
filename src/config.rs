@@ -18,9 +18,8 @@ use tightbeam::identity::AsVerifyKey as _;
 use crate::home::Home;
 
 /// Load this node's signet: the [`NodeId`] it was provisioned to trust, or `None` if it was never
-/// provisioned. The file is a single public node id; an absent file means unprovisioned, which `serve`
-/// treats as "gate on this node's OWN key" (person-zero self-trusts: it admits itself and its devices,
-/// refuses strangers), never a silent open.
+/// provisioned. The file is a single public node id; an absent file means this machine trusts no root,
+/// and `serve`'s gate then admits no member at all.
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
@@ -29,19 +28,6 @@ pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
-}
-
-/// Whether this home holds the SIGNET itself, `node` being its own identity: no signet file (person-zero
-/// self-trusts, so its own key IS the root) or a signet file naming that same key.
-///
-/// The ONE predicate for "may this machine speak for the whole fleet". Both sides of the roster lean on
-/// it, so they cannot drift: the verb that CUTS refuses to sign one anywhere else, and `serve` refuses to
-/// advertise `roster:` anywhere else. A member device signing a roster with its own key produces a blob
-/// every puller rejects, and the operator only finds out from the far end.
-pub async fn holds_signet(home: &Home, node: NodeId) -> eyre::Result<bool> {
-    Ok(load_signet(home)
-        .await?
-        .is_none_or(|configured| configured == node))
 }
 
 /// Whether this home has disabled `root`: the question a verb asks before it follows a key it did not
@@ -57,14 +43,17 @@ pub async fn is_disabled(home: &Home, root: NodeId) -> eyre::Result<bool> {
 /// invite. Overwrites any prior signet (re-provisioning re-trusts), creating the store dir. Written
 /// `0600` beside the secret identity: the signet roots this node's whole trust decision (whose devices it
 /// admits), so it must not be world-readable to a local user who could read or (worse) rewrite it.
+///
+/// Atomic and durable ([`write_private_atomic`]): a running `serve` reads the pin live and fails closed
+/// on a body that is not exactly one key, so a truncating write would drop every member for the length
+/// of the write, and the pin is the commit point every write ordered before it relies on.
 pub async fn write_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
-    write_private(&home.signet(), format!("{signet}\n").as_bytes()).await
+    write_private_atomic(&home.signet(), format!("{signet}\n").as_bytes()).await
 }
 
 /// Load this device's stored membership badge: the signet-signed, device-bound `sheer:` link it presents
-/// on connect, or `None` if none was stored. An absent file means the node was provisioned without a badge
-/// (a home from before badges were carried, or a self-rooted node) or is the signet holder itself
-/// (person-zero), either of which falls back to self-signing. Mirrors [`load_signet`].
+/// on connect, or `None` if none was stored: a machine that is no root's device presents no badge.
+/// Mirrors [`load_signet`].
 ///
 /// The text becomes a [`Link`] HERE, at the one place it leaves the disk, so every consumer downstream
 /// holds a credential that already decoded and verified against its embedded root. A file that holds
@@ -102,8 +91,11 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
 ///
 /// Takes the [`Link`] [`load_badge`] returns, so the store speaks one type in both directions and only a
 /// badge that has decoded and verified against its root can ever reach the disk.
+///
+/// Atomic and durable ([`write_private_atomic`]), like the pin it is ordered before: a torn badge reads as
+/// a damaged home.
 pub async fn write_badge(home: &Home, badge: &Link) -> eyre::Result<()> {
-    write_private(&home.badge(), format!("{badge}\n").as_bytes()).await
+    write_private_atomic(&home.badge(), format!("{badge}\n").as_bytes()).await
 }
 
 /// Create swoosh's store directory owner-only (`0700`) on Unix, recursively, if it does not already exist.
@@ -130,12 +122,13 @@ pub fn create_store_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Write `contents` to `path` owner-only, through a unique temp sibling renamed over the target.
 ///
-/// The two reach files (`<home>/relay`, `<home>/resolver`) land this way; the identity key has its own
-/// store ([`keystore`]), which writes the same way. Each is read by a later run and each is
-/// unrecoverable if it is torn, so the bytes are durable (`sync_all`) before the rename makes them
-/// visible, and the temp is opened `create_new` at mode `0600` so the file is never world-readable for
-/// an instant and the rename carries that mode onto the target. A failed write or rename removes the
-/// temp, leaving the previous contents intact and no litter behind.
+/// The pin, the badge and the two reach files (`<home>/relay`, `<home>/resolver`) land this way; the
+/// identity key has its own store ([`keystore`]), which writes the same way. Each is read by a later run
+/// and each is unrecoverable if it is torn, so the bytes are durable (`sync_all`) before the rename makes
+/// them visible, and the temp is opened `create_new` at mode `0600` so the file is never world-readable
+/// for an instant and the rename carries that mode onto the target. The directory is synced after the
+/// rename, so the new name is durable too: a write ordered before the pin is on disk before the pin is.
+/// A failed write or rename removes the temp, leaving the previous contents intact and no litter behind.
 pub async fn write_private_atomic(path: &Path, contents: &[u8]) -> eyre::Result<()> {
     use tokio::io::AsyncWriteExt as _;
 
@@ -153,7 +146,9 @@ pub async fn write_private_atomic(path: &Path, contents: &[u8]) -> eyre::Result<
         let mut file = options.open(&temp).await?;
         file.write_all(contents).await?;
         file.flush().await?;
-        file.sync_all().await
+        file.sync_all().await?;
+        synced(Synced::File);
+        Ok::<(), std::io::Error>(())
     }
     .await;
     if let Err(error) = written {
@@ -164,7 +159,34 @@ pub async fn write_private_atomic(path: &Path, contents: &[u8]) -> eyre::Result<
         let _ = tokio::fs::remove_file(&temp).await;
         return Err(error.into());
     }
+    if let Some(parent) = path.parent() {
+        tokio::fs::File::open(parent).await?.sync_all().await?;
+        synced(Synced::Dir);
+    }
     Ok(())
+}
+
+/// What [`write_private_atomic`] made durable: the file's bytes, or the directory entry that names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Synced {
+    /// The temp file's bytes, before the rename.
+    File,
+    /// The parent directory, after the rename.
+    Dir,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Every sync [`write_private_atomic`] made on this thread, in order, for a test to count.
+    static SYNCS: core::cell::RefCell<Vec<Synced>> = const { core::cell::RefCell::new(Vec::new()) };
+}
+
+/// Record a sync for a test to count. Nothing outside tests.
+fn synced(what: Synced) {
+    #[cfg(test)]
+    SYNCS.with_borrow_mut(|syncs| syncs.push(what));
+    #[cfg(not(test))]
+    let _ = what;
 }
 
 /// A temp sibling unique to ONE write: the target name plus `.tmp.<pid>.<seq>`. The pid separates
@@ -176,39 +198,6 @@ fn temp_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".tmp.{}.{seq}", std::process::id()));
     path.with_file_name(name)
-}
-
-/// Write `contents` to `path` as an owner-only (`0600` on Unix) file, creating the store dir `0700` first.
-///
-/// The trust files beside the identity (the signet, the badge) are as sensitive as the store they live in,
-/// so this asserts the private posture on every write: the dir is created `0700`, and the file is created
-/// `0600` AND reasserted `0600` even when it already existed (create's mode fires only on first creation),
-/// so a file loosened after an earlier write is retightened. Truncates any prior contents. Non-Unix has no
-/// mode bits; the write still creates the dir and replaces the file.
-async fn write_private(path: &Path, contents: &[u8]) -> eyre::Result<()> {
-    use tokio::io::AsyncWriteExt as _;
-
-    if let Some(parent) = path.parent() {
-        create_store_dir(parent)?;
-    }
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    // tokio's `OpenOptions` carries the `mode` setter inherently under the `fs` feature (as the mint-log
-    // does), so no `OpenOptionsExt` import is needed.
-    #[cfg(unix)]
-    options.mode(0o600);
-    let mut file = options.open(path).await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        // Reassert 0600 on a pre-existing file (create's mode fired only on first creation).
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .await?;
-    }
-    file.write_all(contents).await?;
-    file.flush().await?;
-    Ok(())
 }
 
 #[cfg(test)]

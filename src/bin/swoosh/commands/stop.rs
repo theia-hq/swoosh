@@ -10,8 +10,8 @@
 //!
 //! `control.stop` is MEMBER-only, not merely family-gated: the node admits a whole-node membership badge
 //! (your own devices), and refuses a delegated slip at the route's member floor with the same uniform
-//! refusal a gate miss gives, before any `Response::Ok`. So `stop --at` presents the self-signed membership
-//! badge under your identity; a `--present` slip reaches the gate but cannot stop the node. For a fleet
+//! refusal a gate miss gives, before any `Response::Ok`. So `stop --at` presents this device's
+//! membership badge; a `--present` slip reaches the gate but cannot stop the node. For a fleet
 //! this means any of your own devices can stop it, which is correct for the qat CI-teardown consumer.
 //! Hardening the lifecycle further (an arm->confirm nonce + a single-use device-bound destroy-cap, ideally
 //! owner-only so another fleet device cannot stop the node) is a follow-up, and it needs a security review
@@ -63,8 +63,8 @@ pub struct StopCmd {
     #[arg(
         long,
         value_name = "link",
-        long_help = "Optional: your own devices need no link, the dial presents the self-signed \
-                     membership badge under this identity. Pass a `sheer:` link only to reach as a delegate."
+        long_help = "Optional: your own devices need no link, the dial presents this \
+                     device's membership badge. Pass a `sheer:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     #[command(flatten)]
@@ -150,7 +150,7 @@ impl StopCmd {
     }
 
     /// Reach the peer's member-only `control.stop` service and trigger a graceful stop. Presents the
-    /// resolved `present` (the self-signed membership badge, or an explicit `--present` link) so the gate
+    /// resolved `present` (this device's membership badge, or an explicit `--present` link) so the gate
     /// rules on the stream; only a whole-node member passes the route's member floor, and a node that does
     /// not admit this caller refuses LOUDLY here, never a silent no-op. `--at` is required to reach this
     /// path (a bare `stop` split to [`run_local`](Self::run_local)), so a missing target is a root-dispatch

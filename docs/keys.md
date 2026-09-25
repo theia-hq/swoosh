@@ -91,8 +91,7 @@ A device stores that membership as its **badge**, and presents it on every gated
 answers one question: *are you allowed?* It phones no server to decide. The answer is a signature it
 checks on the spot, against your key.
 
-By default the gate admits your own devices (they carry your membership) and turns everyone else away. A
-plain node is its own root of trust: it trusts itself and whom you delegate, and refuses strangers.
+By default the gate admits your own devices (they carry your membership) and turns everyone else away.
 Opening a service to the public is a deliberate, named opt-out (see [public services](use-cases/public-service.md)).
 
 The only list the gate ever keeps is a **denylist** a revoke writes. There is no allowlist to maintain:

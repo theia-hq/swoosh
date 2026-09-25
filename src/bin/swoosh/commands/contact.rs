@@ -4,13 +4,11 @@
 //! contacts file beside the identity. `main` dispatches this before composing any transport, since there
 //! is nothing to reach. Each leaf owns an `async fn run(self, ..)` that consumes it and persists.
 //!
-//! `add` and `rm` also take the home, because an edit under `me/` changes the operator's FLEET, and the
-//! signed roster the fleet pulls is re-cut from the same act. `ls` and `signet` do not: a read changes
-//! nothing, and a signet is a person's root, not a member.
+//! `me/` is not edited here: it lists this person's own devices, and their root decides it. `add` and
+//! `rm` refuse it and write nothing.
 
 use clap::Subcommand;
-use swoosh::contacts::ContactsStore;
-use swoosh::home::Home;
+use swoosh::contacts::{ContactRef, ContactsStore};
 
 pub mod add;
 pub mod ls;
@@ -32,12 +30,24 @@ pub enum ContactCmd {
 
 impl ContactCmd {
     /// Run the selected contact verb against the loaded store.
-    pub async fn run(self, store: ContactsStore, home: &Home) -> eyre::Result<()> {
+    pub async fn run(self, store: ContactsStore) -> eyre::Result<()> {
         match self {
-            Self::Add(cmd) => cmd.run(store, home).await,
+            Self::Add(cmd) => cmd.run(store).await,
             Self::Signet(cmd) => cmd.run(store).await,
             Self::Ls(cmd) => cmd.run(store).await,
-            Self::Rm(cmd) => cmd.run(store, home).await,
+            Self::Rm(cmd) => cmd.run(store).await,
         }
     }
+}
+
+/// Refuse a name under `me/`, before anything is written: this person's own devices are listed by
+/// their root, never typed into the address book.
+fn refuse_me(name: &ContactRef) -> eyre::Result<()> {
+    if name.petname().as_str() == "me" {
+        eyre::bail!(
+            "`me/` lists your devices, and your root decides it. Add one with `swoosh invite <name> \
+             <key>`; remove one with `swoosh revoke me/<name>`."
+        );
+    }
+    Ok(())
 }

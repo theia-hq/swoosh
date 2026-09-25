@@ -10,9 +10,8 @@
 //!
 //! That is not yet a guarantee that the key cannot be read as a signer elsewhere: [`Secret::with_bytes`]
 //! is public, so `secret.with_bytes(nauthy::Identity::from_secret)` still compiles anywhere until the
-//! `disallowed-methods` ban on `from_secret` lands (U22). Its interim callers are
-//! [`Secret::member_badge`] (removed in U13), [`Secret::sign_device_badge`] (U17) and the `recut`
-//! command (U13).
+//! `disallowed-methods` ban on `from_secret` lands (U22). Its one interim caller is
+//! [`Secret::sign_device_badge`] (U17).
 //!
 //! ```
 //! use swoosh::grants::Delegation;

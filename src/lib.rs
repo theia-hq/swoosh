@@ -10,6 +10,7 @@ pub mod badge;
 pub mod config;
 pub mod contacts;
 pub mod credential;
+pub mod gate;
 pub mod grants;
 pub mod home;
 pub mod identity;

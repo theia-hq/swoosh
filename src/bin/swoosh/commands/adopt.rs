@@ -105,8 +105,7 @@ impl AdoptCmd {
                 // beside the identity, in the SAME home, which `swoosh serve` reads via `load_signet`.
                 config::write_signet(home, signet).await?;
                 // Store the signet-signed membership badge beside the seed, so this device PRESENTS the
-                // badge the signet minted for it when it dials a family-gated node, rather than self-signing
-                // (which roots at this key and is refused).
+                // badge the signet minted for it when it dials a family-gated node.
                 config::write_badge(home, &badge).await?;
                 println!("this machine is already {node}; trusting signet {signet}");
                 println!("{}", COMPARE_SIGNET);

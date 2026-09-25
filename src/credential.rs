@@ -58,10 +58,10 @@ impl LinkExt for Link {
 /// [`Identity`](crate::identity::Identity) mode both derive from this one value.
 #[derive(Debug, Clone)]
 pub enum Credential {
-    /// Reaches a FAMILY-GATED service: presents the member badge rooted at the dialing key (a stored
-    /// device badge, else the signet-holder self-sign), which an explicit `--present` link overrides.
-    /// Derives [`Identity::PersistedIfPresent`](crate::identity::Identity::PersistedIfPresent), so the
-    /// self-badge roots at the same key the dial binds under and the two can never disagree.
+    /// Reaches a FAMILY-GATED service: presents this device's stored member badge, bound to the dialing
+    /// key, which an explicit `--present` link overrides. A machine that is not a device has none to
+    /// present. Derives [`Identity::PersistedIfPresent`](crate::identity::Identity::PersistedIfPresent),
+    /// so the badge is bound to the same key the dial binds under.
     Family {
         /// A delegate's explicit `--present` slip, if given; it overrides the default member badge. The
         /// ONLY surviving `Option` on this path, and an honest one (the user optionally overrode), not

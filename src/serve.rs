@@ -3,20 +3,17 @@
 //! module is the reusable half the command drives and the integration proofs assemble their nodes
 //! from, so a test builds the same routers the product path binds.
 //!
-//! `bind_entry`/`diagnostics` bind the named routes (the diagnostics engines, the roster the signet
-//! signed, tightbeam's own primitives), and the `control.*` handlers plus `Resident`/`InstanceLock`
+//! `bind_entry`/`diagnostics` bind the named routes (the diagnostics engines, tightbeam's own
+//! primitives), and the `control.*` handlers plus `Resident`/`InstanceLock`
 //! carry the node's local control surface. [`Activity`] is where an engine's reported fact becomes a
 //! line, and the only place one does. Nothing here SIGNS: `serve` relays a roster its operator's
 //! signet cut elsewhere, so the long-lived process never holds a signing identity.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use ::fetch::OriginAllowlist;
 use nauthy::Service;
 use tightbeam::tunnel::{Router, Serve};
-
-use crate::roster::Artifact;
 
 mod activity;
 mod control;
@@ -62,6 +59,11 @@ pub const CONTROL_STOP_SERVICE: &str = "control.stop";
 /// name is the verbatim wire name. Public so the `swoosh service` client requests the SAME name the
 /// served handler is keyed under, one source of truth for the wire string.
 pub const CONTROL_SERVICES_SERVICE: &str = "control.services";
+
+/// The update route: every `serve` binds it, member-gated, and serves the home's signed roster
+/// artifact from it, whatever the standing. It is bound by the node, never named in a `serve` entry.
+/// Public so the client that pulls it requests the SAME name the served handler is keyed under.
+pub const ROSTER_SERVICE: &str = "roster";
 
 /// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a
 /// decision at every match site (STYLE: prefer enums to bools). Every arm is a SUCCESS: an owner asked the
@@ -117,16 +119,11 @@ pub fn classify_stop(source: Option<StopKind>) -> Stopped {
 /// (owner limits, effectively unbounded, at a family gate). One input decides both the engine and the
 /// overlay, so an open diagnostic cannot be armed uncapped.
 ///
-/// `roster:` binds the home's signed roster ARTIFACT, and `roster` is `None` when this node does not hold
-/// the signet and therefore can never have one. A node that never names `roster:` never touches it; a
-/// node that names it without the signet is REFUSED here, at serve start, rather than advertising a
-/// service every puller must reject.
 /// Public as the per-entry edge the split-service proof drives to offer a SUBSET of the diagnostics.
 pub fn bind_entry(
     router: Router,
     entry: &str,
     host_seed: [u8; 32],
-    roster: Option<&Arc<Artifact>>,
     public: &[Service],
 ) -> eyre::Result<Router> {
     #[cfg(not(feature = "ssh"))]
@@ -155,22 +152,6 @@ pub fn bind_entry(
             no_argument(scheme, rest, entry)?;
             bind_speed(router, name, public)
         }
-        "roster" => {
-            no_argument(scheme, rest, entry)?;
-            // Only the signet's own machine has a roster to serve. Refuse LOUDLY here: the old path cut
-            // and signed a snapshot with whatever local key `serve` happened to hold, so a member node
-            // advertised a roster every puller rejected, silently, and the operator learned of it only
-            // from the far end. The predicate is the one in `config::holds_signet`, resolved once at the
-            // composition root, so this arm never re-derives it.
-            let Some(artifact) = roster else {
-                eyre::bail!(
-                    "`{entry}`: this node does not hold your signet, so it has no roster to serve and \
-                     any blob it cut would be refused by every device that pulled it. Serve `roster:` \
-                     from the machine whose `swoosh identity` prints your signet"
-                );
-            };
-            router.service(name, Roster::new(Arc::clone(artifact)))
-        }
         // Without the `ssh` engine compiled in there is no arm at all, so `sshd:` falls through to the
         // refusal below and is told it is unknown, which is true of this build.
         #[cfg(feature = "ssh")]
@@ -196,7 +177,7 @@ fn target_help(error: eyre::Report) -> eyre::Report {
 }
 
 /// Refuse a tail on a scheme that takes no argument. Every engine swoosh binds by scheme IS the whole
-/// target (a probe, a throughput test, the roster snapshot, a shell), so none of them takes one, and a
+/// target (a probe, a throughput test, a shell), so none of them takes one, and a
 /// tail is a typo. Refused HERE, by the layer that serves the scheme: falling through would hand
 /// `ping=ping:80` to tightbeam, which would call `ping` unknown when swoosh is the thing serving it.
 fn no_argument(scheme: &str, rest: &str, entry: &str) -> eyre::Result<()> {

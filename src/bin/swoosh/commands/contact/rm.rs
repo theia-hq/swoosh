@@ -2,7 +2,6 @@
 
 use clap::Args;
 use swoosh::contacts::{ContactRef, ContactsStore, Removed};
-use swoosh::home::Home;
 
 /// Remove a whole contact, or just one device grouped under it.
 #[derive(Debug, Args)]
@@ -14,13 +13,9 @@ pub struct RmCmd {
 
 impl RmCmd {
     /// Remove the target and persist. Idempotent: removing something absent is a no-op that says so,
-    /// not an error, so a repeated `rm` is safe.
-    ///
-    /// Removing a device under `me/` is how a member LEAVES the fleet (`invite rm` cancels the badge and
-    /// deliberately keeps the name), so it re-cuts the signed roster: the next pull drops the device
-    /// everywhere, with no restart and no second verb.
-    pub async fn run(self, mut store: ContactsStore, home: &Home) -> eyre::Result<()> {
-        let before = store.contacts().roster_version();
+    /// not an error, so a repeated `rm` is safe. A name under `me/` is refused and nothing is written.
+    pub async fn run(self, mut store: ContactsStore) -> eyre::Result<()> {
+        super::refuse_me(&self.name)?;
         let removed = store
             .contacts_mut()
             .remove(self.name.petname(), self.name.device());
@@ -29,9 +24,6 @@ impl RmCmd {
             Removed::Removed => {
                 println!("removed {}", self.name);
                 store.save().await?;
-                if store.contacts().roster_version() != before {
-                    crate::commands::recut::after_membership_change(home, store.contacts()).await?;
-                }
             }
             Removed::Absent => println!("no such contact {}; nothing to remove", self.name),
         }
