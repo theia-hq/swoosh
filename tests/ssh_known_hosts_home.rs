@@ -219,3 +219,35 @@ fn runs_with_home_unset() {
         "the pin write lands in the selected home's book with HOME unset: {pinned}"
     );
 }
+
+/// A home whose path ssh would read as another file (here `%d`, which ssh expands to the local home)
+/// refuses before ssh runs: exit 1, one line naming the path and the character, no book prepared.
+#[test]
+fn a_home_path_ssh_reads_specially_exits_1_in_one_line() {
+    let scratch = Scratch::new("special");
+    let home = scratch.base.join("a%db");
+    let key = Secret::ephemeral().node_id().to_string();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+        .arg("--home")
+        .arg(&home)
+        .arg("ssh")
+        .arg(&key)
+        .env("PATH", &scratch.bin)
+        .env("SWOOSH_TEST_SSH_LOG", &scratch.log)
+        .env("HOME", &scratch.decoy)
+        .env_remove("SWOOSH_HOME")
+        .env_remove("SWOOSH_KEY")
+        .output()
+        .expect("the swoosh binary runs");
+
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "a refusal exits 1: {stderr}");
+    assert_eq!(stderr.lines().count(), 1, "one line: {stderr}");
+    assert!(
+        stderr.contains(&home.display().to_string()) && stderr.contains("a '%'"),
+        "names the path and the character: {stderr}"
+    );
+    assert!(!scratch.log.exists(), "ssh never ran");
+    assert!(!home.exists(), "no book prepared");
+}
