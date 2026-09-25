@@ -20,7 +20,7 @@
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a badge must bind to whatever id the
 //! mem transport proves for the dialer; see `gated_measure.rs` for the full note on why the badge is signed
-//! here rather than run through `mint`/`adopt`.
+//! here rather than run through `invite`/`join`.
 
 use core::time::Duration;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

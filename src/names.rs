@@ -111,10 +111,16 @@ pub fn suggest() -> Name {
     suggest_from(&hostname())
 }
 
-/// The suggested name for a given hostname: cut at its first `.`, lowercased, every character outside the
-/// alphabet made `-`, runs of `-` collapsed, the ends trimmed of `-`, cut to [`Name::MAX_LEN`]. A hostname
-/// that leaves nothing, or leaves a reserved word (`root.local`), suggests `this`.
+/// The suggested name for a given hostname, as [`suggested_from`] makes it; a hostname that leaves no
+/// name suggests `this`.
 pub fn suggest_from(hostname: &str) -> Name {
+    suggested_from(hostname).unwrap_or_else(|| Name("this".to_owned()))
+}
+
+/// The name a hostname leaves: cut at its first `.`, lowercased, every character outside the alphabet
+/// made `-`, runs of `-` collapsed, the ends trimmed of `-`, cut to [`Name::MAX_LEN`]. `None` when nothing
+/// is left, or a reserved word is (`root.local`).
+pub fn suggested_from(hostname: &str) -> Option<Name> {
     let head = hostname.split('.').next().unwrap_or_default();
     let mut name = String::with_capacity(head.len());
     for character in head.chars() {
@@ -131,16 +137,13 @@ pub fn suggest_from(hostname: &str) -> Name {
     }
     let name = name.trim_end_matches('-');
     let name = &name[..name.len().min(Name::MAX_LEN)];
-    // Built from the alphabet, starting with a letter or digit, and no longer than the bound: always a name.
-    // An empty result (a hostname of only dots or symbols) or a reserved word falls to `this`, so the
-    // suggestion can always name a device.
-    name.parse()
-        .and_then(Name::unreserved)
-        .unwrap_or_else(|_| Name("this".to_owned()))
+    // Built from the alphabet, starting with a letter or digit, and no longer than the bound: a name
+    // unless it is empty (a hostname of only dots or symbols) or reserved.
+    name.parse().and_then(Name::unreserved).ok()
 }
 
 /// This machine's hostname, or the empty string when the system will not say.
-fn hostname() -> String {
+pub fn hostname() -> String {
     let mut buffer = [0_u8; 256];
     // SAFETY: the pointer and length describe `buffer`, which outlives the call; `gethostname` writes at
     // most that many bytes into it.

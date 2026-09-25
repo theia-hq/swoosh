@@ -2,8 +2,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! A plain `serve` holds `<home>/key.lock` shared, end to end: while the compiled binary serves a scratch
-//! home, a command that replaces the key on that home is refused before it reads a backup or asks for
-//! anything. Only the exact spawned pid is ever signalled.
+//! home, `leave --new-key` on that home is refused before it asks for or writes anything. Only the exact
+//! spawned pid is ever signalled.
 
 use core::time::Duration;
 use std::io::Read as _;
@@ -71,20 +71,27 @@ fn a_key_is_never_replaced_under_a_running_serve() {
     assert!(!taken, "serve holds <home>/key.lock");
     drop(lock);
 
-    // No backup exists at this path: without the lock, the restore would fail on that instead.
-    let restore = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+    // Nothing else stops it: the home trusts no root, so without the lock `leave --new-key` would replace
+    // the key.
+    let key_before = std::fs::read(home.join("key")).expect("serve made <home>/key");
+    let leave = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(&home)
-        .args(["identity", "restore", "--force"])
-        .arg(scratch.0.join("no-such-backup"))
+        .args(["leave", "--new-key"])
         .env_remove("SWOOSH_HOME")
         .stdin(Stdio::null())
         .output()
-        .expect("restore runs");
-    let stderr = String::from_utf8_lossy(&restore.stderr);
-    assert!(!restore.status.success());
+        .expect("leave runs");
+    let stderr = String::from_utf8_lossy(&leave.stderr);
+    assert!(!leave.status.success());
     assert!(
-        stderr.contains("a node is running"),
-        "the serving node's lock refuses the restore: {stderr}"
+        stderr.contains("stop swoosh serve first"),
+        "the serving node's lock refuses the new key: {stderr}"
+    );
+    assert!(leave.stdout.is_empty(), "no new key is printed");
+    assert_eq!(
+        std::fs::read(home.join("key")).expect("the key is still there"),
+        key_before,
+        "the key serve runs as is unchanged"
     );
 }

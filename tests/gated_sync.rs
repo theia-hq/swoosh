@@ -134,6 +134,80 @@ async fn proof() {
     );
 }
 
+/// A device whose standing has ended is refused at the update route, so it cannot pull the renewal the
+/// root signed for it while it was away: it takes it by joining the invite the named renewal prints.
+#[test]
+fn a_lapsed_devices_pull_is_refused() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(lapsed_pull()));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn lapsed_pull() {
+    let nas_home = device_home("lapsed-nas", NAS).await;
+    fold(&nas_home, &update(1, vec![])).await.unwrap();
+    let host = Node::new(MemTransport::bind(), NoDiscovery);
+    let host_id = host.node_id();
+    let serving = nas_home.clone();
+    tokio::task::spawn_local(async move {
+        let (gate, cut) = swoosh::gate::anchored(&serving, TestNode::seeded(NAS).node_id())
+            .await
+            .unwrap();
+        Router::new(gate)
+            .member_service(
+                SYNC_SERVICE.parse().unwrap(),
+                swoosh::serve::Exchange::new(serving),
+            )
+            .unwrap()
+            .expose()
+            .unwrap()
+            .with_live_cuts(cut)
+            .run(&host, CancellationToken::new())
+            .await
+            .unwrap();
+    });
+
+    // The same root, the same device, a standing that ended a day ago.
+    let lapsed = Node::new(MemTransport::bind(), NoDiscovery);
+    let standing = TestRoot::seeded(ROOT)
+        .device_badge(
+            lapsed.node_id(),
+            SystemTime::now() - Duration::from_secs(24 * 60 * 60),
+        )
+        .unwrap();
+    let refused = swoosh::sync::connector(host_id, Some(standing))
+        .unwrap()
+        .open_service(&lapsed)
+        .await
+        .expect("the base connect lands; the gate refuses per-stream");
+    assert!(
+        refused.open_bi().await.is_err(),
+        "a lapsed standing is refused at the update route"
+    );
+
+    // A device of the same root with a live standing is admitted: the refusal is the date's.
+    let live = Node::new(MemTransport::bind(), NoDiscovery);
+    let admitted = swoosh::sync::connector(host_id, Some(device_standing(ROOT, live.node_id())))
+        .unwrap()
+        .open_service(&live)
+        .await
+        .expect("a device reaches the update route");
+    assert!(
+        admitted.open_bi().await.is_ok(),
+        "a live standing is admitted"
+    );
+}
+
 fn key(seed: u8) -> VerifyKey {
     TestNode::seeded(seed).verify_key()
 }

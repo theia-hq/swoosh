@@ -1506,3 +1506,168 @@ async fn a_failed_invite_writes_nothing() {
     let ran = invite(&home, &["tablet", &node(LAPTOP).to_string()]).await;
     refused_before_writing(&ran, "is already your device me/laptop", &home, &before);
 }
+
+// --- the device's side: joining what `invite` prints ---
+
+#[derive(Debug, Parser)]
+struct JoinCli {
+    #[command(flatten)]
+    join: crate::commands::join::JoinCmd,
+}
+
+/// A fresh home holding the key `seed`, plain: another machine than the one where the root is kept.
+fn machine(tag: &str, seed: u8) -> Home {
+    let home = scratch(tag);
+    std::fs::remove_file(home.key()).unwrap();
+    let mut bytes = TestNode::seeded(seed).seed();
+    KeyFile::device(home.key())
+        .write(&keystore::Secret::take(&mut bytes), Protection::Plain)
+        .unwrap();
+    home
+}
+
+/// `swoosh join` on `home`, with `invite` on stdin; what it printed on stderr.
+async fn join(home: &Home, invite: &str) -> eyre::Result<String> {
+    let cmd = JoinCli::try_parse_from(["join"]).unwrap().join;
+    let stdin = format!("{invite}\n");
+    let mut err = Vec::new();
+    cmd.admit(
+        home,
+        crate::commands::join::Io {
+            input: stdin.as_bytes(),
+            input_terminal: false,
+            prompt: &Counting::refusing(),
+            hostname: "laptop",
+            now: SystemTime::now(),
+            err: &mut err,
+        },
+    )
+    .await?;
+    Ok(String::from_utf8(err).unwrap())
+}
+
+/// When `home`'s device standing ends, in unix seconds, if it is a device.
+async fn device_until(home: &Home) -> Option<u64> {
+    match swoosh::standing::Standing::read(home)
+        .await
+        .unwrap()
+        .standing
+    {
+        swoosh::standing::Standing::Device { until, .. } => Some(
+            until
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        ),
+        _ => None,
+    }
+}
+
+#[tokio::test]
+async fn a_lapsed_offline_device_renews_by_joining_the_printed_invite() {
+    let home = scratch("lapsed-join-root");
+    let laptop = lapsed(LAPTOP, "laptop");
+    holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
+    // The device, down while its standing ended: it holds the lapsed standing, which no device of the root
+    // admits, so it cannot pull the renewal.
+    let device = machine("lapsed-join-device", LAPTOP);
+    device_of(&device, &laptop).await;
+    assert_eq!(device_until(&device).await, Some(laptop.until));
+
+    let ran = invite(&home, &["laptop"]).await;
+    let printed = ran.invite();
+    join(&device, &printed.to_string()).await.unwrap();
+    let until = device_until(&device).await.expect("still a device");
+    assert!(
+        until > now(),
+        "the device runs again, from the printed line"
+    );
+    assert_eq!(until, row_of(&kept(&home).await, "laptop").until);
+}
+
+#[tokio::test]
+async fn a_machine_that_left_just_after_joining_rejoins_by_renew() {
+    let home = scratch("left-rejoin-root");
+    let laptop = fresh(LAPTOP, "laptop");
+    holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
+    let device = machine("left-rejoin-device", LAPTOP);
+    let first = Invite::bound(node(OWN), name("laptop"), laptop.standing.clone());
+    join(&device, &first.to_string()).await.unwrap();
+
+    // It leaves an hour after joining.
+    let cmd = LeaveCli::try_parse_from(["leave"]).unwrap().leave;
+    cmd.leave(
+        &device,
+        &mut Counting::refusing(),
+        SystemTime::now(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(device_until(&device).await, None);
+
+    // A renewal under a day signs nothing and prints the stored standing, which it joins again.
+    let ran = invite(&home, &["laptop"]).await;
+    assert_eq!(ran.prompts, 0);
+    assert!(
+        ran.err
+            .contains("If it left, or its date passed, on it: swoosh join"),
+        "{}",
+        ran.err
+    );
+    join(&device, &ran.invite().to_string()).await.unwrap();
+    assert_eq!(device_until(&device).await, Some(laptop.until));
+}
+
+#[derive(Debug, Parser)]
+struct LeaveCli {
+    #[command(flatten)]
+    leave: crate::commands::leave::LeaveCmd,
+}
+
+#[tokio::test]
+async fn every_making_verb_prints_only_its_artifact_on_stdout() {
+    // `invite <name> <key>`: the invite.
+    let home = scratch("artifacts");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let ran = add_tv(&home).await;
+    let printed = ran.invite();
+    assert_eq!(ran.out, format!("{printed}\n"));
+    assert!(!ran.err.is_empty(), "the lines about it go to stderr");
+
+    // `status --key`: the key.
+    let home = machine("artifacts-status", TV);
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    crate::commands::status::report::run_to(
+        &home,
+        crate::commands::status::report::Print::Key,
+        &mut out,
+        &mut err,
+    )
+    .await
+    .unwrap();
+    assert_eq!(String::from_utf8(out).unwrap(), format!("{}\n", node(TV)));
+
+    // `leave --new-key`: the new key.
+    let cmd = LeaveCli::try_parse_from(["leave", "--new-key"])
+        .unwrap()
+        .leave;
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    cmd.leave(
+        &home,
+        &mut Counting::refusing(),
+        SystemTime::now(),
+        &mut out,
+        &mut err,
+    )
+    .await
+    .unwrap();
+    let key = KeyFile::device(home.key())
+        .load()
+        .unwrap()
+        .unwrap()
+        .node_id();
+    assert_eq!(String::from_utf8(out).unwrap(), format!("{key}\n"));
+    assert!(!err.is_empty(), "the lines about it go to stderr");
+}

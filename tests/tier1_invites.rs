@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Invites, end to end: the REAL CLI provisions the device, then a live gated reach proves the standing
-//! the `invite:` line carried is the one the adopting device's gate admits.
+//! the `invite:` line carried is the one the joining device's gate admits.
 //!
 //! The flow under test is the offline round trip:
 //!
@@ -11,9 +11,9 @@
 //! 2. the ROOT signs for that key, as `swoosh invite laptop <key>` does where it is kept, so no seed ever
 //!    travels (built in process from a test root: signing takes the root's passphrase at a terminal,
 //!    which a child process has none of; the command's own half is proven in `commands/invite_tests.rs`);
-//! 3. the DEVICE adopts the `invite:` line (`swoosh adopt`), keeping its identity;
+//! 3. the DEVICE joins with the `invite:` line (`swoosh join`), keeping its identity;
 //! 4. the device's node serves behind the gate `serve` builds from its home; a standing the root signed
-//!    for the owner's node is ADMITTED, proving `adopt` wrote the pin the gate reads, while a stranger
+//!    for the owner's node is ADMITTED, proving `join` wrote the pin the gate reads, while a stranger
 //!    with no standing is REFUSED;
 //! 5. the owner's node serves; it pins no root, so it admits no member, and the device's stored standing
 //!    is REFUSED there.
@@ -112,9 +112,17 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .unwrap();
     let token = Invite::bound(owner_id, "laptop".parse().unwrap(), standing).to_string();
 
-    // 3. The device adopts, keeping its identity; the trust + badge land beside it.
-    let adopt = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
-    assert!(adopt.status.success(), "adopt failed: {}", stderr(&adopt));
+    // 3. The device joins, keeping its identity; the pin and the standing land beside it. Its first exchange
+    //    is with the owner's machine, which is not serving, so it ends at once over loopback.
+    let joined = swoosh(&[
+        "join",
+        &token,
+        "--transport",
+        "quirk+noise",
+        "--home",
+        path_str(&device_dir),
+    ]);
+    assert!(joined.status.success(), "join failed: {}", stderr(&joined));
     let device_seed: [u8; 32] = std::fs::read(device_dir.join("key"))
         .unwrap()
         .try_into()
@@ -128,14 +136,14 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     let signet = config::load_signet(&device_home)
         .await
         .unwrap()
-        .expect("adopt wrote the signet the device's gate will arm from");
+        .expect("join wrote the pin the device's gate will arm from");
     assert_eq!(signet, root.node_id(), "the device pins the invite's root");
     let owner_seed: [u8; 32] = std::fs::read(signet_dir.join("key"))
         .unwrap()
         .try_into()
         .expect("the owner key is 32 bytes");
 
-    // 4. The DEVICE's node serves, gated at the pin `adopt` wrote; the owner dials presenting a standing the
+    // 4. The DEVICE's node serves, gated at the pin `join` wrote; the owner dials presenting a standing the
     //    root signed for its node, and is admitted as one of the root's devices.
     let device_transport = sealed(device_seed).await;
     let device_host = Node::new(device_transport, NoDiscovery);

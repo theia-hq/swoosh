@@ -14,7 +14,7 @@
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a badge binds to that id rather than
 //! a device's derived ed25519 key, exactly as `gated_measure.rs` documents; what this proves is that the gate
-//! admits a signet-rooted bound badge and that the OFFERED-service boundary is real, not that mint/adopt
+//! admits a signet-rooted bound badge and that the OFFERED-service boundary is real, not that invite/join
 //! store the badge (that is `device_badge_wiring.rs`).
 
 use core::time::Duration;
@@ -267,7 +267,7 @@ async fn assert_stranger_refused(host: NodeId) {
 
 /// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven mem node
 /// id): a `member(true)` badge rooted at the signing key. A badge rooted at the node's OWN key admits at its
-/// self-gate; one rooted at a stranger key is refused. Signed here (not via mint/adopt) so it binds to the
+/// self-gate; one rooted at a stranger key is refused. Signed here (not via invite/join) so it binds to the
 /// mem transport's synthetic proven id; see the module note and `gated_measure.rs`.
 fn self_badge(signer: u8, bound: NodeId) -> String {
     TestRoot::seeded(signer)

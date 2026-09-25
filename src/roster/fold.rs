@@ -93,7 +93,7 @@ pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
     let _lock = RosterLock::take(&home.roster_lock()).await?;
     let (pin, badge_until) = match Standing::read(home).await?.standing {
         Standing::Device { pin, until } | Standing::HoldsRoot { pin, until } => (pin, until),
-        Standing::Unpinned | Standing::PinOnly { .. } | Standing::InterruptedMint { .. } => {
+        Standing::Unpinned | Standing::InterruptedMint { .. } => {
             return Err(FoldError::NotADevice);
         }
     };
@@ -233,7 +233,7 @@ fn clear_fork(home: &Home, doc: &RosterDoc, pin: VerifyKey) -> Result<(), FoldEr
 }
 
 /// The fold's exclusive flock on `<home>/roster.lock`, held while this value lives.
-struct RosterLock {
+pub(crate) struct RosterLock {
     /// Held, never read: the lock lives exactly as long as this open file does.
     _held: std::fs::File,
 }
@@ -244,7 +244,7 @@ impl RosterLock {
 
     /// Take the lock at `path`, creating the file, and wait for any other fold to finish. It waits
     /// without blocking the thread, so a fold in another task of this process can finish meanwhile.
-    async fn take(path: &Path) -> Result<Self, FoldError> {
+    pub(crate) async fn take(path: &Path) -> Result<Self, FoldError> {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

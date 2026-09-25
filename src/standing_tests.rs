@@ -189,14 +189,18 @@ async fn an_empty_home_is_unpinned() {
     assert!(read.finished.is_empty());
 }
 
+/// A pin with no device standing is left only by a crash while leaving, and reads as damaged, naming `leave`.
 #[tokio::test]
-async fn a_pin_with_no_standing_is_pin_only() {
-    let home = home("pin-only");
+async fn a_pin_with_no_badge_is_damaged() {
+    let home = home("pin-no-badge");
     pin(&home, root()).await;
-    assert_eq!(
-        read(&home).await.standing,
-        Standing::PinOnly { pin: root() }
-    );
+    match Standing::read(&home).await {
+        Err(StandingError::Damaged(what)) => {
+            assert_eq!(what, Disagreement::PinWithoutStanding { pin: root() });
+            assert!(super::damaged_line(&what).contains("swoosh leave"));
+        }
+        other => panic!("a pin with no badge is damaged: {other:?}"),
+    }
 }
 
 #[tokio::test]

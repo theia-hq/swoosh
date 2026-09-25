@@ -34,15 +34,18 @@ use bifrost_mdns::{At, Dialable, Expiring, Missing, ScopeClass};
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::{Gate, Service};
+use swoosh::contacts::ContactsStore;
 use swoosh::gate::AnchorCut;
 use swoosh::home::Home;
 use swoosh::identity::Identity;
+use swoosh::joining::{AdmitError, AdmitLock};
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::serve::{
     Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope, InstanceLock,
     RECV_SCHEME, Resident, SYNC_SERVICE, ServiceList, Stop, StopKind, Stopped, acquire_single,
     bind_entry, bind_recv, classify_stop, extract_recv_services,
 };
+use swoosh::standing::{Standing, StandingError};
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
 use tightbeam::enabled::FileDisabledList;
@@ -115,6 +118,9 @@ pub struct ServeCmd {
     /// be the resident node: one per home, control socket; stays foreground
     #[arg(long)]
     pub resident: bool,
+    /// For this run, let in the devices of another root without joining it (CI).
+    #[arg(long, value_name = "root key", value_parser = admitted_root)]
+    pub admit: Option<NodeId>,
     #[command(flatten)]
     pub reach: ReachArgs,
     /// What `serve` needs beyond the bound node, resolved by the composition root BEFORE the transport
@@ -174,6 +180,65 @@ pub struct ExposeContext {
     /// The node home this serve runs under: the resident socket/lock derive from it, and the composition
     /// root resolves it ONCE, so a `--resident` serve and its future control clients name the same paths.
     pub home: Home,
+    /// Held for the whole run of a `serve --admit`, naming the root it admits.
+    pub admit: Option<AdmitLock>,
+}
+
+/// `--admit`'s root key, typed `root:ed01…`.
+fn admitted_root(text: &str) -> Result<NodeId, String> {
+    swoosh::peer::parse_key(text.strip_prefix("root:").unwrap_or(text))
+        .map_err(|error| error.to_string())
+}
+
+/// Check that this machine may admit the devices of `root` for this run, and hold `<home>/admit.lock`
+/// naming it: never this machine's own key, a root revoked here, or a person's root, and only on a machine
+/// that trusts no root.
+pub(crate) async fn admitting(home: &Home, own: NodeId, root: NodeId) -> eyre::Result<AdmitLock> {
+    if root == own {
+        eyre::bail!("that is this machine's key, not a root.");
+    }
+    if swoosh::config::is_disabled(home, root).await? {
+        eyre::bail!("root:{root} was revoked on this machine; recovery is a new root.");
+    }
+    let store = ContactsStore::open(home.contacts()).await?;
+    let contacts = store.contacts();
+    if let Some(person) = contacts.petnames().find(|person| {
+        contacts
+            .signet(person)
+            .is_some_and(|binding| binding.node == root)
+    }) {
+        eyre::bail!(
+            "root:{root} is {person}'s root: admitting it would admit every one of {person}'s devices. To let \
+             {person} use a service: swoosh share <service> {person}"
+        );
+    }
+    let lock = match AdmitLock::admitting(home, root) {
+        Ok(lock) => lock,
+        Err(AdmitError::Held) => {
+            eyre::bail!("swoosh serve --admit or swoosh join is already running for this home.")
+        }
+        Err(AdmitError::Io(error)) => return Err(error.into()),
+    };
+    match Standing::read(home).await {
+        Ok(read) => match read.standing {
+            Standing::Unpinned => {}
+            Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => eyre::bail!(
+                "this machine trusts root:{pin}, and admits its devices already: --admit is for a machine \
+                 that trusts no root."
+            ),
+            Standing::InterruptedMint { root_key } => {
+                eyre::bail!("{}", swoosh::standing::unfinished_line(root_key))
+            }
+        },
+        Err(StandingError::Damaged(what)) => {
+            eyre::bail!("{}", swoosh::standing::damaged_line(&what))
+        }
+        Err(other) => return Err(other.into()),
+    }
+    eprintln!(
+        "admitting devices of root root:{root} for this run; this machine does not get your revoked keys."
+    );
+    Ok(lock)
 }
 
 impl core::fmt::Debug for ExposeContext {
@@ -248,9 +313,13 @@ impl Reaching for ServeCmd {
             cut,
             enabled,
             home,
+            admit,
         } = *expose;
-        self.run_serve(node, host_seed, gate, cut, enabled, home)
-            .await
+        let result = self
+            .run_serve(node, host_seed, gate, cut, enabled, home)
+            .await;
+        drop(admit);
+        result
     }
 }
 

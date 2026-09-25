@@ -531,6 +531,25 @@ impl Contacts {
         applied
     }
 
+    /// Lay this machine's own entry under `me` as `join` reads it from an invite: a hint, held until the
+    /// first fold rebuilds `me` from the root's update. It is never hand-typed, so that fold replaces it.
+    pub fn seed_me(&mut self, label: DeviceLabel, node: NodeId) {
+        self.insert_binding(
+            Petname(ME.to_owned()),
+            label,
+            Binding {
+                node,
+                source: Source::Roster { epoch: 0 },
+            },
+        );
+    }
+
+    /// Forget every device under `me`: a machine that leaves its root, or moves to another, keeps no list
+    /// of the old root's devices.
+    pub fn clear_me(&mut self) {
+        let _ = self.remove(&Petname(ME.to_owned()), None);
+    }
+
     /// Set the persisted roster epoch floor when the store reconstructs a book from disk. For the store's
     /// codec ONLY: the floor was established by a prior [`hydrate`], and reload just round-trips it, so a
     /// restart does not reset the anti-rollback high-water mark to zero.

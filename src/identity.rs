@@ -14,11 +14,12 @@
 //!
 //! Nothing here ever writes OVER a key that is already there. The file is a [`keystore`] key file, and
 //! that crate enforces the rule for every write: a key is minted only into the absence of one, a file
-//! that is not a key this build reads is refused rather than minted over, and [`write`] (the `adopt`
+//! that is not a key this build reads is refused rather than minted over, and [`write`] (the `join`
 //! path) refuses a home that already holds a different identity. The key is the one file in the store
 //! with no issuer and no second copy: a signet roots every badge its owner ever signed, and there is
-//! nobody to cut another. So it is replaced only by a restore the operator asks for by name
-//! ([`restore`]), which checks the identity it replaces, never as a side effect of another verb.
+//! nobody to cut another. So it is replaced only when the operator asks for it by name, by a restore ([`restore`]),
+//! which checks the identity it replaces, or by `leave --new-key` ([`replace`]), never as a side effect
+//! of another verb.
 //!
 //! How the file protects the key is a property of the FILE, read from its own bytes: `plain` by default,
 //! or sealed under a passphrase once its owner asks for that with [`protect`]. A sealed key opens only
@@ -40,11 +41,13 @@ use crate::passphrase::{Prompt, Terminal};
 mod backup;
 mod lock;
 mod protect;
+mod replace;
 mod stage;
 
 pub use backup::{Existing, Restored, export, restore};
 pub use lock::HomeLock;
 pub use protect::{Protected, protect};
+pub use replace::{Replaced, replace};
 
 /// The ed25519 secret key a verb binds under: a [`keystore::Secret`], which wipes itself on drop and never
 /// hands its bytes out by value.
@@ -140,7 +143,7 @@ pub fn resolve_with(
 }
 
 /// Load the persisted secret at `<home>/key` if the file exists and holds a key, else `None`,
-/// WITHOUT creating one. A bound invite carries no seed, so `adopt` uses this to require the key the
+/// WITHOUT creating one. A bound invite carries no seed, so `join` uses this to require the key the
 /// badge was signed for; a home with no identity gets a teaching error, never a fresh key minted over
 /// the invite's binding.
 pub async fn load(home: &Home) -> eyre::Result<Option<Secret>> {
@@ -236,17 +239,13 @@ fn create_dir(file: &KeyFile) -> std::io::Result<()> {
 /// Write `seed` as the persisted identity at `<home>/key`, plain, mode 0600, creating the store
 /// dir, REFUSING a home that already holds a different one.
 ///
-/// This is how `adopt` provisions the device identity a later `serve` binds: it MUST land in the same
-/// store [`resolve`] reads, so the node comes up AS the adopted device. (Writing tightbeam's separate
-/// store instead was the CI identity-mismatch bug: `serve` bound swoosh's own key, never the adopted
-/// one, so the exposed node had a different id than the contact pointed at.)
+/// This is how `join` provisions the device identity a later `serve` binds from an invite that carries a
+/// key: it MUST land in the same store [`resolve`] reads, so the node comes up AS the invited device.
 ///
 /// The refusal is here, in the module that owns the file, and not at the one call site, because it is
-/// the FILE's rule. What is at stake is not recoverable. Its siblings in `adopt`'s transaction (the
-/// trusted signet, the stored badge) are both `--force`-gated and both re-obtainable from the owner, so
-/// the flag that waves those through deliberately does not reach this one. Writing the key ALREADY on
-/// disk is not a replacement, so re-adopting the same invite stays the silent no-op it should be; if its
-/// owner sealed that key, the passphrase proves it is the same one.
+/// the FILE's rule: the key is the one file nobody can issue again. Writing the key ALREADY on disk is
+/// not a replacement, so joining the same invite again stays the silent no-op it should be; if its owner
+/// locked that key, the passphrase proves it is the same one.
 pub async fn write(seed: &[u8; 32], home: &Home) -> eyre::Result<()> {
     write_with(seed, home, &mut Terminal)
 }
@@ -276,11 +275,9 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
             existing,
             incoming,
         }) => eyre::bail!(
-            "this machine is already {existing}; adopting this would replace it with {incoming}. {} \
-             holds the only copy of that key: nobody can issue another, and if it is the signet your \
-             fleet roots at, every device you enrolled roots there too. --force will not do it either, \
-             because what it waves through is a credential the owner can re-issue. copy the file \
-             somewhere safe and move it aside, if becoming a different device is what you meant",
+            "this machine is already {existing}; joining this would replace it with {incoming}. {} \
+             holds the only copy of that key: nobody can issue another. To replace it: swoosh leave \
+             --new-key",
             path.display(),
         ),
         Err(error) => Err(error.into()),
