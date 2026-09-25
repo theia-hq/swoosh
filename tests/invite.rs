@@ -15,7 +15,7 @@ fn invite_new_is_a_usage_error_not_new_key() {
     let output = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(&home)
-        .args(["invite", "qat", "--new"])
+        .args(["invite", "runner", "--new"])
         .env_remove("SWOOSH_HOME")
         .stdin(Stdio::null())
         .output()
