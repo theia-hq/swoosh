@@ -102,8 +102,8 @@ tightbeam's loopback reflector: it returns the caller's own bytes and opens no h
 How your devices keep one list of your devices. Every `swoosh serve` serves it, whatever else you name;
 no entry can name it. Your other devices reach it on their own, and with `swoosh sync`.
 
-- Posture: member-only, like the rest of `control.*`: a `swoosh:` link naming it is refused at the route.
-  Unmetered: the handler sets no cap, and no public form can ever open it.
+- Posture: your devices only, like the rest of `control.*`: a `swoosh:` link naming it is refused at the
+  route. Unmetered: the handler sets no cap, and no public form can ever open it.
 - Limits: [sync](commands/sync.md).
 
 ### `control.stop` and `control.services`

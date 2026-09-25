@@ -1,8 +1,8 @@
 //! `swoosh sync`: bring your device list up to date with your other devices, both ways.
 //!
-//! It exchanges with every live device of your root ([`swoosh::sync`]), each within 5 s and all within
-//! 20 s, and asks every one: it takes a newer list from any that has one and gives the newest to any
-//! that lacks it. It prints one report on stdout. It takes no argument, and runs only on a device of a
+//! It exchanges with every live device of your root ([`swoosh::sync`]), one at a time, each within 5 s
+//! and all within 20 s, and asks every one: it takes a newer list from any that has one and gives the
+//! newest to any that lacks it, asking again any device it had asked before a take. It prints one report on stdout. It takes no argument, and runs only on a device of a
 //! root, one that holds it or not.
 
 use core::time::Duration;
@@ -127,7 +127,8 @@ impl Row {
 }
 
 /// The report, one line per outcome: a fork line for each device that holds another list, then the one
-/// line that says what moved, with the devices that did not answer in brackets.
+/// line that says what moved, with the devices that did not answer in brackets; when only forks answered,
+/// the devices that did not answer on a line of their own.
 pub(crate) fn report(rows: &[(String, Row)]) -> String {
     let names = |row: Row| -> Vec<&str> {
         rows.iter()
@@ -145,12 +146,7 @@ pub(crate) fn report(rows: &[(String, Row)]) -> String {
              swoosh invite or swoosh revoke settles it.\n"
         ));
     }
-    let missed = names(Row::NoAnswer);
-    let missed = if missed.is_empty() {
-        String::new()
-    } else {
-        format!(" ({} did not answer)", missed.join(", "))
-    };
+    let missed = names(Row::NoAnswer).join(", ");
     let (took, gave, same) = (names(Row::Took), names(Row::Gave), names(Row::InSync));
     let line = if !took.is_empty() {
         let gave = if gave.is_empty() {
@@ -170,7 +166,16 @@ pub(crate) fn report(rows: &[(String, Row)]) -> String {
     } else if !same.is_empty() {
         format!("in sync with {}", same.join(", "))
     } else {
+        // Only forks answered: the devices that did not answer get their own line.
+        if !missed.is_empty() {
+            out.push_str(&format!("{missed} did not answer.\n"));
+        }
         return out;
+    };
+    let missed = if missed.is_empty() {
+        String::new()
+    } else {
+        format!(" ({missed} did not answer)")
     };
     out.push_str(&format!("{line}{missed}.\n"));
     out

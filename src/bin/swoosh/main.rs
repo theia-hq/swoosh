@@ -173,7 +173,7 @@ macro_rules! reaching_verbs {
                 }
             }
 
-            /// The peer the selected verb dials, for the stale-list exchange after it runs.
+            /// The peer the selected verb dials, for the stale-list exchange beside it.
             fn dialed(&self) -> Option<&swoosh::peer::Peer> {
                 match self {
                     $(Self::$verb(cmd) => cmd.dialed(),)+
@@ -780,24 +780,50 @@ impl IrohBind {
     }
 }
 
-/// A dialing verb's stale-list check: when the peer it dialed is one of your devices and this machine's
-/// last exchange is over an hour old, one exchange with it. Never printed; a failure logs at debug.
-async fn stale_exchange<T: Transport, D: Discovery>(
-    node: &Node<T, D>,
+/// The device a dialing verb's peer is, when this machine's list is stale and that peer is one of your
+/// devices: the one to make the stale-list exchange with.
+async fn stale_device(
     home: &Home,
     contacts: &Contacts,
     peer: &swoosh::peer::Peer,
-) {
-    let Some(device) = peer
-        .candidates(contacts)
-        .ok()
-        .and_then(|candidates| candidates.into_iter().next())
-    else {
-        return;
+) -> Option<bifrost::NodeId> {
+    if !swoosh::sync::is_stale(home).await {
+        return None;
+    }
+    let device = peer.candidates(contacts).ok()?.into_iter().next()?;
+    swoosh::sync::is_own_device(home, device.node)
+        .await
+        .then_some(device.node)
+}
+
+/// Run a reaching verb, and beside it, from the moment it starts, the stale-list exchange with the device
+/// it dials (through `dial`). The exchange never waits for the verb, never depends on it succeeding, and
+/// ends with it: whatever the exchange has not finished when the verb returns is dropped, before the node
+/// closes. It is never printed; a failure logs at debug.
+async fn run_verb<T: Transport, D: Discovery>(
+    outward: Outward,
+    node: &Node<T, D>,
+    ctx: reaching::ReachCtx<'_>,
+    dial: &impl swoosh::sync::Dial,
+) -> eyre::Result<()>
+where
+    <T::Session as bifrost::Session>::Write: Send + 'static,
+    <T::Session as bifrost::Session>::Read: Send + 'static,
+{
+    let device = match outward.dialed() {
+        Some(peer) => stale_device(ctx.home, ctx.contacts, peer).await,
+        None => None,
     };
-    if swoosh::sync::is_own_device(home, device.node).await {
-        let dial = swoosh::sync::NodeDial::new(node, home);
-        let _ = swoosh::sync::when_stale(&dial, home, device.node).await;
+    let verb = outward.run(node, ctx);
+    let Some(device) = device else {
+        return verb.await;
+    };
+    let exchange = swoosh::sync::once(dial, device);
+    tokio::pin!(verb, exchange);
+    tokio::select! {
+        biased;
+        _ = &mut exchange => verb.await,
+        result = &mut verb => result,
     }
 }
 
@@ -816,15 +842,8 @@ where
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
-    // What the stale-list exchange needs, read before the verb consumes its context.
-    let (home, contacts) = (ctx.home, ctx.contacts);
-    let dialed = outward.dialed().cloned();
-    let result = outward.run(node, ctx).await;
-    if result.is_ok()
-        && let Some(peer) = dialed
-    {
-        stale_exchange(node, home, contacts, &peer).await;
-    }
+    let home = ctx.home;
+    let result = run_verb(outward, node, ctx, &swoosh::sync::NodeDial::new(node, home)).await;
     node.close().await;
     result
 }
@@ -841,6 +860,9 @@ mod grant_revoke_refuses_tests;
 #[cfg(test)]
 #[path = "signet_dial_verb_tests.rs"]
 mod signet_dial_verb_tests;
+#[cfg(test)]
+#[path = "stale_exchange_tests.rs"]
+mod stale_exchange_tests;
 
 #[cfg(test)]
 mod tests {

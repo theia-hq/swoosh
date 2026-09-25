@@ -23,6 +23,7 @@
 
 use core::future::Future;
 use core::time::Duration;
+use std::collections::VecDeque;
 use std::io;
 use std::time::SystemTime;
 
@@ -396,6 +397,10 @@ pub enum Until {
 /// Exchange with `devices` in order, one at a time, each within [`EACH`] and all within `total`. Each
 /// device's answer, or `None` for one that did not answer in time or failed; a device left unasked when
 /// the round stopped is not listed.
+///
+/// On [`Until::Every`], a take makes every device asked before it (one found the same, given this
+/// machine's list, or taken from) hold an older list than this machine now does, so each is asked again,
+/// and its last answer is the one listed.
 pub async fn round(
     dial: &impl Dial,
     devices: &[Device],
@@ -403,8 +408,10 @@ pub async fn round(
     total: Duration,
 ) -> Vec<(Device, Option<Answer>)> {
     let deadline = tokio::time::Instant::now() + total;
-    let mut out = Vec::new();
-    for device in devices {
+    let mut answers: Vec<Option<Option<Answer>>> = vec![None; devices.len()];
+    let mut queue: VecDeque<usize> = (0..devices.len()).collect();
+    while let Some(index) = queue.pop_front() {
+        let device = &devices[index];
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         let answer = match tokio::time::timeout(EACH.min(left), dial.exchange(device.key)).await {
             Ok(Ok(answer)) => Some(answer),
@@ -417,13 +424,24 @@ pub async fn round(
                 None
             }
         };
-        let took = answer == Some(Answer::Took);
-        out.push((device.clone(), answer));
-        if took && until == Until::Newer {
-            break;
+        answers[index] = Some(answer);
+        if answer == Some(Answer::Took) {
+            if until == Until::Newer {
+                break;
+            }
+            for (earlier, got) in answers.iter().enumerate() {
+                let behind = matches!(got, Some(Some(Answer::Same | Answer::Gave | Answer::Took)));
+                if earlier != index && behind && !queue.contains(&earlier) {
+                    queue.push_back(earlier);
+                }
+            }
         }
     }
-    out
+    devices
+        .iter()
+        .zip(answers)
+        .filter_map(|(device, answer)| Some((device.clone(), answer?)))
+        .collect()
 }
 
 /// Whether this machine is a device of a root, one that holds it or not: the only machines that
@@ -432,18 +450,19 @@ pub async fn is_device(home: &Home) -> bool {
     matches!(device_pin(home).await, Ok(Some(_)))
 }
 
-/// A dialing verb's stale-list check: when this machine is a device and its last exchange with another
-/// device is over [`STALE`] old, one exchange with `peer`, a device of this machine's root. Never
-/// printed; a failure is logged at debug.
-pub async fn when_stale(dial: &impl Dial, home: &Home, peer: NodeId) -> Option<Answer> {
+/// Whether a dialing verb exchanges on its connection: this machine is a device, and its last exchange
+/// with another device is over [`STALE`] old, or never happened.
+pub async fn is_stale(home: &Home) -> bool {
     if !is_device(home).await {
-        return None;
+        return false;
     }
     let now = unix_now();
-    let stale = last_synced(home).is_none_or(|then| now.saturating_sub(then) > STALE.as_secs());
-    if !stale {
-        return None;
-    }
+    last_synced(home).is_none_or(|then| now.saturating_sub(then) > STALE.as_secs())
+}
+
+/// One exchange with `peer` within [`EACH`], as a dialing verb makes it: never printed, and a failure
+/// logged at debug.
+pub async fn once(dial: &impl Dial, peer: NodeId) -> Option<Answer> {
     match tokio::time::timeout(EACH, dial.exchange(peer)).await {
         Ok(Ok(answer)) => Some(answer),
         Ok(Err(error)) => {

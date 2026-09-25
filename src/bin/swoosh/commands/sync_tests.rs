@@ -62,6 +62,13 @@ fn sync_prints_its_lines() {
         "me/nas holds a different list of your devices. Kept every revoked key from both; your next \
          swoosh invite or swoosh revoke settles it.\n"
     );
+    assert_eq!(
+        report(&rows(&[("me/nas", Row::Fork), ("me/phone", Row::NoAnswer)])),
+        "me/nas holds a different list of your devices. Kept every revoked key from both; your next \
+         swoosh invite or swoosh revoke settles it.\n\
+         me/phone did not answer.\n",
+        "a device that did not answer is named beside a fork"
+    );
 }
 
 /// A fresh home holding only this machine's key.

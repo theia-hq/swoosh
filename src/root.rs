@@ -839,25 +839,26 @@ impl Root {
 impl Act {
     /// Present step 9's exchange: ask your devices for a newer update than the one held here, `me` in
     /// random order, then the root's own live devices, then `roster.seed`, stopping at the first that
-    /// gives one, within 10 s. When devices were asked and none answered, say so.
+    /// gives one, within 10 s. When devices were asked and none answered, or they could not be listed, say
+    /// so; a list read and found empty has nothing to ask and says nothing.
     async fn sync(&self, dial: &impl Dial, out: &mut impl Write) {
         let also: Vec<(VerifyKey, String)> = self
             .book
             .live()
             .map(|row| (row.key, format!("me/{}", row.label)))
             .collect();
-        let devices = match crate::sync::devices(&self.home, also).await {
-            Ok(devices) => devices,
+        let checked = match crate::sync::devices(&self.home, also).await {
+            Ok(devices) if devices.is_empty() => return,
+            Ok(devices) => crate::sync::round(dial, &devices, Until::Newer, SYNC_BOUND)
+                .await
+                .iter()
+                .any(|(_, answer)| answer.is_some()),
             Err(error) => {
                 tracing::debug!(%error, "could not list the devices to sync with");
-                Vec::new()
+                false
             }
         };
-        if devices.is_empty() {
-            return;
-        }
-        let answers = crate::sync::round(dial, &devices, Until::Newer, SYNC_BOUND).await;
-        if answers.iter().all(|(_, answer)| answer.is_none()) {
+        if !checked {
             let _ = writeln!(
                 out,
                 "could not check this root against your devices (last synced {}). If another copy of it \

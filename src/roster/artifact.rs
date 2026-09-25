@@ -6,6 +6,8 @@
 use std::io;
 use std::path::Path;
 
+use tokio::io::AsyncWriteExt as _;
+
 /// Write `blob`, a signed update, to `path`, replacing what was there.
 ///
 /// Written to a sibling temp and renamed over the target, so a reader sees the old update or the new one,
@@ -14,10 +16,16 @@ pub(crate) async fn write(path: &Path, blob: &[u8]) -> Result<(), ArtifactError>
     if let Some(parent) = path.parent() {
         crate::config::create_store_dir(parent).map_err(ArtifactError::Write)?;
     }
-    let temp = path.with_extension("tmp");
-    tokio::fs::write(&temp, blob)
+    // `<name>.tmp` beside it, so `roster` and `roster.fork` never share one.
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".tmp");
+    let temp = path.with_file_name(name);
+    let mut file = tokio::fs::File::create(&temp)
         .await
         .map_err(ArtifactError::Write)?;
+    file.write_all(blob).await.map_err(ArtifactError::Write)?;
+    file.sync_all().await.map_err(ArtifactError::Write)?;
+    drop(file);
     tokio::fs::rename(&temp, path)
         .await
         .map_err(ArtifactError::Write)?;

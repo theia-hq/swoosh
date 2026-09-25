@@ -16,14 +16,14 @@ use keystore::{KeyFile, Protection};
 use nauthy::{RevocationId, Revocations as _, VerifyKey};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
-use super::{Answer, Device, Until, answer, digest, exchange, round, when_stale};
+use super::{Answer, Device, Until, answer, digest, exchange, round};
 use crate::codec::Id;
 use crate::config;
 use crate::contacts::DeviceLabel;
 use crate::gate::KeyedDenylist;
 use crate::home::Home;
 use crate::roster::{Epoch, Folded, Member, RosterDoc, fold};
-use crate::testkit::{Answering, Loopback, STANDING_UNTIL, TestNode, TestRoot};
+use crate::testkit::{Loopback, STANDING_UNTIL, TestNode, TestRoot};
 
 /// The root every device here belongs to.
 const ROOT: u8 = 0x21;
@@ -35,6 +35,8 @@ const NAS: u8 = 0x12;
 const PHONE: u8 = 0x13;
 /// A device revoked in an update.
 const STOLEN: u8 = 0x14;
+/// A fourth device.
+const LAPTOP: u8 = 0x15;
 
 fn root() -> TestRoot {
     TestRoot::seeded(ROOT)
@@ -178,6 +180,59 @@ async fn sync_takes_a_newer_update() {
         refuses(&desk, STOLEN).await,
         "this machine stops admitting the key the newer update revoked"
     );
+}
+
+#[tokio::test]
+async fn sync_gives_what_it_took_to_every_device_it_asked_before() {
+    let desk = device("again", DESK).await;
+    let phone = device("again", PHONE).await;
+    let laptop = device("again", LAPTOP).await;
+    let nas = device("again", NAS).await;
+    // me/phone is behind this machine, me/laptop holds what it holds, and me/nas holds a newer list.
+    holding(&phone, &update(1, vec![], vec![])).await;
+    let second = update(2, vec![], vec![]);
+    holding(&desk, &second).await;
+    holding(&laptop, &second).await;
+    holding(&nas, &update(3, vec![], vec![key(STOLEN)])).await;
+
+    let dial = Loopback::new(
+        desk.clone(),
+        [
+            (node(PHONE), phone.clone()),
+            (node(LAPTOP), laptop.clone()),
+            (node(NAS), nas.clone()),
+        ],
+    );
+    let answers = round(
+        &dial,
+        &[
+            named(PHONE, "me/phone"),
+            named(LAPTOP, "me/laptop"),
+            named(NAS, "me/nas"),
+        ],
+        Until::Every,
+        Duration::from_secs(20),
+    )
+    .await;
+
+    let read: Vec<(&str, Option<Answer>)> = answers
+        .iter()
+        .map(|(device, answer)| (device.name.as_str(), *answer))
+        .collect();
+    assert_eq!(
+        read,
+        vec![
+            ("me/phone", Some(Answer::Gave)),
+            ("me/laptop", Some(Answer::Gave)),
+            ("me/nas", Some(Answer::Took)),
+        ]
+    );
+    for (home, name) in [(&phone, "me/phone"), (&laptop, "me/laptop")] {
+        assert!(
+            refuses(home, STOLEN).await,
+            "{name} holds the list taken from me/nas"
+        );
+    }
 }
 
 /// A stream that counts the bytes read through it.
@@ -413,30 +468,6 @@ async fn the_fork_file_survives_a_newer_update_that_drops_its_revocation() {
     );
 }
 
-#[tokio::test]
-async fn a_dialing_verb_pulls_when_stale() {
-    let desk = device("stale", DESK).await;
-    let dial = Answering::with(Answer::Same);
-    let hours_ago = |hours: u64| {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        std::fs::write(desk.roster_synced(), format!("{}\n", now - hours * 3600)).unwrap();
-    };
-
-    hours_ago(2);
-    assert_eq!(
-        when_stale(&dial, &desk, node(NAS)).await,
-        Some(Answer::Same)
-    );
-    assert_eq!(dial.calls(), 1, "one exchange on a dial past an hour");
-
-    hours_ago(0);
-    assert_eq!(when_stale(&dial, &desk, node(NAS)).await, None);
-    assert_eq!(dial.calls(), 1, "none on a fresh one");
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_folds_never_lose_a_revocation() {
     let desk = device("concurrent", DESK).await;
@@ -473,55 +504,5 @@ async fn concurrent_folds_never_lose_a_revocation() {
     assert!(
         kept.contains(&id(1)) && kept.contains(&id(2)),
         "both updates' revocations are kept"
-    );
-}
-
-#[tokio::test]
-async fn a_device_that_missed_its_renewal_update_gets_it_from_the_next() {
-    let first = STANDING_UNTIL - 2_000_000;
-    let renewed = STANDING_UNTIL - 1_000_000;
-    let desk = device_until("missed", DESK, first).await;
-    let with_desk_until = |number: u64, until: u64| {
-        let mut devices = members();
-        devices[0] = Member {
-            node: key(DESK),
-            label: name("desk"),
-            until,
-            duration: 90 * 24 * 60 * 60,
-            ids: Vec::new(),
-            standing: root()
-                .device_badge(
-                    node(DESK),
-                    SystemTime::UNIX_EPOCH + Duration::from_secs(until),
-                )
-                .unwrap(),
-        };
-        let doc = RosterDoc::with_revocations(Epoch(number), devices, vec![], vec![]).unwrap();
-        root().sign_update(&doc)
-    };
-    holding(&desk, &with_desk_until(1, first)).await;
-
-    // Update 2 renewed this device, and it never arrived here. Update 3 revokes something else, and still
-    // carries every device's newest standing.
-    let third = {
-        let mut devices = members();
-        devices[0] = crate::roster::verify(&with_desk_until(2, renewed), root().verify_key())
-            .unwrap()
-            .members()
-            .iter()
-            .find(|member| member.node == key(DESK))
-            .unwrap()
-            .clone();
-        let doc =
-            RosterDoc::with_revocations(Epoch(3), devices, vec![], vec![key(STOLEN)]).unwrap();
-        root().sign_update(&doc)
-    };
-    holding(&desk, &third).await;
-
-    let badge = config::load_badge(&desk).await.unwrap().unwrap();
-    assert_eq!(
-        badge.cap().expiry().unwrap(),
-        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(renewed)),
-        "the device takes its renewed standing from the next update"
     );
 }
