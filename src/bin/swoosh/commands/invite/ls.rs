@@ -10,17 +10,15 @@
 //! twenty rows within a year, most of them `expired`, and the surface that is supposed to carry the
 //! expiry warning becomes the surface renewal ruins. Only the latest-expiring row describes the
 //! credential a device actually carries, so only that row shows. The superseded rows stay in the ledger
-//! and stay auditable: `grant ls` is the view that shows every one of them.
+//! and stay auditable in the ledger.
 
 use std::time::SystemTime;
 
 use bifrost::NodeId;
 use clap::Args;
 use swoosh::contacts::Contacts;
-use swoosh::grants::{GrantKind, GrantRecord, GrantTarget, Grants};
+use swoosh::grants::{self, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
-
-use crate::commands::grant_ls::remaining;
 
 /// The reserved petname the operator's own devices live under (`me/<label>`).
 const ME: &str = "me";
@@ -76,6 +74,15 @@ impl LsCmd {
     }
 }
 
+/// A badge's remaining lifetime as a compact span (`2d`, `1h`, `30m`, `45s`), or `expired` once its
+/// expiry has passed.
+fn remaining(record: &GrantRecord, now: SystemTime) -> String {
+    match record.expiry.duration_since(now) {
+        Ok(left) => grants::humanize(left),
+        Err(_past) => "expired".to_owned(),
+    }
+}
+
 /// Collapse the membership rows to the LIVE badge per holder: the latest-expiring row for each key, in
 /// the order each key first appears in the ledger.
 ///
@@ -93,8 +100,8 @@ fn live_per_holder(records: Vec<GrantRecord>) -> Vec<GrantRecord> {
             // A later badge for a holder already listed supersedes the row kept for it: the last
             // credential minted for a device is the one that device presents.
             Some(kept) if live[kept].expiry < record.expiry => live[kept] = record,
-            // A row that does not outlive the one already kept IS a superseded row. It is not lost:
-            // `grant ls` reads every membership row the ledger holds.
+            // A row that does not outlive the one already kept IS a superseded row. It is not lost: the
+            // ledger keeps every membership row.
             Some(_) => {}
             None => live.push(record),
         }

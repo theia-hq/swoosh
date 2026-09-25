@@ -51,7 +51,7 @@ swoosh:ed01hcq6…
 ```
 
 The last line is the link. Hand it to mum over any channel (chat, AirDrop, a QR code). Repeat the two
-commands per member. (Mum reads her signet once with `swoosh identity` on her own machine and sends it
+commands per member. (Mum reads her signet once from the `root:` line of `swoosh status` on her own machine and sends it
 to you.)
 
 ## On mum's end

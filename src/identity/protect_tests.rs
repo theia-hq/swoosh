@@ -15,7 +15,7 @@ fn an_empty_home_is_created_sealed() {
     let (home, dir) = home("protect-create");
     let node = sealed(&home, "correct horse");
 
-    let stored = inspect(&home).expect("inspect");
+    let stored = inspect(&home).expect("inspect").into_stored();
     assert!(matches!(stored, Stored::Locked(_)), "created sealed");
     let opened = resolve_with(
         Identity::Persisted,
@@ -44,7 +44,7 @@ fn a_plain_key_is_sealed_as_the_same_node() {
     .expect("seal it");
     assert_eq!(done, Protected::Rewritten);
     assert_eq!(
-        inspect(&home).expect("inspect").method(),
+        inspect(&home).expect("inspect").into_stored().method(),
         Method::Passphrase
     );
     let opened = resolve_with(
@@ -68,7 +68,7 @@ fn a_sealed_key_is_unsealed_and_plain_stays_plain() {
     let done =
         protect(&home, Method::Plain, &mut Scripted::new(["correct horse"])).expect("unseal it");
     assert_eq!(done, Protected::Rewritten);
-    let stored = inspect(&home).expect("inspect");
+    let stored = inspect(&home).expect("inspect").into_stored();
     assert!(matches!(stored, Stored::Plain(_)));
     assert_eq!(stored.node_id(), node);
 

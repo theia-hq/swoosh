@@ -111,7 +111,7 @@ Two more nouns cover letting other people in.
 
 A **fleet** is one person's devices: everything their signet vouches for. Grant a fleet and every
 machine that person owns, now or later, is covered. To grant someone's fleet you first record their
-signet, which they read with `swoosh identity` on their own machine and send you.
+signet, which they read from the `root:` line of `swoosh status` on their own machine and send you.
 
 ### Grant
 

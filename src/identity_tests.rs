@@ -333,7 +333,9 @@ async fn inspecting_a_sealed_key_asks_for_nothing() {
     let (home, dir) = home("sealed-inspect");
     let node = sealed(&home, "correct horse");
 
-    let stored = super::inspect(&home).expect("inspect a sealed home");
+    let stored = super::inspect(&home)
+        .expect("inspect a sealed home")
+        .into_stored();
     assert!(matches!(stored, Stored::Locked(_)), "the key stays locked");
     assert_eq!(stored.method(), Method::Passphrase);
     assert_eq!(stored.node_id(), node);

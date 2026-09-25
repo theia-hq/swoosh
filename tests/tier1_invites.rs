@@ -7,7 +7,7 @@
 //!
 //! The flow under test is the spec's offline round trip:
 //!
-//! 1. the DEVICE makes its key and prints it (`swoosh identity`);
+//! 1. the DEVICE makes its key and prints it (`swoosh status --key`);
 //! 2. the OWNER signs for that key (`swoosh invite add laptop --for <key>`), so no seed ever travels;
 //! 3. the DEVICE adopts the `invite:` artifact (`swoosh adopt`), keeping its identity;
 //! 4. the device's node serves behind the gate `serve` builds from its home; a badge the owner's key
@@ -71,10 +71,10 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     std::fs::create_dir_all(&device_dir).unwrap();
 
     // 1. The device makes its key and prints it.
-    let identity = swoosh(&["identity", "--home", path_str(&device_dir)]);
+    let identity = swoosh(&["status", "--key", "--home", path_str(&device_dir)]);
     assert!(
         identity.status.success(),
-        "identity failed: {}",
+        "status --key failed: {}",
         stderr(&identity)
     );
     let device_id: NodeId = String::from_utf8(identity.stdout)
@@ -83,7 +83,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .next()
         .unwrap()
         .parse()
-        .expect("identity prints the node id first");
+        .expect("status --key prints the key alone");
 
     // 2. The owner signs for that key: no seed travels.
     let create = swoosh(&[

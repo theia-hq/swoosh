@@ -3,7 +3,7 @@
 //! One create leaf, two cells:
 //!
 //! - `invite add <label> --for <key>` signs a membership badge for a key the DEVICE made and printed
-//!   (`swoosh identity`). The token carries no secret, so it is safe in transit, but it is not signed by
+//!   (`swoosh status --key`). The token carries no secret, so it is safe in transit, but it is not signed by
 //!   the signet it names: the owner prints the full signet to compare out of band, and the device verifies
 //!   the badge binds its own key before adopting.
 //! - `invite add <label>` derives a child identity from your signet and hands over its seed (the CI case):
@@ -77,7 +77,7 @@ impl AddCmd {
             return Err(fleet_deferred());
         }
         // Signing needs the signet present, so resolve it as a persisted identity (creating one on first
-        // use, exactly as `swoosh identity` would).
+        // use, exactly as `swoosh status` would).
         let signet = identity::resolve(Identity::Persisted, home).await?;
         let signet_id = signet.node_id();
         // Invites are signed BY the configured signet. On an adopted device the home key is that device,
@@ -89,8 +89,8 @@ impl AddCmd {
             eyre::bail!(
                 "this machine trusts signet {configured}, but its own key is {signet_id}: a badge \
                      signed here would root at {signet_id} and be admitted nowhere that signet gates. Run \
-                     `invite add` on the machine that holds the signet (the one whose `swoosh identity` \
-                     prints {configured})."
+                     `invite add` on the machine that holds the signet (the one whose `swoosh status` \
+                     prints `root: root:{configured}, kept on this machine`)."
             );
         }
         // The badge lifetime is the operator's `--expires`, or the default when absent. This same
@@ -203,8 +203,7 @@ async fn record(
     })?;
     let record = GrantRecord {
         // A `member(true)` badge is NOT scoped to one service (it admits the device at the whole family
-        // gate), so it records as Membership: `grant ls` groups it under the bare `membership` heading
-        // and `invite ls` selects it.
+        // gate), so it records as Membership: `invite ls` lists it, and `status` leaves it out of the links.
         target: GrantTarget::Membership,
         kind: GrantKind::Device,
         delegation: Delegation::Sealed,

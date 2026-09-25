@@ -10,7 +10,7 @@ away on its own.
 
 ## Grant one service, timed
 
-Record the contractor's signet (they read it with `swoosh identity` on their machine and send it), then
+Record the contractor's signet (they read it from the `root:` line of `swoosh status` on their machine and send it), then
 grant their fleet the one service, with an expiry:
 
 <!-- capture: swoosh grant issue ssh --for fleet:contractor --expires 14d -->
@@ -47,11 +47,20 @@ name.
 
 ## What you have issued
 
-<!-- capture: swoosh grant ls -->
+<!-- live-run: this machine's key and the link's id and end differ per run -->
 ```console
-$ swoosh grant ls
-ssh
-  fleet   ed01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq  13d  fleet-bound
+$ swoosh status
+key: ed01slc6uxmtglqlm77rtvyq6mkcwkd5nhumkipcpkgoemdmxchhoa6a
+lock: none
+root: none yet.
+  to join yours: swoosh join
+  to make one here: swoosh invite <name> <key>
+
+contacts:
+  contractor  root:ed01o6vqymgz  root
+links you shared:
+  a4a0e014  ssh  root:ed01o6vqymgz  until 2026-10-08
+serving: nothing (swoosh serve is not running)
 ```
 
 ## Cut them off

@@ -5,7 +5,7 @@
 //! far gate refuses it. That expiry is enforced by a datalog CHECK the gate evaluates over the whole
 //! chain, which no holder can read out; nauthy mints an advisory `expires_at` AUTHORITY fact beside the
 //! check so the device CAN. This module is the single place that fact becomes a decision, so the
-//! dial-time refusal, the renewal warning, and the `swoosh identity` line read one clock and name one
+//! dial-time refusal, the renewal warning, and the `swoosh status` line read one clock and name one
 //! fix instead of drifting into three.
 //!
 //! **The reading is an UPPER BOUND, never a lower one.** [`nauthy::Cap::expiry`] reads origin-0 facts
@@ -104,8 +104,8 @@ impl Expiry {
 }
 
 /// The fragment every expiry surface prints about the badge itself: `expires in 34d`, `expired 6d ago`,
-/// or the unreadable case. The span is [`grants::humanize`]d, the same rendering `invite ls` and
-/// `grant ls` give the issuer side, so one badge reads the same on both machines.
+/// or the unreadable case. The span is [`grants::humanize`]d, the same rendering `invite ls` gives
+/// the issuer side, so one badge reads the same on both machines.
 impl fmt::Display for Expiry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

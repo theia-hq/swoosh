@@ -1886,7 +1886,7 @@ fn serve_never_opens_root_key() {
 }
 
 /// `serve --local` must keep the node's address: the bind takes the PERSISTED key, so two runs report
-/// the same NodeId the `identity` verb prints, never a fresh key per run. The banner also prints only
+/// the same key `status --key` prints, never a fresh key per run. The banner also prints only
 /// addresses a peer could dial: never the unspecified socket, and loopback only under the mark that
 /// says it reaches a peer on this machine. Its local gloss reports the advertisement that actually
 /// happened: one of the started outcomes, or the off-state when the run warned mDNS could not start
@@ -1900,14 +1900,14 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
     identity
         .arg("--home")
         .arg(&scratch.home_dir)
-        .arg("identity")
+        .args(["status", "--key"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
         .env_remove("SWOOSH_KEY");
     let output = run_binary_with_deadline(&mut identity, Duration::from_secs(30));
     assert!(
         output.status.success(),
-        "identity exits 0: {}\n{}",
+        "status --key exits 0: {}\n{}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1916,7 +1916,7 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
         .next()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .expect("identity prints the NodeId on its first line")
+        .expect("status --key prints the key")
         .to_owned();
 
     for run in 0..2 {

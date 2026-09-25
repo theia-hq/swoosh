@@ -2,12 +2,11 @@ Back to [Commands index](../commands.md).
 
 # <a id="identity"></a>`swoosh identity`
 
-Print this machine's key (its NodeId), minting one if there is none. Its three leaves back the key up,
-restore it, and set how it is protected.
+Back up this machine's key, restore it, and set how it is protected. `swoosh status --key` prints the key.
 
 <!-- generated: usage from `swoosh identity -h`; option lines curated -->
 ```
-Usage: swoosh identity [OPTIONS] [COMMAND]
+Usage: swoosh identity [OPTIONS] <COMMAND>
 
 Commands:
   export   Write a sealed backup of this identity to <path>
@@ -15,22 +14,8 @@ Commands:
   protect  Set how this identity is protected
 ```
 
-**Example.**
-<!-- capture: swoosh identity -->
-```console
-$ swoosh identity
-ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-key: ~/.config/swoosh/key
-protection: plain
-signet: none
-```
-
-**Things to know.** On an adopted device this prints that *device's* key, not your signet. A fleet grant
-needs the person's signet, read on their signet-holding machine. Use `identity` to provision a key ahead
-of time: make one here, save its NodeId as a contact, then hand the key file to the machine that adopts it.
-
-`protection:` says how the key file protects the key: `plain`, or `passphrase` once `swoosh identity protect
-passphrase` has sealed it. Printing never asks for the passphrase.
+**Things to know.** `swoosh status` says how the key file protects the key on its `lock:` line: `none`, or
+`passphrase` once `swoosh identity protect passphrase` has sealed it.
 
 - `swoosh identity protect <plain|passphrase>` rewrites the key file under that method; the key does not
   change. On a home with no key it creates one already sealed.

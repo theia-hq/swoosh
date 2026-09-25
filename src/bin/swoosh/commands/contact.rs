@@ -12,19 +12,16 @@ use swoosh::contacts::{ContactRef, ContactsStore, Petname};
 use swoosh::names::NameError;
 
 pub mod add;
-pub mod ls;
 pub mod rm;
 pub mod signet;
 
-/// Manage local petnames: save a peer's key under a name, list saved contacts, remove one.
+/// Manage local petnames: save a peer's key under a name, or remove one. `status` lists them.
 #[derive(Debug, Subcommand)]
 pub enum ContactCmd {
     /// Save a peer's key under a petname (`alice` or `alice/macbook` for a device).
     Add(add::AddCmd),
     /// Record a person's signet root, so `--for fleet:<petname>` binds their fleet.
     Signet(signet::SignetCmd),
-    /// List saved contacts, or one contact's devices.
-    Ls(ls::LsCmd),
     /// Remove a contact, or one of its devices (`alice` or `alice/macbook`).
     Rm(rm::RmCmd),
 }
@@ -35,7 +32,6 @@ impl ContactCmd {
         match self {
             Self::Add(cmd) => cmd.run(store).await,
             Self::Signet(cmd) => cmd.run(store).await,
-            Self::Ls(cmd) => cmd.run(store).await,
             Self::Rm(cmd) => cmd.run(store).await,
         }
     }

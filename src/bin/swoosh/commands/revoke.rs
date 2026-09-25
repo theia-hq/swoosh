@@ -57,8 +57,8 @@ impl RevokeCmd {
         if self.target == grants::ANYONE {
             eyre::bail!(
                 "`-` is the placeholder for a bearer grant's holder, not a revoke target: a bearer link has \
-                 no holder to name. Paste the `swoosh:` link to `swoosh grant revoke <link>`, or run \
-                 `swoosh grant ls`"
+                 no holder to name. Paste the `swoosh:` link to `swoosh grant revoke <link>`; `swoosh \
+                 status` lists the links you shared"
             );
         }
         self.revoke_holder(&mut denylist, store.contacts(), home)
@@ -100,7 +100,7 @@ impl RevokeCmd {
         if matches.is_empty() {
             eyre::bail!(
                 "no grant issued to `{}` is recorded in the ledger ({}); paste the `swoosh:` link to revoke \
-                 one directly, or run `swoosh grant ls` to see who you have granted",
+                 one directly, or run `swoosh status` to see the links you shared",
                 self.target,
                 ledger.path().display()
             );

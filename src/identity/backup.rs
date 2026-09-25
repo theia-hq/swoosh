@@ -82,7 +82,7 @@ pub fn export(
     }
     let Some(stored) = file.load()? else {
         eyre::bail!(
-            "there is no identity at {} to export; run `swoosh identity` to create one",
+            "there is no identity at {} to export; run `swoosh status` to create one",
             file.path().display()
         );
     };

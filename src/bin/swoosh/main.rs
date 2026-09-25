@@ -64,18 +64,6 @@ struct Cli {
         global = true
     )]
     home: Option<PathBuf>,
-    /// Retired: the node is a DIRECTORY now, so `--key <file>` became `--home <dir>` (the key lives at
-    /// `<home>/key`). Kept hidden, with no env and no default, ONLY so a stale `--key` gets a
-    /// teaching error that names the replacement, rather than clap's bare "unexpected argument". A clean
-    /// break: it selects nothing, it just triggers the forward message in `run`.
-    #[arg(
-        long = "key",
-        id = "retired-key",
-        value_name = "file",
-        hide = true,
-        global = true
-    )]
-    retired_key: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -93,7 +81,9 @@ enum Command {
     Ping(ping::PingCmd),
     /// Measure throughput to a peer: iperf, but over the overlay.
     Speed(speed::SpeedCmd),
-    /// Show your node's status, or a peer's connection path
+    /// Show this machine: its key, lock, root, devices, contacts, links and services.
+    ///
+    /// `status <machine>` shows how you reach one.
     Status(status::StatusCmd),
     /// Mint a local URL that fetches an origin through a node you name.
     Fetch(fetch::FetchCmd),
@@ -104,10 +94,10 @@ enum Command {
     Send(send::SendCmd),
     /// Bring your device list up to date with your other devices, both ways.
     Sync(sync::SyncCmd),
-    /// Manage local petnames: add a device, record a person's fleet signet, list, and remove.
+    /// Manage local petnames: add a device, record a person's fleet signet, or remove one.
     #[command(subcommand)]
     Contact(contact::ContactCmd),
-    /// Print this node's identity (its NodeId), minting a key if there is none.
+    /// Back up, restore, or protect this machine's key.
     Identity(identity::IdentityCmd),
     /// Create, list, and cancel invites: one device per invite.
     #[command(subcommand)]
@@ -120,7 +110,7 @@ enum Command {
     Mint(RetiredMintCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(ssh::SshCmd),
-    /// Issue, list, narrow, or revoke `swoosh:` capability links.
+    /// Issue, narrow, or revoke `swoosh:` capability links.
     #[command(subcommand)]
     Grant(grant::GrantCmd),
     /// Print this command tree (spec vs binary).
@@ -292,9 +282,8 @@ impl Command {
             Self::Serve(cmd) => Verb::Outward(Outward::Serve(cmd)),
             Self::Ping(cmd) => Verb::Outward(Outward::Ping(cmd)),
             Self::Speed(cmd) => Verb::Outward(Outward::Speed(cmd)),
-            // A bare `status` (no peer) queries YOUR OWN node over the control socket, the same local
-            // grammar as bare `stop`/`service ls`; with a peer it reaches out and reports its path.
-            // Split here so the bare case never composes a transport it would not use.
+            // A bare `status` (no peer) reports THIS machine from its own files; with a peer it reaches out
+            // and reports its path. Split here so the bare case never composes a transport.
             Self::Status(cmd) => match cmd.peer {
                 Some(_) => Verb::Outward(Outward::Status(cmd)),
                 None => Verb::Status(cmd),
@@ -308,7 +297,7 @@ impl Command {
 enum Verb {
     /// Edits the address book; needs no transport.
     Contact(contact::ContactCmd),
-    /// Prints this node's identity; needs no transport and no store, only the home.
+    /// Backs up, restores, or protects this machine's key; needs no transport and no store, only the home.
     Identity(identity::IdentityCmd),
     /// Creates, lists, or cancels invites; needs the key (the signet) and the store, no transport.
     Invite(invite::InviteCmd),
@@ -333,8 +322,8 @@ enum Verb {
     /// A bare `swoosh stop` (no `--at`): stop YOUR OWN node over the local control socket, no transport
     /// or store. With `--at` it is a reaching verb instead.
     Stop(stop::StopCmd),
-    /// A bare `swoosh status` (no peer): querying your OWN node over the control socket needs no
-    /// transport or store. With a peer it is a reaching verb instead.
+    /// A bare `swoosh status` (no peer): this machine, read from its own files; it binds no transport.
+    /// With a peer it is a reaching verb instead.
     Status(status::StatusCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(tree::TreeCmd),
@@ -489,18 +478,10 @@ async fn run() -> eyre::Result<()> {
 
     let cli = Cli::parse();
 
-    // The retired `--key` is a clean break, not a silent alias: a stale invocation gets a teaching error
-    // that names the replacement (the node is a DIRECTORY now), checked before anything else so it fires
-    // whatever verb (or no verb) follows. See the `retired_key` field on `Cli`.
-    if cli.retired_key.is_some() {
-        eyre::bail!("`--key` is gone; pass `--home <dir>` (the key lives at `<home>/key`)");
-    }
-
-    // The retired `SWOOSH_KEY` env var is the SAME clean break as `--key`, and a silent no-op is the danger:
-    // Phase 1a only errored the FLAG, so a stale `SWOOSH_KEY` in a shell profile would sit ignored while
-    // `--home`/`SWOOSH_HOME` (or the default) quietly selected a DIFFERENT identity. Detect it here and error
-    // FORWARD so a stale env can never silently pick the wrong node. Read directly (the field carries no `env`,
-    // deliberately, so clap never binds it); presence alone is the error, whatever its value.
+    // The retired `SWOOSH_KEY` env var is a clean break, and a silent no-op is the danger: a stale
+    // `SWOOSH_KEY` in a shell profile would sit ignored while `--home`/`SWOOSH_HOME` (or the default)
+    // quietly selected a DIFFERENT identity. Read directly (no clap field binds it); presence alone is the
+    // error, whatever its value.
     reject_retired_key_env(std::env::var_os("SWOOSH_KEY").is_some())?;
 
     // No verb given (a bare `swoosh`, even with `SWOOSH_HOME` set): print the full help and exit non-zero,
@@ -529,8 +510,8 @@ async fn run() -> eyre::Result<()> {
         // A bare `swoosh stop` (no `--at`): stop your own node over the control socket, here too, before
         // any transport is composed. With `--at` it fell through to the reach path above.
         Verb::Stop(cmd) => return cmd.run_local(&home).await,
-        // A bare `swoosh status` (no peer): query your own node's live status over the control socket.
-        // Same local dispatch as the bare `stop`/`service ls` arms; with a peer it is a reach verb.
+        // A bare `swoosh status` (no peer): this machine, from its own files. It never dials; with a
+        // peer it is a reach verb.
         Verb::Status(cmd) => return cmd.run_local(&home).await,
         // `service enable`/`disable`: LOCAL file-writes on `<home>/disabled`, honored live by a running
         // `serve` via the mtime-watched oracle. Need only the home; bind no transport and touch no store.
@@ -540,9 +521,9 @@ async fn run() -> eyre::Result<()> {
             let store = ContactsStore::open(home.contacts()).await?;
             return cmd.run(store).await;
         }
-        // Prints this node's NodeId (minting a key if absent). Needs only the home, not the store or
-        // a transport, so it dispatches here beside the other local verbs.
-        Verb::Identity(cmd) => return cmd.run(&home).await,
+        // Backs up, restores, or protects this machine's key. Needs only the home, not the store or a
+        // transport, so it dispatches here beside the other local verbs.
+        Verb::Identity(cmd) => return cmd.run(&home),
         // Creates/lists/cancels invites: `add` signs a badge with this node's key and records the
         // `me/<label>` contact plus a ledger row; `ls` reads the ledger and the labels; `rm` revokes the
         // recorded badge. Needs the key and the store, but binds no transport.
@@ -572,8 +553,6 @@ async fn run() -> eyre::Result<()> {
                     let store = ContactsStore::open(home.contacts()).await?;
                     cmd.run(store, &home).await
                 }
-                // `ls` reads only swoosh's own mint-log ledger, so it needs neither the store nor a transport.
-                grant::GrantCmd::Ls(cmd) => cmd.run(&home).await,
                 grant::GrantCmd::Narrow(cmd) => cmd.run(),
             };
         }
@@ -910,10 +889,9 @@ mod tests {
             );
         }
         for argv in [
-            vec!["swoosh", "identity"],
+            vec!["swoosh", "status"],
+            vec!["swoosh", "status", "--key"],
             vec!["swoosh", "service", "ls"],
-            vec!["swoosh", "grant", "ls"],
-            vec!["swoosh", "contact", "ls"],
             vec!["swoosh", "contact", "rm", "alice"],
         ] {
             assert!(
@@ -1330,12 +1308,8 @@ mod tests {
             "`--local` is not a root global"
         );
         assert!(
-            Cli::try_parse_from(["swoosh", "identity", "--local"]).is_err(),
-            "`identity` binds no transport"
-        );
-        assert!(
-            Cli::try_parse_from(["swoosh", "contact", "ls", "--local"]).is_err(),
-            "`contact ls` binds no transport"
+            Cli::try_parse_from(["swoosh", "contact", "rm", "alice", "--local"]).is_err(),
+            "`contact rm` binds no transport"
         );
     }
 
