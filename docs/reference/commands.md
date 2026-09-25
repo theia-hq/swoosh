@@ -42,7 +42,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="sync"></a>[`swoosh sync`](commands/sync.md): bring your device list up to date with your other devices, both ways
 - <a id="contact"></a>[`swoosh contact`](commands/contact.md): manage local petnames for peers (yours alone, plain TOML)
 - <a id="identity"></a>[`swoosh identity`](commands/identity.md): back up, restore, or protect this machine's key
-- <a id="invite"></a>[`swoosh invite`](commands/invite.md): create, list, and cancel device invites; one device per invite
+- <a id="invite"></a>[`swoosh invite`](commands/invite.md): add one of your devices, or renew it; bare `invite` lists what is due
 - <a id="adopt"></a>[`swoosh adopt`](commands/adopt.md): adopt an invite, joining a signet's family as this machine
 - <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a peer's sshd over the overlay using the system ssh
 - <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue, narrow, or revoke `swoosh:` capability links

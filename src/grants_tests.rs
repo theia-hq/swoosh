@@ -1,13 +1,13 @@
 //! The ledger: an append then load returns exactly what was issued, one corrupt line is skipped (not
-//! fatal) while good rows survive, each malformed field is its own typed parse error, the `membership`
-//! target round-trips, the file is written owner-only, and concurrent writers never lose a row to a prune.
+//! fatal) while good rows survive, each malformed field is its own typed parse error, the file is written
+//! owner-only, and concurrent writers never lose a row to a prune.
 
 use core::time::Duration;
 use std::time::UNIX_EPOCH;
 
 use nauthy::RevocationId;
 
-use super::{ANYONE, Delegation, GrantKind, GrantRecord, GrantTarget, Grants, LedgerError};
+use super::{ANYONE, Delegation, GrantKind, GrantRecord, Grants, LedgerError};
 
 /// A ledger backed by a unique temp path, so parallel tests never share a file.
 fn ledger(tag: &str) -> (Grants, std::path::PathBuf) {
@@ -20,8 +20,8 @@ fn ledger(tag: &str) -> (Grants, std::path::PathBuf) {
     (Grants::at(path.clone()), path)
 }
 
-fn service_target(name: &str) -> GrantTarget {
-    GrantTarget::Service(name.parse().expect("valid service"))
+fn service_target(name: &str) -> nauthy::Service {
+    name.parse().expect("valid service")
 }
 
 fn record(
@@ -38,17 +38,6 @@ fn record(
         holder: holder.to_owned(),
         root_id: RevocationId::from_bytes(vec![0xde, 0xad, 0xbe, 0xef, expiry_secs as u8]),
         // Whole seconds, so the round trip through the ledger's unix-seconds encoding is exact.
-        expiry: UNIX_EPOCH + Duration::from_secs(expiry_secs),
-    }
-}
-
-fn membership_record(kind: GrantKind, holder: &str, expiry_secs: u64) -> GrantRecord {
-    GrantRecord {
-        target: GrantTarget::Membership,
-        kind,
-        delegation: Delegation::Sealed,
-        holder: holder.to_owned(),
-        root_id: RevocationId::from_bytes(vec![0xde, 0xad, 0xbe, 0xef, expiry_secs as u8]),
         expiry: UNIX_EPOCH + Duration::from_secs(expiry_secs),
     }
 }
@@ -134,9 +123,6 @@ fn each_malformed_field_is_its_own_parse_error() {
         GrantRecord::from_line("bearer\tsealed\tBAD!!\t-\t1\tde"),
         Err(LedgerError::Service(_))
     ));
-    // `membership` is the Membership target (asserted in the membership test below), never a service.
-    assert!(!GrantTarget::is_issuable_service_name("membership"));
-    assert!(GrantTarget::is_issuable_service_name("ssh"));
     assert!(matches!(
         GrantRecord::from_line("bearer\tsealed\tssh\t-\tnotanumber\tde"),
         Err(LedgerError::Expiry(_))
@@ -180,45 +166,6 @@ async fn the_created_ledger_is_owner_only() {
         0o600,
         "the ledger is created 0600 (owner read/write only)"
     );
-    let _ = std::fs::remove_file(&path);
-}
-
-/// The membership word `membership` parses to the Membership target and round-trips through the ledger.
-#[tokio::test]
-async fn membership_round_trips_as_membership() {
-    let (grants, path) = ledger("membership");
-    let badge = membership_record(GrantKind::Device, "ed01deadbeef", 1_788_400_000);
-    let slip = record(
-        "ssh",
-        GrantKind::Bearer,
-        Delegation::Sealed,
-        ANYONE,
-        1_788_400_001,
-    );
-    grants.append(&badge).await.expect("append the badge");
-    grants
-        .append(&slip)
-        .await
-        .expect("append the service grant");
-
-    let loaded = grants.load().await.expect("load");
-    assert!(
-        loaded.len() == 2
-            && loaded[0].target == GrantTarget::Membership
-            && loaded[0] == badge
-            && loaded[1] == slip,
-        "a membership record round-trips as Membership alongside a service record"
-    );
-
-    assert_eq!(
-        GrantTarget::Membership.as_str(),
-        "membership",
-        "Membership writes the new word"
-    );
-    assert!(matches!(
-        "membership".parse::<GrantTarget>(),
-        Ok(GrantTarget::Membership)
-    ));
     let _ = std::fs::remove_file(&path);
 }
 

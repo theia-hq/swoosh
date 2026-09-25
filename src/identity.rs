@@ -32,8 +32,6 @@
 
 use bifrost::NodeId;
 use keystore::{KeyFile, Protection, Stored};
-use nauthy::Link;
-use tightbeam::identity::AsVerifyKey as _;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::home::Home;
@@ -47,23 +45,6 @@ mod stage;
 pub use backup::{Existing, Restored, export, restore};
 pub use lock::HomeLock;
 pub use protect::{Protected, protect};
-
-/// The DEFAULT lifetime a signet-signed, STORED device membership badge stands before it must be
-/// re-minted, applied by `swoosh invite add` only when the operator passes no `--expires`. A default, not a
-/// hardcoded law: the CLI threads an explicit window straight into [`sign_device_badge`], and falls back
-/// to this value when none is given.
-///
-/// A stored badge is a long-lived bearer credential, so it must carry a FINITE lifetime, not "forever":
-/// a lost, un-denylisted device then ages out on its own even absent an explicit revoke. Offline there is no control plane to split the invite's
-/// leak-window from the badge lifetime, so this value IS the worst-case leak window for a mint that is
-/// never revoked. 90 days is the chosen default: a real re-mint cadence (about quarterly) a homelab owner
-/// can absorb, and a 90-day backstop instead of a year, matching the invite default operators expect. A
-/// longer window (up to a year via `swoosh invite add --expires 365d`, for a controlled reused-secret case such
-/// as a CI runner) stays reachable, but is now a conscious opt-in rather than the silent, only value. Revocation
-/// stays the primary, immediate control (the `FileDenylist`, offline + live); the TTL is the backstop for
-/// a leak never noticed.
-pub const DEVICE_BADGE_TTL: core::time::Duration =
-    core::time::Duration::from_secs(90 * 24 * 60 * 60);
 
 /// The ed25519 secret key a verb binds under: a [`keystore::Secret`], which wipes itself on drop and never
 /// hands its bytes out by value.
@@ -100,40 +81,6 @@ impl Secret {
     #[cfg(feature = "ssh")]
     pub fn ssh_host_seed(&self) -> [u8; 32] {
         self.0.with_bytes(sshh::host_seed)
-    }
-
-    /// Sign a membership badge FOR a device, rooted at THIS key (the signet) and bound to `device`.
-    ///
-    /// The signet signs a badge for a DIFFERENT key (the device's node id), so the device can present a
-    /// signet-rooted proof it could never mint itself. A gate that pins the signet admits it.
-    /// `bound_device` = `device`, so an intercepted badge replayed from another key fails the binding.
-    ///
-    /// FINITE lifetime: this badge is STORED on the device and stands until it expires or is denylisted,
-    /// so it carries a generous-but-finite `ttl`
-    /// rather than "forever" -- a lost, un-denylisted device eventually ages out. The caller owns the
-    /// window: `swoosh invite add` passes an explicit `--expires`, or falls back to [`DEVICE_BADGE_TTL`], so
-    /// the lifetime is a default the CLI applies, not a constant buried in this signer. The signet secret
-    /// stays in this wrapper: only the signed public badge (a link) leaves.
-    pub fn sign_device_badge(
-        &self,
-        device: NodeId,
-        ttl: core::time::Duration,
-    ) -> eyre::Result<Link> {
-        Ok(self
-            .with_bytes(nauthy::Identity::from_secret)?
-            .mint_member(device.verify_key()?, nauthy::Request::expires_in(ttl))?
-            .seal()?
-            .link()?)
-    }
-
-    /// The seed for a device identity derived from this key (the signet) under `label`: the secret a
-    /// machine ADOPTS to become that device, and the payload of a derived invite. Borrows, so this root
-    /// stays owned here and zeroizes on drop; the raw root never leaves the wrapper, only the derived
-    /// child does. Hardened (only the holder of this root can compute a child), so a leaked device seed
-    /// cannot recover the root or a sibling. The child is secret too, so it arrives in a wiping owner.
-    pub fn derive_child_seed(&self, label: &str) -> Zeroizing<[u8; 32]> {
-        self.0
-            .with_bytes(|root| bifrost_core::derive_ed25519_child_secret(root, label))
     }
 }
 

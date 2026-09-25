@@ -2,19 +2,21 @@
 // test-attributed functions); panicking on failed test setup is exactly the intent.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! Tier-1 invites, end to end: the REAL CLI provisions two homes, then a live gated reach proves the
-//! credential the `invite:` artifact carried is the one the adopting device's gate admits.
+//! Invites, end to end: the REAL CLI provisions the device, then a live gated reach proves the standing
+//! the `invite:` line carried is the one the adopting device's gate admits.
 //!
-//! The flow under test is the spec's offline round trip:
+//! The flow under test is the offline round trip:
 //!
 //! 1. the DEVICE makes its key and prints it (`swoosh status --key`);
-//! 2. the OWNER signs for that key (`swoosh invite add laptop --for <key>`), so no seed ever travels;
-//! 3. the DEVICE adopts the `invite:` artifact (`swoosh adopt`), keeping its identity;
-//! 4. the device's node serves behind the gate `serve` builds from its home; a badge the owner's key
-//!    signed for the owner's own node is ADMITTED, proving `adopt` wrote the pin the gate reads, while a
-//!    stranger with no badge is REFUSED;
-//! 5. the owner's node serves; it pins no root, so its own key admits no member, and the device's
-//!    stored badge is REFUSED there.
+//! 2. the ROOT signs for that key, as `swoosh invite laptop <key>` does where it is kept, so no seed ever
+//!    travels (built in process from a test root: signing takes the root's passphrase at a terminal,
+//!    which a child process has none of; the command's own half is proven in `commands/invite_tests.rs`);
+//! 3. the DEVICE adopts the `invite:` line (`swoosh adopt`), keeping its identity;
+//! 4. the device's node serves behind the gate `serve` builds from its home; a standing the root signed
+//!    for the owner's node is ADMITTED, proving `adopt` wrote the pin the gate reads, while a stranger
+//!    with no standing is REFUSED;
+//! 5. the owner's node serves; it pins no root, so it admits no member, and the device's stored standing
+//!    is REFUSED there.
 //!
 //! The transport is `Noise<Quirk>` on loopback, so the gate's `bound_device` check runs against the
 //! REAL key the device binds under (the wrapper proves the NodeId), not a synthetic test id.
@@ -30,6 +32,7 @@ use measure::Ping;
 use swoosh::config;
 use swoosh::credential::Credential;
 use swoosh::home::Home;
+use swoosh::invite::Invite;
 use swoosh::reaching::BindRole;
 use swoosh::testkit::TestRoot;
 use swoosh::transport::PeerHint;
@@ -85,27 +88,29 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .parse()
         .expect("status --key prints the key alone");
 
-    // 2. The owner signs for that key: no seed travels.
-    let create = swoosh(&[
-        "invite",
-        "add",
-        "laptop",
-        "--for",
-        &device_id.to_string(),
-        "--home",
-        path_str(&signet_dir),
-    ]);
+    // 2. The root signs for that key: no seed travels. The owner's machine is where the invite says it
+    //    came from.
+    let owner = swoosh(&["status", "--key", "--home", path_str(&signet_dir)]);
     assert!(
-        create.status.success(),
-        "invite add --for failed: {}",
-        stderr(&create)
+        owner.status.success(),
+        "status --key failed: {}",
+        stderr(&owner)
     );
-    let token = String::from_utf8(create.stdout)
+    let owner_id: NodeId = String::from_utf8(owner.stdout)
         .unwrap()
-        .split_whitespace()
-        .find(|word| word.starts_with("invite:"))
-        .expect("invite add --for prints an invite: token")
-        .to_owned();
+        .lines()
+        .next()
+        .unwrap()
+        .parse()
+        .expect("status --key prints the key alone");
+    let root = TestRoot::seeded(0x21);
+    let standing = root
+        .device_badge(
+            device_id,
+            std::time::SystemTime::now() + Duration::from_secs(90 * 24 * 60 * 60),
+        )
+        .unwrap();
+    let token = Invite::bound(owner_id, "laptop".parse().unwrap(), standing).to_string();
 
     // 3. The device adopts, keeping its identity; the trust + badge land beside it.
     let adopt = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
@@ -124,15 +129,14 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .await
         .unwrap()
         .expect("adopt wrote the signet the device's gate will arm from");
+    assert_eq!(signet, root.node_id(), "the device pins the invite's root");
     let owner_seed: [u8; 32] = std::fs::read(signet_dir.join("key"))
         .unwrap()
         .try_into()
         .expect("the owner key is 32 bytes");
-    let owner_id = NodeId::from_ed25519_secret(&owner_seed);
-    assert_eq!(signet, owner_id, "the invite roots at the owner's signet");
 
-    // 4. The DEVICE's node serves, gated at the pin `adopt` wrote; the owner dials presenting a badge its
-    //    key signed for its own node, and is admitted as one of the device's root's members.
+    // 4. The DEVICE's node serves, gated at the pin `adopt` wrote; the owner dials presenting a standing the
+    //    root signed for its node, and is admitted as one of the root's devices.
     let device_transport = sealed(device_seed).await;
     let device_host = Node::new(device_transport, NoDiscovery);
     let device_id_bound = device_host.node_id();
@@ -146,7 +150,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     let owner_discovery =
         PeerHint::discovery(&owner_transport, [owner_hint.clone()], &DIALING).discovery;
     let owner = Node::new(owner_transport, owner_discovery);
-    let owner_badge = TestRoot::from_seed(owner_seed)
+    let owner_badge = root
         .device_badge(
             owner_id,
             nauthy::Request::expires_in(Duration::from_secs(300)),
@@ -198,8 +202,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     });
     served.expect("the device's exposer ends Ok once the dials finish");
 
-    // 5. The OWNER's node serves. It pins no root, and its own key is never one, so the badge it signed
-    //    for the device admits nothing here.
+    // 5. The OWNER's node serves. It pins no root, so the device's standing admits nothing here.
     let owner_home = Home::resolve(Some(signet_dir.clone())).unwrap();
     let host_transport = sealed(owner_seed).await;
     let host = Node::new(host_transport, NoDiscovery);

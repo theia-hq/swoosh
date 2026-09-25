@@ -6,7 +6,7 @@ use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{DEVICE_WARN_WINDOW, Expiry};
-use crate::identity::DEVICE_BADGE_TTL;
+use crate::root::DEFAULT_DURATION as DEVICE_BADGE_TTL;
 use crate::testkit::{TestNode, TestRoot};
 
 /// A day, the unit the window and the TTL are both expressed in.
@@ -86,7 +86,7 @@ fn an_unreadable_expiry_is_its_own_state() {
 }
 
 /// The rendered fragment every surface prints, in the same span vocabulary the issuer side already uses
-/// (`invite ls`), so one badge reads the same on the device and on the signet machine.
+/// (`status`), so one badge reads the same on the device and on the signet machine.
 #[test]
 fn an_expiry_renders_as_a_span_in_the_ledger_vocabulary() {
     assert_eq!(

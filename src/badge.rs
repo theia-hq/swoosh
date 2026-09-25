@@ -1,7 +1,7 @@
 //! What a stored membership badge can say about its OWN remaining life, and the one remedy that renews
 //! it.
 //!
-//! The badge `adopt` stores is signed by the signet and stands for [`DEVICE_BADGE_TTL`], after which the
+//! The badge `adopt` stores is signed by the signet and stands for its duration ([`DEFAULT_DURATION`] unless the invite said), after which the
 //! far gate refuses it. That expiry is enforced by a datalog CHECK the gate evaluates over the whole
 //! chain, which no holder can read out; nauthy mints an advisory `expires_at` AUTHORITY fact beside the
 //! check so the device CAN. This module is the single place that fact becomes a decision, so the
@@ -15,7 +15,7 @@
 //! turn away a dial the gate would have admitted. Nothing here admits anything. The CHECK remains the
 //! sole enforcement, and no admission path may read a [`Expiry`].
 //!
-//! [`DEVICE_BADGE_TTL`]: crate::identity::DEVICE_BADGE_TTL
+//! [`DEFAULT_DURATION`]: crate::root::DEFAULT_DURATION
 
 use core::fmt;
 use core::time::Duration;
@@ -29,12 +29,12 @@ use crate::grants;
 /// How long before a stored badge dies this device starts saying so, on every surface that renders an
 /// [`Expiry`].
 ///
-/// 14 days against a 90-day [`DEVICE_BADGE_TTL`]: the device's own last warning, so it speaks for the
+/// 14 days against a 90-day [`DEFAULT_DURATION`]: the device's own last warning, so it speaks for the
 /// final fortnight rather than for a third of the badge's life, and still leaves the operator time to
 /// reach the machine that holds the root. A missed renewal costs the uniform `not admitted` at the far
 /// gate, which is the least actionable error in the system; a warning costs one line on stderr.
 ///
-/// [`DEVICE_BADGE_TTL`]: crate::identity::DEVICE_BADGE_TTL
+/// [`DEFAULT_DURATION`]: crate::root::DEFAULT_DURATION
 pub const DEVICE_WARN_WINDOW: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
 /// What a membership badge's own `expires_at` fact says about its remaining life at one instant.
@@ -104,7 +104,7 @@ impl Expiry {
 }
 
 /// The fragment every expiry surface prints about the badge itself: `expires in 34d`, `expired 6d ago`,
-/// or the unreadable case. The span is [`grants::humanize`]d, the same rendering `invite ls` gives
+/// or the unreadable case. The span is [`grants::humanize`]d, the same rendering `status` gives
 /// the issuer side, so one badge reads the same on both machines.
 impl fmt::Display for Expiry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -118,17 +118,14 @@ impl fmt::Display for Expiry {
     }
 }
 
-/// The one remedy every badge-expiry surface names, for the device whose key is `node`.
-///
-/// Renewal is re-enrolment: the signet holder re-runs `invite add` for this key and this machine adopts
-/// the result, which is why there is no renew verb. Written once, here, so the refusal and the warning
-/// cannot teach two different fixes for one problem, and so the day the enrolment door changes there is
-/// one line to change.
+/// The one remedy every badge-expiry surface names, for the device whose key is `node`: renew it where the
+/// root is kept, and this machine picks it up. Written once, here, so the refusal and the warning cannot
+/// teach two different fixes for one problem.
 #[must_use]
 pub fn remedy(node: NodeId) -> String {
     format!(
-        "ask the signet holder for a fresh invite (`swoosh invite add <label> --for {node}`) and adopt \
-         it here with `swoosh adopt`"
+        "where your root is kept: swoosh invite <name> {node}. This machine picks it up the next time it \
+         reaches one of your devices (or now: swoosh sync)."
     )
 }
 

@@ -21,7 +21,7 @@ use keystore::{KeyFile, Protection};
 use nauthy::{Revocations as _, VerifyKey};
 use swoosh::contacts::DeviceLabel;
 use swoosh::gate::KeyedDenylist;
-use swoosh::grants::{Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
+use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::roster::{Epoch, RosterDoc, fold};
 use swoosh::serve::SYNC_SERVICE;
@@ -187,7 +187,7 @@ async fn issue_own_slip(home: &Home) -> nauthy::Link {
         .unwrap();
     Grants::at(home.links())
         .append(&GrantRecord {
-            target: GrantTarget::Service(service),
+            target: service,
             kind: GrantKind::Bearer,
             delegation: Delegation::Delegable,
             holder: swoosh::grants::ANYONE.to_owned(),

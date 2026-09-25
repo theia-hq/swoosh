@@ -13,12 +13,13 @@ use bifrost::NodeId;
 use keystore::{Method, Stored};
 use nauthy::{FileDenylist, VerifyKey};
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME};
-use swoosh::grants::{ANYONE, GrantKind, GrantRecord, GrantTarget, Grants};
+use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::root::{Date, Moved, Root, RootPlace};
 use swoosh::serve::control_codec::{ControlError, DisabledList, ServiceMenu};
 use swoosh::standing::{Standing, StandingError};
+use swoosh::state::Row;
 use swoosh::{badge, identity, roster, standing, sync};
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -141,6 +142,7 @@ impl Report {
         contacts: &Contacts,
         now: u64,
     ) -> eyre::Result<()> {
+        let mut carrying = Vec::new();
         let (rows, until) = match standing {
             Standing::Unpinned => {
                 self.root = vec![
@@ -191,6 +193,12 @@ impl Report {
                     })
                     .collect();
                 self.devices("devices:".to_owned(), &rows, now);
+                carrying = rows
+                    .iter()
+                    .zip(inspected.state.rows())
+                    .filter(|(shown, _)| !shown.revoked)
+                    .filter_map(|(_, row)| invite_ends(row, now))
+                    .collect();
                 (rows, until)
             }
             Standing::Device { pin, until } => {
@@ -263,6 +271,7 @@ impl Report {
             self.nags
                 .push(format!("{me} ends on {}. {how}", Date(until)));
         }
+        self.nags.extend(carrying);
         Ok(())
     }
 
@@ -449,6 +458,23 @@ fn use_your_root(rows: &[DeviceRow], now: u64) -> Option<String> {
     ))
 }
 
+/// For a device whose key came in its invite, in the 14 days before that invite ends: what to do if it
+/// starts from that invite each time. Read from `invite_until`, never `until`: a bound renewal moves the
+/// row's date, not the date its invite stops working.
+fn invite_ends(row: &Row, now: u64) -> Option<String> {
+    let ends = row.invite_until;
+    let warns =
+        row.seeded && ends.saturating_sub(badge::DEVICE_WARN_WINDOW.as_secs()) <= now && now < ends;
+    warns.then(|| {
+        format!(
+            "me/{name}'s key came in its invite, which ends on {}. If it starts from that invite each time \
+             (a runner summoned from a secret): swoosh invite {name} --new-key, then set its secret again.",
+            Date(ends),
+            name = row.label
+        )
+    })
+}
+
 /// The name this machine has among `me`'s devices in the address book, when the root's list has none.
 fn own_name(contacts: &Contacts, own: NodeId) -> Option<DeviceLabel> {
     let me = ME.parse().ok()?;
@@ -507,7 +533,6 @@ async fn links_section(home: &Home, now: u64) -> eyre::Result<Section> {
     let revoked = FileDenylist::load(home.revoked()).await?;
     let rows = records
         .iter()
-        .filter(|record| record.target != GrantTarget::Membership)
         .map(|record| link_row(record, &revoked, now))
         .collect();
     Ok(Section {

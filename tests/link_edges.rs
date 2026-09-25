@@ -5,10 +5,15 @@
 //! A link carries `swoosh:` only where a person reads it: the real binary prints it on an issued link,
 //! and the files it writes hold the bare form.
 
+use core::time::Duration;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::SystemTime;
 
+use bifrost::NodeId;
 use swoosh::home::Home;
+use swoosh::invite::Invite;
+use swoosh::testkit::{TestNode, TestRoot};
 
 /// A scratch directory for this test, removed on drop.
 struct Scratch(PathBuf);
@@ -71,19 +76,29 @@ fn share_prints_the_swoosh_prefix() {
     assert!(printed.starts_with("swoosh:ed01"), "{printed}");
 }
 
-/// The files a verb writes hold links bare: the badge `adopt` stores and the ledger `invite add` and
-/// `grant issue` append carry no `swoosh:`.
+/// The files a verb writes hold links bare: the standing `adopt` stores from an invite and the ledger
+/// `grant issue` appends carry no `swoosh:`.
 #[test]
 fn a_stored_link_carries_no_prefix() {
     let scratch = Scratch::new("stored");
     let owner = scratch.home("owner");
     let device = scratch.home("device");
-    let created = swoosh(&owner, &["invite", "add", "laptop"]);
-    let invite = created
-        .split_whitespace()
-        .find(|word| word.starts_with("invite:"))
-        .expect("invite add prints an invite");
-    swoosh(&device, &["adopt", invite]);
+    // The key-carrying invite `swoosh invite laptop --new-key` prints where the root is kept.
+    let seed = [0x77; 32];
+    let standing = TestRoot::seeded(0x21)
+        .device_badge(
+            NodeId::from_ed25519_secret(&seed),
+            SystemTime::now() + Duration::from_secs(90 * 24 * 60 * 60),
+        )
+        .unwrap();
+    let invite = Invite::keyed(
+        seed,
+        TestNode::seeded(0x11).node_id(),
+        "laptop".parse().unwrap(),
+        standing,
+    )
+    .to_string();
+    swoosh(&device, &["adopt", &invite]);
     swoosh(&owner, &["grant", "issue", "ping"]);
 
     let badge = std::fs::read_to_string(Home::resolve(Some(device)).unwrap().badge())

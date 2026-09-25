@@ -23,6 +23,7 @@ use bifrost::NodeId;
 use keystore::{KeyFile, Method, Protection, Stored};
 use nauthy::{DisabledRoots, Link, RevocationId, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
+use zeroize::Zeroizing;
 
 use crate::codec::{FormatError, Id, MAX_IDS, MAX_MEMBERS, MAX_REVOKED, MAX_REVOKED_KEYS};
 use crate::contacts::DeviceLabel;
@@ -240,6 +241,26 @@ pub enum RootError {
         /// The name asked for.
         name: DeviceLabel,
     },
+    /// A new key was asked for a device that made its own.
+    #[error(
+        "me/{name} keeps its own key; renew it without --new-key. For a new key, on that machine: swoosh \
+        leave --new-key, then invite the new key."
+    )]
+    KeepsOwnKey {
+        /// The device.
+        name: DeviceLabel,
+    },
+    /// A new key was asked for a device that holds the most renewals in force.
+    #[error(
+        "me/{name} has {MAX_IDS} renewals in force until {earliest}. To hand it a new key now: swoosh \
+        revoke me/{name}, then swoosh invite {name} --new-key."
+    )]
+    RenewalsInForce {
+        /// The device.
+        name: DeviceLabel,
+        /// When the first of them ends.
+        earliest: Date,
+    },
     /// A revoke named a device the root does not have.
     #[error("me/{name} is not one of your devices (`swoosh status`)")]
     NotYourDevice {
@@ -437,6 +458,13 @@ pub struct Inspected {
     pub finished: Vec<Finished>,
 }
 
+impl Inspected {
+    /// The rows due to renew at `now`: what the next act that cuts renews on its own.
+    pub fn due(&self, now: u64) -> impl Iterator<Item = &Row> {
+        self.state.rows().iter().filter(move |row| due(row, now))
+    }
+}
+
 /// What [`Root::mint`] did.
 #[derive(Debug)]
 pub enum Minted {
@@ -572,14 +600,31 @@ impl Root {
     }
 
     /// [`present`](Self::present), printing to `out`.
-    pub(crate) async fn present_to(
+    pub async fn present_to<W: Write>(
         home: &Home,
         place: RootPlace,
         verb: RootVerb,
         prompt: &mut impl Prompt,
         dial: &impl Dial,
-        out: &mut impl Write,
+        out: &mut W,
     ) -> Result<Self, RootError> {
+        Self::present_with(home, place, verb, prompt, dial, out, |_, _| Ok(()))
+            .await
+            .map(|(root, ())| root)
+    }
+
+    /// [`present_to`](Self::present_to), with `check` run on the records as the act will sign from them,
+    /// after every other check and before the prompt: a refusal it returns costs no prompt, and what it
+    /// prints comes before one. What it returns comes back with the root.
+    pub async fn present_with<W: Write, T>(
+        home: &Home,
+        place: RootPlace,
+        verb: RootVerb,
+        prompt: &mut impl Prompt,
+        dial: &impl Dial,
+        out: &mut W,
+        check: impl FnOnce(&Records<'_>, &mut W) -> Result<T, RootError>,
+    ) -> Result<(Self, T), RootError> {
         no_core_dumps()?;
         let found = find(home, &place, Some(verb)).await?;
         report(out, &found.finished);
@@ -614,16 +659,58 @@ impl Root {
             act.book.check_bounds(act.now)?;
             act.list_renewals(out);
         }
+        let checked = check(&act.records(), out)?;
         if !prompt.terminal() {
             return Err(RootError::NoTerminalToUnlock);
         }
         let passphrase = prompt
             .unlock(&act.dir.join(KEY_FILE))
             .map_err(prompt_error)?;
-        Ok(Self {
+        let root = Self {
             secret: found.locked.unlock(&passphrase)?,
             act,
-        })
+        };
+        Ok((root, checked))
+    }
+
+    /// The named device's key, end and stored standing when renewing it would sign nothing and nothing
+    /// else is to be signed: it needs no renewal, no device is due, and the update held here and the
+    /// records carry the same thing. Read with no lock, no prompt and no write, as
+    /// [`inspect`](Self::inspect) reads: the held update, any fork of it, and this machine's own
+    /// revocations are applied to a copy of the records, and anything they would change there (a device, a
+    /// revocation, a row marked revoked) means the act has something to sign. `None` then, and for a name
+    /// the root has no live device under.
+    pub async fn unchanged(
+        home: &Home,
+        place: RootPlace,
+        name: &DeviceLabel,
+        duration: Option<Duration>,
+    ) -> Result<Option<(VerifyKey, u64, Link)>, RootError> {
+        let found = find(home, &place, None).await?;
+        let pin = found.header.verify_key()?;
+        let book = Book::from(state::load(&found.dir, pin)?);
+        let now = unix_now();
+        let Some((held, _)) = read_held(&home.roster(), pin) else {
+            return Ok(None);
+        };
+        let fork = read_held(&home.roster_fork(), pin);
+        let mut forward = book.clone();
+        let mut brought = Brought::default();
+        for update in core::iter::once(&held).chain(fork.iter().map(|(fork, _)| fork)) {
+            forward.bring_forward(update, now, &mut brought);
+        }
+        forward.carry_forward(home, Some(&held))?;
+        forward.follow_keys(now);
+        if forward != book || book.lacks(&held, now) || book.rows.iter().any(|row| due(row, now)) {
+            return Ok(None);
+        }
+        let Some(row) = book.live().find(|row| &row.label == name) else {
+            return Ok(None);
+        };
+        let duration = duration.map_or_else(|| own_duration(row), |duration| duration.as_secs());
+        Ok(book
+            .renewal_skips(row, duration, now)
+            .then(|| (row.key, row.until, row.standing.clone())))
     }
 
     /// Read the root at `place` with no lock, no prompt and no write: its key and verified records. A
@@ -643,7 +730,7 @@ impl Root {
     }
 
     /// [`mint`](Self::mint), printing to `out`.
-    pub(crate) async fn mint_to(
+    pub async fn mint_to(
         home: &Home,
         prompt: &mut impl Prompt,
         out: &mut impl Write,
@@ -677,6 +764,11 @@ impl Root {
         &self.act.book.rows
     }
 
+    /// The records as this act has them so far, for the checks an act runs before it signs.
+    pub fn records(&self) -> Records<'_> {
+        self.act.records()
+    }
+
     /// Sign a standing for a new device `key` named `name`, running `duration` from now, and add its row.
     ///
     /// Before the root's first update, `name` may be the one its mint gave this machine: no device has
@@ -688,45 +780,18 @@ impl Root {
         name: DeviceLabel,
         duration: Duration,
     ) -> Result<Link, RootError> {
+        self.act.records().check_add(key, &name)?;
         let book = &self.act.book;
-        if book.revoked_keys.contains_key(key.bytes()) {
-            let on = book
-                .rows
-                .iter()
-                .find(|row| row.key == key && row.revoked_on != 0)
-                .map(|row| Date(row.revoked_on));
-            return Err(RootError::RevokedKey { key, on });
-        }
-        if let Some(row) = book.live().find(|row| row.key == key) {
-            if Some(key) == self.act.own {
-                return Err(RootError::OwnKey {
-                    name: row.label.clone(),
-                });
-            }
-            return Err(RootError::AlreadyDevice {
-                key,
-                name: row.label.clone(),
-                until: Date(row.until),
-            });
-        }
         if let Some(index) = book
             .rows
             .iter()
             .position(|row| !row.is_revoked() && row.label == name)
         {
-            let row = &book.rows[index];
-            if Some(row.key) != self.act.own || book.last_update != Epoch(0) {
-                return Err(RootError::NameTaken { name, key: row.key });
-            }
+            // `check_add` let the name through only as the one this machine's mint gave it.
             let moved = fresh_name(name.as_str(), |label| {
                 book.live().any(|row| &row.label == label)
             });
             self.act.book.rows[index].label = moved;
-        }
-        let book = &self.act.book;
-        let count = book.live().count();
-        if count >= MAX_MEMBERS {
-            return Err(RootError::TooManyDevices { count });
         }
         let until = self.act.now.saturating_add(duration.as_secs());
         let (standing, id) = self.sign_member(key, until)?;
@@ -743,6 +808,60 @@ impl Root {
         });
         self.act.added.push(key);
         Ok(standing)
+    }
+
+    /// Add a device named `name` whose key the root makes here, running `duration` from now: its standing,
+    /// and the key's seed for the invite that carries it. The root keeps no copy of the seed; the row is
+    /// marked as having come with its key, and its invite's end is recorded.
+    pub fn sign_keyed(
+        &mut self,
+        name: DeviceLabel,
+        duration: Duration,
+    ) -> Result<(Link, Zeroizing<[u8; 32]>), RootError> {
+        let (seed, key) = fresh_key()?;
+        let standing = self.sign_standing(key, name, duration)?;
+        if let Some(row) = self.act.book.rows.iter_mut().find(|row| row.key == key) {
+            row.seeded = true;
+            row.invite_until = row.until;
+        }
+        Ok((standing, seed))
+    }
+
+    /// Hand the live device named `name`, whose key came in its invite, a new key made here, running
+    /// `duration` from now. The old key leaves the row and is not revoked: its ids stay in the row, so its
+    /// invite works to its own date and a revoke of the device still ends it.
+    pub fn rekey(&mut self, name: &DeviceLabel, duration: Duration) -> Result<Rekeyed, RootError> {
+        self.act.records().check_rekey(name)?;
+        let Some(index) = self
+            .act
+            .book
+            .rows
+            .iter()
+            .position(|row| !row.is_revoked() && &row.label == name)
+        else {
+            return Err(RootError::NoDeviceToRenew { name: name.clone() });
+        };
+        let (seed, key) = fresh_key()?;
+        let now = self.act.now;
+        let until = now.saturating_add(duration.as_secs());
+        let (standing, id) = self.sign_member(key, until)?;
+        let row = &mut self.act.book.rows[index];
+        let old_invite_until = row.invite_until;
+        row.key = key;
+        row.ids.retain(|id| id.expires > now);
+        row.ids.push(id);
+        row.until = until;
+        row.duration = duration.as_secs();
+        row.invite_until = until;
+        row.standing = standing.clone();
+        self.act.due.retain(|due| *due != key);
+        self.act.added.push(key);
+        Ok(Rekeyed {
+            standing,
+            seed,
+            until,
+            old_invite_until,
+        })
     }
 
     /// Revoke the live device named `name`: its row, its key and every id it holds.
@@ -821,21 +940,14 @@ impl Root {
             let row = &self.act.book.rows[index];
             let duration =
                 duration.map_or_else(|| own_duration(row), |duration| duration.as_secs());
-            let newest_signed = row
-                .ids
-                .iter()
-                .map(|id| id.expires.saturating_sub(row.duration))
-                .max()
-                .unwrap_or(0);
-            let live = row.ids.iter().filter(|id| id.expires > now).count();
-            if newest_signed.saturating_add(DAY) > now
-                || live >= MAX_IDS
-                || now.saturating_add(duration) <= row.until
-            {
+            if self.act.book.renewal_skips(row, duration, now) {
                 list.unchanged
                     .push((row.label.clone(), row.until, row.standing.clone()));
                 continue;
             }
+            let key = row.key;
+            // Renewed by name here, so the renewal of what is due does not sign it a second time.
+            self.act.due.retain(|due| *due != key);
             list.renewed.push(self.renew_row(index, duration)?);
         }
         Ok(list)
@@ -851,7 +963,7 @@ impl Root {
     }
 
     /// [`commit`](Self::commit), printing to `out`.
-    pub(crate) async fn commit_to(&mut self, out: &mut impl Write) -> Result<Committed, RootError> {
+    pub async fn commit_to(&mut self, out: &mut impl Write) -> Result<Committed, RootError> {
         let now = self.act.now;
         self.act.book.prune(now);
         self.act.book.check_bounds(now)?;
@@ -962,6 +1074,15 @@ impl Root {
 }
 
 impl Act {
+    /// The records as this act has them, for a check before the prompt.
+    fn records(&self) -> Records<'_> {
+        Records {
+            book: &self.book,
+            own: self.own,
+            now: self.now,
+        }
+    }
+
     /// Present step 9's exchange: ask your devices for a newer update than the one held here, `me` in
     /// random order, then the root's own live devices, then `roster.seed`, stopping at the first that
     /// gives one, within 10 s. When devices were asked and none answered, or they could not be listed, say
@@ -1015,47 +1136,12 @@ impl Act {
                 self.book.bring_forward(update, self.now, &mut brought);
             }
         }
-        self.carry_forward()?;
+        let held = self.held.as_ref().map(|(held, _)| held);
+        self.book.carry_forward(&self.home, held)?;
         brought.marked += self.book.follow_keys(self.now);
         // A fork that adds nothing is no news; a copy behind the held update always says so.
         if behind || (fork.is_some() && brought.any()) {
             brought.print(out);
-        }
-        Ok(())
-    }
-
-    /// Add to the root's revocations the ids in this machine's `revoked` that are the root's own (a row's,
-    /// or in the held update) and the keys in its `revoked_keys` that are rows' keys. A machine's
-    /// revocations of its own links never go further.
-    fn carry_forward(&mut self) -> Result<(), RootError> {
-        let mut known: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
-        for id in self.book.rows.iter().flat_map(|row| row.ids.iter()) {
-            known.insert(id.id.as_bytes().to_vec(), id.expires);
-        }
-        if let Some((held, _)) = &self.held {
-            let members = held.members().iter().flat_map(|member| member.ids.iter());
-            for id in held.revoked().iter().chain(members) {
-                known.insert(id.id.as_bytes().to_vec(), id.expires);
-            }
-        }
-        for line in read_lines(&self.home.revoked())? {
-            let Ok(id) = RevocationId::from_hex(&line) else {
-                continue;
-            };
-            if let Some(expires) = known.get(id.as_bytes()) {
-                self.book.revoke_id(Id {
-                    expires: *expires,
-                    id,
-                });
-            }
-        }
-        for line in read_lines(&self.home.revoked_keys())? {
-            let Ok(key) = line.parse::<VerifyKey>() else {
-                continue;
-            };
-            if self.book.rows.iter().any(|row| row.key == key) {
-                self.book.revoked_keys.insert(*key.bytes(), key);
-            }
         }
         Ok(())
     }
@@ -1467,7 +1553,7 @@ fn fresh_name(base: &str, taken: impl Fn(&DeviceLabel) -> bool) -> DeviceLabel {
 
 /// The root's working records: `state` as this act changes it. A plain structure, so a bound can be
 /// crossed here and refused with its count, rather than being unrepresentable in [`State`].
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Book {
     last_update: Epoch,
     rows: Vec<Row>,
@@ -1638,6 +1724,42 @@ impl Book {
         }
     }
 
+    /// Add to these records' revocations the ids in `home`'s `revoked` that are the root's own (a row's,
+    /// or in `held`) and the keys in its `revoked_keys` that are rows' keys. A machine's revocations of its
+    /// own links never go further.
+    fn carry_forward(&mut self, home: &Home, held: Option<&RosterDoc>) -> Result<(), RootError> {
+        let mut known: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
+        for id in self.rows.iter().flat_map(|row| row.ids.iter()) {
+            known.insert(id.id.as_bytes().to_vec(), id.expires);
+        }
+        if let Some(held) = held {
+            let members = held.members().iter().flat_map(|member| member.ids.iter());
+            for id in held.revoked().iter().chain(members) {
+                known.insert(id.id.as_bytes().to_vec(), id.expires);
+            }
+        }
+        for line in read_lines(&home.revoked())? {
+            let Ok(id) = RevocationId::from_hex(&line) else {
+                continue;
+            };
+            if let Some(expires) = known.get(id.as_bytes()) {
+                self.revoke_id(Id {
+                    expires: *expires,
+                    id,
+                });
+            }
+        }
+        for line in read_lines(&home.revoked_keys())? {
+            let Ok(key) = line.parse::<VerifyKey>() else {
+                continue;
+            };
+            if self.rows.iter().any(|row| row.key == key) {
+                self.revoked_keys.insert(*key.bytes(), key);
+            }
+        }
+        Ok(())
+    }
+
     /// Mark revoked every row whose key is revoked, and revoke its live ids. A revoked id alone never
     /// marks a row. Returns how many rows it marked.
     fn follow_keys(&mut self, now: u64) -> usize {
@@ -1668,6 +1790,19 @@ impl Book {
             && !row.seeded
             && now < row.until
             && row.until - now < row.duration / 2
+    }
+
+    /// Whether a renewal of `row` by name, for `duration`, would leave it as it is: it holds the most
+    /// renewals in force, or its standing still stands and it was renewed under a day ago or the renewal
+    /// would not move its date later. A standing whose id is revoked here always takes a new one.
+    fn renewal_skips(&self, row: &Row, duration: u64, now: u64) -> bool {
+        let newest = row.ids.iter().max_by_key(|id| id.expires);
+        let newest_signed = newest.map_or(0, |id| id.expires.saturating_sub(row.duration));
+        let standing_revoked = newest.is_some_and(|id| self.revoked.contains_key(id.id.as_bytes()));
+        live_ids(row, now) >= MAX_IDS
+            || (!standing_revoked
+                && (newest_signed.saturating_add(DAY) > now
+                    || now.saturating_add(duration) <= row.until))
     }
 
     /// Drop every id whose standing has ended: a revocation of an ended standing blocks nothing.
@@ -1793,6 +1928,123 @@ impl Book {
         )
         .map_err(RootError::Format)
     }
+}
+
+/// The root's records as an act will sign from them, brought forward, for a check before the prompt.
+#[derive(Debug)]
+pub struct Records<'a> {
+    book: &'a Book,
+    own: Option<VerifyKey>,
+    now: u64,
+}
+
+impl Records<'_> {
+    /// The device named `name` that is not revoked, lapsed or live.
+    pub fn device(&self, name: &DeviceLabel) -> Option<&Row> {
+        self.book.live().find(|row| &row.label == name)
+    }
+
+    /// When the act runs, in unix seconds.
+    pub fn now(&self) -> u64 {
+        self.now
+    }
+
+    /// Refuse adding the device `key` as `name`: a revoked key, a key that is already a device, a name a
+    /// device already has, or one device more than an update can carry. Before the root's first update,
+    /// the name its mint gave this machine is free: this machine moves off it.
+    pub fn check_add(&self, key: VerifyKey, name: &DeviceLabel) -> Result<(), RootError> {
+        let book = self.book;
+        if book.revoked_keys.contains_key(key.bytes()) {
+            let on = book
+                .rows
+                .iter()
+                .find(|row| row.key == key && row.revoked_on != 0)
+                .map(|row| Date(row.revoked_on));
+            return Err(RootError::RevokedKey { key, on });
+        }
+        if let Some(row) = book.live().find(|row| row.key == key) {
+            if Some(key) == self.own {
+                return Err(RootError::OwnKey {
+                    name: row.label.clone(),
+                });
+            }
+            return Err(RootError::AlreadyDevice {
+                key,
+                name: row.label.clone(),
+                until: Date(row.until),
+            });
+        }
+        if let Some(row) = self.device(name)
+            && (Some(row.key) != self.own || book.last_update != Epoch(0))
+        {
+            return Err(RootError::NameTaken {
+                name: name.clone(),
+                key: row.key,
+            });
+        }
+        let count = book.live().count();
+        if count >= MAX_MEMBERS {
+            return Err(RootError::TooManyDevices { count });
+        }
+        Ok(())
+    }
+
+    /// Refuse handing the device named `name` a new key: it has none, it made its own key, or it holds the
+    /// most renewals in force.
+    pub fn check_rekey(&self, name: &DeviceLabel) -> Result<(), RootError> {
+        let Some(row) = self.device(name) else {
+            return Err(RootError::NoDeviceToRenew { name: name.clone() });
+        };
+        if !row.seeded {
+            return Err(RootError::KeepsOwnKey { name: name.clone() });
+        }
+        if live_ids(row, self.now) >= MAX_IDS {
+            let earliest = row
+                .ids
+                .iter()
+                .map(|id| id.expires)
+                .filter(|expires| *expires > self.now)
+                .min()
+                .unwrap_or(row.until);
+            return Err(RootError::RenewalsInForce {
+                name: name.clone(),
+                earliest: Date(earliest),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// What handing a device a new key signed.
+#[derive(Debug)]
+pub struct Rekeyed {
+    /// The standing for the new key.
+    pub standing: Link,
+    /// The new key's seed, for the invite that carries it.
+    pub seed: Zeroizing<[u8; 32]>,
+    /// When the new standing ends, in unix seconds.
+    pub until: u64,
+    /// When the invite that carried the old key ended, in unix seconds; 0 if none did.
+    pub old_invite_until: u64,
+}
+
+/// A fresh random device key: its seed, and the key.
+fn fresh_key() -> Result<(Zeroizing<[u8; 32]>, VerifyKey), RootError> {
+    let secret =
+        keystore::Secret::generate().map_err(|source| RootError::Write(Box::new(source)))?;
+    let seed = secret.with_bytes(|bytes| Zeroizing::new(*bytes));
+    Ok((seed, secret.node_id().verify_key()?))
+}
+
+/// Whether `row` is due to renew at this act: it renews on its own, and it holds fewer than the most
+/// renewals in force. The one test the renewal list, bare `invite`'s list and [`Root::unchanged`] share.
+fn due(row: &Row, now: u64) -> bool {
+    Book::renews_on_its_own(row, now) && live_ids(row, now) < MAX_IDS
+}
+
+/// How many of `row`'s standings have not ended at `now`.
+fn live_ids(row: &Row, now: u64) -> usize {
+    row.ids.iter().filter(|id| id.expires > now).count()
 }
 
 /// A standing left at `path`, or `None` when there is none or it is not one.

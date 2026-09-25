@@ -10,8 +10,8 @@
 //! `Noise::new` carrying the same seed, paired with the composed `PeerHint` discovery, and served by
 //! the SAME `diagnostics` assembly and rooted gate `swoosh serve` binds.
 //!
-//! The member's badge is minted the way `swoosh mint` mints one (signet-rooted, bound to the device's
-//! derived `NodeId`), and the wrapper proves exactly that `NodeId`, so the gate's bound-device check
+//! The member's badge is signed the way `swoosh invite` signs one (root-signed, bound to the device's
+//! `NodeId`), and the wrapper proves exactly that `NodeId`, so the gate's bound-device check
 //! admits over real keys rather than over a synthetic test id. The load-bearing half sits beside it:
 //! the rooted gate arms over the wrapper and REFUSES the bare, announced inner, so `quirk` alone still
 //! cannot carry a credential.
@@ -50,7 +50,7 @@ async fn sealed(byte: u8) -> Noise<Endpoint> {
     Noise::new(inner, &seed(byte)).expect("wrap quirk under its own identity")
 }
 
-/// A membership badge the signet signed and bound to `bound`, the shape `swoosh mint` mints for a device
+/// A membership badge the signet signed and bound to `bound`, the shape `swoosh invite` signs for a device
 /// and the signet holder self-signs. The gate trusts the signet root and checks the binding against the
 /// session's proven peer, so over the wrapper this is the real device-badge path.
 fn signet_badge(bound: NodeId) -> String {

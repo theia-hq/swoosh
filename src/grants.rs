@@ -346,10 +346,8 @@ impl IssuedIds for IssuedLedger {
 /// capability).
 #[derive(Clone, PartialEq, Eq)]
 pub struct GrantRecord {
-    /// What the grant reaches: one named service (e.g. `ssh`), or family membership itself. An enum, not
-    /// a service name, so a service can never be named `membership` and a membership line can never read
-    /// as a service.
-    pub target: GrantTarget,
+    /// The one service the grant reaches (e.g. `ssh`).
+    pub target: Service,
     /// How the grant is bound: device, fleet, or bearer.
     pub kind: GrantKind,
     /// Whether the holder may narrow and re-share it: a bound grant is always [`Sealed`](Delegation::Sealed);
@@ -410,7 +408,7 @@ impl GrantRecord {
         let mut next = || fields.next().ok_or(LedgerError::Malformed);
         let kind = next()?.parse::<GrantKind>()?;
         let delegation = next()?.parse::<Delegation>()?;
-        let target = next()?.parse::<GrantTarget>()?;
+        let target = next()?.parse::<Service>().map_err(LedgerError::Service)?;
         let holder = next()?.to_owned();
         let expiry = from_unix_secs(next()?.parse::<u64>().map_err(LedgerError::Expiry)?);
         let root_id = RevocationId::from_hex(next()?).map_err(|_| LedgerError::RootId)?;
@@ -426,51 +424,6 @@ impl GrantRecord {
             root_id,
             expiry,
         })
-    }
-}
-
-/// What a grant reaches: one named service, or family membership itself.
-///
-/// The line word is the service name verbatim, or `membership`. A service named `membership` is
-/// unrepresentable: the word is rejected as a service at this boundary and at `grant issue`, so no
-/// service line can contain it and no membership line contains a service name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GrantTarget {
-    /// One named service (e.g. `ssh`).
-    Service(Service),
-    /// Family membership: the whole family gate, not one service.
-    Membership,
-}
-
-impl GrantTarget {
-    /// The ledger word for membership.
-    pub const MEMBERSHIP_WORD: &str = "membership";
-
-    /// The word this target is stored and displayed as: the service name verbatim, or `membership`.
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Service(service) => service.as_str(),
-            Self::Membership => Self::MEMBERSHIP_WORD,
-        }
-    }
-
-    /// Whether `service` names a service that may be issued. The membership word is reserved out of the
-    /// service namespace: a service named `membership` would collide with the real membership line.
-    pub fn is_issuable_service_name(text: &str) -> bool {
-        text != Self::MEMBERSHIP_WORD
-    }
-}
-
-impl FromStr for GrantTarget {
-    type Err = LedgerError;
-
-    /// The word alone decides: `membership` is Membership, and anything else is parsed as a service name.
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if text == Self::MEMBERSHIP_WORD {
-            return Ok(Self::Membership);
-        }
-        let service = text.parse::<Service>().map_err(LedgerError::Service)?;
-        Ok(Self::Service(service))
     }
 }
 
@@ -545,7 +498,7 @@ impl FromStr for Delegation {
 
 /// A duration as its largest whole unit, `<n>d`/`<n>h`/`<n>m`/`<n>s`. Coarse on purpose: a grant lifetime is
 /// a rough "how much longer", not a stopwatch. Shared by `grant issue` (framing the fresh lifetime) and
-/// `invite ls` (a row's remaining lifetime).
+/// `invite` (a device's).
 pub fn humanize(span: Duration) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;

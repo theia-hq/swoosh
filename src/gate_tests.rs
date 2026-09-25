@@ -12,7 +12,7 @@ use tightbeam::tunnel::LiveCuts as _;
 
 use super::{AnchorCut, FilePin, KeyedDenylist, anchored};
 use crate::config;
-use crate::grants::{Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
+use crate::grants::{Delegation, GrantKind, GrantRecord, Grants};
 use crate::home::Home;
 use crate::testkit::{TestNode, TestRoot};
 
@@ -223,7 +223,7 @@ async fn issued_slip(home: &Home) -> Cap {
         .expect("mint a slip");
     Grants::at(home.links())
         .append(&GrantRecord {
-            target: GrantTarget::Service(service()),
+            target: service(),
             kind: GrantKind::Bearer,
             delegation: Delegation::Delegable,
             holder: crate::grants::ANYONE.to_owned(),
