@@ -69,7 +69,13 @@ async fn device(tag: &str, hours: u64) -> Home {
 /// Run `swoosh ping me/nas` as the composition root runs it, from `home`, with the exchange dialed
 /// through `dial`. Nothing answers at me/nas, so the verb itself fails.
 async fn ping_nas(home: &Home, dial: &Answering) -> eyre::Result<()> {
-    let Some(command) = Cli::try_parse_from(["swoosh", "ping", "me/nas"])
+    ping(home, "me/nas", dial).await
+}
+
+/// Run `swoosh ping <peer>` as the composition root runs it, from `home`, with the exchange dialed through
+/// `dial`.
+async fn ping(home: &Home, peer: &str, dial: &Answering) -> eyre::Result<()> {
+    let Some(command) = Cli::try_parse_from(["swoosh", "ping", peer])
         .unwrap()
         .command
     else {
@@ -136,4 +142,36 @@ async fn stale_then_fresh() {
     let dial = Answering::with(Answer::Same);
     let _ = ping_nas(&fresh, &dial).await;
     assert_eq!(dial.calls(), 0, "none on a fresh one");
+}
+
+/// A dial under a throwaway key is none of your devices, so it makes no exchange, even with one of them:
+/// an `anyone` link that me/nas signed dials me/nas under a key nobody holds.
+#[test]
+fn a_throwaway_key_dial_makes_no_exchange() {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(throwaway());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn throwaway() {
+    let stale = device("throwaway", 2).await;
+    let until = SystemTime::now() + Duration::from_secs(3600);
+    let link = TestNode::seeded(NAS)
+        .slip(&"ping".parse().unwrap(), until)
+        .unwrap()
+        .link()
+        .unwrap();
+    let printed = swoosh::link::Link::from(link).to_string();
+    let dial = Answering::with(Answer::Same);
+    let _ = ping(&stale, &printed, &dial).await;
+    assert_eq!(dial.calls(), 0, "no exchange under a throwaway key");
 }

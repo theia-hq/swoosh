@@ -810,9 +810,12 @@ where
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
+    // A dial under a throwaway key is none of your devices, so it makes no exchange.
     let device = match outward.dialed() {
-        Some(peer) => stale_device(ctx.home, ctx.contacts, peer).await,
-        None => None,
+        Some(peer) if outward.identity() != Identity::Ephemeral => {
+            stale_device(ctx.home, ctx.contacts, peer).await
+        }
+        _ => None,
     };
     let verb = outward.run(node, ctx);
     let Some(device) = device else {
@@ -851,6 +854,9 @@ where
 // The CLI-surface proofs that drive a real verb (clap-parsed, exactly as the binary dispatches it):
 // they live with the binary because they exercise its command types, and the library only sees the
 // core those verbs call.
+#[cfg(test)]
+#[path = "bearer_dial_tests.rs"]
+mod bearer_dial_tests;
 #[cfg(test)]
 #[path = "grant_issue_fleet_tests.rs"]
 mod grant_issue_fleet_tests;

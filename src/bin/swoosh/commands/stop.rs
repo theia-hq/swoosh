@@ -47,6 +47,17 @@ const STOP_PROBE_WINDOW: Duration = Duration::from_secs(3);
 /// The delay between probe dials inside [`STOP_PROBE_WINDOW`].
 const STOP_PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
+/// The peer `--at` names: never a path, since a link cannot stop a machine.
+fn at_peer(text: &str) -> Result<Peer, String> {
+    if swoosh::peer::is_path(text) {
+        return Err(
+            "a link cannot stop a machine; only your own devices can: swoosh stop me/<name>"
+                .to_owned(),
+        );
+    }
+    text.parse::<Peer>().map_err(|error| error.to_string())
+}
+
 /// Stop a node (stop it serving): your own, or a peer's with `--at`.
 #[derive(Debug, Args)]
 pub struct StopCmd {
@@ -54,6 +65,7 @@ pub struct StopCmd {
     #[arg(
         long,
         value_name = "peer",
+        value_parser = at_peer,
         long_help = "stop a peer's node rather than your own\n\
                      Bare `swoosh stop` stops the node running on this machine.\n\
                      A peer is a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link."
@@ -100,13 +112,15 @@ impl swoosh::reaching::Reaching for StopCmd {
     /// rooted at the dialing key (only a family member may stop the node). `Family` fuses the identity to
     /// `PersistedIfPresent`. The effective slip is the FOLD of a self-addressing `swoosh:` link in the `--at`
     /// peer with an explicit `--present`, threaded INTO the credential so the ONE resolver owns both slots.
+    ///
+    /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
-            present: self
-                .at
-                .as_ref()
-                .and_then(Peer::self_present)
-                .or_else(|| self.present.clone()),
+        let present = self.present.clone();
+        swoosh::reaching::BindRole::Dialing(match &self.at {
+            Some(peer) => {
+                swoosh::credential::Credential::dialing(peer, present, CONTROL_STOP_SERVICE)
+            }
+            None => swoosh::credential::Credential::Family { present },
         })
     }
 

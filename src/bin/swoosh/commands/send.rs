@@ -93,10 +93,14 @@ impl swoosh::reaching::Reaching for SendCmd {
     /// FOLD of a self-addressing `swoosh:` link-as-peer with an explicit `--present`, threaded INTO the
     /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
     /// badge exactly as a `--present` link does).
+    ///
+    /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
-            present: self.peer.self_present().or_else(|| self.present.clone()),
-        })
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
+            &self.peer,
+            self.present.clone(),
+            self.service.as_str(),
+        ))
     }
 
     /// Uniform dispatch: unpack the reach context and run. `send` reads the resolved `present` badge and
