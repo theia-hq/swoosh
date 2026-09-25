@@ -30,7 +30,8 @@ use crate::passphrase::Prompt;
 use crate::roster::{Epoch, Member, RosterDoc};
 use crate::standing::Standing;
 use crate::state::{self, Row, State};
-use crate::testkit::{Counting, STANDING_UNTIL, TestNode, TestRoot};
+use crate::sync::Answer;
+use crate::testkit::{Answering, Counting, STANDING_UNTIL, TestNode, TestRoot};
 
 /// This machine's key.
 const OWN: u8 = 0x11;
@@ -208,7 +209,10 @@ async fn present(
     prompt: &mut impl Prompt,
 ) -> (Result<Root, RootError>, String) {
     let mut out = Vec::new();
-    let root = Root::present_to(home, place, verb, prompt, &mut out).await;
+    // Every device answers that it holds the same update, so an act that cuts brings forward from what
+    // this home holds, as each test sets it up.
+    let dial = Answering::with(Answer::Same);
+    let root = Root::present_to(home, place, verb, prompt, &dial, &mut out).await;
     (root, String::from_utf8(out).unwrap())
 }
 
@@ -1474,4 +1478,29 @@ async fn a_fork_that_adds_nothing_prints_nothing() {
     )
     .await;
     assert!(!out.contains("brought forward"), "{out}");
+}
+
+#[tokio::test]
+async fn a_revocation_only_cut_advances_the_number() {
+    let home = home("revocation-only");
+    let laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]);
+    let rows = vec![own_row(), laptop.clone()];
+    holds(&home, &records(1, rows.clone(), vec![], vec![])).await;
+    held(
+        &home,
+        &RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap(),
+    );
+
+    let mut prompt = Counting::new([PASS]);
+    let (root, _) = present(&home, RootPlace::Home, RootVerb::Revoke, &mut prompt).await;
+    let mut root = root.unwrap();
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, update) = commit(root).await;
+
+    assert_eq!(
+        committed.number,
+        Epoch(2),
+        "a revoke alone moves the number"
+    );
+    assert!(update.revoked_keys().contains(&key(LAPTOP)));
 }

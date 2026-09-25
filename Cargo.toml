@@ -48,6 +48,9 @@ measure = { git = "https://github.com/theia-hq/services", rev = "49eac8ad41d4158
 sshh = { git = "https://github.com/theia-hq/services", rev = "49eac8ad41d415808adfb2593ff30bc4ccf60e88", optional = true }
 transfer = { git = "https://github.com/theia-hq/services", rev = "49eac8ad41d415808adfb2593ff30bc4ccf60e88" }
 
+# The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
+# sending it.
+blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
 eyre = "0.6"

@@ -30,6 +30,7 @@ pub mod secret;
 pub mod serve;
 pub mod standing;
 pub mod state;
+pub mod sync;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;
 pub mod transport;

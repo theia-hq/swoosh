@@ -59,6 +59,11 @@ impl swoosh::reaching::Reaching for ReachCmd {
         &self.reach
     }
 
+    /// The peer this verb dials, for the stale-list exchange after it runs.
+    fn dialed(&self) -> Option<&swoosh::peer::Peer> {
+        Some(&self.peer)
+    }
+
     fn reject_redundant_present(&self) -> eyre::Result<()> {
         self.peer.reject_redundant_present(self.present.as_ref())
     }

@@ -97,14 +97,14 @@ tightbeam's loopback reflector: it returns the caller's own bytes and opens no h
 - Example: `swoosh serve demo=echo:`
 - Limits: [tightbeam](https://github.com/theia-hq/tightbeam).
 
-### `roster`
+### `control.sync`
 
-The signed membership snapshot of your fleet. Every `swoosh serve` serves it, whatever else you name; it
-is not a target an entry can name. Another of your devices reads it with `swoosh fleet <peer>`.
+How your devices keep one list of your devices. Every `swoosh serve` serves it, whatever else you name;
+no entry can name it. Your other devices reach it on their own, and with `swoosh sync`.
 
-- Posture: member-only, like `control.*`: a `swoosh:` grant naming it is refused at the route. Unmetered:
-  the handler sets no cap, and no public form can ever open it.
-- Limits: [fleet](commands/fleet.md).
+- Posture: member-only, like the rest of `control.*`: a `swoosh:` link naming it is refused at the route.
+  Unmetered: the handler sets no cap, and no public form can ever open it.
+- Limits: [sync](commands/sync.md).
 
 ### `control.stop` and `control.services`
 
@@ -144,7 +144,7 @@ Every service row links the doc that owns its sharp edges. The engine limits liv
 [tightbeam README](https://github.com/theia-hq/tightbeam#what-a-forward-carries). On the command side:
 [serve](commands/serve.md) for the flags, and [send](commands/send.md), [fetch](commands/fetch.md),
 [ssh](commands/ssh.md), [reach](commands/reach.md), [service](commands/service.md),
-[stop](commands/stop.md), and [fleet](commands/fleet.md) for the client verbs. The gate itself is
+[stop](commands/stop.md), and [sync](commands/sync.md) for the client verbs. The gate itself is
 [Keys](../keys.md#the-gate). An open `ping` or `speed` is metered by the engine, per
 [Public service](../use-cases/public-service.md#the-limit).
 

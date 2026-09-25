@@ -29,7 +29,7 @@ use crate::roster::{Epoch, RosterDoc};
 
 /// The reserved petname for the operator's own devices: the signet is person-zero, each device it derives
 /// lives under `me/<label>`. A signet-verified roster hydrates into exactly this partition.
-const ME: &str = "me";
+pub const ME: &str = "me";
 
 mod store;
 
@@ -458,6 +458,16 @@ impl Contacts {
         {
             return Hydrated::NotNewer { floor };
         }
+        let applied = self.rebuild_me(roster);
+        self.roster_floor = Some(epoch);
+        Hydrated::Applied(applied)
+    }
+
+    /// Replace the roster-sourced devices under `me` with the live devices of a verified update, keeping
+    /// every hand-typed binding. The caller has already decided the update is newer: a fold holds the
+    /// floor in the update it keeps, not here.
+    pub fn rebuild_me(&mut self, roster: &RosterDoc) -> Applied {
+        let epoch = roster.epoch();
         let person = self.people.entry(Petname(ME.to_owned())).or_default();
         // Snapshot-REPLACE the DEVICE set only; the fence: hydrate never touches `person.signet` (a roster
         // carries no signet in v1), so a hand-typed `me` signet survives every pull. Drop the prior
@@ -512,8 +522,7 @@ impl Contacts {
         {
             self.people.remove(&Petname(ME.to_owned()));
         }
-        self.roster_floor = Some(epoch);
-        Hydrated::Applied(applied)
+        applied
     }
 
     /// Set the persisted roster epoch floor when the store reconstructs a book from disk. For the store's

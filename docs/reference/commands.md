@@ -39,7 +39,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="fetch"></a>[`swoosh fetch`](commands/fetch.md): mint a local URL that fetches an origin through a named node
 - <a id="reach"></a>[`swoosh reach`](commands/reach.md): reach any service a peer serves, on stdout or a local port
 - <a id="send"></a>[`swoosh send`](commands/send.md): push a file or directory to a peer, verified end to end
-- <a id="fleet"></a>[`swoosh fleet`](commands/fleet.md): pull the signed roster from a coordination node into your contacts
+- <a id="sync"></a>[`swoosh sync`](commands/sync.md): bring your device list up to date with your other devices, both ways
 - <a id="contact"></a>[`swoosh contact`](commands/contact.md): manage local petnames for peers (yours alone, plain TOML)
 - <a id="identity"></a>[`swoosh identity`](commands/identity.md): print this machine's key, minting one if there is none
 - <a id="invite"></a>[`swoosh invite`](commands/invite.md): create, list, and cancel device invites; one device per invite

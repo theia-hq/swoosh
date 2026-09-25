@@ -23,9 +23,11 @@ use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
 use crate::contacts::DeviceLabel;
+use crate::home::Home;
 use crate::passphrase::Prompt;
 use crate::roster::{Member, RosterDoc};
 use crate::state::State;
+use crate::sync::{Answer, Dial, ExchangeError};
 
 /// When a test standing ends, in unix seconds: far enough out that no test outlives it.
 pub const STANDING_UNTIL: u64 = 4_000_000_000;
@@ -295,6 +297,92 @@ impl Prompt for Counting {
 
     fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
         self.answer(2)
+    }
+}
+
+/// A [`Dial`] that runs each exchange in process: the dialer is `home`, and the device dialed answers from
+/// its own home, over an in-memory stream. A key with no home here does not answer. Every dial is recorded.
+pub struct Loopback {
+    home: Home,
+    devices: Vec<(NodeId, Home)>,
+    dialed: std::sync::Mutex<Vec<NodeId>>,
+}
+
+impl Loopback {
+    /// Exchanges from `home` with each of `devices`, by key.
+    pub fn new(home: Home, devices: impl IntoIterator<Item = (NodeId, Home)>) -> Self {
+        Self {
+            home,
+            devices: devices.into_iter().collect(),
+            dialed: std::sync::Mutex::default(),
+        }
+    }
+
+    /// Every key dialed so far, in order.
+    pub fn dialed(&self) -> Vec<NodeId> {
+        self.dialed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Dial for Loopback {
+    async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
+        self.dialed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(peer);
+        let Some((_, server)) = self.devices.iter().find(|(key, _)| *key == peer) else {
+            return Err(eyre::eyre!("no device answers at that key").into());
+        };
+        let (near, far) = tokio::io::duplex(64 * 1024);
+        let (near_read, near_write) = tokio::io::split(near);
+        let (far_read, far_write) = tokio::io::split(far);
+        let (dialed, answered) = tokio::join!(
+            crate::sync::exchange(&self.home, near_read, near_write),
+            crate::sync::answer(server, far_read, far_write),
+        );
+        answered?;
+        dialed
+    }
+}
+
+/// A [`Dial`] every device answers with the same [`Answer`], touching nothing. Every dial is counted.
+pub struct Answering {
+    answer: Option<Answer>,
+    calls: core::sync::atomic::AtomicUsize,
+}
+
+impl Answering {
+    /// Every device answers `answer`.
+    pub fn with(answer: Answer) -> Self {
+        Self {
+            answer: Some(answer),
+            calls: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// No device answers.
+    pub fn nobody() -> Self {
+        Self {
+            answer: None,
+            calls: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// How many exchanges were dialed.
+    pub fn calls(&self) -> usize {
+        self.calls.load(core::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Dial for Answering {
+    async fn exchange(&self, _peer: NodeId) -> Result<Answer, ExchangeError> {
+        self.calls
+            .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        self.answer
+            .ok_or_else(|| eyre::eyre!("no device answers").into())
     }
 }
 

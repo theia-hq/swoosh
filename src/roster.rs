@@ -17,8 +17,14 @@ use crate::codec::{Put as _, Reader, bound, canonicalize, check_device, check_id
 use crate::contacts::DeviceLabel;
 
 mod artifact;
+mod fold;
 
-pub use artifact::{Artifact, ArtifactError};
+pub use artifact::ArtifactError;
+pub(crate) use artifact::write;
+#[cfg(test)]
+pub(crate) use fold::SLOW;
+pub(crate) use fold::read_held;
+pub use fold::{FoldError, Folded, fold};
 
 /// The magic the update's payload opens with: `swoosh-` and the file it heads. A payload this key signs
 /// under another magic is never read as an update.
