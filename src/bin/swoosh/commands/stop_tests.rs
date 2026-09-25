@@ -298,3 +298,19 @@ async fn a_live_peer_behind_a_failed_stream_open_is_not_masked() {
         "the failed stream open was probed against the still-live peer"
     );
 }
+
+/// `stop` takes no path: a link cannot stop a machine, so a path is refused at parse, before any file is
+/// read or anything binds.
+#[test]
+fn stop_refuses_a_path() {
+    let error = crate::Cli::try_parse_from(["swoosh", "stop", "--at", "./nas.link"])
+        .map(|_| ())
+        .expect_err("a path refuses");
+    assert_eq!(error.exit_code(), 2, "a refused peer is a usage error");
+    assert!(
+        error.to_string().contains(
+            "a link cannot stop a machine; only your own devices can: swoosh stop me/<name>"
+        ),
+        "{error}"
+    );
+}

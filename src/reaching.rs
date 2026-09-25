@@ -234,7 +234,17 @@ async fn resolve_to<W: std::io::Write>(
     home: &Home,
     warn: &mut W,
 ) -> eyre::Result<Resolved> {
-    let Credential::Family { present } = cred;
+    let present = match cred {
+        // An `anyone` link presents alone: no badge is read or sent, so nothing ties the throwaway key
+        // it dials under to this home.
+        Credential::Anyone(link) => {
+            return Ok(Resolved {
+                grant: Some(link),
+                membership: None,
+            });
+        }
+        Credential::Family { present } => present,
+    };
     let badge = device_badge(home).await?;
     let node = secret.node_id();
     match present {

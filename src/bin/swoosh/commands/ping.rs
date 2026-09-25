@@ -77,10 +77,14 @@ impl swoosh::reaching::Reaching for PingCmd {
     /// privacy-aware slot 2 (a fleet badge, only for a signet-bound slip). The effective slip is the FOLD of
     /// a self-addressing `swoosh:` link-as-peer with an explicit `--present`, so a link-as-peer resolves
     /// through the same slot path as a `--present` link.
+    ///
+    /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
-            present: self.peer.self_present().or_else(|| self.present.clone()),
-        })
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
+            &self.peer,
+            self.present.clone(),
+            reach::PING_SERVICE,
+        ))
     }
 
     /// Uniform dispatch: unpack the reach context and run. `ping` reads `contacts` (fan-out), the

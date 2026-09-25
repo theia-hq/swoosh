@@ -82,10 +82,14 @@ impl swoosh::reaching::Reaching for FetchCmd {
     /// (the verb used to dial `Ephemeral` + slip-only, so an owner with no slip was refused). The effective
     /// slip is the FOLD of a self-addressing `swoosh:` link in the `--via` peer with an explicit `--present`,
     /// threaded INTO the credential so the ONE resolver owns both slots.
+    ///
+    /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
-            present: self.via.self_present().or_else(|| self.present.clone()),
-        })
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
+            &self.via,
+            self.present.clone(),
+            self.service.as_str(),
+        ))
     }
 
     /// Uniform dispatch: unpack the reach context and run. `fetch` reads `contacts` (to resolve `--via`),

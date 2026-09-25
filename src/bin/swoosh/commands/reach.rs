@@ -81,10 +81,14 @@ impl swoosh::reaching::Reaching for ReachCmd {
     /// roots at the key the dial binds under. The effective slip is the FOLD of a self-addressing `swoosh:`
     /// link-as-peer with an explicit `--present`, threaded INTO the credential so the ONE resolver owns
     /// both slots (slot 1 present-or-badge, slot 2 the fleet badge for a signet-bound slip).
+    ///
+    /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
-            present: self.peer.self_present().or_else(|| self.present.clone()),
-        })
+        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
+            &self.peer,
+            self.present.clone(),
+            self.service.as_str(),
+        ))
     }
 
     /// Drive the sink `--to` names: stream to stdout, bind a local port and forward each connection, or the

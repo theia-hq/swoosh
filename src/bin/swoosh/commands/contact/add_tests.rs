@@ -160,3 +160,16 @@ fn a_torsioned_key_is_refused_as_a_contact_key() {
         "the refusal names the key and the check: {error}"
     );
 }
+
+/// A contact name never starts with `.`, `/` or `~`, so a peer typed as a path can never shadow a name.
+#[test]
+fn a_contact_name_may_not_start_with_a_path_character() {
+    for name in ["./x", ".x", "/x", "~/x", "~x"] {
+        let error = parse_add(name).expect_err("a name starting with a path character refuses");
+        assert_eq!(
+            error.exit_code(),
+            2,
+            "{name}: a refused name is a usage error"
+        );
+    }
+}

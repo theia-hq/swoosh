@@ -83,13 +83,15 @@ impl swoosh::reaching::Reaching for StatusCmd {
     /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. The
     /// effective slip is the FOLD of a self-addressing `swoosh:` link-as-peer with an explicit `--present`,
     /// threaded INTO the credential so the ONE resolver owns both slots.
+    ///
+    /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
-            present: self
-                .peer
-                .as_ref()
-                .and_then(Peer::self_present)
-                .or_else(|| self.present.clone()),
+        let present = self.present.clone();
+        swoosh::reaching::BindRole::Dialing(match &self.peer {
+            Some(peer) => {
+                swoosh::credential::Credential::dialing(peer, present, reach::PING_SERVICE)
+            }
+            None => swoosh::credential::Credential::Family { present },
         })
     }
 

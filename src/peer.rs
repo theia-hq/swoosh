@@ -1,4 +1,5 @@
-//! A peer to dial, as typed: a saved petname, a raw key, or a self-addressing `swoosh:` link.
+//! A peer to dial, as typed: a saved petname, a raw key, or a self-addressing `swoosh:` link, typed as
+//! itself or as a path to a file holding it.
 //!
 //! A "peer to dial" is a higher-level concept than the address book, so it composes the contacts domain
 //! (`ContactRef`, `Candidate`, `Contacts`) rather than squatting in it, and it unifies the two dial-target
@@ -9,6 +10,7 @@
 //! one place, uniform across every dialing verb.
 
 use core::str::FromStr;
+use std::path::{Path, PathBuf};
 
 use bifrost::{KeyError, NodeId, NodeIdParseError};
 use nauthy::{Link, Service};
@@ -22,7 +24,8 @@ use crate::names::NameError;
 /// A peer a dialing verb reaches, before resolution. Replaces BOTH the reach family's old `Target` and the
 /// tunnel family's old `Dial`: one type, three arms, tried in a fixed order at the clap boundary.
 ///
-/// A `swoosh:` link supersedes the identity path (it self-addresses: it names the node to dial AND carries
+/// A path (`./`, `/`, `~/`) is read first, as a file holding a link, so the link never enters argv. A
+/// `swoosh:` link supersedes the identity path (it self-addresses: it names the node to dial AND carries
 /// the credential); else a raw base32 node id is dialed verbatim; else the text is a saved petname resolved
 /// against the contact store just before dialing (deferred because the store loads at startup, not at the
 /// clap boundary). Every dialing verb holds this in its peer slot, so `alice`, `alice/desk`, a raw key, and
@@ -37,8 +40,18 @@ pub enum Peer {
     Raw(NodeId),
     /// A `swoosh:` capability link. Self-addressing: it supplies the dial target (the cap's root node) AND
     /// the slot-1 credential, so a separate `--present` is redundant (see the fold in [`self_present`](Self::self_present)).
-    Capability(Link),
+    Capability {
+        /// The link.
+        link: Link,
+        /// The file it was read from, when the peer was typed as a path: a surface that hands the peer on
+        /// to another process hands on this path, so the link never enters that process's argv.
+        file: Option<PathBuf>,
+    },
 }
+
+/// What a peer typed as a path starts with. No name starts with `.`, `/` or `~`, so a path never shadows a
+/// name.
+const PATH_STARTS: [&str; 3] = ["./", "/", "~/"];
 
 impl FromStr for Peer {
     type Err = PeerParseError;
@@ -47,9 +60,15 @@ impl FromStr for Peer {
     /// fails fast at the boundary), then a raw base32 node id (always valid, never a petname, since petnames
     /// are additive), else a saved petname address (validated here, resolved against the store at dial time).
     /// A bare link (`ed01….x`) is none of these: no name holds a dot, so it refuses naming the prefix.
+    /// Before all of them, text starting `./`, `/` or `~/` is a file holding a link (see [`read_file`]).
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if crate::link::is_prefixed(text) {
-            Ok(Self::Capability(crate::link::parse(text)?))
+        if is_path(text) {
+            read_file(text)
+        } else if crate::link::is_prefixed(text) {
+            Ok(Self::Capability {
+                link: crate::link::parse(text)?,
+                file: None,
+            })
         } else {
             if let Some(node) = raw_key(text)? {
                 return Ok(Self::Raw(node));
@@ -61,6 +80,38 @@ impl FromStr for Peer {
             }
         }
     }
+}
+
+/// Whether `text` is a peer typed as a path: it starts with `./`, `/` or `~/`.
+pub fn is_path(text: &str) -> bool {
+    PATH_STARTS.iter().any(|start| text.starts_with(start))
+}
+
+/// A peer typed as a path: the file it names holds one link, so the link never enters argv. A `~/` that
+/// reached swoosh quoted is expanded here, and one trailing newline is trimmed. The file's mode is not
+/// checked.
+fn read_file(text: &str) -> Result<Peer, PeerParseError> {
+    let path = match text.strip_prefix("~/") {
+        Some(rest) => match std::env::var_os("HOME") {
+            Some(home) => Path::new(&home).join(rest),
+            None => return Err(PeerParseError::NoHome),
+        },
+        None => PathBuf::from(text),
+    };
+    let held = std::fs::read_to_string(&path).map_err(|source| PeerParseError::Unreadable {
+        path: text.to_owned(),
+        source,
+    })?;
+    let held = held.strip_suffix('\n').unwrap_or(&held);
+    if !crate::link::is_prefixed(held) {
+        return Err(PeerParseError::NoLink {
+            path: text.to_owned(),
+        });
+    }
+    Ok(Peer::Capability {
+        link: crate::link::parse(held)?,
+        file: Some(path),
+    })
 }
 
 /// A typed key that spells a key, but not one anyone can hold: the one line every typed key refuses with,
@@ -121,6 +172,24 @@ pub enum PeerParseError {
     /// The text spells a key, but not one anyone can hold.
     #[error(transparent)]
     Key(#[from] UnusableKey),
+    /// The text is a path, and the file it names holds no link.
+    #[error("{path} holds no swoosh: link")]
+    NoLink {
+        /// The path as typed.
+        path: String,
+    },
+    /// The text is a path, and the file it names could not be read.
+    #[error("could not read {path}")]
+    Unreadable {
+        /// The path as typed.
+        path: String,
+        /// Why.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The text is a `~/` path, and `HOME` is not set to expand it against.
+    #[error("HOME is not set, so a path starting with ~/ has nowhere to point")]
+    NoHome,
 }
 
 impl Peer {
@@ -140,7 +209,7 @@ impl Peer {
                 label: node.short(),
                 node: *node,
             }]),
-            Self::Capability(link) => Ok(vec![Candidate {
+            Self::Capability { link, .. } => Ok(vec![Candidate {
                 label: link.short(),
                 node: link.dial_node()?,
             }]),
@@ -163,7 +232,7 @@ impl Peer {
     ) -> eyre::Result<Connector> {
         let dial = match self {
             Self::Raw(id) => *id,
-            Self::Capability(link) => link.dial_node()?,
+            Self::Capability { link, .. } => link.dial_node()?,
             Self::Named(reference) => {
                 contacts
                     .resolve_candidates(reference)?
@@ -188,7 +257,15 @@ impl Peer {
     /// link-as-peer computes its slot-2 member badge exactly as a `--present` link does.
     pub fn self_present(&self) -> Option<Link> {
         match self {
-            Self::Capability(link) => Some(link.clone()),
+            Self::Capability { link, .. } => Some(link.clone()),
+            _ => None,
+        }
+    }
+
+    /// The file this peer's link was read from, when it was typed as a path.
+    pub fn file(&self) -> Option<&Path> {
+        match self {
+            Self::Capability { file, .. } => file.as_deref(),
             _ => None,
         }
     }
@@ -199,7 +276,7 @@ impl Peer {
     /// once at the top of each verb's run before resolving, so the conflict is loud and local while
     /// [`bind_role`](crate::reaching::Reaching::bind_role), which carries the credential, stays infallible.
     pub fn reject_redundant_present(&self, explicit: Option<&Link>) -> eyre::Result<()> {
-        if matches!(self, Self::Capability(_)) && explicit.is_some() {
+        if matches!(self, Self::Capability { .. }) && explicit.is_some() {
             eyre::bail!(
                 "a `swoosh:` link peer already presents its own credential; drop `--present` (or name \
                  a petname/key peer to present a different link)"
@@ -216,7 +293,7 @@ impl core::fmt::Display for Peer {
         match self {
             Self::Named(reference) => reference.fmt(f),
             Self::Raw(node) => f.write_str(&node.short()),
-            Self::Capability(link) => f.write_str(&link.short()),
+            Self::Capability { link, .. } => f.write_str(&link.short()),
         }
     }
 }
@@ -318,7 +395,7 @@ mod tests {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a swoosh: link parses");
         let root = match &peer {
-            Peer::Capability(link) => link.dial_node().expect("a link root is a key"),
+            Peer::Capability { link, .. } => link.dial_node().expect("a link root is a key"),
             _ => panic!("a swoosh: link parses as a Capability peer"),
         };
 
@@ -374,6 +451,35 @@ mod tests {
         }
     }
 
+    /// A peer typed as a path reads the link its file holds, one trailing newline trimmed, and keeps the
+    /// path; a file holding anything else refuses naming the path as typed.
+    #[test]
+    fn a_path_peer_reads_its_link_from_the_file() {
+        let dir = std::env::temp_dir().join(format!("swoosh-peer-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let link = signet_link();
+        let kept = dir.join("nas.link");
+        std::fs::write(&kept, format!("{link}\n")).expect("write");
+        let typed = kept.to_str().expect("a UTF-8 path");
+        let peer = typed.parse::<Peer>().expect("a path holding a link parses");
+        assert_eq!(peer.file(), Some(kept.as_path()));
+        assert_eq!(
+            peer.self_present()
+                .map(|held| crate::link::Link::from(held).to_string()),
+            Some(link),
+        );
+
+        let empty = dir.join("empty");
+        std::fs::write(&empty, "alice\n").expect("write");
+        let typed = empty.to_str().expect("a UTF-8 path");
+        let error = typed
+            .parse::<Peer>()
+            .expect_err("a file with no link refuses");
+        assert_eq!(error.to_string(), format!("{typed} holds no swoosh: link"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A `swoosh:` link peer plus an explicit `--present` is a LOUD conflict (the link already presents its
     /// own credential); a link peer with no `--present`, and a `Named`/`Raw` peer WITH `--present` (the
     /// delegate case, a slip rooted elsewhere), are both fine.
@@ -408,7 +514,7 @@ mod tests {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a link peer");
         let root = match &peer {
-            Peer::Capability(link) => link.dial_node().expect("a link root is a key"),
+            Peer::Capability { link, .. } => link.dial_node().expect("a link root is a key"),
             _ => panic!("a swoosh: link parses as a Capability peer"),
         };
         // The two slots come from the resolver, not from the peer link: distinct valid links prove the

@@ -14,8 +14,10 @@
 //! two reads swoosh needs of a link that nauthy does not owe a consumer.
 
 use bifrost::NodeId;
-use nauthy::{Link, VerifyKey};
+use nauthy::{Link, Request, Service, VerifyKey};
 use tightbeam::identity::AsNodeId as _;
+
+use crate::peer::Peer;
 
 /// The reads swoosh takes of a [`Link`]: the node it self-addresses and its short form for output.
 ///
@@ -75,9 +77,25 @@ pub enum Credential {
         /// "the author forgot".
         present: Option<Link>,
     },
+    /// An `anyone` link typed as the peer: presented alone, under a throwaway key. It admits whoever holds
+    /// it, so no key of this home travels with it, and revoking this machine's key closes nothing it opens.
+    /// Derives [`Identity::Ephemeral`](crate::identity::Identity::Ephemeral).
+    Anyone(Link),
 }
 
 impl Credential {
+    /// What a dial to `peer` for `service` presents: an `anyone` link typed as the peer presents alone
+    /// ([`Anyone`](Self::Anyone)); any other peer presents as this home ([`Family`](Self::Family)), with a
+    /// link peer, else the explicit `present`, as its slip.
+    pub fn dialing(peer: &Peer, present: Option<Link>, service: &str) -> Self {
+        match peer.self_present() {
+            Some(link) if admits_anyone(&link, service) => Self::Anyone(link),
+            link => Self::Family {
+                present: link.or(present),
+            },
+        }
+    }
+
     /// The identity a verb with this credential must bind under. This is the ONLY place the
     /// identity/badge coupling lives, so a `Family` credential is always `PersistedIfPresent`: its badge
     /// roots at the dialing key, so the dial MUST bind that same key wherever it exists.
@@ -86,6 +104,7 @@ impl Credential {
     pub fn identity(&self) -> crate::identity::Identity {
         match self {
             Self::Family { .. } => crate::identity::Identity::PersistedIfPresent,
+            Self::Anyone(_) => crate::identity::Identity::Ephemeral,
         }
     }
 
@@ -95,9 +114,23 @@ impl Credential {
     pub fn warm_mode(&self) -> WarmMode {
         match self {
             Self::Family { present: None } => WarmMode::Resident,
-            Self::Family { present: Some(_) } => WarmMode::Personal,
+            Self::Family { present: Some(_) } | Self::Anyone(_) => WarmMode::Personal,
         }
     }
+}
+
+/// Whether `link` admits a dialer it was never bound to, for `service`: the `anyone` link. It is asked of a
+/// key nobody holds, so a link bound to a device or to a root's devices reads as bound, and so does one
+/// that cannot admit anyone at all (expired, or for another service), which then dials as this home.
+pub fn admits_anyone(link: &Link, service: &str) -> bool {
+    let (Ok(service), Ok(stranger)) = (service.parse::<Service>(), nauthy::Identity::generate())
+    else {
+        return false;
+    };
+    let request = Request::now(service).bound_to(stranger.verifying_key());
+    link.cap()
+        .verify_at_root_without_revocation(&request, link.root())
+        .is_ok()
 }
 
 /// Whether a dial may use the resident's warm reach.
