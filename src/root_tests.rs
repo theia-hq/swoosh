@@ -18,11 +18,11 @@ use std::time::SystemTime;
 
 use keystore::{KeyFile, Passphrase, Protection, Stored};
 use nauthy::{DisabledRoots, RevocationId, VerifyKey};
-use tightbeam::identity::AsVerifyKey as _;
+use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
 
 use super::{Committed, Minted, Root, RootError, RootPlace, RootVerb, STOP, Seam};
-use crate::codec::{Id, MAX_REVOKED_KEYS};
+use crate::codec::{Id, MAX_REVOKED, MAX_REVOKED_KEYS};
 use crate::config;
 use crate::contacts::DeviceLabel;
 use crate::home::Home;
@@ -341,17 +341,51 @@ async fn an_interrupted_mint_with_no_standing_prompts_once() {
     std::fs::remove_file(home.root().join("standing")).unwrap();
 
     let mut prompt = Counting::new([PASS]);
-    let finished = Root::mint_to(&home, &mut prompt, &mut io::sink())
+    let Minted::Made(mut root) = Root::mint_to(&home, &mut prompt, &mut io::sink())
         .await
+        .unwrap()
+    else {
+        panic!("a finish that asked hands back the root it unlocked, so the act asks no more");
+    };
+    assert!(matches!(standing(&home).await, Standing::HoldsRoot { .. }));
+    // The act goes on to its cut on the one prompt.
+    root.sign_standing(key(LAPTOP), name("laptop"), Duration::from_secs(90 * DAY))
         .unwrap();
-    assert!(matches!(finished, Minted::Finished));
-    assert_eq!(prompt.events(), 1);
+    let _committed = root.commit_to(&mut io::sink()).await.unwrap();
+    assert_eq!(prompt.events(), 1, "the whole act asks once");
     assert_eq!(
         prompt.reads(),
         1,
         "the existing passphrase, asked once, never chosen again"
     );
-    assert!(matches!(standing(&home).await, Standing::HoldsRoot { .. }));
+}
+
+#[tokio::test]
+async fn an_interrupted_mint_takes_no_standing_that_is_not_its_own() {
+    let home = home("mint-foreign");
+    STOP.set(Some(Seam::Renamed));
+    let stopped = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink()).await;
+    STOP.set(None);
+    assert!(stopped.is_err());
+    // A standing another root signed, left where the mint keeps this machine's.
+    let foreign = TestRoot::seeded(OTHER).standing(key(OWN)).unwrap();
+    std::fs::write(home.root().join("standing"), format!("{foreign}\n")).unwrap();
+
+    let mut prompt = Counting::new([PASS]);
+    let minted = Root::mint_to(&home, &mut prompt, &mut io::sink())
+        .await
+        .unwrap();
+    assert!(matches!(minted, Minted::Made(_)), "{minted:?}");
+    assert_eq!(prompt.events(), 1, "it signs a standing of its own instead");
+    let Standing::HoldsRoot { pin, .. } = standing(&home).await else {
+        panic!("the mint finished");
+    };
+    let badge = config::load_badge(&home).await.unwrap().unwrap();
+    assert_eq!(
+        badge.root(),
+        pin.verify_key(),
+        "the badge roots at this root"
+    );
 }
 
 /// The stderr the prompt and the output share, in the order written.
@@ -1108,4 +1142,336 @@ fn a_root_act_sets_rlimit_core_zero() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(stdout.contains("1 passed"), "{stdout}");
+}
+
+// --- the review's fixes ---
+
+/// A prompt with nobody at a terminal: every event fails.
+struct NoTerminal(Counting);
+
+impl Prompt for NoTerminal {
+    fn terminal(&self) -> bool {
+        false
+    }
+
+    fn unlock(&mut self, path: &Path) -> eyre::Result<Passphrase> {
+        self.0.unlock(path)
+    }
+
+    fn choose(&mut self, path: &Path) -> eyre::Result<Passphrase> {
+        self.0.choose(path)
+    }
+}
+
+#[tokio::test]
+async fn a_root_act_with_no_terminal_refuses_before_the_prompt() {
+    let home = home("no-terminal");
+    holds(&home, &records(0, vec![own_row()], Vec::new(), Vec::new())).await;
+    let mut prompt = NoTerminal(Counting::new([PASS]));
+    let (refused, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
+    let Err(refused) = refused else {
+        panic!("no terminal, no root");
+    };
+    assert!(
+        matches!(refused, RootError::NoTerminalToUnlock),
+        "{refused:?}"
+    );
+    assert_eq!(
+        refused.to_string(),
+        "using your root asks for its passphrase, which needs a terminal: run this at one."
+    );
+    assert_eq!(prompt.0.events(), 0);
+}
+
+#[tokio::test]
+async fn a_copy_that_is_only_read_never_promotes_its_staged_state() {
+    let home = home("read-only-copy");
+    let records = records(2, vec![own_row()], Vec::new(), Vec::new());
+    let dir = beside(&home, "stick");
+    copy(&dir, ROOT, &records);
+    // A write that stopped after `state.new`, on a stick that cannot be written now.
+    std::fs::rename(dir.join("state"), dir.join("state.new")).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let (root, _) = present(
+        &home,
+        RootPlace::Dir(dir.clone()),
+        RootVerb::Backup,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = root.unwrap();
+    assert_eq!(root.rows(), records.rows(), "it reads the staged records");
+    assert!(
+        dir.join("state.new").exists() && !dir.join("state").exists(),
+        "a backup never writes its source"
+    );
+}
+
+#[tokio::test]
+async fn a_planted_probe_link_is_not_followed() {
+    let home = home("probe-link");
+    let dir = beside(&home, "copy");
+    copy(
+        &dir,
+        ROOT,
+        &records(0, vec![own_row()], Vec::new(), Vec::new()),
+    );
+    let target = beside(&home, "victim");
+    std::fs::write(&target, b"keep me").unwrap();
+    std::os::unix::fs::symlink(&target, dir.join("lock.probe")).unwrap();
+    let (root, _) = present(
+        &home,
+        RootPlace::Dir(dir.clone()),
+        RootVerb::Lock,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    root.unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
+    assert!(!dir.join("lock.probe").exists());
+}
+
+#[tokio::test]
+async fn a_planted_lock_link_is_not_followed() {
+    let home = home("lock-link");
+    let dir = beside(&home, "copy");
+    copy(
+        &dir,
+        ROOT,
+        &records(0, vec![own_row()], Vec::new(), Vec::new()),
+    );
+    let target = beside(&home, "planted");
+    let _ = std::fs::remove_file(&target);
+    std::os::unix::fs::symlink(&target, dir.join("lock")).unwrap();
+    let mut prompt = Counting::refusing();
+    let (refused, _) = present(&home, RootPlace::Dir(dir), RootVerb::Lock, &mut prompt).await;
+    assert!(matches!(refused, Err(RootError::Io { .. })), "{refused:?}");
+    assert!(!target.exists(), "the lock creates nothing through a link");
+    assert_eq!(prompt.events(), 0);
+}
+
+#[tokio::test]
+async fn the_first_invite_under_this_machines_name_moves_this_machine() {
+    let home = home("mint-clash");
+    let Minted::Made(mut root) = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink())
+        .await
+        .unwrap()
+    else {
+        panic!("an unpinned home makes a root");
+    };
+    let suggested = root
+        .rows()
+        .iter()
+        .find(|row| row.key == key(OWN))
+        .unwrap()
+        .label
+        .clone();
+    root.sign_standing(
+        key(LAPTOP),
+        suggested.clone(),
+        Duration::from_secs(90 * DAY),
+    )
+    .unwrap();
+    let label = |root: &Root, seed: u8| {
+        root.rows()
+            .iter()
+            .find(|row| row.key == key(seed))
+            .unwrap()
+            .label
+            .to_string()
+    };
+    assert_eq!(
+        label(&root, LAPTOP),
+        suggested.to_string(),
+        "the invited device keeps its name"
+    );
+    assert_eq!(
+        label(&root, OWN),
+        format!("{suggested}-2"),
+        "this machine moves"
+    );
+
+    // Once the root has published, a name is taken for good.
+    let _committed = root.commit_to(&mut io::sink()).await.unwrap();
+    let own = name(&label(&root, OWN));
+    let refused = root
+        .sign_standing(key(PHONE), own, Duration::from_secs(90 * DAY))
+        .unwrap_err();
+    assert!(
+        matches!(refused, RootError::NameTaken { .. }),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_device_refusals_print_their_lines() {
+    let home = home("refusal-lines");
+    let mut gone = row(LAPTOP, "laptop", Vec::new());
+    gone.revoked_on = 86_400 * 20_000;
+    holds(
+        &home,
+        &records(
+            1,
+            vec![own_row(), gone, row(PHONE, "phone", Vec::new())],
+            Vec::new(),
+            vec![key(LAPTOP), key(0x51)],
+        ),
+    )
+    .await;
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Invite,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    let mut root = root.unwrap();
+    let short = |seed: u8| key(seed).node_id().short();
+    let days = Duration::from_secs(90 * DAY);
+
+    let line = root.renew(&[name("nas")], None).unwrap_err().to_string();
+    assert_eq!(
+        line,
+        "you have no device nas. For a machine with no console: swoosh invite nas --new-key. Otherwise: \
+         swoosh invite nas <its key>."
+    );
+    let line = root.revoke_device(&name("nas")).unwrap_err().to_string();
+    assert_eq!(line, "me/nas is not one of your devices (`swoosh status`)");
+
+    let line = root
+        .sign_standing(key(LAPTOP), name("new"), days)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        line,
+        format!(
+            "{}… was revoked on 2024-10-04; a revoked key is not re-admitted. On that machine: swoosh leave \
+             --new-key, then invite the new key.",
+            short(LAPTOP)
+        )
+    );
+    let line = root
+        .sign_standing(key(0x51), name("new"), days)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        line.starts_with(&format!("{}… was revoked; ", short(0x51))),
+        "no row, no date: {line}"
+    );
+
+    let line = root
+        .sign_standing(key(OWN), name("new"), days)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        line,
+        "that is this machine's key; it is already your device me/desk"
+    );
+
+    let line = root
+        .sign_standing(key(0x61), name("phone"), days)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        line,
+        format!(
+            "me/phone is {}…. To replace it: swoosh revoke me/phone, then invite the new key.",
+            short(PHONE)
+        )
+    );
+}
+
+/// A home holding a root that has revoked as many unexpired ids as one update carries, and a laptop with
+/// one live id.
+async fn full_revocations(tag: &str) -> Home {
+    let home = home(tag);
+    let later = now() + 10 * DAY;
+    let full: Vec<Id> = (0..MAX_REVOKED)
+        .map(|nth| {
+            let mut bytes = vec![0xdd_u8; 64];
+            bytes[..8].copy_from_slice(&(nth as u64).to_be_bytes());
+            Id {
+                expires: later,
+                id: RevocationId::from_bytes(bytes),
+            }
+        })
+        .collect();
+    holds(
+        &home,
+        &records(
+            0,
+            vec![own_row(), row(LAPTOP, "laptop", vec![id(LAPTOP, later)])],
+            full,
+            Vec::new(),
+        ),
+    )
+    .await;
+    home
+}
+
+#[tokio::test]
+async fn revoking_past_max_revoked_refuses_with_its_line() {
+    let home = full_revocations("revoke-bound").await;
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Revoke,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    let mut root = root.unwrap();
+    let refused = root.revoke_device(&name("laptop")).unwrap_err();
+    assert!(
+        matches!(refused, RootError::TooManyRevoked { count, .. } if count == MAX_REVOKED + 1),
+        "{refused:?}"
+    );
+    assert!(
+        root.rows().iter().all(|row| !row.is_revoked()),
+        "nothing is revoked on a refusal"
+    );
+}
+
+#[tokio::test]
+async fn a_commit_over_a_bound_refuses_with_its_line() {
+    let home = full_revocations("commit-bound").await;
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Revoke,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    let mut root = root.unwrap();
+    let over = id(0x77, now() + 10 * DAY);
+    root.act
+        .book
+        .revoked
+        .insert(over.id.as_bytes().to_vec(), over);
+    let refused = root.commit_to(&mut io::sink()).await.unwrap_err();
+    assert!(
+        matches!(refused, RootError::TooManyRevoked { .. }),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_fork_that_adds_nothing_prints_nothing() {
+    let home = home("empty-fork");
+    holds(&home, &records(1, vec![own_row()], Vec::new(), Vec::new())).await;
+    let same = RosterDoc::new(Epoch(1), vec![member(&own_row())]).unwrap();
+    held(&home, &same);
+    std::fs::write(
+        home.roster_fork(),
+        TestRoot::seeded(ROOT).sign_update(&same),
+    )
+    .unwrap();
+    let (_, out) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Invite,
+        &mut Counting::refusing(),
+    )
+    .await;
+    assert!(!out.contains("brought forward"), "{out}");
 }

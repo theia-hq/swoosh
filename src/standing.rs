@@ -622,7 +622,8 @@ impl DirLock {
         Self::take(dir).ok()
     }
 
-    /// Take `<dir>/lock` without waiting, creating it if it is not there.
+    /// Take `<dir>/lock` without waiting, creating it if it is not there. A link at that name is refused,
+    /// never followed, so a planted one cannot make this create or lock a file elsewhere.
     ///
     /// The lock taken is checked to still be `<dir>/lock` once held. Opening and locking are two steps,
     /// and between them the directory can be removed and another made at its name, whose lock this
@@ -634,6 +635,7 @@ impl DirLock {
             .create(true)
             .append(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
             .open(dir.join("lock"))
             .map_err(LockError::Io)?;
         seam(Seam::LockOpened, dir);

@@ -42,12 +42,11 @@ impl Prompt for Terminal {
     }
 
     fn unlock(&mut self, path: &Path) -> eyre::Result<Passphrase> {
-        let question = if is_root(path) {
-            "root passphrase: ".to_owned()
-        } else {
-            format!("passphrase for {}: ", path.display())
-        };
-        passphrase(Tty::open()?.ask(&question)?)
+        if is_root(path) {
+            let tty = Tty::open().map_err(|_| eyre::eyre!(crate::root::UNLOCK_NEEDS_TERMINAL))?;
+            return passphrase(tty.ask("root passphrase: ")?);
+        }
+        passphrase(Tty::open()?.ask(&format!("passphrase for {}: ", path.display()))?)
     }
 
     fn choose(&mut self, path: &Path) -> eyre::Result<Passphrase> {
@@ -59,7 +58,11 @@ impl Prompt for Terminal {
                 "repeat the new passphrase: ",
             )
         };
-        let tty = Tty::open()?;
+        let tty = if is_root(path) {
+            Tty::open().map_err(|_| eyre::eyre!(crate::root::MINT_NEEDS_TERMINAL))?
+        } else {
+            Tty::open()?
+        };
         let first = tty.ask(&question)?;
         let second = tty.ask(again)?;
         if first != second {
