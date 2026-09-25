@@ -22,7 +22,12 @@ use nauthy::{Cap, CapError, Identity, Link, Service, Signed, VerifyKey};
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
+use crate::contacts::DeviceLabel;
 use crate::passphrase::Prompt;
+use crate::roster::Member;
+
+/// When a test standing ends, in unix seconds: far enough out that no test outlives it.
+pub const STANDING_UNTIL: u64 = 4_000_000_000;
 
 /// A root's key: what signs device badges, a fleet's documents, and the slips a root holder issues.
 pub struct TestRoot(Keys);
@@ -120,6 +125,29 @@ impl Keys {
         self.member_badge(device.verify_key(), until)?
             .seal()?
             .link()
+    }
+
+    /// A live device for an update: `node`, named `label`, carrying this root's sealed badge for it as its
+    /// standing, with no ids and no renewal.
+    pub fn member(&self, node: VerifyKey, label: DeviceLabel) -> Result<Member, CapError> {
+        Ok(Member {
+            node,
+            label,
+            until: STANDING_UNTIL,
+            duration: 0,
+            ids: Vec::new(),
+            standing: self.standing(node)?,
+        })
+    }
+
+    /// This root's sealed badge for `node`, bare: the standing an update or `state` carries for it.
+    pub fn standing(&self, node: VerifyKey) -> Result<Link, CapError> {
+        self.member_badge(
+            node,
+            SystemTime::UNIX_EPOCH + core::time::Duration::from_secs(STANDING_UNTIL),
+        )?
+        .seal()?
+        .link()
     }
 
     /// A slip for `service`, until `until`, that anyone holding it may present or narrow.
