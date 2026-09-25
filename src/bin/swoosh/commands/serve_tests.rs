@@ -1852,6 +1852,54 @@ fn plain_serve_creates_no_runtime_state() {
     );
 }
 
+/// `serve` never presents the root. With a root kept here, sealed, and no terminal for a passphrase prompt
+/// to open, it starts and stops on its expiry: a prompt would have failed, and so would the run.
+#[test]
+fn serve_never_opens_root_key() {
+    use std::os::unix::process::CommandExt as _;
+
+    let scratch = ProcessScratch::new("sealed-root");
+    let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    let minted = runtime.block_on(swoosh::root::Root::mint(
+        &home,
+        &mut swoosh::testkit::Counting::new(["a passphrase for the root"]),
+    ));
+    assert!(
+        matches!(minted, Ok(swoosh::root::Minted::Made(_))),
+        "the home keeps a sealed root: {minted:?}"
+    );
+    drop(minted);
+
+    let mut command = Command::new(swoosh_binary());
+    command
+        .arg("--home")
+        .arg(&scratch.home_dir)
+        .args(["serve", "--quiet", "--expires", "1s"])
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .env_remove("SWOOSH_KEY")
+        .stdin(Stdio::null());
+    // SAFETY: `setsid` is async-signal-safe and touches only the child's own session. The child leaves
+    // the test's terminal, so `/dev/tty` opens for nothing in it.
+    unsafe {
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let output = run_binary_with_deadline(&mut command, Duration::from_secs(30));
+    assert!(
+        output.status.success(),
+        "serve runs beside a sealed root without asking for it: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// `serve --local` must keep the node's address: the bind takes the PERSISTED key, so two runs report
 /// the same NodeId the `identity` verb prints, never a fresh key per run. The banner also prints only
 /// addresses a peer could dial: never the unspecified socket, and loopback only under the mark that

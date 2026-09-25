@@ -1,10 +1,11 @@
 //! The update: the root's signed list of its live devices and its revocations, and its canonical encoding.
 //!
 //! Any device may serve an update, but only the root signs one, so a courier that relays the blob cannot
-//! forge it. This module is the payload, its bounds and its codec; the signing is nauthy's generic
-//! [`sign_document`](nauthy::Identity::sign_document) and [`Signed`](nauthy::Signed). Each live device
-//! carries its name, the end and length of its standing, the ids of its live standings, and its newest
-//! standing (bare), so a device can pick up its own renewal from any peer. No last-seen is carried.
+//! forge it. This module is the payload, its bounds, its codec and its verification; the one cutter is
+//! [`Root::commit`](crate::root::Root::commit), and the envelope is nauthy's [`Signed`](nauthy::Signed).
+//! Each live device carries its name, the end and length of its standing, the ids of its live standings,
+//! and its newest standing (bare), so a device can pick up its own renewal from any peer. No last-seen is
+//! carried.
 
 use nauthy::{Link, SignError, Signed, VerifyKey};
 
@@ -36,7 +37,7 @@ pub(crate) const MAX_ID_LEN: usize = 8 + 2 + MAX_REVOCATION_ID;
 pub(crate) const MAX_MEMBER_LEN: usize =
     VerifyKey::LEN + 2 + DeviceLabel::MAX_LEN + 8 + 8 + 1 + MAX_IDS * MAX_ID_LEN + 2 + MAX_BADGE;
 
-/// The detached ed25519 signature in the envelope [`cut`] writes.
+/// The detached ed25519 signature in the envelope a cut writes.
 const SIGNATURE_LEN: usize = 64;
 
 /// nauthy's signed envelope: the signer key and the signature ahead of the payload ([`Signed::encode`]).
@@ -69,7 +70,7 @@ pub const MAX_ROSTER_BLOB: u64 = (ENVELOPE_LEN
 /// changes, not when a doc is re-cut or re-served. It orders two snapshots a device might see from two
 /// courier nodes: the higher epoch is newer. It is NOT a timestamp (no wall clock, so no pattern-of-life
 /// leak) and NOT a per-member field (no last-seen): it versions the WHOLE doc.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Epoch(pub u64);
 
 impl Epoch {
@@ -255,21 +256,6 @@ impl RosterDoc {
             revoked_keys,
         })
     }
-}
-
-/// Cut a fresh signed roster: canonicalize `doc` and sign it with the signet `identity`, yielding the wire
-/// blob a `roster:` handler serves. The single CUT seam, so the canonicalize-then-sign pair is one call and
-/// a caller cannot sign bytes that are not this doc's canonical form.
-///
-/// DESIGN LOCK, the one-writer rule: the SIGNET is the sole cutter. Only the signet SECRET can
-/// produce a signature the signet verifies, so cutting a roster requires the secret (this `identity`), and
-/// there is exactly ONE writer. SERVE (relaying an already-signed blob) needs only the bytes, so any member
-/// node may courier a roster, but none may cut one. Multi-writer is rejected by rule: two signet-holding
-/// devices cutting concurrently is not supported, which is what makes reconciliation trivial (highest epoch
-/// wins, a total order, because one writer never reuses an epoch). Any feature that would need a second
-/// writer (co-owned fleets, delegated cutting) is a new design, not a roster change.
-pub fn cut(identity: &nauthy::Identity, doc: &RosterDoc) -> Vec<u8> {
-    identity.sign_document(&doc.canonical_bytes()).encode()
 }
 
 /// Verify a wire blob against `signet` and parse the enclosed roster. The single VERIFY seam, so

@@ -24,7 +24,8 @@ use zeroize::Zeroizing;
 
 use crate::contacts::DeviceLabel;
 use crate::passphrase::Prompt;
-use crate::roster::Member;
+use crate::roster::{Member, RosterDoc};
+use crate::state::State;
 
 /// When a test standing ends, in unix seconds: far enough out that no test outlives it.
 pub const STANDING_UNTIL: u64 = 4_000_000_000;
@@ -187,6 +188,16 @@ impl Keys {
     pub fn sign(&self, bytes: &[u8]) -> Signed {
         self.identity.sign_document(bytes)
     }
+
+    /// `doc`, signed by this key: the bytes a root act cuts and every device serves.
+    pub fn sign_update(&self, doc: &RosterDoc) -> Vec<u8> {
+        self.sign(&doc.canonical_bytes()).encode()
+    }
+
+    /// `state`, signed by this key: the bytes a root's copy holds in its `state` file.
+    pub fn sign_state(&self, state: &State) -> Vec<u8> {
+        self.sign(&state.canonical_bytes()).encode()
+    }
 }
 
 /// Device badges no mint here can sign, for a reader that must refuse them. Each was signed once, by
@@ -225,15 +236,16 @@ pub mod hand_signed {
     const UNREADABLE_END_DATE: &str = "ed01rbfyqv7u5kqwcpdbkbg3gtkl5lzumul2byy54pg52tm3iia5tufq.ck7aecwraefauzlyobuxezltl5qxicqboqfayytpovxgix3emv3gsy3fbiawicrymvsdamjsmjtgyzlnor2wm3zsnn3w64lunzrtm5lnmzygknbtnfrwk43wpbsgsylxpbwdiztfmnzhizttnr4hcnbtoemamiqibidaqeasaiyaciqsbiiaraaicifsb77777777777777qcmrnbivquaqidmjaocafcibqraiidioaubikameiccakbufawih77777777777776aikaqnaecacgitaujakaiebweqibcbaqeqdbcbqqgqubicquayiqmeaubikammiicakaqnaecavcisaqaaseczpw4arhdawc5evu7eewkf4zwzfvzatltsllzvuoapwcbgs3j3pggsa2scnkknecq6w5ehdo5li62ghci3yhglq6mstgyvxlxnjxu54xsjy2daj26gwzop45b6v6ue7w74yz3mk7eu6sbc25adobrcapenu2driaereeesavqcob3tukcm4xzxcrte7ty6bpjy2wcqniqczybsk2hqsnggwiev44vjnypzfxem7cxxdh2lnoqhvfk7pjofr3h5lkgcosm3sibri4di";
 }
 
-/// A [`Prompt`] that counts prompt events and answers from a script.
+/// A [`Prompt`] that counts prompt events and the passphrases they read, and answers from a script.
 ///
 /// One event is one call to `unlock` or `choose`, whatever the terminal behind it would read: `choose`
-/// asks for the passphrase twice, and is still one event. A call with no answer left is still an event:
-/// it refuses the way a missing terminal does, after being asked. So a test that scripts nothing and
-/// reads a count of zero proves nothing was asked.
+/// asks for the passphrase twice, and is still one event of two reads. A call with no answer left is
+/// still an event: it refuses the way a missing terminal does, after being asked. So a test that scripts
+/// nothing and reads a count of zero proves nothing was asked.
 pub struct Counting {
     answers: VecDeque<&'static str>,
     events: usize,
+    reads: usize,
 }
 
 impl Counting {
@@ -242,6 +254,7 @@ impl Counting {
         Self {
             answers: answers.into_iter().collect(),
             events: 0,
+            reads: 0,
         }
     }
 
@@ -255,8 +268,14 @@ impl Counting {
         self.events
     }
 
-    fn answer(&mut self) -> eyre::Result<Passphrase> {
+    /// How many passphrases the events read: one per `unlock`, two per `choose`.
+    pub fn reads(&self) -> usize {
+        self.reads
+    }
+
+    fn answer(&mut self, reads: usize) -> eyre::Result<Passphrase> {
         self.events += 1;
+        self.reads += reads;
         let answer = self
             .answers
             .pop_front()
@@ -266,12 +285,16 @@ impl Counting {
 }
 
 impl Prompt for Counting {
+    fn terminal(&self) -> bool {
+        true
+    }
+
     fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
-        self.answer()
+        self.answer(1)
     }
 
     fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
-        self.answer()
+        self.answer(2)
     }
 }
 

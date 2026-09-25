@@ -1,13 +1,9 @@
-//! The signed roster ARTIFACT in the node home: `<home>/roster`, cut on change and served on demand.
+//! The signed update in the node home: `<home>/roster`, written where a root act cuts it and served on
+//! demand.
 //!
-//! Signing needs the signet secret, and a long-lived `serve` deliberately must not hold it, so the cut
-//! cannot happen per request. It happens where the change happens instead: `invite add` and the `me/*`
-//! contact edits already hold the secret, are local, and are the only acts that alter membership, so they
-//! re-cut and write this file. `serve` then only ever READS it.
-//!
-//! That split buys two properties by construction. The long-lived process never holds a signing identity,
-//! and a relay-only node (one that does not hold the signet) writes no artifact at all, so it is
-//! physically unable to mis-cut a roster signed by the wrong key.
+//! Signing needs the root, and a long-lived `serve` must never hold it, so the cut cannot happen per
+//! request. It happens where the change happens instead: the root act that cuts writes this file, and
+//! `serve` only ever READS it.
 //!
 //! It also makes the roster eligible for the refresh shape this family already uses twice
 //! ([`nauthy::FileDenylist`] and [`tightbeam::enabled::FileDisabledList`]): read on demand, with a
@@ -20,8 +16,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime};
-
-use super::RosterDoc;
 
 /// The stat debounce, mirroring `nauthy::FileDenylist` and `tightbeam::FileDisabledList` so all three
 /// oracles behave identically. A pull is far rarer than an admit, so this is not a hot-path saving; it is
@@ -127,23 +121,17 @@ impl Artifact {
         state.stamp = current;
     }
 
-    /// Sign `doc` with the signet `identity` and write the artifact to `path`, replacing any previous cut.
+    /// Write `blob`, a signed update, to `path`, replacing the previous one.
     ///
-    /// The ONE write seam, so the canonicalize-sign-persist trio is a single call and no caller can
-    /// persist bytes that are not this doc's signed canonical form. Written to a sibling temp and renamed
-    /// over the target, so a `serve` reading concurrently sees the old blob or the new one, never a torn
-    /// one; the artifact is public (it is handed to every member) so it takes no private mode.
-    pub async fn write(
-        path: &Path,
-        identity: &nauthy::Identity,
-        doc: &RosterDoc,
-    ) -> Result<(), ArtifactError> {
-        let blob = super::cut(identity, doc);
+    /// Written to a sibling temp and renamed over the target, so a `serve` reading concurrently sees the
+    /// old blob or the new one, never a torn one; the artifact is public (it is handed to every member) so
+    /// it takes no private mode.
+    pub async fn write(path: &Path, blob: &[u8]) -> Result<(), ArtifactError> {
         if let Some(parent) = path.parent() {
             crate::config::create_store_dir(parent).map_err(ArtifactError::Write)?;
         }
         let temp = path.with_extension("tmp");
-        tokio::fs::write(&temp, &blob)
+        tokio::fs::write(&temp, blob)
             .await
             .map_err(ArtifactError::Write)?;
         tokio::fs::rename(&temp, path)

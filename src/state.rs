@@ -265,11 +265,6 @@ fn check_rows(rows: &[Row], revoked_keys: &[VerifyKey]) -> Result<(), FormatErro
     unique_labels(live().map(|row| &row.label))
 }
 
-/// Sign `state` with the root `identity`: the bytes [`write`] stores.
-pub fn sign(identity: &nauthy::Identity, state: &State) -> Vec<u8> {
-    identity.sign_document(&state.canonical_bytes()).encode()
-}
-
 /// Verify signed bytes against `root` and parse the `state` inside.
 pub fn verify(bytes: &[u8], root: VerifyKey) -> Result<State, StateVerifyError> {
     let signed = Signed::decode(bytes)?;
@@ -291,7 +286,10 @@ pub enum StateVerifyError {
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
     /// Neither `state` nor `state.new` holds valid records of this root.
-    #[error("the root's records in {} are damaged: restore the root with swoosh restore <dir>", dir.display())]
+    #[error(
+        "this root's records were changed outside swoosh ({}): refusing to sign with them. Use another copy.",
+        dir.display()
+    )]
     Damaged {
         /// The root's directory.
         dir: PathBuf,
@@ -307,7 +305,7 @@ pub enum StateError {
     },
 }
 
-/// Store `signed` (from [`sign`]) as `dir/state`: write `state.new` and fsync it, rename it over `state`,
+/// Store `signed` (the root's signature over [`State::canonical_bytes`]) as `dir/state`: write `state.new` and fsync it, rename it over `state`,
 /// then fsync `dir`. A crash at any point leaves the old `state` or the new one, and [`load`] finds it.
 pub fn write(dir: &Path, signed: &[u8]) -> io::Result<()> {
     write_with(&mut RealDisk, dir, signed)

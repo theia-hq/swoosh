@@ -20,6 +20,10 @@ const MAX_LINE: usize = 1024;
 
 /// Where a verb gets a passphrase from.
 pub trait Prompt {
+    /// Whether a person can be asked at all. A check that runs before anything is printed or written,
+    /// so a command that must ask refuses up front rather than half way.
+    fn terminal(&self) -> bool;
+
     /// The passphrase the sealed key file at `path` opens under.
     fn unlock(&mut self, path: &Path) -> eyre::Result<Passphrase>;
 
@@ -33,20 +37,45 @@ pub trait Prompt {
 pub struct Terminal;
 
 impl Prompt for Terminal {
+    fn terminal(&self) -> bool {
+        Tty::open().is_ok()
+    }
+
     fn unlock(&mut self, path: &Path) -> eyre::Result<Passphrase> {
-        let text = Tty::open()?.ask(&format!("passphrase for {}: ", path.display()))?;
-        passphrase(text)
+        if is_root(path) {
+            let tty = Tty::open().map_err(|_| eyre::eyre!(crate::root::UNLOCK_NEEDS_TERMINAL))?;
+            return passphrase(tty.ask("root passphrase: ")?);
+        }
+        passphrase(Tty::open()?.ask(&format!("passphrase for {}: ", path.display()))?)
     }
 
     fn choose(&mut self, path: &Path) -> eyre::Result<Passphrase> {
-        let tty = Tty::open()?;
-        let first = tty.ask(&format!("new passphrase for {}: ", path.display()))?;
-        let second = tty.ask("repeat the new passphrase: ")?;
+        let (question, again) = if is_root(path) {
+            ("root passphrase: ".to_owned(), "again: ")
+        } else {
+            (
+                format!("new passphrase for {}: ", path.display()),
+                "repeat the new passphrase: ",
+            )
+        };
+        let tty = if is_root(path) {
+            Tty::open().map_err(|_| eyre::eyre!(crate::root::MINT_NEEDS_TERMINAL))?
+        } else {
+            Tty::open()?
+        };
+        let first = tty.ask(&question)?;
+        let second = tty.ask(again)?;
         if first != second {
             eyre::bail!("the two passphrases did not match; nothing was changed");
         }
         passphrase(first)
     }
+}
+
+/// Whether `path` is a root's key file, whose passphrase is asked for as the root's rather than by path.
+fn is_root(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name == crate::root::KEY_FILE)
 }
 
 /// Typed text as a passphrase: put in the one byte form every sealed file uses, and never empty.
@@ -272,6 +301,10 @@ impl Scripted {
 
 #[cfg(test)]
 impl Prompt for Scripted {
+    fn terminal(&self) -> bool {
+        true
+    }
+
     fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
         self.next()
     }

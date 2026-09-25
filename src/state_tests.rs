@@ -9,7 +9,7 @@ use nauthy::{RevocationId, VerifyKey};
 
 use super::{
     Disk, FILE, MAX_ROWS, RealDisk, Row, STAGED, State, StateError, load, recover, recover_with,
-    sign, verify, write, write_with,
+    verify, write, write_with,
 };
 use crate::codec::{FormatError, Id};
 use crate::contacts::DeviceLabel;
@@ -67,9 +67,9 @@ fn dir(tag: &str) -> PathBuf {
 }
 
 #[test]
-fn a_state_round_trips_through_sign_and_verify() {
+fn a_state_round_trips_through_its_signature_and_verify() {
     let state = sample(4);
-    let signed = sign(root().identity(), &state);
+    let signed = root().sign_state(&state);
     assert_eq!(verify(&signed, root().verify_key()), Ok(state));
 }
 
@@ -169,8 +169,8 @@ fn root_documents_never_parse_as_each_other() {
             Ok(sample(3)),
         ),
     ] {
-        let update = roster::cut(root.identity(), &update);
-        let state = sign(root.identity(), &state.unwrap());
+        let update = root.sign_update(&update);
+        let state = root.sign_state(&state.unwrap());
         assert!(matches!(
             verify(&update, root.verify_key()),
             Err(super::StateVerifyError::Payload(FormatError::BadMagic))
@@ -255,10 +255,10 @@ fn a_torn_write_leaves_one_consistent_state() {
     let root = root();
     let old = sample(1);
     let new = sample(2);
-    let signed = sign(root.identity(), &new);
+    let signed = root.sign_state(&new);
     for fail_at in 0.. {
         let dir = dir(&format!("torn-{fail_at}"));
-        write(&dir, &sign(root.identity(), &old)).unwrap();
+        write(&dir, &root.sign_state(&old)).unwrap();
         let mut disk = Faulty { calls: 0, fail_at };
         let done = write_with(&mut disk, &dir, &signed).is_ok();
         let read_back = recover(&dir, root.verify_key()).expect("one valid state survives");
@@ -282,7 +282,7 @@ fn a_valid_staged_state_is_promoted_when_state_is_not() {
     let root = root();
     let dir = dir("promote");
     let staged = sample(5);
-    std::fs::write(dir.join(STAGED), sign(root.identity(), &staged)).unwrap();
+    std::fs::write(dir.join(STAGED), root.sign_state(&staged)).unwrap();
     std::fs::write(dir.join(FILE), b"torn").unwrap();
     assert_eq!(recover(&dir, root.verify_key()).unwrap(), staged);
     assert!(
@@ -298,26 +298,22 @@ fn a_valid_state_wins_over_a_staged_one() {
     let root = root();
     let dir = dir("wins");
     let current = sample(1);
-    write(&dir, &sign(root.identity(), &current)).unwrap();
-    std::fs::write(dir.join(STAGED), sign(root.identity(), &sample(2))).unwrap();
+    write(&dir, &root.sign_state(&current)).unwrap();
+    std::fs::write(dir.join(STAGED), root.sign_state(&sample(2))).unwrap();
     assert_eq!(recover(&dir, root.verify_key()).unwrap(), current);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
-fn no_valid_state_refuses_as_damaged_naming_restore() {
+fn no_valid_state_refuses_as_changed_outside_swoosh() {
     let root = root();
     let dir = dir("damaged");
     std::fs::write(dir.join(FILE), b"torn").unwrap();
     // Signed by another root: it verifies under nothing this home trusts.
-    std::fs::write(
-        dir.join(STAGED),
-        sign(TestRoot::seeded(8).identity(), &sample(1)),
-    )
-    .unwrap();
+    std::fs::write(dir.join(STAGED), TestRoot::seeded(8).sign_state(&sample(1))).unwrap();
     let error = recover_with(&mut RealDisk, &dir, root.verify_key()).unwrap_err();
     assert!(matches!(error, StateError::Damaged { .. }));
-    assert!(error.to_string().contains("swoosh restore"));
+    assert!(error.to_string().contains("changed outside swoosh"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -396,7 +392,7 @@ fn loading_never_promotes_state_new() {
     let root = root();
     let dir = dir("load");
     let staged = sample(5);
-    std::fs::write(dir.join(STAGED), sign(root.identity(), &staged)).unwrap();
+    std::fs::write(dir.join(STAGED), root.sign_state(&staged)).unwrap();
     std::fs::write(dir.join(FILE), b"torn").unwrap();
     assert_eq!(load(&dir, root.verify_key()).unwrap(), staged);
     assert!(dir.join(STAGED).exists(), "state.new is left where it was");
@@ -416,7 +412,7 @@ fn state_is_written_owner_only() {
 
     let root = root();
     let state = sample(1);
-    let signed = sign(root.identity(), &state);
+    let signed = root.sign_state(&state);
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
 
     let dir = dir("owner-only");
