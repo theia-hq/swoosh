@@ -359,7 +359,7 @@ fn is_revoked(revoked: &DisabledRoots, key: NodeId) -> bool {
 
 /// This machine's own key, from its key file's header. `None` when the home has no key yet.
 fn own_key(home: &Home) -> Result<Option<NodeId>, StandingError> {
-    KeyFile::device(home.identity_key())
+    KeyFile::device(home.key())
         .load()
         .map(|stored| stored.map(|stored| stored.node_id()))
         .map_err(StandingError::OwnKey)

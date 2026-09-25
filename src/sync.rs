@@ -405,7 +405,7 @@ pub async fn devices(
     home: &Home,
     also: impl IntoIterator<Item = (VerifyKey, String)>,
 ) -> eyre::Result<Vec<Device>> {
-    let own = keystore::KeyFile::device(home.identity_key())
+    let own = keystore::KeyFile::device(home.key())
         .load()?
         .map(|stored| stored.node_id());
     let mut revoked: Vec<NodeId> = revoked_keys_here(home);

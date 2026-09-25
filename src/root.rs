@@ -1785,7 +1785,7 @@ fn read_lines(path: &Path) -> Result<Vec<String>, RootError> {
 
 /// This machine's key, from its key file's header, when it has one.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, RootError> {
-    KeyFile::device(home.identity_key())
+    KeyFile::device(home.key())
         .load()?
         .map(|stored| stored.node_id().verify_key())
         .transpose()

@@ -182,7 +182,7 @@ async fn a_disabled_signet_is_refused_even_with_force() {
         "refused for the disabled signet: {refused:#}"
     );
     assert!(!home.signet().exists(), "no signet was written");
-    assert!(!home.identity_key().exists(), "no identity was written");
+    assert!(!home.key().exists(), "no identity was written");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -11,7 +11,7 @@ On the machine that will hold your signet, create the key sealed under a passphr
 <!-- manual: the passphrase is typed at the terminal -->
 ```console
 $ swoosh identity protect passphrase
-new passphrase for ~/.config/swoosh/identity.key:
+new passphrase for ~/.config/swoosh/key:
 repeat the new passphrase:
 ed012xdjkuwbokai5brwac6varo7xsvuxba6wmfkottpronrhjavyp4q
 protection: passphrase
@@ -32,7 +32,7 @@ node in the foreground; `swoosh serve &` stops at the prompt until you bring it 
 <!-- manual: the backup destination is a path only the operator knows -->
 ```console
 $ swoosh identity export /Volumes/backup/signet.key
-passphrase for ~/.config/swoosh/identity.key:
+passphrase for ~/.config/swoosh/key:
 new passphrase for /Volumes/backup/signet.key:
 repeat the new passphrase:
 exported to /Volumes/backup/signet.key
@@ -75,7 +75,7 @@ node that is serving.
 
 ## A restore brings back the key, nothing else
 
-Revocations are a separate file. `revoked` sits beside `identity.key` in the home, one line per recalled
+Revocations are a separate file. `revoked` sits beside `key` in the home, one line per recalled
 grant, and the backup carries none of it. Restore into an empty home and that node starts with no denylist,
 so every grant you had revoked is admitted again until it expires. Copy `revoked` from your old home, or
 revoke those grants again.

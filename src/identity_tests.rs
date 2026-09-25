@@ -1,5 +1,5 @@
 //! The persisted identity file's failure modes: a corrupt, too-open, or ALREADY-PROVISIONED
-//! `identity.key` is refused, never silently replaced, a write is atomic (a failed one leaves the store
+//! `key` is refused, never silently replaced, a write is atomic (a failed one leaves the store
 //! exactly as it was), and a sealed key opens only under its passphrase and never becomes a new identity.
 
 use std::path::PathBuf;
@@ -23,12 +23,12 @@ pub(super) fn home(tag: &str) -> (Home, PathBuf) {
     (home, dir)
 }
 
-/// A wrong-size `identity.key` is corrupt or foreign: reading it fails closed with the size named, and
+/// A wrong-size `key` is corrupt or foreign: reading it fails closed with the size named, and
 /// `Persisted` never mints a fresh key over the file (the old silent-overwrite bug this guards).
 #[tokio::test]
 async fn a_wrong_size_key_file_refuses_and_is_never_overwritten() {
     let (home, dir) = home("wrong-size");
-    let path = home.identity_key();
+    let path = home.key();
     let corrupt = [7u8; 16];
     std::fs::write(&path, corrupt).expect("seed a wrong-size key file");
     // The mode guard reads before the size check, so lock the corrupt file owner-only: this test is about
@@ -76,7 +76,7 @@ async fn a_wrong_size_key_file_refuses_and_is_never_overwritten() {
 #[tokio::test]
 async fn a_write_lands_the_key_atomically_owner_only() {
     let (home, dir) = home("atomic");
-    let path = home.identity_key();
+    let path = home.key();
 
     super::write(&[1u8; 32], &home).await.expect("first write");
     assert_eq!(
@@ -107,7 +107,7 @@ async fn a_write_lands_the_key_atomically_owner_only() {
         .collect();
     assert_eq!(
         entries,
-        vec!["identity.key".to_owned()],
+        vec!["key".to_owned()],
         "the atomic write leaves no temp sibling behind: {entries:?}"
     );
 
@@ -124,7 +124,7 @@ async fn a_write_lands_the_key_atomically_owner_only() {
 #[tokio::test]
 async fn a_write_refuses_a_home_that_already_holds_a_different_key() {
     let (home, dir) = home("already-provisioned");
-    let path = home.identity_key();
+    let path = home.key();
     let provisioned = [9u8; 32];
     super::write(&provisioned, &home)
         .await
@@ -171,7 +171,7 @@ async fn a_failed_write_leaves_the_store_untouched() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let (home, dir) = home("failed-write");
-    let path = home.identity_key();
+    let path = home.key();
 
     // Drop write permission on the store dir: the write cannot create its temp sibling.
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500))
@@ -199,7 +199,7 @@ async fn a_group_or_world_readable_key_is_refused_with_a_chmod_hint() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let (home, dir) = home("too-open");
-    let path = home.identity_key();
+    let path = home.key();
     let seed = [5u8; 32];
     std::fs::write(&path, seed).expect("seed the key");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod 644");
@@ -234,7 +234,7 @@ async fn a_group_or_world_readable_key_is_refused_with_a_chmod_hint() {
 #[tokio::test]
 async fn an_outward_dial_never_creates_the_key_under_an_explicit_home() {
     let (home, dir) = home("outward-no-create");
-    let path = home.identity_key();
+    let path = home.key();
 
     let dialed = super::resolve(super::Identity::PersistedIfPresent, &home)
         .await
@@ -301,7 +301,7 @@ async fn a_sealed_key_opens_under_its_passphrase() {
 async fn a_wrong_passphrase_is_never_a_new_identity() {
     let (home, dir) = home("sealed-wrong");
     sealed(&home, "correct horse");
-    let before = std::fs::read(home.identity_key()).expect("read the sealed key");
+    let before = std::fs::read(home.key()).expect("read the sealed key");
 
     for intent in [
         super::Identity::Persisted,
@@ -318,7 +318,7 @@ async fn a_wrong_passphrase_is_never_a_new_identity() {
         );
     }
     assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
+        std::fs::read(home.key()).expect("read it back"),
         before,
         "the sealed key survives a failed unlock untouched"
     );
@@ -354,12 +354,12 @@ async fn re_adopting_a_sealed_key_proves_it_and_keeps_it_sealed() {
     )
     .expect("open the sealed key")
     .with_bytes(|seed| *seed);
-    let before = std::fs::read(home.identity_key()).expect("read the sealed key");
+    let before = std::fs::read(home.key()).expect("read the sealed key");
 
     super::write_with(&seed, &home, &mut Scripted::new(["correct horse"]))
         .expect("the same key, proven, is a no-op");
     assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
+        std::fs::read(home.key()).expect("read it back"),
         before,
         "the sealed file is left exactly as it was"
     );

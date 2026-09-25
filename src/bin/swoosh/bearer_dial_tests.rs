@@ -114,7 +114,7 @@ async fn share(server: &Scratch, bind: Bind) -> Link {
             .unwrap(),
         expiry: nauthy::Request::expires_in(lifetime),
     };
-    Grants::at(server.home.grants())
+    Grants::at(server.home.links())
         .append(&record)
         .await
         .unwrap();

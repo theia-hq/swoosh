@@ -9,9 +9,9 @@
 //! holder, and `grant ls`, read. It is a who-can-reach-what record, so it is written `0600`, and it lives
 //! in the node home beside the identity so one home moves the whole identity and trust unit together.
 //!
-//! Every writer takes the exclusive flock on `<home>/grants.lock`. An [`append`](Grants::append) is one
+//! Every writer takes the exclusive flock on `<home>/links.lock`. An [`append`](Grants::append) is one
 //! `O_APPEND` line and a `sync_data`, so a link is on disk before it is printed; a rewrite (the prune an
-//! append runs once enough rows have expired) writes `grants.new`, syncs it and renames it over `grants`.
+//! append runs once enough rows have expired) writes `links.new`, syncs it and renames it over `links`.
 
 use core::num::ParseIntError;
 use core::str::FromStr;
@@ -31,7 +31,7 @@ use nauthy::{FileStamp, IssuedIds, RevocationId, STAT_DEBOUNCE, Service, Service
 pub const PRUNE_AT: usize = 64;
 
 /// The persisted ledger backing a node home. Owns the load / append / prune logic over its path; the
-/// location is the caller's to choose (see [`Home::grants`](crate::home::Home::grants)), and the lock and
+/// location is the caller's to choose (see [`Home::links`](crate::home::Home::links)), and the lock and
 /// the rewrite's temp are its siblings, `<path>.lock` and `<path>.new`.
 pub struct Grants {
     path: PathBuf,
@@ -67,7 +67,7 @@ impl Grants {
     /// after this never prints a link whose row a crash could lose.
     ///
     /// When at least [`PRUNE_AT`] rows have expired, the append first rewrites the file without them. The
-    /// lock is what makes that safe: a rewrite reads, writes `grants.new` and renames it over `grants`, and
+    /// lock is what makes that safe: a rewrite reads, writes `links.new` and renames it over `links`, and
     /// a concurrent append to the old file would be lost in between.
     ///
     /// The private posture is reasserted every append: the config dir is `0700` and the ledger `0600`,
@@ -242,10 +242,10 @@ struct LedgerState {
 }
 
 impl IssuedLedger {
-    /// The ledger at `<home>/grants`, read once now so `serve` logs an unreadable ledger at start.
+    /// The ledger at `<home>/links`, read once now so `serve` logs an unreadable ledger at start.
     pub fn open(home: &crate::home::Home) -> Self {
         let ledger = Self {
-            path: home.grants(),
+            path: home.links(),
             state: Mutex::new(LedgerState {
                 ids: HashSet::new(),
                 stamp: None,

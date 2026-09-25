@@ -110,7 +110,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     // 3. The device adopts, keeping its identity; the trust + badge land beside it.
     let adopt = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
     assert!(adopt.status.success(), "adopt failed: {}", stderr(&adopt));
-    let device_seed: [u8; 32] = std::fs::read(device_dir.join("identity.key"))
+    let device_seed: [u8; 32] = std::fs::read(device_dir.join("key"))
         .unwrap()
         .try_into()
         .expect("the device key is 32 bytes");
@@ -124,7 +124,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .await
         .unwrap()
         .expect("adopt wrote the signet the device's gate will arm from");
-    let owner_seed: [u8; 32] = std::fs::read(signet_dir.join("identity.key"))
+    let owner_seed: [u8; 32] = std::fs::read(signet_dir.join("key"))
         .unwrap()
         .try_into()
         .expect("the owner key is 32 bytes");

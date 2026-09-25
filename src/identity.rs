@@ -1,7 +1,7 @@
 //! The node identity: the ed25519 secret every swoosh verb binds under.
 //!
 //! Identity is chosen by intent, and exactly one intent CREATES a key. A verb that must be *reachable at
-//! a stable address* (`serve`) persists its secret at `<home>/identity.key`: it loads that key and writes
+//! a stable address* (`serve`) persists its secret at `<home>/key`: it loads that key and writes
 //! one on first use, so restarting the node keeps its address. A verb that only *reaches outward* (`ping`,
 //! `speed`, `reach`, including the `reach` behind `swoosh ssh`) LOADS that key when it already exists,
 //! because the membership badge it presents must root at the key the dial binds under, and mints a
@@ -28,7 +28,7 @@
 //! The secret is a [`Secret`] newtype, never a bare `[u8; 32]`: it zeroizes its bytes on drop so the
 //! key does not linger in freed memory, and it lends them out only at the boundaries that need them raw.
 //!
-//! The persisted default lives at `~/.config/swoosh/identity.key`, mode 0600.
+//! The persisted default lives at `~/.config/swoosh/key`, mode 0600.
 
 use bifrost::NodeId;
 use keystore::{KeyFile, Protection, Stored};
@@ -159,7 +159,7 @@ pub enum Identity {
     PersistedIfPresent,
 }
 
-/// Resolve the secret a verb binds under from its home: the key is always `<home>/identity.key`, and the
+/// Resolve the secret a verb binds under from its home: the key is always `<home>/key`, and the
 /// verb's [`Identity`] ALONE decides whether one is written.
 ///
 /// The home names the directory, default or explicit alike. A `--home`/`SWOOSH_HOME` run does not turn an
@@ -192,7 +192,7 @@ pub fn resolve_with(
     }
 }
 
-/// Load the persisted secret at `<home>/identity.key` if the file exists and holds a key, else `None`,
+/// Load the persisted secret at `<home>/key` if the file exists and holds a key, else `None`,
 /// WITHOUT creating one. A bound invite carries no seed, so `adopt` uses this to require the key the
 /// badge was signed for; a home with no identity gets a teaching error, never a fresh key minted over
 /// the invite's binding.
@@ -215,7 +215,7 @@ pub fn inspect(home: &Home) -> eyre::Result<Stored> {
 
 /// The home's key file.
 fn key_file(home: &Home) -> KeyFile {
-    KeyFile::device(home.identity_key())
+    KeyFile::device(home.key())
 }
 
 /// The key the file holds, unlocked, or `None` only when nothing is at the path.
@@ -249,7 +249,7 @@ fn create_dir(file: &KeyFile) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Write `seed` as the persisted identity at `<home>/identity.key`, plain, mode 0600, creating the store
+/// Write `seed` as the persisted identity at `<home>/key`, plain, mode 0600, creating the store
 /// dir, REFUSING a home that already holds a different one.
 ///
 /// This is how `adopt` provisions the device identity a later `serve` binds: it MUST land in the same

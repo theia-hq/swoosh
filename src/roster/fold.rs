@@ -170,7 +170,7 @@ async fn pick_up(
     pin: VerifyKey,
     badge_until: SystemTime,
 ) -> Result<(), FoldError> {
-    let own = keystore::KeyFile::device(home.identity_key())
+    let own = keystore::KeyFile::device(home.key())
         .load()
         .map_err(|error| eyre::eyre!(error))?
         .map(|stored| stored.node_id().verify_key());

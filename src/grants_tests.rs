@@ -244,7 +244,7 @@ fn issued(writer: u8, index: u8, live: bool) -> GrantRecord {
 
 /// Two writers, each with its own handle as two processes would have, issue 100 links each while a prune
 /// runs on nearly every append (each writer adds an expired row before each live one, and the threshold
-/// is one). A prune reads the file, writes `grants.new` and renames it over `grants`, so without the lock
+/// is one). A prune reads the file, writes `links.new` and renames it over `links`, so without the lock
 /// an append landing in between goes to the replaced file and is lost.
 #[test]
 fn concurrent_issues_never_lose_a_ledger_row() {

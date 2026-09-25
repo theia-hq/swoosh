@@ -212,7 +212,7 @@ async fn record(
         root_id,
         expiry: nauthy::Request::expires_in(ttl),
     };
-    Grants::at(home.grants()).append(&record).await?;
+    Grants::at(home.links()).append(&record).await?;
 
     // The reserved `me` petname is a constant and always parses; `?` satisfies the no-`expect` rule.
     // `refuse_shadowed` ran before signing, so this `add` can only create the binding or leave it

@@ -88,7 +88,7 @@ fn a_stored_link_carries_no_prefix() {
 
     let badge = std::fs::read_to_string(Home::resolve(Some(device)).unwrap().badge())
         .expect("adopt stores the badge");
-    let ledger = std::fs::read_to_string(Home::resolve(Some(owner)).unwrap().grants())
+    let ledger = std::fs::read_to_string(Home::resolve(Some(owner)).unwrap().links())
         .expect("the ledger is written");
     for (file, text) in [("badge", &badge), ("ledger", &ledger)] {
         assert!(!text.is_empty(), "{file} holds something");
@@ -101,4 +101,20 @@ fn a_stored_link_carries_no_prefix() {
         .trim()
         .parse::<nauthy::Link>()
         .expect("the stored badge is nauthy's bare link");
+}
+
+/// A fresh home's first key is `<home>/key` and its first link row is in `<home>/links`; no file under an
+/// older name is written.
+#[test]
+fn a_fresh_home_writes_key_and_links() {
+    let scratch = Scratch::new("fresh");
+    let home = scratch.home("owner");
+    swoosh(&home, &["grant", "issue", "ping"]);
+
+    assert!(home.join("key").is_file(), "the key is <home>/key");
+    let rows = std::fs::read_to_string(home.join("links")).expect("the row is in <home>/links");
+    assert_eq!(rows.lines().count(), 1, "one link, one row: {rows}");
+    for old in ["identity.key", "grants"] {
+        assert!(!home.join(old).exists(), "nothing is written at {old}");
+    }
 }

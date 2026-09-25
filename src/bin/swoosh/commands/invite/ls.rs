@@ -34,7 +34,7 @@ impl LsCmd {
     /// `-`), the key it admits, and the remaining lifetime of the live badge it holds. An empty ledger
     /// prints a friendly line, not a blank.
     pub async fn run(self, contacts: &Contacts, home: &Home) -> eyre::Result<()> {
-        let records: Vec<GrantRecord> = Grants::at(home.grants())
+        let records: Vec<GrantRecord> = Grants::at(home.links())
             .load()
             .await?
             .into_iter()

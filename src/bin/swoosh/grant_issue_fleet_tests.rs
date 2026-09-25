@@ -53,7 +53,7 @@ async fn issuing_for_a_raw_signet_records_a_fleet_grant_keyed_by_the_signet() {
         .expect("issuing a fleet grant for a raw signet succeeds");
 
     // The ledger records exactly one Fleet grant, sealed, keyed by the signet key string.
-    let records = Grants::at(home.grants()).load().await.unwrap();
+    let records = Grants::at(home.links()).load().await.unwrap();
     let [record] = records.as_slice() else {
         panic!("expected exactly one recorded grant, got {}", records.len());
     };
@@ -106,7 +106,7 @@ async fn issuing_for_a_petname_binds_that_persons_stored_signet() {
         .await
         .expect("a petname with a stored signet resolves and mints");
 
-    let records = Grants::at(home.grants()).load().await.unwrap();
+    let records = Grants::at(home.links()).load().await.unwrap();
     let [record] = records.as_slice() else {
         panic!("expected exactly one recorded grant, got {}", records.len());
     };
@@ -194,7 +194,7 @@ async fn a_device_issues_its_own_grant() {
         .run(store_at(&dir).await, &home)
         .await
         .expect("a device issues a link of its own");
-    let records = Grants::at(home.grants()).load().await.unwrap();
+    let records = Grants::at(home.links()).load().await.unwrap();
     assert_eq!(records.len(), 1, "the link is recorded");
 
     let _ = std::fs::remove_dir_all(&dir);

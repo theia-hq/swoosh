@@ -58,7 +58,7 @@ trap 'if [ -n "$SERVE_PID" ]; then kill "$SERVE_PID" 2>/dev/null || true; fi; rm
 
 # Three sovereign identities, one per home dir. `--home` pins the whole node
 # home (key + address book + signet + badge), so three homes is three identities.
-# The key lives at `<home>/identity.key` within each.
+# The key lives at `<home>/key` within each.
 SERVER="$WORK/server"
 MEMBER="$WORK/member"
 STRANGER="$WORK/stranger"
