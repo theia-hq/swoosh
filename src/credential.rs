@@ -119,15 +119,23 @@ impl Credential {
     }
 }
 
+/// The one moment this process asks whether a link admits anyone. A run asks more than once (the key it
+/// binds and the credential it presents are read apart), and a link that expired between two asks would
+/// bind a throwaway key yet present this home's badge under it. Asked at one moment, every ask agrees.
+static ASKED_AT: std::sync::LazyLock<std::time::SystemTime> =
+    std::sync::LazyLock::new(std::time::SystemTime::now);
+
 /// Whether `link` admits a dialer it was never bound to, for `service`: the `anyone` link. It is asked of a
 /// key nobody holds, so a link bound to a device or to a root's devices reads as bound, and so does one
-/// that cannot admit anyone at all (expired, or for another service), which then dials as this home.
+/// that cannot admit anyone at all (expired, or for another service), which then dials as this home. It is
+/// asked at [`ASKED_AT`], so every ask in one run gets the same answer.
 pub fn admits_anyone(link: &Link, service: &str) -> bool {
     let (Ok(service), Ok(stranger)) = (service.parse::<Service>(), nauthy::Identity::generate())
     else {
         return false;
     };
-    let request = Request::now(service).bound_to(stranger.verifying_key());
+    let mut request = Request::now(service).bound_to(stranger.verifying_key());
+    request.now = *ASKED_AT;
     link.cap()
         .verify_at_root_without_revocation(&request, link.root())
         .is_ok()
@@ -142,4 +150,37 @@ pub enum WarmMode {
     /// A personal credential (an explicit `--present` slip, or a link-as-peer): never warm. A personal
     /// credential must not ride the socket.
     Personal,
+}
+
+#[cfg(test)]
+mod tests {
+    use core::time::Duration;
+
+    use nauthy::Request;
+
+    use super::admits_anyone;
+    use crate::testkit::TestNode;
+
+    /// One run asks whether a link admits anyone more than once, and every ask agrees even when the link
+    /// expires between them: otherwise the run binds a throwaway key for the first answer and presents this
+    /// home's badge under it for the second.
+    #[test]
+    fn every_anyone_ask_in_a_run_agrees_across_expiry() {
+        let link = TestNode::seeded(1)
+            .slip(
+                &"ssh".parse().expect("a service"),
+                Request::expires_in(Duration::from_secs(2)),
+            )
+            .expect("mint an anyone slip")
+            .seal()
+            .expect("seal")
+            .link()
+            .expect("a link");
+        assert!(admits_anyone(&link, "ssh"), "an anyone link admits anyone");
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(
+            admits_anyone(&link, "ssh"),
+            "the second ask, after the link expired, gets the first ask's answer"
+        );
+    }
 }
