@@ -1385,7 +1385,7 @@ mod tests {
         assert!(cmd.reach.local, "the flag is set");
         assert_eq!(
             cmd.public,
-            vec!["speed".to_owned()],
+            vec!["speed".parse::<nauthy::Service>().expect("a service")],
             "--public names the same opened set"
         );
         assert!(
@@ -1636,5 +1636,101 @@ mod tests {
                 .any(|cmd| cmd.get_name() == "mint" && cmd.is_hide_set()),
             "the hidden catch-all still parses, so a stale invocation reaches the forward error"
         );
+    }
+
+    /// A typed service name follows the one name rule, so a dotted internal route (`control.stop`) can never
+    /// be typed: the entry refuses at parse, exit 2, before anything binds. A capital folds.
+    #[test]
+    fn a_typed_service_name_cannot_be_an_internal_route() {
+        let error = Cli::try_parse_from(["swoosh", "serve", "control.stop=tcp:localhost:1"])
+            .expect_err("a dotted service name refuses");
+        assert_eq!(error.exit_code(), 2, "a bad name is a usage error");
+        assert!(
+            error.to_string().contains(
+                "control.stop is not a name: a name uses a-z, 0-9 and -, and starts with a letter or digit."
+            ),
+            "the refusal states the rule: {error}"
+        );
+        let Some(Command::Serve(cmd)) =
+            Cli::try_parse_from(["swoosh", "serve", "Web=tcp:localhost:1"])
+                .expect("a capital name parses")
+                .command
+        else {
+            panic!("serve parses to the serve verb");
+        };
+        assert_eq!(cmd.services, ["web=tcp:localhost:1"]);
+
+        // Every service name a person types takes the same rule: a dotted route refuses at parse, exit 2,
+        // wherever it is typed.
+        let key = bifrost::NodeId::from_ed25519_secret(&[3u8; 32]).to_string();
+        for argv in [
+            vec!["swoosh", "serve", "control.stop"],
+            vec!["swoosh", "serve", "--public", "control.stop"],
+            vec!["swoosh", "serve", "--public-unsafe", "control.stop"],
+            vec!["swoosh", "grant", "issue", "control.stop"],
+            vec!["swoosh", "service", "disable", "control.stop"],
+            vec!["swoosh", "service", "enable", "control.stop"],
+            vec!["swoosh", "reach", key.as_str(), "control.stop"],
+            vec!["swoosh", "ssh", key.as_str(), "--service", "control.stop"],
+            vec![
+                "swoosh",
+                "send",
+                "f",
+                key.as_str(),
+                "--service",
+                "control.stop",
+            ],
+        ] {
+            let error = Cli::try_parse_from(&argv).expect_err("a dotted service name refuses");
+            assert_eq!(error.exit_code(), 2, "{argv:?} is a usage error");
+            assert!(
+                error.to_string().contains("control.stop is not a name"),
+                "{argv:?} states the rule: {error}"
+            );
+        }
+
+        // And a capital folds to the one spelling the node serves.
+        let parsed = |argv: &[&str]| Cli::try_parse_from(argv).expect("a capital parses").command;
+        let Some(Command::Serve(cmd)) =
+            parsed(&["swoosh", "serve", "Web=tcp:localhost:1", "--public", "Web"])
+        else {
+            panic!("serve parses to the serve verb");
+        };
+        assert_eq!(
+            cmd.public,
+            ["web".parse::<nauthy::Service>().expect("a service")]
+        );
+        let Some(Command::Grant(grant::GrantCmd::Issue(cmd))) =
+            parsed(&["swoosh", "grant", "issue", "Web"])
+        else {
+            panic!("grant issue parses");
+        };
+        assert_eq!(cmd.service.as_str(), "web");
+        let Some(Command::Reach(cmd)) = parsed(&["swoosh", "reach", key.as_str(), "Web"]) else {
+            panic!("reach parses");
+        };
+        assert_eq!(cmd.service.as_str(), "web");
+    }
+
+    /// A device typed as an address follows the one name rule, and its refusal is the rule's own line, not a
+    /// generic wrapper.
+    #[test]
+    fn a_typed_address_refuses_with_the_name_rule() {
+        for (argv, bad) in [
+            (vec!["swoosh", "ssh", "me/La.ptop"], "La.ptop"),
+            (
+                vec!["swoosh", "grant", "issue", "ssh", "--for", "a.b/x"],
+                "a.b",
+            ),
+        ] {
+            let error = Cli::try_parse_from(&argv).expect_err("a bad name refuses");
+            assert_eq!(error.exit_code(), 2, "{argv:?} is a usage error");
+            assert!(
+                error.to_string().contains(&format!(
+                    "{bad} is not a name: a name uses a-z, 0-9 and -, and starts with a letter or digit."
+                )),
+                "{argv:?} states the rule: {error}"
+            );
+        }
     }
 }

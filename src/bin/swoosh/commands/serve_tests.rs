@@ -2473,7 +2473,7 @@ fn a_scoped_gated_fetch_does_not_mask_a_bare_public_open_relay() {
         "pub=fetch:".to_owned(),                     // unconstrained, public
     ];
     let fetch = FetchScope::extract(&mut requested).expect("parse");
-    let public = vec!["pub".to_owned()];
+    let public = vec![svc("pub")];
     assert!(
         fetch.refuse_open_relay(&public).is_err(),
         "an unconstrained public fetch is an open relay even beside a scoped gated fetch (no masking)"
@@ -2486,7 +2486,7 @@ fn a_scoped_gated_fetch_does_not_mask_a_bare_public_open_relay() {
 fn an_unconstrained_public_fetch_is_refused_as_an_open_relay() {
     let mut requested = vec!["api=fetch:".to_owned()];
     let fetch = FetchScope::extract(&mut requested).expect("unconstrained fetch parses");
-    let public = vec!["api".to_owned()];
+    let public = vec![svc("api")];
     let error = fetch
         .refuse_open_relay(&public)
         .expect_err("a public unconstrained fetch is an open relay and must be refused");
@@ -2503,7 +2503,7 @@ fn an_unconstrained_public_fetch_is_refused_as_an_open_relay() {
 fn a_scoped_public_fetch_is_allowed() {
     let mut requested = vec!["api=fetch:https://origin.example".to_owned()];
     let fetch = FetchScope::extract(&mut requested).expect("origin parses");
-    let public = vec!["api".to_owned()];
+    let public = vec![svc("api")];
     assert!(
         fetch.refuse_open_relay(&public).is_ok(),
         "a public fetch scoped to an origin is armed, not an open relay"
@@ -2827,7 +2827,7 @@ fn public_flag_requires_a_value_and_splits_on_commas() {
         .expect("a comma-list parses");
     assert_eq!(
         wrap.serve.public,
-        vec!["speed".to_owned(), "fetch".to_owned()],
+        vec![svc("speed"), svc("fetch")],
         "--public splits on commas into the per-service set"
     );
     // Omitting `--public` opens nothing.
@@ -2939,4 +2939,34 @@ fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
         b"recv: received notes.txt (5 bytes)\n",
         "a plain serve's renderer carries the line"
     );
+}
+
+/// A capital folds on both sides of `serve`: `Web=…` binds `web` and `--public Web` opens `web`, so the
+/// overlay finds the route it names and the node serves it open.
+#[test]
+fn a_capital_service_name_binds_and_opens_one_spelling() {
+    use clap::Parser as _;
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        serve: super::ServeCmd,
+    }
+
+    let wrap = Wrap::try_parse_from(["x", "Web=tcp:127.0.0.1:1", "--public", "Web"])
+        .expect("capital names parse");
+    let mut router = Router::new(gated());
+    for entry in &wrap.serve.services {
+        router = bind_entry(router, entry, [0u8; 32], &wrap.serve.public).expect("the entry binds");
+    }
+    let manifest = router
+        .public(wrap.serve.public.clone())
+        .expose()
+        .expect("`--public Web` opens the route `Web=` bound")
+        .manifest();
+    let web = manifest
+        .iter()
+        .find(|entry| entry.name == "web")
+        .expect("`web` is in the manifest");
+    assert_eq!(web.posture, Posture::Open, "the one spelling is opened");
 }

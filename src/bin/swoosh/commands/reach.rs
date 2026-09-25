@@ -35,7 +35,7 @@ pub struct ReachCmd {
     // stand in for it because a bare `swoosh serve` binds TWO services. So a zero-config dial refused with
     // a message that named nothing. A slot the user must always fill is a positional, and an absent one is
     // now clap's own "required argument" error rather than a refusal at the far gate.
-    #[arg(value_name = "service")]
+    #[arg(value_name = "service", value_parser = swoosh::names::service)]
     pub service: Service,
     /// where to put the stream: a local port, `-` for stdout, or `unix:<path>`
     // Defaults to stdout: the generic dial's common case is a pipe, so the flagless form is the good one.

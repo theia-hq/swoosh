@@ -37,7 +37,7 @@ const ME: &str = "me";
 pub struct AddCmd {
     /// the device label, e.g. `ci-runner` or `desk` (recorded as `me/<label>`)
     #[arg(value_name = "label")]
-    pub label: String,
+    pub label: DeviceLabel,
     /// the key it admits; omit to derive a device identity
     #[arg(
         long = "for",
@@ -68,9 +68,7 @@ pub struct AddCmd {
 impl AddCmd {
     /// Sign the invite, record `me/<label>` and the ledger row, and print the token.
     pub async fn run(self, mut store: ContactsStore, home: &Home) -> eyre::Result<()> {
-        // Validate the label as a device label before touching the key, so a bad name fails fast. The
-        // label also may not look like a `--for` widening token (DeviceLabel reserves `fleet:`/`cluster:`).
-        let device: DeviceLabel = self.label.parse()?;
+        let device = self.label;
         // A fleet row cannot be pre-signed (only the signet can mint an admitting badge and the keys are
         // unknown until each device dials), so the fleet arm rides the enrollment door, not built yet.
         // Refused at RUN time, never at parse: the grammar stays final so the arm is additive. Checked

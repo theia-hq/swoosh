@@ -8,7 +8,8 @@
 //! `rm` refuse it and write nothing.
 
 use clap::Subcommand;
-use swoosh::contacts::{ContactRef, ContactsStore};
+use swoosh::contacts::{ContactRef, ContactsStore, Petname};
+use swoosh::names::NameError;
 
 pub mod add;
 pub mod ls;
@@ -40,14 +41,35 @@ impl ContactCmd {
     }
 }
 
-/// Refuse a name under `me/`, before anything is written: this person's own devices are listed by
-/// their root, never typed into the address book.
+/// The guidance for a typed name under `me/`: this person's own devices are listed by their root, never
+/// typed into the address book.
+const ME_IS_YOUR_ROOTS: &str = "`me/` lists your devices, and your root decides it. Add one with `swoosh \
+                                invite <name> <key>`; remove one with `swoosh revoke me/<name>`.";
+
+/// Refuse a name under `me/`, before anything is written.
 fn refuse_me(name: &ContactRef) -> eyre::Result<()> {
     if name.petname().as_str() == "me" {
-        eyre::bail!(
-            "`me/` lists your devices, and your root decides it. Add one with `swoosh invite <name> \
-             <key>`; remove one with `swoosh revoke me/<name>`."
-        );
+        eyre::bail!(ME_IS_YOUR_ROOTS);
     }
     Ok(())
+}
+
+/// Parse the name `contact add` saves, at the clap boundary (exit 2): a contact address whose person is not
+/// reserved. `me` gets its own guidance; `root` and `anyone` name nobody.
+fn new_contact(text: &str) -> Result<ContactRef, String> {
+    let name: ContactRef = text.parse().map_err(|error: NameError| error.to_string())?;
+    if name.petname().as_str() == "me" {
+        return Err(ME_IS_YOUR_ROOTS.to_owned());
+    }
+    name.petname()
+        .clone()
+        .unreserved()
+        .map_err(|error| error.to_string())?;
+    Ok(name)
+}
+
+/// Parse the person `contact signet` records, at the clap boundary (exit 2): a petname that is not
+/// reserved.
+fn new_person(text: &str) -> Result<Petname, NameError> {
+    text.parse::<Petname>()?.unreserved()
 }

@@ -14,8 +14,9 @@ use bifrost::NodeId;
 use nauthy::{Link, SCHEME, Service};
 use tightbeam::tunnel::Connector;
 
-use crate::contacts::{Candidate, ContactRef, ContactRefParseError, Contacts};
+use crate::contacts::{Candidate, ContactRef, Contacts};
 use crate::credential::LinkExt as _;
+use crate::names::NameError;
 
 /// A peer a dialing verb reaches, before resolution. Replaces BOTH the reach family's old `Target` and the
 /// tunnel family's old `Dial`: one type, three arms, tried in a fixed order at the clap boundary.
@@ -61,9 +62,9 @@ pub enum PeerParseError {
     /// The `sheer:`-prefixed text was not a valid capability link.
     #[error("invalid capability link")]
     Capability(#[from] nauthy::CapError),
-    /// The text was neither a link nor a raw key, and did not parse as a petname address.
-    #[error("invalid peer address")]
-    Contact(#[from] ContactRefParseError),
+    /// The text was neither a link nor a raw key, and a part of it was not a name: the name rule's own line.
+    #[error(transparent)]
+    Contact(#[from] NameError),
 }
 
 impl Peer {

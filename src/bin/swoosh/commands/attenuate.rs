@@ -22,6 +22,7 @@ pub struct AttenuateCmd {
     #[arg(
         long,
         value_name = "service",
+        value_parser = swoosh::names::service,
         long_help = "Narrowing only adds checks: naming a service the link does not permit yields a link \
                      nothing admits."
     )]

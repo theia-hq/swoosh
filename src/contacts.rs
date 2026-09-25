@@ -24,6 +24,7 @@ use std::collections::btree_map::Entry;
 
 use bifrost::{CryptoKind, NodeId};
 
+use crate::names::{Name, NameError};
 use crate::roster::{Epoch, RosterDoc};
 
 /// The reserved petname for the operator's own devices: the signet is person-zero, each device it derives
@@ -36,9 +37,9 @@ pub use store::{ContactsStore, StoreError};
 
 /// A local alias for a peer: a human-meaningful name for one or more of their device identities.
 ///
-/// Validated once at the boundary so the rest of the code holds a name already known to be a single
-/// non-empty path segment: no slash (that separates a petname from a device label), no whitespace, non
-/// empty. Parsing rejects garbage here rather than letting it reach a lookup and miss silently.
+/// A [`Name`] under the one name rule, so it is a single segment that never holds the `/` separating a
+/// petname from a device label. It may be reserved: `me` addresses this person's own devices. Naming a new
+/// person refuses a reserved name through [`Name::unreserved`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Petname(String);
 
@@ -48,22 +49,25 @@ impl Petname {
         let Self(name) = self;
         name
     }
+
+    /// This petname, refused when it is reserved: the check for a petname about to name a person.
+    pub fn unreserved(self) -> Result<Self, NameError> {
+        let Self(name) = self;
+        Ok(Self(Name::from_str(&name)?.unreserved()?.into()))
+    }
+
+    /// A petname read back from the contacts file, taken as stored: a capital there refuses rather than
+    /// folds ([`Name::stored`]), so one person has one spelling on disk.
+    pub fn stored(text: &str) -> Result<Self, NameError> {
+        Ok(Self(Name::stored(text)?.into()))
+    }
 }
 
 impl FromStr for Petname {
-    type Err = PetnameParseError;
+    type Err = NameError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if text.is_empty() {
-            return Err(PetnameParseError::Empty);
-        }
-        if text.contains('/') {
-            return Err(PetnameParseError::Slash);
-        }
-        if text.chars().any(char::is_whitespace) {
-            return Err(PetnameParseError::Whitespace);
-        }
-        Ok(Self(text.to_owned()))
+        Ok(Self(text.parse::<Name>()?.into()))
     }
 }
 
@@ -73,28 +77,12 @@ impl core::fmt::Display for Petname {
     }
 }
 
-/// Why a string was not a valid [`Petname`].
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum PetnameParseError {
-    /// The name was empty.
-    #[error("petname is empty")]
-    Empty,
-    /// The name held a `/`, which separates a petname from a device label and cannot appear inside one.
-    #[error("petname cannot contain '/' (that separates the device label)")]
-    Slash,
-    /// The name held whitespace.
-    #[error("petname cannot contain whitespace")]
-    Whitespace,
-}
-
 /// A label for one device under a petname (`macbook`, `iphone`).
 ///
-/// Same single-segment discipline as a [`Petname`], plus a length bound and a control-byte reject the
-/// signed-roster encoding requires: this is the ONE label type, used both for local contacts and for a
-/// member in a [`RosterDoc`](crate::roster::RosterDoc), so the codec's `u16` length prefix stays total and
-/// no smuggled control byte can reframe the signed bytes at a puller. A bare `contact add alice <key>` (no
-/// `/device`) uses the reserved [`DEFAULT`](Self::DEFAULT) slot, so a person addressed without a device
-/// still resolves.
+/// A [`Name`] under the one name rule, never reserved: no device is `me`, `root` or `anyone`. This is the ONE
+/// label type, used both for local contacts and for a member in a [`RosterDoc`](crate::roster::RosterDoc),
+/// so the codec's `u16` length prefix stays total. A bare `contact add alice <key>` (no `/device`) uses the
+/// [`DEFAULT`](Self::DEFAULT) slot, so a person addressed without a device still resolves.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceLabel(String);
 
@@ -103,72 +91,27 @@ impl DeviceLabel {
     /// unqualified person resolves to their default device first.
     pub const DEFAULT: &'static str = "default";
 
-    /// The label reserved for a person's SIGNET root, refused as a device label. A signet is a person's
-    /// root, not a device, and it persists under this exact key in the person's table (`store::SIGNET_KEY`),
-    /// so a device literally labelled `signet` would collide with it on save. This is the ONE source of
-    /// truth for that reserved string, shared with the store codec so the parse-reject and the on-disk key
-    /// can never drift apart.
-    pub const SIGNET_RESERVED: &'static str = "signet";
-
-    /// The `--for` WIDENING prefixes reserved out of the device-label namespace: a label that looked
-    /// like a widening token (`fleet:alice`) would collide with `invite rm fleet:<person>` and read as a
-    /// bind, so the parse refuses it and names the flag it belongs on. A [`Petname`] does not reserve
-    /// these (a person named `fleet:home` is still a person; only the device-label slot is ambiguous).
-    pub(crate) const WIDENING_PREFIXES: [&'static str; 2] = ["fleet:", "cluster:"];
-
-    /// The maximum label length in bytes. Small: a device label (`desk`, `macbook`) is never long, and a
-    /// bound keeps the `u16` length prefix in the roster's canonical encoding total.
-    pub const MAX_LEN: usize = 255;
+    /// The maximum label length in bytes, the name rule's bound.
+    pub const MAX_LEN: usize = Name::MAX_LEN;
 
     /// The underlying label, for display and lookup.
     pub fn as_str(&self) -> &str {
         let Self(label) = self;
         label
     }
+
+    /// A label read back from disk or a signed roster, taken as stored: a capital there refuses rather than
+    /// folds ([`Name::stored`]), so one label has one byte-string and a signed roster stays non-malleable.
+    pub fn stored(text: &str) -> Result<Self, NameError> {
+        Ok(Self(Name::stored(text)?.unreserved()?.into()))
+    }
 }
 
 impl FromStr for DeviceLabel {
-    type Err = DeviceLabelParseError;
+    type Err = NameError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if text.is_empty() {
-            return Err(DeviceLabelParseError::Empty);
-        }
-        if text.len() > Self::MAX_LEN {
-            return Err(DeviceLabelParseError::TooLong);
-        }
-        if text.contains('/') {
-            return Err(DeviceLabelParseError::Slash);
-        }
-        // Reject whitespace AND other control bytes: whitespace keeps a label a single word, and a control
-        // byte (a smuggled newline) must never enter the roster's signed bytes where it could reframe a
-        // later field.
-        if text
-            .bytes()
-            .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-        {
-            return Err(DeviceLabelParseError::BadByte);
-        }
-        // `signet` is reserved for a person's signet root (it persists under the same key in the person's
-        // table), so it can never be a device label: rejecting it here makes the device/signet collision
-        // unrepresentable, the same reserved-word discipline the store's reserved keys use. For the ROSTER
-        // path this same reject fires UPSTREAM, at `roster::parse_canonical` (which parses each member label
-        // through here): a `signet`-labelled member fails the WHOLE already-signature-verified roster there,
-        // so `hydrate` never re-parses a label and needs no reserved-word gate of its own (one could never
-        // fire, since it only ever sees `DeviceLabel`s that already passed this check).
-        if text == Self::SIGNET_RESERVED {
-            return Err(DeviceLabelParseError::Reserved);
-        }
-        // `fleet:`/`cluster:` are the `--for` widening prefixes: a device label must never look like a
-        // widening token, or `invite rm fleet:alice` would be ambiguous between a row label and a bind.
-        // Refused here so the collision is unrepresentable; the message names the flag it belongs on.
-        if Self::WIDENING_PREFIXES
-            .iter()
-            .any(|prefix| text.starts_with(prefix))
-        {
-            return Err(DeviceLabelParseError::Widening);
-        }
-        Ok(Self(text.to_owned()))
+        Ok(Self(text.parse::<Name>()?.unreserved()?.into()))
     }
 }
 
@@ -176,32 +119,6 @@ impl core::fmt::Display for DeviceLabel {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.as_str())
     }
-}
-
-/// Why a string was not a valid [`DeviceLabel`].
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum DeviceLabelParseError {
-    /// The label was empty (a trailing `alice/` with nothing after the slash).
-    #[error("device label is empty")]
-    Empty,
-    /// The label exceeded [`DeviceLabel::MAX_LEN`].
-    #[error("device label is too long")]
-    TooLong,
-    /// The label held a further `/`; a device address is exactly `<petname>/<device>`, one level deep.
-    #[error("device label cannot contain '/'")]
-    Slash,
-    /// The label held whitespace or another control byte.
-    #[error("device label cannot contain whitespace or control bytes")]
-    BadByte,
-    /// The label was `signet`, reserved for a person's signet root (record it with `contact signet`).
-    #[error("device label 'signet' is reserved for a person's signet root")]
-    Reserved,
-    /// The label started with a `--for` widening prefix (`fleet:`/`cluster:`), which belongs on `--for`.
-    #[error(
-        "device label cannot start with `fleet:` or `cluster:`; a widening token goes in `--for`, e.g. \
-         `invite add desk --for fleet:alice`"
-    )]
-    Widening,
 }
 
 /// A `<petname>` or `<petname>/<device>` address, as typed on the command line.
@@ -228,7 +145,7 @@ impl ContactRef {
 }
 
 impl FromStr for ContactRef {
-    type Err = ContactRefParseError;
+    type Err = NameError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         match text.split_once('/') {
@@ -242,17 +159,6 @@ impl FromStr for ContactRef {
             }),
         }
     }
-}
-
-/// Why a string was not a valid [`ContactRef`].
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum ContactRefParseError {
-    /// The petname part was invalid.
-    #[error("invalid petname")]
-    Petname(#[from] PetnameParseError),
-    /// The device part was invalid.
-    #[error("invalid device label")]
-    Device(#[from] DeviceLabelParseError),
 }
 
 /// Where a contact binding came from: a name YOU typed, or a member the signet vouched for in a signed

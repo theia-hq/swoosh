@@ -13,7 +13,7 @@ use swoosh::contacts::{Added, ContactsStore, Petname};
 #[derive(Debug, Args)]
 pub struct SignetCmd {
     /// The person whose signet this is (a bare petname; a device address `alice/x` is rejected).
-    #[arg(value_name = "petname")]
+    #[arg(value_name = "petname", value_parser = super::new_person)]
     pub petname: Petname,
     /// The person's signet public key (from their `swoosh identity`).
     #[arg(value_name = "key")]
