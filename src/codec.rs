@@ -99,6 +99,9 @@ pub enum FormatError {
     /// Two devices that are not revoked share one name.
     #[error("the document lists the name {0} twice")]
     DuplicateLabel(DeviceLabel),
+    /// A device's row is revoked but its key is not a revoked key, or its row is live and its key is.
+    #[error("device {0} is revoked in one list and not the other")]
+    RevokedMismatch(VerifyKey),
     /// A list was not strictly ascending, or held one entry twice.
     #[error("the document's entries are not in canonical order")]
     NonCanonicalOrder,
@@ -132,6 +135,18 @@ pub(crate) fn check_ids(ids: &mut [Id]) -> Result<(), FormatError> {
         bound(id.id.as_bytes().len(), MAX_REVOCATION_ID, "revocation id")?;
     }
     canonicalize(ids, |id| id.id.as_bytes().to_vec())
+}
+
+/// Refuse two devices under one name.
+pub(crate) fn unique_labels<'a>(
+    labels: impl Iterator<Item = &'a DeviceLabel>,
+) -> Result<(), FormatError> {
+    let mut labels: Vec<&DeviceLabel> = labels.collect();
+    labels.sort();
+    match labels.windows(2).find(|pair| pair[0] == pair[1]) {
+        Some(pair) => Err(FormatError::DuplicateLabel(pair[0].clone())),
+        None => Ok(()),
+    }
 }
 
 /// Refuse `len` over `max`, naming the field.

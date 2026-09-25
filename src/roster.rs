@@ -12,7 +12,7 @@ pub use crate::codec::{
     FormatError, Id, MAX_BADGE, MAX_IDS, MAX_MEMBERS, MAX_REVOCATION_ID, MAX_REVOKED,
     MAX_REVOKED_KEYS,
 };
-use crate::codec::{Put as _, Reader, bound, canonicalize, check_device, check_ids};
+use crate::codec::{Put as _, Reader, bound, canonicalize, check_device, check_ids, unique_labels};
 use crate::contacts::DeviceLabel;
 
 mod artifact;
@@ -30,10 +30,10 @@ const VERSION: u8 = 1;
 const HEADER_LEN: usize = MAGIC.len() + 1 + 8 + 4;
 
 /// One id on the wire: its `u64` expiry, `u16` length and bytes, at the bound.
-const MAX_ID_LEN: usize = 8 + 2 + MAX_REVOCATION_ID;
+pub(crate) const MAX_ID_LEN: usize = 8 + 2 + MAX_REVOCATION_ID;
 
 /// One member on the wire at every bound: node key, name, `until`, `duration`, its ids, and its standing.
-const MAX_MEMBER_LEN: usize =
+pub(crate) const MAX_MEMBER_LEN: usize =
     VerifyKey::LEN + 2 + DeviceLabel::MAX_LEN + 8 + 8 + 1 + MAX_IDS * MAX_ID_LEN + 2 + MAX_BADGE;
 
 /// The detached ed25519 signature in the envelope [`cut`] writes.
@@ -42,7 +42,7 @@ const SIGNATURE_LEN: usize = 64;
 /// nauthy's signed envelope: the signer key and the signature ahead of the payload ([`Signed::encode`]).
 /// Restated because nauthy keeps its signature length private; the exactness test cuts a maximal update
 /// and holds this to the byte.
-const ENVELOPE_LEN: usize = VerifyKey::LEN + SIGNATURE_LEN;
+pub(crate) const ENVELOPE_LEN: usize = VerifyKey::LEN + SIGNATURE_LEN;
 
 /// The largest update blob a reader admits, in bytes: the envelope around the biggest payload
 /// [`RosterDoc::parse_canonical`] accepts. A fold reads no more. Computed from the bounds, never chosen:
@@ -127,7 +127,7 @@ impl RosterDoc {
     }
 
     /// An update listing `members`, the revoked ids and the revoked keys. Sorts every list, and refuses a
-    /// repeated key or id and anything over its bound.
+    /// repeated key, name or id and anything over its bound.
     pub fn with_revocations(
         epoch: Epoch,
         mut members: Vec<Member>,
@@ -144,6 +144,7 @@ impl RosterDoc {
         if let Some(pair) = members.windows(2).find(|pair| pair[0].node == pair[1].node) {
             return Err(FormatError::DuplicateNode(pair[0].node));
         }
+        unique_labels(members.iter().map(|member| &member.label))?;
         check_ids(&mut revoked)?;
         canonicalize(&mut revoked_keys, |key| *key.bytes())?;
         Ok(Self {
@@ -243,6 +244,7 @@ impl RosterDoc {
                 standing: reader.standing()?,
             });
         }
+        unique_labels(members.iter().map(|member| &member.label))?;
         let revoked = reader.revoked()?;
         let revoked_keys = reader.revoked_keys()?;
         reader.finish()?;

@@ -406,7 +406,12 @@ fn maximal_blob(id: &TestRoot, standing: &Link) -> Vec<u8> {
     let members = (0..MAX_MEMBERS)
         .map(|nth| Member {
             node: VerifyKey::new(index_key(nth)),
-            label: DeviceLabel::from_str(&"n".repeat(DeviceLabel::MAX_LEN)).unwrap(),
+            // Every name at its bound, and no two alike.
+            label: DeviceLabel::from_str(&format!(
+                "{}{nth:04x}",
+                "n".repeat(DeviceLabel::MAX_LEN - 4)
+            ))
+            .unwrap(),
             until: u64::MAX,
             duration: u64::MAX,
             ids: (0..MAX_IDS).map(full_id).collect(),
@@ -437,5 +442,20 @@ fn the_largest_update_the_parser_accepts_is_exactly_the_blob_bound() {
     assert!(
         super::verify(&blob, id.verify_key()).is_ok(),
         "the largest update a reader accepts verifies and parses"
+    );
+}
+
+#[test]
+fn an_update_refuses_two_members_under_one_name() {
+    // A fold would file both under one `me/<label>`, and the second would overwrite the first.
+    let desk = DeviceLabel::from_str("desk").unwrap();
+    assert_eq!(
+        RosterDoc::new(Epoch(7), vec![member(1, "desk"), member(2, "desk")]),
+        Err(FormatError::DuplicateLabel(desk.clone()))
+    );
+    let bytes = two_members_on_the_wire(&member(1, "desk"), &member(2, "desk"));
+    assert_eq!(
+        RosterDoc::parse_canonical(&bytes),
+        Err(FormatError::DuplicateLabel(desk))
     );
 }

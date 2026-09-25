@@ -5,21 +5,22 @@
 //! ones included, and what only the root needs (`seeded`, `invite_until`, `revoked_on`), so it is never
 //! served. A payload under another magic (an update the same root signed) is refused.
 //!
-//! [`write`] replaces the file atomically through `state.new`; [`read`] takes a valid `state`, else
-//! promotes a valid `state.new`, else refuses as damaged.
+//! [`write`] replaces the file atomically through an owner-only `state.new`. [`load`] takes a valid
+//! `state`, else a valid `state.new`, else refuses as damaged, and renames nothing; [`recover`] does the
+//! same and promotes the `state.new` it took, so only a holder of the root's lock calls it.
 
 use std::fs::{self, File};
-use std::io::{self, Write as _};
+use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use nauthy::{Link, SignError, Signed, VerifyKey};
 
 use crate::codec::{
     FormatError, Id, MAX_MEMBERS, MAX_REVOKED, MAX_REVOKED_KEYS, Put as _, Reader, bound,
-    canonicalize, check_device, check_ids,
+    canonicalize, check_device, check_ids, unique_labels,
 };
 use crate::contacts::DeviceLabel;
-use crate::roster::Epoch;
+use crate::roster::{ENVELOPE_LEN, Epoch, MAX_ID_LEN, MAX_MEMBER_LEN};
 
 /// The magic the payload opens with: `swoosh-` and the file it heads.
 pub(crate) const MAGIC: &[u8] = b"swoosh-state";
@@ -35,6 +36,23 @@ pub const STAGED: &str = "state.new";
 
 /// The most rows `state` holds: every live device and every revoked one, whose keys are kept for good.
 pub const MAX_ROWS: usize = MAX_MEMBERS + MAX_REVOKED_KEYS;
+
+/// One row at every bound: a member's fields, then `seeded`, `invite_until` and `revoked_on`.
+const MAX_ROW_LEN: usize = MAX_MEMBER_LEN + 1 + 8 + 8;
+
+/// The largest signed `state` a read admits, in bytes: the envelope around the biggest payload
+/// [`State::parse_canonical`] accepts, computed from the bounds like
+/// [`MAX_ROSTER_BLOB`](crate::roster::MAX_ROSTER_BLOB). A longer file is not read.
+pub const MAX_STATE_BLOB: u64 = (ENVELOPE_LEN
+    + MAGIC.len()
+    + 1
+    + 8
+    + 4
+    + MAX_ROWS * MAX_ROW_LEN
+    + 4
+    + MAX_REVOKED * MAX_ID_LEN
+    + 4
+    + MAX_REVOKED_KEYS * VerifyKey::LEN) as u64;
 
 /// One device the root has signed for.
 #[derive(Debug, Clone)]
@@ -82,8 +100,9 @@ impl PartialEq for Row {
 
 impl Eq for Row {}
 
-/// The root's records. Canonical at construction: rows sorted and unique by key, at most one row that is
-/// not revoked per name, every list sorted and every bound held, so every `State` that builds also parses.
+/// The root's records. Canonical at construction: rows sorted and unique by key, at most
+/// [`MAX_MEMBERS`] rows that are not revoked and at most one per name, a row revoked exactly when its key
+/// is a revoked key, every list sorted and every bound held, so every `State` that builds also parses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct State {
     last_update: Epoch,
@@ -95,8 +114,8 @@ pub struct State {
 
 impl State {
     /// The records: the last update cut (`Epoch(0)` for none), the rows, the revoked ids and the revoked
-    /// keys. Sorts every list, and refuses a repeated key, a name two live rows share, and anything over
-    /// its bound.
+    /// keys. Sorts every list, and refuses a repeated key, a name two live rows share, a row revoked in
+    /// one list and not the other, and anything over its bound.
     pub fn new(
         last_update: Epoch,
         mut rows: Vec<Row>,
@@ -113,9 +132,9 @@ impl State {
         if let Some(pair) = rows.windows(2).find(|pair| pair[0].key == pair[1].key) {
             return Err(FormatError::DuplicateNode(pair[0].key));
         }
-        one_live_row_per_label(&rows)?;
         check_ids(&mut revoked)?;
         canonicalize(&mut revoked_keys, |key| *key.bytes())?;
+        check_rows(&rows, &revoked_keys)?;
         Ok(Self {
             last_update,
             rows,
@@ -217,10 +236,10 @@ impl State {
                 standing: reader.standing()?,
             });
         }
-        one_live_row_per_label(&rows)?;
         let revoked = reader.revoked()?;
         let revoked_keys = reader.revoked_keys()?;
         reader.finish()?;
+        check_rows(&rows, &revoked_keys)?;
         Ok(Self {
             last_update,
             rows,
@@ -230,18 +249,20 @@ impl State {
     }
 }
 
-/// Refuse two rows that are not revoked under one name.
-fn one_live_row_per_label(rows: &[Row]) -> Result<(), FormatError> {
-    let mut live: Vec<&DeviceLabel> = rows
-        .iter()
-        .filter(|row| !row.is_revoked())
-        .map(|row| &row.label)
-        .collect();
-    live.sort();
-    match live.windows(2).find(|pair| pair[0] == pair[1]) {
-        Some(pair) => Err(FormatError::DuplicateLabel(pair[0].clone())),
-        None => Ok(()),
+/// Refuse more than [`MAX_MEMBERS`] live rows, two live rows under one name, and a row revoked in one
+/// list and not the other (`revoked_keys` sorted). A revoked key may have no row.
+fn check_rows(rows: &[Row], revoked_keys: &[VerifyKey]) -> Result<(), FormatError> {
+    let live = || rows.iter().filter(|row| !row.is_revoked());
+    bound(live().count(), MAX_MEMBERS, "live rows")?;
+    for row in rows {
+        let key_revoked = revoked_keys
+            .binary_search_by(|key| key.bytes().cmp(row.key.bytes()))
+            .is_ok();
+        if key_revoked != row.is_revoked() {
+            return Err(FormatError::RevokedMismatch(row.key));
+        }
     }
+    unique_labels(live().map(|row| &row.label))
 }
 
 /// Sign `state` with the root `identity`: the bytes [`write`] stores.
@@ -287,15 +308,39 @@ pub enum StateError {
 }
 
 /// Store `signed` (from [`sign`]) as `dir/state`: write `state.new` and fsync it, rename it over `state`,
-/// then fsync `dir`. A crash at any point leaves the old `state` or the new one, and [`read`] finds it.
+/// then fsync `dir`. A crash at any point leaves the old `state` or the new one, and [`load`] finds it.
 pub fn write(dir: &Path, signed: &[u8]) -> io::Result<()> {
     write_with(&mut RealDisk, dir, signed)
 }
 
-/// Read `dir/state` and verify it against `root`. A valid `state` wins; else a valid `state.new` is
-/// promoted over it; else the records are damaged.
-pub fn read(dir: &Path, root: VerifyKey) -> Result<State, StateError> {
-    read_with(&mut RealDisk, dir, root)
+/// Read `dir/state` and verify it against `root`: a valid `state`, else a valid `state.new`, else the
+/// records are damaged. Renames nothing, so it needs no lock.
+pub fn load(dir: &Path, root: VerifyKey) -> Result<State, StateError> {
+    let io = io_error(dir);
+    if let Some(state) = load_file(&dir.join(FILE), root).map_err(&io)? {
+        return Ok(state);
+    }
+    match load_file(&dir.join(STAGED), root).map_err(&io)? {
+        Some(state) => Ok(state),
+        None => Err(StateError::Damaged {
+            dir: dir.to_path_buf(),
+        }),
+    }
+}
+
+/// [`load`], and when the records came from `state.new`, rename it over `state`. Only a holder of the
+/// root's lock calls it: a writer may be rewriting `state.new` under anyone else.
+pub fn recover(dir: &Path, root: VerifyKey) -> Result<State, StateError> {
+    recover_with(&mut RealDisk, dir, root)
+}
+
+/// Name `dir` on a failed read or promotion.
+fn io_error(dir: &Path) -> impl Fn(io::Error) -> StateError + use<> {
+    let dir = dir.to_path_buf();
+    move |source| StateError::Io {
+        dir: dir.clone(),
+        source,
+    }
 }
 
 /// The filesystem calls a write and a promotion make, one method per call, so a test can fail each one.
@@ -309,8 +354,18 @@ pub(crate) trait Disk {
 pub(crate) struct RealDisk;
 
 impl Disk for RealDisk {
+    /// A fresh owner-only file: whatever sat at `path` is removed first, and `create_new` never follows a
+    /// link there.
     fn write(&mut self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        File::create(path)?.write_all(bytes)
+        match fs::remove_file(path) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        options.open(path)?.write_all(bytes)
     }
 
     fn sync(&mut self, path: &Path) -> io::Result<()> {
@@ -330,36 +385,40 @@ pub(crate) fn write_with(disk: &mut impl Disk, dir: &Path, signed: &[u8]) -> io:
     disk.sync(dir)
 }
 
-pub(crate) fn read_with(
+pub(crate) fn recover_with(
     disk: &mut impl Disk,
     dir: &Path,
     root: VerifyKey,
 ) -> Result<State, StateError> {
-    let io = |source| StateError::Io {
-        dir: dir.to_path_buf(),
-        source,
-    };
-    if let Some(state) = load(&dir.join(FILE), root).map_err(io)? {
+    let io = io_error(dir);
+    if let Some(state) = load_file(&dir.join(FILE), root).map_err(&io)? {
         return Ok(state);
     }
     let staged = dir.join(STAGED);
-    let Some(state) = load(&staged, root).map_err(io)? else {
+    let Some(state) = load_file(&staged, root).map_err(&io)? else {
         return Err(StateError::Damaged {
             dir: dir.to_path_buf(),
         });
     };
-    disk.rename(&staged, &dir.join(FILE)).map_err(io)?;
-    disk.sync(dir).map_err(io)?;
+    disk.rename(&staged, &dir.join(FILE)).map_err(&io)?;
+    disk.sync(dir).map_err(&io)?;
     Ok(state)
 }
 
-/// The verified records at `path`, or `None` when the file is missing or does not verify.
-fn load(path: &Path, root: VerifyKey) -> io::Result<Option<State>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(verify(&bytes, root).ok()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+/// The verified records at `path`, or `None` when the file is missing, longer than [`MAX_STATE_BLOB`], or
+/// does not verify.
+fn load_file(path: &Path, root: VerifyKey) -> io::Result<Option<State>> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_STATE_BLOB + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_STATE_BLOB {
+        return Ok(None);
     }
+    Ok(verify(&bytes, root).ok())
 }
 
 #[cfg(test)]

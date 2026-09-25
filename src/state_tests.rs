@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use nauthy::{RevocationId, VerifyKey};
 
 use super::{
-    Disk, FILE, MAX_ROWS, RealDisk, Row, STAGED, State, StateError, read, read_with, sign, verify,
-    write, write_with,
+    Disk, FILE, MAX_ROWS, RealDisk, Row, STAGED, State, StateError, load, recover, recover_with,
+    sign, verify, write, write_with,
 };
 use crate::codec::{FormatError, Id};
 use crate::contacts::DeviceLabel;
@@ -261,7 +261,7 @@ fn a_torn_write_leaves_one_consistent_state() {
         write(&dir, &sign(root.identity(), &old)).unwrap();
         let mut disk = Faulty { calls: 0, fail_at };
         let done = write_with(&mut disk, &dir, &signed).is_ok();
-        let read_back = read(&dir, root.verify_key()).expect("one valid state survives");
+        let read_back = recover(&dir, root.verify_key()).expect("one valid state survives");
         assert!(
             read_back == old || read_back == new,
             "a fault at call {fail_at} left neither"
@@ -284,12 +284,12 @@ fn a_valid_staged_state_is_promoted_when_state_is_not() {
     let staged = sample(5);
     std::fs::write(dir.join(STAGED), sign(root.identity(), &staged)).unwrap();
     std::fs::write(dir.join(FILE), b"torn").unwrap();
-    assert_eq!(read(&dir, root.verify_key()).unwrap(), staged);
+    assert_eq!(recover(&dir, root.verify_key()).unwrap(), staged);
     assert!(
         !dir.join(STAGED).exists(),
         "state.new was renamed over state"
     );
-    assert_eq!(read(&dir, root.verify_key()).unwrap(), staged);
+    assert_eq!(recover(&dir, root.verify_key()).unwrap(), staged);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -300,7 +300,7 @@ fn a_valid_state_wins_over_a_staged_one() {
     let current = sample(1);
     write(&dir, &sign(root.identity(), &current)).unwrap();
     std::fs::write(dir.join(STAGED), sign(root.identity(), &sample(2))).unwrap();
-    assert_eq!(read(&dir, root.verify_key()).unwrap(), current);
+    assert_eq!(recover(&dir, root.verify_key()).unwrap(), current);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -315,8 +315,130 @@ fn no_valid_state_refuses_as_damaged_naming_restore() {
         sign(TestRoot::seeded(8).identity(), &sample(1)),
     )
     .unwrap();
-    let error = read_with(&mut RealDisk, &dir, root.verify_key()).unwrap_err();
+    let error = recover_with(&mut RealDisk, &dir, root.verify_key()).unwrap_err();
     assert!(matches!(error, StateError::Damaged { .. }));
     assert!(error.to_string().contains("swoosh restore"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `sample`'s bytes with the revoked row's `revoked_on` (set to a marker) zeroed: a live row whose key is
+/// still a revoked key.
+fn revived(mut state_rows: Vec<Row>, revoked_keys: Vec<VerifyKey>) -> Vec<u8> {
+    const MARKER: u64 = 0x5eed_0f0f_f1ce_0000;
+    for row in &mut state_rows {
+        if row.is_revoked() {
+            row.revoked_on = MARKER;
+        }
+    }
+    let mut bytes = State::new(Epoch(1), state_rows, vec![], revoked_keys)
+        .unwrap()
+        .canonical_bytes();
+    let at = bytes
+        .windows(8)
+        .position(|window| window == MARKER.to_be_bytes())
+        .unwrap();
+    bytes[at..at + 8].fill(0);
+    bytes
+}
+
+#[test]
+fn a_row_is_revoked_exactly_when_its_key_is() {
+    let mut gone = row(3, "desk");
+    gone.revoked_on = 40;
+    // A revoked row whose key is not a revoked key.
+    assert_eq!(
+        State::new(Epoch(1), vec![row(1, "desk"), gone.clone()], vec![], vec![]).err(),
+        Some(FormatError::RevokedMismatch(key(3)))
+    );
+    // A live row whose key is a revoked key.
+    assert_eq!(
+        State::new(Epoch(1), vec![row(1, "desk")], vec![], vec![key(1)]).err(),
+        Some(FormatError::RevokedMismatch(key(1)))
+    );
+    // A revoked key with no row is kept.
+    assert!(State::new(Epoch(1), vec![row(1, "desk")], vec![], vec![key(9)]).is_ok());
+    // On the wire: the revoked row made live again.
+    assert_eq!(
+        State::parse_canonical(&revived(vec![row(1, "laptop"), gone], vec![key(3)])),
+        Err(FormatError::RevokedMismatch(key(3)))
+    );
+}
+
+#[test]
+fn state_holds_at_most_max_members_live_rows() {
+    let standing = row(1, "desk").standing;
+    let live = |n: usize| Row {
+        key: VerifyKey::new(core::array::from_fn(|at| (n >> (8 * (at % 2))) as u8)),
+        label: DeviceLabel::from_str(&format!("d{n}")).unwrap(),
+        ids: vec![],
+        standing: standing.clone(),
+        ..row(1, "desk")
+    };
+    let rows: Vec<Row> = (0..=crate::codec::MAX_MEMBERS).map(live).collect();
+    assert_eq!(
+        State::new(Epoch(1), rows.clone(), vec![], vec![]).err(),
+        Some(FormatError::TooLarge("live rows"))
+    );
+    // On the wire: MAX_MEMBERS live rows and one revoked, made live again.
+    let mut rows = rows;
+    let last = rows.last_mut().unwrap();
+    last.revoked_on = 1;
+    let revoked = vec![last.key];
+    assert_eq!(
+        State::parse_canonical(&revived(rows, revoked)),
+        Err(FormatError::TooLarge("live rows"))
+    );
+}
+
+#[test]
+fn loading_never_promotes_state_new() {
+    // `load` takes no lock, so it renames nothing: a writer may be rewriting `state.new` under it.
+    let root = root();
+    let dir = dir("load");
+    let staged = sample(5);
+    std::fs::write(dir.join(STAGED), sign(root.identity(), &staged)).unwrap();
+    std::fs::write(dir.join(FILE), b"torn").unwrap();
+    assert_eq!(load(&dir, root.verify_key()).unwrap(), staged);
+    assert!(dir.join(STAGED).exists(), "state.new is left where it was");
+    assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"torn");
+    std::fs::write(dir.join(STAGED), b"torn").unwrap();
+    assert!(matches!(
+        load(&dir, root.verify_key()),
+        Err(StateError::Damaged { .. })
+    ));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn state_is_written_owner_only() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    let root = root();
+    let state = sample(1);
+    let signed = sign(root.identity(), &state);
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+    let dir = dir("owner-only");
+    write(&dir, &signed).unwrap();
+    assert_eq!(mode(&dir.join(FILE)), 0o600);
+
+    // A looser `state.new` left behind does not lend `state` its mode.
+    std::fs::write(dir.join(STAGED), b"left behind").unwrap();
+    std::fs::set_permissions(dir.join(STAGED), std::fs::Permissions::from_mode(0o644)).unwrap();
+    write(&dir, &signed).unwrap();
+    assert_eq!(mode(&dir.join(FILE)), 0o600);
+
+    // A link at `state.new` is replaced, never followed.
+    let target = dir.join("elsewhere");
+    std::fs::write(&target, b"untouched").unwrap();
+    symlink(&target, dir.join(STAGED)).unwrap();
+    write(&dir, &signed).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
+    assert_eq!(mode(&dir.join(FILE)), 0o600);
+    assert_eq!(
+        verify(&std::fs::read(dir.join(FILE)).unwrap(), root.verify_key()),
+        Ok(state)
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
