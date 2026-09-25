@@ -1,6 +1,6 @@
 # Capabilities: hand out one service, expiring and revocable
 
-Give someone access to exactly one service on your machine: a **capability link** (a `sheer:` link). It
+Give someone access to exactly one service on your machine: a **capability link** (a `swoosh:` link). It
 expires on its own, and you can revoke it while your node runs. No account for them, no password to
 rotate, nothing to clean up after.
 
@@ -19,7 +19,7 @@ $ swoosh grant issue ping --expires 15m
 issued a bearer grant for `ping`
   anyone holding the link can use it; expires in 15m.
   revoke: paste the link to `swoosh grant revoke <link>`, or let it expire
-sheer:bf01hcq6…
+swoosh:ed01hcq6…
 ```
 
 Hand that last line over any channel (chat, a QR code). It names the node, the one service it grants,
@@ -33,8 +33,8 @@ The holder presents the link when they dial. The link alone names the node and t
 
 <!-- live-run: real iroh reach, non-deterministic; re-capture before release -->
 ```console
-$ swoosh ping sheer:bf01hcq6…
-bf01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.115:51445 and relayed)
+$ swoosh ping swoosh:ed01hcq6…
+ed01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.115:51445 and relayed)
   3 sent, 3 received, 0% loss
   rtt min/avg/max/mdev = 0.891/1.075/1.277/0.135 ms
 ```
@@ -44,7 +44,7 @@ the link separately:
 
 <!-- manual: needs a live gated peer -->
 ```console
-$ swoosh ping bf01hcq6… --present sheer:bf01hcq6…
+$ swoosh ping ed01hcq6… --present swoosh:ed01hcq6…
 ```
 
 The gate checks the link offline, against your key. The holder gets that one service and nothing else.
@@ -56,7 +56,7 @@ revoke it on the node that issued it:
 
 <!-- manual: needs the link you issued -->
 ```console
-$ swoosh grant revoke sheer:bf01hcq6…
+$ swoosh grant revoke swoosh:ed01hcq6…
 revoked link (…/revoked)
 ```
 
@@ -64,9 +64,9 @@ Either way the next dial is refused, with no restart:
 
 <!-- manual: needs a revoked link -->
 ```console
-$ swoosh ping sheer:bf01hcq6…
-bf01hcq6balrlxwa via iroh: reached, but refused (not admitted: no member badge or capability for this service was accepted)
-Error: bf01hcq6balrlxwa: reached, but refused
+$ swoosh ping swoosh:ed01hcq6…
+ed01hcq6balrlxwa via iroh: reached, but refused (not admitted: no member badge or capability for this service was accepted)
+Error: ed01hcq6balrlxwa: reached, but refused
 ```
 
 ## The limit

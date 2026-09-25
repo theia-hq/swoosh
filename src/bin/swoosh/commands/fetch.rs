@@ -28,7 +28,7 @@ pub struct FetchCmd {
     /// The origin URL to fetch (path and query on the local URL resolve against it).
     #[arg(value_name = "url")]
     pub url: String,
-    /// the node to fetch through: a petname (`usa`, `alice/box`), a raw node id, or a `sheer:` link
+    /// the node to fetch through: a petname (`usa`, `alice/box`), a raw node id, or a `swoosh:` link
     #[arg(long, value_name = "peer")]
     pub via: Peer,
     /// which served service to reach
@@ -38,12 +38,13 @@ pub struct FetchCmd {
     // value.
     #[arg(long, value_name = "service", default_value = Unbound::FETCH.name(), value_parser = swoosh::names::service)]
     pub service: Service,
-    /// present a `sheer:` capability link to reach a gated node
+    /// present a `swoosh:` capability link to reach a gated node
     #[arg(
         long,
         value_name = "link",
+        value_parser = swoosh::link::parse,
         long_help = "Optional: your own devices need no link; this machine's membership badge is \
-                     presented automatically. Pass a `sheer:` link only to reach as a delegate."
+                     presented automatically. Pass a `swoosh:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     /// Pin the local listener port (default: an OS-assigned free port).
@@ -74,7 +75,7 @@ impl swoosh::reaching::Reaching for FetchCmd {
     /// `Family` FUSES the identity to `PersistedIfPresent`, so the owner's self-badge roots at the same
     /// key the dial binds under and admits: this is the one-line fix for the owner-reaching-own-node 403
     /// (the verb used to dial `Ephemeral` + slip-only, so an owner with no slip was refused). The effective
-    /// slip is the FOLD of a self-addressing `sheer:` link in the `--via` peer with an explicit `--present`,
+    /// slip is the FOLD of a self-addressing `swoosh:` link in the `--via` peer with an explicit `--present`,
     /// threaded INTO the credential so the ONE resolver owns both slots.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {

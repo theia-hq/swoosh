@@ -1,4 +1,4 @@
-//! `swoosh grant issue <service>`: mint a `sheer:` capability link for one of this node's services.
+//! `swoosh grant issue <service>`: mint a `swoosh:` capability link for one of this node's services.
 //!
 //! A local verb: it signs with this node's persisted identity (the key an exposed service roots at) and
 //! binds no transport. Bare, the link is a BEARER slip, anyone holding it may present it, so short expiry is
@@ -25,7 +25,7 @@ use swoosh::node_signer::{Bind, NodeSigner};
 use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
 
-/// Mint a `sheer:` capability link granting one service.
+/// Mint a `swoosh:` capability link granting one service.
 ///
 /// The link roots at this node's identity, so a connector needs no separate node id and the exposer needs
 /// no allowlist to keep in sync. Bare it is a bearer slip (delegable with `--delegable`); `--for <who>` binds
@@ -153,7 +153,7 @@ impl ShareCmd {
         // Frame the mint on STDERR (what was minted, its blast radius, and how to revoke it) so a person sees
         // the consequence; STDOUT gets ONLY the link, so `swoosh grant issue ... > link.txt` stays clean.
         eprint!("{}", frame(&record, self.service.as_str(), lifetime));
-        println!("{link}");
+        println!("{}", swoosh::link::Link::from(link));
         Ok(())
     }
 }

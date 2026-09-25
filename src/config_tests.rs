@@ -153,14 +153,14 @@ async fn a_written_badge_reads_back_as_the_same_link() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A badge file holding something that is not a `sheer:` link FAILS CLOSED at the load, naming the file and
+/// A badge file holding something that is not a link FAILS CLOSED at the load, naming the file and
 /// the escape (`adopt --force`, the only adopt that does not itself run this load). Before the parse moved
 /// to the edge, the junk travelled the whole reach path and the peer refused it with nothing said.
 #[tokio::test]
 async fn a_corrupt_badge_file_fails_closed_and_names_the_fix() {
     let (home, dir) = store("badge-corrupt");
     super::create_store_dir(&dir).expect("create the store dir");
-    std::fs::write(home.badge(), "sheer:not-a-real-link\n").expect("write a corrupt badge file");
+    std::fs::write(home.badge(), "not-a-real-link\n").expect("write a corrupt badge file");
 
     let error = super::load_badge(&home)
         .await

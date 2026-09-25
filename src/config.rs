@@ -51,7 +51,7 @@ pub async fn write_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
     write_private_atomic(&home.signet(), format!("{signet}\n").as_bytes()).await
 }
 
-/// Load this device's stored membership badge: the signet-signed, device-bound `sheer:` link it presents
+/// Load this device's stored membership badge: the signet-signed, device-bound link it presents
 /// on connect, or `None` if none was stored: a machine that is no root's device presents no badge.
 /// Mirrors [`load_signet`].
 ///
@@ -71,7 +71,7 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
             }
             let badge = badge.parse::<Link>().wrap_err_with(|| {
                 format!(
-                    "the stored membership badge {} is not a usable `sheer:` link; re-run `swoosh \
+                    "the stored membership badge {} is not a usable link; re-run `swoosh \
                      adopt --force <invite>` to replace it, or move the file aside",
                     path.display(),
                 )
@@ -83,7 +83,7 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
     }
 }
 
-/// Write this device's membership badge: the signet-signed, device-bound `sheer:` link it presents on
+/// Write this device's membership badge: the signet-signed, device-bound link it presents on
 /// connect, as `adopt` stores it from an invite's badge field. Overwrites any prior badge (re-provisioning
 /// re-badges), creating the store dir. It lands beside the identity, mirroring [`write_signet`], and is
 /// written `0600`: though the signet already signed it (it carries no secret), it is a device-bound

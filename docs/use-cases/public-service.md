@@ -13,7 +13,7 @@ Name the services you want public. Everything else stays [gated](../keys.md#the-
 $ swoosh serve --public ping,speed
 swoosh ready
 
-    bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
+    ed01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
 
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
@@ -36,8 +36,8 @@ nothing to present:
 
 <!-- live-run: real iroh RTT over the internet, non-deterministic; 135.129.x.x masks the peer's address; re-capture before release -->
 ```console
-$ swoosh ping bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -c 4
-bf01hcq6balrlxwa via iroh: mixed (direct to 135.129.x.x:56141 and relayed)
+$ swoosh ping ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -c 4
+ed01hcq6balrlxwa via iroh: mixed (direct to 135.129.x.x:56141 and relayed)
   4 sent, 4 received, 0% loss
   rtt min/avg/max/mdev = 41.843/113.534/299.872/93.169 ms
 ```

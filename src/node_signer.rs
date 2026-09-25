@@ -26,7 +26,7 @@
 //!     core::time::Duration::from_secs(3600),
 //!     Delegation::Sealed,
 //! )?;
-//! assert!(link.as_str().starts_with("sheer:"));
+//! assert!(link.as_str().starts_with("ed01"));
 //! # Ok::<(), Box<dyn core::error::Error>>(())
 //! ```
 //!

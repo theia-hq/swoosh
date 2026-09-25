@@ -7,7 +7,7 @@ Measure throughput to a peer, like `iperf` but addressed by key.
 <!-- generated: usage from `swoosh speed -h`; option lines curated -->
 ```
 Usage: swoosh speed [OPTIONS] <peer>
-  <peer>          a petname, a raw node id, or a sheer: link
+  <peer>          a petname, a raw node id, or a swoosh: link
   --up / --down   which direction to measure (default: down)
   --bidir         measure both at once, full-duplex on one stream
   -t, --secs <seconds>   run for a fixed time (default: 5)

@@ -17,7 +17,7 @@ Publish the box's services behind its own gate:
 $ swoosh serve ssh=sshd: tv=tcp:127.0.0.1:8096
 swoosh ready
 
-    bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
+    ed01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
 
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
@@ -40,14 +40,14 @@ with no new grant:
 
 <!-- capture: swoosh grant issue tv --for fleet:mum -->
 ```console
-$ swoosh contact signet mum bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
-recorded mum's signet -> bf01o6vqymgz727g
+$ swoosh contact signet mum ed01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
+recorded mum's signet -> ed01o6vqymgz727g
 
 $ swoosh grant issue tv --for fleet:mum
-issued a fleet-bound grant for `tv` to fleet signet bf01o6vqymgz727g…
+issued a fleet-bound grant for `tv` to fleet signet ed01o6vqymgz727g…
   every device that signet vouches for can use it (theft-resistant); expires in 1h
-  revoke: swoosh grant revoke bf01o6vqymgz727g…
-sheer:bf01hcq6…
+  revoke: swoosh grant revoke ed01o6vqymgz727g…
+swoosh:ed01hcq6…
 ```
 
 The last line is the link. Hand it to mum over any channel (chat, AirDrop, a QR code). Repeat the two
@@ -61,7 +61,7 @@ the box:
 
 <!-- manual: long-running port bind -->
 ```console
-$ swoosh reach mediacenter tv --to 8096 --present sheer:bf01hcq6…
+$ swoosh reach mediacenter tv --to 8096 --present swoosh:ed01hcq6…
 ```
 
 Then she opens `http://127.0.0.1:8096` and watches. Any device her signet vouches for can present that
@@ -75,10 +75,10 @@ keeps is the denylist a revoke writes.
 
 Take mum's household off in one step:
 
-<!-- capture: swoosh grant revoke bf01o6vqymgz727g -->
+<!-- capture: swoosh grant revoke ed01o6vqymgz727g -->
 ```console
-$ swoosh grant revoke bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
-revoked 1 grant(s) to bf01o6vqymgz727g… (…/revoked)
+$ swoosh grant revoke ed01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
+revoked 1 grant(s) to ed01o6vqymgz727g… (…/revoked)
 ```
 
 ## The limits

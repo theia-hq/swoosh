@@ -395,10 +395,10 @@ impl StopSource {
 
     /// Record a kind, first writer wins.
     pub fn note(&self, kind: StopKind) {
-        if let Ok(mut first) = self.first.lock() {
-            if first.is_none() {
-                *first = Some(kind);
-            }
+        if let Ok(mut first) = self.first.lock()
+            && first.is_none()
+        {
+            *first = Some(kind);
         }
     }
 

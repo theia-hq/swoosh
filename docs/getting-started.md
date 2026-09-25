@@ -32,7 +32,7 @@ On the machine you want to reach, open two diagnostics to anyone and note the ke
 $ swoosh serve --public ping,speed
 swoosh ready
 
-    bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
+    ed01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
 
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
@@ -59,16 +59,16 @@ credential to present:
 
 <!-- live-run: real iroh RTT over the internet, non-deterministic; re-capture before release -->
 ```console
-$ swoosh ping bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -c 4
-bf01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.64:51778 and relayed)
+$ swoosh ping ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -c 4
+ed01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.64:51778 and relayed)
   4 sent, 4 received, 0% loss
   rtt min/avg/max/mdev = 0.532/0.739/0.888/0.103 ms
 ```
 
 <!-- live-run: real iroh throughput; a public route is metered, so the run may stop before -t -->
 ```console
-$ swoosh speed bf01uyi7g54bpea45hafea4gohlnay5bs23p3ck4z4g24dvcpeldkczq --down -t 5
-speed test to bf01uyi7g54bpea4 via iroh (down)
+$ swoosh speed ed01uyi7g54bpea45hafea4gohlnay5bs23p3ck4z4g24dvcpeldkczq --down -t 5
+speed test to ed01uyi7g54bpea4 via iroh (down)
 path: direct to 127.0.0.1:50769
 down  64.00 MiB in 0.58s = 110.87 MiB/s
 ```
@@ -89,7 +89,7 @@ You just did the zero-auth version. Each step from here adds exactly one thing:
   See [Keys: the gate](keys.md#the-gate).
 - **Reach by name.** Save a key under a petname once, then use the name everywhere:
   `swoosh contact add desk <key>`, then `swoosh ping desk`. See [contact](reference/commands.md#contact).
-- **Let other people in.** Issue a `sheer:` capability link to one service, for one person or their
+- **Let other people in.** Issue a `swoosh:` capability link to one service, for one person or their
   whole fleet, revocable. [Capabilities](capabilities.md) walks the whole loop in a minute.
 
 ## Next

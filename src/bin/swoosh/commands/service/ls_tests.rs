@@ -209,13 +209,15 @@ async fn bare_ls_rejects_present() {
 
     let base = scratch("present");
     let home = home_in(&base);
-    let link = swoosh::testkit::TestRoot::seeded(0xb0)
-        .device_badge(
-            swoosh::testkit::TestNode::seeded(0xb1).node_id(),
-            nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
-        )
-        .expect("mint a stand-in slip")
-        .to_string();
+    let link = swoosh::link::Link::from(
+        swoosh::testkit::TestRoot::seeded(0xb0)
+            .device_badge(
+                swoosh::testkit::TestNode::seeded(0xb1).node_id(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
+            )
+            .expect("mint a stand-in slip"),
+    )
+    .to_string();
     let ls = Wrap::try_parse_from(["x", "--present", &link])
         .expect("bare service ls --present parses")
         .ls;

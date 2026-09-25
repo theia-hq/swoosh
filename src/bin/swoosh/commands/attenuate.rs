@@ -1,4 +1,4 @@
-//! `swoosh grant attenuate <link>`: narrow an existing `sheer:` link, offline, before handing it on.
+//! `swoosh grant attenuate <link>`: narrow an existing `swoosh:` link, offline, before handing it on.
 //!
 //! A local verb: no identity, no transport, no network. It calls nauthy's
 //! [`Link::narrow`](nauthy::Link::narrow) grant logic; it only ever adds constraints, so the result
@@ -9,13 +9,13 @@ use clap::Args;
 use nauthy::{CapError, Link, Service};
 use tightbeam::duration::Lifetime;
 
-/// Narrow an existing `sheer:` link offline before handing it on.
+/// Narrow an existing `swoosh:` link offline before handing it on.
 ///
 /// This needs no secret and no network. It only ever adds constraints, so the result is never broader than
 /// the input; a holder uses it to hand a colleague a strictly smaller slice of their own access.
 #[derive(Debug, Args)]
 pub struct AttenuateCmd {
-    /// The `sheer:` link to narrow.
+    /// The `swoosh:` link to narrow.
     #[arg(value_name = "link")]
     pub link: String,
     /// restrict the link to one service
@@ -37,11 +37,11 @@ impl AttenuateCmd {
     /// Narrow the link and print the result.
     pub fn run(self) -> eyre::Result<()> {
         let shorten = self.expires.map(Lifetime::duration);
-        let link: Link = self.link.parse()?;
+        let link: Link = swoosh::link::parse(&self.link)?;
         let narrowed = link
             .narrow(self.service.as_ref(), shorten)
             .map_err(narrow_failure)?;
-        println!("{narrowed}");
+        println!("{}", swoosh::link::Link::from(narrowed));
         Ok(())
     }
 }
@@ -85,7 +85,7 @@ mod tests {
             .link()
             .expect("render the link");
         let cmd = AttenuateCmd {
-            link: link.to_string(),
+            link: swoosh::link::Link::from(link).to_string(),
             service: None,
             expires: Some("10m".parse().expect("a valid span")),
         };
@@ -116,7 +116,7 @@ mod tests {
             .link()
             .expect("render the link");
         let cmd = AttenuateCmd {
-            link: link.to_string(),
+            link: swoosh::link::Link::from(link).to_string(),
             service: Some(service),
             expires: None,
         };

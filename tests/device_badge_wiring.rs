@@ -11,11 +11,11 @@
 //! The test drives the actual `swoosh invite add` and `swoosh adopt` verbs (the product path, not a
 //! hand-rolled near-copy) and proves both tier-1 cells:
 //!
-//! - the DERIVED cell (`invite add <label>`) emits a three-field `invite:<seed>.<signet>.<badge>` whose
-//!   badge is signet-ROOTED and bound to the derived node id, which the device stores on `adopt`;
-//! - the BOUND cell (`invite add <label> --for <key>`) emits a two-field `invite:<signet>.<badge>` for a
-//!   key the device made: no secret travels, `adopt` keeps that identity, and the badge still verifies at
-//!   the signet root bound to the device;
+//! - the DERIVED cell (`invite add <label>`) emits a five-field `invite:<seed>.<from>.<name>.<root>.<token>`
+//!   whose standing is signet-ROOTED and bound to the derived node id, which the device stores on `adopt`;
+//! - the BOUND cell (`invite add <label> --for <key>`) emits a four-field `invite:<from>.<name>.<root>.<token>`
+//!   for a key the device made: no secret travels, `adopt` keeps that identity, and the badge still
+//!   verifies at the signet root bound to the device;
 //! - `invite rm <label>` revokes the recorded badge at its root, so the gate's revocation seam refuses it;
 //! - `invite ls` lists the row under its label, and `rm` leaves the ledger row for audit.
 //!
@@ -68,24 +68,18 @@ fn invite_add_derives_signs_adopt_stores_and_it_verifies_at_the_signet_root() {
     let token = first_invite(&String::from_utf8(create.stdout).unwrap())
         .expect("invite add prints an invite: token");
 
-    // The invite MUST be three fields (seed . signet . badge), where the badge is a `sheer:` link.
-    let fields: Vec<&str> = token
-        .strip_prefix(INVITE_SCHEME)
-        .unwrap()
-        .splitn(3, '.')
-        .collect();
+    // The invite MUST be five fields (seed . from . name . root . token), where `<root>.<token>` is the
+    // bare standing link.
+    let fields = invite_fields(&token);
     assert_eq!(
         fields.len(),
-        3,
-        "a derived invite carries three fields (seed.signet.badge), got {}: {token}",
+        5,
+        "a keyed invite carries five fields (seed.from.name.root.token), got {}: {token}",
         fields.len()
     );
-    let signet: NodeId = fields[1].parse().expect("the signet field is a node id");
-    let badge_field = fields[2];
-    assert!(
-        badge_field.starts_with("sheer:"),
-        "the third field is a signed badge (a sheer: link), got: {badge_field}"
-    );
+    assert_eq!(fields[2], "ci-runner", "the name rides without `me/`");
+    let signet: NodeId = fields[3].parse().expect("the root field is a key");
+    let badge_field = standing_field(&token);
 
     // The signet SECRET must NEVER be in the invite: only the child seed, the signet PUBLIC id, and the
     // public badge travel. Read the signet secret off disk and prove its base32 form is absent from the
@@ -209,20 +203,15 @@ async fn invite_add_for_binds_a_device_made_key_and_adopt_keeps_that_identity() 
         create_out.contains(&device.to_string()),
         "the recorded line prints the full admitted key for the out-of-band compare: {create_out}"
     );
-    // A bound invite is `<signet>.<badge>`; the badge itself is a `sheer:` link that contains a `.`, so
-    // split off the signet field only, exactly as the parser does.
-    let (signet_field, badge_field) = token
-        .strip_prefix(INVITE_SCHEME)
-        .unwrap()
-        .split_once('.')
-        .expect("a bound invite carries a signet field and a badge");
-    let signet: NodeId = signet_field
-        .parse()
-        .expect("the first field is the signet node id");
-    assert!(
-        badge_field.starts_with("sheer:"),
-        "the second field is the badge"
+    // A bound invite is `<from>.<name>.<root>.<token>`, where `<root>.<token>` is the bare standing.
+    let fields = invite_fields(&token);
+    assert_eq!(
+        fields.len(),
+        4,
+        "a bound invite carries four fields: {token}"
     );
+    let signet: NodeId = fields[2].parse().expect("the root field is a key");
+    let badge_field = standing_field(&token);
 
     // The device secret must never travel: the device's identity key bytes, base32-encoded, are absent.
     let secret_b32 = data_encoding::BASE32_NOPAD
@@ -335,14 +324,9 @@ async fn invite_add_then_invite_rm_refuses_the_device_at_the_gate() {
     );
     let token = first_invite(&String::from_utf8(create.stdout).unwrap())
         .expect("invite add prints an invite: token");
-    // The badge is field three of the derived invite; recover its cap so we can assert the gate refuses it.
-    let badge = token
-        .strip_prefix(INVITE_SCHEME)
-        .unwrap()
-        .splitn(3, '.')
-        .nth(2)
-        .expect("the invite carries the badge field");
-    let cap = Cap::parse(badge).expect("the badge parses as a cap");
+    // The standing is the invite's last two fields; recover its cap so we can assert the gate refuses it.
+    let badge = standing_field(&token);
+    let cap = Cap::parse(&badge).expect("the badge parses as a cap");
 
     // Before cancel: nothing denylists the badge (the gate would admit the device).
     let denylist = FileDenylist::load(signet_home.revoked()).await.unwrap();
@@ -556,13 +540,8 @@ async fn invite_add_refuses_to_reuse_a_label_for_a_different_key() {
     ]);
     assert!(create.status.success(), "{}", stderr(&create));
     let token = first_invite(&String::from_utf8(create.stdout).unwrap()).expect("token");
-    let badge = token
-        .strip_prefix(INVITE_SCHEME)
-        .unwrap()
-        .split_once('.')
-        .expect("a bound invite carries a signet field and a badge")
-        .1;
-    let cap = Cap::parse(badge).expect("the badge parses as a cap");
+    let badge = standing_field(&token);
+    let cap = Cap::parse(&badge).expect("the badge parses as a cap");
 
     // A second device with its own key asks for the SAME label: refused, with the two-step fix named.
     let second_identity = swoosh(&["identity", "--home", path_str(&second_dir)]);
@@ -806,7 +785,7 @@ fn adopt_renews_without_a_flag_and_refuses_a_downgrade() {
         ]);
         assert!(out.status.success(), "{}", stderr(&out));
         let token = first_invite(&String::from_utf8(out.stdout).unwrap()).expect("token");
-        let badge = bound_badge(&token);
+        let badge = standing_field(&token);
         (token, badge)
     };
 
@@ -988,16 +967,19 @@ fn first_invite(text: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// The badge field of a bound (two-field) `invite:<signet>.<badge>` token. The badge is itself a
-/// `sheer:` link with dots, so split off the signet field only.
-fn bound_badge(token: &str) -> String {
+/// The `.`-separated fields of an `invite:` token.
+fn invite_fields(token: &str) -> Vec<&str> {
     token
         .strip_prefix(INVITE_SCHEME)
-        .expect("a bound invite carries the invite: scheme")
-        .split_once('.')
-        .expect("a bound invite carries a signet field and a badge")
-        .1
-        .to_owned()
+        .expect("an invite carries the invite: prefix")
+        .split('.')
+        .collect()
+}
+
+/// The standing an invite carries: its last two fields, `<root>.<token>`, the bare link.
+fn standing_field(token: &str) -> String {
+    let fields = invite_fields(token);
+    fields[fields.len() - 2..].join(".")
 }
 
 /// The badge adopt stored in `home`, trimmed of the trailing newline `write_badge` appends.

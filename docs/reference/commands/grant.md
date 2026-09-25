@@ -2,7 +2,7 @@ Back to [Commands index](../commands.md).
 
 # <a id="grant"></a>`swoosh grant`
 
-Issue, list, narrow, or revoke `sheer:` capability links: signed grants to one of your services, checked
+Issue, list, narrow, or revoke `swoosh:` capability links: signed grants to one of your services, checked
 offline with no server and no allowlist. See [keys](../../keys.md#grant) for when to reach for each.
 
 <!-- generated: usage from `swoosh grant -h`; option lines curated -->
@@ -23,10 +23,10 @@ Usage: swoosh grant [OPTIONS] <COMMAND>
 <!-- capture: swoosh grant issue ssh --for fleet:alice -->
 ```console
 $ swoosh grant issue ssh --for fleet:alice
-issued a fleet-bound grant for `ssh` to fleet signet bf01o6vqymgz727g…
+issued a fleet-bound grant for `ssh` to fleet signet ed01o6vqymgz727g…
   every device that signet vouches for can use it (theft-resistant); expires in 1h
-  revoke: swoosh grant revoke bf01o6vqymgz727g…
-sheer:bf01hcq6…
+  revoke: swoosh grant revoke ed01o6vqymgz727g…
+swoosh:ed01hcq6…
 ```
 
 **Things to know.** A bare person (`--for alice`) is refused: you must type `fleet:alice` to widen, so a

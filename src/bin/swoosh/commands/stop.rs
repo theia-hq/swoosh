@@ -12,7 +12,7 @@
 //! (your own devices), and refuses a delegated slip at the route's member floor with the same uniform
 //! refusal a gate miss gives, before any `Response::Ok`. So `stop --at` presents this device's
 //! membership badge; a `--present` slip reaches the gate but cannot stop the node. For a fleet
-//! this means any of your own devices can stop it, which is correct for the qat CI-teardown consumer.
+//! this means any of your own devices can stop it, which is correct for a CI teardown.
 //! Hardening the lifecycle further (an arm->confirm nonce + a single-use device-bound destroy-cap, ideally
 //! owner-only so another fleet device cannot stop the node) is a follow-up, and it needs a security review
 //! before `control.stop` is trusted across a multi-device fleet.
@@ -56,15 +56,16 @@ pub struct StopCmd {
         value_name = "peer",
         long_help = "stop a peer's node rather than your own\n\
                      Bare `swoosh stop` stops the node running on this machine.\n\
-                     A peer is a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link."
+                     A peer is a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link."
     )]
     pub at: Option<Peer>,
-    /// present a `sheer:` capability link to reach a gated peer
+    /// present a `swoosh:` capability link to reach a gated peer
     #[arg(
         long,
         value_name = "link",
+        value_parser = swoosh::link::parse,
         long_help = "Optional: your own devices need no link, the dial presents this \
-                     device's membership badge. Pass a `sheer:` link only to reach as a delegate."
+                     device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     #[command(flatten)]
@@ -92,7 +93,7 @@ impl swoosh::reaching::Reaching for StopCmd {
     ///
     /// `stop --at` reaches the peer's family-gated `control.stop` service, so it presents the member badge
     /// rooted at the dialing key (only a family member may stop the node). `Family` fuses the identity to
-    /// `PersistedIfPresent`. The effective slip is the FOLD of a self-addressing `sheer:` link in the `--at`
+    /// `PersistedIfPresent`. The effective slip is the FOLD of a self-addressing `swoosh:` link in the `--at`
     /// peer with an explicit `--present`, threaded INTO the credential so the ONE resolver owns both slots.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
@@ -105,7 +106,7 @@ impl swoosh::reaching::Reaching for StopCmd {
     }
 
     /// Uniform dispatch: unpack the reach context and run. `stop --at` reads the resolved `present` badge and
-    /// `contacts` (to resolve a petname like `me/qat` in its `--at` slot); it ignores `transport` and `key`.
+    /// `contacts` (to resolve a petname like `me/ci` in its `--at` slot); it ignores `transport` and `key`.
     /// Only reached WITH `--at`: a bare `stop` splits to [`run_local`](Self::run_local) before any transport
     /// is composed, so `at` is always `Some` here.
     async fn run<T: Transport, D: Discovery>(

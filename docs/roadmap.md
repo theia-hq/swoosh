@@ -21,7 +21,7 @@ rest is planned and lands as it is built.
 - [x] `send` push a file or directory to a peer, verified end to end
 - [x] `fetch` mint a local URL whose fetch egresses at a node you name
 - [x] `fleet` pull a signed fleet roster and fold it into your contacts
-- [x] `grant issue` / `ls` / `narrow` / `revoke` `sheer:` capability links, bearer or bound to a device or fleet
+- [x] `grant issue` / `ls` / `narrow` / `revoke` `swoosh:` capability links, bearer or bound to a device or fleet
 - [x] `stop` stop a peer's node over the gated `control.stop` service
 
 ## Planned

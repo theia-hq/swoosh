@@ -120,7 +120,7 @@ enum Command {
     Mint(RetiredMintCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(ssh::SshCmd),
-    /// Issue, list, narrow, or revoke `sheer:` capability links.
+    /// Issue, list, narrow, or revoke `swoosh:` capability links.
     #[command(subcommand)]
     Grant(grant::GrantCmd),
     /// Print this command tree (spec vs binary).
@@ -173,7 +173,7 @@ macro_rules! reaching_verbs {
                 }
             }
 
-            /// Reject a redundant `--present` alongside a self-addressing `sheer:` link peer, ONCE for every
+            /// Reject a redundant `--present` alongside a self-addressing `swoosh:` link peer, ONCE for every
             /// reaching verb, so the guard can never be forgotten in a verb's own `run`.
             fn reject_redundant_present(&self) -> eyre::Result<()> {
                 match self {
@@ -331,7 +331,7 @@ enum Verb {
     Status(status::StatusCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(tree::TreeCmd),
-    /// Mints, narrows, or revokes a `sheer:` capability link. `share` signs with the persisted key;
+    /// Mints, narrows, or revokes a `swoosh:` capability link. `share` signs with the persisted key;
     /// `attenuate` and `revoke` are wholly offline. No leaf binds a transport or reads the address book.
     Grant(grant::GrantCmd),
     /// Reaches a peer; binds a transport.
@@ -645,7 +645,7 @@ async fn run() -> eyre::Result<()> {
             }
         },
     };
-    // Reject a redundant `--present` alongside a self-addressing `sheer:` link peer ONCE here, before any
+    // Reject a redundant `--present` alongside a self-addressing `swoosh:` link peer ONCE here, before any
     // dial, so the conflict is loud and compiler-forced for every verb (each states its own check via
     // `Reaching::reject_redundant_present`), never a per-verb one-liner a new verb could forget.
     reach.reject_redundant_present()?;
@@ -831,8 +831,8 @@ mod tests {
 
         // The bare verbs are gone from the top level; clap rejects them as unknown subcommands.
         assert!(Cli::try_parse_from(["swoosh", "issue", "ssh"]).is_err());
-        assert!(Cli::try_parse_from(["swoosh", "narrow", "sheer:x"]).is_err());
-        assert!(Cli::try_parse_from(["swoosh", "revoke", "sheer:x"]).is_err());
+        assert!(Cli::try_parse_from(["swoosh", "narrow", "swoosh:x"]).is_err());
+        assert!(Cli::try_parse_from(["swoosh", "revoke", "swoosh:x"]).is_err());
     }
 
     /// I.2 (no aliases, one spelling per act): the five retired spellings do not resolve, and the
@@ -1003,7 +1003,7 @@ mod tests {
     #[test]
     fn the_ssh_proxycommand_line_parses_as_a_public_reach() {
         let peer = NodeId::from_ed25519_secret(&[1u8; 32]).to_string();
-        let link = sheer_link();
+        let link = shown_link();
         let hint = format!("{peer}=127.0.0.1:9000");
         let cli = Cli::try_parse_from([
             "swoosh",
@@ -1032,7 +1032,8 @@ mod tests {
         );
         assert_eq!(
             cmd.present.as_ref().map(nauthy::Link::as_str),
-            Some(link.as_str())
+            link.strip_prefix(swoosh::link::PREFIX),
+            "the bridge presents the bare link"
         );
         assert_eq!(cmd.reach.peer.len(), 1, "each `--peer` hint rides verbatim");
 
@@ -1124,27 +1125,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A real `sheer:` capability link, minted through the library so a parse test exercises the true
+    /// A real `swoosh:` capability link, minted through the library so a parse test exercises the true
     /// boundary (a `Peer::Capability` arm), not a fake token a lenient parser would wave through.
-    fn sheer_link() -> String {
-        swoosh::testkit::TestNode::seeded(3)
+    fn shown_link() -> String {
+        let link = swoosh::testkit::TestNode::seeded(3)
             .fleet_slip(
                 &"ssh".parse().expect("valid service"),
                 swoosh::testkit::TestRoot::seeded(4).verify_key(),
                 nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
             )
-            .expect("mint a sheer: link")
-            .to_string()
+            .expect("mint a swoosh: link");
+        swoosh::link::Link::from(link).to_string()
     }
 
-    /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `sheer:` link all
+    /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `swoosh:` link all
     /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`reach`/`send`/`stop --at`/
     /// `service ls --at`/`fetch --via`/`ssh`/`fleet`. `stop` and `service ls` carry the peer on `--at`
     /// (bare acts on your own node); the rest carry it positionally.
     #[test]
     fn every_dialing_verb_takes_a_petname_a_key_and_a_link() {
         let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
-        let link = sheer_link();
+        let link = shown_link();
         for peer in ["alice", key.as_str(), link.as_str()] {
             let cases: [&[&str]; 10] = [
                 &["swoosh", "ping", peer],

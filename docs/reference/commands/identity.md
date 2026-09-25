@@ -19,7 +19,7 @@ Commands:
 <!-- capture: swoosh identity -->
 ```console
 $ swoosh identity
-bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
+ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
 key: ~/.config/swoosh/identity.key
 protection: plain
 signet: none

@@ -81,7 +81,7 @@ pub trait Reaching {
     /// not a match arm.
     fn reach_args(&self) -> &transport::ReachArgs;
 
-    /// Reject a redundant `--present` alongside a self-addressing `sheer:` link peer: the link already
+    /// Reject a redundant `--present` alongside a self-addressing `swoosh:` link peer: the link already
     /// presents its own credential (it is folded into [`credential`](Self::credential)), so a second
     /// explicit one is ambiguous. REQUIRED with no default body and dispatched ONCE in the composition
     /// root, so a new dialing verb cannot silently skip the conflict check (the same no-forgettable-invariant
@@ -501,7 +501,7 @@ mod tests {
         );
         let membership = membership.expect("a signet-bound slip attaches slot 2 (the fleet badge)");
         assert!(
-            membership.as_str().starts_with("sheer:") && membership.as_str() != slip_text,
+            membership.as_str().starts_with("ed01") && membership.as_str() != slip_text,
             "slot 2 is the stored member badge, not the slip: {membership}"
         );
     }
@@ -545,7 +545,7 @@ mod tests {
         );
     }
 
-    /// REGRESSION (defect #1): a signet-bound `sheer:` link passed AS THE PEER (not via `--present`) folds
+    /// REGRESSION (defect #1): a signet-bound `swoosh:` link passed AS THE PEER (not via `--present`) folds
     /// through `bind_role()` -> `resolve()` and attaches slot 2, IDENTICAL to passing it via `--present`.
     /// A `Peer::Capability` self-presents its own link, so the peer-link and a `--present` link resolve
     /// through ONE path. Before this consolidation a signet-bound link-as-peer dropped slot 2 (it dialed via
@@ -568,7 +568,9 @@ mod tests {
 
         // The slip arrives AS THE PEER: a `Capability` peer self-presents its own link, which the verb's
         // the credential fold puts it in `present` exactly as an explicit `--present` slip would be.
-        let peer: Peer = link_text.parse().expect("a sheer: link is a peer");
+        let peer: Peer = format!("{}{link_text}", crate::link::PREFIX)
+            .parse()
+            .expect("a swoosh: link is a peer");
         let cred = Credential::Family {
             present: peer.self_present(),
         };
@@ -584,17 +586,17 @@ mod tests {
         let membership = membership
             .expect("a signet-bound link-as-peer attaches slot 2 (defect #1: it used to drop it)");
         assert!(
-            membership.as_str().starts_with("sheer:") && membership.as_str() != link_text,
+            membership.as_str().starts_with("ed01") && membership.as_str() != link_text,
             "slot 2 is the stored member badge, not the slip: {membership}"
         );
     }
 
-    /// A NON-signet `sheer:` link passed as the peer folds to slot 1 alone; slot 2 stays `None`, so a
+    /// A NON-signet `swoosh:` link passed as the peer folds to slot 1 alone; slot 2 stays `None`, so a
     /// link-as-peer never over-shares this device's signet linkage, mirroring the `--present` privacy rule.
     #[tokio::test]
     async fn a_plain_link_as_peer_attaches_only_slot_one() {
         let secret = Secret::ephemeral();
-        // A member badge stands in for a plain (non-signet-bound) `sheer:` link passed as the peer.
+        // A member badge stands in for a plain (non-signet-bound) `swoosh:` link passed as the peer.
         let link_text = crate::testkit::TestRoot::seeded(0xb0)
             .device_badge(
                 crate::testkit::TestNode::seeded(0xb1).node_id(),
@@ -602,7 +604,9 @@ mod tests {
             )
             .expect("mint a stand-in plain slip")
             .to_string();
-        let peer: Peer = link_text.parse().expect("a sheer: link is a peer");
+        let peer: Peer = format!("{}{link_text}", crate::link::PREFIX)
+            .parse()
+            .expect("a swoosh: link is a peer");
         let cred = Credential::Family {
             present: peer.self_present(),
         };
@@ -716,7 +720,7 @@ mod tests {
         assert!(
             resolved
                 .grant
-                .is_some_and(|grant| grant.as_str().starts_with("sheer:")),
+                .is_some_and(|grant| grant.as_str().starts_with("ed01")),
             "the dial goes ahead carrying the stored badge"
         );
         let warned = String::from_utf8(warned).expect("the warning is utf-8");

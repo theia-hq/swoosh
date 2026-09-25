@@ -183,7 +183,7 @@ impl Home {
         self.dir.join("revoked_keys.lock")
     }
 
-    /// `<home>/disabled_roots`: the root keys this node no longer trusts, one `bf01` key per line, which
+    /// `<home>/disabled_roots`: the root keys this node no longer trusts, one `ed01` key per line, which
     /// the `serve` gate refuses every cap rooted at and `fleet` and `adopt` refuse to follow. It only ever
     /// grows, and nothing here removes a key. Deliberately NOT [`disabled`](Self::disabled), the service
     /// toggle, whose list a re-enable shrinks: a root disable is terminal, and the two must never share a

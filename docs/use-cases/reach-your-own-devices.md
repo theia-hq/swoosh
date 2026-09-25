@@ -15,9 +15,9 @@ machine:
 <!-- capture: swoosh invite add laptop -->
 ```console
 $ swoosh invite add laptop
-invite:….bf01hcq6…
+invite:….ed01hcq6…
 
-recorded me/laptop -> bf01imv3ljql6kjn  [derived]
+recorded me/laptop -> ed01imv3ljql6kjn  [derived]
 hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
@@ -28,8 +28,8 @@ line to a file, the `invite:` prefix included. The file must be `0600` (`chmod 6
 <!-- capture: swoosh adopt @invite.txt -->
 ```console
 $ swoosh adopt @invite.txt
-adopted this machine as bf01imv3ljql6kjn  [mine]
-trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates.
+adopted this machine as ed01imv3ljql6kjn  [mine]
+trusting signet ed01hcq6…: `swoosh serve` now admits its members and delegates.
 compare that signet with the owner out of band before serving: the token is not signed by the signet it names, so it alone does not prove who sent it.
 stored your membership badge: this device now reaches your gated services.
 ```
@@ -48,7 +48,7 @@ On the machine you want to reach, stay online:
 $ swoosh serve
 swoosh ready
 
-    bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
+    ed01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
 
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
@@ -68,10 +68,10 @@ ctrl-c to stop
 Save its key under a name once, then reach it by name from any of your devices. Because both machines
 carry your membership, the gate admits you with nothing to present:
 
-<!-- capture: swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -->
+<!-- capture: swoosh contact add desk ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -->
 ```console
-$ swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-added desk -> bf01hcq6balrlxwa
+$ swoosh contact add desk ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
+added desk -> ed01hcq6balrlxwa
 ```
 
 <!-- live-run: real iroh RTT over the internet, non-deterministic; 135.129.x.x masks the peer's address; re-capture before release -->

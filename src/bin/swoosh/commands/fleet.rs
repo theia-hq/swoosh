@@ -27,19 +27,20 @@ use tokio::io::AsyncReadExt as _;
 /// Learn your fleet from a coordination node: pull, verify, and fold its members into your contacts.
 #[derive(Debug, Args)]
 pub struct FleetCmd {
-    /// the coordination node to pull from: a petname (`me/hub`), a raw node id, or a `sheer:` link
+    /// the coordination node to pull from: a petname (`me/hub`), a raw node id, or a `swoosh:` link
     // POSITIONAL because it is mandatory and sole, and `fleet` has no own-node form to fall back to: a
     // flag that is never optional is a positional in costume. It shipped as `--pull <peer>` through
     // v0.11.2, the same shape the retired `forward --service` wore. A second act (cutting a roster)
     // makes this a group of leaves, never an optional slot on this one.
     #[arg(value_name = "peer")]
     pub peer: Peer,
-    /// present a `sheer:` capability link to reach a gated coordination node
+    /// present a `swoosh:` capability link to reach a gated coordination node
     #[arg(
         long,
         value_name = "link",
+        value_parser = swoosh::link::parse,
         long_help = "Optional: your own devices need no link; this machine's membership badge is \
-                     presented automatically. Pass a `sheer:` link only to reach as a delegate."
+                     presented automatically. Pass a `swoosh:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     #[command(flatten)]
@@ -64,7 +65,7 @@ impl swoosh::reaching::Reaching for FleetCmd {
     ///
     /// `fleet` reaches the coordination node's member-gated update route, so it presents the
     /// member badge rooted at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The
-    /// effective slip is the FOLD of a self-addressing `sheer:` link in the `<peer>` slot with an explicit
+    /// effective slip is the FOLD of a self-addressing `swoosh:` link in the `<peer>` slot with an explicit
     /// `--present`, threaded INTO the credential so the ONE resolver owns both slots.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {

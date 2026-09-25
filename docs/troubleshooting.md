@@ -38,8 +38,8 @@ Fix one of:
 ## "reached, but refused (not admitted)"
 
 ```
-bf01hcq6balrlxwa via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)
-Error: bf01hcq6balrlxwa: reached, but refused
+ed01hcq6balrlxwa via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)
+Error: ed01hcq6balrlxwa: reached, but refused
 ```
 
 You reached the peer, but its gate turned you away. You are not one of its devices and you presented no
@@ -54,7 +54,7 @@ Fix one of:
 
 - If it is your own node, enroll this machine: `swoosh invite add <label>` on the machine that holds your
   signet, then `swoosh adopt` here.
-- If someone else runs it, ask them for a [capability link](keys.md#grant) and add `--present sheer:…` to
+- If someone else runs it, ask them for a [capability link](keys.md#grant) and add `--present swoosh:…` to
   your command.
 - If the service is meant to be public, the owner opens it with `swoosh serve --public <service>`.
 - If the menu from `swoosh service ls --at <peer>` is missing the service, the node is not serving it:

@@ -34,15 +34,16 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 #[command(group = ArgGroup::new("way").args(["up", "down", "bidir"]))]
 #[command(group = ArgGroup::new("bound").args(["secs", "bytes"]))]
 pub struct SpeedCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
-    /// present a `sheer:` capability link to reach a gated peer
+    /// present a `swoosh:` capability link to reach a gated peer
     #[arg(
         long,
         value_name = "link",
+        value_parser = swoosh::link::parse,
         long_help = "Optional: your own devices need no link, the dial presents this \
-                     device's membership badge. Pass a `sheer:` link only to reach as a delegate."
+                     device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     /// Measure the upload direction (this node sends).
@@ -82,7 +83,7 @@ impl swoosh::reaching::Reaching for SpeedCmd {
     ///
     /// `speed` reaches the peer's family-gated `speed` service, so it presents the member badge rooted at
     /// the dialing key (like `ping`). `Family` fuses the identity to `PersistedIfPresent`. The effective
-    /// slip is the FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded
+    /// slip is the FOLD of a self-addressing `swoosh:` link-as-peer with an explicit `--present`, threaded
     /// INTO the credential so the ONE resolver owns both slots.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {

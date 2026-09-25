@@ -7,7 +7,7 @@
 //! [`Reaching`](crate::reaching)), from which the badge and the [`identity`](crate::identity::Identity)
 //! mode both DERIVE, so the two can never disagree.
 //!
-//! The credential a verb carries is a [`Link`]: a `sheer:` link is parse-validated at the clap boundary
+//! The credential a verb carries is a [`Link`]: a `swoosh:` link is parse-validated at the clap boundary
 //! (the scheme, the embedded root key, the base32 body, and the signature chain, the same check the far
 //! gate runs), so a malformed link is refused where the user typed it, naming the fault, rather than
 //! laundered down the whole reach path as if valid and refused opaquely at the peer. [`LinkExt`] adds the

@@ -26,7 +26,7 @@ use crate::commands::connect::{To, connect};
 /// Reach a peer's served service: stdout by default, or `--to <port>`.
 #[derive(Debug, Args)]
 pub struct ReachCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
     /// the served service to reach, under the name the host bound it
@@ -41,12 +41,13 @@ pub struct ReachCmd {
     // Defaults to stdout: the generic dial's common case is a pipe, so the flagless form is the good one.
     #[arg(long, value_name = "port | - | unix:PATH", default_value = "-")]
     pub to: To,
-    /// present a `sheer:` capability link to reach a gated peer
+    /// present a `swoosh:` capability link to reach a gated peer
     #[arg(
         long,
         value_name = "link",
+        value_parser = swoosh::link::parse,
         long_help = "Optional. `reach` presents this node's membership badge by default, so your own \
-                     devices admit it. Pass a `sheer:` link to reach a peer that granted you one instead."
+                     devices admit it. Pass a `swoosh:` link to reach a peer that granted you one instead."
     )]
     pub present: Option<Link>,
     #[command(flatten)]
@@ -72,7 +73,7 @@ impl swoosh::reaching::Reaching for ReachCmd {
     /// `reach` reaches a family-gated service like every other reach-outward verb, so it presents the
     /// member badge rooted at the dialing key: a member reaching a service on their OWN node is admitted
     /// by their own fleet. Stating `Family` FUSES the identity to `PersistedIfPresent`, so the self-badge
-    /// roots at the key the dial binds under. The effective slip is the FOLD of a self-addressing `sheer:`
+    /// roots at the key the dial binds under. The effective slip is the FOLD of a self-addressing `swoosh:`
     /// link-as-peer with an explicit `--present`, threaded INTO the credential so the ONE resolver owns
     /// both slots (slot 1 present-or-badge, slot 2 the fleet badge for a signet-bound slip).
     fn bind_role(&self) -> swoosh::reaching::BindRole {

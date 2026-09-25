@@ -149,7 +149,13 @@ fn only_a_strictly_later_readable_expiry_supersedes() {
 fn derived_invite(signet: &TestRoot, seed: [u8; 32]) -> String {
     let device = NodeId::from_ed25519_secret(&seed);
     let expiry = SystemTime::now() + DAY;
-    Invite::derived(seed, signet.node_id(), badge_for(signet, device, expiry)).to_string()
+    Invite::keyed(
+        seed,
+        signet.node_id(),
+        "laptop".parse().expect("a name"),
+        badge_for(signet, device, expiry),
+    )
+    .to_string()
 }
 
 #[tokio::test]

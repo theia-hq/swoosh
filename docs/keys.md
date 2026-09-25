@@ -6,7 +6,7 @@ trade the math forces on you. Once you hold these, the rest of swoosh is just ve
 ## You are your key
 
 swoosh reaches a machine by its **public key**, not its IP address. A key is a short base32 string like
-`bf01hcq6…`. You hand someone your key; they reach you, wherever you are, across home routers and NATs,
+`ed01hcq6…`. You hand someone your key; they reach you, wherever you are, across home routers and NATs,
 with no address to look up.
 
 An IP address changes: you move networks, your router hands out a new lease. A key does not. Reach a
@@ -48,8 +48,8 @@ private (`chmod 600 invite.txt`); `adopt` refuses a file readable by anyone else
 <!-- capture: swoosh adopt @invite.txt -->
 ```console
 $ swoosh adopt @invite.txt
-adopted this machine as bf01imv3ljql6kjn  [mine]
-trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates.
+adopted this machine as ed01imv3ljql6kjn  [mine]
+trusting signet ed01hcq6…: `swoosh serve` now admits its members and delegates.
 compare that signet with the owner out of band before serving: the token is not signed by the signet it names, so it alone does not prove who sent it.
 stored your membership badge: this device now reaches your gated services.
 ```
@@ -57,14 +57,14 @@ stored your membership badge: this device now reaches your gated services.
 To keep the secret from travelling at all, make the key ON the new machine first and have your signet
 sign only its public half (`--for`):
 
-<!-- capture: swoosh invite add laptop --for bf01imv3ljql6kjn -->
+<!-- capture: swoosh invite add laptop --for ed01imv3ljql6kjn -->
 ```console
-$ swoosh invite add laptop --for bf01imv3ljql6kjn
-invite:bf01hcq6….sheer:…
+$ swoosh invite add laptop --for ed01imv3ljql6kjn
+invite:ed01hcq6….laptop.ed01hcq6….…
 
-recorded me/laptop -> bf01imv3ljql6kjn
-signet bf01hcq6…
-hand this invite back to that key: it admits bf01imv3ljql6kjn only.
+recorded me/laptop -> ed01imv3ljql6kjn
+signet ed01hcq6…
+hand this invite back to that key: it admits ed01imv3ljql6kjn only.
 compare those keys with the device operator out of band: the token itself is not signed, so it alone does not prove who sent it.
 ```
 
@@ -115,7 +115,7 @@ signet, which they read with `swoosh identity` on their own machine and send you
 
 ### Grant
 
-A **grant** is access to one of your services. Its shareable form is a **capability link** (a `sheer:`
+A **grant** is access to one of your services. Its shareable form is a **capability link** (a `swoosh:`
 link): a signed token, rooted at your key, that a gate checks offline with no server and no allowlist
 to sync. You issue a grant with `swoosh grant issue`, hand the link over any channel (chat, a QR code),
 and the holder presents it when they dial.
@@ -150,7 +150,7 @@ that one service until it expires or you revoke it. Keep bearer grants short-liv
 ## Using a grant you were given
 
 Everything above is how you hand access OUT. Using a grant someone handed YOU is the mirror image. A
-`sheer:` link carries both the node to reach and the grant to present, so you pass it in place of a peer on
+`swoosh:` link carries both the node to reach and the grant to present, so you pass it in place of a peer on
 any reach verb.
 
 Nothing else is needed: the link names the node, names the one service it grants, and proves you may reach
@@ -172,8 +172,8 @@ as a delegate holding someone's grant.
 | [invite](reference/commands.md#invite) | a one-device token from your signet; adopting it stores that device's membership |
 | [badge](#membership) | a device's membership as a credential: the signet-signed proof it stores and presents |
 | [fleet](#fleet) | one person's devices; everything their signet vouches for |
-| [grant](#grant) | access to one service; its shareable form is a `sheer:` capability link, checked offline |
-| [capability link](#grant) | a grant's shareable form, a `sheer:` link; commands name it `<link>` |
+| [grant](#grant) | access to one service; its shareable form is a `swoosh:` capability link, checked offline |
+| [capability link](#grant) | a grant's shareable form, a `swoosh:` link; commands name it `<link>` |
 
 ## Next
 
