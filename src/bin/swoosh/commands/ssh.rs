@@ -126,17 +126,6 @@ impl SshCmd {
         let host = self.peer.to_string();
         let key = first.node.to_string();
 
-        // swoosh keeps its own host-key book under the RESOLVED home (see module docs): prepare the private
-        // file, and on the first sight of this node id print the id being pinned, so a human can eyeball it
-        // against an out-of-band value. First sight is over the already-authenticated overlay, so this is a
-        // record, not blind TOFU. Same home seam as the identity (`--home`/`SWOOSH_HOME`), so an isolated
-        // run pins into its own book instead of appending to the live one.
-        let known_hosts = home.known_hosts();
-        prepare_known_hosts(&known_hosts)?;
-        if !already_pinned(&known_hosts, &key) {
-            eprintln!("swoosh: pinning {key} on first connection (over the authenticated overlay)");
-        }
-
         let proxy = self_invocation()?;
         // Thread the effective --home into the ProxyCommand so the re-invoked `reach` dials under the
         // SAME identity `swoosh ssh` was given, not swoosh's default. ONLY when the home was named explicitly
@@ -160,16 +149,35 @@ impl SshCmd {
         let (target, present) = match (&self.peer, self.peer.file()) {
             (_, Some(file)) => (proxy_path(&std::path::absolute(file)?)?, None),
             (Peer::Capability { link, .. }, None) => (
-                proxy_quote(&swoosh::link::Link::from(Link::clone(link)).to_string()),
+                proxy_word(&swoosh::link::Link::from(Link::clone(link)).to_string())?,
                 None,
             ),
             _ => (
                 String::clone(&key),
                 self.present
                     .clone()
-                    .map(|link| proxy_quote(&swoosh::link::Link::from(link).to_string())),
+                    .map(|link| proxy_word(&swoosh::link::Link::from(link).to_string()))
+                    .transpose()?,
             ),
         };
+        // Every word is quoted, or refused, before anything is prepared or printed, so a refusal is the one
+        // line a person sees.
+        let hints = self
+            .peer_hint
+            .iter()
+            .map(|hint| proxy_word(hint.as_arg()))
+            .collect::<eyre::Result<Vec<_>>>()?;
+
+        // swoosh keeps its own host-key book under the RESOLVED home (see module docs): prepare the private
+        // file, and on the first sight of this node id print the id being pinned, so a human can eyeball it
+        // against an out-of-band value. First sight is over the already-authenticated overlay, so this is a
+        // record, not blind TOFU. Same home seam as the identity (`--home`/`SWOOSH_HOME`), so an isolated
+        // run pins into its own book instead of appending to the live one.
+        let known_hosts = home.known_hosts();
+        prepare_known_hosts(&known_hosts)?;
+        if !already_pinned(&known_hosts, &key) {
+            eprintln!("swoosh: pinning {key} on first connection (over the authenticated overlay)");
+        }
         Ok(ssh_argv(
             &proxy,
             &target,
@@ -179,7 +187,7 @@ impl SshCmd {
             &host,
             &known_hosts,
             home_arg.as_deref(),
-            &self.peer_hint,
+            &hints,
             &self.args,
         ))
     }
@@ -191,14 +199,14 @@ impl SshCmd {
 /// Pure so it is unit-testable (the `exec` itself is not): given the quoted `proxy` (this binary's own
 /// path, see [`self_invocation`]), the `target` the bridge dials (the resolved key, or a link peer quoted,
 /// or a peer file's quoted absolute path), the resolved `key`, the `service`, an optional quoted `present`
-/// capability link, the placeholder `host`, the private `known_hosts` path, the quoted `home`, the
+/// capability link, the placeholder `host`, the private `known_hosts` path, the quoted `home`, the quoted
 /// direct-address `hints`, and the user's trailing ssh `args`, it assembles the exact argv [`exec_ssh`]
 /// hands to `ssh`. The `ProxyCommand` value is
 /// `<self> reach <target> <service> --to - [--home <dir>] [--present <link>] [--peer <key>=<addr>]...`:
 /// ssh runs it to bridge the overlay stream in-process, under swoosh's own identity, with no `tightbeam`
-/// binary and no `$PATH` lookup. ssh expands `%` tokens in it and then hands it to the shell, so every
-/// token that carries text from outside swoosh arrives through [`proxy_quote`]; the rest are fixed
-/// characters (a `NodeId` is base32, the service is a single name, a `<key>=<addr>` hint is one token).
+/// binary and no `$PATH` lookup. ssh expands `%` tokens in it and then hands it to the user's shell, so
+/// every token that carries text from outside swoosh arrives through [`proxy_word`]; the rest are fixed
+/// characters (a `NodeId` is base32, the service is a single name).
 ///
 /// The four host-key options (see the module docs) come BEFORE the passthrough args: ssh honors the first
 /// occurrence of an option, so swoosh's intent wins over a user's trailing `-o`. `HostKeyAlias` keys the
@@ -218,7 +226,7 @@ fn ssh_argv(
     host: &str,
     known_hosts: &Path,
     home: Option<&str>,
-    hints: &[transport::PeerHint],
+    hints: &[String],
     args: &[String],
 ) -> Vec<String> {
     // `--to -` streams the overlay service over stdin/stdout (the ProxyCommand shape). `-` is one
@@ -235,13 +243,11 @@ fn ssh_argv(
     if let Some(link) = present {
         proxy_command.push_str(&format!(" --present {link}"));
     }
-    // Forward each `--peer <key>=<addr>` hint verbatim into the bridge's own reach flags, where the dial
-    // actually happens (so DNS resolves at the dial site, not this launcher). A `<key>=<host:port>` hint is
-    // whitespace-free (base32 key, `=`, host:port), so it rides unquoted in the whitespace-split
-    // ProxyCommand like the key and the link. The bridge's flattened `ReachArgs` receives them as any other
-    // reach verb would.
+    // Forward each `--peer <key>=<addr>` hint, already quoted by [`proxy_word`], into the bridge's own
+    // reach flags, where the dial actually happens (so DNS resolves at the dial site, not this launcher).
+    // The bridge's flattened `ReachArgs` receives them as any other reach verb would.
     for hint in hints {
-        proxy_command.push_str(&format!(" --peer {}", hint.as_arg()));
+        proxy_command.push_str(&format!(" --peer {hint}"));
     }
     let mut argv = vec![
         "-o".to_owned(),
@@ -311,8 +317,8 @@ fn already_pinned(path: &Path, node_id: &str) -> bool {
 ///
 /// Using `current_exe()` (not the bare name `swoosh`, and not a separate `tightbeam`) means ssh spawns
 /// exactly THIS binary by absolute path (no `$PATH` entry needed) and the overlay bridge runs in-process
-/// under swoosh's own identity. ssh runs a `ProxyCommand` through `/bin/sh -c` and splits it on
-/// whitespace, so the path is shell-quoted to survive an install directory with a space.
+/// under swoosh's own identity. ssh runs a `ProxyCommand` through the user's `$SHELL -c`, so the path
+/// goes through [`proxy_word`] to survive an install directory with a space.
 fn self_invocation() -> eyre::Result<String> {
     use eyre::WrapErr as _;
 
@@ -321,15 +327,41 @@ fn self_invocation() -> eyre::Result<String> {
     let path = exe
         .to_str()
         .ok_or_else(|| eyre::eyre!("this executable's path is not valid UTF-8"))?;
-    Ok(proxy_quote(path))
+    proxy_word(path)
 }
 
-/// A path as one `ProxyCommand` word, through [`proxy_quote`]. A path that is not UTF-8 refuses rather
+/// A path as one `ProxyCommand` word, through [`proxy_word`]. A path that is not UTF-8 refuses rather
 /// than reaching the child as a lossy spelling of some other path.
 fn proxy_path(path: &Path) -> eyre::Result<String> {
-    path.to_str()
-        .map(proxy_quote)
-        .ok_or_else(|| eyre::eyre!("{} is not valid UTF-8", path.display()))
+    proxy_word(
+        path.to_str()
+            .ok_or_else(|| eyre::eyre!("{} is not valid UTF-8", path.display()))?,
+    )
+}
+
+/// `s` as one word of an ssh `ProxyCommand` through [`proxy_quote`], or a refusal when `s` holds a
+/// character a single quote does not carry in every shell ssh may run it with.
+///
+/// ssh runs the `ProxyCommand` with the user's `$SHELL -c`, which need not be a POSIX shell. A newline
+/// (or any control character) ends a single-quoted word in csh and tcsh, a backslash escapes a quote
+/// inside fish's single quotes, and `!` is history expansion in csh. A name holding any of these could
+/// run a command, so it refuses in one line that names it, before ssh starts.
+fn proxy_word(s: &str) -> eyre::Result<String> {
+    if let Some(c) = s
+        .chars()
+        .find(|&c| c.is_control() || matches!(c, '\\' | '!'))
+    {
+        let what = match c {
+            '\n' => "a newline",
+            '\\' => "a backslash",
+            '!' => "a '!'",
+            _ => "a control character",
+        };
+        eyre::bail!(
+            "{s:?} holds {what}, which the shell ssh runs its ProxyCommand with cannot carry safely; rename it"
+        );
+    }
+    Ok(proxy_quote(s))
 }
 
 /// `s` as one word of an ssh `ProxyCommand`, arriving at the child exactly as given.
@@ -452,9 +484,10 @@ mod tests {
     }
 
     /// The argv ssh's `ProxyCommand` child receives, taken the way ssh takes it: `%%` expands to `%` (any
-    /// other `%` token is one ssh would replace, and fails the test), then a real `/bin/sh` in `cwd` splits
-    /// the value into words, with every expansion and quote removal the shell performs.
-    fn child_argv(argv: &[String], cwd: &Path) -> Vec<String> {
+    /// other `%` token is one ssh would replace, and fails the test), then a real `shell -c` in `cwd` (ssh
+    /// uses the user's `$SHELL`) splits the value into words, with every expansion and quote removal the
+    /// shell performs. A `pwned` file appearing in `cwd` fails the test: a word ran a command.
+    fn child_argv(argv: &[String], cwd: &Path, shell: &Path) -> Vec<String> {
         let value = argv[1]
             .strip_prefix("ProxyCommand=")
             .expect("the first option is the bridge");
@@ -470,17 +503,24 @@ mod tests {
             }
             expanded.push(c);
         }
-        let out = std::process::Command::new("/bin/sh")
+        // `printf` prints each word it is given NUL-terminated, in every shell here (a builtin or the
+        // system one). HOME is the scratch dir so no rc file of the person running the tests takes part.
+        let out = std::process::Command::new(shell)
             .arg("-c")
-            .arg(format!(
-                "for word in {expanded}; do printf '%s\\0' \"$word\"; done"
-            ))
+            .arg(format!("printf '%s\\0' {expanded}"))
             .current_dir(cwd)
+            .env("HOME", cwd)
             .output()
-            .expect("run /bin/sh");
+            .unwrap_or_else(|error| panic!("run {}: {error}", shell.display()));
+        assert!(
+            !cwd.join("pwned").exists(),
+            "a word ran a command under {}: {out:?}",
+            shell.display()
+        );
         assert!(
             out.status.success(),
-            "the shell ran the ProxyCommand words: {out:?}"
+            "{} ran the ProxyCommand words: {out:?}",
+            shell.display()
         );
         String::from_utf8(out.stdout)
             .expect("UTF-8 words")
@@ -490,8 +530,8 @@ mod tests {
     }
 
     /// The `reach` a ProxyCommand child runs, parsed from [`child_argv`] through swoosh's own clap model.
-    fn child_reach(argv: &[String], cwd: &Path) -> (crate::Cli, Vec<String>) {
-        let words = child_argv(argv, cwd);
+    fn child_reach(argv: &[String], cwd: &Path, shell: &Path) -> (crate::Cli, Vec<String>) {
+        let words = child_argv(argv, cwd, shell);
         let parsed = crate::Cli::try_parse_from(
             core::iter::once("swoosh").chain(words.iter().skip(1).map(String::as_str)),
         )
@@ -542,7 +582,7 @@ mod tests {
     #[test]
     fn the_proxy_command_parses_back_as_the_reach_it_names() {
         let link = signet_link();
-        let hints = [hint("127.0.0.1:9000")];
+        let hints = [proxy_word(hint("127.0.0.1:9000").as_arg()).expect("a hint is a plain word")];
         let argv = ssh_argv(
             PROXY,
             KEY,
@@ -555,9 +595,9 @@ mod tests {
             &hints,
             &[],
         );
-        // ssh hands the whole value to `/bin/sh`, which splits it into words and removes the quoting
+        // ssh hands the whole value to the shell, which splits it into words and removes the quoting
         // the launcher added; those words are the re-invocation's argv.
-        let (parsed, words) = child_reach(&argv, &std::env::temp_dir());
+        let (parsed, words) = child_reach(&argv, &std::env::temp_dir(), Path::new("/bin/sh"));
         assert_eq!(
             words.first().map(String::as_str),
             Some("/opt/bin/swoosh"),
@@ -725,10 +765,13 @@ mod tests {
 
     #[test]
     fn argv_forwards_peer_hints_into_the_proxy_command() {
-        // Each `--peer <key>=<addr>` hint rides verbatim in the ProxyCommand, appended after `--to -` (and
-        // after any `--present`), one whitespace-free token per hint, so the whitespace-split ProxyCommand
-        // hands them to the bridge intact for the bridge to resolve at the dial site.
-        let hints = [hint("127.0.0.1:9000"), hint("198.51.100.4:22")];
+        // Each `--peer <key>=<addr>` hint rides quoted in the ProxyCommand, appended after `--to -` (and
+        // after any `--present`), one word per hint, so the bridge gets them intact to resolve at the dial
+        // site.
+        let hints = [hint("127.0.0.1:9000"), hint("198.51.100.4:22")]
+            .iter()
+            .map(|hint| proxy_word(hint.as_arg()).expect("a hint is a plain word"))
+            .collect::<Vec<_>>();
         let argv = ssh_argv(
             PROXY,
             KEY,
@@ -745,7 +788,7 @@ mod tests {
             argv[1],
             format!(
                 "ProxyCommand={PROXY} reach {KEY} ssh --to - \
-                 --peer {KEY}=127.0.0.1:9000 --peer {KEY}=198.51.100.4:22"
+                 --peer '{KEY}=127.0.0.1:9000' --peer '{KEY}=198.51.100.4:22'"
             )
         );
     }
@@ -762,7 +805,7 @@ mod tests {
         let argv = parse_ssh(&["swoosh", &link])
             .argv(&Contacts::default(), &home)
             .expect("the launch assembles");
-        let (parsed, _) = child_reach(&argv, &dir);
+        let (parsed, _) = child_reach(&argv, &dir, Path::new("/bin/sh"));
         let Some(crate::Command::Reach(reach)) = parsed.command else {
             panic!("the bridge is the public `reach` verb");
         };
@@ -789,7 +832,7 @@ mod tests {
         let argv = parse_ssh(&["swoosh", &link])
             .argv(&Contacts::default(), &home)
             .expect("the launch assembles");
-        let (parsed, _) = child_reach(&argv, &dir);
+        let (parsed, _) = child_reach(&argv, &dir, Path::new("/bin/sh"));
         let Some(crate::Command::Reach(reach)) = parsed.command else {
             panic!("the bridge is the public `reach` verb");
         };
@@ -819,7 +862,7 @@ mod tests {
         let argv = cmd
             .argv(&Contacts::default(), &home)
             .expect("the launch assembles");
-        let (parsed, _) = child_reach(&argv, &dir);
+        let (parsed, _) = child_reach(&argv, &dir, Path::new("/bin/sh"));
         let Some(crate::Command::Reach(reach)) = parsed.command else {
             panic!("the bridge is the public `reach` verb");
         };
@@ -853,7 +896,7 @@ mod tests {
         }
 
         // The child is the ProxyCommand as the shell runs it: it names the file, and reads the link from it.
-        let (parsed, _) = child_reach(&argv, &dir);
+        let (parsed, _) = child_reach(&argv, &dir, Path::new("/bin/sh"));
         let Some(crate::Command::Reach(reach)) = parsed.command else {
             panic!("the bridge is the public `reach` verb");
         };
@@ -871,40 +914,95 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ssh expands `%` tokens in the ProxyCommand and runs it with the shell, and a link file's name is
-    /// chosen by whoever sent it. A name carrying a command substitution, a quote, or a `%` token reaches
-    /// the child as exactly that name: nothing runs, and nothing points at another path. The home rides
-    /// the same way.
+    /// The shells ssh may run the ProxyCommand with: its `$SHELL`, POSIX or not. A shell not installed
+    /// here is skipped with a note (CI installs them all).
+    fn shells() -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for shell in ["/bin/sh", "/bin/tcsh", "/bin/csh", "fish"] {
+            let path = if shell.starts_with('/') {
+                Some(PathBuf::from(shell)).filter(|path| path.exists())
+            } else {
+                std::env::var_os("PATH").and_then(|paths| {
+                    std::env::split_paths(&paths)
+                        .map(|dir| dir.join(shell))
+                        .find(|path| path.exists())
+                })
+            };
+            match path {
+                Some(path) => found.push(path),
+                None => eprintln!("note: {shell} is not installed; skipping it"),
+            }
+        }
+        found
+    }
+
+    /// ssh expands `%` tokens in the ProxyCommand and runs it with the user's `$SHELL`, and a link file's
+    /// name is chosen by whoever sent it. Under every shell, a name either reaches the child as exactly
+    /// that name (nothing runs, nothing points at another path) or refuses before ssh starts, in one line
+    /// naming it: a newline ends a single-quoted word in csh, a backslash escapes a quote in fish's single
+    /// quotes, and `!` is csh history. The home rides the same way.
     #[test]
     fn a_peer_path_with_shell_or_percent_characters_cannot_escape_the_proxy_command() {
-        let dir = scratch("hostile");
-        let file = dir.join("a$(touch pwned)`touch pwned`\"'%h.link");
-        std::fs::write(&file, format!("{}\n", anyone_link())).expect("write the link file");
-        let home_dir = dir.join("h$(touch pwned)%p");
-        let home = Home::resolve(Some(home_dir.clone())).expect("resolve");
+        // (file name, home name, whether a shell here cannot carry it, so it may refuse)
+        let cases = [
+            (
+                "a$(touch pwned)`touch pwned`\"'%h;touch pwned.link",
+                "h$(touch pwned)%p",
+                false,
+            ),
+            ("a\n;touch pwned\n.link", "h", true),
+            ("a\\';touch pwned;#.link", "h", true),
+            ("a!!;touch pwned.link", "h", true),
+            ("a\u{7f}.link", "h", true),
+            ("a.link", "h\n;touch pwned\n", true),
+        ];
+        for shell in shells() {
+            for (i, (name, home_name, may_refuse)) in cases.iter().enumerate() {
+                let dir = scratch(&format!("hostile{i}"));
+                let file = dir.join(name);
+                std::fs::write(&file, format!("{}\n", anyone_link())).expect("write the link file");
+                let home_dir = dir.join(home_name);
+                let home = Home::resolve(Some(home_dir.clone())).expect("resolve");
 
-        let argv = parse_ssh(&["swoosh", file.to_str().expect("a UTF-8 path")])
-            .argv(&Contacts::default(), &home)
-            .expect("the launch assembles");
-        let (parsed, _) = child_reach(&argv, &dir);
-        assert!(
-            !dir.join("pwned").exists(),
-            "a file name ran a command in the ProxyCommand"
-        );
-        assert_eq!(
-            parsed.home.as_deref(),
-            Some(home_dir.as_path()),
-            "the home arrives as itself"
-        );
-        let Some(crate::Command::Reach(reach)) = parsed.command else {
-            panic!("the bridge is the public `reach` verb");
-        };
-        assert_eq!(
-            reach.peer.file(),
-            Some(file.as_path()),
-            "the file arrives as itself"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+                let launch = parse_ssh(&["swoosh", file.to_str().expect("a UTF-8 path")])
+                    .argv(&Contacts::default(), &home);
+                match launch {
+                    // Refused: only a name some shell cannot carry, in one line that names it.
+                    Err(error) => {
+                        let error = format!("{error:#}");
+                        assert!(may_refuse, "{name:?} must launch: {error}");
+                        assert!(!error.contains('\n'), "one line: {error}");
+                        assert!(
+                            error.contains(&format!("{:?}", file.to_str().expect("UTF-8")))
+                                || error
+                                    .contains(&format!("{:?}", home_dir.to_str().expect("UTF-8"))),
+                            "the refusal names the path: {error}"
+                        );
+                    }
+                    // Launched: the name reaches the child as itself, and nothing ran.
+                    Ok(argv) => {
+                        let (parsed, _) = child_reach(&argv, &dir, &shell);
+                        assert_eq!(
+                            parsed.home.as_deref(),
+                            Some(home_dir.as_path()),
+                            "the home arrives as itself under {}",
+                            shell.display()
+                        );
+                        let Some(crate::Command::Reach(reach)) = parsed.command else {
+                            panic!("the bridge is the public `reach` verb");
+                        };
+                        assert_eq!(
+                            reach.peer.file(),
+                            Some(file.as_path()),
+                            "the file arrives as itself under {}",
+                            shell.display()
+                        );
+                    }
+                }
+                assert!(!dir.join("pwned").exists(), "a name ran a command");
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+        }
     }
 
     /// The passthrough only opens after `--`, so while swoosh still has flags to parse no ssh-shaped

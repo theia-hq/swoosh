@@ -19,6 +19,9 @@ jobs:
         run: sh scripts/lock-guard.sh .
       - name: build
         run: cargo build --locked
+      # ssh runs its ProxyCommand with the user's $SHELL; the quoting test runs under each of these.
+      - name: install shells
+        run: sudo apt-get update && sudo apt-get install -y tcsh csh fish
       - name: test
         run: cargo test --locked
       - name: clippy
