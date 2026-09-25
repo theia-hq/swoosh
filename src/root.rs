@@ -28,9 +28,10 @@ use crate::codec::{FormatError, Id, MAX_IDS, MAX_MEMBERS, MAX_REVOKED, MAX_REVOK
 use crate::contacts::DeviceLabel;
 use crate::home::Home;
 use crate::passphrase::Prompt;
-use crate::roster::{Artifact, ArtifactError, Epoch, Member, RosterDoc};
+use crate::roster::{ArtifactError, Epoch, FoldError, Member, RosterDoc, read_held};
 use crate::standing::{DirLock, Finished, LockError, Standing, StandingError};
 use crate::state::{self, Row, State, StateError};
+use crate::sync::{Dial, Until};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
 pub const KEY_FILE: &str = "root.key";
@@ -48,6 +49,9 @@ pub const DEFAULT_DURATION: Duration = Duration::from_secs(90 * DAY);
 const SHORTEST_RENEWING: u64 = 30 * DAY;
 
 const DAY: u64 = 24 * 60 * 60;
+
+/// How long an act that cuts spends asking your devices for a newer update before it signs.
+const SYNC_BOUND: Duration = Duration::from_secs(10);
 
 /// The refusal when a root is to be made with nobody at a terminal to choose its passphrase.
 pub(crate) const MINT_NEEDS_TERMINAL: &str = "making your root asks you to choose its passphrase, which needs a terminal once: run this at one.";
@@ -125,7 +129,7 @@ pub enum RootError {
     #[error("your root is not on this machine: run this where it is, or add --root <dir>.")]
     NotOnThisMachine,
     /// A root is here, and making it did not finish.
-    #[error("root: root:{}… made here, not finished: the next swoosh invite finishes it.", .root.short())]
+    #[error("{}", crate::standing::unfinished_line(*.root))]
     Unfinished {
         /// The root being made.
         root: NodeId,
@@ -291,6 +295,9 @@ pub enum RootError {
     /// The update could not be written here.
     #[error(transparent)]
     Artifact(#[from] ArtifactError),
+    /// The update cut could not be folded here.
+    #[error(transparent)]
+    Fold(#[from] FoldError),
     /// A file the act reads or writes failed.
     #[error("{}: {source}", .path.display())]
     Io {
@@ -436,14 +443,16 @@ pub struct RenewalList {
 }
 
 impl Root {
-    /// Present the root at `place` to `verb`: every check, then one prompt, then unlock.
+    /// Present the root at `place` to `verb`: every check, then one prompt, then unlock. An act that cuts
+    /// first exchanges with your devices through `dial`, so it signs from the newest update they hold.
     pub async fn present(
         home: &Home,
         place: RootPlace,
         verb: RootVerb,
         prompt: &mut impl Prompt,
+        dial: &impl Dial,
     ) -> Result<Self, RootError> {
-        Self::present_to(home, place, verb, prompt, &mut io::stderr()).await
+        Self::present_to(home, place, verb, prompt, dial, &mut io::stderr()).await
     }
 
     /// [`present`](Self::present), printing to `out`.
@@ -452,6 +461,7 @@ impl Root {
         place: RootPlace,
         verb: RootVerb,
         prompt: &mut impl Prompt,
+        dial: &impl Dial,
         out: &mut impl Write,
     ) -> Result<Self, RootError> {
         no_core_dumps()?;
@@ -483,6 +493,7 @@ impl Root {
             minted: false,
         };
         if verb.cuts() {
+            act.sync(dial, out).await;
             act.bring_forward(out)?;
             act.book.check_bounds(act.now)?;
             act.list_renewals(out);
@@ -746,7 +757,7 @@ impl Root {
         };
         self.write_state()?;
         if cut {
-            Artifact::write(&self.act.home.roster(), &bytes).await?;
+            let _ = crate::roster::fold(&self.act.home, &bytes).await?;
         }
         if self.act.minted {
             self.act.announce_made(out);
@@ -826,12 +837,43 @@ impl Root {
 }
 
 impl Act {
+    /// Present step 9's exchange: ask your devices for a newer update than the one held here, `me` in
+    /// random order, then the root's own live devices, then `roster.seed`, stopping at the first that
+    /// gives one, within 10 s. When devices were asked and none answered, or they could not be listed, say
+    /// so; a list read and found empty has nothing to ask and says nothing.
+    async fn sync(&self, dial: &impl Dial, out: &mut impl Write) {
+        let also: Vec<(VerifyKey, String)> = self
+            .book
+            .live()
+            .map(|row| (row.key, format!("me/{}", row.label)))
+            .collect();
+        let checked = match crate::sync::devices(&self.home, also).await {
+            Ok(devices) if devices.is_empty() => return,
+            Ok(devices) => crate::sync::round(dial, &devices, Until::Newer, SYNC_BOUND)
+                .await
+                .iter()
+                .any(|(_, answer)| answer.is_some()),
+            Err(error) => {
+                tracing::debug!(%error, "could not list the devices to sync with");
+                false
+            }
+        };
+        if !checked {
+            let _ = writeln!(
+                out,
+                "could not check this root against your devices (last synced {}). If another copy of it \
+                has been used since, a device will report two copies.",
+                crate::sync::ago(&self.home)
+            );
+        }
+    }
+
     /// Bring the records forward from the update this machine holds and any fork of it, carry this
     /// machine's own revocations of the root's devices, then mark every row whose key is revoked.
     fn bring_forward(&mut self, out: &mut impl Write) -> Result<(), RootError> {
         let pin = self.key.verify_key();
-        self.held = read_update(&self.home.roster(), pin);
-        let fork = read_update(&self.home.roster_fork(), pin);
+        self.held = read_held(&self.home.roster(), pin);
+        let fork = read_held(&self.home.roster_fork(), pin);
         let behind = self
             .held
             .as_ref()
@@ -1620,23 +1662,6 @@ impl Book {
         )
         .map_err(RootError::Format)
     }
-}
-
-/// The update at `path` and its bytes, if it verifies under `root`; else `None`.
-fn read_update(path: &Path, root: VerifyKey) -> Option<(RosterDoc, Vec<u8>)> {
-    use std::io::Read as _;
-
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(crate::roster::MAX_ROSTER_BLOB + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > crate::roster::MAX_ROSTER_BLOB {
-        return None;
-    }
-    let doc = crate::roster::verify(&bytes, root).ok()?;
-    Some((doc, bytes))
 }
 
 /// A standing left at `path`, or `None` when there is none or it is not one.

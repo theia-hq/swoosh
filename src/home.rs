@@ -114,9 +114,8 @@ impl Home {
         self.dir.join("resolver")
     }
 
-    /// `<home>/roster`: the signet-signed membership snapshot of this operator's fleet, re-cut by every
-    /// verb that changes the `me/*` member set and served verbatim on the update route every `serve` binds. Only the machine
-    /// holding the signet ever writes one, which is what makes a relay-only node unable to mis-cut.
+    /// `<home>/roster`: the newest update this machine holds from its root. Only a fold writes it: a root
+    /// act's own cut, or one taken in an exchange with another device.
     pub fn roster(&self) -> PathBuf {
         self.dir.join("roster")
     }
@@ -130,6 +129,11 @@ impl Home {
     /// sync asks.
     pub fn roster_seed(&self) -> PathBuf {
         self.dir.join("roster.seed")
+    }
+
+    /// `<home>/roster.lock`: the flock every fold holds, so two folds never read one floor and both write.
+    pub fn roster_lock(&self) -> PathBuf {
+        self.dir.join("roster.lock")
     }
 
     /// `<home>/roster.fork`: a second update seen at the number of the one in `roster`, kept as evidence

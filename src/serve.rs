@@ -6,8 +6,8 @@
 //! `bind_entry`/`diagnostics` bind the named routes (the diagnostics engines, tightbeam's own
 //! primitives), and the `control.*` handlers plus `Resident`/`InstanceLock`
 //! carry the node's local control surface. [`Activity`] is where an engine's reported fact becomes a
-//! line, and the only place one does. Nothing here SIGNS: `serve` relays a roster its operator's
-//! signet cut elsewhere, so the long-lived process never holds a signing identity.
+//! line, and the only place one does. Nothing here SIGNS: `serve` exchanges updates its root cut
+//! elsewhere, so the long-lived process never holds a signing identity.
 
 use std::path::{Path, PathBuf};
 
@@ -37,7 +37,7 @@ pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_singl
 // `sshh`, `transfer`) are consumed from the services repo, so the names resolve to those crates.
 pub use transfer::Recv;
 
-pub use self::roster::Roster;
+pub use self::roster::Exchange;
 pub use self::services::ServiceList;
 pub use self::stop::{STOP_ACK, Stop};
 
@@ -62,10 +62,11 @@ pub const CONTROL_STOP_SERVICE: &str = "control.stop";
 /// served handler is keyed under, one source of truth for the wire string.
 pub const CONTROL_SERVICES_SERVICE: &str = "control.services";
 
-/// The update route: every `serve` binds it, member-gated, and serves the home's signed roster
-/// artifact from it, whatever the standing. It is bound by the node, never named in a `serve` entry.
-/// Public so the client that pulls it requests the SAME name the served handler is keyed under.
-pub const ROSTER_SERVICE: &str = "roster";
+/// The update route: every `serve` binds it, member-gated, and answers the exchange on it
+/// ([`crate::sync`]), whatever the standing. It is bound by the node, never named in a `serve` entry, and
+/// its dotted name is one no name a person types can be. Public so every dialer requests the SAME name
+/// the served handler is keyed under.
+pub const SYNC_SERVICE: &str = "control.sync";
 
 /// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a
 /// decision at every match site (STYLE: prefer enums to bools). Every arm is a SUCCESS: an owner asked the

@@ -23,6 +23,7 @@
 //! module, which the integration proofs also assemble their nodes from.
 
 use core::net::SocketAddr;
+use core::time::Duration;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -38,9 +39,9 @@ use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::serve::{
-    Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, InstanceLock,
-    RECV_SCHEME, ROSTER_SERVICE, Resident, Roster, ServiceList, Stop, StopKind, Stopped,
-    acquire_single, bind_entry, bind_recv, classify_stop, extract_recv_services,
+    Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope, InstanceLock,
+    RECV_SCHEME, Resident, SYNC_SERVICE, ServiceList, Stop, StopKind, Stopped, acquire_single,
+    bind_entry, bind_recv, classify_stop, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
@@ -150,8 +151,8 @@ pub struct ServeCmd {
     pub bound_reach: Box<Reach>,
 }
 
-/// What `serve` needs beyond the bound node: swoosh's ssh host seed, the gate and the live cut beside it,
-/// and the signed roster artifact it relays. All resolved in the composition root (the
+/// What `serve` needs beyond the bound node: swoosh's ssh host seed, and the gate and the live cut beside
+/// it. All resolved in the composition root (the
 /// host seed needs the secret before the transport consumes it), then attached to [`ServeCmd`] via
 /// [`with_expose`](ServeCmd::with_expose). Moved here from `main.rs` so `serve` reads its own context.
 /// The home rides along too: `serve --resident` names its socket/lock off the home, and the SAME `home`
@@ -170,10 +171,6 @@ pub struct ExposeContext {
     /// written to `<home>/disabled` refuses the service live, and a `service enable` restores it, both with no
     /// restart. The exact mtime-watch shape as the denylist, loaded beside it in the composition root.
     pub enabled: FileDisabledList,
-    /// The home's signed roster artifact, served on the update route every `serve` binds. `serve` READS
-    /// it and never signs, so this long-lived process holds no signing identity. A missing file reads as
-    /// none. Re-read per pull (a debounced stat), so an update lands without a restart.
-    pub roster: Arc<swoosh::roster::Artifact>,
     /// The node home this serve runs under: the resident socket/lock derive from it, and the composition
     /// root resolves it ONCE, so a `--resident` serve and its future control clients name the same paths.
     pub home: Home,
@@ -185,7 +182,6 @@ impl core::fmt::Debug for ExposeContext {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExposeContext")
             .field("host_seed", &self.host_seed)
-            .field("roster", &self.roster.path())
             .finish_non_exhaustive()
     }
 }
@@ -193,6 +189,11 @@ impl core::fmt::Debug for ExposeContext {
 impl Reaching for ServeCmd {
     fn reach_args(&self) -> &ReachArgs {
         &self.reach
+    }
+
+    /// `serve` dials no peer of its own: its exchanges are its own rounds.
+    fn dialed(&self) -> Option<&swoosh::peer::Peer> {
+        None
     }
 
     /// `serve` is the gate: it dials no peer and takes no `--present`, so there is no self-addressing link
@@ -246,10 +247,9 @@ impl Reaching for ServeCmd {
             gate,
             cut,
             enabled,
-            roster,
             home,
         } = *expose;
-        self.run_serve(node, host_seed, gate, cut, enabled, roster, home)
+        self.run_serve(node, host_seed, gate, cut, enabled, home)
             .await
     }
 }
@@ -288,12 +288,6 @@ impl ServeCmd {
     /// `ping`/`speed`, the update route, and `sshd` under the `ssh` feature) behind the gate the
     /// composition root built, print swoosh's banner, and run the exposer with the live cut wired. A
     /// `sshd:`/`ping:`/`speed:` service stays gated unless `--public` opens it.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "run_serve takes the pre-resolved serve inputs one by one (seed, gate, cut, oracle, \
-                  roster, home) so each stays a named parameter at the one call site; bundling them \
-                  into a struct would only rename the list"
-    )]
     async fn run_serve<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -301,7 +295,6 @@ impl ServeCmd {
         gate: Gate,
         cut: AnchorCut,
         enabled: FileDisabledList,
-        roster: Arc<swoosh::roster::Artifact>,
         home: Home,
     ) -> eyre::Result<()>
     where
@@ -355,8 +348,8 @@ impl ServeCmd {
             router = bind_entry(router, entry, host_seed, &public)?;
         }
         // The update route, on every `serve` whatever the standing, member-gated: only this root's devices
-        // read it. Bound by the node, never by an entry, so no typed name reaches it.
-        router = router.member_service(ROSTER_SERVICE.parse()?, Roster::new(roster))?;
+        // exchange on it. Bound by the node, never by an entry, and dotted, so no typed name reaches it.
+        router = router.member_service(SYNC_SERVICE.parse()?, Exchange::new(home.clone()))?;
         for scoped in fetch.services() {
             // One engine handler per fetch service, holding ONLY its own origin scope: the SSRF pivot is
             // unrepresentable, not merely refused. An unconstrained scope is the NEVER engine (the open
@@ -562,9 +555,11 @@ impl ServeCmd {
         // `swoosh stop` (or a timer, or a Ctrl-C) must exit 0 so a CI action reads a clean teardown as
         // green, not a crash; only a genuine error teardown exits non-zero. The resident arm (when `Some`)
         // joins as the third select arm there; plain serve passes `None`, so nothing new executes.
-        let stopped = self
-            .run_until_stopped(exposer, node, cancel, resident)
-            .await?;
+        // Beside the run, this node's own exchanges with your devices: they end when the run does.
+        let stopped = tokio::select! {
+            stopped = self.run_until_stopped(exposer, node, cancel, resident) => stopped?,
+            () = sync_rounds(node, &home) => unreachable!("the rounds run until the node stops"),
+        };
         // The teardown line is best-effort: a piped consumer (a supervisor, `swoosh serve | head`) may have
         // already closed stdout by the time the node stops, so a broken-pipe write must NOT turn a clean stop
         // into a panic. `println!` panics on a write error, so write directly and ignore a closed pipe.
@@ -718,6 +713,46 @@ impl ServeCmd {
             cancel.clone(),
         ));
         Ok((state, listener, lock))
+    }
+}
+
+/// When a `serve` first exchanges with your devices after it starts.
+const FIRST_ROUND: Duration = Duration::from_secs(60);
+
+/// How often a `serve` exchanges with your devices after its first round, give or take a tenth.
+const EVERY_ROUND: Duration = Duration::from_secs(60 * 60);
+
+/// Every `serve`'s own exchanges with your devices: 60 s after start, then hourly with a tenth of jitter
+/// either way. Each round reads the standing, the pin, the standing's badge and `me` afresh, runs only on
+/// a device of a root, and stops at the first device that gave this machine a newer update. It never
+/// returns; it ends when the run beside it does.
+async fn sync_rounds<T: Transport, D: Discovery>(node: &Node<T, D>, home: &Home) {
+    use rand::Rng as _;
+
+    let dial = swoosh::sync::NodeDial::new(node, home);
+    let mut wait = FIRST_ROUND;
+    loop {
+        tokio::time::sleep(wait).await;
+        let devices = if swoosh::sync::is_device(home).await {
+            swoosh::sync::devices(home, []).await
+        } else {
+            Ok(Vec::new())
+        };
+        match devices {
+            Ok(devices) => {
+                let answers = swoosh::sync::round(
+                    &dial,
+                    &devices,
+                    swoosh::sync::Until::Newer,
+                    swoosh::sync::EACH * 4,
+                )
+                .await;
+                tracing::debug!(asked = answers.len(), "a sync round finished");
+            }
+            Err(error) => tracing::debug!(%error, "no sync round: the devices could not be read"),
+        }
+        let jitter = rand::thread_rng().gen_range(0.9..=1.1);
+        wait = EVERY_ROUND.mul_f64(jitter);
     }
 }
 
@@ -1265,9 +1300,9 @@ fn serving_section(
     let mut has_control = false;
     for entry in manifest {
         // `control.stop` / `control.services` fold into one row: node plumbing an operator never opts into,
-        // never a hidden service. Detected by the `control.` prefix, the verbatim wire family. The update
-        // route every serve binds is the same kind of plumbing and folds with them.
-        if entry.name.starts_with("control.") || entry.name == ROSTER_SERVICE {
+        // never a hidden service. Detected by the `control.` prefix, the verbatim wire family, which the
+        // update route every serve binds (`control.sync`) is part of.
+        if entry.name.starts_with("control.") {
             has_control = true;
             continue;
         }

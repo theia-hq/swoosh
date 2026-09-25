@@ -30,7 +30,8 @@ use crate::passphrase::Prompt;
 use crate::roster::{Epoch, Member, RosterDoc};
 use crate::standing::Standing;
 use crate::state::{self, Row, State};
-use crate::testkit::{Counting, STANDING_UNTIL, TestNode, TestRoot};
+use crate::sync::Answer;
+use crate::testkit::{Answering, Counting, STANDING_UNTIL, TestNode, TestRoot};
 
 /// This machine's key.
 const OWN: u8 = 0x11;
@@ -208,7 +209,10 @@ async fn present(
     prompt: &mut impl Prompt,
 ) -> (Result<Root, RootError>, String) {
     let mut out = Vec::new();
-    let root = Root::present_to(home, place, verb, prompt, &mut out).await;
+    // Every device answers that it holds the same update, so an act that cuts brings forward from what
+    // this home holds, as each test sets it up.
+    let dial = Answering::with(Answer::Same);
+    let root = Root::present_to(home, place, verb, prompt, &dial, &mut out).await;
     (root, String::from_utf8(out).unwrap())
 }
 
@@ -1474,4 +1478,148 @@ async fn a_fork_that_adds_nothing_prints_nothing() {
     )
     .await;
     assert!(!out.contains("brought forward"), "{out}");
+}
+
+#[tokio::test]
+async fn a_revocation_only_cut_advances_the_number() {
+    let home = home("revocation-only");
+    let laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]);
+    let rows = vec![own_row(), laptop.clone()];
+    holds(&home, &records(1, rows.clone(), vec![], vec![])).await;
+    held(
+        &home,
+        &RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap(),
+    );
+
+    let mut prompt = Counting::new([PASS]);
+    let (root, _) = present(&home, RootPlace::Home, RootVerb::Revoke, &mut prompt).await;
+    let mut root = root.unwrap();
+    root.revoke_device(&name("laptop")).unwrap();
+    let (committed, update) = commit(root).await;
+
+    assert_eq!(
+        committed.number,
+        Epoch(2),
+        "a revoke alone moves the number"
+    );
+    assert!(update.revoked_keys().contains(&key(LAPTOP)));
+}
+
+// --- the exchange before a cut ---
+
+#[tokio::test]
+async fn a_cutting_act_that_cannot_list_your_devices_says_it_could_not_check() {
+    let home = home("unlisted");
+    let laptop = row(LAPTOP, "laptop", Vec::new());
+    holds(
+        &home,
+        &records(1, vec![own_row(), laptop.clone()], Vec::new(), Vec::new()),
+    )
+    .await;
+    held(
+        &home,
+        &RosterDoc::new(Epoch(1), vec![member(&own_row()), member(&laptop)]).unwrap(),
+    );
+    std::fs::write(home.contacts(), "not = [an address book").unwrap();
+
+    let log = Log::default();
+    let mut prompt = Marking(log.clone(), Counting::new([PASS]));
+    let dial = Answering::with(Answer::Same);
+    let root = Root::present_to(
+        &home,
+        RootPlace::Home,
+        RootVerb::Invite,
+        &mut prompt,
+        &dial,
+        &mut log.clone(),
+    )
+    .await;
+
+    assert!(root.is_ok(), "the act goes on from what is held here");
+    assert_eq!(dial.calls(), 0, "no device could be listed to ask");
+    assert_eq!(
+        String::from_utf8(log.0.borrow().clone()).unwrap(),
+        "could not check this root against your devices (last synced never). If another copy of it has \
+         been used since, a device will report two copies.\n\
+         <prompt>\n",
+        "the line prints before the prompt"
+    );
+}
+
+#[tokio::test]
+async fn a_device_that_missed_its_renewal_update_gets_it_from_the_next() {
+    let home = home("missed-renewal");
+    // me/laptop's standing ends in ten days, and was signed eighty days ago.
+    let ends = now() + 10 * DAY;
+    let laptop = Row {
+        until: ends,
+        ids: vec![id(LAPTOP, ends)],
+        ..row(LAPTOP, "laptop", Vec::new())
+    };
+    let phone = row(PHONE, "phone", vec![id(PHONE, STANDING_UNTIL)]);
+    let rows = vec![own_row(), laptop.clone(), phone.clone()];
+    holds(&home, &records(1, rows.clone(), Vec::new(), Vec::new())).await;
+    let first = RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap();
+    held(&home, &first);
+
+    // me/laptop, a device of the same root holding the first update and its standing.
+    let device = {
+        let dir = beside(&home, "laptop");
+        let _ = std::fs::remove_dir_all(&dir);
+        config::create_store_dir(&dir).unwrap();
+        let device = Home::resolve(Some(dir)).unwrap();
+        let mut seed = TestNode::seeded(LAPTOP).seed();
+        KeyFile::device(device.identity_key())
+            .write(&keystore::Secret::take(&mut seed), Protection::Plain)
+            .unwrap();
+        let root = TestRoot::seeded(ROOT);
+        config::write_signet(&device, root.node_id()).await.unwrap();
+        let badge = root
+            .device_badge(
+                TestNode::seeded(LAPTOP).node_id(),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(ends),
+            )
+            .unwrap();
+        config::write_badge(&device, &badge).await.unwrap();
+        crate::roster::fold(&device, &TestRoot::seeded(ROOT).sign_update(&first))
+            .await
+            .unwrap();
+        device
+    };
+
+    // One act renews me/laptop; its update never reaches it.
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Invite,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    let mut root = root.unwrap();
+    let renewed = root.renew(&[name("laptop")], None).unwrap();
+    assert_eq!(renewed.renewed.len(), 1, "me/laptop is renewed");
+    let renewed_until = renewed.renewed[0].until;
+    let (missed, _) = commit(root).await;
+    assert_eq!(missed.number, Epoch(2));
+
+    // The next act only revokes me/phone.
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Revoke,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    let mut root = root.unwrap();
+    root.revoke_device(&name("phone")).unwrap();
+    let (next, _) = commit(root).await;
+    assert_eq!(next.number, Epoch(3));
+
+    crate::roster::fold(&device, &next.bytes).await.unwrap();
+    let badge = config::load_badge(&device).await.unwrap().unwrap();
+    assert_eq!(
+        badge.cap().expiry().unwrap(),
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(renewed_until)),
+        "me/laptop takes its renewed standing from the next update"
+    );
 }

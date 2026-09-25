@@ -34,8 +34,8 @@ use swoosh::{credential, reaching, transport};
 // The verb modules this binary dispatches to, each its own tree beside the composition root. The
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
-    adopt, contact, fetch, fleet, grant, identity, invite, ping, reach, send, serve, service,
-    speed, ssh, status, stop, tree,
+    adopt, contact, fetch, grant, identity, invite, ping, reach, send, serve, service, speed, ssh,
+    status, stop, sync, tree,
 };
 
 mod commands;
@@ -102,8 +102,8 @@ enum Command {
     /// Push a file or directory to a peer, verified end to end.
     #[command(name = "send")]
     Send(send::SendCmd),
-    /// Learn your fleet: pull the signed roster from a coordination node and fold it into your contacts.
-    Fleet(fleet::FleetCmd),
+    /// Bring your device list up to date with your other devices, both ways.
+    Sync(sync::SyncCmd),
     /// Manage local petnames: add a device, record a person's fleet signet, list, and remove.
     #[command(subcommand)]
     Contact(contact::ContactCmd),
@@ -170,6 +170,13 @@ macro_rules! reaching_verbs {
             fn reach_args(&self) -> &transport::ReachArgs {
                 match self {
                     $(Self::$verb(cmd) => cmd.reach_args(),)+
+                }
+            }
+
+            /// The peer the selected verb dials, for the stale-list exchange beside it.
+            fn dialed(&self) -> Option<&swoosh::peer::Peer> {
+                match self {
+                    $(Self::$verb(cmd) => cmd.dialed(),)+
                 }
             }
 
@@ -242,9 +249,9 @@ reaching_verbs! {
     /// `SERVICE  GATE` table. Presents a membership badge (like `stop`), so it rides the reach path under
     /// the persisted identity when one exists. A bare `service ls` (your own node) splits to a local report.
     Service(service::ServiceLsCmd),
-    /// `swoosh fleet <peer>`: pull the signed fleet roster from a coordination node and hydrate contacts.
-    /// Presents a membership badge (like `ping`/`send`) and needs the persisted identity (adopt first).
-    Fleet(fleet::FleetCmd),
+    /// `swoosh sync`: exchange with every live device of your root. Presents this machine's standing and
+    /// binds its own key, so each device's gate admits it as one of your devices.
+    Sync(sync::SyncCmd),
 }
 
 impl Command {
@@ -263,7 +270,7 @@ impl Command {
             Self::Grant(cmd) => Verb::Grant(cmd),
             Self::Reach(cmd) => Verb::Outward(Outward::Reach(cmd)),
             Self::Send(cmd) => Verb::Outward(Outward::Send(cmd)),
-            Self::Fleet(cmd) => Verb::Outward(Outward::Fleet(cmd)),
+            Self::Sync(cmd) => Verb::Outward(Outward::Sync(cmd)),
             // `stop --at <peer>` reaches a peer's `control.stop`; a bare `stop` stops YOUR OWN node over
             // the local control socket. Split on `--at` here so the bare case runs WITHOUT composing a
             // transport it would never use, the same local dispatch `ssh`/`grant` take.
@@ -390,8 +397,8 @@ impl Outward {
     ) -> eyre::Result<Option<serve::ExposeContext>> {
         match self {
             // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
-            // returns `None`. Nothing is signed here (or anywhere in `serve`): the roster artifact is
-            // only OPENED, beside the home files the gate reads.
+            // returns `None`. Nothing is signed here (or anywhere in `serve`): an update it gives or
+            // takes was signed by the root.
             Self::Serve(_) => {
                 let (gate, cut) = swoosh::gate::anchored(home, secret.node_id()).await?;
                 Ok(Some(serve::ExposeContext {
@@ -405,11 +412,6 @@ impl Outward {
                     // `service disable`/`enable` written to `<home>/disabled` is honored with no
                     // restart. Loaded here beside the gate because both are home files it reads.
                     enabled: tightbeam::enabled::FileDisabledList::load(home.disabled()).await?,
-                    // The update route's artifact, served on every `serve` whatever the standing. It
-                    // reads a missing file as none, so a machine with no update yet serves nothing.
-                    roster: std::sync::Arc::new(
-                        swoosh::roster::Artifact::open(home.roster()).await?,
-                    ),
                     // The SAME home the root resolved once: the resident socket/lock derive from it, so
                     // a `--resident` serve and its future control clients name the same paths.
                     home: home.clone(),
@@ -778,6 +780,53 @@ impl IrohBind {
     }
 }
 
+/// The device a dialing verb's peer is, when this machine's list is stale and that peer is one of your
+/// devices: the one to make the stale-list exchange with.
+async fn stale_device(
+    home: &Home,
+    contacts: &Contacts,
+    peer: &swoosh::peer::Peer,
+) -> Option<bifrost::NodeId> {
+    if !swoosh::sync::is_stale(home).await {
+        return None;
+    }
+    let device = peer.candidates(contacts).ok()?.into_iter().next()?;
+    swoosh::sync::is_own_device(home, device.node)
+        .await
+        .then_some(device.node)
+}
+
+/// Run a reaching verb, and beside it, from the moment it starts, the stale-list exchange with the device
+/// it dials (through `dial`). The exchange never waits for the verb, never depends on it succeeding, and
+/// ends with it: whatever the exchange has not finished when the verb returns is dropped, before the node
+/// closes. It is never printed; a failure logs at debug.
+async fn run_verb<T: Transport, D: Discovery>(
+    outward: Outward,
+    node: &Node<T, D>,
+    ctx: reaching::ReachCtx<'_>,
+    dial: &impl swoosh::sync::Dial,
+) -> eyre::Result<()>
+where
+    <T::Session as bifrost::Session>::Write: Send + 'static,
+    <T::Session as bifrost::Session>::Read: Send + 'static,
+{
+    let device = match outward.dialed() {
+        Some(peer) => stale_device(ctx.home, ctx.contacts, peer).await,
+        None => None,
+    };
+    let verb = outward.run(node, ctx);
+    let Some(device) = device else {
+        return verb.await;
+    };
+    let exchange = swoosh::sync::once(dial, device);
+    tokio::pin!(verb, exchange);
+    tokio::select! {
+        biased;
+        _ = &mut exchange => verb.await,
+        result = &mut verb => result,
+    }
+}
+
 /// Run a reaching verb against the bound node, then CLOSE the node on the way out on EVERY path (a clean
 /// return and an error alike). The composition root owns the node's lifetime, so teardown lives here in one
 /// place for the whole reaching family: iroh's `Endpoint` logs a red "Aborting ungracefully" if it drops
@@ -793,7 +842,8 @@ where
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
-    let result = outward.run(node, ctx).await;
+    let home = ctx.home;
+    let result = run_verb(outward, node, ctx, &swoosh::sync::NodeDial::new(node, home)).await;
     node.close().await;
     result
 }
@@ -810,6 +860,9 @@ mod grant_revoke_refuses_tests;
 #[cfg(test)]
 #[path = "signet_dial_verb_tests.rs"]
 mod signet_dial_verb_tests;
+#[cfg(test)]
+#[path = "stale_exchange_tests.rs"]
+mod stale_exchange_tests;
 
 #[cfg(test)]
 mod tests {
@@ -958,36 +1011,6 @@ mod tests {
             commands::connect::To::Stdout,
             "the sink defaults to stdout, so the common case composes with the shell"
         );
-    }
-
-    /// `fleet` takes its coordination node POSITIONALLY, by the same rule that took `--service` off the
-    /// generic dial: the slot is mandatory and sole, and the verb has no own-node form, so a long flag
-    /// was a positional wearing a costume. It shipped as `fleet --pull <peer>` through v0.11.2.
-    ///
-    /// Each assertion inverts, and the negatives come first so the failure names the regression. Put
-    /// `long` back on the peer slot and the first goes red (`--pull` starts parsing again); give the slot
-    /// a `default_value` (or make it `Option<Peer>`) and the second goes red (a bare `fleet` stops being
-    /// clap's own missing-argument error and becomes a verb with no object); either edit takes the third,
-    /// because the flagless form is the only thing both spellings cannot share.
-    #[test]
-    fn fleet_takes_its_coordination_node_as_a_positional() {
-        assert!(
-            Cli::try_parse_from(["swoosh", "fleet", "--pull", "me/hub"]).is_err(),
-            "the coordination node is a positional, not a flag: `--pull` is not a spelling of it"
-        );
-        assert!(
-            Cli::try_parse_from(["swoosh", "fleet"]).is_err(),
-            "the peer slot is required: a pull with no coordination node is clap's own error, never \
-             a verb that dials nothing"
-        );
-
-        let Some(Command::Fleet(cmd)) = Cli::try_parse_from(["swoosh", "fleet", "me/hub"])
-            .expect("the flagless form parses: the verb and its object, nothing else")
-            .command
-        else {
-            panic!("`fleet` parses to the fleet verb");
-        };
-        assert_eq!(cmd.peer.to_string(), "me/hub");
     }
 
     /// The `swoosh ssh` ProxyCommand ABI, which is now the PUBLIC `reach` verb: ssh re-invokes
@@ -1140,14 +1163,14 @@ mod tests {
 
     /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `swoosh:` link all
     /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`reach`/`send`/`stop --at`/
-    /// `service ls --at`/`fetch --via`/`ssh`/`fleet`. `stop` and `service ls` carry the peer on `--at`
+    /// `service ls --at`/`fetch --via`/`ssh`. `stop` and `service ls` carry the peer on `--at`
     /// (bare acts on your own node); the rest carry it positionally.
     #[test]
     fn every_dialing_verb_takes_a_petname_a_key_and_a_link() {
         let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
         let link = shown_link();
         for peer in ["alice", key.as_str(), link.as_str()] {
-            let cases: [&[&str]; 10] = [
+            let cases: [&[&str]; 9] = [
                 &["swoosh", "ping", peer],
                 &["swoosh", "speed", peer],
                 &["swoosh", "status", peer],
@@ -1157,7 +1180,6 @@ mod tests {
                 &["swoosh", "service", "ls", "--at", peer],
                 &["swoosh", "fetch", "http://example.com/x", "--via", peer],
                 &["swoosh", "ssh", peer],
-                &["swoosh", "fleet", peer],
             ];
             for argv in cases {
                 assert!(
@@ -1353,7 +1375,7 @@ mod tests {
                 vec!["swoosh", "service", "ls", "--at", &key],
                 IrohBind::Dialing,
             ),
-            (vec!["swoosh", "fleet", &key], IrohBind::Dialing),
+            (vec!["swoosh", "sync"], IrohBind::Dialing),
         ];
 
         for (argv, expected) in cases {

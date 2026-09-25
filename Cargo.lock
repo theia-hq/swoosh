@@ -4845,6 +4845,7 @@ dependencies = [
  "bifrost-mem",
  "bifrost-noise",
  "bifrost-quirk",
+ "blake3",
  "clap",
  "data-encoding",
  "eyre",

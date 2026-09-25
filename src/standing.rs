@@ -243,6 +243,24 @@ impl fmt::Display for Disagreement {
     }
 }
 
+/// The line for a root made here whose making did not finish: `status`'s, and the refusal of every verb
+/// that needs the root finished first.
+pub fn unfinished_line(root: NodeId) -> String {
+    format!(
+        "root: root:{}… made here, not finished: the next swoosh invite finishes it.",
+        root.short()
+    )
+}
+
+/// The line for a home whose records disagree: `status`'s, and the refusal of every verb that needs to
+/// know which root this machine trusts.
+pub fn damaged_line(what: &Disagreement) -> String {
+    format!(
+        "root: this machine's records disagree ({what}): swoosh cannot tell which root it trusts. Run swoosh \
+        leave to start over; a root kept here stays."
+    )
+}
+
 impl Standing {
     /// Read this home's standing, finishing any crash state first. Never prompts.
     ///

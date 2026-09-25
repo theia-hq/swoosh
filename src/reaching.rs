@@ -81,6 +81,12 @@ pub trait Reaching {
     /// not a match arm.
     fn reach_args(&self) -> &transport::ReachArgs;
 
+    /// The peer this verb dials, when it dials one. While the verb runs, the composition root makes one
+    /// stale-list exchange with it when it is one of your devices ([`crate::sync::is_stale`]). REQUIRED
+    /// with no default body, so a new dialing verb states it; a verb that dials no peer of its own says
+    /// `None`.
+    fn dialed(&self) -> Option<&crate::peer::Peer>;
+
     /// Reject a redundant `--present` alongside a self-addressing `swoosh:` link peer: the link already
     /// presents its own credential (it is folded into [`credential`](Self::credential)), so a second
     /// explicit one is ambiguous. REQUIRED with no default body and dispatched ONCE in the composition

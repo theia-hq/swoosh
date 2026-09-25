@@ -20,8 +20,8 @@ use swoosh::home::Home;
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
-    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, FetchService, ROSTER_SERVICE,
-    Roster, ServiceList, Stop, Stopped, bind_entry, extract_recv_services,
+    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope, FetchService,
+    SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
@@ -191,27 +191,25 @@ fn default_manifest() -> Vec<ManifestEntry> {
             TargetKind::Handler,
             Some(Metering::Unmetered),
         ),
+        entry_gated(
+            "control.sync",
+            TargetKind::Handler,
+            Some(Metering::Unmetered),
+        ),
         entry_gated("ping", TargetKind::Handler, Some(Metering::Unmetered)),
-        entry_gated("roster", TargetKind::Handler, Some(Metering::Unmetered)),
         entry_gated("speed", TargetKind::Handler, Some(Metering::Unmetered)),
     ]
 }
 
-/// The update route every serve binds, over an artifact that is not on disk: what a machine with no
-/// update yet serves.
+/// The update route every serve binds, over a home with no update: what a machine with none yet
+/// answers from.
 fn update_route(router: Router) -> Router {
-    let artifact = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .expect("a runtime")
-        .block_on(swoosh::roster::Artifact::open(
-            std::env::temp_dir().join(format!("swoosh-no-roster-{}", std::process::id())),
-        ))
-        .expect("a missing artifact opens as none");
+    let home = swoosh::home::Home::resolve(Some(
+        std::env::temp_dir().join(format!("swoosh-no-update-{}", std::process::id())),
+    ))
+    .expect("a home");
     router
-        .member_service(
-            ROSTER_SERVICE.parse().expect("a name"),
-            Roster::new(std::sync::Arc::new(artifact)),
-        )
+        .member_service(SYNC_SERVICE.parse().expect("a name"), Exchange::new(home))
         .expect("the update route binds")
 }
 
@@ -385,19 +383,6 @@ fn ping_with_an_argument_is_refused_rather_than_read_as_a_forward() {
     assert!(
         bind_entry(Router::new(gated()), "ping=ping:", [0u8; 32], &[]).is_ok(),
         "`ping=ping:` is the spelling that binds the probe"
-    );
-}
-
-/// The update route is bound by the node, never by an entry: a typed `roster:` is a scheme nobody
-/// serves, refused like any other unknown target.
-#[test]
-fn a_typed_roster_entry_is_an_unknown_form() {
-    let Err(error) = bind_entry(Router::new(gated()), "hub=roster:", [0u8; 32], &[]) else {
-        panic!("`roster:` is not a target an entry can name");
-    };
-    assert!(
-        format!("{error:#}").contains("`swoosh serve --help` lists every target this node accepts"),
-        "it is refused as an unknown target: {error:#}"
     );
 }
 
@@ -1680,7 +1665,7 @@ fn a_bare_serve_binds_exactly_ping_speed_the_control_routes_and_the_update_route
         reach::SPEED_SERVICE,
         CONTROL_STOP_SERVICE,
         CONTROL_SERVICES_SERVICE,
-        ROSTER_SERVICE,
+        SYNC_SERVICE,
     ]
     .into_iter()
     .map(str::to_owned)
@@ -2261,7 +2246,7 @@ fn a_bare_serve_serves_the_update_route() {
         assert!(
             menu.catalog
                 .entries()
-                .any(|entry| entry.name == ROSTER_SERVICE && entry.posture == Posture::Gated),
+                .any(|entry| entry.name == SYNC_SERVICE && entry.posture == Posture::Gated),
             "a {standing} serve binds the update route, gated"
         );
         let _ = runtime.block_on(control_round_trip(&socket, Request::Stop));
@@ -3017,4 +3002,27 @@ fn a_capital_service_name_binds_and_opens_one_spelling() {
         .find(|entry| entry.name == "web")
         .expect("`web` is in the manifest");
     assert_eq!(web.posture, Posture::Open, "the one spelling is opened");
+}
+
+/// The update route's one name, on both sides: the route every serve binds is catalogued as
+/// `control.sync`, and the dial every exchange makes requests that same name.
+#[test]
+fn the_update_route_is_control_sync() {
+    let exposer = update_route(Router::new(gated()))
+        .expose()
+        .expect("the update route exposes");
+    assert!(
+        exposer
+            .manifest()
+            .iter()
+            .any(|entry| entry.name == "control.sync" && entry.posture == Posture::Gated),
+        "serve binds the update route as control.sync, gated"
+    );
+    let dial = swoosh::sync::connector(bifrost::NodeId::from_ed25519_secret(&[9; 32]), None)
+        .expect("the dial builds");
+    assert_eq!(
+        dial.service().to_string(),
+        "control.sync",
+        "an exchange dials control.sync"
+    );
 }
