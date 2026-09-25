@@ -306,7 +306,7 @@ fn resolve_fleet_root(
         FleetTarget::Named(petname) => {
             let binding = contacts.signet(petname).ok_or_else(|| {
                 eyre::eyre!(
-                    "no signet on file for `{petname}`; ask them for their signet key (`swoosh status --key`) \
+                    "no signet on file for `{petname}`; ask them for their root (the `root:` line of their `swoosh status`) \
                      and record it with `swoosh contact signet {petname} <key>`, then retry `--for fleet:{petname}`"
                 )
             })?;

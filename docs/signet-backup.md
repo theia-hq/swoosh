@@ -96,7 +96,7 @@ revoke` still works: it writes a local file and signs nothing.
 `swoosh invite add` refuses to sign anywhere else:
 
 ```
-Error: this machine trusts signet ed01hcq6…, but its own key is ed01imv3…: a badge signed here would root at ed01imv3… and be admitted nowhere that signet gates. Run `invite add` on the machine that holds the signet (the one whose `swoosh status --key` prints ed01hcq6…).
+Error: this machine trusts signet ed01hcq6…, but its own key is ed01imv3…: a badge signed here would root at ed01imv3… and be admitted nowhere that signet gates. Run `invite add` on the machine that holds the signet (the one whose `swoosh status` prints `root: root:ed01hcq6…, kept on this machine`).
 ```
 
 You cannot renew a badge either. A membership badge lasts 90 days unless the invite set another window,

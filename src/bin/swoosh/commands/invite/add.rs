@@ -89,8 +89,8 @@ impl AddCmd {
             eyre::bail!(
                 "this machine trusts signet {configured}, but its own key is {signet_id}: a badge \
                      signed here would root at {signet_id} and be admitted nowhere that signet gates. Run \
-                     `invite add` on the machine that holds the signet (the one whose `swoosh status --key` \
-                     prints {configured})."
+                     `invite add` on the machine that holds the signet (the one whose `swoosh status` \
+                     prints `root: root:{configured}, kept on this machine`)."
             );
         }
         // The badge lifetime is the operator's `--expires`, or the default when absent. This same

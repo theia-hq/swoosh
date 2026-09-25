@@ -10,7 +10,7 @@ away on its own.
 
 ## Grant one service, timed
 
-Record the contractor's signet (they read it with `swoosh status --key` on their machine and send it), then
+Record the contractor's signet (they read it from the `root:` line of `swoosh status` on their machine and send it), then
 grant their fleet the one service, with an expiry:
 
 <!-- capture: swoosh grant issue ssh --for fleet:contractor --expires 14d -->
@@ -57,9 +57,9 @@ root: none yet.
   to make one here: swoosh invite <name> <key>
 
 contacts:
-  alice  root:ed01o6vqymgz  root
+  contractor  root:ed01o6vqymgz  root
 links you shared:
-  a4a0e014  ssh  ed01o6vqymgz  until 2026-10-08
+  a4a0e014  ssh  root:ed01o6vqymgz  until 2026-10-08
 serving: nothing (swoosh serve is not running)
 ```
 

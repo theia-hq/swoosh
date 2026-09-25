@@ -13,11 +13,11 @@ use bifrost::NodeId;
 use keystore::{Method, Stored};
 use nauthy::{FileDenylist, VerifyKey};
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME};
-use swoosh::grants::{ANYONE, GrantRecord, GrantTarget, Grants};
+use swoosh::grants::{ANYONE, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::root::{Date, Moved, Root, RootPlace};
-use swoosh::serve::control_codec::{ControlError, DisabledList};
+use swoosh::serve::control_codec::{ControlError, DisabledList, ServiceMenu};
 use swoosh::standing::{Standing, StandingError};
 use swoosh::{badge, identity, roster, standing, sync};
 use tightbeam::identity::AsVerifyKey as _;
@@ -99,16 +99,25 @@ impl Report {
         };
         let store = ContactsStore::open(home.contacts()).await?;
         let contacts = store.contacts();
-        match Standing::read(home).await {
-            Err(StandingError::Damaged(what)) => report.root = vec![standing::damaged_line(&what)],
+        // A damaged or unfinished standing has no `root:` line of its own: its line is a nag, printed last.
+        let last = match Standing::read(home).await {
+            Err(StandingError::Damaged(what)) => Some(standing::damaged_line(&what)),
             Err(other) => return Err(other.into()),
             Ok(read) => {
                 report
                     .notices
                     .extend(read.finished.iter().map(ToString::to_string));
-                report.standing(home, read.standing, contacts, now).await?;
+                match read.standing {
+                    Standing::InterruptedMint { root_key } => {
+                        Some(standing::unfinished_line(root_key))
+                    }
+                    standing => {
+                        report.standing(home, standing, contacts, now).await?;
+                        None
+                    }
+                }
             }
-        }
+        };
         report.sections.push(contacts_section(contacts));
         report.sections.push(links_section(home, now).await?);
         report.serving = report.serving_line(home).await;
@@ -120,6 +129,7 @@ impl Report {
                     .to_owned(),
             );
         }
+        report.nags.extend(last);
         Ok(report)
     }
 
@@ -140,10 +150,7 @@ impl Report {
                 ];
                 return Ok(());
             }
-            Standing::InterruptedMint { root_key } => {
-                self.root = vec![standing::unfinished_line(root_key)];
-                return Ok(());
-            }
+            Standing::InterruptedMint { .. } => return Ok(()),
             Standing::PinOnly { pin } => {
                 self.root = vec![not_here(home, pin)];
                 return Ok(());
@@ -160,16 +167,26 @@ impl Report {
                      or serves."
                         .to_owned(),
                 ];
+                // Another copy of the root may have revoked a device since the last act here: the update this
+                // machine holds says so before the records do.
+                let held = pin
+                    .verify_key()
+                    .ok()
+                    .and_then(|root| roster::held(home, root));
+                let revoked_elsewhere = held.as_ref().map_or(&[][..], |held| held.revoked_keys());
                 let rows: Vec<DeviceRow> = inspected
                     .state
                     .rows()
                     .iter()
                     .map(|row| DeviceRow {
-                        label: row.label.clone(),
+                        label: Some(row.label.clone()),
                         key: row.key,
                         until: row.until,
                         duration: row.duration,
                         seeded: row.seeded,
+                        revoked: row.revoked_on != 0
+                            || inspected.state.revoked_keys().contains(&row.key)
+                            || revoked_elsewhere.contains(&row.key),
                         revoked_on: row.revoked_on,
                     })
                     .collect();
@@ -183,18 +200,27 @@ impl Report {
                     .ok()
                     .and_then(|root| roster::held(home, root))
                     .map(|update| {
-                        update
-                            .members()
-                            .iter()
-                            .map(|member| DeviceRow {
-                                label: member.label.clone(),
-                                key: member.node,
-                                until: member.until,
-                                duration: member.duration,
-                                seeded: false,
-                                revoked_on: 0,
-                            })
-                            .collect()
+                        let members = update.members().iter().map(|member| DeviceRow {
+                            label: Some(member.label.clone()),
+                            key: member.node,
+                            until: member.until,
+                            duration: member.duration,
+                            seeded: false,
+                            revoked: false,
+                            revoked_on: 0,
+                        });
+                        // The update carries no row for a revoked device, only its key and no date: the name
+                        // is the one saved under `me/`, if any.
+                        let revoked = update.revoked_keys().iter().map(|key| DeviceRow {
+                            label: me_name(contacts, *key),
+                            key: *key,
+                            until: 0,
+                            duration: 0,
+                            seeded: false,
+                            revoked: true,
+                            revoked_on: 0,
+                        });
+                        members.chain(revoked).collect()
                     })
                     .unwrap_or_default();
                 let title = format!("devices (as of the last sync, {}):", sync::ago(home));
@@ -204,9 +230,9 @@ impl Report {
         };
         let until = unix(until);
         let own = self.key.verify_key().ok();
-        let own_row = rows.iter().find(|row| Some(row.key) == own);
+        let own_row = rows.iter().find(|row| Some(row.key) == own && !row.revoked);
         let name = own_row
-            .map(|row| row.label.clone())
+            .and_then(|row| row.label.clone())
             .or_else(|| own_name(contacts, self.key));
         let me = name
             .as_ref()
@@ -246,8 +272,12 @@ impl Report {
         let rows = rows
             .iter()
             .map(|row| {
-                let (state, date) = if row.revoked_on != 0 {
-                    ("revoked".to_owned(), Date(row.revoked_on).to_string())
+                let (state, date) = if row.revoked {
+                    let on = match row.revoked_on {
+                        0 => String::new(),
+                        on => Date(on).to_string(),
+                    };
+                    ("revoked".to_owned(), on)
                 } else if row.until <= now {
                     ("ended".to_owned(), Date(row.until).to_string())
                 } else {
@@ -260,9 +290,12 @@ impl Report {
                     };
                     (state, format!("until {}", Date(row.until)))
                 };
+                let key = short(&row.key.to_string());
                 [
-                    format!("me/{}", row.label),
-                    short(&row.key.to_string()),
+                    row.label
+                        .as_ref()
+                        .map_or_else(|| key.clone(), |label| format!("me/{label}")),
+                    key,
                     state,
                     date,
                 ]
@@ -280,31 +313,18 @@ impl Report {
             Err(error) => return self.serving_unknown(&error),
         };
         match client.status().await {
-            Ok(status) => {
-                let off: &[String] = match &status.menu.disabled {
-                    DisabledList::Known(names) => names,
-                    DisabledList::Unknown(_) => &[],
-                };
-                let on: Vec<&str> = status
-                    .menu
-                    .catalog
-                    .entries()
-                    .map(|entry| entry.name.as_str())
-                    .filter(|name| !off.iter().any(|off| off == name))
-                    .collect();
-                match on.as_slice() {
-                    [] => "serving: nothing".to_owned(),
-                    names => format!("serving: {}", names.join(", ")),
-                }
-            }
+            Ok(status) => match serving(&status.menu) {
+                Ok(line) => line,
+                Err(why) => self.serving_unknown(&why),
+            },
             Err(error) => self.serving_unknown(&error),
         }
     }
 
     /// A `serve` is there and could not be read: the line says so, and why goes to stderr.
-    fn serving_unknown(&mut self, error: &ControlError) -> String {
+    fn serving_unknown(&mut self, why: &dyn core::fmt::Display) -> String {
         self.notices
-            .push(format!("could not read the running swoosh serve: {error}"));
+            .push(format!("could not read the running swoosh serve: {why}"));
         "serving: unknown".to_owned()
     }
 
@@ -360,14 +380,39 @@ impl Report {
     }
 }
 
+/// `serving:` from a running `serve`'s menu: every service it serves that is not turned off. When the list
+/// of what is off could not be read, what is served is not known: the reason, for stderr.
+fn serving(menu: &ServiceMenu) -> Result<String, String> {
+    let off = match &menu.disabled {
+        DisabledList::Known(names) => names,
+        DisabledList::Unknown(why) => {
+            return Err(format!("its list of services turned off: {why}"));
+        }
+    };
+    let on: Vec<&str> = menu
+        .catalog
+        .entries()
+        .map(|entry| entry.name.as_str())
+        .filter(|name| !off.iter().any(|off| off == name))
+        .collect();
+    Ok(match on.as_slice() {
+        [] => "serving: nothing".to_owned(),
+        names => format!("serving: {}", names.join(", ")),
+    })
+}
+
 /// One of the root's devices, from its records where the root is kept, or from the update a device holds.
 #[derive(Debug)]
 struct DeviceRow {
-    label: DeviceLabel,
+    /// Its name among `me`'s devices; `None` for a revoked device whose name this machine never saved.
+    label: Option<DeviceLabel>,
     key: VerifyKey,
     until: u64,
     duration: u64,
     seeded: bool,
+    /// Revoked, by these records or by an update another copy of the root signed.
+    revoked: bool,
+    /// The day it was revoked, 0 when the records here do not say.
     revoked_on: u64,
 }
 
@@ -388,7 +433,7 @@ fn not_here(home: &Home, root: NodeId) -> String {
 fn use_your_root(rows: &[DeviceRow], now: u64) -> Option<String> {
     let due: Vec<u64> = rows
         .iter()
-        .filter(|row| row.revoked_on == 0 && row.until > now)
+        .filter(|row| !row.revoked && row.until > now)
         .filter_map(|row| swoosh::root::renew_by(row.until, row.duration, row.seeded))
         .collect();
     let earliest = due.iter().min()?;
@@ -399,9 +444,8 @@ fn use_your_root(rows: &[DeviceRow], now: u64) -> Option<String> {
         ));
     }
     let count = due.iter().filter(|by| **by <= now).count();
-    let noun = if count == 1 { "device" } else { "devices" };
     Some(format!(
-        "use your root now: swoosh invite ({count} {noun} due)"
+        "use your root now: swoosh invite ({count} devices due)"
     ))
 }
 
@@ -411,6 +455,15 @@ fn own_name(contacts: &Contacts, own: NodeId) -> Option<DeviceLabel> {
     contacts
         .devices(&me)?
         .find(|(_, key)| **key == own)
+        .map(|(label, _)| label.clone())
+}
+
+/// The name `key` is saved under among `me`'s devices in the address book.
+fn me_name(contacts: &Contacts, key: VerifyKey) -> Option<DeviceLabel> {
+    let me = ME.parse().ok()?;
+    contacts
+        .devices(&me)?
+        .find(|(_, saved)| saved.verify_key().ok() == Some(key))
         .map(|(label, _)| label.clone())
 }
 
@@ -469,6 +522,10 @@ fn link_row(record: &GrantRecord, revoked: &FileDenylist, now: u64) -> [String; 
     let holder = match record.holder.as_str() {
         ANYONE => "anyone".to_owned(),
         holder => match holder.parse::<NodeId>() {
+            // A link shared with a person's devices is bound to their root, and a root prints as one.
+            Ok(key) if record.kind == GrantKind::Fleet => {
+                format!("root:{}", short(&key.to_string()))
+            }
             Ok(key) => short(&key.to_string()),
             Err(_) => holder.to_owned(),
         },
