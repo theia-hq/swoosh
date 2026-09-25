@@ -38,15 +38,15 @@ bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "a4eaaa7ad9
 bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "a4eaaa7ad9bb7d50c8f7576965334f069dba52ce" }
 # The key file store, in bifrost's repo beside the identity it stores.
 keystore = { git = "https://github.com/theia-hq/bifrost", rev = "a4eaaa7ad9bb7d50c8f7576965334f069dba52ce" }
-nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "a9e8424d99fdd41d10be26b5ddb3cec6c1c41ce6" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "f7f3e5db7ec70da28d54a54c9cbc9a4978fec30c" }
+nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "3adae5a19487781b944e2a4ca4361227b0ba8dcc" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "8f7b31402da2a7693b6e78b514ea043801e4213c" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "08d5b9167d2edbc9b0dbdc8ce5ce0cf7f4f128f6" }
-measure = { git = "https://github.com/theia-hq/services", rev = "08d5b9167d2edbc9b0dbdc8ce5ce0cf7f4f128f6" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "08d5b9167d2edbc9b0dbdc8ce5ce0cf7f4f128f6", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "08d5b9167d2edbc9b0dbdc8ce5ce0cf7f4f128f6" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "6810b0a13e3664829a48cabf309803bdb1851f80" }
+measure = { git = "https://github.com/theia-hq/services", rev = "6810b0a13e3664829a48cabf309803bdb1851f80" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "6810b0a13e3664829a48cabf309803bdb1851f80", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "6810b0a13e3664829a48cabf309803bdb1851f80" }
 
 # The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
 # sending it.

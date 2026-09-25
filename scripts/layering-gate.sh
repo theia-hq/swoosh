@@ -34,6 +34,10 @@
 #   5. OWN-WORDS check -- any tracked file but a CHANGELOG, in a library, uses the org's name
 #      as its own word. Only the org's address may carry it.
 #
+#   6. HOUSE-WORD check -- any tracked file but a CHANGELOG, in a library, uses a word an app
+#      coined for its own things. The words and the ordinary-English phrases that may carry one
+#      are the two lines in check 6.
+#
 # NOTHING IS HARDCODED about WHICH crates exist. The crate SET is DERIVED (see below) from
 # the Cargo.toml manifests in the tree, so a new crate is covered the day it lands. Each
 # crate's own declared dependencies are derived from its own manifest.
@@ -521,6 +525,83 @@ else
   paths=$(tr '\0' '\n' <"$scratch/paths" | own_org_hits "" || true)
   if [ -n "$paths" ]; then
     printf 'LEAK  a tracked path uses the org name (only %s-hq is allowed):\n' "$ORG"
+    printf '%s\n' "$paths" | sed 's/^/        /'
+    fail=1
+  fi
+fi
+
+# 6. HOUSE-WORD check: a library speaks its own words, never an app's coinage for the things it
+# builds from them (design/crate-independence-enforcement.md). HOUSE below lists those words. A
+# word matches in any case with any non-alphanumeric character (`-` and `_` included) as a
+# boundary, with or without a plural `s`, and also as one hump of an identifier: for a word
+# `word`, `WordLink`, `myWord`, `wordX` and `WORD2`. A word run into lowercase letters is other
+# English and passes. HOUSE_OK lists, comma-separated, the ordinary-English phrases that carry a
+# word in its everyday sense; each is removed from a line, in any case, before the line is matched.
+# Every tracked file is scanned but a CHANGELOG, its lines and its path. The two lines below are
+# the only lines exempt, and only in this file. An `app` row is skipped: the app is where the
+# words are coined. A repo no row names is scanned.
+HOUSE='signet fleet'
+HOUSE_OK="relay fleet,n0's fleet"
+HOUSE_LINE="^HOUSE(_OK)?=['\"][a-z0-9' ,]+['\"]\$"
+
+# house_hits PREFIXED -- read lines on stdin, print each whose text (after any `path:line:`
+# prefix, when PREFIXED is set) holds a HOUSE word once every HOUSE_OK phrase is removed.
+house_hits() {
+  awk -v words="$HOUSE" -v ok="$HOUSE_OK" -v p="$1" '
+  BEGIN {
+    nw = split(words, w, " ")
+    no = split(ok, phrase, ",")
+    alt = ""
+    hump = ""
+    for (i = 1; i <= nw; i++) {
+      cap = toupper(substr(w[i], 1, 1)) substr(w[i], 2)
+      alt = alt (i > 1 ? "|" : "") w[i]
+      hump = hump (i > 1 ? "|" : "") cap "[A-Z0-9]|[a-z0-9]" cap "|" w[i] "[A-Z0-9]|" toupper(w[i]) "[A-Z0-9]"
+    }
+    bounded = "(^|[^a-z0-9])(" alt ")s?([^a-z0-9]|$)"
+  }
+  {
+    t = $0
+    if (p) sub(/^[^:]*:[0-9]+:/, "", t)
+    low = tolower(t)
+    for (i = 1; i <= no; i++) {
+      n = length(phrase[i])
+      while ((at = index(low, phrase[i])) > 0) {
+        blank = sprintf("%" n "s", "")
+        t = substr(t, 1, at - 1) blank substr(t, at + n)
+        low = substr(low, 1, at - 1) blank substr(low, at + n)
+      }
+    }
+    if (low ~ bounded || t ~ hump) print
+  }'
+}
+
+if [ -n "$own_layer" ] && [ "$(layer_field "$own_layer" 1)" = app ]; then
+  printf 'layering-gate: check 6: layer %s is an app, skipped\n' "$own_layer"
+elif ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  printf 'LEAK  check 6: %s is not a git checkout, so its tracked files cannot be read\n' "$ROOT"
+  fail=1
+else
+  st=0
+  out=$(git -C "$ROOT" grep --text -n --ignore-case -E -e "$(printf '%s' "$HOUSE" | tr ' ' '|')" \
+    -- . ':(exclude,glob)**/CHANGELOG.md' 2>"$scratch/err") || st=$?
+  git_ok "check 6: git grep" "$st" 1
+  hits=$(printf '%s\n' "$out" | grep . \
+    | grep -v -E "^scripts/layering-gate\.sh:[0-9]+:${HOUSE_LINE#^}" \
+    | house_hits 1 || true)
+  if [ -n "$hits" ]; then
+    printf 'LEAK  this repo uses an app'"'"'s house word (%s):\n' "$HOUSE"
+    printf '%s\n' "$hits" | sed 's/^/        /'
+    fail=1
+  fi
+
+  st=0
+  git -C "$ROOT" ls-files -z -- . ':(exclude,glob)**/CHANGELOG.md' \
+    >"$scratch/paths" 2>"$scratch/err" || st=$?
+  git_ok "check 6: git ls-files" "$st" 0
+  paths=$(tr '\0' '\n' <"$scratch/paths" | house_hits "" || true)
+  if [ -n "$paths" ]; then
+    printf 'LEAK  a tracked path uses an app'"'"'s house word (%s):\n' "$HOUSE"
     printf '%s\n' "$paths" | sed 's/^/        /'
     fail=1
   fi
