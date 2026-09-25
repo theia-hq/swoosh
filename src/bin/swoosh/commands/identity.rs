@@ -88,9 +88,9 @@ async fn print(home: &Home) -> eyre::Result<()> {
 /// the file it lives in, how that file protects it, the signet this machine trusts, and how long its badge
 /// still stands.
 ///
-/// Every line is present on every run, including the absent cases: a machine with no badge says so,
-/// because "no line" and "no badge" read identically to an operator who is here precisely because they
-/// do not know which of the two they have.
+/// The signet line is present on every run, including the absent case. The badge line is present only
+/// when this machine holds a badge: its own key never signs one for itself, so a machine with none has no
+/// badge to describe.
 fn render(
     node: NodeId,
     key: &Path,
@@ -101,15 +101,10 @@ fn render(
     let mut out = format!("{node}\nkey: {}\nprotection: {protection}\n", key.display());
     match signet {
         Some(signet) => out.push_str(&format!("signet: {signet}\n")),
-        // No signet file means this machine's own key IS its root (person zero self-trusts), which is a
-        // real provisioning state and not a missing one.
-        None => out.push_str("signet: none (this machine is its own root)\n"),
+        None => out.push_str("signet: none\n"),
     }
-    match badge {
-        Some(expiry) => out.push_str(&format!("badge: {expiry}\n")),
-        // No stored badge is the signet holder's normal state: it self-signs a fresh badge per dial, so
-        // it has nothing to store and nothing to renew.
-        None => out.push_str("badge: none (this machine self-signs when it dials)\n"),
+    if let Some(expiry) = badge {
+        out.push_str(&format!("badge: {expiry}\n"));
     }
     out
 }

@@ -5,7 +5,7 @@
 //! the body it drives. The two halves are split because the act ("dial a peer's served service,
 //! optionally presenting a cap, then drive it") is one thing while WHERE the bytes go is a choice the
 //! caller makes: `Port` binds a local port and forwards each connection, `Stdout` streams the single
-//! stream over this process's stdin/stdout, `UnixListener` is reserved. The present/self-signed-badge
+//! stream over this process's stdin/stdout, `UnixListener` is reserved. The present/badge
 //! choice lives in exactly one place (the caller picks `present` before handing off).
 //!
 //! `swoosh ssh` reaches the same runner the same way, through the PUBLIC verb: its `ProxyCommand`

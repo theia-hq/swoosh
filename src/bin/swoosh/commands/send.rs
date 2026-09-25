@@ -6,7 +6,7 @@
 //! under it, and files pipeline over concurrent streams (capped so one connection is not flooded); a file
 //! that cannot be read is skipped and reported, not fatal, so a courier sends what it can.
 //!
-//! The `recv:` service is family-gated like `ping`/`speed`, so send presents the same self-signed
+//! The `recv:` service is family-gated like `ping`/`speed`, so send presents the same
 //! membership badge (or an explicit `--present` link) to prove membership before the receiver admits a
 //! stream. Integrity is checked end to end by `bifrost-wire`: the sender hashes each file with BLAKE3 and
 //! the receiver re-hashes as bytes arrive, so a truncated or tampered transfer is rejected, never written.
@@ -111,7 +111,7 @@ impl swoosh::reaching::Reaching for SendCmd {
 
 impl SendCmd {
     /// Reach the peer's `recv:` service and push every named file over its own gated stream, expanding
-    /// directories first. Presents the resolved `present` (the self-signed membership badge, or an explicit
+    /// directories first. Presents the resolved `present` (this device's membership badge, or an explicit
     /// `--present` link) so the receiver's family gate admits each stream. A file that cannot be read is
     /// skipped and reported; the run ends non-zero if any item failed.
     async fn run_send<T: Transport, D: Discovery>(

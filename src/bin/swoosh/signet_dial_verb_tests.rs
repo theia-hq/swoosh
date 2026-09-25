@@ -15,6 +15,9 @@
 //! `reach` (the generic dial, spelled `forward` when this defect shipped) rides the same chain: it used
 //! to derive slot 1 by hand inside its own `run`, which silently dropped slot 2 (the resolver is the only
 //! code that computes it), so a signet-bound dial through it was capped at what slot 1 alone could open.
+//!
+//! Every dialer here is a `Device`: a scratch home holding this machine's key, a pin, and the badge that
+//! root signed for it. That is the only standing whose dial carries a badge.
 
 use core::time::Duration;
 
@@ -26,7 +29,6 @@ use swoosh::home::Home;
 use swoosh::identity::Secret;
 use swoosh::reaching::{self, BindRole, Reaching};
 use swoosh::testkit::{TestNode, TestRoot};
-use tightbeam::identity::AsVerifyKey as _;
 
 use crate::commands::{ping, reach};
 
@@ -66,31 +68,75 @@ fn ping_with_peer(peer: &str) -> ping::PingCmd {
         .cmd
 }
 
-/// Drive the verb's declared credential through the ONE resolver under a caller-supplied `secret` (so the
-/// test controls the dialer's own fleet, which the fleet-match slot-2 rule compares against) and read the
-/// two wire slots, the exact path the composition root runs before dialing. Takes any reaching verb, so
-/// `reach` is proven through the same chain as `ping`.
-async fn slots_for(cmd: &impl Reaching, secret: &Secret) -> (Option<Link>, Option<Link>) {
-    // The default home (no stored badge), so a `Family` dial falls back to the self-sign, exactly as an
-    // unprovisioned dialer does.
-    let home = Home::resolve(None).expect("resolve the default home");
-    let BindRole::Dialing(credential) = cmd.bind_role() else {
-        panic!("a reaching verb that dials states the credential it dials with");
-    };
-    reaching::resolve(credential, secret, &home)
-        .await
-        .expect("resolve the verb's credential into wire slots")
-        .into_slots()
+/// The root the dialing device's badge roots at: its own fleet, which the fleet-match slot-2 rule
+/// compares a slip against.
+const ROOT: u8 = 0x71;
+/// The dialing device's key.
+const DEVICE: u8 = 0x72;
+
+/// A dialing device: a scratch home with its key, a pin to [`ROOT`], and the badge [`ROOT`] signed for
+/// it. Removed on drop.
+struct Device {
+    home: Home,
+    secret: Secret,
+}
+
+impl Device {
+    async fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "swoosh-dial-verb-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let home = Home::resolve(Some(dir)).unwrap();
+        let device = TestNode::seeded(DEVICE);
+        swoosh::identity::write(&device.seed(), &home)
+            .await
+            .unwrap();
+        let root = TestRoot::seeded(ROOT);
+        swoosh::config::write_signet(&home, root.node_id())
+            .await
+            .unwrap();
+        let badge = root
+            .device_badge(
+                device.node_id(),
+                Request::expires_in(Duration::from_secs(60 * 24 * 60 * 60)),
+            )
+            .unwrap();
+        swoosh::config::write_badge(&home, &badge).await.unwrap();
+        let secret = swoosh::identity::load(&home).await.unwrap().unwrap();
+        Self { home, secret }
+    }
+
+    /// Drive the verb's declared credential through the ONE resolver and read the two wire slots, the
+    /// exact path the composition root runs before dialing. Takes any reaching verb, so `reach` is proven
+    /// through the same chain as `ping`.
+    async fn slots_for(&self, cmd: &impl Reaching) -> (Option<Link>, Option<Link>) {
+        let BindRole::Dialing(credential) = cmd.bind_role() else {
+            panic!("a reaching verb that dials states the credential it dials with");
+        };
+        reaching::resolve(credential, &self.secret, &self.home)
+            .await
+            .expect("resolve the verb's credential into wire slots")
+            .into_slots()
+    }
+}
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(self.home.dir());
+    }
 }
 
 #[tokio::test]
 async fn a_verb_with_a_signet_bound_present_slip_fills_slot_two() {
-    // Work issues a signet-bound slip pinning the DIALER'S OWN fleet; a hire runs `ping <work> --present
-    // <slip>`. On the default home, the dialer self-signs its badge at `secret.node_id()`, so the slip must pin
-    // that fleet for slot 2 to help admission (and thus be attached) under the fleet-match rule.
-    let secret = Secret::ephemeral();
+    // Work issues a signet-bound slip pinning the DIALER'S OWN fleet (the root its badge roots at); a hire
+    // runs `ping <work> --present <slip>`. The slip must pin that fleet for slot 2 to help admission (and
+    // thus be attached) under the fleet-match rule.
+    let device = Device::new("present").await;
     let work = TestNode::seeded(1);
-    let fleet = secret.node_id().verify_key();
+    let fleet = TestRoot::seeded(ROOT).verify_key();
     let service: Service = "ping".parse().unwrap();
     let slip = work
         .fleet_slip(
@@ -102,7 +148,7 @@ async fn a_verb_with_a_signet_bound_present_slip_fills_slot_two() {
 
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
     let cmd = ping_with_present(&peer, slip.as_str());
-    let (slot1, slot2) = slots_for(&cmd, &secret).await;
+    let (slot1, slot2) = device.slots_for(&cmd).await;
 
     assert_eq!(
         slot1.as_ref().map(Link::as_str),
@@ -121,7 +167,7 @@ async fn a_verb_with_a_signet_bound_present_slip_fills_slot_two() {
 async fn a_verb_with_a_bearer_present_slip_leaves_slot_two_empty() {
     // A plain bearer slip is NOT signet-bound, so no fleet badge is attached: a dial that does not already
     // prove fleet membership must not leak the dialer's device-to-signet linkage.
-    let secret = Secret::ephemeral();
+    let device = Device::new("bearer").await;
     let work = TestNode::seeded(1);
     let service: Service = "ping".parse().unwrap();
     let bearer = work
@@ -134,7 +180,7 @@ async fn a_verb_with_a_bearer_present_slip_leaves_slot_two_empty() {
 
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
     let cmd = ping_with_present(&peer, bearer.as_str());
-    let (slot1, slot2) = slots_for(&cmd, &secret).await;
+    let (slot1, slot2) = device.slots_for(&cmd).await;
 
     assert_eq!(
         slot1.as_ref().map(Link::as_str),
@@ -153,9 +199,9 @@ async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
     // the PEER; the credential fold self-presents it, so `bind_role() -> resolve() -> slots` fills slot 1
     // (the link) AND slot 2 (the dialer's own fleet badge), IDENTICAL to passing it via `--present`. The
     // slip pins the dialer's OWN fleet so the fleet-match rule attaches slot 2.
-    let secret = Secret::ephemeral();
+    let device = Device::new("link-peer").await;
     let work = TestNode::seeded(1);
-    let fleet = secret.node_id().verify_key();
+    let fleet = TestRoot::seeded(ROOT).verify_key();
     let service: Service = "ping".parse().unwrap();
     let link = work
         .fleet_slip(
@@ -166,7 +212,7 @@ async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
         .unwrap();
 
     let cmd = ping_with_peer(link.as_str());
-    let (slot1, slot2) = slots_for(&cmd, &secret).await;
+    let (slot1, slot2) = device.slots_for(&cmd).await;
 
     assert_eq!(
         slot1.as_ref().map(Link::as_str),
@@ -186,7 +232,7 @@ async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
 async fn a_verb_with_a_foreign_fleet_link_as_peer_leaves_slot_two_empty() {
     // ADV1 at the verb boundary: a link-as-peer pinning a fleet the dialer is NOT in attaches no slot 2, so
     // pasting an attacker's signet-bound link as the peer never leaks the dialer's own fleet-signet badge.
-    let secret = Secret::ephemeral();
+    let device = Device::new("foreign").await;
     let work = TestNode::seeded(1);
     let foreign_fleet = TestRoot::seeded(2).verify_key();
     let service: Service = "ping".parse().unwrap();
@@ -199,7 +245,7 @@ async fn a_verb_with_a_foreign_fleet_link_as_peer_leaves_slot_two_empty() {
         .unwrap();
 
     let cmd = ping_with_peer(link.as_str());
-    let (slot1, slot2) = slots_for(&cmd, &secret).await;
+    let (slot1, slot2) = device.slots_for(&cmd).await;
 
     assert_eq!(
         slot1.as_ref().map(Link::as_str),
@@ -217,10 +263,10 @@ async fn reach_presents_the_member_badge_like_its_siblings() {
     // The shipped defect: the generic dial declared no badge, so a member reaching a service on their OWN
     // gated node was refused by their own fleet while `ping`/`speed`/`ssh` to the same node worked. A plain
     // `reach <key> <service>` must resolve slot 1 to the member badge, exactly as `ping <key>` does.
-    let secret = Secret::ephemeral();
+    let device = Device::new("reach-badge").await;
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
 
-    let (reach_slot1, reach_slot2) = slots_for(&reach_to_peer(&peer), &secret).await;
+    let (reach_slot1, reach_slot2) = device.slots_for(&reach_to_peer(&peer)).await;
     let badge = reach_slot1
         .expect("REGRESSION: `reach` must present the member badge, not dial as a stranger");
     assert!(
@@ -229,8 +275,8 @@ async fn reach_presents_the_member_badge_like_its_siblings() {
     );
     assert_eq!(
         badge.dial_node(),
-        secret.node_id(),
-        "the badge roots at the key the dial binds under, which is what the family gate proves"
+        TestRoot::seeded(ROOT).node_id(),
+        "the badge is the stored one, rooted at this device's root"
     );
     assert!(
         reach_slot2.is_none(),
@@ -239,11 +285,11 @@ async fn reach_presents_the_member_badge_like_its_siblings() {
 
     // The same slots its siblings resolve, which is the whole claim: one fold, one resolver, one wire
     // shape, so a member is admitted (or refused) identically whichever verb they reach with.
-    let (ping_slot1, ping_slot2) = slots_for(&ping_with_peer(&peer), &secret).await;
+    let (ping_slot1, ping_slot2) = device.slots_for(&ping_with_peer(&peer)).await;
     assert_eq!(
-        ping_slot1.map(|grant| grant.dial_node()),
-        Some(secret.node_id()),
-        "`ping` presents the same self-signed member badge `reach` now does"
+        ping_slot1.as_ref().map(Link::as_str),
+        Some(badge.as_str()),
+        "`ping` presents the same member badge `reach` does"
     );
     assert!(
         ping_slot2.is_none(),
@@ -256,9 +302,9 @@ async fn reach_with_a_signet_bound_link_as_peer_fills_slot_two() {
     // The generic dial's bearer-only ceiling: it derived slot 1 by hand inside its own `run`, and the
     // resolver is the ONLY code that computes slot 2, so a signet-bound link through it arrived without the
     // fleet badge its gate ANDs. Reading both slots off the shared resolver is what lifts the ceiling.
-    let secret = Secret::ephemeral();
+    let device = Device::new("reach-link").await;
     let work = TestNode::seeded(1);
-    let fleet = secret.node_id().verify_key();
+    let fleet = TestRoot::seeded(ROOT).verify_key();
     let service: Service = "ssh".parse().unwrap();
     let link = work
         .fleet_slip(
@@ -268,7 +314,7 @@ async fn reach_with_a_signet_bound_link_as_peer_fills_slot_two() {
         )
         .unwrap();
 
-    let (slot1, slot2) = slots_for(&reach_to_peer(link.as_str()), &secret).await;
+    let (slot1, slot2) = device.slots_for(&reach_to_peer(link.as_str())).await;
 
     assert_eq!(
         slot1.as_ref().map(Link::as_str),

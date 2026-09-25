@@ -8,10 +8,11 @@
 //! service (`ping=ping:`, never a bare `ping:`). It drives tightbeam's tunnel LIBRARY
 //! (`Exposer`) directly under swoosh's OWN persisted identity:
 //! the node binds the same key `swoosh ssh` and a minted `swoosh grant issue` link root at, gates on the
-//! signet read from swoosh's own store, and derives the ssh host seed from swoosh's secret, so an
-//! `ssh=sshd:` service presents the host key a client pins. swoosh assembles the whole route table
-//! itself (`fetch`/`recv` instances, `ping`/`speed`, and `sshd` under the `ssh` feature), builds the gate through the shared
-//! [`resolve_gate`](tightbeam::tunnel::resolve_gate) policy, and prints its OWN readiness banner. `--public`
+//! pin read live from swoosh's own store and on the links this machine signed, and derives the ssh host
+//! seed from swoosh's secret, so an `ssh=sshd:` service presents the host key a client pins. swoosh
+//! assembles the whole route table itself (`fetch`/`recv` instances, `ping`/`speed`, the update route,
+//! and `sshd` under the `ssh` feature), takes the gate the composition root built
+//! ([`swoosh::gate::anchored`]), and prints its OWN readiness banner. `--public`
 //! and `--quiet` live on THIS verb (not root), and reach comes via the shared
 //! [`ReachArgs`](swoosh::transport::ReachArgs), flattened like every other reaching verb. `--expires` is a
 //! LOCAL timer with no security surface: when its deadline passes the node ends by itself, the same
@@ -31,21 +32,21 @@ use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use bifrost_mdns::{At, Dialable, Expiring, Missing, ScopeClass};
 use clap::Args;
 use eyre::WrapErr as _;
-use nauthy::{FileDenylist, Latch, Service};
+use nauthy::{Gate, Service};
+use swoosh::gate::AnchorCut;
 use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::serve::{
     Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, FetchScope, InstanceLock,
-    RECV_SCHEME, Resident, ServiceList, Stop, StopKind, Stopped, acquire_single, bind_entry,
-    bind_recv, classify_stop, extract_recv_services,
+    RECV_SCHEME, ROSTER_SERVICE, Resident, Roster, ServiceList, Stop, StopKind, Stopped,
+    acquire_single, bind_entry, bind_recv, classify_stop, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
 use tightbeam::enabled::FileDisabledList;
 use tightbeam::tunnel::{
-    self, CancellationToken, Exposer, ManifestEntry, Metering, Posture, RawSource, Router,
-    TargetKind,
+    CancellationToken, Exposer, ManifestEntry, Metering, Posture, RawSource, Router, TargetKind,
 };
 
 /// The default services `serve` publishes when none is named: the gated `ping` and `speed` engine
@@ -59,7 +60,7 @@ const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 #[derive(Debug, Args)]
 pub struct ServeCmd {
     /// publish services as `name=target` (bare: `ping` and `speed`)
-    // The long form lists every target scheme, both halves: the four engines swoosh serves and the six
+    // The long form lists every target scheme, both halves: the three engines swoosh serves and the six
     // forms the tunnel grammar routes. A refusal from either half points here, so this list is the one a
     // mistyped scheme is sent to and it has to be complete.
     #[arg(
@@ -69,7 +70,6 @@ pub struct ServeCmd {
                      Every target carries a scheme. swoosh serves:\n\
                      \x20 ping:            round-trip probe\n\
                      \x20 speed:           throughput test\n\
-                     \x20 roster:          this node's signed membership snapshot\n\
                      \x20 sshd:            a shell, keyless (the node's gate is the auth)\n\
                      \n\
                      and it forwards or streams:\n\
@@ -80,7 +80,7 @@ pub struct ServeCmd {
                      \x20 stdin:             this process's own stdin\n\
                      \x20 echo:              reflects whatever is sent\n\
                      \n\
-                     The four swoosh serves take no argument, and neither do `stdin:` and `echo:`. \
+                     The three swoosh serves take no argument, and neither do `stdin:` and `echo:`. \
                      A live single-writer source (`stdin:`, `fifo:`) may be suffixed `+lossy` to fan \
                      out to many readers at once, dropping bytes for one that falls behind."
     )]
@@ -147,8 +147,8 @@ pub struct ServeCmd {
     pub bound_reach: Box<Reach>,
 }
 
-/// What `serve` needs beyond the bound node: swoosh's ssh host seed, the trusted signet, the revocation
-/// denylist the gate honors, and the signed roster artifact it relays. All resolved in the composition root (the
+/// What `serve` needs beyond the bound node: swoosh's ssh host seed, the gate and the live cut beside it,
+/// and the signed roster artifact it relays. All resolved in the composition root (the
 /// host seed needs the secret before the transport consumes it), then attached to [`ServeCmd`] via
 /// [`with_expose`](ServeCmd::with_expose). Moved here from `main.rs` so `serve` reads its own context.
 /// The home rides along too: `serve --resident` names its socket/lock off the home, and the SAME `home`
@@ -158,37 +158,31 @@ pub struct ExposeContext {
     /// swoosh's ssh host key seed, derived from the secret so an `ssh=sshd:` service presents the host
     /// key a client pins.
     pub host_seed: [u8; 32],
-    /// The signet the default gate trusts: a provisioned signet if one was adopted, else this node's OWN
-    /// key (person-zero self-trusts).
-    pub signet: Option<NodeId>,
-    /// The revocation policy the gate honors: the denylist of revoked grants behind the latch of disabled
-    /// root keys. One shared instance, read by the gate at admission and by the live cut after it.
-    pub revocations: Arc<Latch<FileDenylist>>,
+    /// The one gate this node runs in every standing ([`swoosh::gate::anchored`]): the pin read live,
+    /// this machine's own key for the links it signed, and the revocations.
+    pub gate: Gate,
+    /// The live cut over the same pin and revocations the gate reads, wired beside it.
+    pub cut: AnchorCut,
     /// The live enable/disable oracle the exposer's per-stream gate consults: a `service disable`
     /// written to `<home>/disabled` refuses the service live, and a `service enable` restores it, both with no
     /// restart. The exact mtime-watch shape as the denylist, loaded beside it in the composition root.
     pub enabled: FileDisabledList,
-    /// The home's signed roster artifact, `None` when the signet never cut one here. `serve` READS it
-    /// and never signs: the blob was cut by the verb that last changed the membership, on the machine
-    /// holding the signet, so this long-lived process holds no signing identity and a relay-only node
-    /// cannot mis-cut. Re-read per pull (a debounced stat), so an invite lands without a restart.
-    pub roster: Option<Arc<swoosh::roster::Artifact>>,
+    /// The home's signed roster artifact, served on the update route every `serve` binds. `serve` READS
+    /// it and never signs, so this long-lived process holds no signing identity. A missing file reads as
+    /// none. Re-read per pull (a debounced stat), so an update lands without a restart.
+    pub roster: Arc<swoosh::roster::Artifact>,
     /// The node home this serve runs under: the resident socket/lock derive from it, and the composition
     /// root resolves it ONCE, so a `--resident` serve and its future control clients name the same paths.
     pub home: Home,
 }
 
 impl core::fmt::Debug for ExposeContext {
-    /// `FileDenylist` and `FileDisabledList` each hold a `Mutex` (not `Debug`), so this impl names the fields
-    /// it can and elides those, which is enough for the derived `Debug` on `ServeCmd`/`Command` to compile.
+    /// The gate, the cut and `FileDisabledList` are not `Debug`, so this impl names the fields it can and
+    /// elides those, which is enough for the derived `Debug` on `ServeCmd`/`Command` to compile.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExposeContext")
             .field("host_seed", &self.host_seed)
-            .field("signet", &self.signet)
-            .field(
-                "roster",
-                &self.roster.as_ref().map(|artifact| artifact.path()),
-            )
+            .field("roster", &self.roster.path())
             .finish_non_exhaustive()
     }
 }
@@ -246,13 +240,13 @@ impl Reaching for ServeCmd {
         };
         let ExposeContext {
             host_seed,
-            signet,
-            revocations,
+            gate,
+            cut,
             enabled,
             roster,
             home,
         } = *expose;
-        self.run_serve(node, host_seed, signet, revocations, enabled, roster, home)
+        self.run_serve(node, host_seed, gate, cut, enabled, roster, home)
             .await
     }
 }
@@ -287,15 +281,13 @@ impl ServeCmd {
 
 impl ServeCmd {
     /// Serve the named services (default `ping:` + `speed:`) under swoosh's identity by driving the
-    /// tunnel core directly: parse the services, resolve the gate from swoosh's own signet + denylist (through
-    /// the shared `resolve_gate` policy, so `--public` opens, else a family gate on the signet), assemble the
-    /// route table (`fetch`/`recv` instances, `ping`/`speed`, and `sshd` under the `ssh` feature), print
-    /// swoosh's banner, and run the exposer. A `sshd:`/`ping:`/`speed:` service stays gated regardless. The `signet` here is already
-    /// resolved by the composition root: a provisioned signet if one was adopted, else this node's OWN key
-    /// (person-zero self-trusts), so a plain node gates on itself rather than failing "no signet".
+    /// tunnel core directly: parse the services, assemble the route table (`fetch`/`recv` instances,
+    /// `ping`/`speed`, the update route, and `sshd` under the `ssh` feature) behind the gate the
+    /// composition root built, print swoosh's banner, and run the exposer with the live cut wired. A
+    /// `sshd:`/`ping:`/`speed:` service stays gated unless `--public` opens it.
     #[expect(
         clippy::too_many_arguments,
-        reason = "run_serve takes the pre-resolved serve inputs one by one (seed, signet, oracles, \
+        reason = "run_serve takes the pre-resolved serve inputs one by one (seed, gate, cut, oracle, \
                   roster, home) so each stays a named parameter at the one call site; bundling them \
                   into a struct would only rename the list"
     )]
@@ -303,10 +295,10 @@ impl ServeCmd {
         self,
         node: &Node<T, D>,
         host_seed: [u8; 32],
-        signet: Option<NodeId>,
-        revocations: Arc<Latch<FileDenylist>>,
+        gate: Gate,
+        cut: AnchorCut,
         enabled: FileDisabledList,
-        roster: Option<Arc<swoosh::roster::Artifact>>,
+        roster: Arc<swoosh::roster::Artifact>,
         home: Home,
     ) -> eyre::Result<()>
     where
@@ -345,11 +337,9 @@ impl ServeCmd {
         // the node down themselves. So this one token is the join point for every way the node can stop:
         // a Ctrl-C, a `--expires` deadline, a remote `swoosh stop`, or the local socket stop.
         let cancel = CancellationToken::new();
-        // Resolve the node BASE gate before announcing readiness: an unprovisioned node fails HERE, through
-        // the ONE shared policy point, rather than ever serving on a permissive default. Opening individual
-        // services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
+        // The node BASE gate is the one the composition root built, the same in every standing. Opening
+        // individual services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
         //
-        let gate = tunnel::resolve_gate(signet, Arc::clone(&revocations))?;
         // One `Router`: each route binds a handler VALUE (the engine handlers, roster, stop, the fetch and
         // recv instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector)
         // through the `name=addr` grammar. The public overlays prove at `.expose()` below, so
@@ -359,8 +349,11 @@ impl ServeCmd {
         let public = parse_services(&self.public)?;
         let mut router = Router::new(gate);
         for entry in &requested {
-            router = bind_entry(router, entry, host_seed, roster.as_ref(), &public)?;
+            router = bind_entry(router, entry, host_seed, &public)?;
         }
+        // The update route, on every `serve` whatever the standing, member-gated: only this root's devices
+        // read it. Bound by the node, never by an entry, so no typed name reaches it.
+        router = router.member_service(ROSTER_SERVICE.parse()?, Roster::new(roster))?;
         for scoped in fetch.services() {
             // One engine handler per fetch service, holding ONLY its own origin scope: the SSRF pivot is
             // unrepresentable, not merely refused. An unconstrained scope is the NEVER engine (the open
@@ -415,13 +408,10 @@ impl ServeCmd {
         // service named in `<home>/disabled` is refused at the gate seam, live, and a re-enable restores it
         // with no restart. `with_enabled` cannot fail (it only stores the oracle), so it tails the chain.
         //
-        // The live cut reads the one revocation instance the gate was resolved over: a session admitted
-        // on a cap since revoked, or rooted at a key since disabled, ends itself within a sweep rather
-        // than running on.
-        let exposer = router
-            .expose()?
-            .with_enabled(enabled)
-            .with_live_cuts(revocations);
+        // The live cut reads the one pin and the one revocation instance the gate reads: a session admitted
+        // on a cap since revoked, rooted at a key since disabled, anchored at a root no longer pinned, or
+        // held by a device key since revoked, ends itself within a sweep rather than running on.
+        let exposer = router.expose()?.with_enabled(enabled).with_live_cuts(cut);
         // Prove the transport can carry this gate BEFORE announcing readiness or binding the resident
         // socket: a rooted gate over a transport that does not prove the peer refuses here with the
         // teaching error, never after a "ready" banner the node cannot honor (and never with a lock or
@@ -1271,8 +1261,9 @@ fn serving_section(
     let mut has_control = false;
     for entry in manifest {
         // `control.stop` / `control.services` fold into one row: node plumbing an operator never opts into,
-        // never a hidden service. Detected by the `control.` prefix, the verbatim wire family.
-        if entry.name.starts_with("control.") {
+        // never a hidden service. Detected by the `control.` prefix, the verbatim wire family. The update
+        // route every serve binds is the same kind of plumbing and folds with them.
+        if entry.name.starts_with("control.") || entry.name == ROSTER_SERVICE {
             has_control = true;
             continue;
         }

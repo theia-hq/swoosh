@@ -1,38 +1,60 @@
-//! The issuer-side mint log: one record per grant this node has issued, so a grant can be revoked by the
-//! holder it was issued to, and audited, after the link has left this machine.
+//! The ledger: one record per link this machine has signed with its own key.
 //!
-//! A minted link is gone the moment it is handed off: the holder carries it and this node keeps no copy. But
-//! revoking a grant by NAMING its holder (rather than pasting the exact link back) needs an issuer-side index
-//! from grantee to the cap's ROOT revocation id, the id that, once recorded in the denylist, kills the grant
-//! and everything delegated from it. This ledger IS that index. It is a who-can-reach-what record, so it is
-//! written `0600` and the gate NEVER reads it: it is issuer-side audit and revoke only, never an admission
-//! input. It lives in the node home beside the identity, like the denylist and the contacts file, so one
-//! home moves the whole identity+trust unit as a unit.
+//! It is an admission input. `serve`'s gate admits a link rooted at this machine's own key only when the
+//! link's root revocation id is recorded here ([`IssuedLedger`]), so a copy of the key cannot mint access
+//! to this machine: every mint yields a fresh id, and a mint made elsewhere never lands in this file. A
+//! ledger that cannot be read admits no such link.
+//!
+//! It is also the issuer's index from holder to that root id, which is what revoking a link by naming its
+//! holder, and `grant ls`, read. It is a who-can-reach-what record, so it is written `0600`, and it lives
+//! in the node home beside the identity so one home moves the whole identity and trust unit together.
+//!
+//! Every writer takes the exclusive flock on `<home>/grants.lock`. An [`append`](Grants::append) is one
+//! `O_APPEND` line and a `sync_data`, so a link is on disk before it is printed; a rewrite (the prune an
+//! append runs once enough rows have expired) writes `grants.new`, syncs it and renames it over `grants`.
 
 use core::num::ParseIntError;
 use core::str::FromStr;
 use core::time::Duration;
-#[cfg(unix)]
-use std::os::unix::fs::DirBuilderExt as _;
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt as _;
+use std::collections::HashSet;
+use std::io::Write as _;
+use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use nauthy::{RevocationId, Service, ServiceParseError};
-use tokio::io::AsyncWriteExt as _;
+use nauthy::{FileStamp, IssuedIds, RevocationId, STAT_DEBOUNCE, Service, ServiceParseError};
 
-/// The persisted mint-log ledger backing a node home. Owns the load / append / read logic over its path;
-/// the location is the caller's to choose (see [`Home::grants`](crate::home::Home::grants)).
+/// How many expired rows an [`append`](Grants::append) lets gather before it prunes them. A prune rewrites
+/// the whole file, so it waits until the rewrite removes enough to be worth it.
+pub const PRUNE_AT: usize = 64;
+
+/// The persisted ledger backing a node home. Owns the load / append / prune logic over its path; the
+/// location is the caller's to choose (see [`Home::grants`](crate::home::Home::grants)), and the lock and
+/// the rewrite's temp are its siblings, `<path>.lock` and `<path>.new`.
 pub struct Grants {
     path: PathBuf,
+    /// Prune once this many rows have expired. [`PRUNE_AT`] outside tests.
+    prune_at: usize,
 }
 
 impl Grants {
     /// A ledger backed by `path`. No file is touched until the first [`append`](Self::append); an absent file
     /// reads as no grants.
     pub fn at(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            prune_at: PRUNE_AT,
+        }
+    }
+
+    /// This ledger, pruning once `rows` rows have expired rather than [`PRUNE_AT`], so a test can force a
+    /// prune on every append.
+    #[cfg(test)]
+    pub(crate) fn pruning_at(mut self, rows: usize) -> Self {
+        self.prune_at = rows;
+        self
     }
 
     /// The file backing this ledger.
@@ -40,42 +62,23 @@ impl Grants {
         &self.path
     }
 
-    /// Record one issued grant, creating the file (and its parent dir) on first use. Appends a single line,
-    /// so a concurrent read of the ledger sees whole records only. The private-posture is reasserted every
-    /// append: the config dir is `0700` and the ledger `0600`, because this index of who can reach what is as
-    /// sensitive as the grants it tracks. `create`'s mode applies only on first creation, so the file mode is
-    /// reasserted (an fchmod on the open fd) to tighten a ledger that was somehow loosened after creation.
+    /// Record one issued grant, creating the file (and its parent dir) on first use, under the ledger's
+    /// exclusive lock. Returns once the row is on disk (`sync_data`), so a caller that prints the link
+    /// after this never prints a link whose row a crash could lose.
+    ///
+    /// When at least [`PRUNE_AT`] rows have expired, the append first rewrites the file without them. The
+    /// lock is what makes that safe: a rewrite reads, writes `grants.new` and renames it over `grants`, and
+    /// a concurrent append to the old file would be lost in between.
+    ///
+    /// The private posture is reasserted every append: the config dir is `0700` and the ledger `0600`,
+    /// because this index of who can reach what is as sensitive as the grants it tracks.
     pub async fn append(&self, record: &GrantRecord) -> Result<(), LedgerError> {
-        if let Some(parent) = self.path.parent() {
-            // swoosh's config dir holds the identity key, the denylist, and this index, so create it owner-only
-            // (`0700`). Create-with-mode tightens only dirs WE make; it is a no-op on an existing dir, so we
-            // never chmod (and fight ownership of) a dir another verb or the user already made.
-            #[cfg(unix)]
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)
-                .map_err(LedgerError::Io)?;
-            #[cfg(not(unix))]
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(LedgerError::Io)?;
-        }
-        let mut options = tokio::fs::OpenOptions::new();
-        options.append(true).create(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        let mut file = options.open(&self.path).await.map_err(LedgerError::Io)?;
-        // Reassert 0600 even on a pre-existing ledger (create's mode fired only on first creation).
-        #[cfg(unix)]
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        let path = self.path.clone();
+        let line = format!("{}\n", record.to_line());
+        let prune_at = self.prune_at;
+        tokio::task::spawn_blocking(move || append_locked(&path, &line, prune_at))
             .await
-            .map_err(LedgerError::Io)?;
-        file.write_all(format!("{}\n", record.to_line()).as_bytes())
-            .await
-            .map_err(LedgerError::Io)?;
-        file.flush().await.map_err(LedgerError::Io)?;
-        Ok(())
+            .map_err(|error| LedgerError::Io(std::io::Error::other(error)))?
     }
 
     /// Every grant this node has issued, in append order. An absent file is no grants (nothing issued yet).
@@ -108,6 +111,233 @@ impl Grants {
             }
         }
         Ok(records)
+    }
+}
+
+/// `path` with `suffix` appended to its file name: the ledger's lock and its rewrite's temp.
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+/// The body of [`Grants::append`], synchronous so the flock and the file work never hold an executor
+/// thread across an await. The lock is held until this returns.
+fn append_locked(path: &Path, line: &str, prune_at: usize) -> Result<(), LedgerError> {
+    if let Some(parent) = path.parent() {
+        // swoosh's config dir holds the identity key, the denylist, and this index, so create it owner-only
+        // (`0700`). Create-with-mode tightens only dirs WE make; it is a no-op on an existing dir, so we
+        // never chmod (and fight ownership of) a dir another verb or the user already made.
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)
+            .map_err(LedgerError::Io)?;
+    }
+    let _lock = LedgerLock::take(&sibling(path, ".lock")).map_err(LedgerError::Io)?;
+    prune_expired(path, prune_at).map_err(LedgerError::Io)?;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(LedgerError::Io)?;
+    // Reassert 0600 even on a pre-existing ledger (create's mode fired only on first creation).
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(LedgerError::Io)?;
+    file.write_all(line.as_bytes()).map_err(LedgerError::Io)?;
+    file.sync_data().map_err(LedgerError::Io)
+}
+
+/// Rewrite the ledger without its expired rows, when at least `prune_at` have expired. Called with the
+/// ledger's lock held. A line that does not parse is kept as it is: a prune removes only rows it read as
+/// expired, never one it could not read.
+// `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+fn prune_expired(path: &Path, prune_at: usize) -> std::io::Result<()> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let now = SystemTime::now();
+    let expired =
+        |line: &str| GrantRecord::from_line(line.trim()).is_ok_and(|record| record.expiry <= now);
+    if text.lines().filter(|line| expired(line)).count() < prune_at {
+        return Ok(());
+    }
+    let mut kept = String::with_capacity(text.len());
+    for line in text
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !expired(line))
+    {
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    let new = sibling(path, ".new");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&new)?;
+    file.write_all(kept.as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&new, path)?;
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+/// The ledger's exclusive flock, held while this value lives. On its own file, a stable inode, because a
+/// prune replaces the ledger itself by rename.
+struct LedgerLock {
+    /// Held, never read: the lock lives exactly as long as this open file does.
+    _held: std::fs::File,
+}
+
+impl LedgerLock {
+    /// Take the lock at `path`, creating the file, and wait for any other writer to finish.
+    fn take(path: &Path) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path)?;
+        // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory lock to
+        // it. Without `LOCK_NB` it waits for a writer that holds the lock.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Self { _held: file })
+    }
+}
+
+/// The ledger as the gate reads it: the root revocation ids of every link this machine signed, so an
+/// anchored gate admits a link rooted at this machine's own key only when this machine recorded issuing
+/// it.
+///
+/// Live: it re-stats the file at most once per [`STAT_DEBOUNCE`] and re-reads it when its [`FileStamp`]
+/// changed, so a `grant issue` run while `serve` runs is admitted with no restart.
+///
+/// It fails closed. A file that cannot be opened or read admits no self-anchored link until it can be
+/// read again, and each change between readable and unreadable is logged with the path. A missing file is
+/// readable and holds no links. One malformed line fails only that row.
+pub struct IssuedLedger {
+    path: PathBuf,
+    state: Mutex<LedgerState>,
+}
+
+/// What an [`IssuedLedger`] read last.
+struct LedgerState {
+    /// The ids the last successful read found; empty while the file is unreadable.
+    ids: HashSet<RevocationId>,
+    /// The stamp of the file the ids came from, `None` before a read or after a failed one.
+    stamp: Option<FileStamp>,
+    /// When the file was last statted, to debounce the next stat.
+    last_stat: Option<Instant>,
+    /// Whether the last look at the file could read it, `None` before the first look.
+    readable: Option<bool>,
+}
+
+impl IssuedLedger {
+    /// The ledger at `<home>/grants`, read once now so `serve` logs an unreadable ledger at start.
+    pub fn open(home: &crate::home::Home) -> Self {
+        let ledger = Self {
+            path: home.grants(),
+            state: Mutex::new(LedgerState {
+                ids: HashSet::new(),
+                stamp: None,
+                last_stat: None,
+                readable: None,
+            }),
+        };
+        ledger.refresh(&mut ledger.state.lock().unwrap_or_else(PoisonError::into_inner));
+        ledger
+    }
+
+    /// Re-read the file when its stamp changed, at most once per [`STAT_DEBOUNCE`].
+    // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
+    #[allow(clippy::std_instead_of_core)]
+    fn refresh(&self, state: &mut LedgerState) {
+        if state
+            .last_stat
+            .is_some_and(|last| last.elapsed() < STAT_DEBOUNCE)
+        {
+            return;
+        }
+        state.last_stat = Some(Instant::now());
+        let read = match std::fs::metadata(&self.path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+            Ok(meta) => {
+                let stamp = FileStamp::of(&meta);
+                if FileStamp::unchanged(state.stamp, stamp) {
+                    return;
+                }
+                std::fs::read_to_string(&self.path).map(|text| Some((text, stamp)))
+            }
+        };
+        let readable = match read {
+            Ok(None) => {
+                state.ids.clear();
+                state.stamp = None;
+                true
+            }
+            Ok(Some((text, stamp))) => {
+                state.ids = self.parse(&text);
+                state.stamp = stamp;
+                true
+            }
+            Err(error) => {
+                state.ids.clear();
+                state.stamp = None;
+                if state.readable != Some(false) {
+                    tracing::error!(
+                        path = %self.path.display(),
+                        %error,
+                        "the grants ledger cannot be read; no link this machine signed is admitted until it can"
+                    );
+                }
+                false
+            }
+        };
+        if readable && state.readable == Some(false) {
+            tracing::warn!(path = %self.path.display(), "the grants ledger can be read again");
+        }
+        state.readable = Some(readable);
+    }
+
+    /// The root ids in `text`, skipping and naming each line that does not parse.
+    fn parse(&self, text: &str) -> HashSet<RevocationId> {
+        let mut ids = HashSet::new();
+        for (index, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match GrantRecord::from_line(line) {
+                Ok(record) => {
+                    ids.insert(record.root_id);
+                }
+                Err(error) => tracing::warn!(
+                    path = %self.path.display(),
+                    line = index + 1,
+                    %error,
+                    "skipping a malformed grants ledger line"
+                ),
+            }
+        }
+        ids
+    }
+}
+
+impl IssuedIds for IssuedLedger {
+    fn is_issued(&self, id: &RevocationId) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        self.refresh(&mut state);
+        state.ids.contains(id)
     }
 }
 
@@ -201,18 +431,9 @@ impl GrantRecord {
 
 /// What a grant reaches: one named service, or family membership itself.
 ///
-/// The line word is the service name verbatim, or `membership`. Legacy `member` fails closed (a parse
-/// error, surfaced per line by [`Grants::load`]): it was the old badge sentinel and must never relabel
-/// into Membership. A service named `member` or `membership` is unrepresentable by construction: both are
-/// rejected at this boundary and at `grant issue`, so no service line can ever contain either word and no
-/// membership line contains a service name.
-///
-/// The reservation lives HERE (this parse plus [`GrantTarget::is_issuable_service_name`], enforced by
-/// `grant issue`), not in the [`Service`] type itself: `Service` is owned by the `nauthy` crate, a separate
-/// repo pinned by rev in shipping form, so a swoosh-side parse reservation is the whole of what this task
-/// can ship. A `Service` carrying either word can still exist as a value; it can never enter the ledger
-/// through either write path (`grant issue`, `invite add`), and any stray line carrying one fails this parse.
-/// Flagged to the Systems-Architect as a possible nauthy-side follow-up.
+/// The line word is the service name verbatim, or `membership`. A service named `membership` is
+/// unrepresentable: the word is rejected as a service at this boundary and at `grant issue`, so no
+/// service line can contain it and no membership line contains a service name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GrantTarget {
     /// One named service (e.g. `ssh`).
@@ -224,8 +445,6 @@ pub enum GrantTarget {
 impl GrantTarget {
     /// The ledger word for membership.
     pub const MEMBERSHIP_WORD: &str = "membership";
-    /// The legacy word, never written, always rejected.
-    pub const LEGACY_MEMBER_WORD: &str = "member";
 
     /// The word this target is stored and displayed as: the service name verbatim, or `membership`.
     pub fn as_str(&self) -> &str {
@@ -235,27 +454,20 @@ impl GrantTarget {
         }
     }
 
-    /// Whether `service` names a service that may be issued. The two membership words are reserved out of
-    /// the service namespace: a service named `member` would relabel into membership anywhere it is
-    /// displayed, and one named `membership` would collide with the real membership line.
+    /// Whether `service` names a service that may be issued. The membership word is reserved out of the
+    /// service namespace: a service named `membership` would collide with the real membership line.
     pub fn is_issuable_service_name(text: &str) -> bool {
-        text != Self::MEMBERSHIP_WORD && text != Self::LEGACY_MEMBER_WORD
+        text != Self::MEMBERSHIP_WORD
     }
 }
 
 impl FromStr for GrantTarget {
     type Err = LedgerError;
 
-    /// The word alone decides: `membership` is Membership, legacy `member` fails closed, anything else is
-    /// parsed as a service name, with both reserved words rejected here as well as at issue time. No
-    /// dual-parse branch, no kind guard: the word decides, and the legacy word is a typed error the
-    /// per-line warning in [`Grants::load`] reports.
+    /// The word alone decides: `membership` is Membership, and anything else is parsed as a service name.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if text == Self::MEMBERSHIP_WORD {
             return Ok(Self::Membership);
-        }
-        if !Self::is_issuable_service_name(text) {
-            return Err(LedgerError::ReservedTarget(text.to_owned()));
         }
         let service = text.parse::<Service>().map_err(LedgerError::Service)?;
         Ok(Self::Service(service))
@@ -381,10 +593,6 @@ pub enum LedgerError {
     /// A line's service field was not a valid service name.
     #[error("grants ledger has an invalid service name")]
     Service(#[source] ServiceParseError),
-    /// A line's target word is reserved for family membership (`member` or `membership` as a service), so
-    /// it fails closed rather than relabeling into a service grant.
-    #[error("grants ledger has a reserved target word {0:?}; it is not a service")]
-    ReservedTarget(String),
     /// A line's expiry field was not a decimal number of seconds.
     #[error("grants ledger has an invalid expiry")]
     Expiry(#[source] ParseIntError),

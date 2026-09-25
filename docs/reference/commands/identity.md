@@ -22,8 +22,7 @@ $ swoosh identity
 bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
 key: ~/.config/swoosh/identity.key
 protection: plain
-signet: none (this machine is its own root)
-badge: none (this machine self-signs when it dials)
+signet: none
 ```
 
 **Things to know.** On an adopted device this prints that *device's* key, not your signet. A fleet grant

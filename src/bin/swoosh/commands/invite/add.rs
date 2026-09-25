@@ -220,15 +220,8 @@ async fn record(
     // `refuse_shadowed` ran before signing, so this `add` can only create the binding or leave it
     // unchanged; there is no displaced key to report.
     let me: Petname = ME.parse()?;
-    let before = store.contacts().roster_version();
     store.contacts_mut().add(me, Some(device.clone()), node);
     store.save().await?;
-    // Re-cut the signed roster when, and only when, the member SET changed. A badge RENEWAL re-invites a
-    // key already on file, which leaves the set (and so the version) untouched, so the quarterly cadence
-    // never drives a fleet-wide re-pull. Contacts' own version is the predicate; the verb that ran is not.
-    if store.contacts().roster_version() != before {
-        crate::commands::recut::after_membership_change(home, store.contacts()).await?;
-    }
     Ok(())
 }
 

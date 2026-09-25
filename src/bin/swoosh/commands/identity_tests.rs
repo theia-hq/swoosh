@@ -1,5 +1,5 @@
 //! `swoosh identity`'s local report: an adopted device reads its signet and how long its badge still
-//! stands, the signet holder reads both absences as states, and a badge that cannot say when it dies
+//! stands, a machine with no root says so and prints no badge line, and a badge that cannot say when it dies
 //! says that rather than nothing.
 
 use core::time::Duration;
@@ -54,15 +54,18 @@ fn a_dead_badge_says_so_and_says_when() {
     );
 }
 
-/// The signet holder's own machine: no signet file (its key is the root) and no stored badge (it
-/// self-signs per dial). Both absences are STATED, because a missing line and a missing badge read
-/// the same to the operator who came here to find out which they have.
+/// A machine that trusts no root states it, and prints no badge line: its own key signs no badge for
+/// itself.
 #[test]
-fn the_signet_holder_reads_both_absences_as_states() {
+fn a_machine_with_no_root_says_so_and_prints_no_badge() {
     let out = render(node(), Path::new("/k"), Method::Plain, None, None);
     assert!(
-        out.contains("signet: none") && out.contains("badge: none"),
-        "neither absence may render as a blank line, got:\n{out}"
+        out.contains("signet: none\n"),
+        "the absent pin is stated, got:\n{out}"
+    );
+    assert!(
+        !out.contains("badge:"),
+        "there is no badge to describe, got:\n{out}"
     );
 }
 

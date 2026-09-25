@@ -115,7 +115,7 @@ fn invite_add_derives_signs_adopt_stores_and_it_verifies_at_the_signet_root() {
         stderr(&adopt)
     );
 
-    // adopt STORED the badge (this is what `self_badge` presents on connect, in place of a self-sign).
+    // adopt STORED the badge: what this device presents on every gated dial.
     let stored_badge = std::fs::read_to_string(device_dir.join("badge"))
         .expect("adopt stores the badge beside the seed")
         .trim()

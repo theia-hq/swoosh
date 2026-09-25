@@ -164,25 +164,38 @@ async fn for_fleet_with_an_unknown_petname_teaches_the_hand_add_recipe() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A device signs its own links: its own gate admits them through the ledger row, whatever root it
+/// trusts, so `grant issue` on a `Device` issues and records the link like on any other standing.
 #[tokio::test]
-async fn a_member_device_refuses_to_issue_a_grant_no_fleet_node_would_admit() {
-    let dir = std::env::temp_dir().join(format!("swoosh-grant-member-{}", std::process::id()));
+async fn a_device_issues_its_own_grant() {
+    let dir = std::env::temp_dir().join(format!("swoosh-grant-device-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let home = Home::resolve(Some(dir.clone())).unwrap();
 
-    // An adopted device: its home pins a signet that is not its own key.
-    let signet = NodeId::from_ed25519_secret(&[3u8; 32]);
-    swoosh::config::write_signet(&home, signet).await.unwrap();
+    // A `Device`: this machine's key, a pin to a root that is not its own key, and that root's badge.
+    let device = swoosh::testkit::TestNode::seeded(0x3a);
+    swoosh::identity::write(&device.seed(), &home)
+        .await
+        .unwrap();
+    let root = swoosh::testkit::TestRoot::seeded(0x3b);
+    swoosh::config::write_signet(&home, root.node_id())
+        .await
+        .unwrap();
+    let badge = root
+        .device_badge(
+            device.node_id(),
+            nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
+        )
+        .unwrap();
+    swoosh::config::write_badge(&home, &badge).await.unwrap();
 
-    let error = share("ssh", None, false)
+    share("ssh", None, false)
         .run(store_at(&dir).await, &home)
         .await
-        .expect_err("a member's own-key grant roots nowhere the fleet gates, so it is refused");
-    assert!(
-        error.to_string().contains("admitted nowhere"),
-        "the refusal says why: {error}"
-    );
+        .expect("a device issues a link of its own");
     let records = Grants::at(home.grants()).load().await.unwrap();
-    assert!(records.is_empty(), "a refused issue records nothing");
+    assert_eq!(records.len(), 1, "the link is recorded");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

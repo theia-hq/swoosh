@@ -42,9 +42,9 @@ fn the_same_sentence_attaches_to_every_way_a_dial_can_fail() {
     );
 }
 
-/// A name no verb defaults to is left alone, and so are the two a bare `serve` DOES bind: there is
-/// nothing for a client to teach about `ping` or `speed`, and `sshd` is the engine's spelling, never a
-/// name any client requests. The report comes back byte-identical, with nothing appended.
+/// A name no verb defaults to is left alone, and so are the ones a bare `serve` DOES bind: there is
+/// nothing for a client to teach about `ping`, `speed` or the update route, and `sshd` is the engine's
+/// spelling, never a name any client requests. The report comes back byte-identical, with nothing appended.
 #[test]
 fn a_name_the_client_did_not_default_to_is_left_alone() {
     for name in [
@@ -52,6 +52,7 @@ fn a_name_the_client_did_not_default_to_is_left_alone() {
         "speed",
         "control.stop",
         "control.services",
+        "roster",
         "sshd",
         "web",
     ] {
@@ -101,7 +102,7 @@ fn every_row_teaches_an_entry_that_binds_its_own_name() {
     }
     assert_eq!(
         names.len(),
-        4,
-        "the four verbs that default outside the bare set: {names:?}"
+        3,
+        "the three verbs that default outside the bare set: {names:?}"
     );
 }

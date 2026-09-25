@@ -1,6 +1,6 @@
-//! The mint-log ledger: an append then load returns exactly what was issued, one corrupt line is skipped
-//! (not fatal) while good rows survive, each malformed field is its own typed parse error, the `membership`
-//! target round-trips while legacy `member` fails closed, and the file is written owner-only.
+//! The ledger: an append then load returns exactly what was issued, one corrupt line is skipped (not
+//! fatal) while good rows survive, each malformed field is its own typed parse error, the `membership`
+//! target round-trips, the file is written owner-only, and concurrent writers never lose a row to a prune.
 
 use core::time::Duration;
 use std::time::UNIX_EPOCH;
@@ -134,14 +134,7 @@ fn each_malformed_field_is_its_own_parse_error() {
         GrantRecord::from_line("bearer\tsealed\tBAD!!\t-\t1\tde"),
         Err(LedgerError::Service(_))
     ));
-    // The membership words never parse as services. `membership` is the Membership target (asserted in
-    // the membership test below); legacy `member` fails closed with its own typed error so the per-line
-    // warning names the collision instead of a generic service complaint.
-    assert!(matches!(
-        GrantRecord::from_line("bearer\tsealed\tmember\t-\t1\tde"),
-        Err(LedgerError::ReservedTarget(_))
-    ));
-    assert!(!GrantTarget::is_issuable_service_name("member"));
+    // `membership` is the Membership target (asserted in the membership test below), never a service.
     assert!(!GrantTarget::is_issuable_service_name("membership"));
     assert!(GrantTarget::is_issuable_service_name("ssh"));
     assert!(matches!(
@@ -190,10 +183,9 @@ async fn the_created_ledger_is_owner_only() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// The membership word `membership` parses to the Membership target and round-trips through the ledger;
-/// legacy `member` fails closed with its own typed error, never relabeling.
+/// The membership word `membership` parses to the Membership target and round-trips through the ledger.
 #[tokio::test]
-async fn membership_writes_membership_and_legacy_member_fails_closed() {
+async fn membership_round_trips_as_membership() {
     let (grants, path) = ledger("membership");
     let badge = membership_record(GrantKind::Device, "bf01deadbeef", 1_788_400_000);
     let slip = record(
@@ -218,7 +210,6 @@ async fn membership_writes_membership_and_legacy_member_fails_closed() {
         "a membership record round-trips as Membership alongside a service record"
     );
 
-    // The wire word is `membership`, never legacy `member`.
     assert_eq!(
         GrantTarget::Membership.as_str(),
         "membership",
@@ -228,13 +219,124 @@ async fn membership_writes_membership_and_legacy_member_fails_closed() {
         "membership".parse::<GrantTarget>(),
         Ok(GrantTarget::Membership)
     ));
-    assert!(matches!(
-        "member".parse::<GrantTarget>(),
-        Err(LedgerError::ReservedTarget(_))
-    ));
-    assert!(matches!(
-        GrantRecord::from_line("device\tsealed\tmember\tbf01\t1\tde"),
-        Err(LedgerError::ReservedTarget(_))
-    ));
     let _ = std::fs::remove_file(&path);
+}
+
+/// A row for `service` from writer `writer`'s `index`th issue, expired or live.
+fn issued(writer: u8, index: u8, live: bool) -> GrantRecord {
+    let expiry = if live {
+        let now = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("after the epoch");
+        UNIX_EPOCH + Duration::from_secs(now.as_secs() + 3600)
+    } else {
+        UNIX_EPOCH + Duration::from_secs(1)
+    };
+    GrantRecord {
+        target: service_target("ssh"),
+        kind: GrantKind::Bearer,
+        delegation: Delegation::Sealed,
+        holder: ANYONE.to_owned(),
+        root_id: RevocationId::from_bytes(vec![writer, index, u8::from(live)]),
+        expiry,
+    }
+}
+
+/// Two writers, each with its own handle as two processes would have, issue 100 links each while a prune
+/// runs on nearly every append (each writer adds an expired row before each live one, and the threshold
+/// is one). A prune reads the file, writes `grants.new` and renames it over `grants`, so without the lock
+/// an append landing in between goes to the replaced file and is lost.
+#[test]
+fn concurrent_issues_never_lose_a_ledger_row() {
+    let (_, path) = ledger("concurrent");
+    let writers: Vec<_> = [1u8, 2]
+        .into_iter()
+        .map(|writer| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("a runtime");
+                runtime.block_on(async {
+                    let grants = Grants::at(path).pruning_at(1);
+                    for index in 0..100u8 {
+                        grants
+                            .append(&issued(writer, index, false))
+                            .await
+                            .expect("append an expired row");
+                        grants
+                            .append(&issued(writer, index, true))
+                            .await
+                            .expect("append a live row");
+                    }
+                });
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().expect("the writer ends");
+    }
+
+    let rows = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a runtime")
+        .block_on(Grants::at(path.clone()).load())
+        .expect("load");
+    let live = rows
+        .iter()
+        .filter(|row| row.expiry > std::time::SystemTime::now())
+        .count();
+    assert_eq!(live, 200, "every issued link keeps its row");
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(super::sibling(&path, ".lock"));
+}
+
+/// A prune waits for [`PRUNE_AT`](super::PRUNE_AT) expired rows, then drops every expired row and keeps
+/// every live one and every line it cannot read.
+#[tokio::test]
+async fn a_prune_drops_only_expired_rows_once_enough_have_expired() {
+    let (grants, path) = ledger("prune");
+    for index in 0..u8::try_from(super::PRUNE_AT - 1).expect("fits") {
+        grants
+            .append(&issued(3, index, false))
+            .await
+            .expect("append an expired row");
+    }
+    grants
+        .append(&issued(3, 200, true))
+        .await
+        .expect("append a live row");
+    assert_eq!(
+        grants.load().await.expect("load").len(),
+        super::PRUNE_AT,
+        "one short of the threshold, nothing is pruned"
+    );
+
+    std::fs::write(
+        &path,
+        format!(
+            "{}not a row\n",
+            std::fs::read_to_string(&path).expect("read")
+        ),
+    )
+    .expect("add an unreadable line");
+    grants
+        .append(&issued(3, 250, false))
+        .await
+        .expect("append the expired row that reaches the threshold");
+    grants
+        .append(&issued(3, 201, true))
+        .await
+        .expect("append a live row, which prunes first");
+    let rows = grants.load().await.expect("load");
+    assert_eq!(rows.len(), 2, "only the live rows are left");
+    assert!(
+        std::fs::read_to_string(&path)
+            .expect("read")
+            .contains("not a row"),
+        "a line the prune cannot read is kept"
+    );
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(super::sibling(&path, ".lock"));
 }

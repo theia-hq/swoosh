@@ -3,17 +3,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Tier-1 invites, end to end: the REAL CLI provisions two homes, then a live gated reach proves the
-//! credential the `invite:` artifact carried is the one a signet-rooted gate admits.
+//! credential the `invite:` artifact carried is the one the adopting device's gate admits.
 //!
 //! The flow under test is the spec's offline round trip:
 //!
 //! 1. the DEVICE makes its key and prints it (`swoosh identity`);
 //! 2. the OWNER signs for that key (`swoosh invite add laptop --for <key>`), so no seed ever travels;
 //! 3. the DEVICE adopts the `invite:` artifact (`swoosh adopt`), keeping its identity;
-//! 4. the owner's node serves; the adopted device dials with its stored badge and is ADMITTED, while a
+//! 4. the device's node serves behind the gate `serve` builds from its home; a badge the owner's key
+//!    signed for the owner's own node is ADMITTED, proving `adopt` wrote the pin the gate reads, while a
 //!    stranger with no badge is REFUSED;
-//! 5. the device's node serves; the owner (self-signing, the signet holder) dials and is admitted,
-//!    proving `adopt` wrote the signet the serve gate arms from.
+//! 5. the owner's node serves; it pins no root, so its own key admits no member, and the device's
+//!    stored badge is REFUSED there.
 //!
 //! The transport is `Noise<Quirk>` on loopback, so the gate's `bound_device` check runs against the
 //! REAL key the device binds under (the wrapper proves the NodeId), not a synthetic test id.
@@ -26,15 +27,13 @@ use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_noise::Noise;
 use bifrost_quirk::Endpoint;
 use measure::Ping;
-use nauthy::FileDenylist;
 use swoosh::config;
 use swoosh::credential::Credential;
 use swoosh::home::Home;
 use swoosh::reaching::BindRole;
 use swoosh::testkit::TestRoot;
 use swoosh::transport::PeerHint;
-use tightbeam::identity::AsVerifyKey as _;
-use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
+use tightbeam::tunnel::{CancellationToken, Connector, Router};
 
 /// The role every node that dials here binds under: it browses the LAN and advertises nothing.
 const DIALING: BindRole = BindRole::Dialing(Credential::Family { present: None });
@@ -48,16 +47,16 @@ async fn sealed(seed: [u8; 32]) -> Noise<Endpoint> {
     Noise::new(inner, &seed).expect("wrap quirk under its own identity")
 }
 
-/// The rooted gate `serve` arms for a node: the signet it trusts plus an empty denylist.
-async fn gated_exposer(tag: &str, signet: NodeId) -> tightbeam::tunnel::Exposer {
-    let path = std::env::temp_dir().join(format!("swoosh-tier1-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_file(&path);
-    let gate = tunnel::resolve_gate(Some(signet), FileDenylist::load(path).await.unwrap())
-        .expect("the signet-rooted gate resolves");
+/// The gate `serve` builds for a node from its home, over the diagnostics, with the live cut wired.
+async fn anchored_exposer(home: &Home, own: NodeId) -> tightbeam::tunnel::Exposer {
+    let (gate, cut) = swoosh::gate::anchored(home, own)
+        .await
+        .expect("the gate builds");
     swoosh::serve::diagnostics(Router::new(gate), &[])
         .expect("the diagnostics routes bind")
         .expose()
         .expect("the exposer assembles")
+        .with_live_cuts(cut)
 }
 
 /// The member's gated ping rides the sealed wrapper: the dial reaches the node, the gate admits the
@@ -132,89 +131,51 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     let owner_id = NodeId::from_ed25519_secret(&owner_seed);
     assert_eq!(signet, owner_id, "the invite roots at the owner's signet");
 
-    // The membership edit CUT a signed roster on the owner's machine, there and then: no node is serving
-    // here and no second verb was typed. This is the write half the loop was missing, and the reason
-    // `fleet cut` is not a verb.
-    let owner_home = Home::resolve(Some(signet_dir.clone())).unwrap();
-    assert!(
-        owner_home.roster().exists(),
-        "`invite add` cuts a roster on the signet's machine"
-    );
-    let cut = swoosh::roster::Artifact::open(owner_home.roster())
-        .await
-        .unwrap();
-    let doc = swoosh::roster::verify(&cut.bytes(), owner_id.verify_key())
-        .expect("the cut roster verifies against the owner's signet");
-    assert_eq!(
-        doc.epoch(),
-        swoosh::roster::Epoch(1),
-        "the first membership edit publishes version 1, which is newer than every floor in the field"
-    );
-    assert_eq!(doc.members().len(), 1);
-    let first_cut = cut.bytes();
+    // 4. The DEVICE's node serves, gated at the pin `adopt` wrote; the owner dials presenting a badge its
+    //    key signed for its own node, and is admitted as one of the device's root's members.
+    let device_transport = sealed(device_seed).await;
+    let device_host = Node::new(device_transport, NoDiscovery);
+    let device_id_bound = device_host.node_id();
+    let device_addr = device_host.local_addr();
+    let exposer = anchored_exposer(&device_home, device_id).await;
 
-    // A RENEWAL: `invite add` for a key already on file mints a fresh badge and leaves the member SET
-    // byte-identical, so it must publish nothing. Bumping here would weld the quarterly credential
-    // cadence to the membership version and drive a fleet-wide re-pull four times a year for no delta.
-    let renew = swoosh(&[
-        "invite",
-        "add",
-        "laptop",
-        "--for",
-        &device_id.to_string(),
-        "--home",
-        path_str(&signet_dir),
-    ]);
-    assert!(renew.status.success(), "renewal failed: {}", stderr(&renew));
-    let after_renewal = swoosh::roster::Artifact::open(owner_home.roster())
-        .await
-        .unwrap();
-    assert_eq!(
-        after_renewal.bytes(),
-        first_cut,
-        "a renewal changes no member, so it must not re-publish the roster"
-    );
-
-    // 4a. The OWNER's node serves; the adopted device is ADMITTED with its stored badge.
-    let host_transport = sealed(owner_seed).await;
-    let host = Node::new(host_transport, NoDiscovery);
-    let host_id = host.node_id();
-    let addr = host.local_addr();
-    let exposer = gated_exposer("owner-serves", owner_id).await;
-
-    let member_transport = sealed(device_seed).await;
-    let hint: PeerHint = format!("{host_id}={}", addr.hints[0])
+    let owner_transport = sealed(owner_seed).await;
+    let owner_hint: PeerHint = format!("{device_id_bound}={}", device_addr.hints[0])
         .parse()
         .expect("the direct hint parses");
-    let discovery = PeerHint::discovery(&member_transport, [hint.clone()], &DIALING).discovery;
-    let member = Node::new(member_transport, discovery);
+    let owner_discovery =
+        PeerHint::discovery(&owner_transport, [owner_hint.clone()], &DIALING).discovery;
+    let owner = Node::new(owner_transport, owner_discovery);
+    let owner_badge = TestRoot::from_seed(owner_seed)
+        .device_badge(
+            owner_id,
+            nauthy::Request::expires_in(Duration::from_secs(300)),
+        )
+        .unwrap();
 
     let cancel = CancellationToken::new();
-    let serving = exposer.run(&host, cancel.clone());
+    let serving = exposer.run(&device_host, cancel.clone());
     let dialing = async {
-        let session = Connector::to_node(host_id, "ping".parse().unwrap(), Some(badge))
-            .open_service(&member)
-            .await
-            .expect("the admitted device opens the gated ping");
+        let session =
+            Connector::to_node(device_id_bound, "ping".parse().unwrap(), Some(owner_badge))
+                .open_service(&owner)
+                .await
+                .expect("the owner opens the device's gated ping");
         let report = Ping {
             count: 3,
             interval: Duration::ZERO,
         }
         .run(&session)
         .await
-        .expect("the gated ping runs for the admitted device");
-        assert_eq!(
-            report.received(),
-            3,
-            "every probe answers for the adopted device"
-        );
+        .expect("the gated ping runs for the owner");
+        assert_eq!(report.received(), 3, "every probe answers for the owner");
 
         // A STRANGER: a different key, no badge at all. The gate refuses the stream.
         let stranger_transport = sealed([0x5a; 32]).await;
         let stranger_discovery =
-            PeerHint::discovery(&stranger_transport, [hint.clone()], &DIALING).discovery;
+            PeerHint::discovery(&stranger_transport, [owner_hint.clone()], &DIALING).discovery;
         let stranger = Node::new(stranger_transport, stranger_discovery);
-        let refused = Connector::to_node(host_id, "ping".parse().unwrap(), None)
+        let refused = Connector::to_node(device_id_bound, "ping".parse().unwrap(), None)
             .open_service(&stranger)
             .await
             .expect("the base connect lands; the gate refuses per-stream");
@@ -233,55 +194,51 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     let (served, ()) = tokio::join!(serving, async {
         tokio::time::timeout(Duration::from_secs(15), dialing)
             .await
-            .expect("the member completes its gated dial within the deadline");
+            .expect("the owner completes its gated dial within the deadline");
     });
-    served.expect("the owner's exposer ends Ok once the dials finish");
+    served.expect("the device's exposer ends Ok once the dials finish");
 
-    // 4b. The DEVICE's node serves, gated at the signet `adopt` wrote; the owner (the signet holder,
-    //     self-signing) dials and is admitted. This is the reverse half of the same membership.
-    let device_transport = sealed(device_seed).await;
-    let device_host = Node::new(device_transport, NoDiscovery);
-    let device_id_bound = device_host.node_id();
-    let device_addr = device_host.local_addr();
-    let exposer = gated_exposer("device-serves", signet).await;
+    // 5. The OWNER's node serves. It pins no root, and its own key is never one, so the badge it signed
+    //    for the device admits nothing here.
+    let owner_home = Home::resolve(Some(signet_dir.clone())).unwrap();
+    let host_transport = sealed(owner_seed).await;
+    let host = Node::new(host_transport, NoDiscovery);
+    let host_id = host.node_id();
+    let addr = host.local_addr();
+    let exposer = anchored_exposer(&owner_home, owner_id).await;
 
-    let owner_transport = sealed(owner_seed).await;
-    let owner_hint: PeerHint = format!("{device_id_bound}={}", device_addr.hints[0])
+    let member_transport = sealed(device_seed).await;
+    let hint: PeerHint = format!("{host_id}={}", addr.hints[0])
         .parse()
         .expect("the direct hint parses");
-    let owner_discovery = PeerHint::discovery(&owner_transport, [owner_hint], &DIALING).discovery;
-    let owner = Node::new(owner_transport, owner_discovery);
-    let owner_badge = TestRoot::from_seed(owner_seed)
-        .device_badge(
-            owner_id,
-            nauthy::Request::expires_in(Duration::from_secs(300)),
-        )
-        .unwrap();
+    let discovery = PeerHint::discovery(&member_transport, [hint], &DIALING).discovery;
+    let member = Node::new(member_transport, discovery);
 
     let cancel = CancellationToken::new();
-    let serving = exposer.run(&device_host, cancel.clone());
+    let serving = exposer.run(&host, cancel.clone());
     let dialing = async {
-        let session =
-            Connector::to_node(device_id_bound, "ping".parse().unwrap(), Some(owner_badge))
-                .open_service(&owner)
-                .await
-                .expect("the signet holder opens the device's gated ping");
+        let session = Connector::to_node(host_id, "ping".parse().unwrap(), Some(badge))
+            .open_service(&member)
+            .await
+            .expect("the base connect lands; the gate refuses per-stream");
         let report = Ping {
-            count: 3,
+            count: 1,
             interval: Duration::ZERO,
         }
         .run(&session)
-        .await
-        .expect("the gated ping runs for the owner");
-        assert_eq!(report.received(), 3, "every probe answers for the owner");
+        .await;
+        assert!(
+            report.is_err(),
+            "a machine with no pin admits no member, even one its own key signed: {report:?}"
+        );
         cancel.cancel();
     };
     let (served, ()) = tokio::join!(serving, async {
         tokio::time::timeout(Duration::from_secs(15), dialing)
             .await
-            .expect("the owner completes its gated dial within the deadline");
+            .expect("the refused dial completes within the deadline");
     });
-    served.expect("the device's exposer ends Ok once the dial finishes");
+    served.expect("the owner's exposer ends Ok once the dial finishes");
 
     let _ = std::fs::remove_dir_all(&base);
 }

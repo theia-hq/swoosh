@@ -16,7 +16,6 @@ use core::str::FromStr;
 use bifrost::NodeId;
 use clap::Args;
 use nauthy::{Cap, Service};
-use swoosh::config;
 use swoosh::contacts::{ContactRef, ContactRefParseError, Contacts, ContactsStore, Petname};
 use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
 use swoosh::home::Home;
@@ -67,10 +66,10 @@ impl ShareCmd {
                 "a bound grant (--for) is theft-resistant and cannot be delegated; drop --delegable, or issue a bearer link (no --for) if you need to delegate"
             );
         }
-        // `member` and `membership` are reserved for family membership, not services: issuing a service by
-        // either name would write a line the ledger reads as membership, so the parse refuses them here,
-        // at the word the issuer typed, before any mint. `GrantTarget::is_issuable_service_name` owns the
-        // word list; this is its teaching surface.
+        // `membership` is reserved for family membership, not a service: issuing a service by that name
+        // would write a line the ledger reads as membership, so the parse refuses it here, at the word
+        // the issuer typed, before any mint. `GrantTarget::is_issuable_service_name` owns the word; this
+        // is its teaching surface.
         if !GrantTarget::is_issuable_service_name(self.service.as_str()) {
             eyre::bail!(
                 "grant issue failed: '{}' is reserved for family membership, pick another service name",
@@ -80,17 +79,8 @@ impl ShareCmd {
         // The link roots at swoosh's stable key (the one an exposed service is reached at), so resolve the
         // persisted identity, creating one on first use exactly as `swoosh identity` would.
         let secret = identity::resolve(Identity::Persisted, home).await?;
-        // A grant roots at this machine's key, so it is admitted only where this key is the root. On an
-        // adopted device that is nowhere: every node of the fleet, this one included, gates on the signet.
-        // Refuse the dead grant here, as `invite add` and `recut` do, rather than hand out a link every
-        // gate turns away without saying why.
-        if !config::holds_signet(home, secret.node_id()).await? {
-            eyre::bail!(
-                "this machine is a member of a fleet whose signet is another key, so a grant signed here \
-                 would be admitted nowhere. Run `grant issue` on the machine that holds the signet, or \
-                 pass on a narrower copy of a link you hold with `grant attenuate`."
-            );
-        }
+        // A link signs with this machine's own key in every standing: this machine's gate admits it
+        // through the ledger row appended below, whatever root it trusts.
         let signer = NodeSigner::from(&secret);
         let lifetime = self.expires.duration();
         // The absolute expiry recorded in the ledger. `mint_slip` recomputes its own from the same lifetime,
@@ -499,16 +489,14 @@ mod tests {
         ));
     }
 
-    /// `grant issue` reserves the two membership words at the word the issuer typed: `member` and
-    /// `membership` are teaching errors naming the fix, never minted service grants.
+    /// `grant issue` reserves the membership word at the word the issuer typed: `membership` is a
+    /// teaching error naming the fix, never a minted service grant.
     #[test]
-    fn issue_rejects_the_reserved_membership_words() {
-        for word in ["member", "membership"] {
-            assert!(
-                !GrantTarget::is_issuable_service_name(word),
-                "{word} is reserved for family membership"
-            );
-        }
+    fn issue_rejects_the_reserved_membership_word() {
+        assert!(
+            !GrantTarget::is_issuable_service_name("membership"),
+            "membership is reserved for family membership"
+        );
         assert!(GrantTarget::is_issuable_service_name("ssh"));
     }
 

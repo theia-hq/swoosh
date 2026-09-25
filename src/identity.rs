@@ -53,9 +53,8 @@ pub use protect::{Protected, protect};
 /// hardcoded law: the CLI threads an explicit window straight into [`sign_device_badge`], and falls back
 /// to this value when none is given.
 ///
-/// A stored badge is a longer-lived bearer credential than the 5-minute self-sign a signet holder mints
-/// per dial, so it must carry a FINITE lifetime, not "forever" -- a lost, un-denylisted device then ages
-/// out on its own even absent an explicit revoke. Offline there is no control plane to split the invite's
+/// A stored badge is a long-lived bearer credential, so it must carry a FINITE lifetime, not "forever":
+/// a lost, un-denylisted device then ages out on its own even absent an explicit revoke. Offline there is no control plane to split the invite's
 /// leak-window from the badge lifetime, so this value IS the worst-case leak window for a mint that is
 /// never revoked. 90 days is the chosen default: a real re-mint cadence (about quarterly) a homelab owner
 /// can absorb, and a 90-day backstop instead of a year, matching the invite default operators expect. A
@@ -93,28 +92,6 @@ impl Secret {
         self.0.node_id()
     }
 
-    /// Self-sign a membership badge for THIS identity: a short-lived cap carrying a `member(true)` fact in
-    /// its authority block, rooted at this key and bound to this key's own node id. The `member(true)` fact
-    /// is what a family gate reads as membership; because biscuit trusts only authority-block facts, it
-    /// cannot be forged by attenuation. The signet holder is the one party always entitled to a badge
-    /// (it holds the root), so when it dials a family-gated node it mints one in-process rather than
-    /// carrying a stored one. Short-lived because it is re-minted per dial; the binding makes it useless if
-    /// intercepted off another key. Returns the `sheer:` link to present.
-    pub fn member_badge(&self) -> eyre::Result<Link> {
-        use core::time::Duration;
-
-        // Minted fresh each dial, so a few minutes is ample and bounds a leaked in-flight badge.
-        let ttl = Duration::from_secs(5 * 60);
-        Ok(self
-            .with_bytes(nauthy::Identity::from_secret)?
-            .mint_member(
-                self.node_id().verify_key(),
-                nauthy::Request::expires_in(ttl),
-            )?
-            .seal()?
-            .link()?)
-    }
-
     /// A stable seed for this node's ssh host key, so a swoosh node exposing `ssh=sshd:` under its persisted
     /// key presents the SAME host key a client pins. Delegates to [`sshh::host_seed`], which owns the
     /// domain-separated derivation, so it lives in exactly one place; the raw secret never leaves the
@@ -127,15 +104,12 @@ impl Secret {
 
     /// Sign a membership badge FOR a device, rooted at THIS key (the signet) and bound to `device`.
     ///
-    /// This is the mint-time counterpart to [`member_badge`](Self::member_badge): where the signet holder
-    /// self-signs its OWN badge per dial (root == dialer), here the signet signs a badge for a DIFFERENT
-    /// key (the device's derived node id), so the device can present a signet-rooted proof it could never
-    /// mint itself. The gate trusts the signet root, so this badge admits; a device's own self-sign roots
-    /// at its child key and is (correctly) refused. `bound_device` = `device`, so an intercepted badge
-    /// replayed from another key fails the binding.
+    /// The signet signs a badge for a DIFFERENT key (the device's node id), so the device can present a
+    /// signet-rooted proof it could never mint itself. A gate that pins the signet admits it.
+    /// `bound_device` = `device`, so an intercepted badge replayed from another key fails the binding.
     ///
-    /// FINITE lifetime: unlike the 5-minute self-sign (re-minted per dial), this badge is STORED on the
-    /// device and stands until it expires or is denylisted, so it carries a generous-but-finite `ttl`
+    /// FINITE lifetime: this badge is STORED on the device and stands until it expires or is denylisted,
+    /// so it carries a generous-but-finite `ttl`
     /// rather than "forever" -- a lost, un-denylisted device eventually ages out. The caller owns the
     /// window: `swoosh invite add` passes an explicit `--expires`, or falls back to [`DEVICE_BADGE_TTL`], so
     /// the lifetime is a default the CLI applies, not a constant buried in this signer. The signet secret

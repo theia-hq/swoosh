@@ -1,9 +1,10 @@
 //! `swoosh fleet <peer>`: learn your fleet from a coordination node.
 //!
 //! The client side of roster-sync. A fresh device that has adopted its signet dials a coordination node
-//! (any member of the fleet serving `roster:`), reads the signet-signed membership snapshot, VERIFIES it
-//! against the signet it trusts, and folds the members into its contacts as `me/<device>` entries. After
-//! this, `swoosh ssh me/<device>` reaches any fleet member by key, with nothing copied by hand.
+//! (any machine serving: every `serve` binds the update route), reads the signet-signed membership
+//! snapshot, VERIFIES it against the signet it trusts, and folds the members into its contacts as
+//! `me/<device>` entries. After this, `swoosh ssh me/<device>` reaches any fleet member by key, with
+//! nothing copied by hand.
 //!
 //! The verification is the whole security seam: a roster NOT signed by your signet (a forged blob, or one
 //! from a foreign key) is refused HERE, before any contact is written. Pulling is the whole verb today:
@@ -19,7 +20,6 @@ use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::roster;
 use swoosh::transport::ReachArgs;
-use swoosh::unbound::Unbound;
 use tightbeam::identity::AsVerifyKey as _;
 use tokio::io;
 use tokio::io::AsyncReadExt as _;
@@ -62,7 +62,7 @@ impl swoosh::reaching::Reaching for FleetCmd {
     /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
     /// home key, so its bind must not write the key's address record (0.9.0 F1).
     ///
-    /// `fleet` reaches the coordination node's family-gated `roster:` service, so it presents the
+    /// `fleet` reaches the coordination node's member-gated update route, so it presents the
     /// member badge rooted at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The
     /// effective slip is the FOLD of a self-addressing `sheer:` link in the `<peer>` slot with an explicit
     /// `--present`, threaded INTO the credential so the ONE resolver owns both slots.
@@ -90,7 +90,7 @@ impl swoosh::reaching::Reaching for FleetCmd {
 }
 
 impl FleetCmd {
-    /// Dial the coordination node's gated `roster:` service presenting this device's membership badge, read
+    /// Dial the coordination node's member-gated update route presenting this device's membership badge, read
     /// the signed blob, verify it against the adopted signet, and hydrate contacts. Refuses loudly if the
     /// node has no signet (adopt first), if the coordination node refuses the read, or if the roster is not
     /// signed by our signet.
@@ -115,31 +115,22 @@ impl FleetCmd {
         // an earlier pull already wrote stay as they are.
         refuse_disabled(home, signet).await?;
 
-        // Dial the GATED roster: service through the unified peer resolver (so a petname/link coordination
-        // node resolves like every other verb), presenting our membership badge so the family gate admits us.
-        // Slot 2 (membership) rides along for a signet-bound coordination node; a no-op on the plain member
-        // dial. The redundant-present conflict was rejected in the composition root before this runs.
-        //
-        // The name comes from the table that knows a bare `swoosh serve` does not bind it: `fleet` has
-        // no `--service` flag to drop, so naming the `serve` entry on a failed read is the only way it
-        // can satisfy the rule at all.
-        let roster_service = Unbound::ROSTER.name();
+        // Dial the member-gated update route every `serve` binds, through the unified peer resolver (so a
+        // petname/link coordination node resolves like every other verb), presenting our membership badge
+        // so the gate admits us. Slot 2 (membership) rides along for a signet-bound coordination node; a
+        // no-op on the plain member dial. The redundant-present conflict was rejected in the composition
+        // root before this runs.
         let connector = self.peer.connector(
             contacts,
-            roster_service.parse::<Service>()?,
+            swoosh::serve::ROSTER_SERVICE.parse::<Service>()?,
             self_badge,
             membership,
         )?;
         let session = connector.open_service(node).await?;
-        // The read's one gated stream: a zero-config coordination node refuses here, and the refusal
-        // names nothing (it must not: a stranger never learns what a node serves), so the client adds
-        // what that node would have to run. Attached to EVERY failure of this stream, without reading
-        // any of them, so it can never report the difference between two refusals.
         let (send, recv) = session
             .open_bi()
             .await
-            .wrap_err("the coordination node refused the roster read")
-            .map_err(|error| Unbound::name_the_entry(error, roster_service))?;
+            .wrap_err("the coordination node refused the roster read")?;
         drop(send); // a roster is a read; we send nothing, so the handler's write half completes
         let bytes = read_roster(recv, &self.peer).await?;
 

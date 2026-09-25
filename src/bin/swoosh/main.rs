@@ -29,7 +29,7 @@ use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::reaching::{BindRole, Reaching};
 use swoosh::transport::{MdnsState, PeerHint};
-use swoosh::{config, credential, reaching, transport};
+use swoosh::{credential, reaching, transport};
 
 // The verb modules this binary dispatches to, each its own tree beside the composition root. The
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
@@ -377,18 +377,12 @@ impl Outward {
     }
 
     /// The exposer context `serve` needs, resolved before the secret is consumed by the transport bind:
-    /// swoosh's ssh host seed (derived from the secret), the signet its default gate trusts,
-    /// and the revocation denylist the gate honors. All read from swoosh's OWN store, the node home, so a
-    /// swoosh node gates on the signet `swoosh adopt` set under the same `--home`. Every other verb returns
-    /// `None`. Async because the signet and denylist are read from disk.
+    /// swoosh's ssh host seed (derived from the secret), and the one gate `serve` runs in every standing
+    /// with its live cut ([`swoosh::gate::anchored`]). All read from swoosh's OWN store, the node home.
+    /// Every other verb returns `None`. Async because the gate's files are read from disk.
     ///
-    /// Person-zero self-signet: a node with its OWN key but no PROVISIONED signet (no `adopt`) gates on its
-    /// OWN identity key as the signet root, rather than failing "no signet to gate on". A node self-trusts:
-    /// it admits its own self-signed member badge (rooted at this key) and any device/delegate it later
-    /// signs from this root, and refuses a stranger (whose badge roots at some other key the gate never
-    /// trusts). This is what lets a plain node answer its own gated `ping`/`speed` without `--public`. The
-    /// EXPLICIT-signet path (an adopted device carrying a provisioned signet) is untouched: `load_signet`
-    /// wins whenever a signet file exists, and only its ABSENCE falls back to self.
+    /// The gate never treats this machine's own key as a root: with no pin it admits no member, and the
+    /// own key admits only the links this machine recorded signing.
     async fn expose_context(
         &self,
         secret: &swoosh::identity::Secret,
@@ -396,48 +390,31 @@ impl Outward {
     ) -> eyre::Result<Option<serve::ExposeContext>> {
         match self {
             // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
-            // returns `None`. The roster is not cut here (or anywhere in `serve`): the artifact was
-            // signed by whichever verb last changed the membership, on the machine holding the signet,
-            // so this path only OPENS it, beside the two other home oracles the gate reads.
-            Self::Serve(_) => Ok(Some(serve::ExposeContext {
-                #[cfg(feature = "ssh")]
-                host_seed: secret.ssh_host_seed(),
-                #[cfg(not(feature = "ssh"))]
-                host_seed: [0u8; 32],
-                signet: Some(
-                    config::load_signet(home)
-                        .await?
-                        .unwrap_or_else(|| secret.node_id()),
-                ),
-                // The gate's whole revocation policy, composed here: the denylist of revoked grants,
-                // behind the latch of root keys this node disabled, so a cap rooted at a disabled key is
-                // refused whatever the denylist says. Shared, because the gate and the live cut must
-                // read the one instance.
-                revocations: std::sync::Arc::new(nauthy::Latch::new(
-                    nauthy::DisabledRoots::load(home.disabled_roots()).await?,
-                    nauthy::FileDenylist::load(home.revoked()).await?,
-                )),
-                // The live enable/disable oracle: the running exposer consults it per stream, so a
-                // `service disable`/`enable` written to `<home>/disabled` is honored with no restart. Loaded
-                // here beside the denylist because both are home files the gate reads.
-                enabled: tightbeam::enabled::FileDisabledList::load(home.disabled()).await?,
-                // The third home oracle, same read-on-demand shape as the two above, and `None` on a
-                // node that does not hold the signet: such a node can never have a roster to serve, and
-                // saying so at bind time is what the old self-signed cut hid. The oracle tolerates an
-                // absent file, so the signet's machine may `serve roster:` before its first invite and
-                // start serving the moment one is cut. Only an entry that actually names `roster:` acts
-                // on the `None`, so an unrelated serve never fails on a roster concern.
-                roster: if config::holds_signet(home, secret.node_id()).await? {
-                    Some(std::sync::Arc::new(
+            // returns `None`. Nothing is signed here (or anywhere in `serve`): the roster artifact is
+            // only OPENED, beside the home files the gate reads.
+            Self::Serve(_) => {
+                let (gate, cut) = swoosh::gate::anchored(home, secret.node_id()).await?;
+                Ok(Some(serve::ExposeContext {
+                    #[cfg(feature = "ssh")]
+                    host_seed: secret.ssh_host_seed(),
+                    #[cfg(not(feature = "ssh"))]
+                    host_seed: [0u8; 32],
+                    gate,
+                    cut,
+                    // The live enable/disable oracle: the running exposer consults it per stream, so a
+                    // `service disable`/`enable` written to `<home>/disabled` is honored with no
+                    // restart. Loaded here beside the gate because both are home files it reads.
+                    enabled: tightbeam::enabled::FileDisabledList::load(home.disabled()).await?,
+                    // The update route's artifact, served on every `serve` whatever the standing. It
+                    // reads a missing file as none, so a machine with no update yet serves nothing.
+                    roster: std::sync::Arc::new(
                         swoosh::roster::Artifact::open(home.roster()).await?,
-                    ))
-                } else {
-                    None
-                },
-                // The SAME home the root resolved once: the resident socket/lock derive from it, so a
-                // `--resident` serve and its future control clients name the same paths by construction.
-                home: home.clone(),
-            })),
+                    ),
+                    // The SAME home the root resolved once: the resident socket/lock derive from it, so
+                    // a `--resident` serve and its future control clients name the same paths.
+                    home: home.clone(),
+                }))
+            }
             _ => Ok(None),
         }
     }
@@ -561,7 +538,7 @@ async fn run() -> eyre::Result<()> {
         Verb::ServiceDisable(cmd) => return cmd.run_disable(&home),
         Verb::Contact(cmd) => {
             let store = ContactsStore::open(home.contacts()).await?;
-            return cmd.run(store, &home).await;
+            return cmd.run(store).await;
         }
         // Prints this node's NodeId (minting a key if absent). Needs only the home, not the store or
         // a transport, so it dispatches here beside the other local verbs.
@@ -672,11 +649,11 @@ async fn run() -> eyre::Result<()> {
     // dial, so the conflict is loud and compiler-forced for every verb (each states its own check via
     // `Reaching::reject_redundant_present`), never a per-verb one-liner a new verb could forget.
     reach.reject_redundant_present()?;
-    // Resolve the membership badge to present BEFORE the secret is consumed by the transport bind: an
-    // adopted device presents its STORED signet-signed badge (bound to this key, which the dial then binds
-    // under, so the far gate's device-binding matches); the signet holder self-signs one against the same
-    // key for the same reason. The exposer context (`serve`) is resolved before the bind too: its ssh
-    // host seed derives from the secret before the bind consumes it.
+    // Resolve the membership badge to present BEFORE the secret is consumed by the transport bind: a
+    // device presents its STORED badge (bound to this key, which the dial then binds under, so the far
+    // gate's device-binding matches), and a machine that is not a device presents none. The exposer
+    // context (`serve`) is resolved before the bind too: its ssh host seed derives from the secret
+    // before the bind consumes it.
     //
     // The SERVING verb resolves nothing: it is the gate, so it presents no credential and never mints or
     // loads a badge it would not send. There is no wildcard here and no "present nothing" credential for a
@@ -1076,105 +1053,11 @@ mod tests {
         );
     }
 
-    /// Person-zero self-signet: `serve` on a node with its OWN key but NO provisioned signet (an empty
-    /// config dir, no `signet` file) resolves its gate root to the node's OWN id, not `None`. This is the
-    /// seam that lets a plain node gate on itself rather than fail "no signet to gate on"; the security
-    /// consequence (admit self, refuse a stranger) is proved end to end in `person_zero_self_signet.rs`.
-    #[tokio::test]
-    async fn serve_with_no_signet_gates_on_the_nodes_own_key() {
-        let dir = std::env::temp_dir().join(format!("swoosh-person-zero-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create an empty config dir");
-        let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
-
-        // An in-memory secret standing in for the persisted identity; the home it points at has no signet.
-        let secret = swoosh::identity::Secret::ephemeral();
-        let outward = match Cli::try_parse_from(["swoosh", "serve"])
-            .expect("bare serve parses")
-            .command
-            .expect("serve is a command")
-            .split()
-        {
-            Verb::Outward(outward) => outward,
-            _ => panic!("serve splits to a reaching verb"),
-        };
-
-        let expose = outward
-            .expose_context(&secret, &home)
-            .await
-            .expect("expose context resolves")
-            .expect("serve carries an expose context");
-        assert_eq!(
-            expose.signet,
-            Some(secret.node_id()),
-            "an unprovisioned node gates on its OWN key (person-zero self-signet), not None"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The composition root decides ONCE whether this node may serve a roster, and it decides it on the
-    /// signet, not on whether a file happens to exist.
-    ///
-    /// A member device gets `None` (so naming `roster:` is refused at bind, loudly, instead of
-    /// advertising a service every puller must reject, which is what the old self-signed cut did
-    /// silently). The signet's own machine gets the oracle even with nothing cut yet, so it may serve
-    /// before its first invite and start serving the moment one lands.
-    #[tokio::test]
-    async fn only_the_signets_machine_carries_a_roster_to_serve() {
-        let dir = std::env::temp_dir().join(format!("swoosh-roster-ctx-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create an empty config dir");
-        let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
-        let secret = swoosh::identity::Secret::ephemeral();
-        let serve_verb = || match Cli::try_parse_from(["swoosh", "serve"])
-            .expect("bare serve parses")
-            .command
-            .expect("serve is a command")
-            .split()
-        {
-            Verb::Outward(outward) => outward,
-            _ => panic!("serve splits to a reaching verb"),
-        };
-
-        // Person-zero: no signet file, so this node IS the root and carries the oracle, empty as it is.
-        let expose = serve_verb()
-            .expose_context(&secret, &home)
-            .await
-            .expect("expose context resolves")
-            .expect("serve carries an expose context");
-        let roster = expose
-            .roster
-            .expect("the signet's own machine may serve a roster");
-        assert!(
-            roster.bytes().is_empty(),
-            "nothing is cut yet, and that is not a reason to refuse the operator's serve"
-        );
-
-        // Adopt a foreign signet: this is now a MEMBER device and can never cut a verifiable roster.
-        swoosh::config::write_signet(&home, bifrost::NodeId::from_ed25519_secret(&[77u8; 32]))
-            .await
-            .expect("adopt");
-        let expose = serve_verb()
-            .expose_context(&secret, &home)
-            .await
-            .expect("expose context resolves")
-            .expect("serve carries an expose context");
-        assert!(
-            expose.roster.is_none(),
-            "a member device must not advertise a roster it cannot sign"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The gate `serve` resolves refuses every cap rooted at a key this home disabled, and the context
-    /// fails to resolve at all over a latch it cannot read, rather than serving as if nothing were
-    /// disabled.
+    /// The gate `serve` builds refuses a pin to a root this home disabled, as if there were no pin, and
+    /// the context fails to resolve at all over a latch it cannot read, rather than serving as if nothing
+    /// were disabled.
     #[tokio::test]
     async fn the_serve_gate_honors_the_homes_disabled_roots() {
-        use nauthy::Revocations as _;
-
         let dir = std::env::temp_dir().join(format!("swoosh-latch-ctx-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create an empty config dir");
@@ -1189,32 +1072,48 @@ mod tests {
             Verb::Outward(outward) => outward,
             _ => panic!("serve splits to a reaching verb"),
         };
-        let disabled = swoosh::testkit::TestNode::seeded(41);
-        let live = swoosh::testkit::TestNode::seeded(42);
+        let disabled = swoosh::testkit::TestRoot::seeded(41);
+        let live = swoosh::testkit::TestRoot::seeded(42);
+        let device = swoosh::testkit::TestNode::seeded(43).verify_key();
         let hour = nauthy::Request::expires_in(core::time::Duration::from_secs(3600));
         let service: nauthy::Service = "ssh".parse().expect("valid service");
+        let admits = |gate: &nauthy::Gate, root: &swoosh::testkit::TestRoot| {
+            matches!(
+                gate.admit(
+                    nauthy::ProvenPeer::from_handshake(device),
+                    Some(&root.member_badge(device, hour).expect("mint")),
+                    &service,
+                ),
+                nauthy::Decision::Admit
+            )
+        };
         nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
             .disable(disabled.verify_key())
             .await
             .expect("disable a root");
 
+        swoosh::config::write_signet(&home, disabled.node_id())
+            .await
+            .expect("pin the disabled root");
         let expose = serve_verb()
             .expose_context(&secret, &home)
             .await
             .expect("expose context resolves")
             .expect("serve carries an expose context");
         assert!(
-            expose
-                .revocations
-                .is_revoked(&disabled.slip(&service, hour).expect("mint")),
-            "a cap rooted at the disabled key is refused"
+            !admits(&expose.gate, &disabled),
+            "a pin to a disabled root admits none of its devices"
         );
-        assert!(
-            !expose
-                .revocations
-                .is_revoked(&live.slip(&service, hour).expect("mint")),
-            "a cap rooted anywhere else is not"
-        );
+
+        swoosh::config::write_signet(&home, live.node_id())
+            .await
+            .expect("pin a live root");
+        let expose = serve_verb()
+            .expose_context(&secret, &home)
+            .await
+            .expect("expose context resolves")
+            .expect("serve carries an expose context");
+        assert!(admits(&expose.gate, &live), "a live pin admits its devices");
 
         std::fs::write(home.disabled_roots(), "not a key\n").expect("corrupt the latch");
         assert!(

@@ -97,14 +97,13 @@ tightbeam's loopback reflector: it returns the caller's own bytes and opens no h
 - Example: `swoosh serve demo=echo:`
 - Limits: [tightbeam](https://github.com/theia-hq/tightbeam).
 
-### `roster:`
+### `roster`
 
-The signet-signed membership snapshot of your fleet. Serve it on a node you own; another member reads it
-with `swoosh fleet <peer>`.
+The signed membership snapshot of your fleet. Every `swoosh serve` serves it, whatever else you name; it
+is not a target an entry can name. Another of your devices reads it with `swoosh fleet <peer>`.
 
-- Posture: family-gated, no public form. Unmetered: the handler sets no cap, and no public form can
-  ever open it.
-- Example: `swoosh serve hub=roster:`
+- Posture: member-only, like `control.*`: a `sheer:` grant naming it is refused at the route. Unmetered:
+  the handler sets no cap, and no public form can ever open it.
 - Limits: [fleet](commands/fleet.md).
 
 ### `control.stop` and `control.services`
