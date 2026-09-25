@@ -107,9 +107,9 @@ impl NodeSigner<'_> {
             (Bind::Device(device), Delegation::Sealed) => {
                 Ok(Link::mint_bound(&identity, service, device, lifetime)?)
             }
-            (Bind::Fleet(root), Delegation::Sealed) => {
-                Ok(Link::mint_signet(&identity, service, root, lifetime)?)
-            }
+            (Bind::Fleet(root), Delegation::Sealed) => Ok(Link::mint_authority_bound(
+                &identity, service, root, lifetime,
+            )?),
         }
     }
 }
