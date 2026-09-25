@@ -22,16 +22,17 @@ use std::time::SystemTime;
 use bifrost::NodeId;
 use keystore::{KeyFile, Method, Protection, Stored};
 use nauthy::{DisabledRoots, Link, RevocationId, VerifyKey};
-use tightbeam::identity::AsVerifyKey as _;
+use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 
 use crate::codec::{FormatError, Id, MAX_IDS, MAX_MEMBERS, MAX_REVOKED, MAX_REVOKED_KEYS};
 use crate::contacts::DeviceLabel;
 use crate::home::Home;
 use crate::passphrase::Prompt;
+use crate::reach_report::{Missed, Reach, Why};
 use crate::roster::{ArtifactError, Epoch, FoldError, Member, RosterDoc, read_held};
 use crate::standing::{DirLock, Finished, LockError, Standing, StandingError};
 use crate::state::{self, Row, State, StateError};
-use crate::sync::{Dial, Until};
+use crate::sync::{Answer, Device, Dial, EACH, Until};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
 pub const KEY_FILE: &str = "root.key";
@@ -52,6 +53,9 @@ const DAY: u64 = 24 * 60 * 60;
 
 /// How long an act that cuts spends asking your devices for a newer update before it signs.
 const SYNC_BOUND: Duration = Duration::from_secs(10);
+
+/// How long a root act's offer of its cut may take in all.
+const OFFER_BOUND: Duration = Duration::from_secs(20);
 
 /// The refusal when a root is to be made with nobody at a terminal to choose its passphrase.
 pub(crate) const MINT_NEEDS_TERMINAL: &str = "making your root asks you to choose its passphrase, which needs a terminal once: run this at one.";
@@ -417,10 +421,79 @@ pub struct Committed {
     pub bytes: Vec<u8>,
     /// Its number.
     pub number: Epoch,
-    /// The devices to offer it to: every live device but this machine and the ones this act added.
-    pub targets: Vec<VerifyKey>,
+    /// The devices to offer it to: every live device but this machine, a revoked key, and the ones this
+    /// act added.
+    pub targets: Vec<Device>,
     /// The latest date a row this act revoked would have lasted to, if it revoked one.
     pub until: Option<u64>,
+    /// The home the cut was folded into, which offers it.
+    home: Home,
+}
+
+impl Committed {
+    /// Offer the cut to every target at once, each within [`EACH`] and all within [`OFFER_BOUND`], and say
+    /// which of them have it. Runs after the command has printed what it made.
+    ///
+    /// A device that answers that it holds this cut, or that it folded it, has it. One that holds a newer
+    /// list, or another list at this number, makes the whole act [`Reach::Behind`]. One that refused it,
+    /// or did not answer in time, did not take it.
+    pub async fn offer(self, dial: &impl Dial) -> Reach {
+        let started = tokio::time::Instant::now();
+        let each = EACH.min(OFFER_BOUND);
+        let answers = futures::future::join_all(self.targets.iter().map(|device| async move {
+            let answer = tokio::time::timeout_at(started + each, dial.exchange(device.key)).await;
+            (device, answer)
+        }))
+        .await;
+        let mut took = Vec::new();
+        let mut missed = Vec::new();
+        let mut behind = false;
+        for (device, answer) in answers {
+            match answer {
+                Ok(Ok(Answer::Same | Answer::Gave)) => took.push(device.name.clone()),
+                Ok(Ok(Answer::Took | Answer::Forked)) => {
+                    tracing::debug!(device = %device.name, cut = self.number.0, "a device holds a newer or another list");
+                    behind = true;
+                }
+                Ok(Ok(Answer::ForkRecorded { floor })) => {
+                    tracing::debug!(device = %device.name, cut = self.number.0, floor = floor.0, "a device recorded a fork");
+                    behind = true;
+                }
+                Ok(Ok(Answer::Refused)) => missed.push(Missed {
+                    name: device.name.clone(),
+                    why: Why::Refused,
+                }),
+                Ok(Err(error)) => {
+                    tracing::debug!(device = %device.name, %error, "an offer failed");
+                    missed.push(Missed {
+                        name: device.name.clone(),
+                        why: Why::Silent,
+                    });
+                }
+                Err(_) => {
+                    tracing::debug!(device = %device.name, "an offer timed out");
+                    missed.push(Missed {
+                        name: device.name.clone(),
+                        why: Why::Silent,
+                    });
+                }
+            }
+        }
+        if behind {
+            Reach::Behind
+        } else if !took.is_empty() || crate::identity::HomeLock::is_held(&self.home) {
+            Reach::Published {
+                took,
+                missed,
+                until: self.until,
+            }
+        } else {
+            Reach::Held {
+                missed,
+                until: self.until,
+            }
+        }
+    }
 }
 
 /// One device a renewal gave a new standing.
@@ -769,14 +842,25 @@ impl Root {
         let targets = act
             .book
             .live()
-            .map(|row| row.key)
-            .filter(|key| Some(*key) != act.own && !act.added.contains(key))
+            .filter(|row| {
+                Some(row.key) != act.own
+                    && !act.added.contains(&row.key)
+                    && !act.book.revoked_keys.contains_key(row.key.bytes())
+            })
+            // A key nobody can hold cannot be dialed, so it is left out.
+            .filter_map(|row| {
+                Some(Device {
+                    key: row.key.node_id().ok()?,
+                    name: format!("me/{}", row.label),
+                })
+            })
             .collect();
         Ok(Committed {
             bytes,
             number,
             targets,
             until: act.revoked_until,
+            home: act.home.clone(),
         })
     }
 

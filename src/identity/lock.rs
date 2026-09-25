@@ -65,6 +65,17 @@ impl HomeLock {
         })
     }
 
+    /// Whether a node serves this home now: something holds its lock. Asked without waiting, and the
+    /// answer can be stale by the time it is read, so it only chooses what a line says.
+    pub fn is_held(home: &Home) -> bool {
+        let Ok(file) = std::fs::File::open(home.identity_lock()) else {
+            return false;
+        };
+        // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory lock to
+        // it, released when `file` drops at the end of this function. `LOCK_NB` makes a held lock an error.
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
+    }
+
     /// Open (creating) the lock file owner-only and take the lock without waiting. `Err` means someone
     /// holds it in a way that excludes `hold`, or the lock itself failed; either way the caller refuses.
     fn take(home: &Home, hold: Hold) -> io::Result<Self> {
