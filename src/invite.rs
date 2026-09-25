@@ -58,9 +58,14 @@ impl Invite {
     }
 
     /// A keyed invite: the device key `seed`, plus the standing for the key it derives.
-    pub fn keyed(seed: [u8; 32], from: NodeId, name: DeviceLabel, standing: Link) -> Self {
+    pub fn keyed(
+        seed: impl Into<Zeroizing<[u8; 32]>>,
+        from: NodeId,
+        name: DeviceLabel,
+        standing: Link,
+    ) -> Self {
         Self {
-            seed: Some(Zeroizing::new(seed)),
+            seed: Some(seed.into()),
             from,
             name,
             standing,

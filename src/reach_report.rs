@@ -124,11 +124,48 @@ impl Reach {
     pub fn invite_line(&self, device: &str) -> Option<String> {
         matches!(self, Self::Behind).then(|| self.line(&What::Invite(device.to_owned())))
     }
+
+    /// The line a renewal of `device` by name prints after the offer: which devices have it, and how the
+    /// device takes it if it reaches none of them. `None` for `Behind`, whose line
+    /// [`invite_line`](Self::invite_line) prints, and for `Complete` and `LocalOnly`, which no renewal is.
+    pub fn renewed_line(&self, device: &str, until: u64) -> Option<String> {
+        let clause = match self {
+            Self::Published { took, missed, .. } => clause(took, missed, RENEWAL_SILENT),
+            Self::Held { missed, .. } => clause(&[], missed, RENEWAL_SILENT),
+            Self::Behind | Self::Complete | Self::LocalOnly { .. } => return None,
+        };
+        let head = if clause.is_empty() {
+            format!("renewed {device} until {}", Date(until))
+        } else {
+            format!("renewed {device} until {}: {clause}", Date(until))
+        };
+        Some(format!(
+            "{head}. If {device} cannot reach any of your devices: on it, swoosh join, and paste the line \
+             above."
+        ))
+    }
 }
+
+/// What a device that did not answer does next, in a revoke's line.
+const SYNC_SILENT: [&str; 2] = [
+    "it gets it on its next sync",
+    "each gets it on its next sync",
+];
+
+/// What a device that did not answer does next, in a renewal's line.
+const RENEWAL_SILENT: [&str; 2] = [
+    "it picks it up when it next reaches one of your devices",
+    "each picks it up when it next reaches one of your devices",
+];
 
 /// "me/desk and me/nas have it; me/phone did not answer (it gets it on its next sync)", with a device
 /// that refused listed as "me/x refused it". Empty when there is nobody to name.
 fn took_clause(took: &[String], missed: &[Missed]) -> String {
+    clause(took, missed, SYNC_SILENT)
+}
+
+/// [`took_clause`], with `silent` saying what one device, or several, that did not answer does next.
+fn clause(took: &[String], missed: &[Missed], silent_next: [&str; 2]) -> String {
     let named = |why: Why| -> Vec<String> {
         missed
             .iter()
@@ -147,12 +184,14 @@ fn took_clause(took: &[String], missed: &[Missed]) -> String {
     match silent.len() {
         0 => {}
         1 => clauses.push(format!(
-            "{} did not answer (it gets it on its next sync)",
-            and(&silent)
+            "{} did not answer ({})",
+            and(&silent),
+            silent_next[0]
         )),
         _ => clauses.push(format!(
-            "{} did not answer (each gets it on its next sync)",
-            and(&silent)
+            "{} did not answer ({})",
+            and(&silent),
+            silent_next[1]
         )),
     }
     if !refused.is_empty() {

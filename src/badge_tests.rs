@@ -6,7 +6,7 @@ use core::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{DEVICE_WARN_WINDOW, Expiry};
-use crate::identity::DEVICE_BADGE_TTL;
+use crate::root::DEFAULT_DURATION;
 use crate::testkit::{TestNode, TestRoot};
 
 /// A day, the unit the window and the TTL are both expressed in.
@@ -23,9 +23,9 @@ fn now() -> SystemTime {
 #[test]
 fn the_window_is_fourteen_days_of_a_ninety_day_badge() {
     assert_eq!(DEVICE_WARN_WINDOW, 14 * DAY);
-    assert_eq!(DEVICE_BADGE_TTL, 90 * DAY);
+    assert_eq!(DEFAULT_DURATION, 90 * DAY);
     assert!(
-        DEVICE_WARN_WINDOW < DEVICE_BADGE_TTL,
+        DEVICE_WARN_WINDOW < DEFAULT_DURATION,
         "a window at or past the TTL would warn from the moment the badge is minted, which warns about \
          nothing"
     );
@@ -86,7 +86,7 @@ fn an_unreadable_expiry_is_its_own_state() {
 }
 
 /// The rendered fragment every surface prints, in the same span vocabulary the issuer side already uses
-/// (`invite ls`), so one badge reads the same on the device and on the signet machine.
+/// (`status`), so one badge reads the same on the device and on the signet machine.
 #[test]
 fn an_expiry_renders_as_a_span_in_the_ledger_vocabulary() {
     assert_eq!(
@@ -115,7 +115,7 @@ fn a_real_signed_badge_reads_its_own_minted_expiry() {
     let badge = TestRoot::seeded(1)
         .device_badge(
             TestNode::seeded(2).node_id(),
-            SystemTime::now() + DEVICE_BADGE_TTL,
+            SystemTime::now() + DEFAULT_DURATION,
         )
         .expect("sign a device badge");
     let expiry = Expiry::read(&badge, SystemTime::now()).expect("read the badge's own expiry");
@@ -123,7 +123,7 @@ fn a_real_signed_badge_reads_its_own_minted_expiry() {
         panic!("a freshly minted 90-day badge is live, got {expiry:?}");
     };
     assert!(
-        left > DEVICE_BADGE_TTL - DAY && left <= DEVICE_BADGE_TTL,
+        left > DEFAULT_DURATION - DAY && left <= DEFAULT_DURATION,
         "the reading is the minted TTL, got {left:?}"
     );
 }

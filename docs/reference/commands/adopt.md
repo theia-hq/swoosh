@@ -14,8 +14,8 @@ Usage: swoosh adopt [OPTIONS] [invite]
 **Example.** `swoosh adopt @invite.txt` reads the invite from a file. `swoosh adopt` alone reads
 `SWOOSH_INVITE` from the environment.
 
-**Things to know.** A derived invite (`invite add` with no `--for`) carries a device seed: adopting it
-replaces this home's identity and becomes that device. A bound invite (`invite add --for <key>`) carries
+**Things to know.** An invite from `invite <name> --new-key` carries a device key: adopting it replaces
+this home's identity and becomes that device. An invite from `invite <name> <key>` carries
 no secret, so it is safe in transit, but it is not signed by the signet it names: `adopt` verifies the
 badge is bound to this machine's key and unexpired before it writes anything, then prints the full signet
 to compare with the owner out of band before serving. Adopting an invite whose signet differs from the

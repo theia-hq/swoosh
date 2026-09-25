@@ -13,12 +13,13 @@ use bifrost::NodeId;
 use keystore::{Method, Stored};
 use nauthy::{FileDenylist, VerifyKey};
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME};
-use swoosh::grants::{ANYONE, GrantKind, GrantRecord, GrantTarget, Grants};
+use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::root::{Date, Moved, Root, RootPlace};
 use swoosh::serve::control_codec::{ControlError, DisabledList, ServiceMenu};
 use swoosh::standing::{Standing, StandingError};
+use swoosh::state::Row;
 use swoosh::{badge, identity, roster, standing, sync};
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -141,6 +142,8 @@ impl Report {
         contacts: &Contacts,
         now: u64,
     ) -> eyre::Result<()> {
+        let mut carrying = Vec::new();
+        let due;
         let (rows, until) = match standing {
             Standing::Unpinned => {
                 self.root = vec![
@@ -167,13 +170,14 @@ impl Report {
                      or serves."
                         .to_owned(),
                 ];
-                // Another copy of the root may have revoked a device since the last act here: the update this
-                // machine holds says so before the records do.
-                let held = pin
-                    .verify_key()
-                    .ok()
-                    .and_then(|root| roster::held(home, root));
-                let revoked_elsewhere = held.as_ref().map_or(&[][..], |held| held.revoked_keys());
+                // Another copy of the root, or this machine, may have revoked a device since the last act
+                // here: the records as the next act would bring them forward say so before the stored ones do.
+                let revoked_forward = |key: VerifyKey| {
+                    inspected
+                        .rows()
+                        .iter()
+                        .any(|row| row.key == key && row.is_revoked())
+                };
                 let rows: Vec<DeviceRow> = inspected
                     .state
                     .rows()
@@ -186,11 +190,18 @@ impl Report {
                         seeded: row.seeded,
                         revoked: row.revoked_on != 0
                             || inspected.state.revoked_keys().contains(&row.key)
-                            || revoked_elsewhere.contains(&row.key),
+                            || revoked_forward(row.key),
                         revoked_on: row.revoked_on,
                     })
                     .collect();
                 self.devices("devices:".to_owned(), &rows, now);
+                due = inspected.due(now).count();
+                carrying = rows
+                    .iter()
+                    .zip(inspected.state.rows())
+                    .filter(|(shown, _)| !shown.revoked)
+                    .filter_map(|(_, row)| invite_ends(row, now))
+                    .collect();
                 (rows, until)
             }
             Standing::Device { pin, until } => {
@@ -225,6 +236,12 @@ impl Report {
                     .unwrap_or_default();
                 let title = format!("devices (as of the last sync, {}):", sync::ago(home));
                 self.devices(title, &rows, now);
+                due = rows
+                    .iter()
+                    .filter(|row| !row.revoked && row.until > now)
+                    .filter_map(|row| swoosh::root::renew_by(row.until, row.duration, row.seeded))
+                    .filter(|by| *by <= now)
+                    .count();
                 (rows, until)
             }
         };
@@ -241,7 +258,7 @@ impl Report {
             "this machine: {me}, your device until {}",
             Date(until)
         ));
-        self.nags.extend(use_your_root(&rows, now));
+        self.nags.extend(use_your_root(&rows, now, due));
         let name = name.map_or_else(|| "<name>".to_owned(), |name| name.to_string());
         if until <= now {
             self.nags.push(format!(
@@ -263,6 +280,7 @@ impl Report {
             self.nags
                 .push(format!("{me} ends on {}. {how}", Date(until)));
         }
+        self.nags.extend(carrying);
         Ok(())
     }
 
@@ -428,25 +446,42 @@ fn not_here(home: &Home, root: NodeId) -> String {
     }
 }
 
-/// "use your root by <date>", the earliest day a device of the root falls due to renew, or, once that
-/// day has passed, how many are due. Nothing when no device renews on its own.
-fn use_your_root(rows: &[DeviceRow], now: u64) -> Option<String> {
-    let due: Vec<u64> = rows
+/// "use your root by <date>", the earliest day a device of the root falls due to renew; or, while `due`
+/// devices are due, how many. Nothing when no device renews on its own. `due` is counted by the caller:
+/// where the root is kept, by the same test the renewal runs.
+fn use_your_root(rows: &[DeviceRow], now: u64, due: usize) -> Option<String> {
+    if due > 0 {
+        return Some(format!(
+            "use your root now: swoosh invite ({due} devices due)"
+        ));
+    }
+    let earliest = rows
         .iter()
         .filter(|row| !row.revoked && row.until > now)
         .filter_map(|row| swoosh::root::renew_by(row.until, row.duration, row.seeded))
-        .collect();
-    let earliest = due.iter().min()?;
-    if now < *earliest {
-        return Some(format!(
-            "use your root by {}: swoosh invite (it lists what is due)",
-            Date(*earliest)
-        ));
-    }
-    let count = due.iter().filter(|by| **by <= now).count();
+        .filter(|by| *by > now)
+        .min()?;
     Some(format!(
-        "use your root now: swoosh invite ({count} devices due)"
+        "use your root by {}: swoosh invite (it lists what is due)",
+        Date(earliest)
     ))
+}
+
+/// For a device whose key came in its invite, in the 14 days before that invite ends: what to do if it
+/// starts from that invite each time. Read from `invite_until`, never `until`: a bound renewal moves the
+/// row's date, not the date its invite stops working.
+fn invite_ends(row: &Row, now: u64) -> Option<String> {
+    let ends = row.invite_until;
+    let warns =
+        row.seeded && ends.saturating_sub(badge::DEVICE_WARN_WINDOW.as_secs()) <= now && now < ends;
+    warns.then(|| {
+        format!(
+            "me/{name}'s key came in its invite, which ends on {}. If it starts from that invite each time \
+             (a runner summoned from a secret): swoosh invite {name} --new-key, then set its secret again.",
+            Date(ends),
+            name = row.label
+        )
+    })
 }
 
 /// The name this machine has among `me`'s devices in the address book, when the root's list has none.
@@ -507,7 +542,6 @@ async fn links_section(home: &Home, now: u64) -> eyre::Result<Section> {
     let revoked = FileDenylist::load(home.revoked()).await?;
     let rows = records
         .iter()
-        .filter(|record| record.target != GrantTarget::Membership)
         .map(|record| link_row(record, &revoked, now))
         .collect();
     Ok(Section {

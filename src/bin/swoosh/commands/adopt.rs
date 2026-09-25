@@ -1,6 +1,6 @@
 //! `swoosh adopt <invite>`: join a signet's family as this machine.
 //!
-//! The device half of `invite add`, one command for both invite shapes:
+//! The device half of `invite`, one command for both invite shapes:
 //!
 //! - A BOUND invite (`invite:<signet>.<badge>`) was signed for a key this machine made and printed with
 //!   `swoosh status --key`. Adopting trusts the signet and stores the badge, KEEPING this machine's identity.
@@ -14,7 +14,7 @@
 //!
 //! Either way the write lands in swoosh's own store (the node home, the default `~/.config/swoosh/` or
 //! `--home`/`SWOOSH_HOME`) -- the SAME store `swoosh serve` binds under -- so the served node id matches
-//! the contact `invite add` recorded. The trusted signet lands beside it, where the serve gate reads it.
+//! the device `invite` added. The trusted signet lands beside it, where the serve gate reads it.
 //!
 //! An invite is a secret only for the derived shape, so it is not forced onto argv (visible in `ps` /
 //! `/proc`): the value comes off the command line where the caller chooses, via the shared secret-input
@@ -46,9 +46,9 @@ pub struct AdoptCmd {
     /// the invite to adopt (a secret for a derived invite; `-` stdin, `@<path>` file, or SWOOSH_INVITE)
     #[arg(
         value_name = "invite",
-        long_help = "The invite to adopt. A derived invite (`invite add` with no `--for`) carries a \
-                     device SECRET and adopting it becomes that identity; a bound invite (`invite add \
-                     --for <key>`) carries no secret and leaves this machine's identity alone. Give it as \
+        long_help = "The invite to adopt. An invite from `invite <name> --new-key` carries a \
+                     device SECRET and adopting it becomes that identity; one from `invite <name> \
+                     <key>` carries no secret and leaves this machine's identity alone. Give it as \
                      a literal, `-` to read stdin, or `@<path>` to read a file. argv is visible to other \
                      processes (`ps`, `/proc`), so prefer stdin or a file when the invite carries a \
                      secret.\n\nOr set SWOOSH_INVITE: a convenience, not a full close (spawned children \
@@ -92,8 +92,8 @@ impl AdoptCmd {
                 let Some(secret) = identity::load(home).await? else {
                     eyre::bail!(
                         "this invite is bound to a device key, but this machine has no identity yet; run \
-                         `swoosh status --key` to make one, then have the owner run `swoosh invite add <label> \
-                         --for <that key>`"
+                         `swoosh status --key` to make one, then, where your root is kept: `swoosh invite <name> \
+                         <that key>`"
                     );
                 };
                 let node = secret.node_id();
@@ -182,7 +182,7 @@ fn verify_badge(badge: Link, node: NodeId, signet: NodeId) -> eyre::Result<Link>
             format!(
                 "the invite's badge does not bind this machine ({node}) at signet {signet}: it is bound \
                  to another key, rooted elsewhere, or expired. Ask the owner to sign a fresh invite for \
-                 this machine's key: `swoosh invite add <label> --for {node}`"
+                 this machine's key: `swoosh invite <name> {node}`"
             )
         })?;
     Ok(badge)
@@ -246,7 +246,7 @@ async fn admit_badge(home: &Home, badge: &Link, node: NodeId, force: bool) -> ey
         "this machine already stores a membership badge that this invite does not outlive; adopting it \
          would replace the stored badge with one that is older, bound to another device, rooted at \
          another signet, or carries no readable expiry. To narrow a device's window, cut the old \
-         badge first with `swoosh invite rm <label>`, then mint the shorter one: re-issuing short \
+         badge first with `swoosh revoke me/<name>`, then invite it again: re-issuing short \
          over a live longer badge does not narrow anything, because the longer one stays signed and \
          admitted. Re-run with --force if replacing it is what you meant"
     )
@@ -262,7 +262,7 @@ async fn admit_badge(home: &Home, badge: &Link, node: NodeId, force: bool) -> ey
 /// still signed, unexpired and admitted everywhere, so replaying it afterwards reads as a renewal.
 /// Expiry is the only ordering fact a badge carries, so no comparison here can tell "newer" from
 /// "longer". It costs nothing, because re-issuing short never narrowed the window in the first
-/// place: the correct act is `invite rm <label>` and then the shorter mint, which the refusal text
+/// place: the correct act is `revoke me/<name>` and then a new invite, which the refusal text
 /// below now teaches. Ruled an accepted cost. The two expiries come from nauthy's advisory `expires_at` fact,
 /// which is an UPPER BOUND (a narrowing an attenuation block added is invisible to the origin-0 read),
 /// and that cuts the safe way twice here: a badge carrying no fact reads `None` and falls back to the

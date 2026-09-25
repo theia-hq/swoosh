@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Transport};
-use clap::{Args, CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::home::Home;
 use swoosh::identity::Identity;
@@ -99,15 +99,10 @@ enum Command {
     Contact(contact::ContactCmd),
     /// Back up, restore, or protect this machine's key.
     Identity(identity::IdentityCmd),
-    /// Create, list, and cancel invites: one device per invite.
-    #[command(subcommand)]
+    /// Add one of your devices, or renew it. Bare `invite` lists what is due.
     Invite(invite::InviteCmd),
     /// Adopt an invite: join a signet's family as this machine.
     Adopt(adopt::AdoptCmd),
-    /// Retired: `mint` folded into `invite add`. Kept hidden ONLY so a stale invocation gets a teaching
-    /// error that names the replacement, rather than clap's bare "unexpected argument".
-    #[command(hide = true)]
-    Mint(RetiredMintCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(ssh::SshCmd),
     /// Issue, narrow, or revoke `swoosh:` capability links.
@@ -115,23 +110,6 @@ enum Command {
     Grant(grant::GrantCmd),
     /// Print this command tree (spec vs binary).
     Tree(tree::TreeCmd),
-}
-
-/// The retired `mint` verb, kept hidden ONLY so a stale invocation gets a teaching error naming
-/// `invite add` instead of clap's bare "unexpected argument" (the same clean-break shape the retired
-/// `--key` uses). The catch-all positional swallows whatever follows (`mint laptop`, `mint --expires
-/// 90d`), so the forward error always fires; the field is never read.
-#[derive(Debug, Args)]
-struct RetiredMintCmd {
-    /// never read; present so any argument tail still parses and forwards
-    #[arg(
-        value_name = "args",
-        num_args = 0..,
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        hide = true
-    )]
-    args: Vec<String>,
 }
 
 /// Declare the reaching verbs ONCE: the list below becomes both the [`Reach`] enum and its whole
@@ -242,6 +220,9 @@ reaching_verbs! {
     /// `swoosh sync`: exchange with every live device of your root. Presents this machine's standing and
     /// binds its own key, so each device's gate admits it as one of your devices.
     Sync(sync::SyncCmd),
+    /// `swoosh invite <name> …`: a root act that syncs with your devices before it signs and offers them
+    /// its cut after. Presents this machine's standing, like `sync`. A bare `invite` splits to a local read.
+    Invite(invite::InviteCmd),
 }
 
 impl Command {
@@ -252,9 +233,13 @@ impl Command {
         match self {
             Self::Contact(cmd) => Verb::Contact(cmd),
             Self::Identity(cmd) => Verb::Identity(cmd),
-            Self::Invite(cmd) => Verb::Invite(cmd),
+            // A bare `invite` lists what is due from the root's records and dials nothing; a named one is a
+            // root act that syncs and offers, so it binds a transport.
+            Self::Invite(cmd) => match cmd.name {
+                Some(_) => Verb::Outward(Outward::Invite(cmd)),
+                None => Verb::Invite(cmd),
+            },
             Self::Adopt(cmd) => Verb::Adopt(cmd),
-            Self::Mint(_) => Verb::RetiredMint,
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Grant(cmd) => Verb::Grant(cmd),
@@ -299,15 +284,12 @@ enum Verb {
     Contact(contact::ContactCmd),
     /// Backs up, restores, or protects this machine's key; needs no transport and no store, only the home.
     Identity(identity::IdentityCmd),
-    /// Creates, lists, or cancels invites; needs the key (the signet) and the store, no transport.
+    /// A bare `swoosh invite`: what is due, from the root's records; it binds no transport. With a name it is
+    /// a reaching verb instead.
     Invite(invite::InviteCmd),
     /// Adopts an invite: writes the trust + badge (a derived invite also writes the identity); needs the
     /// home, no store or transport.
     Adopt(adopt::AdoptCmd),
-    /// The retired `mint` verb: parsed only so a stale invocation reaches the forward error in `run`,
-    /// never a clap "unexpected argument". The parsed arguments are discarded: the message names the
-    /// replacement whatever was typed.
-    RetiredMint,
     /// Reads the address book to resolve a peer, then execs the system `ssh` over the overlay. A launcher:
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
@@ -426,16 +408,6 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// The teaching error a stale `mint` invocation gets. `mint` folded into `invite add` (one create
-/// surface); the hidden verb exists only so the message can name the replacement and its two cells,
-/// rather than clap's bare "unexpected argument". A pure constructor so the message is unit-tested.
-fn retired_mint_error() -> eyre::Report {
-    eyre::eyre!(
-        "`mint` is gone; use `invite add <label>` to derive a device identity, or `invite add <label> \
-         --for <key>` to bind a key the device made"
-    )
-}
-
 /// Error FORWARD if the retired `SWOOSH_KEY` env var is set (Phase 1a errored only the flag, so a stale env
 /// was a silent no-op that could select the wrong identity). A pure function over the presence bit, so the
 /// forward message is unit-tested without touching (and racing on) the process environment.
@@ -524,20 +496,12 @@ async fn run() -> eyre::Result<()> {
         // Backs up, restores, or protects this machine's key. Needs only the home, not the store or a
         // transport, so it dispatches here beside the other local verbs.
         Verb::Identity(cmd) => return cmd.run(&home),
-        // Creates/lists/cancels invites: `add` signs a badge with this node's key and records the
-        // `me/<label>` contact plus a ledger row; `ls` reads the ledger and the labels; `rm` revokes the
-        // recorded badge. Needs the key and the store, but binds no transport.
-        Verb::Invite(cmd) => {
-            let store = ContactsStore::open(home.contacts()).await?;
-            return cmd.run(store, &home).await;
-        }
+        // A bare `swoosh invite`: what is due, read from the root's records with no lock and no prompt.
+        Verb::Invite(cmd) => return cmd.run_due(&home).await,
         // Adopts an invite: a derived invite writes the device identity + signet + badge; a bound invite
         // keeps the home's identity and writes the signet + badge. Needs only the home; no store, no
         // transport.
         Verb::Adopt(cmd) => return cmd.run(&home).await,
-        // `mint` folded into `invite add`: a hidden catch-all so any stale invocation gets a teaching
-        // error naming the replacement, whatever arguments followed it.
-        Verb::RetiredMint => return Err(retired_mint_error()),
         // The `grant` group: `share` signs a link with the persisted key; `attenuate`/`revoke` are wholly
         // offline. No leaf binds a transport, so the group dispatches here beside the local verbs rather
         // than falling through to the reach path; `issue --for` reads the address book to resolve a device.
@@ -1591,109 +1555,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A torsioned key is refused as the key an invite admits, at parse, naming the check it failed,
-    /// never read as a person's name.
+    /// `mint` is no command: clap refuses it as an unknown subcommand, a usage error.
     #[test]
-    fn a_torsioned_key_is_refused_as_an_invite_key() {
-        let key = swoosh::testkit::torsioned_text();
-        let error = Cli::try_parse_from(["swoosh", "invite", "add", "desk", "--for", key.as_str()])
-            .expect_err("a torsioned key is refused");
-        assert_eq!(
-            error.exit_code(),
-            2,
-            "a key that is not a key is a usage error"
-        );
-        assert!(
-            error.to_string().contains(&format!(
-                "{key} is not a usable key: carries a torsion component"
-            )),
-            "the refusal names the key and the check: {error}"
-        );
-    }
-
-    /// The `invite` group resolves its three leaves, and `--for` is the SHARED `GrantFor` grammar: a raw
-    /// key and a `<person>/<device>` are devices, `fleet:` parses (refused at run time, not at parse), and
-    /// a bare person is the shared teaching parse error.
-    #[test]
-    fn invite_group_parses_the_grant_for_grammar() {
-        let key = NodeId::from_ed25519_secret(&[4u8; 32]).to_string();
-        assert!(matches!(
-            Cli::try_parse_from(["swoosh", "invite", "add", "desk"])
-                .expect("invite add parses")
-                .command,
-            Some(Command::Invite(invite::InviteCmd::Add(_)))
-        ));
-        assert!(matches!(
-            Cli::try_parse_from(["swoosh", "invite", "ls"])
-                .expect("invite ls parses")
-                .command,
-            Some(Command::Invite(invite::InviteCmd::Ls(_)))
-        ));
-        assert!(matches!(
-            Cli::try_parse_from(["swoosh", "invite", "rm", "desk"])
-                .expect("invite rm parses")
-                .command,
-            Some(Command::Invite(invite::InviteCmd::Rm(_)))
-        ));
-
-        for who in [key.as_str(), "alice/laptop", "fleet:alice"] {
-            assert!(
-                Cli::try_parse_from(["swoosh", "invite", "add", "desk", "--for", who]).is_ok(),
-                "--for {who} parses through the shared GrantFor grammar"
-            );
-        }
-        // A bare person is refused at parse by the shared widening guardrail, and `cluster:` stays the
-        // reserved-not-built kind it is on `grant issue`.
-        assert!(
-            Cli::try_parse_from(["swoosh", "invite", "add", "desk", "--for", "alice"]).is_err(),
-            "a bare person is the shared GrantFor teaching parse error"
-        );
-        assert!(
-            Cli::try_parse_from(["swoosh", "invite", "add", "desk", "--for", "cluster:home"])
-                .is_err(),
-            "cluster: stays the shared reserved-kind parse error"
-        );
-    }
-
-    /// `mint` is retired into `invite add`: the hidden verb still parses, so a stale invocation reaches
-    /// the forward error that names both `invite add` cells, whatever arguments followed it.
-    #[test]
-    fn mint_is_hidden_and_forwards_to_invite_add() {
-        for argv in [
-            vec!["swoosh", "mint"],
-            vec!["swoosh", "mint", "laptop"],
-            vec!["swoosh", "mint", "laptop", "--expires", "365d"],
-        ] {
-            let cli = Cli::try_parse_from(&argv).expect("the retired mint still parses");
-            assert!(
-                matches!(cli.command, Some(Command::Mint(_))),
-                "{argv:?} reaches the forward error, never a clap parse error"
-            );
-        }
-        let message = format!("{:#}", retired_mint_error());
-        assert!(
-            message.contains("invite add") && message.contains("--for"),
-            "the forward error names the replacement and both cells: {message}"
-        );
-    }
-
-    /// The retired verb stays OFF the user surface: no help render or `swoosh tree` walk names a `mint`
-    /// subcommand (the tree walk skips hidden subcommands). It still exists hidden, which the test above
-    /// parses, so a stale invocation reaches the forward error instead of a clap parse error.
-    #[test]
-    fn the_retired_mint_verb_is_hidden_from_help_and_tree() {
-        let root = Cli::command();
-        assert!(
-            root.get_subcommands()
-                .filter(|cmd| !cmd.is_hide_set())
-                .all(|cmd| cmd.get_name() != "mint"),
-            "a visible `mint` subcommand must not render in help or tree"
-        );
-        assert!(
-            root.get_subcommands()
-                .any(|cmd| cmd.get_name() == "mint" && cmd.is_hide_set()),
-            "the hidden catch-all still parses, so a stale invocation reaches the forward error"
-        );
+    fn mint_is_not_a_command() {
+        let error = Cli::try_parse_from(["swoosh", "mint"]).expect_err("mint is no command");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        assert_eq!(error.exit_code(), 2);
     }
 
     /// A typed service name follows the one name rule, so a dotted internal route (`control.stop`) can never

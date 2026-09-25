@@ -8,7 +8,7 @@
 #
 # Three identities, each in its own home dir, so this is a real membership story:
 #   - the SERVER runs the node and gates diagnostics behind its signet.
-#   - the MEMBER is invited + adopted, so the server's signet trusts it; it
+#   - the MEMBER is invited + adopted, so the server's root trusts it; it
 #     reaches the server's gated ping/speed service over iroh and quirk+noise.
 #   - the STRANGER is never adopted, so the gate refuses it.
 #
@@ -103,11 +103,12 @@ stop_server() {
 }
 
 # ---------------------------------------------------------------------------
-# Part 1: admit the member. The server signs an invite; the member adopts it,
-# becoming a device identity the server's signet trusts.
+# Part 1: admit the member. The server's first invite makes its root (it asks
+# you to choose a passphrase, at this terminal) and prints an invite carrying
+# a new key; the member adopts it, becoming a device the server's root trusts.
 # ---------------------------------------------------------------------------
-banner "server creates an invite for the member"
-INVITE="$(SWOOSH_HOME="$SERVER" "$BIN" invite add laptop | head -1)"
+banner "server invites the member (choose the root's passphrase when asked)"
+INVITE="$(SWOOSH_HOME="$SERVER" "$BIN" invite laptop --new-key)"
 echo "$INVITE"
 
 banner "member adopts it (distinct home: its own identity + the trusted signet)"
@@ -131,7 +132,7 @@ fi
 # The server key is a key, not a transport property: read it offline, so the
 # parts below can show each serve binds the same NodeId.
 banner "the server's NodeId, read offline"
-SERVER_ID="$(SWOOSH_HOME="$SERVER" "$BIN" identity | head -1)"
+SERVER_ID="$(SWOOSH_HOME="$SERVER" "$BIN" status --key)"
 echo "$SERVER_ID"
 
 # ---------------------------------------------------------------------------

@@ -9,8 +9,9 @@ use keystore::{KeyFile, Passphrase, Protection};
 use nauthy::{FileDenylist, RevocationId, VerifyKey};
 use swoosh::config;
 use swoosh::contacts::{ContactsStore, DeviceLabel, ME};
-use swoosh::grants::{ANYONE, Delegation, GrantKind, GrantRecord, GrantTarget};
+use swoosh::grants::{ANYONE, Delegation, GrantKind, GrantRecord};
 use swoosh::home::Home;
+use swoosh::root::Date;
 use swoosh::roster::{Epoch, RosterDoc};
 use swoosh::serve::control_codec::{DisabledList, ServiceMenu};
 use swoosh::state::{self, Row, State};
@@ -342,7 +343,7 @@ fn use_your_root_now_counts_devices_as_quoted() {
         revoked_on: 0,
     };
     assert_eq!(
-        super::use_your_root(&[due], now).as_deref(),
+        super::use_your_root(&[due], now, 1).as_deref(),
         Some("use your root now: swoosh invite (1 devices due)")
     );
 }
@@ -385,7 +386,7 @@ async fn a_link_row_prints_its_holder_by_kind() {
         .expect("no revocations");
     let holder = |kind, holder: String| {
         let record = GrantRecord {
-            target: GrantTarget::Service("ssh".parse().expect("a service")),
+            target: "ssh".parse().expect("a service"),
             kind,
             delegation: Delegation::Sealed,
             holder,
@@ -418,4 +419,124 @@ fn the_gate_never_reads_the_ledger() {
             "{name} must not name the mint-log ledger: the gate never reads it"
         );
     }
+}
+
+/// Make `home` keep `ROOT`, sealed, with this machine and `rows` in its records.
+async fn holds_rows(home: &Home, rows: Vec<Row>) {
+    holds(home).await;
+    let mut all = vec![row(OWN, "desk")];
+    all.extend(rows);
+    let keys = all
+        .iter()
+        .filter(|row| row.is_revoked())
+        .map(|row| row.key)
+        .collect();
+    let records = State::new(Epoch(1), all, Vec::new(), keys).expect("the records");
+    state::write(&home.root(), &TestRoot::seeded(ROOT).sign_state(&records)).expect("the records");
+}
+
+/// Where the root is kept, a device whose key came in its invite is warned for in the 14 days before
+/// that invite ends: read from when the invite ends, never from the device's own date; silent once it
+/// has ended, and for a revoked device.
+#[tokio::test]
+async fn status_warns_before_a_key_carrying_invite_ends() {
+    let now = unix_now();
+    let carrying = |seed, label: &str, until, invite_until| Row {
+        until,
+        seeded: true,
+        invite_until,
+        ..row(seed, label)
+    };
+    let home = home("invite-ends");
+    holds_rows(
+        &home,
+        vec![
+            carrying(LAPTOP, "ci", now + 80 * DAY, now + 10 * DAY),
+            carrying(0x43, "later", now + 10 * DAY, now + 60 * DAY),
+            carrying(0x44, "ended", now + 80 * DAY, now - DAY),
+            Row {
+                revoked_on: now - DAY,
+                ..carrying(OLD, "gone", now + 80 * DAY, now + 5 * DAY)
+            },
+        ],
+    )
+    .await;
+    let out = status(&home).await;
+    let warned: Vec<&str> = out
+        .lines()
+        .filter(|line| line.contains("key came in its invite"))
+        .collect();
+    assert_eq!(
+        warned,
+        [format!(
+            "me/ci's key came in its invite, which ends on {}. If it starts from that invite each time (a \
+             runner summoned from a secret): swoosh invite ci --new-key, then set its secret again.",
+            Date(now + 10 * DAY)
+        )],
+        "{out}"
+    );
+}
+
+/// Where the root is kept, "use your root now" counts what the renewal renews: a device in its window with
+/// four renewals in force is skipped by the renewal, so it is not counted.
+#[tokio::test]
+async fn status_counts_only_what_the_renewal_renews() {
+    let now = unix_now();
+    let id = |byte: u8, expires| swoosh::roster::Id {
+        expires,
+        id: RevocationId::from_bytes(vec![byte; 64]),
+    };
+    let home = home("due-count");
+    holds_rows(
+        &home,
+        vec![
+            Row {
+                until: now + 20 * DAY,
+                ids: vec![
+                    id(1, now + 5 * DAY),
+                    id(2, now + 10 * DAY),
+                    id(3, now + 15 * DAY),
+                    id(4, now + 20 * DAY),
+                ],
+                ..row(LAPTOP, "laptop")
+            },
+            Row {
+                until: now + 20 * DAY,
+                ..row(0x43, "nas")
+            },
+        ],
+    )
+    .await;
+    let out = status(&home).await;
+    assert!(
+        out.lines()
+            .any(|line| line == "use your root now: swoosh invite (1 devices due)"),
+        "{out}"
+    );
+}
+
+/// A device reads "use your root by <date>" from the update it holds, not only where the root is kept.
+#[tokio::test]
+async fn a_device_shows_use_your_root_by_from_the_update() {
+    let now = unix_now();
+    let home = home("use-by-device");
+    device_of(&home).await;
+    let until = now + 80 * DAY;
+    let laptop = swoosh::roster::Member {
+        until,
+        duration: 90 * DAY,
+        ..TestRoot::seeded(ROOT)
+            .member(key(LAPTOP), "laptop".parse().expect("a name"))
+            .expect("a member")
+    };
+    let update = RosterDoc::new(Epoch(2), vec![laptop]).expect("an update");
+    swoosh::roster::fold(&home, &TestRoot::seeded(ROOT).sign_update(&update))
+        .await
+        .expect("the device holds the update");
+    let out = status(&home).await;
+    let line = format!(
+        "use your root by {}: swoosh invite (it lists what is due)",
+        Date(until - 45 * DAY)
+    );
+    assert!(out.lines().any(|found| found == line), "{out}");
 }

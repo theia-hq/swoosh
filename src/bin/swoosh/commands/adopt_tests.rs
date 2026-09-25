@@ -1,7 +1,7 @@
 //! `adopt`'s badge guard, which is a DOWNGRADE check and not a difference check: the quarterly renewal
 //! lands with no flag, and every shape that is not an improvement on what is stored still takes one.
 //!
-//! The predicate is what makes "re-run `invite add`" the whole renewal mechanism. If it refused every
+//! The predicate is what makes "run `invite <name>` again" a renewal that lands. If it refused every
 //! differing badge, the routine act would need the `--force` that also disables the re-root guard, so
 //! the safe act would demand the dangerous flag every quarter.
 

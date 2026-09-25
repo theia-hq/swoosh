@@ -2,46 +2,39 @@ Back to [Commands index](../commands.md).
 
 # <a id="invite"></a>`swoosh invite`
 
-Create, list, and cancel invites: one device per invite.
+Add one of your devices, or renew it. Bare `invite` lists what is due.
 
-An invite admits one device at your signet's whole gate. Create it on the machine that holds your signet;
-the machine you invite runs `swoosh adopt`.
+Run it where your root is kept, or add `--root <dir>` to use a copy of your root from a device. A named
+form asks for your root's passphrase once, then prints the invite on stdout for the device to join. Bare
+`invite` never asks, and neither does a renewal of a device that needs none when nothing else needs signing.
 
-## `swoosh invite add`
-
-Create an invite: label names the row, `--for` binds the key it admits.
-
-<!-- generated: usage from `swoosh invite add -h`; option lines curated -->
+<!-- generated: usage from `swoosh invite -h`; option lines curated -->
 ```
-Usage: swoosh invite add [OPTIONS] <label>
-  <label>   the device label, e.g. ci-runner or desk (recorded as me/<label>)
-  --for <who>   the key it admits; omit to derive a device identity
-  --expires <duration>   how long the invite's badge stays valid [default: 90d]
+Usage: swoosh invite [OPTIONS] [name] [key]
+  [name]   the device, as it is named among your devices (me/<name>)
+  [key]    the key the device made (`swoosh join` on it shows it)
+  --new-key   Make a new key: inside the invite, or for this machine
+  --expires <d>   How long: `2h`, `90d`
+  --root <dir>   Act on your root, or on the root kept in `<dir>`
 ```
 
-**Example.** `swoosh invite add laptop` derives a device identity and prints an invite for it. To keep
-the secret from travelling, make the key on the device first (`swoosh status --key` prints it) and sign only
-its public half: `swoosh invite add laptop --for <key>` prints an invite with no secret in it.
-`--for alice/laptop` binds a device from your contacts; `swoosh invite add ci --for <key> --expires 365d`
-signs a year-long badge.
+**The forms.**
 
-**Things to know.** A derived invite (`--for` omitted) carries the device seed, so hand it over something
-private. A bound invite (`--for`) carries no secret, so it is safe in transit. It is not signed by the
-signet it names, so compare the full signet and the full admitted key that `invite add` prints out of band
-before admission: the invite is a token, not proof of who sent it. The badge expiry is the leak window for
-a derived invite, and `adopt` checks the badge is bound to the machine's own key and is unexpired before
-storing it. An invite admits one device at the whole gate; to open one service to a device or a whole
-fleet, use `swoosh grant issue`. A label already recorded for a different key is refused; `invite rm <label>`
-cuts the old badge and `swoosh contact rm me/<label>` frees the name.
+- `swoosh invite <name> <key>` adds the device that made `<key>` as `me/<name>`. The invite carries no
+  secret. If `me/<name>` is already that key, this renews it.
+- `swoosh invite <name> --new-key` adds a machine with no console: the invite carries a new key, so
+  anyone holding it becomes `me/<name>`. Send it privately. On a device whose key came in its invite, it
+  hands that device a new key; the old invite works until its own date.
+- `swoosh invite <name>` renews that device, whatever its date, one whose date has passed included.
+- `swoosh invite` lists each device due to renew as a `swoosh invite <name>` line. It never asks for the
+  passphrase and writes nothing.
 
-## `swoosh invite ls`
-
-List the invites you have issued: one line per badge, with the label it was recorded under, the key it
-admits, and the badge's remaining lifetime.
-
-## `swoosh invite rm`
-
-Cancel an invite by revoking its badge now, offline. The label you gave `invite add` (or the raw device
-key) selects it; the ledger row stays for audit. To cut a service grant instead, use `swoosh grant revoke`.
+**Things to know.** The first `swoosh invite <name> <key>` or `swoosh invite <name> --new-key` on a machine
+with no root makes your root here. `--expires` sets how long a device runs, 1h to 365d. A new device runs 90
+days by default; a renewal keeps the device's own length. Every invite says which it used. Each time your root is used, it also renews every device in the last half of its time, except one
+whose key came in its invite or one that runs under 30 days: those end on their date. A device renewed
+under a day ago, or already holding four renewals in force, is not signed again: `invite` prints the
+invite it already has. A name that is a contact's, a key that is already one of your devices, and a revoked
+key are refused before the passphrase is asked for. A device is removed with `swoosh revoke me/<name>`.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

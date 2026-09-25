@@ -260,12 +260,12 @@ async fn proof() {
 }
 
 /// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id).
-/// This is the shape the signet mints for a device (`identity::Secret::sign_device_badge`, delivered by
-/// `mint` and stored by `adopt`) and the shape a signet holder self-signs (`member_badge`): a `member(true)`
-/// badge rooted at the signing key and bound to the dialer. A badge rooted at the signet admits (the gate
-/// trusts that key AND its binding matches the proven dialer); one rooted at a stranger key is refused,
-/// because the gate trusts only the signet's key. Signed here (not via `mint`/`adopt`) so it binds to the mem
-/// transport's synthetic proven id; `device_badge_wiring.rs` covers the real mint/adopt production.
+/// This is the shape the root signs for a device (`swoosh invite`, stored by `adopt`) and the shape a root
+/// holder signs for its own machine: a `member(true)` badge rooted at the signing key and bound to the
+/// dialer. A badge rooted at the pinned root admits (the gate trusts that key AND its binding matches the
+/// proven dialer); one rooted at a stranger key is refused, because the gate trusts only the pinned key.
+/// Signed here (not via `invite`/`adopt`) so it binds to the mem transport's synthetic proven id;
+/// `device_badge_wiring.rs` covers the invite/adopt path.
 fn signet_badge(signer: u8, bound: NodeId) -> String {
     TestRoot::seeded(signer)
         .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))

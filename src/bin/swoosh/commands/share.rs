@@ -17,7 +17,7 @@ use bifrost::NodeId;
 use clap::Args;
 use nauthy::{Cap, Service};
 use swoosh::contacts::{ContactRef, Contacts, ContactsStore, Petname};
-use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
+use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::identity::{self, Identity};
 use swoosh::names::NameError;
@@ -66,16 +66,6 @@ impl ShareCmd {
         if self.delegable && self.bind.is_some() {
             eyre::bail!(
                 "a bound grant (--for) is theft-resistant and cannot be delegated; drop --delegable, or issue a bearer link (no --for) if you need to delegate"
-            );
-        }
-        // `membership` is reserved for family membership, not a service: issuing a service by that name
-        // would write a line the ledger reads as membership, so the parse refuses it here, at the word
-        // the issuer typed, before any mint. `GrantTarget::is_issuable_service_name` owns the word; this
-        // is its teaching surface.
-        if !GrantTarget::is_issuable_service_name(self.service.as_str()) {
-            eyre::bail!(
-                "grant issue failed: '{}' is reserved for family membership, pick another service name",
-                self.service.as_str()
             );
         }
         // The link roots at swoosh's stable key (the one an exposed service is reached at), so resolve the
@@ -143,7 +133,7 @@ impl ShareCmd {
                 eyre::eyre!("minted capability has no authority block to key revocation on")
             })?;
         let record = GrantRecord {
-            target: GrantTarget::Service(Service::clone(&self.service)),
+            target: Service::clone(&self.service),
             kind,
             delegation,
             holder,
@@ -320,8 +310,6 @@ fn resolve_fleet_root(
 /// reach here: `GrantFor::from_str` refused it at parse, so a `DeviceTarget::Named` always carries a device
 /// by construction.
 ///
-/// Shared with `invite add --for` (one grammar, one resolution, one set of teaching errors), so a
-/// petname bind means the same thing on both verbs.
 pub(crate) fn resolve_one_device(
     target: &DeviceTarget,
     contacts: &Contacts,
@@ -396,7 +384,7 @@ mod tests {
             .expect("mint signet slip");
         let cap = slip.cap();
         let record = GrantRecord {
-            target: GrantTarget::Service(Service::clone(&service)),
+            target: Service::clone(&service),
             kind: GrantKind::Fleet,
             delegation: Delegation::Sealed,
             holder: resolved.to_string(),
@@ -494,17 +482,6 @@ mod tests {
         ));
     }
 
-    /// `grant issue` reserves the membership word at the word the issuer typed: `membership` is a
-    /// teaching error naming the fix, never a minted service grant.
-    #[test]
-    fn issue_rejects_the_reserved_membership_word() {
-        assert!(
-            !GrantTarget::is_issuable_service_name("membership"),
-            "membership is reserved for family membership"
-        );
-        assert!(GrantTarget::is_issuable_service_name("ssh"));
-    }
-
     /// A `--for fleet:` mint's stderr frame echoes the RESOLVED signet key (so the issuer can catch a wrong
     /// paste), names the fleet posture, and gives the `grant revoke <signet>` recipe keyed by that key.
     #[test]
@@ -521,7 +498,7 @@ mod tests {
             .expect("mint signet slip");
         let cap = slip.cap();
         let record = GrantRecord {
-            target: GrantTarget::Service(Service::clone(&service)),
+            target: Service::clone(&service),
             kind: GrantKind::Fleet,
             delegation: Delegation::Sealed,
             holder: fleet.to_string(),

@@ -17,7 +17,7 @@ use bifrost_noise::Noise;
 use clap::Parser as _;
 use nauthy::{Cap, Link, Service, VerifyKey};
 use swoosh::contacts::Contacts;
-use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, GrantTarget, Grants};
+use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::identity::Secret;
 use swoosh::node_signer::{Bind, NodeSigner};
@@ -104,7 +104,7 @@ async fn share(server: &Scratch, bind: Bind) -> Link {
         .mint_slip(&service, bind, lifetime, Delegation::Sealed)
         .unwrap();
     let record = GrantRecord {
-        target: GrantTarget::Service(service),
+        target: service,
         kind,
         delegation: Delegation::Sealed,
         holder,

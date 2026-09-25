@@ -167,7 +167,7 @@ impl FromStr for ContactRef {
 /// peer at read time, so flattening the two can never silently launder a stranger into a signed member.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// A binding the operator added by hand (`contact add`, `invite add`), or loaded from the legacy bare-string
+    /// A binding the operator added by hand (`contact add`), or loaded from the legacy bare-string
     /// wire form. It carries no signature; it is trust the operator asserted locally.
     HandTyped,
     /// A binding hydrated from a signet-signed roster at the given epoch. Only [`Contacts::hydrate`] writes
@@ -309,8 +309,8 @@ impl Contacts {
     /// [`DEFAULT`](DeviceLabel::DEFAULT) slot.
     ///
     /// An add under `me` that CHANGES the member set bumps [`roster_version`](Self::roster_version); an
-    /// [`Unchanged`](Added::Unchanged) one does not. A badge RENEWAL re-runs `invite add` with the same
-    /// label and the same key, leaving the member set byte-identical, so bumping there would weld
+    /// [`Unchanged`](Added::Unchanged) one does not. A re-add under the same
+    /// label and the same key (a renewal) leaves the member set byte-identical, so bumping there would weld
     /// quarterly credential churn to the rare membership version and drive every device through a
     /// full-snapshot re-pull for no delta.
     pub fn add(&mut self, petname: Petname, device: Option<DeviceLabel>, node: NodeId) -> Added {
@@ -327,7 +327,7 @@ impl Contacts {
             None => Added::Created,
         };
         // Anchored to this book's OWN answer about whether the set changed, never to the verb that ran:
-        // `invite add` enrolling and `invite add` renewing differ by the data, not by the call site.
+        // an add that enrolls and one that renews differ by the data, not by the call site.
         if mine && added != Added::Unchanged {
             self.roster_version = self.roster_version.bumped();
         }

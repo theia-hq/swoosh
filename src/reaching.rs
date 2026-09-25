@@ -709,7 +709,7 @@ mod tests {
         };
         let report = format!("{error:#}");
         assert!(
-            report.contains("expired") && report.contains("swoosh invite add"),
+            report.contains("expired") && report.contains("swoosh invite <name>"),
             "the refusal names the cause and the remedy, got: {report}"
         );
         assert!(
@@ -744,7 +744,7 @@ mod tests {
         let warned = String::from_utf8(warned).expect("the warning is utf-8");
         assert_eq!(warned.lines().count(), 1, "one line, not a paragraph");
         assert!(
-            warned.contains("expires in") && warned.contains("swoosh invite add"),
+            warned.contains("expires in") && warned.contains("swoosh invite <name>"),
             "the warning names the remaining life and the remedy, got: {warned}"
         );
     }

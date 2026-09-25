@@ -70,8 +70,8 @@ async fn build_exposer(home: &Home) -> Exposer {
         .with_enabled(enabled)
 }
 
-/// A membership badge the signet signed, bound to the dialer's proven mem id: the shape `swoosh mint`
-/// mints for a device, and the cap `swoosh grant revoke` cuts at its root.
+/// A membership badge the signet signed, bound to the dialer's proven mem id: the shape `swoosh invite`
+/// signs for a device, and the cap `swoosh grant revoke` cuts at its root.
 fn signet_badge(bound: NodeId) -> String {
     TestRoot::seeded(SIGNET)
         .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
