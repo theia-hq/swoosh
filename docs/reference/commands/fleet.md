@@ -7,7 +7,7 @@ Learn your fleet: pull the signed roster from a coordination node and fold it in
 <!-- generated: usage from `swoosh fleet -h`; option lines curated -->
 ```
 Usage: swoosh fleet [OPTIONS] <peer>
-  <peer>          the coordination node to pull from: a petname, a raw node id, or a sheer: link
+  <peer>          the coordination node to pull from: a petname, a raw node id, or a swoosh: link
 ```
 
 **Example.** `swoosh fleet me/hub` verifies the roster against your signet and records each member

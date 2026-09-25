@@ -139,11 +139,11 @@ impl LockChild {
     fn await_pid(&mut self, pid_file: &Path) -> u32 {
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
-            if let Ok(text) = std::fs::read_to_string(pid_file) {
-                if let Ok(pid) = text.trim().parse::<u32>() {
-                    assert_eq!(pid, self.pid(), "the child recorded its own spawned pid");
-                    return pid;
-                }
+            if let Ok(text) = std::fs::read_to_string(pid_file)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                assert_eq!(pid, self.pid(), "the child recorded its own spawned pid");
+                return pid;
             }
             if let Some(status) = self.child.try_wait().expect("poll the child") {
                 panic!("the lock child exited before recording its pid: {status}");

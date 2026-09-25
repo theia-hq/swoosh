@@ -559,7 +559,7 @@ impl ServeCmd {
         // deadline, or a Ctrl-C) from an ERRORED teardown. The exposer returns `Ok` when the token fires and
         // an `Err` only on a real failure, so `run_until_stopped` maps that into a typed [`Stopped`] reason
         // for a graceful end and propagates the error otherwise. A requested stop is SUCCESS: a deliberate
-        // `swoosh stop` (or a timer, or a Ctrl-C) must exit 0 so the qat CI action reads a clean teardown as
+        // `swoosh stop` (or a timer, or a Ctrl-C) must exit 0 so a CI action reads a clean teardown as
         // green, not a crash; only a genuine error teardown exits non-zero. The resident arm (when `Some`)
         // joins as the third select arm there; plain serve passes `None`, so nothing new executes.
         let stopped = self

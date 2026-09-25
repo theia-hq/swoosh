@@ -83,15 +83,15 @@ impl AddCmd {
         // Invites are signed BY the configured signet. On an adopted device the home key is that device,
         // so a badge it signs roots at the device key and is admitted nowhere the real signet gates.
         // Refuse the silent mis-sign rather than mint a dead, wrongly-rooted invite.
-        if let Some(configured) = config::load_signet(home).await? {
-            if configured != signet_id {
-                eyre::bail!(
-                    "this machine trusts signet {configured}, but its own key is {signet_id}: a badge \
+        if let Some(configured) = config::load_signet(home).await?
+            && configured != signet_id
+        {
+            eyre::bail!(
+                "this machine trusts signet {configured}, but its own key is {signet_id}: a badge \
                      signed here would root at {signet_id} and be admitted nowhere that signet gates. Run \
                      `invite add` on the machine that holds the signet (the one whose `swoosh identity` \
                      prints {configured})."
-                );
-            }
+            );
         }
         // The badge lifetime is the operator's `--expires`, or the default when absent. This same
         // window bounds the badge (via `sign_device_badge`) and the ledger row's expiry below, so the two
@@ -115,7 +115,7 @@ impl AddCmd {
                 // badge cannot be replayed from another key). The signet SECRET stays in `signet`; only
                 // the signed PUBLIC badge leaves.
                 let badge = signet.sign_device_badge(node, ttl)?;
-                let token = Invite::bound(signet_id, Link::clone(&badge));
+                let token = Invite::bound(signet_id, device.clone(), Link::clone(&badge));
                 record(&mut store, home, &device, node, ttl, &badge).await?;
                 // The token carries no secret, so it needs no private hand-off; the record lines are what
                 // the owner keeps. Blank-frame the token so it is copy-obvious, like `serve` frames the
@@ -138,7 +138,7 @@ impl AddCmd {
                 // used with `--for` would still be shadowed: refuse on the same rule.
                 refuse_shadowed(store.contacts(), &device, node)?;
                 let badge = signet.sign_device_badge(node, ttl)?;
-                let token = Invite::derived(*seed, signet_id, Link::clone(&badge));
+                let token = Invite::keyed(*seed, signet_id, device.clone(), Link::clone(&badge));
                 record(&mut store, home, &device, node, ttl, &badge).await?;
                 println!("{token}\n");
                 println!("recorded me/{device} -> {node}  [derived]");

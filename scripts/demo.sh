@@ -75,13 +75,13 @@ start_server() {
   SERVE_PID=$!
   local i
   for i in $(seq 1 60); do
-    grep -q 'bf01' "$out" && break
+    grep -q 'ed01' "$out" && break
     sleep 0.5
   done
   cat "$out"
   # The key is always in the banner; the address only appears on the direct
   # (quirk) spellings, so a miss there is expected and not a failure.
-  SERVER_KEY="$(grep -m1 -oE 'bf01[a-z0-9]+' "$out" || true)"
+  SERVER_KEY="$(grep -m1 -oE 'ed01[a-z0-9]+' "$out" || true)"
   # LOOPBACK FIRST, deliberately. Both nodes in this demo run on this machine, and the banner's direct
   # lane lists the LAN address ahead of loopback because it is ordered for the common case, a peer on
   # another host. Taking the first address would hand this script the LAN one, which is the address that

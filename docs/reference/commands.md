@@ -20,7 +20,7 @@ These apply to most commands and are omitted from the per-command signatures bel
   [run the relay and the resolver yourself](../transports.md#self-run).
 - `--resolver <url>` where address records are published and read (fleet-wide). See
   [run the relay and the resolver yourself](../transports.md#self-run).
-- `--present <link>` present a `sheer:` capability link when reaching a gated peer you are not a member of.
+- `--present <link>` present a `swoosh:` capability link when reaching a gated peer you are not a member of.
 
 ## Commands
 
@@ -31,7 +31,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 `commands.md#<command>` keep resolving to this index, which then links to the focused page.
 
 - <a id="serve"></a>[`swoosh serve`](commands/serve.md): be a node, publish named services behind your signet gate
-- <a id="stop"></a>[`swoosh stop`](commands/stop.md): stop a peer's node by its key or a `sheer:` link
+- <a id="stop"></a>[`swoosh stop`](commands/stop.md): stop a peer's node by its key or a `swoosh:` link
 - <a id="service"></a>[`swoosh service`](commands/service.md): list a peer's menu, or enable/disable a service on your node
 - <a id="ping"></a>[`swoosh ping`](commands/ping.md): measure round-trip time to a peer, addressed by key
 - <a id="speed"></a>[`swoosh speed`](commands/speed.md): measure throughput to a peer, addressed by key
@@ -45,7 +45,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="invite"></a>[`swoosh invite`](commands/invite.md): create, list, and cancel device invites; one device per invite
 - <a id="adopt"></a>[`swoosh adopt`](commands/adopt.md): adopt an invite, joining a signet's family as this machine
 - <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a peer's sshd over the overlay using the system ssh
-- <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue, list, narrow, or revoke `sheer:` capability links
+- <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue, list, narrow, or revoke `swoosh:` capability links
 - <a id="tree"></a>[`swoosh tree`](commands/tree.md): print the command tree read straight from the parser
 
 ## Next

@@ -7,7 +7,7 @@ Measure the round-trip time to a peer, like `ping(8)` but addressed by key.
 <!-- generated: usage from `swoosh ping -h`; option lines curated -->
 ```
 Usage: swoosh ping [OPTIONS] <peer>
-  <peer>            a petname, a raw node id, or a sheer: link
+  <peer>            a petname, a raw node id, or a swoosh: link
   -c, --count <N>   how many probes to send [default: 4]
   -i, --interval <seconds>   seconds between probes [default: 1]
   -v, --verbose     print a line per probe as it lands, showing the path

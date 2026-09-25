@@ -48,18 +48,19 @@ pub struct SendCmd {
     /// The files or directories to push.
     #[arg(required = true, value_name = "path")]
     pub paths: Vec<PathBuf>,
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
     /// the peer's file-receiving service
     #[arg(long, value_name = "service", default_value = RECV_SERVICE, value_parser = swoosh::names::service)]
     pub service: Service,
-    /// present a `sheer:` capability link to reach a gated peer
+    /// present a `swoosh:` capability link to reach a gated peer
     #[arg(
         long,
         value_name = "link",
+        value_parser = swoosh::link::parse,
         long_help = "Optional: your own devices need no link; this machine's membership badge is \
-                     presented automatically. Pass a `sheer:` link only to reach as a delegate."
+                     presented automatically. Pass a `swoosh:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     #[command(flatten)]
@@ -84,7 +85,7 @@ impl swoosh::reaching::Reaching for SendCmd {
     ///
     /// `send` pushes to the peer's family-gated `recv:` service, so it presents the member badge rooted
     /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The effective slip is the
-    /// FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`, threaded INTO the
+    /// FOLD of a self-addressing `swoosh:` link-as-peer with an explicit `--present`, threaded INTO the
     /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
     /// badge exactly as a `--present` link does).
     fn bind_role(&self) -> swoosh::reaching::BindRole {

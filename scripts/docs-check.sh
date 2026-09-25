@@ -29,7 +29,7 @@
 #   PAYLOAD  marker payload grammar: executable argv, no prose, no placeholders (M3)
 #   UNKNOWN / ORPHAN / DOUBLE / UNMARKED / COVERAGE   the marker binding rules (M3)
 #   LINK / ANCHOR   every relative link resolves; every #anchor exists in its target (M5)
-#   SECRET   a full-length invite:/sheer: literal in expected text
+#   SECRET   a full-length invite:/swoosh: literal in expected text
 #   plus the census and the coverage invariant above
 #
 # WHAT IT DOES NOT DO YET (the spec's later slices; those modes refuse instead of passing, so a
@@ -63,8 +63,8 @@ set -eu
 EMDASH=$(printf '\342\200\224')
 # M2's banned list (DOCS-MODEL section 5): process language in product docs.
 PROCESS_RE='delib-[0-9]|deliberation|SYNTHESIS|DOC-VOICE|STYLE\.md|panel|sweep|PR #[0-9]'
-# A full-length invite/sheer token (32-byte seed, 52 base32 chars); truncated `invite:…` is not.
-SECRET_RE='(invite|sheer):[a-z2-7]{40,}'
+# A full-length invite/swoosh token (32-byte seed, 52 base32 chars); truncated `invite:…` is not.
+SECRET_RE='(invite|swoosh):[a-z2-7]{40,}'
 
 usage() {
     printf 'usage: sh scripts/docs-check.sh --lint [ROOT] | --self-test\n' >&2
@@ -314,11 +314,11 @@ check_links() {
     return 0
 }
 
-# The full-length secret rule: a live invite or sheer literal in expected text is a failure, not
+# The full-length secret rule: a live invite or swoosh literal in expected text is a failure, not
 # a nuance to mask. Truncated forms (`invite:…`) are the documented shape and do not match.
 check_secret() {
     LC_ALL=C grep -nE -e "$SECRET_RE" "$2" 2>/dev/null | while IFS=: read -r ln _; do
-        printf 'SECRET %s:%s: full-length invite/sheer literal\n' "$1" "$ln" >> "$TMP/findings"
+        printf 'SECRET %s:%s: full-length invite/swoosh literal\n' "$1" "$ln" >> "$TMP/findings"
     done
     return 0
 }

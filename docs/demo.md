@@ -55,7 +55,7 @@ The server derives a device identity for the member and prints an invite to hand
 <!-- capture: scripts/demo.sh invite-add -->
 ```console
 $ swoosh invite add laptop
-invite:….bf01jsmb…
+invite:….ed01jsmb…
 ```
 
 The member adopts it. On its own machine (a distinct key dir), `adopt` writes the derived seed as the
@@ -64,8 +64,8 @@ member's identity AND records the server's signet as trusted:
 <!-- capture: scripts/demo.sh adopt -->
 ```console
 $ swoosh adopt @invite.txt
-adopted this machine as bf01ntwii5ojl5fk  [mine]
-trusting signet bf01jsmbbj7p3sjv: `swoosh serve` now admits its members and delegates.
+adopted this machine as ed01ntwii5ojl5fk  [mine]
+trusting signet ed01jsmbbj7p3sjv: `swoosh serve` now admits its members and delegates.
 stored your membership badge: this device now reaches your gated services.
 ```
 
@@ -98,7 +98,7 @@ nodes in this demo run on this machine, so the loopback line is the one to copy:
 $ swoosh serve --transport quirk+noise
 swoosh ready
 
-    bf01tldy5zh5nvbqhfbvk46ijdppyay6ma6nkh76axuoh2tu7dpz6rfq
+    ed01tldy5zh5nvbqhfbvk46ijdppyay6ma6nkh76axuoh2tu7dpz6rfq
 
 how peers reach you
   local    automatic; local mDNS, or direct, no NAT traversal
@@ -122,7 +122,7 @@ back with `--peer`:
 <!-- capture: scripts/demo.sh ping-quirk-noise -->
 ```console
 $ swoosh ping $SERVER --transport quirk+noise --peer $SERVER=127.0.0.1:63254 -c 5 -i 0.2
-bf01jsmbbj7p3sjv via quirk+noise: direct to 127.0.0.1:63254
+ed01jsmbbj7p3sjv via quirk+noise: direct to 127.0.0.1:63254
   5 sent, 5 received, 0% loss
   rtt min/avg/max/mdev = 0.545/0.725/0.839/0.074 ms
 ```
@@ -140,7 +140,7 @@ no `--peer` is needed. The NodeId is byte-for-byte identical:
 $ swoosh serve --transport iroh
 swoosh ready
 
-    bf01tldy5zh5nvbqhfbvk46ijdppyay6ma6nkh76axuoh2tu7dpz6rfq
+    ed01tldy5zh5nvbqhfbvk46ijdppyay6ma6nkh76axuoh2tu7dpz6rfq
 
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs
@@ -164,11 +164,11 @@ member runs the identical commands, now over iroh with no `--peer`:
 <!-- live-run: iroh reach over the internet observed 2026-09-15 (a GitHub runner reached a home node across NAT); RTT, path, and throughput vary per run, and 143.105.x.x masks the peer's address -->
 ```console
 $ swoosh ping  $SERVER --transport iroh -c 5 -i 0.2
-bf01f62wtyapessv via iroh: mixed (direct to 143.105.x.x:41125 and relayed)
+ed01f62wtyapessv via iroh: mixed (direct to 143.105.x.x:41125 and relayed)
   5 sent, 5 received, 0% loss
   rtt min/avg/max/mdev = 193.685/233.854/306.825/45.510 ms
 $ swoosh speed $SERVER --transport iroh --down -t 3
-speed test to bf01f62wtyapessv via iroh (down)
+speed test to ed01f62wtyapessv via iroh (down)
     1.0s  0.01 MiB/s
     2.0s  0.17 MiB/s
     3.0s  0.61 MiB/s
@@ -187,8 +187,8 @@ which the server's signet has never trusted, so the gate turns it away:
 <!-- capture: scripts/demo.sh stranger-refused -->
 ```console
 $ swoosh ping $SERVER --transport quirk+noise --peer $SERVER=127.0.0.1:63254 -c 3 -i 0.2
-bf01jsmbbj7p3sjv via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)
-Error: bf01jsmbbj7p3sjv: reached, but refused
+ed01jsmbbj7p3sjv via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)
+Error: ed01jsmbbj7p3sjv: reached, but refused
 ```
 
 Exit status 1. The member is in; the stranger is out. The script runs the same check over iroh when n0

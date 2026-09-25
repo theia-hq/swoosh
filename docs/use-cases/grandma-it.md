@@ -15,9 +15,9 @@ From your own machine, create a device invite:
 <!-- capture: swoosh invite add grandma-pc -->
 ```console
 $ swoosh invite add grandma-pc
-invite:….bf01hcq6…
+invite:….ed01hcq6…
 
-recorded me/grandma-pc -> bf01imv3ljql6kjn  [derived]
+recorded me/grandma-pc -> ed01imv3ljql6kjn  [derived]
 hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
@@ -27,8 +27,8 @@ start a gated shell that comes back on reboot:
 <!-- capture: swoosh adopt @invite.txt -->
 ```console
 $ swoosh adopt @invite.txt
-adopted this machine as bf01imv3ljql6kjn  [mine]
-trusting signet bf01hcq6…: `swoosh serve` now admits its members and delegates.
+adopted this machine as ed01imv3ljql6kjn  [mine]
+trusting signet ed01hcq6…: `swoosh serve` now admits its members and delegates.
 compare that signet with the owner out of band before serving: the token is not signed by the signet it names, so it alone does not prove who sent it.
 stored your membership badge: this device now reaches your gated services.
 ```
@@ -41,7 +41,7 @@ serving.
 $ swoosh serve ssh=sshd:
 swoosh ready
 
-    bf01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
+    ed01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq
 
 how peers reach you
   internet   automatic; peers reach you by the key above, even across NATs

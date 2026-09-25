@@ -6,14 +6,14 @@ use super::*;
 use crate::names::NameError;
 
 /// A deterministic node id from a seed, so tests can assert on distinct identities. Each seed maps to a
-/// valid `bf01` base32 string (an all-`seed`-byte key), parsed through the real boundary rather than
+/// valid `ed01` base32 string (an all-`seed`-byte key), parsed through the real boundary rather than
 /// constructed, so the tests exercise the same path a user's pasted key takes.
 fn node(seed: u8) -> NodeId {
     let encoded = match seed {
-        1 => "bf01aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq",
-        2 => "bf01aibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaiba",
-        3 => "bf01ambqgaydambqgaydambqgaydambqgaydambqgaydambqgaydambq",
-        7 => "bf01a4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dq",
+        1 => "ed01aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq",
+        2 => "ed01aibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaiba",
+        3 => "ed01ambqgaydambqgaydambqgaydambqgaydambqgaydambqgaydambq",
+        7 => "ed01a4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dqobyha4dq",
         other => panic!("no fixture node id for seed {other}"),
     };
     encoded.parse().expect("fixture node id parses")

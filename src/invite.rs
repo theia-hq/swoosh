@@ -1,21 +1,18 @@
-//! The `invite:` token: a membership authorization for one device key.
+//! The `invite:` token: a device's standing, with what `join` needs to find its root's devices.
 //!
-//! An owner creates an invite with `swoosh invite add`; a machine adopts it to join the owner's family.
-//! Two shapes share the one scheme:
+//! ```text
+//! invite:<from>.<name>.<root>.<token>           bound: 4 fields, no secret
+//! invite:<seed>.<from>.<name>.<root>.<token>    carries a key: 5 fields
+//! ```
 //!
-//! - **Bound**: `invite:<signet>.<badge>`. The owner signed a device-bound badge for a key the DEVICE
-//!   made and printed (`invite add <label> --for <key>`), so the token carries no secret and is safe in
-//!   transit. It is NOT authenticated: anyone can name any signet, so the device verifies the badge binds
-//!   its own key and trusts the signet only after comparing the full signet with the owner out of band.
-//! - **Derived**: `invite:<seed>.<signet>.<badge>`. The owner derived a child identity and hands over its
-//!   seed (`invite add <label>`, the CI case): adopting it BECOMES that identity. The seed is a device
-//!   SECRET, so this shape is handed over a private channel only.
+//! `<root>.<token>` is the device's standing: nauthy's bare link, whose key is the root, so the root rides
+//! once. `<from>` is the inviting machine's key and `<name>` the device's name without `me/`. Both are
+//! unsigned hints: neither feeds an admission, a pin or a revocation. `<seed>` is the device key a keyed
+//! invite hands over, so that shape is a secret.
 //!
-//! The signet SECRET never travels in either shape: only the child seed (derived), the signet's PUBLIC
-//! node id, and the already-signed public badge (a `sheer:` link). `invite:` is the one accepted scheme:
-//! there is no legacy spelling, so a retired token fails loudly instead of parsing as a second shape.
-//! Sibling to the `sheer:` capability link: one scheme per kind of thing you hand a machine, so a glance
-//! at the prefix says what it is.
+//! Every field is dot-free by construction (a name follows the one name rule; keys and the seed are base32;
+//! the token is nauthy's), so the field count alone decides the shape. There is no version field and no
+//! kind letter.
 
 use core::fmt;
 
@@ -24,129 +21,110 @@ use data_encoding::BASE32_NOPAD;
 use nauthy::Link;
 use zeroize::{Zeroize as _, Zeroizing};
 
-/// The `invite:` scheme prefix.
-pub const SCHEME: &str = "invite:";
+use crate::contacts::DeviceLabel;
+use crate::names::NameError;
 
-/// Separates the encoded fields. A base32 seed, a node id, and a `sheer:` link all lack one, so it
-/// delimits unambiguously.
+/// The mark every invite starts with.
+pub const PREFIX: &str = "invite:";
+
+/// Separates the fields.
 const SEPARATOR: char = '.';
 
-/// A parsed invite: the signet it trusts plus, for the derived shape, the device seed it carries.
+/// A parsed invite.
 ///
-/// The derived seed never renders in `{:?}`: the manual [`fmt::Debug`] below prints it as `<redacted>`,
-/// mirroring [`SecretSource`](crate::secret::SecretSource)'s redacting Debug. A debug line, a panic
-/// message, or a future `tracing` field must never leak the device identity.
-pub enum Invite {
-    /// `invite:<signet>.<badge>`: the machine already holds the key the badge binds; adopting trusts the
-    /// signet and stores the badge, keeping that identity.
-    Bound {
-        /// The signet's PUBLIC node id, the root the device's gate trusts.
-        signet: NodeId,
-        /// The signet-signed, device-bound membership badge (a `sheer:` link).
-        badge: Link,
-    },
-    /// `invite:<seed>.<signet>.<badge>`: adopting writes the seed as the device identity.
-    Derived {
-        /// The device's derived child seed. SECRET: adopting it IS becoming that device.
-        seed: Zeroizing<[u8; 32]>,
-        /// The signet's PUBLIC node id, the root the device's gate trusts.
-        signet: NodeId,
-        /// The signet-signed, device-bound membership badge.
-        badge: Link,
-    },
+/// The seed never renders in `{:?}`: the manual [`fmt::Debug`] below prints it as `<redacted>`. A debug
+/// line, a panic message, or a future `tracing` field must never leak a device key.
+pub struct Invite {
+    /// The device key a keyed invite hands over, or `None` for a bound invite. SECRET: holding it IS being
+    /// that device.
+    pub seed: Option<Zeroizing<[u8; 32]>>,
+    /// The inviting machine's key: a hint for where to sync first.
+    pub from: NodeId,
+    /// The device's name, without `me/`: a hint until the first sync.
+    pub name: DeviceLabel,
+    /// The device's standing: a link whose key is the root.
+    pub standing: Link,
 }
 
 impl Invite {
-    /// A bound invite: a signed badge for a key the device made, no secret carried.
-    pub fn bound(signet: NodeId, badge: Link) -> Self {
-        Self::Bound { signet, badge }
-    }
-
-    /// A derived invite: the child `seed` plus the signet-signed badge for the child's node.
-    pub fn derived(seed: [u8; 32], signet: NodeId, badge: Link) -> Self {
-        Self::Derived {
-            seed: Zeroizing::new(seed),
-            signet,
-            badge,
+    /// A bound invite: the standing for a key the device made, no secret carried.
+    pub fn bound(from: NodeId, name: DeviceLabel, standing: Link) -> Self {
+        Self {
+            seed: None,
+            from,
+            name,
+            standing,
         }
     }
 
-    /// Parse an `invite:` token into its shape.
-    ///
-    /// The badge is a `sheer:` link, which itself contains a `.` (the root and the token), so the field
-    /// count cannot decide the shape: the badge's `sheer:` scheme marks where it starts, and the fields
-    /// before it (one for bound, two for derived) decide the shape. Any other scheme is refused: a token
-    /// parses under `invite:` or not at all. The decoded seed buffer is wiped before returning, and the
-    /// returned seed zeroizes on drop, so no key material lingers in freed memory.
-    ///
-    /// Every field lands as its own type here, the badge included: a token that carries something other
-    /// than a decodable `sheer:` link is an [`InviteError::Badge`], so a parsed `Invite` holds a credential
-    /// that verified against its root and no caller downstream re-parses it. The badge is decoded LAST, so
-    /// a token whose seed or signet is also wrong still names the field a reader typed wrong first.
-    ///
-    /// [`Derived`]: Invite::Derived
+    /// A keyed invite: the device key `seed`, plus the standing for the key it derives.
+    pub fn keyed(seed: [u8; 32], from: NodeId, name: DeviceLabel, standing: Link) -> Self {
+        Self {
+            seed: Some(Zeroizing::new(seed)),
+            from,
+            name,
+            standing,
+        }
+    }
+
+    /// Parse an invite: require the prefix (ASCII case-insensitive, surrounding whitespace trimmed), split
+    /// on `.`, and read 4 fields as bound and 5 as keyed. Each field parses as its own type, the standing
+    /// last, so an invite with two bad fields names the one typed first. The decoded seed zeroizes on drop.
     pub fn parse(token: &str) -> Result<Self, InviteError> {
-        if let Some(body) = token.strip_prefix(SCHEME) {
-            // The signed badge always starts at `sheer:`; everything before it is `.`-terminated:
-            // `<signet>.` (bound) or `<seed>.<signet>.` (derived).
-            let (head, rest) = body.split_once("sheer:").ok_or(InviteError::Malformed)?;
-            if rest.is_empty() {
-                return Err(InviteError::Malformed);
+        let token = token.trim();
+        let body = token
+            .get(..PREFIX.len())
+            .filter(|head| head.eq_ignore_ascii_case(PREFIX))
+            .and_then(|_| token.get(PREFIX.len()..))
+            .ok_or(InviteError::NotAnInvite)?;
+        let fields: Vec<&str> = body.split(SEPARATOR).collect();
+        let (seed, rest) = match fields.as_slice() {
+            [from, name, root, token] => (None, [*from, *name, *root, *token]),
+            [seed, from, name, root, token] => {
+                (Some(parse_seed(seed)?), [*from, *name, *root, *token])
             }
-            let badge = format!("sheer:{rest}");
-            let head = head.strip_suffix(SEPARATOR).ok_or(InviteError::Malformed)?;
-            return match head.split(SEPARATOR).collect::<Vec<_>>().as_slice() {
-                [signet] => Ok(Self::Bound {
-                    signet: parse_signet(signet)?,
-                    badge: parse_badge(&badge)?,
-                }),
-                [seed, signet] => Ok(Self::Derived {
-                    seed: parse_seed(seed)?,
-                    signet: parse_signet(signet)?,
-                    badge: parse_badge(&badge)?,
-                }),
-                _ => Err(InviteError::Malformed),
-            };
-        }
-        Err(InviteError::Scheme)
+            _ => return Err(InviteError::NotAnInvite),
+        };
+        let [from, name, root, token] = rest;
+        let from = from.parse::<NodeId>().map_err(InviteError::From)?;
+        let name = name.parse::<DeviceLabel>().map_err(InviteError::Name)?;
+        let standing = format!("{root}{SEPARATOR}{token}")
+            .parse::<Link>()
+            .map_err(InviteError::Standing)?;
+        Ok(Self {
+            seed,
+            from,
+            name,
+            standing,
+        })
     }
 }
 
 impl fmt::Debug for Invite {
-    /// Redact the derived seed, the one secret an invite can carry: the shape, the signet, and the
-    /// badge's presence (with its byte length) are safe to print. The seed prints as `<redacted>`.
+    /// Everything but the seed, which prints as `<redacted>` when there is one.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Bound { signet, badge } => f
-                .debug_struct("Invite::Bound")
-                .field("signet", signet)
-                .field("badge", &badge.as_str().len())
-                .finish(),
-            Self::Derived { signet, badge, .. } => f
-                .debug_struct("Invite::Derived")
-                .field("seed", &"<redacted>")
-                .field("signet", signet)
-                .field("badge", &badge.as_str().len())
-                .finish(),
-        }
+        f.debug_struct("Invite")
+            .field("seed", &self.seed.as_ref().map(|_| "<redacted>"))
+            .field("from", &self.from)
+            .field("name", &self.name)
+            .field("standing", &self.standing)
+            .finish()
     }
 }
 
 impl fmt::Display for Invite {
-    /// The canonical token for this shape: both shapes render under `invite:`, so re-encoding is stable.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Bound { signet, badge } => write!(f, "{SCHEME}{signet}{SEPARATOR}{badge}"),
-            Self::Derived {
-                seed,
-                signet,
-                badge,
-            } => write!(
-                f,
-                "{SCHEME}{}{SEPARATOR}{signet}{SEPARATOR}{badge}",
-                encode_seed(seed).as_str()
-            ),
+        f.write_str(PREFIX)?;
+        if let Some(seed) = &self.seed {
+            write!(f, "{}{SEPARATOR}", encode_seed(seed).as_str())?;
         }
+        write!(
+            f,
+            "{}{SEPARATOR}{}{SEPARATOR}{}",
+            self.from,
+            self.name,
+            self.standing.as_str()
+        )
     }
 }
 
@@ -180,208 +158,29 @@ fn parse_seed(text: &str) -> Result<Zeroizing<[u8; 32]>, InviteError> {
     Ok(Zeroizing::new(seed))
 }
 
-/// Parse the signet field as a node id, with a typed error.
-fn parse_signet(text: &str) -> Result<NodeId, InviteError> {
-    text.parse::<NodeId>().map_err(InviteError::Signet)
-}
-
-/// Parse the badge field as a `sheer:` link, with a typed error. The scheme was already matched to find
-/// the field boundary, so what this adds is the decode and the signature check against the embedded root:
-/// a token carrying a truncated or forged badge is refused here rather than stored and presented.
-fn parse_badge(text: &str) -> Result<Link, InviteError> {
-    text.parse::<Link>().map_err(InviteError::Badge)
-}
-
-/// Why a string was not a valid [`Invite`] token.
+/// Why a string was not a valid [`Invite`].
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {
-    /// The token did not carry the `invite:` prefix.
-    #[error("not an invite (expected the `invite:` prefix)")]
-    Scheme,
-    /// The token had the wrong number of fields.
-    #[error(
-        "malformed invite (expected `invite:<signet>.<badge>` or `invite:<seed>.<signet>.<badge>`)"
-    )]
-    Malformed,
-    /// The seed part was not valid base32.
+    /// No `invite:` prefix, or neither 4 nor 5 fields.
+    #[error("this is not a swoosh invite")]
+    NotAnInvite,
+    /// The seed was not valid base32.
     #[error("invalid base32 in the invite seed")]
     Encoding,
     /// The seed decoded to the wrong length (not 32 bytes).
     #[error("invite seed is not 32 bytes")]
     Length,
-    /// The signet part was not a valid node id.
-    #[error("invalid signet in invite")]
-    Signet(#[source] NodeIdParseError),
-    /// The badge part was not a decodable `sheer:` capability link.
-    #[error("invalid membership badge in invite")]
-    Badge(#[source] nauthy::CapError),
+    /// The inviting machine's key was not a key.
+    #[error("invalid key in the invite")]
+    From(#[source] NodeIdParseError),
+    /// The device's name broke the name rule.
+    #[error("invalid name in the invite")]
+    Name(#[source] NameError),
+    /// The standing was not a link.
+    #[error("invalid standing in the invite")]
+    Standing(#[source] nauthy::CapError),
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn signet() -> NodeId {
-        NodeId::from_ed25519_secret(&[9u8; 32])
-    }
-
-    /// A real signet-signed membership badge, so a token test carries what the product carries: the badge
-    /// field is a parsed `sheer:` link now, and a stand-in string would only prove the parser is lenient.
-    fn badge() -> Link {
-        crate::testkit::TestRoot::seeded(0xb0)
-            .device_badge(
-                crate::testkit::TestNode::seeded(0xb1).node_id(),
-                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
-            )
-            .expect("mint a membership badge")
-    }
-
-    /// The bound shape round-trips through the one scheme with no seed in the token.
-    #[test]
-    fn bound_invite_round_trips_and_carries_no_seed() {
-        let badge = badge();
-        let token = Invite::bound(signet(), Link::clone(&badge)).to_string();
-        assert!(token.starts_with("invite:"));
-        let parsed = Invite::parse(&token).expect("a bound invite round-trips");
-        match parsed {
-            Invite::Bound {
-                signet: root,
-                badge: carried,
-            } => {
-                assert_eq!(root, signet());
-                assert_eq!(carried.as_str(), badge.as_str());
-            }
-            other => panic!("expected the bound shape, got {other:?}"),
-        }
-    }
-
-    /// The derived shape round-trips with the seed, signet, and badge fields intact.
-    #[test]
-    fn derived_invite_round_trips() {
-        let minted = badge();
-        let token = Invite::derived([7u8; 32], signet(), Link::clone(&minted)).to_string();
-        assert!(token.starts_with("invite:"));
-        let parsed = Invite::parse(&token).expect("a derived invite round-trips");
-        match parsed {
-            Invite::Derived {
-                seed,
-                signet: root,
-                badge,
-            } => {
-                assert_eq!(&*seed, &[7u8; 32]);
-                assert_eq!(root, signet());
-                assert_eq!(badge.as_str(), minted.as_str());
-            }
-            other => panic!("expected the derived shape, got {other:?}"),
-        }
-    }
-
-    /// The manual Debug redacts the derived seed, the one secret an invite can carry: a device seed IS
-    /// an identity, so no `{:?}` (a log line, a panic message, a future trace) may print it. The shape,
-    /// the signet, and the badge's presence stay.
-    #[test]
-    fn derived_debug_redacts_the_seed() {
-        let seed = [7u8; 32];
-        let invite = Invite::derived(seed, signet(), badge());
-        let shown = format!("{invite:?}");
-        assert!(
-            shown.contains("Invite::Derived"),
-            "the shape is still named: {shown}"
-        );
-        assert!(
-            shown.contains("<redacted>"),
-            "the seed renders as redacted: {shown}"
-        );
-        assert!(
-            !shown.contains("7, 7"),
-            "the seed's bytes never render: {shown}"
-        );
-        assert!(
-            !shown.contains(&BASE32_NOPAD.encode(&seed).to_lowercase()),
-            "the seed's base32 form never renders: {shown}"
-        );
-    }
-
-    /// A seed has one spelling. `ſ` and `ı` uppercase to `S` and `I` under Unicode rules, so standing in
-    /// for `s` or `i` they would decode to the same seed; they are refused instead.
-    #[test]
-    fn a_seed_with_a_unicode_look_alike_is_refused() {
-        for (letter, look_alike) in [('s', "\u{17f}"), ('i', "\u{131}")] {
-            let seed = (0..=u8::MAX)
-                .map(|byte| [byte; 32])
-                .find(|seed| encode_seed(seed).contains(letter))
-                .expect("some seed spells the letter");
-            let token = Invite::derived(seed, signet(), badge()).to_string();
-            assert!(Invite::parse(&token).is_ok(), "the seed as sent parses");
-            let encoded = encode_seed(&seed);
-            let spelled = token.replacen(
-                encoded.as_str(),
-                &encoded.replacen(letter, look_alike, 1),
-                1,
-            );
-            assert!(
-                matches!(Invite::parse(&spelled), Err(InviteError::Encoding)),
-                "{look_alike} for {letter} is not the same seed"
-            );
-        }
-    }
-
-    /// A pre-rename `authkey:` token is REFUSED, both shapes: `invite:` is the one scheme, with no
-    /// aliasing, so a token carrying the retired prefix fails loudly instead of half-working as a
-    /// legacy shape.
-    #[test]
-    fn a_pre_rename_token_is_refused() {
-        let two_field = format!(
-            "authkey:{}.{}",
-            BASE32_NOPAD.encode(&[4u8; 32]).to_lowercase(),
-            signet()
-        );
-        assert!(matches!(
-            Invite::parse(&two_field),
-            Err(InviteError::Scheme)
-        ));
-
-        let three_field = format!("{two_field}.sheer:BADGE");
-        assert!(matches!(
-            Invite::parse(&three_field),
-            Err(InviteError::Scheme)
-        ));
-    }
-
-    /// The scheme and the shape markers are the whole grammar: a foreign scheme, a missing or empty
-    /// badge, a short seed, bad base32, a bad signet, and a badge that does not decode are each a typed
-    /// refusal, never a silent default.
-    #[test]
-    fn malformed_tokens_are_refused() {
-        assert!(matches!(Invite::parse("sheer:x"), Err(InviteError::Scheme)));
-        assert!(matches!(
-            Invite::parse("invite:"),
-            Err(InviteError::Malformed)
-        ));
-        assert!(matches!(
-            Invite::parse(&format!("invite:{}", signet())),
-            Err(InviteError::Malformed)
-        ));
-        let short = BASE32_NOPAD.encode(&[0u8; 8]).to_lowercase();
-        assert!(matches!(
-            Invite::parse(&format!("invite:{short}.{}.sheer:B", signet())),
-            Err(InviteError::Length)
-        ));
-        assert!(matches!(
-            Invite::parse(&format!("invite:not-base32.{}.sheer:B", signet())),
-            Err(InviteError::Encoding)
-        ));
-        assert!(matches!(
-            Invite::parse("invite:not-a-node.sheer:B"),
-            Err(InviteError::Signet(_))
-        ));
-        assert!(matches!(
-            Invite::parse(&format!("invite:{}.", signet())),
-            Err(InviteError::Malformed)
-        ));
-        assert!(matches!(
-            Invite::parse(&format!("invite:{}.sheer:not-a-link", signet())),
-            Err(InviteError::Badge(_))
-        ));
-    }
-}
+#[path = "invite_tests.rs"]
+mod invite_tests;

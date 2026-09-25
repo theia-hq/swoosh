@@ -39,15 +39,16 @@ use crate::commands::service::ls::{disabled_warning, render_catalog};
 /// Show your node's status, or a peer's connection path
 #[derive(Debug, Args)]
 pub struct StatusCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
     #[arg(value_name = "peer")]
     pub peer: Option<Peer>,
-    /// present a `sheer:` capability link to reach a gated peer
+    /// present a `swoosh:` capability link to reach a gated peer
     #[arg(
         long,
         value_name = "link",
+        value_parser = swoosh::link::parse,
         long_help = "Optional: your own devices need no link, the dial presents this \
-                     device's membership badge. Pass a `sheer:` link only to reach as a delegate."
+                     device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     #[command(flatten)]
@@ -75,7 +76,7 @@ impl swoosh::reaching::Reaching for StatusCmd {
     ///
     /// `status` probes the peer's family-gated `ping` service, so it presents the member badge rooted at
     /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. The
-    /// effective slip is the FOLD of a self-addressing `sheer:` link-as-peer with an explicit `--present`,
+    /// effective slip is the FOLD of a self-addressing `swoosh:` link-as-peer with an explicit `--present`,
     /// threaded INTO the credential so the ONE resolver owns both slots.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
@@ -561,13 +562,15 @@ mod tests {
             std::env::temp_dir().join(format!("sw4-status-present-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(base.join("home")).expect("scratch home");
         let home = Home::resolve(Some(base.join("home"))).expect("the scratch home resolves");
-        let link = swoosh::testkit::TestRoot::seeded(0xb0)
-            .device_badge(
-                swoosh::testkit::TestNode::seeded(0xb1).node_id(),
-                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
-            )
-            .expect("mint a stand-in slip")
-            .to_string();
+        let link = swoosh::link::Link::from(
+            swoosh::testkit::TestRoot::seeded(0xb0)
+                .device_badge(
+                    swoosh::testkit::TestNode::seeded(0xb1).node_id(),
+                    nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
+                )
+                .expect("mint a stand-in slip"),
+        )
+        .to_string();
         let status = Wrap::try_parse_from(["x", "--present", &link])
             .expect("bare status --present parses")
             .status;

@@ -40,6 +40,11 @@ struct PingWrap {
     cmd: ping::PingCmd,
 }
 
+/// A minted link as a person types it: `swoosh:` then the bare text.
+fn shown(link: &nauthy::Link) -> String {
+    swoosh::link::Link::from(nauthy::Link::clone(link)).to_string()
+}
+
 fn ping_with_present(peer: &str, present: &str) -> ping::PingCmd {
     PingWrap::try_parse_from(["ping", peer, "--present", present])
         .expect("the verb parses with a --present link")
@@ -60,7 +65,7 @@ fn reach_to_peer(peer: &str) -> reach::ReachCmd {
         .cmd
 }
 
-/// Clap-parse a `ping` verb whose PEER is the given string (a raw key, a petname, or a `sheer:` link), with
+/// Clap-parse a `ping` verb whose PEER is the given string (a raw key, a petname, or a `swoosh:` link), with
 /// no `--present`: the link-as-peer path, where the peer self-presents its own slip via the credential fold.
 fn ping_with_peer(peer: &str) -> ping::PingCmd {
     PingWrap::try_parse_from(["ping", peer])
@@ -147,7 +152,7 @@ async fn a_verb_with_a_signet_bound_present_slip_fills_slot_two() {
         .unwrap();
 
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-    let cmd = ping_with_present(&peer, slip.as_str());
+    let cmd = ping_with_present(&peer, &shown(&slip));
     let (slot1, slot2) = device.slots_for(&cmd).await;
 
     assert_eq!(
@@ -158,7 +163,7 @@ async fn a_verb_with_a_signet_bound_present_slip_fills_slot_two() {
     let badge = slot2
         .expect("REGRESSION: a signet-bound --present dial must fill slot 2 with the fleet badge");
     assert!(
-        badge.as_str().starts_with("sheer:") && badge.as_str() != slip.as_str(),
+        badge.as_str().starts_with("ed01") && badge.as_str() != slip.as_str(),
         "slot 2 is the dialer's own member badge, not the slip: {badge}"
     );
 }
@@ -179,7 +184,7 @@ async fn a_verb_with_a_bearer_present_slip_leaves_slot_two_empty() {
         .unwrap();
 
     let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-    let cmd = ping_with_present(&peer, bearer.as_str());
+    let cmd = ping_with_present(&peer, &shown(&bearer));
     let (slot1, slot2) = device.slots_for(&cmd).await;
 
     assert_eq!(
@@ -195,7 +200,7 @@ async fn a_verb_with_a_bearer_present_slip_leaves_slot_two_empty() {
 
 #[tokio::test]
 async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
-    // Defect #1 at the VERB boundary: `ping sheer:<own-fleet-signet-link>` with NO `--present`. The link is
+    // Defect #1 at the VERB boundary: `ping swoosh:<own-fleet-signet-link>` with NO `--present`. The link is
     // the PEER; the credential fold self-presents it, so `bind_role() -> resolve() -> slots` fills slot 1
     // (the link) AND slot 2 (the dialer's own fleet badge), IDENTICAL to passing it via `--present`. The
     // slip pins the dialer's OWN fleet so the fleet-match rule attaches slot 2.
@@ -211,7 +216,7 @@ async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
         )
         .unwrap();
 
-    let cmd = ping_with_peer(link.as_str());
+    let cmd = ping_with_peer(&shown(&link));
     let (slot1, slot2) = device.slots_for(&cmd).await;
 
     assert_eq!(
@@ -223,7 +228,7 @@ async fn a_verb_with_a_signet_bound_link_as_peer_fills_slot_two() {
         "REGRESSION (defect #1): a signet-bound link-as-peer must fill slot 2, not drop it as before",
     );
     assert!(
-        badge.as_str().starts_with("sheer:") && badge.as_str() != link.as_str(),
+        badge.as_str().starts_with("ed01") && badge.as_str() != link.as_str(),
         "slot 2 is the dialer's own member badge, not the link: {badge}"
     );
 }
@@ -244,7 +249,7 @@ async fn a_verb_with_a_foreign_fleet_link_as_peer_leaves_slot_two_empty() {
         )
         .unwrap();
 
-    let cmd = ping_with_peer(link.as_str());
+    let cmd = ping_with_peer(&shown(&link));
     let (slot1, slot2) = device.slots_for(&cmd).await;
 
     assert_eq!(
@@ -270,8 +275,8 @@ async fn reach_presents_the_member_badge_like_its_siblings() {
     let badge = reach_slot1
         .expect("REGRESSION: `reach` must present the member badge, not dial as a stranger");
     assert!(
-        badge.as_str().starts_with("sheer:"),
-        "slot 1 is the member badge as a sheer: link, got {badge}"
+        badge.as_str().starts_with("ed01"),
+        "slot 1 is the member badge as a swoosh: link, got {badge}"
     );
     assert_eq!(
         badge.dial_node(),
@@ -314,7 +319,7 @@ async fn reach_with_a_signet_bound_link_as_peer_fills_slot_two() {
         )
         .unwrap();
 
-    let (slot1, slot2) = device.slots_for(&reach_to_peer(link.as_str())).await;
+    let (slot1, slot2) = device.slots_for(&reach_to_peer(&shown(&link))).await;
 
     assert_eq!(
         slot1.as_ref().map(Link::as_str),
@@ -325,7 +330,32 @@ async fn reach_with_a_signet_bound_link_as_peer_fills_slot_two() {
         "REGRESSION: a signet-bound `reach` must fill slot 2 with the dialer's fleet badge",
     );
     assert!(
-        badge.as_str().starts_with("sheer:") && badge.as_str() != link.as_str(),
+        badge.as_str().starts_with("ed01") && badge.as_str() != link.as_str(),
         "slot 2 is the dialer's own member badge, not the link: {badge}"
     );
+}
+
+/// A link typed with its `swoosh:` mark reaches the dial bare: slot 1 carries nauthy's text, never the
+/// printed form.
+#[tokio::test]
+async fn a_presented_link_carries_no_prefix_on_the_wire() {
+    let device = Device::new("wire").await;
+    let service: Service = "ping".parse().unwrap();
+    let slip = TestNode::seeded(1)
+        .bound_slip(
+            &service,
+            TestNode::seeded(DEVICE).verify_key(),
+            Request::expires_in(Duration::from_secs(3600)),
+        )
+        .unwrap();
+    let typed = shown(&slip);
+    assert!(typed.starts_with("swoosh:"), "{typed}");
+
+    let peer = NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
+    for cmd in [ping_with_present(&peer, &typed), ping_with_peer(&typed)] {
+        let (slot1, _) = device.slots_for(&cmd).await;
+        let slot1 = slot1.expect("the typed link is slot 1");
+        assert_eq!(slot1.as_str(), slip.as_str(), "slot 1 is the bare link");
+        assert!(!slot1.as_str().contains("swoosh:"), "{slot1:?}");
+    }
 }

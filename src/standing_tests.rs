@@ -145,10 +145,11 @@ fn hold(dir: &Path) -> std::fs::File {
 fn at_seam(at: Seam, dir: PathBuf, step: impl FnOnce() + 'static) -> SeamGuard {
     let mut step = Some(step);
     SEAM.set(Some(Box::new(move |reached, path| {
-        if reached == at && path == dir {
-            if let Some(step) = step.take() {
-                step();
-            }
+        if reached == at
+            && path == dir
+            && let Some(step) = step.take()
+        {
+            step();
         }
     })));
     SeamGuard
@@ -245,7 +246,7 @@ async fn a_root_with_no_pin_is_an_interrupted_mint_whatever_the_badge_holds() {
     }
     let home = home("mint-torn");
     root_dir(&home.root(), ROOT);
-    std::fs::write(home.badge(), b"sheer:torn").expect("tear the badge");
+    std::fs::write(home.badge(), b"torn").expect("tear the badge");
     assert_eq!(
         read(&home).await.standing,
         Standing::InterruptedMint { root_key: root() }
@@ -356,7 +357,7 @@ async fn a_held_root_with_no_standing_reads_damaged() {
 async fn a_torn_standing_reads_damaged() {
     let home = home("torn-badge");
     pin(&home, root()).await;
-    std::fs::write(home.badge(), b"sheer:torn").expect("tear the badge");
+    std::fs::write(home.badge(), b"torn").expect("tear the badge");
     assert_eq!(
         damaged(&home).await,
         Disagreement::UnreadableStanding { path: home.badge() }
@@ -426,7 +427,7 @@ async fn a_standing_with_no_readable_end_date_reads_damaged() {
 #[tokio::test]
 async fn a_malformed_pin_reads_damaged() {
     let home = home("torn-pin");
-    std::fs::write(home.signet(), b"bf01torn\n").expect("tear the pin");
+    std::fs::write(home.signet(), b"ed01torn\n").expect("tear the pin");
     assert_eq!(
         damaged(&home).await,
         Disagreement::UnreadablePin {

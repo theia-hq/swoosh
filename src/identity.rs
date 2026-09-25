@@ -59,7 +59,7 @@ pub use protect::{Protected, protect};
 /// never revoked. 90 days is the chosen default: a real re-mint cadence (about quarterly) a homelab owner
 /// can absorb, and a 90-day backstop instead of a year, matching the invite default operators expect. A
 /// longer window (up to a year via `swoosh invite add --expires 365d`, for a controlled reused-secret case such
-/// as qat) stays reachable, but is now a conscious opt-in rather than the silent, only value. Revocation
+/// as a CI runner) stays reachable, but is now a conscious opt-in rather than the silent, only value. Revocation
 /// stays the primary, immediate control (the `FileDenylist`, offline + live); the TTL is the backstop for
 /// a leak never noticed.
 pub const DEVICE_BADGE_TTL: core::time::Duration =
@@ -113,7 +113,7 @@ impl Secret {
     /// rather than "forever" -- a lost, un-denylisted device eventually ages out. The caller owns the
     /// window: `swoosh invite add` passes an explicit `--expires`, or falls back to [`DEVICE_BADGE_TTL`], so
     /// the lifetime is a default the CLI applies, not a constant buried in this signer. The signet secret
-    /// stays in this wrapper: only the signed public badge (a `sheer:` link) leaves.
+    /// stays in this wrapper: only the signed public badge (a link) leaves.
     pub fn sign_device_badge(
         &self,
         device: NodeId,
@@ -254,7 +254,7 @@ fn create_dir(file: &KeyFile) -> eyre::Result<()> {
 ///
 /// This is how `adopt` provisions the device identity a later `serve` binds: it MUST land in the same
 /// store [`resolve`] reads, so the node comes up AS the adopted device. (Writing tightbeam's separate
-/// store instead was the qat identity-mismatch bug: `serve` bound swoosh's own key, never the adopted
+/// store instead was the CI identity-mismatch bug: `serve` bound swoosh's own key, never the adopted
 /// one, so the exposed node had a different id than the contact pointed at.)
 ///
 /// The refusal is here, in the module that owns the file, and not at the one call site, because it is

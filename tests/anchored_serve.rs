@@ -136,7 +136,7 @@ fn swoosh(home: &Path, args: &[&str]) -> String {
 fn issue(home: &Path, args: &[&str]) -> Link {
     let mut full = vec!["grant", "issue"];
     full.extend_from_slice(args);
-    let link = swoosh(home, &full).trim().parse().expect("a link");
+    let link = swoosh::link::parse(&swoosh(home, &full)).expect("a link");
     std::thread::sleep(nauthy::STAT_DEBOUNCE + Duration::from_millis(100));
     link
 }
@@ -259,7 +259,8 @@ async fn a_self_slip_revoked_mid_session_is_cut() {
     let (mut write, mut read) = open(&session).await.expect("the link is admitted");
     assert!(echoes(&mut write, &mut read).await, "served once admitted");
 
-    swoosh(&scratch.0, &["grant", "revoke", link.as_str()]);
+    let shown = swoosh::link::Link::from(Link::clone(&link)).to_string();
+    swoosh(&scratch.0, &["grant", "revoke", &shown]);
     let deadline = Instant::now() + 3 * SWEEP;
     while echoes(&mut write, &mut read).await {
         assert!(

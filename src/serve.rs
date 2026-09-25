@@ -71,7 +71,7 @@ pub const ROSTER_SERVICE: &str = "roster";
 /// decision at every match site (STYLE: prefer enums to bools). Every arm is a SUCCESS: an owner asked the
 /// node to stop and it did, so the process exits 0. A real teardown FAILURE never becomes a `Stopped`, it
 /// stays an `Err` the run propagates, so "graceful" and "errored" cannot be confused: the type only exists
-/// on the success path. This is the distinction the qat CI action reads, a deliberate stop is green.
+/// on the success path. This is the distinction a CI action reads, a deliberate stop is green.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stopped {
     /// An owner requested the stop: an admitted `control.stop` caller, or a `--expires` deadline. The exposer's
@@ -87,7 +87,7 @@ pub enum Stopped {
 }
 
 impl Stopped {
-    /// The one clear line printed on a graceful stop, so a CI action log (the qat teardown) reads a
+    /// The one clear line printed on a graceful stop, so a CI action log (a CI teardown) reads a
     /// deliberate stop as a clean end, not a mystery exit. Names the reason plainly.
     pub fn message(self) -> &'static str {
         match self {

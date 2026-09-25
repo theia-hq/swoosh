@@ -76,7 +76,7 @@ async fn append_then_load_returns_every_record_in_order() {
         "web",
         GrantKind::Device,
         Delegation::Sealed,
-        "bf01deadbeef",
+        "ed01deadbeef",
         1_788_405_000,
     );
     grants.append(&bearer).await.expect("append bearer");
@@ -99,7 +99,7 @@ async fn a_corrupt_line_is_skipped_and_the_good_rows_survive() {
         "ssh",
         GrantKind::Device,
         Delegation::Sealed,
-        "bf01deadbeef",
+        "ed01deadbeef",
         1_788_400_000,
     );
     grants.append(&good).await.expect("append the good record");
@@ -187,7 +187,7 @@ async fn the_created_ledger_is_owner_only() {
 #[tokio::test]
 async fn membership_round_trips_as_membership() {
     let (grants, path) = ledger("membership");
-    let badge = membership_record(GrantKind::Device, "bf01deadbeef", 1_788_400_000);
+    let badge = membership_record(GrantKind::Device, "ed01deadbeef", 1_788_400_000);
     let slip = record(
         "ssh",
         GrantKind::Bearer,

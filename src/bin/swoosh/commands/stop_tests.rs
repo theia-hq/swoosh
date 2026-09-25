@@ -108,13 +108,15 @@ async fn bare_stop_rejects_present() {
 
     let base = scratch("present");
     let home = home_in(&base);
-    let link = swoosh::testkit::TestRoot::seeded(0xb0)
-        .device_badge(
-            swoosh::testkit::TestNode::seeded(0xb1).node_id(),
-            nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
-        )
-        .expect("mint a stand-in slip")
-        .to_string();
+    let link = swoosh::link::Link::from(
+        swoosh::testkit::TestRoot::seeded(0xb0)
+            .device_badge(
+                swoosh::testkit::TestNode::seeded(0xb1).node_id(),
+                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
+            )
+            .expect("mint a stand-in slip"),
+    )
+    .to_string();
     let stop = Wrap::try_parse_from(["x", "--present", &link])
         .expect("bare stop --present parses")
         .stop;

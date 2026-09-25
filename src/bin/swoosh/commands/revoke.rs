@@ -1,6 +1,6 @@
 //! `swoosh grant revoke <peer|link>`: revoke a grant so this node refuses it, offline and at once.
 //!
-//! One verb, two objects. Given a `sheer:` LINK, it revokes exactly that link and everything attenuated from
+//! One verb, two objects. Given a `swoosh:` LINK, it revokes exactly that link and everything attenuated from
 //! it, the way pasting the link back always has (nauthy's [`Link::revoke`](nauthy::Link::revoke),
 //! unchanged). Given a PEER instead (a node id or a `petname/device` you granted), it looks that holder up in
 //! swoosh's own mint-log ledger, takes the ROOT revocation id recorded when the grant was issued, and revokes
@@ -16,19 +16,19 @@ use swoosh::home::Home;
 
 /// Revoke a grant so this node refuses it at once, without waiting for expiry.
 ///
-/// The object is either a `sheer:` link (revokes that link and everything attenuated from it) or a peer you
+/// The object is either a `swoosh:` link (revokes that link and everything attenuated from it) or a peer you
 /// granted (a node id or `petname/device`; revokes every grant issued to that holder, at its root, so all
 /// delegations fall with it).
 #[derive(Debug, Args)]
 pub struct RevokeCmd {
-    /// A `sheer:` link to revoke, or a peer you granted (a node id or `petname/device`) to cut off.
+    /// A `swoosh:` link to revoke, or a peer you granted (a node id or `petname/device`) to cut off.
     #[arg(value_name = "peer|link")]
     pub target: String,
 }
 
 impl RevokeCmd {
     /// Revoke the target into swoosh's persisted denylist in the same home the expose gate reads.
-    /// A `sheer:` target takes the link path; anything else is a holder looked up in the ledger. Reads the
+    /// A `swoosh:` target takes the link path; anything else is a holder looked up in the ledger. Reads the
     /// address book only to resolve a petname holder to its canonical node id (the link path never does).
     pub async fn run(self, store: ContactsStore, home: &Home) -> eyre::Result<()> {
         let revoked = home.revoked();
@@ -39,13 +39,17 @@ impl RevokeCmd {
             swoosh::config::create_store_dir(parent)?;
         }
         let mut denylist = FileDenylist::load(revoked).await?;
-        // A `sheer:` prefix is the one unambiguous mark of a link: parse-don't-validate on the object's shape.
+        // A `swoosh:` prefix is the one unambiguous mark of a link: parse-don't-validate on the object's shape.
         // A malformed link still routes here (and fails as a bad link), rather than being misread as a peer.
-        if self.target.starts_with(nauthy::SCHEME) {
-            let link: Link = self.target.parse()?;
+        if swoosh::link::is_prefixed(&self.target) {
+            let link: Link = swoosh::link::parse(&self.target)?;
             link.revoke(&mut denylist).await?;
             println!("revoked link ({})", denylist.path().display());
             return Ok(());
+        }
+        // A bare link is not a holder: no name holds a dot. Refuse it naming the prefix.
+        if swoosh::link::looks_bare(&self.target) {
+            return Err(swoosh::link::LinkError::Prefix.into());
         }
         // `-` is the ledger's placeholder for a bearer grant's (absent) holder, never a revoke target: a
         // bearer link has no holder to name, and treating `-` as one would mass-revoke every bearer grant.
@@ -53,7 +57,7 @@ impl RevokeCmd {
         if self.target == grants::ANYONE {
             eyre::bail!(
                 "`-` is the placeholder for a bearer grant's holder, not a revoke target: a bearer link has \
-                 no holder to name. Paste the `sheer:` link to `swoosh grant revoke <link>`, or run \
+                 no holder to name. Paste the `swoosh:` link to `swoosh grant revoke <link>`, or run \
                  `swoosh grant ls`"
             );
         }
@@ -95,7 +99,7 @@ impl RevokeCmd {
             .collect();
         if matches.is_empty() {
             eyre::bail!(
-                "no grant issued to `{}` is recorded in the ledger ({}); paste the `sheer:` link to revoke \
+                "no grant issued to `{}` is recorded in the ledger ({}); paste the `swoosh:` link to revoke \
                  one directly, or run `swoosh grant ls` to see who you have granted",
                 self.target,
                 ledger.path().display()

@@ -31,6 +31,24 @@ jobs:
           tool: cargo-deny
       - name: cargo-deny (sources)
         run: cargo deny check sources
+  # Check with the oldest toolchain the manifest claims (rust-version), so a dependency or a language
+  # feature that needs a newer compiler fails here instead of in a user's build. The version is read from
+  # Cargo.toml, so this job is the same in every repo.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: read rust-version
+        id: msrv
+        run: |
+          v=$(sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml)
+          test -n "$v" || { echo "no rust-version in Cargo.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: check
+        run: cargo +${{ steps.msrv.outputs.version }} check --all-targets --locked
   fmt:
     runs-on: ubuntu-latest
     steps:

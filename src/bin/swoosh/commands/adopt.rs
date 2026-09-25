@@ -28,6 +28,7 @@ use bifrost::NodeId;
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::Link;
+use swoosh::credential::LinkExt as _;
 use swoosh::home::Home;
 use swoosh::invite::Invite;
 use swoosh::secret::SecretSource;
@@ -77,11 +78,14 @@ impl AdoptCmd {
         )?
         .read()?;
         let invite = Invite::parse(&token)?;
-        if from_argv && matches!(invite, Invite::Derived { .. }) {
+        if from_argv && invite.seed.is_some() {
             swoosh::secret::warn_argv_leak(&mut std::io::stderr(), "invite");
         }
-        match invite {
-            Invite::Bound { signet, badge } => {
+        // The standing's key is the root: the invite carries it once.
+        let signet = invite.standing.dial_node();
+        let badge = invite.standing;
+        match invite.seed {
+            None => {
                 // A bound invite admits a key this machine already holds, so there must already BE an
                 // identity: minting one here would produce a key the badge is not bound to, and writing
                 // the badge anyway would store a credential the far gate must refuse.
@@ -113,11 +117,7 @@ impl AdoptCmd {
                     "stored your membership badge: this device now reaches your gated services."
                 );
             }
-            Invite::Derived {
-                seed,
-                signet,
-                badge,
-            } => {
+            Some(seed) => {
                 // Compute the adopted node id before the seed drops (the zeroizing wrapper wipes it).
                 let node = NodeId::from_ed25519_secret(&seed);
                 // Same device-side check as the bound arm, on the node the seed derives: the badge must
@@ -208,13 +208,13 @@ async fn admit_signet(home: &Home, signet: NodeId, force: bool) -> eyre::Result<
     if force {
         return Ok(());
     }
-    if let Some(trusted) = config::load_signet(home).await? {
-        if trusted != signet {
-            eyre::bail!(
-                "this machine already trusts signet {trusted}; adopting this invite would re-root it at \
+    if let Some(trusted) = config::load_signet(home).await?
+        && trusted != signet
+    {
+        eyre::bail!(
+            "this machine already trusts signet {trusted}; adopting this invite would re-root it at \
                  {signet}. Re-run with --force if that is intended"
-            );
-        }
+        );
     }
     Ok(())
 }

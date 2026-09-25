@@ -13,7 +13,7 @@ On the machine that will hold your signet, create the key sealed under a passphr
 $ swoosh identity protect passphrase
 new passphrase for ~/.config/swoosh/identity.key:
 repeat the new passphrase:
-bf012xdjkuwbokai5brwac6varo7xsvuxba6wmfkottpronrhjavyp4q
+ed012xdjkuwbokai5brwac6varo7xsvuxba6wmfkottpronrhjavyp4q
 protection: passphrase
 ```
 
@@ -55,7 +55,7 @@ On a new machine, restore the backup into the home:
 ```console
 $ swoosh identity restore /Volumes/backup/signet.key
 passphrase for /Volumes/backup/signet.key:
-restored bf012xdjkuwbokai5brwac6varo7xsvuxba6wmfkottpronrhjavyp4q
+restored ed012xdjkuwbokai5brwac6varo7xsvuxba6wmfkottpronrhjavyp4q
 only the key came back; this home has no revocation list, so grants you revoked work again
 ```
 
@@ -96,7 +96,7 @@ revoke` still works: it writes a local file and signs nothing.
 `swoosh invite add` refuses to sign anywhere else:
 
 ```
-Error: this machine trusts signet bf01hcq6…, but its own key is bf01imv3…: a badge signed here would root at bf01imv3… and be admitted nowhere that signet gates. Run `invite add` on the machine that holds the signet (the one whose `swoosh identity` prints bf01hcq6…).
+Error: this machine trusts signet ed01hcq6…, but its own key is ed01imv3…: a badge signed here would root at ed01imv3… and be admitted nowhere that signet gates. Run `invite add` on the machine that holds the signet (the one whose `swoosh identity` prints ed01hcq6…).
 ```
 
 You cannot renew a badge either. A membership badge lasts 90 days unless the invite set another window,

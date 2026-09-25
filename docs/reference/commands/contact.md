@@ -15,10 +15,10 @@ Usage: swoosh contact [OPTIONS] <COMMAND>
 ```
 
 **Example.**
-<!-- capture: swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -->
+<!-- capture: swoosh contact add desk ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -->
 ```console
-$ swoosh contact add desk bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-added desk -> bf01hcq6balrlxwa
+$ swoosh contact add desk ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
+added desk -> ed01hcq6balrlxwa
 ```
 
 **Things to know.** One person can have several machines: `contact add alice/laptop <key>` files a key

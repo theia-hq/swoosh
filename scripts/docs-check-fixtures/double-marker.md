@@ -4,5 +4,5 @@
 <!-- manual: the same block cannot carry two markers -->
 ```console
 $ swoosh status
-direct to bf01hcq6…
+direct to ed01hcq6…
 ```

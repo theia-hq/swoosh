@@ -14,9 +14,9 @@ From your own machine, create a device invite for the runner:
 <!-- capture: swoosh invite add ci-runner -->
 ```console
 $ swoosh invite add ci-runner
-invite:….bf01hcq6…
+invite:….ed01hcq6…
 
-recorded me/ci-runner -> bf01imv3ljql6kjn  [derived]
+recorded me/ci-runner -> ed01imv3ljql6kjn  [derived]
 hand this invite to the machine (a SECRET: adopting it becomes this identity and trusts your signet).
 ```
 
@@ -81,7 +81,7 @@ runner's membership admits it:
 <!-- capture: swoosh send app.tar deploybox -->
 ```console
 $ swoosh send app.tar deploybox
-sending to bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
+sending to ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
 sent app.tar (204800 bytes)
 ```
 

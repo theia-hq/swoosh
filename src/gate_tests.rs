@@ -122,7 +122,7 @@ async fn a_malformed_pin_reads_as_none() {
         "the pinned root's device is admitted"
     );
 
-    std::fs::write(scratch.home.signet(), b"bf01 not a key\n").expect("garble the pin");
+    std::fs::write(scratch.home.signet(), b"ed01 not a key\n").expect("garble the pin");
     past_the_debounce();
     assert!(
         !admits(&gate, &badge(ROOT)),

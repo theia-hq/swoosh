@@ -110,7 +110,7 @@ async fn a_member_stops_a_gated_node_over_control_stop() {
 
             // The stop cancelled the exposer's token, so its run returns gracefully. This `Ok` is EXACTLY
             // what `serve` classifies as a graceful, exit-0 stop: its run maps an exposer `Ok` (the token
-            // fired) to `Stopped::Requested` and exits 0, so a deliberate `swoosh stop` (the qat CI teardown)
+            // fired) to `Stopped::Requested` and exits 0, so a deliberate `swoosh stop` (a CI teardown)
             // reads as SUCCESS, not a crash. An `Err` here would instead propagate and exit non-zero; a
             // `control.stop` never produces one.
             let ended = tokio::time::timeout(Duration::from_secs(5), run)

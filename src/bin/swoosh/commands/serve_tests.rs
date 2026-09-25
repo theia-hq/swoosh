@@ -232,7 +232,7 @@ fn default_targets() -> HashMap<String, String> {
 #[test]
 fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
     let banner = render_ready_banner(
-        "bf01exampleid",
+        "ed01exampleid",
         ReachKind::Internet,
         &heard_on_the_network(),
         &n0(),
@@ -245,7 +245,7 @@ fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
     );
 
     assert!(
-        banner.starts_with("swoosh ready\n\n    bf01exampleid\n\n"),
+        banner.starts_with("swoosh ready\n\n    ed01exampleid\n\n"),
         "{banner}"
     );
     assert!(banner.contains("how peers reach you"), "{banner}");
@@ -1308,7 +1308,7 @@ fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
 fn a_disabled_discovery_says_so_plainly() {
     for reach in [ReachKind::Internet, ReachKind::DirectOnly] {
         let banner = render_ready_banner(
-            "bf01exampleid",
+            "ed01exampleid",
             reach,
             &MdnsState::Blocked,
             &n0(),
@@ -1544,7 +1544,7 @@ fn a_fetch_service_glosses_by_name_and_never_leaks_its_scope() {
     );
 }
 
-/// Every graceful-stop reason reports a distinct, non-empty line, so a CI action log (the qat teardown)
+/// Every graceful-stop reason reports a distinct, non-empty line, so a CI action log (a CI teardown)
 /// reads a deliberate stop as a clean end rather than a bare exit. The line names WHY the node stopped.
 #[test]
 fn each_graceful_stop_reason_has_a_distinct_legible_message() {
@@ -2008,7 +2008,7 @@ fn resident_banner_differs_only_by_the_control_line() {
     );
 
     let plain = render_ready_banner(
-        "bf01exampleid",
+        "ed01exampleid",
         ReachKind::Internet,
         &heard_on_the_network(),
         &n0(),
@@ -2020,7 +2020,7 @@ fn resident_banner_differs_only_by_the_control_line() {
         None,
     );
     let resident = render_ready_banner(
-        "bf01exampleid",
+        "ed01exampleid",
         ReachKind::Internet,
         &heard_on_the_network(),
         &n0(),
@@ -2717,7 +2717,7 @@ fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
     };
 
     let banner = render_ready_banner(
-        "bf01exampleid",
+        "ed01exampleid",
         ReachKind::Internet,
         &heard_on_the_network(),
         &n0(),

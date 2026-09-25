@@ -15,17 +15,17 @@ grant their fleet the one service, with an expiry:
 
 <!-- capture: swoosh grant issue ssh --for fleet:contractor --expires 14d -->
 ```console
-$ swoosh contact signet contractor bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
-recorded contractor's signet -> bf01o6vqymgz727g
+$ swoosh contact signet contractor ed01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
+recorded contractor's signet -> ed01o6vqymgz727g
 
 $ swoosh grant issue ssh --for fleet:contractor --expires 14d
-issued a fleet-bound grant for `ssh` to fleet signet bf01o6vqymgz727g…
+issued a fleet-bound grant for `ssh` to fleet signet ed01o6vqymgz727g…
   every device that signet vouches for can use it (theft-resistant); expires in 14d
-  revoke: swoosh grant revoke bf01o6vqymgz727g…
-sheer:bf01hcq6…
+  revoke: swoosh grant revoke ed01o6vqymgz727g…
+swoosh:ed01hcq6…
 ```
 
-Hand them the `sheer:` link. On the build box, serve the shell gated:
+Hand them the `swoosh:` link. On the build box, serve the shell gated:
 
 <!-- manual: long-running serve -->
 ```console
@@ -39,7 +39,7 @@ laptop and their spare both reach the box, with the same link:
 
 <!-- manual: interactive ssh -->
 ```console
-$ swoosh ssh buildbox --present sheer:bf01hcq6…
+$ swoosh ssh buildbox --present swoosh:ed01hcq6…
 ```
 
 They reach `ssh` and nothing else. The link names one service; the gate refuses everything it does not
@@ -51,17 +51,17 @@ name.
 ```console
 $ swoosh grant ls
 ssh
-  fleet   bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq  13d  fleet-bound
+  fleet   ed01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq  13d  fleet-bound
 ```
 
 ## Cut them off
 
 The link expires on its own at the end of the engagement. To cut access early, revoke their fleet:
 
-<!-- capture: swoosh grant revoke bf01o6vqymgz727g -->
+<!-- capture: swoosh grant revoke ed01o6vqymgz727g -->
 ```console
-$ swoosh grant revoke bf01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
-revoked 1 grant(s) to bf01o6vqymgz727g… (…/revoked)
+$ swoosh grant revoke ed01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
+revoked 1 grant(s) to ed01o6vqymgz727g… (…/revoked)
 ```
 
 ## The limit

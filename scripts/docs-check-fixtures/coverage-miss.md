@@ -6,5 +6,5 @@ the coverage equation fails instead of the page passing quietly.
 <!-- capture:swoosh status -->
 ```console
 $ swoosh status
-direct to bf01hcq6…
+direct to ed01hcq6…
 ```

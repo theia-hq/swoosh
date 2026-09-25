@@ -8,7 +8,7 @@ Push a file or directory to a peer, verified end to end.
 ```
 Usage: swoosh send [OPTIONS] <path>... <peer>
   <path>...           the files or directories to push
-  <peer>              a petname, a raw node id, or a sheer: link
+  <peer>              a petname, a raw node id, or a swoosh: link
   --service <name>    which served service to reach [default: recv]
 ```
 
@@ -16,7 +16,7 @@ Usage: swoosh send [OPTIONS] <path>... <peer>
 <!-- capture: swoosh send app.tar deploybox -->
 ```console
 $ swoosh send app.tar deploybox
-sending to bf01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
+sending to ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
 sent app.tar (204800 bytes)
 ```
 

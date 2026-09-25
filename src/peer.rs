@@ -1,40 +1,41 @@
-//! A peer to dial, as typed: a saved petname, a raw key, or a self-addressing `sheer:` link.
+//! A peer to dial, as typed: a saved petname, a raw key, or a self-addressing `swoosh:` link.
 //!
 //! A "peer to dial" is a higher-level concept than the address book, so it composes the contacts domain
 //! (`ContactRef`, `Candidate`, `Contacts`) rather than squatting in it, and it unifies the two dial-target
 //! types the reach and tunnel families used to keep apart: the multi-device diagnostic verbs
 //! (`ping`/`speed`/`status`/`fetch`) fan a peer out via [`candidates`](Peer::candidates), the single-target
 //! verbs (`reach`/`send`/`stop`/`service`/`fleet`) resolve one via [`connector`](Peer::connector). Both
-//! shapes read the SAME three arms, so `alice`, `alice/desk`, a raw key, and a `sheer:` link all parse in
+//! shapes read the SAME three arms, so `alice`, `alice/desk`, a raw key, and a `swoosh:` link all parse in
 //! one place, uniform across every dialing verb.
 
 use core::str::FromStr;
 
 use bifrost::NodeId;
-use nauthy::{Link, SCHEME, Service};
+use nauthy::{Link, Service};
 use tightbeam::tunnel::Connector;
 
 use crate::contacts::{Candidate, ContactRef, Contacts};
 use crate::credential::LinkExt as _;
+use crate::link::LinkError;
 use crate::names::NameError;
 
 /// A peer a dialing verb reaches, before resolution. Replaces BOTH the reach family's old `Target` and the
 /// tunnel family's old `Dial`: one type, three arms, tried in a fixed order at the clap boundary.
 ///
-/// A `sheer:` link supersedes the identity path (it self-addresses: it names the node to dial AND carries
+/// A `swoosh:` link supersedes the identity path (it self-addresses: it names the node to dial AND carries
 /// the credential); else a raw base32 node id is dialed verbatim; else the text is a saved petname resolved
 /// against the contact store just before dialing (deferred because the store loads at startup, not at the
 /// clap boundary). Every dialing verb holds this in its peer slot, so `alice`, `alice/desk`, a raw key, and
-/// a `sheer:` link all parse in one place, uniform across `ping`/`speed`/`status`/`fetch`/`reach`/`send`/
+/// a `swoosh:` link all parse in one place, uniform across `ping`/`speed`/`status`/`fetch`/`reach`/`send`/
 /// `stop`/`service`/`ssh`.
 #[derive(Debug, Clone)]
 pub enum Peer {
-    /// A saved petname (`alice`, `me/qat`), resolved against the store at dial time. Fan-out capable: a
+    /// A saved petname (`alice`, `me/ci`), resolved against the store at dial time. Fan-out capable: a
     /// bare person resolves to all their devices in label order.
     Named(ContactRef),
     /// A literal node id, dialed verbatim with no store lookup.
     Raw(NodeId),
-    /// A `sheer:` capability link. Self-addressing: it supplies the dial target (the cap's root node) AND
+    /// A `swoosh:` capability link. Self-addressing: it supplies the dial target (the cap's root node) AND
     /// the slot-1 credential, so a separate `--present` is redundant (see the fold in [`self_present`](Self::self_present)).
     Capability(Link),
 }
@@ -42,14 +43,17 @@ pub enum Peer {
 impl FromStr for Peer {
     type Err = PeerParseError;
 
-    /// A `sheer:` link first (the self-addressing capability form, parse-validated here so a malformed link
+    /// A `swoosh:` link first (the self-addressing capability form, parse-validated here so a malformed link
     /// fails fast at the boundary), then a raw base32 node id (always valid, never a petname, since petnames
     /// are additive), else a saved petname address (validated here, resolved against the store at dial time).
+    /// A bare link (`ed01….x`) is none of these: no name holds a dot, so it refuses naming the prefix.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if text.starts_with(SCHEME) {
-            Ok(Self::Capability(text.parse::<Link>()?))
+        if crate::link::is_prefixed(text) {
+            Ok(Self::Capability(crate::link::parse(text)?))
         } else if let Ok(node) = text.parse::<NodeId>() {
             Ok(Self::Raw(node))
+        } else if crate::link::looks_bare(text) {
+            Err(PeerParseError::Capability(LinkError::Prefix))
         } else {
             Ok(Self::Named(text.parse::<ContactRef>()?))
         }
@@ -59,9 +63,9 @@ impl FromStr for Peer {
 /// Why a string was not a valid [`Peer`].
 #[derive(Debug, thiserror::Error)]
 pub enum PeerParseError {
-    /// The `sheer:`-prefixed text was not a valid capability link.
-    #[error("invalid capability link")]
-    Capability(#[from] nauthy::CapError),
+    /// The text was a link without its `swoosh:` prefix, or a `swoosh:` link that did not parse.
+    #[error(transparent)]
+    Capability(#[from] LinkError),
     /// The text was neither a link nor a raw key, and a part of it was not a name: the name rule's own line.
     #[error(transparent)]
     Contact(#[from] NameError),
@@ -127,7 +131,7 @@ impl Peer {
     }
 
     /// The credential this peer self-supplies when it is a self-addressing link, else `None`. This is what
-    /// the fold prefers over an explicit `--present`: a `sheer:` link passed AS the peer flows through the
+    /// the fold prefers over an explicit `--present`: a `swoosh:` link passed AS the peer flows through the
     /// same [`resolve`](crate::reaching::resolve) path as an explicit `--present`, so a signet-bound
     /// link-as-peer computes its slot-2 member badge exactly as a `--present` link does.
     pub fn self_present(&self) -> Option<Link> {
@@ -145,7 +149,7 @@ impl Peer {
     pub fn reject_redundant_present(&self, explicit: Option<&Link>) -> eyre::Result<()> {
         if matches!(self, Self::Capability(_)) && explicit.is_some() {
             eyre::bail!(
-                "a `sheer:` link peer already presents its own credential; drop `--present` (or name \
+                "a `swoosh:` link peer already presents its own credential; drop `--present` (or name \
                  a petname/key peer to present a different link)"
             );
         }
@@ -173,41 +177,40 @@ mod tests {
     use super::Peer;
     use crate::contacts::{Contacts, Petname};
     use crate::credential::LinkExt as _;
+    use crate::link::LinkError;
 
     /// A distinct node id for a test, derived from a fixed seed so it is stable and comparable.
     fn node(seed: u8) -> NodeId {
         NodeId::from_ed25519_secret(&[seed; 32])
     }
 
-    /// A real signet-bound `sheer:` link (work issues it for a foreign fleet), so a test can assert a
+    /// A real signet-bound `swoosh:` link (work issues it for a foreign fleet), so a test can assert a
     /// `Capability` peer self-addresses to the cap ROOT and folds its slip like an explicit `--present`.
     fn signet_link() -> String {
-        crate::testkit::TestNode::seeded(1)
+        let slip = crate::testkit::TestNode::seeded(1)
             .fleet_slip(
                 &"ssh".parse().expect("valid service"),
                 crate::testkit::TestRoot::seeded(2).verify_key(),
                 nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
             )
-            .expect("mint a signet-bound slip")
-            .to_string()
+            .expect("mint a signet-bound slip");
+        crate::link::Link::from(slip).to_string()
     }
 
-    /// `me/qat` parses as a `Named` peer (not a raw key, not a link), then `connector` resolves it through
+    /// `me/ci` parses as a `Named` peer (not a raw key, not a link), then `connector` resolves it through
     /// the contact store to the saved key. A raw key parses `Raw` and needs no store; an unknown petname is
     /// a loud `connector` error, never a silent nothing.
     #[test]
     fn a_petname_peer_resolves_through_contacts_to_the_saved_key() {
-        let qat = node(7);
+        let ci = node(7);
         let mut contacts = Contacts::default();
         contacts.add(
             "me".parse::<Petname>().expect("valid petname"),
-            Some("qat".parse().expect("valid device")),
-            qat,
+            Some("ci".parse().expect("valid device")),
+            ci,
         );
 
-        let peer = "me/qat"
-            .parse::<Peer>()
-            .expect("a petname parses as a Peer");
+        let peer = "me/ci".parse::<Peer>().expect("a petname parses as a Peer");
         assert!(
             matches!(peer, Peer::Named(_)),
             "a saved-contact address parses as a petname to resolve, not a raw key"
@@ -217,7 +220,7 @@ mod tests {
             .expect("a known petname resolves to a connector");
         assert_eq!(
             connector.dial(),
-            qat,
+            ci,
             "the petname must dial the key it was saved under"
         );
 
@@ -255,16 +258,16 @@ mod tests {
         );
     }
 
-    /// `sheer:<link>` parses as a `Capability` peer, and BOTH resolution shapes self-address to the cap root
-    /// (`dial_node`): `candidates` yields exactly one candidate at that node, and `connector` dials it, so a
-    /// link degenerates to a single target uniform with a raw key.
+    /// A pasted `swoosh:<link>` parses as a `Capability` peer, and BOTH resolution shapes self-address to the
+    /// cap root (`dial_node`): `candidates` yields exactly one candidate at that node, and `connector` dials
+    /// it, so a link degenerates to a single target uniform with a raw key.
     #[test]
-    fn a_sheer_link_parses_capability_and_self_addresses() {
+    fn a_pasted_swoosh_link_parses_as_a_peer() {
         let link = signet_link();
-        let peer = link.parse::<Peer>().expect("a sheer: link parses");
+        let peer = link.parse::<Peer>().expect("a swoosh: link parses");
         let root = match &peer {
             Peer::Capability(link) => link.dial_node(),
-            _ => panic!("a sheer: link parses as a Capability peer"),
+            _ => panic!("a swoosh: link parses as a Capability peer"),
         };
 
         let contacts = Contacts::default();
@@ -287,25 +290,46 @@ mod tests {
         assert_eq!(connector.dial(), root, "the connector dials the cap root");
     }
 
-    /// A malformed `sheer:` link is a `PeerParseError::Capability` at the boundary, not deferred to a
+    /// A malformed `swoosh:` link is a `PeerParseError::Capability` at the boundary, not deferred to a
     /// petname lookup that would miss: the parse fails fast where the user typed it.
     #[test]
     fn parse_rejects_a_malformed_link_at_the_boundary() {
-        let error = "sheer:not-a-real-link".parse::<Peer>();
+        let error = "swoosh:not-a-real-link".parse::<Peer>();
         assert!(
-            matches!(error, Err(super::PeerParseError::Capability(_))),
-            "a bad sheer: link is a Capability parse error, not a petname to resolve: {error:?}"
+            matches!(
+                error,
+                Err(super::PeerParseError::Capability(LinkError::Link(_)))
+            ),
+            "a bad swoosh: link is a Capability parse error, not a petname to resolve: {error:?}"
         );
     }
 
-    /// A `sheer:` link peer plus an explicit `--present` is a LOUD conflict (the link already presents its
+    /// A bare link typed where a peer goes (`ed01….x`) is not a name and not a key: it refuses with the
+    /// line that names the prefix, whatever follows the dot.
+    #[test]
+    fn a_bare_link_is_refused_with_the_prefix_hint() {
+        let bare = crate::link::parse(&signet_link()).expect("a link");
+        for text in [bare.as_str().to_owned(), format!("{}.x", node(3))] {
+            let error = text.parse::<Peer>().expect_err("a bare link is refused");
+            assert!(
+                matches!(error, super::PeerParseError::Capability(LinkError::Prefix)),
+                "{text}: {error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                "this looks like a link; a link starts with `swoosh:`"
+            );
+        }
+    }
+
+    /// A `swoosh:` link peer plus an explicit `--present` is a LOUD conflict (the link already presents its
     /// own credential); a link peer with no `--present`, and a `Named`/`Raw` peer WITH `--present` (the
     /// delegate case, a slip rooted elsewhere), are both fine.
     #[test]
     fn link_peer_plus_present_is_a_loud_error() {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a link peer");
-        let explicit: Link = link.parse().expect("a slip");
+        let explicit: Link = crate::link::parse(&link).expect("a slip");
         assert!(
             peer.reject_redundant_present(Some(&explicit)).is_err(),
             "a link peer + --present is a loud conflict, not a silent pick"
@@ -333,12 +357,12 @@ mod tests {
         let peer = link.parse::<Peer>().expect("a link peer");
         let root = match &peer {
             Peer::Capability(link) => link.dial_node(),
-            _ => panic!("a sheer: link parses as a Capability peer"),
+            _ => panic!("a swoosh: link parses as a Capability peer"),
         };
         // The two slots come from the resolver, not from the peer link: distinct valid links prove the
         // connector took them rather than deriving slot 1 from the link itself.
-        let slot1: Link = signet_link().parse().expect("a valid slot-1 link");
-        let slot2: Link = signet_link().parse().expect("a valid slot-2 link");
+        let slot1: Link = crate::link::parse(&signet_link()).expect("a valid slot-1 link");
+        let slot2: Link = crate::link::parse(&signet_link()).expect("a valid slot-2 link");
         let connector = peer
             .connector(
                 &Contacts::default(),

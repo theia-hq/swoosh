@@ -24,7 +24,7 @@ use swoosh::transport::{self, ReachArgs};
 /// Measure the round-trip time to a peer, addressed by a petname or their public key.
 #[derive(Debug, Args)]
 pub struct PingCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `sheer:` link
+    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
     /// How many probes to send.
@@ -33,12 +33,13 @@ pub struct PingCmd {
     /// Seconds between probes.
     #[arg(short = 'i', long, value_name = "seconds", default_value_t = 1.0)]
     pub interval: f64,
-    /// present a `sheer:` capability link to reach a gated peer
+    /// present a `swoosh:` capability link to reach a gated peer
     #[arg(
         long,
         value_name = "link",
+        value_parser = swoosh::link::parse,
         long_help = "Optional: your own devices need no link, the dial presents this \
-                     device's membership badge. Pass a `sheer:` link only to reach as a delegate."
+                     device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
     /// Print a line per probe as it lands, showing the path at that moment (watch iroh punch to direct).
@@ -69,7 +70,7 @@ impl swoosh::reaching::Reaching for PingCmd {
     /// roots correctly. A `--present` slip is threaded INTO the credential so the ONE resolver
     /// ([`resolve`](swoosh::reaching::resolve)) owns both slots: slot 1 (present-or-badge) and the
     /// privacy-aware slot 2 (a fleet badge, only for a signet-bound slip). The effective slip is the FOLD of
-    /// a self-addressing `sheer:` link-as-peer with an explicit `--present`, so a link-as-peer resolves
+    /// a self-addressing `swoosh:` link-as-peer with an explicit `--present`, so a link-as-peer resolves
     /// through the same slot path as a `--present` link.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::Family {
@@ -105,7 +106,7 @@ impl PingCmd {
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
-        // The redundant-present conflict (a `sheer:` link peer plus an explicit `--present`) is rejected
+        // The redundant-present conflict (a `swoosh:` link peer plus an explicit `--present`) is rejected
         // ONCE in the composition root via `Reaching::reject_redundant_present`, before this runs.
         let candidates = reach::candidates(&self.peer, contacts)?;
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver: slot 1 (`present`) is

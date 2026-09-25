@@ -89,7 +89,7 @@ Because it is direct-only, a `quirk+noise` `serve` lists every address it is dia
 $ swoosh serve --transport quirk+noise
 swoosh ready
 
-    bf014v3ob63glpu3xyi55uf4yadh2bjaq3pgycoucxsahwcc5ixodt5q
+    ed014v3ob63glpu3xyi55uf4yadh2bjaq3pgycoucxsahwcc5ixodt5q
 
 how peers reach you
   local    automatic; local mDNS, or direct, no NAT traversal
@@ -121,7 +121,7 @@ blocked. Take the `direct` line a peer's `serve` printed and pass it back:
 
 <!-- manual: needs a direct peer and its address -->
 ```console
-$ swoosh ping bf01hcq6… --transport quirk+noise --peer bf01hcq6…=127.0.0.1:50902 -c 4
+$ swoosh ping ed01hcq6… --transport quirk+noise --peer ed01hcq6…=127.0.0.1:50902 -c 4
 ```
 
 `quirk+noise` is the quirk dial; use it when the peer gates its services.

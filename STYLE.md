@@ -53,8 +53,8 @@ The code should be beautiful to read and tell a story as you scroll._
 ## Concurrency
 - **A capability to request, never the authority to perform.** A handler that may stop or change a shared resource holds a cloneable token or a bounded channel; the one owner acts, in one place.
 - **A byte pump ends on the direction that means done.** Name it in a comment; do not park on a stream that never closes.
-- **A hand-rolled `poll_*` registers interest before it checks the condition, and holds the `Notified` across polls.** The worked case is `tightbeam::raw_stream_fanout::Cursor::poll_read`.
-- **A timeout around a blocking syscall leaks the thread.** Make the syscall nonblocking and drive readiness through the reactor; the worked case is `tightbeam::raw_stream::open_path`.
+- **A hand-rolled `poll_*` registers interest before it checks the condition, and holds the `Notified` across polls.** The worked case is a fan-out reader's `poll_read`, where each cursor waits on one shared source.
+- **A timeout around a blocking syscall leaks the thread.** Make the syscall nonblocking and drive readiness through the reactor; the worked case is opening a FIFO, which waits for a writer.
 - **A concurrency primitive gets a why-comment** at the site.
 
 ## Layering

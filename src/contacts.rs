@@ -481,11 +481,11 @@ impl Contacts {
         for member in roster.members() {
             // The label is already a `DeviceLabel` (one label type across the seam), so there is no lossy
             // re-parse here. A HandTyped binding is sovereign and was kept by `retain`; never clobber it.
-            if let Entry::Occupied(entry) = person.devices.entry(member.label.clone()) {
-                if entry.get().source == Source::HandTyped {
-                    applied.skipped += 1;
-                    continue;
-                }
+            if let Entry::Occupied(entry) = person.devices.entry(member.label.clone())
+                && entry.get().source == Source::HandTyped
+            {
+                applied.skipped += 1;
+                continue;
             }
             person.devices.insert(
                 member.label.clone(),

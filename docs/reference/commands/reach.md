@@ -7,10 +7,10 @@ Reach any service a peer serves. The stream lands on stdout unless you send it s
 <!-- generated: usage from `swoosh reach -h`; option lines curated -->
 ```
 Usage: swoosh reach [OPTIONS] <peer> <service>
-  <peer>              a petname, a raw node id, or a sheer: link
+  <peer>              a petname, a raw node id, or a swoosh: link
   <service>           the served service to reach, under the name the host bound it
   --to <port|-|unix:PATH>   where to put the stream: a local port, - for stdout [default: -]
-  --present <link>    a sheer: capability link to present to a gated peer
+  --present <link>    a swoosh: capability link to present to a gated peer
 ```
 
 **Example.** `swoosh reach desk tv --to 8096` puts the peer's `tv` service on `127.0.0.1:8096`, so a
