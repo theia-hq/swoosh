@@ -159,26 +159,29 @@ fn parse_seed(text: &str) -> Result<Zeroizing<[u8; 32]>, InviteError> {
 }
 
 /// Why a string was not a valid [`Invite`].
+///
+/// Every variant prints the same one line, and none carries a source, so the printed error chain is that
+/// line alone. The variant and its inner error stay for tests and `Debug`.
 #[derive(Debug, thiserror::Error)]
 pub enum InviteError {
     /// No `invite:` prefix, or neither 4 nor 5 fields.
     #[error("this is not a swoosh invite")]
     NotAnInvite,
     /// The seed was not valid base32.
-    #[error("invalid base32 in the invite seed")]
+    #[error("this is not a swoosh invite")]
     Encoding,
     /// The seed decoded to the wrong length (not 32 bytes).
-    #[error("invite seed is not 32 bytes")]
+    #[error("this is not a swoosh invite")]
     Length,
     /// The inviting machine's key was not a key.
-    #[error("invalid key in the invite")]
-    From(#[source] NodeIdParseError),
+    #[error("this is not a swoosh invite")]
+    From(NodeIdParseError),
     /// The device's name broke the name rule.
-    #[error("invalid name in the invite")]
-    Name(#[source] NameError),
-    /// The standing was not a link.
-    #[error("invalid standing in the invite")]
-    Standing(#[source] nauthy::CapError),
+    #[error("this is not a swoosh invite")]
+    Name(NameError),
+    /// The last field was not a link.
+    #[error("this is not a swoosh invite")]
+    Standing(nauthy::CapError),
 }
 
 #[cfg(test)]

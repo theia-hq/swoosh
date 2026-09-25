@@ -128,30 +128,35 @@ fn a_seed_with_a_unicode_look_alike_is_refused() {
     }
 }
 
-/// Each field refuses as its own type: a short seed, bad base32, a bad key, a bad name, a bad standing.
+/// Each field refuses as its own type: a short seed, bad base32, a bad key, a bad name, a bad link. Each
+/// prints the one invite line and nothing after it.
 #[test]
 fn each_field_refuses_as_its_own_type() {
     let standing = standing();
     let short = BASE32_NOPAD.encode(&[0u8; 8]).to_lowercase();
     let (f, n, s) = (from(), name(), standing.as_str());
-    assert!(matches!(
-        Invite::parse(&format!("invite:{short}.{f}.{n}.{s}")),
-        Err(InviteError::Length)
-    ));
-    assert!(matches!(
-        Invite::parse(&format!("invite:not-base32.{f}.{n}.{s}")),
-        Err(InviteError::Encoding)
-    ));
-    assert!(matches!(
-        Invite::parse(&format!("invite:not-a-key.{n}.{s}")),
-        Err(InviteError::From(_))
-    ));
-    assert!(matches!(
-        Invite::parse(&format!("invite:{f}.me.{s}")),
-        Err(InviteError::Name(_))
-    ));
-    assert!(matches!(
-        Invite::parse(&format!("invite:{f}.{n}.{f}.x")),
-        Err(InviteError::Standing(_))
-    ));
+    let refusals = [
+        (format!("invite:{short}.{f}.{n}.{s}"), "Length"),
+        (format!("invite:not-base32.{f}.{n}.{s}"), "Encoding"),
+        (format!("invite:not-a-key.{n}.{s}"), "From"),
+        (format!("invite:{f}.me.{s}"), "Name"),
+        (format!("invite:{f}.{n}.{f}.x"), "Standing"),
+    ];
+    for (token, variant) in refusals {
+        let refused = Invite::parse(&token).expect_err("a malformed field refuses");
+        let matched = match &refused {
+            InviteError::Length => "Length",
+            InviteError::Encoding => "Encoding",
+            InviteError::From(_) => "From",
+            InviteError::Name(_) => "Name",
+            InviteError::Standing(_) => "Standing",
+            InviteError::NotAnInvite => "NotAnInvite",
+        };
+        assert_eq!(matched, variant, "{token}");
+        assert_eq!(
+            format!("{:#}", eyre::Report::new(refused)),
+            "this is not a swoosh invite",
+            "{token} prints one line"
+        );
+    }
 }
