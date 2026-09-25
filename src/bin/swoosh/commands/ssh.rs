@@ -204,7 +204,7 @@ fn ssh_argv(
         proxy_command.push_str(&format!(" --home \"{}\"", path.display()));
     }
     // A `sheer:` link is whitespace-free (a single token, like the key), so it is safe unquoted in the
-    // whitespace-split ProxyCommand. Appended only when present; without it the bridge self-signs a badge.
+    // whitespace-split ProxyCommand. Appended only when present; without it the bridge presents by standing.
     if let Some(link) = present {
         proxy_command.push_str(&format!(" --present {link}"));
     }
@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn argv_appends_a_present_link_to_the_proxy_command() {
         // A `sheer:` link (whitespace-free, like the key) rides unquoted in the whitespace-split
-        // ProxyCommand, after `--to -`, so the bridge presents the given slip instead of self-signing.
+        // ProxyCommand, after `--to -`, so the bridge presents the given slip.
         let link = "sheer:abcdef0123456789";
         let argv = ssh_argv(
             PROXY,

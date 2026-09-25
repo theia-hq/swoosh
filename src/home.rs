@@ -115,7 +115,7 @@ impl Home {
     }
 
     /// `<home>/roster`: the signet-signed membership snapshot of this operator's fleet, re-cut by every
-    /// verb that changes the `me/*` member set and served verbatim by `serve roster:`. Only the machine
+    /// verb that changes the `me/*` member set and served verbatim on the update route every `serve` binds. Only the machine
     /// holding the signet ever writes one, which is what makes a relay-only node unable to mis-cut.
     pub fn roster(&self) -> PathBuf {
         self.dir.join("roster")

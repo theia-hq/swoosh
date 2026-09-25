@@ -36,7 +36,7 @@ fn signet() -> TestRoot {
 }
 
 /// An absent file opens as an EMPTY artifact, and the file APPEARING is picked up with no reload. This is
-/// the founder's opening move: `serve roster:` before any device has been invited, then invite one from
+/// the founder's opening move: `serve` before any device has been invited, then invite one from
 /// another terminal. The old path cut once at serve start, so that invite needed a restart to publish.
 #[tokio::test]
 async fn an_absent_artifact_opens_empty_and_fills_in_when_the_signet_cuts() {

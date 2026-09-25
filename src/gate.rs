@@ -11,7 +11,8 @@
 //! recorded signing, and a pin that names the own key is no pin: that rule lives in nauthy's gate alone.
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -59,7 +60,50 @@ pub enum GateError {
     /// The revoked links could not be read, or lost ids they once held.
     #[error(transparent)]
     Denylist(#[from] DenylistError),
+    /// The revoked device keys could not be read, or lost keys they once held.
+    #[error(transparent)]
+    RevokedKeys(#[from] RevokedKeysError),
 }
+
+/// Why `<home>/revoked_keys` may not be loaded as it reads.
+#[derive(Debug, thiserror::Error)]
+pub enum RevokedKeysError {
+    /// The file, or its `.written` witness, exists but could not be read.
+    #[error("read {}", path.display())]
+    Io {
+        /// The file that could not be read.
+        path: PathBuf,
+        /// Why.
+        #[source]
+        source: std::io::Error,
+    },
+    /// The file is larger than [`MAX_REVOKED_KEYS_LEN`].
+    #[error("{} is larger than {MAX_REVOKED_KEYS_LEN} bytes", path.display())]
+    TooLarge {
+        /// The file.
+        path: PathBuf,
+    },
+    /// The file holds fewer keys than its `.written` witness says a write left there (an absent file holds
+    /// none). No write shrinks it, so keys were lost to a deletion, a truncation, or a crash, and loading
+    /// it would admit them again.
+    #[error(
+        "{} holds {found} revoked keys but held {expected}: restore it, re-revoke what is missing, or remove {}.written to accept the loss",
+        path.display(),
+        path.display()
+    )]
+    Lost {
+        /// The keys file.
+        path: PathBuf,
+        /// The count the witness records.
+        expected: u64,
+        /// The distinct keys the file holds now.
+        found: u64,
+    },
+}
+
+/// The most bytes `<home>/revoked_keys` may hold: room for thousands of keys, and a bound on what one
+/// admission reads.
+pub const MAX_REVOKED_KEYS_LEN: u64 = 1 << 20;
 
 /// The pin as `serve` reads it: `<home>/signet`, afresh on every admission.
 ///
@@ -208,20 +252,22 @@ impl PinSource for FilePin {
 /// This machine's revocations: the revoked links in `<home>/revoked`, and the revoked device keys in
 /// `<home>/revoked_keys`.
 ///
-/// Both reload when their [`FileStamp`] changes, and both keep the last set they read when their file is
-/// missing or cannot be read, since a deleted revocation must never un-revoke. The keys file only ever
-/// grows, so a read adds to the set and never removes from it.
+/// Both are read in full at load, where a file that cannot be read or holds fewer entries than its
+/// `.written` witness refuses the load. After that both reload when their [`FileStamp`] changes, and both
+/// keep the last set they read when their file is missing or cannot be read, since a deleted revocation
+/// must never un-revoke. The keys file only ever grows, so a read adds to the set and never removes from it.
 pub struct KeyedDenylist {
     links: FileDenylist,
     keys: RevokedKeys,
 }
 
 impl KeyedDenylist {
-    /// Load both files under `home`. A missing `revoked_keys` holds no keys.
-    pub async fn load(home: &Home) -> Result<Self, DenylistError> {
+    /// Load both files under `home`, each on the same witness rules: a missing file holds nothing only
+    /// while its `.written` witness is absent or zero.
+    pub async fn load(home: &Home) -> Result<Self, GateError> {
         Ok(Self {
             links: FileDenylist::load(home.revoked()).await?,
-            keys: RevokedKeys::open(home.revoked_keys()),
+            keys: RevokedKeys::load(home.revoked_keys(), &home.revoked_keys_written())?,
         })
     }
 }
@@ -262,16 +308,43 @@ struct KeysState {
 }
 
 impl RevokedKeys {
-    /// The keys at `path`, read at the first check.
-    fn open(path: PathBuf) -> Self {
-        Self {
+    /// Read the keys at `path` now, and check them against the witness at `written`.
+    // `core::io::ErrorKind` is still unstable, so the error kinds read from `std`.
+    #[allow(clippy::std_instead_of_core)]
+    fn load(path: PathBuf, written: &Path) -> Result<Self, RevokedKeysError> {
+        let (keys, stamp) = match read_keys(&path) {
+            Ok(Some(read)) => read,
+            Ok(None) => (HashSet::new(), None),
+            Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+                return Err(RevokedKeysError::TooLarge { path });
+            }
+            Err(source) => return Err(RevokedKeysError::Io { path, source }),
+        };
+        let found = u64::try_from(keys.len()).unwrap_or(u64::MAX);
+        match read_witness(written) {
+            Ok(Some(expected)) if found < expected => {
+                return Err(RevokedKeysError::Lost {
+                    path,
+                    expected,
+                    found,
+                });
+            }
+            Ok(_) => {}
+            Err(source) => {
+                return Err(RevokedKeysError::Io {
+                    path: written.to_path_buf(),
+                    source,
+                });
+            }
+        }
+        Ok(Self {
             path,
             state: Mutex::new(KeysState {
-                keys: HashSet::new(),
-                stamp: None,
-                last_stat: None,
+                keys,
+                stamp,
+                last_stat: Some(Instant::now()),
             }),
-        }
+        })
     }
 
     /// Whether `peer` is revoked, re-reading the file first when it changed.
@@ -294,32 +367,80 @@ impl RevokedKeys {
         let Ok(meta) = std::fs::metadata(&self.path) else {
             return;
         };
-        let stamp = FileStamp::of(&meta);
-        if FileStamp::unchanged(state.stamp, stamp) {
+        if FileStamp::unchanged(state.stamp, FileStamp::of(&meta)) {
             return;
         }
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
-            return;
-        };
-        for (index, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+        match read_keys(&self.path) {
+            Ok(Some((keys, stamp))) => {
+                state.keys.extend(keys);
+                state.stamp = stamp;
             }
-            match line.parse::<NodeId>() {
-                Ok(key) => {
-                    state.keys.insert(key.verify_key());
-                }
-                Err(error) => tracing::warn!(
-                    path = %self.path.display(),
-                    line = index + 1,
-                    %error,
-                    "skipping a line that is not a key"
-                ),
-            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                path = %self.path.display(),
+                %error,
+                "keeping the revoked keys already read"
+            ),
         }
-        state.stamp = stamp;
     }
+}
+
+/// Read the keys file at `path` and its stamp from one open handle, or `None` when there is no file. More
+/// than [`MAX_REVOKED_KEYS_LEN`] bytes is `FileTooLarge`, found before the excess is buffered. A line that
+/// is not a key is skipped and logged; it counts toward nothing.
+// `core::io::ErrorKind` is still unstable, so the error kinds read from `std`.
+#[allow(clippy::std_instead_of_core)]
+fn read_keys(path: &Path) -> std::io::Result<Option<(HashSet<VerifyKey>, Option<FileStamp>)>> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut text = String::new();
+    (&mut file)
+        .take(MAX_REVOKED_KEYS_LEN + 1)
+        .read_to_string(&mut text)?;
+    if u64::try_from(text.len()).unwrap_or(u64::MAX) > MAX_REVOKED_KEYS_LEN {
+        return Err(std::io::ErrorKind::FileTooLarge.into());
+    }
+    let stamp = file.metadata().ok().and_then(|meta| FileStamp::of(&meta));
+    let mut keys = HashSet::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match line.parse::<NodeId>() {
+            Ok(key) => {
+                keys.insert(key.verify_key());
+            }
+            Err(error) => tracing::warn!(
+                path = %path.display(),
+                line = index + 1,
+                %error,
+                "skipping a line that is not a key"
+            ),
+        }
+    }
+    Ok(Some((keys, stamp)))
+}
+
+/// The count in the `.written` witness at `path`, or `None` when there is none. A witness that is not a
+/// count is an error: guessing it would either refuse a sound file forever or accept a lost one.
+// `core::io::ErrorKind` is still unstable, so the error kinds read from `std`.
+#[allow(clippy::std_instead_of_core)]
+fn read_witness(path: &Path) -> std::io::Result<Option<u64>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    text.trim().parse().map(Some).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "the witness is not a count",
+        )
+    })
 }
 
 /// The live cut `serve` wires beside its gate: it ends a session whose link was revoked or whose root was

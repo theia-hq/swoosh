@@ -103,7 +103,7 @@ async fn a_loosened_trust_file_is_retightened_on_rewrite() {
 }
 
 /// An unprovisioned home reads as no badge, and so does an EMPTY badge file: neither is a corrupt store,
-/// so both fall back to self-signing rather than failing the dial. The empty case is the one a truncated
+/// so both dial presenting no badge rather than failing the dial. The empty case is the one a truncated
 /// write leaves behind, so it must stay a `None` and not reach the parser.
 #[tokio::test]
 async fn an_absent_or_empty_badge_file_reads_as_none() {

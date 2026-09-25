@@ -49,11 +49,9 @@ struct State {
 impl Artifact {
     /// Open the oracle over `path`. An ABSENT file is an empty artifact, not an error or a `None`.
     ///
-    /// This is what lets `serve roster:` come up on a fleet the operator has not populated yet and then
-    /// start serving the moment the first `invite add` cuts one, with no restart. An absent backing file
-    /// that appears later is picked up by the ordinary refresh, exactly as it is for both sibling
-    /// oracles; "this node may serve a roster at all" is a different question, decided once by the
-    /// composition root from [`config::holds_signet`](crate::config::holds_signet).
+    /// This is what lets every `serve` bind the update route before this home holds any roster, and
+    /// start serving one the moment it is written, with no restart. An absent backing file that appears
+    /// later is picked up by the ordinary refresh, exactly as it is for both sibling oracles.
     ///
     /// The bytes and the `(mtime, len)` stamp come from ONE opened handle, so a file replaced during this
     /// load cannot stamp the old bytes as current and make every later refresh skip a real re-cut. That is

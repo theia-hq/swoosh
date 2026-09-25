@@ -272,3 +272,97 @@ fn a_pin_is_exactly_one_key() {
     assert_eq!(super::one_key(&format!("{key}\n{key}\n")), None);
     assert_eq!(super::one_key(""), None);
 }
+
+/// Three device keys, revoked in a file whose witness then records three.
+fn three_revoked_keys(home: &Home) -> String {
+    let body: String = [0x41, 0x42, 0x43]
+        .into_iter()
+        .map(|seed| format!("{}\n", TestNode::seeded(seed).node_id()))
+        .collect();
+    std::fs::write(home.revoked_keys(), &body).expect("write the revoked keys");
+    std::fs::write(home.revoked_keys_written(), "3\n").expect("write the witness");
+    body
+}
+
+#[tokio::test]
+async fn a_revoked_keys_file_shorter_than_its_witness_refuses_to_load() {
+    let scratch = Scratch::new("keys-lost");
+    let body = three_revoked_keys(&scratch.home);
+    assert!(
+        KeyedDenylist::load(&scratch.home).await.is_ok(),
+        "the file loads while it holds what its witness says"
+    );
+
+    let first = body.lines().next().expect("a line");
+    std::fs::write(scratch.home.revoked_keys(), format!("{first}\n{first}\n"))
+        .expect("truncate the keys");
+    let Err(error) = KeyedDenylist::load(&scratch.home).await else {
+        panic!("a truncated file must not load");
+    };
+    assert!(
+        matches!(
+            error,
+            super::GateError::RevokedKeys(super::RevokedKeysError::Lost {
+                expected: 3,
+                found: 1,
+                ..
+            })
+        ),
+        "a repeated key counts once: {error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains(&scratch.home.revoked_keys().display().to_string()),
+        "the refusal names the file: {error}"
+    );
+
+    std::fs::remove_file(scratch.home.revoked_keys()).expect("remove the keys");
+    assert!(
+        anchored(&scratch.home, TestNode::seeded(OWN).node_id())
+            .await
+            .is_err(),
+        "a removed file beside its witness keeps serve's gate from building"
+    );
+}
+
+#[tokio::test]
+async fn an_unreadable_revoked_keys_refuses_to_load() {
+    let scratch = Scratch::new("keys-unreadable");
+    std::fs::create_dir(scratch.home.revoked_keys()).expect("a directory where the file goes");
+    assert!(
+        matches!(
+            KeyedDenylist::load(&scratch.home).await,
+            Err(super::GateError::RevokedKeys(
+                super::RevokedKeysError::Io { .. }
+            ))
+        ),
+        "a keys file that cannot be read refuses the load"
+    );
+}
+
+#[tokio::test]
+async fn an_oversized_revoked_keys_refuses_to_load() {
+    let scratch = Scratch::new("keys-large");
+    let line = format!("{}\n", TestNode::seeded(0x41).node_id());
+    let copies = usize::try_from(super::MAX_REVOKED_KEYS_LEN).expect("fits") / line.len() + 1;
+    std::fs::write(scratch.home.revoked_keys(), line.repeat(copies)).expect("write the keys");
+    assert!(
+        matches!(
+            KeyedDenylist::load(&scratch.home).await,
+            Err(super::GateError::RevokedKeys(
+                super::RevokedKeysError::TooLarge { .. }
+            ))
+        ),
+        "a keys file past the cap refuses the load"
+    );
+}
+
+#[tokio::test]
+async fn a_missing_revoked_keys_with_no_witness_holds_no_keys() {
+    let scratch = Scratch::new("keys-fresh");
+    let denylist = KeyedDenylist::load(&scratch.home)
+        .await
+        .expect("a fresh home loads");
+    assert!(!nauthy::Revocations::is_revoked_peer(&denylist, &device()));
+}
