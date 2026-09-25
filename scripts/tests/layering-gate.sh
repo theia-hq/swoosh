@@ -1,11 +1,12 @@
 #!/bin/sh
-# layering-gate fixture: exercise checks 4 and 5 of scripts/layering-gate.sh on throwaway git trees,
-# so a regression in the layer table, the dependent walk, the word boundary, the org-name match,
-# the path handling or the self-exemption fails HERE instead of passing silently in CI. Each case
-# builds a temp repo whose root manifest names one layer of the table, carries a copy of the gate,
-# plants one file, and asserts the exit code plus a substring of the output. The layers are read
-# from the gate's own table by row number and the org's name from its ORG line, so this file names
-# none of them.
+# layering-gate fixture: exercise checks 4, 5 and 6 of scripts/layering-gate.sh on throwaway git
+# trees, so a regression in the layer table, the dependent walk, the word boundary, the org-name
+# match, the house-word match, the path handling or the self-exemption fails HERE instead of passing
+# silently in CI. Each case builds a temp repo whose root manifest names one layer of the table,
+# carries a copy of the gate, plants one file, and asserts the exit code plus a substring of the
+# output. The layers are read from the gate's own table by row number, the org's name from its ORG
+# line and the house words and phrases from its HOUSE and HOUSE_OK lines, so this file names none of
+# them.
 # Dependency-free: POSIX sh + git + awk + grep + sed.
 
 set -eu
@@ -48,6 +49,8 @@ words_of() { printf '%s\n' "$rows" | sed -n "${1}p" | awk -F'|' '{ print $2 }' |
 first_word_of() { words_of "$1" | awk '{ print $1 }'; }
 kind_of() { printf '%s\n' "$rows" | sed -n "${1}p" | awk '{ print $1 }'; }
 org=$(sed -n "s/^ORG='\([a-z]*\)'\$/\1/p" "$gate")
+house=$(sed -n "s/^HOUSE='\([a-z ]*\)'\$/\1/p" "$gate")
+house_ok=$(sed -n 's/^HOUSE_OK="\(.*\)"$/\1/p' "$gate")
 
 # mkrepo CASE ROW [ws] -- a git repo whose root manifest identifies as ROW: a root [package]
 # named for it, or with `ws`, a virtual workspace whose member carries that name.
@@ -96,6 +99,10 @@ if [ "$row_count" -ne 7 ]; then
 fi
 if [ -z "$org" ]; then
   printf 'FAIL  the gate has no ORG line\n'
+  exit 1
+fi
+if [ -z "$house" ] || [ -z "$house_ok" ]; then
+  printf 'FAIL  the gate has no HOUSE or HOUSE_OK line\n'
   exit 1
 fi
 
@@ -285,6 +292,86 @@ mkrepo org-broken 1
 git -C "$tmp/org-broken" add -A
 printf 'junk' > "$tmp/org-broken/.git/index"
 expect org-broken 1 "check 5: git grep failed" "a failed git grep fails check 5" untracked
+
+# Check 6. Every library refuses each house word, and every app is skipped.
+for hw in $house; do
+  r=1
+  while [ "$r" -le 7 ]; do
+    kind=""
+    [ "$r" -eq 5 ] && kind=ws
+    mkrepo "house-$hw-$r" "$r" "$kind"
+    plant "house-$hw-$r" src/lib.rs "//! mint one for the $hw"
+    if [ "$(expected_kind "$r")" = lib ]; then
+      expect "house-$hw-$r" 1 "src/lib.rs:2:" "row $r, a library, refuses the house word $hw"
+    else
+      expect "house-$hw-$r" 0 "check 6: layer" "row $r, an app, may use the house word $hw"
+    fi
+    r=$((r + 1))
+  done
+
+  # Every spelling a name or a doc takes is caught.
+  n=0
+  for text in "pub fn mint_$hw() {}" "//! two ${hw}s" "struct $(capital "$hw")Link;" "struct my$(capital "$hw");" \
+      "const V: &str = \"$(upper "$hw")_HOME\";" "let ${hw}X = 1;" "//! $(upper "$hw")2" "//! a $hw-bound slip"; do
+    n=$((n + 1))
+    mkrepo "house-$hw-sp-$n" 1
+    plant "house-$hw-sp-$n" src/lib.rs "$text"
+    expect "house-$hw-sp-$n" 1 "src/lib.rs:2:" "the house word is caught in: $text"
+  done
+
+  # A word run into lowercase letters is other English.
+  mkrepo "house-$hw-prose" 1
+  plant "house-$hw-prose" src/lib.rs "//! a ${hw}ing thought"
+  expect "house-$hw-prose" 0 "OK" "a house word run into lowercase letters is allowed"
+
+  # A tracked path is checked like a line.
+  mkrepo "house-$hw-path" 1
+  plant "house-$hw-path" "tests/${hw}_bound.rs" "//! fixture"
+  expect "house-$hw-path" 1 "tests/${hw}_bound.rs" "a path with a house word is caught"
+
+  # A CHANGELOG at any depth may keep history.
+  mkrepo "house-$hw-changelog" 1
+  plant "house-$hw-changelog" CHANGELOG.md "- renamed mint_$hw"
+  plant "house-$hw-changelog" crates/x/CHANGELOG.md "- renamed mint_$hw"
+  expect "house-$hw-changelog" 0 "OK" "a CHANGELOG may use a house word"
+done
+
+# Each ordinary-English phrase passes, in any case, in a library; a bare word beside it is caught.
+n=0
+printf '%s\n' "$house_ok" | tr ',' '\n' >"$tmp/house-ok"
+while IFS= read -r phrase; do
+  n=$((n + 1))
+  mkrepo "house-ok-$n" 1
+  plant "house-ok-$n" src/lib.rs "/// the $phrase, the default."
+  plant "house-ok-$n" src/lib.rs "/// $(upper "$phrase") too"
+  expect "house-ok-$n" 0 "OK" "the phrase \"$phrase\" is allowed"
+  bare=$(printf '%s' "$phrase" | awk '{ print $NF }')
+  mkrepo "house-ok-bare-$n" 1
+  plant "house-ok-bare-$n" src/lib.rs "/// the $phrase, and one $bare more."
+  expect "house-ok-bare-$n" 1 "src/lib.rs:2:" "a bare word beside the phrase \"$phrase\" is caught"
+done <"$tmp/house-ok"
+
+# Only the HOUSE and HOUSE_OK lines are exempt, and only in the gate.
+hw=$(printf '%s' "$house" | awk '{ print $1 }')
+mkrepo house-self 1
+plant house-self scripts/layering-gate.sh "# as the $hw does it"
+expect house-self 1 "scripts/layering-gate.sh:" "a comment in the gate itself is checked for house words"
+mkrepo house-linecopy 1
+grep -E "^HOUSE='" "$gate" > "$tmp/house-linecopy/notes.md"
+expect house-linecopy 1 "notes.md:1:" "the HOUSE line outside the gate is not exempt"
+
+# A repo the table does not know is still scanned.
+mkrepo house-unknown 1
+sed 's/^name = .*/name = "unlisted"/' "$tmp/house-unknown/Cargo.toml" > "$tmp/house-unknown/Cargo.toml.new"
+mv "$tmp/house-unknown/Cargo.toml.new" "$tmp/house-unknown/Cargo.toml"
+plant house-unknown src/lib.rs "//! mint one for the $hw"
+expect house-unknown 1 "house word" "an unlisted repo is scanned for house words"
+
+# A git read that fails fails check 6 too.
+mkrepo house-broken 1
+git -C "$tmp/house-broken" add -A
+printf 'junk' > "$tmp/house-broken/.git/index"
+expect house-broken 1 "check 6: git grep failed" "a failed git grep fails check 6" untracked
 
 printf 'layering-gate fixture: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
