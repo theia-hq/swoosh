@@ -189,7 +189,7 @@ pub struct Binding {
 ///
 /// A signet is the key a person's fleet roots at (the root that vouches for their devices); it is NOT a
 /// device, so it lives in its own at-most-one slot, never in `devices`. Keeping it out of `devices` keeps
-/// it out of reach fan-out ([`resolve_candidates`](Contacts::resolve_candidates)) and out of `contact ls`'s
+/// it out of reach fan-out ([`resolve_candidates`](Contacts::resolve_candidates)) and out of `status`'s
 /// device columns: you never dial a signet, you BIND a fleet grant to it (`grant issue --for fleet:<petname>`).
 /// Modeling it as a distinct `Option` makes "a person has zero-or-one signet" the only representable shape.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -334,12 +334,12 @@ impl Contacts {
         added
     }
 
-    /// Every petname, in name order, for `contact ls` with no argument.
+    /// Every petname, in name order, for `status`'s contacts.
     pub fn petnames(&self) -> impl Iterator<Item = &Petname> {
         self.people.keys()
     }
 
-    /// One person's devices, label to identity, in label order, for `contact ls <petname>`. `None` if
+    /// One person's devices, label to identity, in label order, for `status`'s contacts. `None` if
     /// the petname is unknown.
     pub fn devices(
         &self,
@@ -354,7 +354,7 @@ impl Contacts {
     }
 
     /// Every device binding under a petname WITH its provenance, in label order, for the store's codec and
-    /// for a `contact ls` that wants to show which entries the signet vouched for. `None` for an unknown
+    /// for a `status` that wants to show which entries the signet vouched for. `None` for an unknown
     /// petname. Unlike [`devices`](Self::devices) (which projects to the node for reach), this carries the
     /// [`Source`] so a roster-hydrated member round-trips through persistence.
     pub fn bindings(
@@ -580,7 +580,7 @@ impl Contacts {
     }
 
     /// A person's recorded signet binding (node + provenance), or `None` if none is on file. The resolver
-    /// reads `.node`; `contact ls` reads `.source` to mark a hand-typed vs vouched signet.
+    /// reads `.node`; `status` reads `.source` to mark a hand-typed vs vouched signet.
     pub fn signet(&self, petname: &Petname) -> Option<&Binding> {
         self.people
             .get(petname)
@@ -723,9 +723,7 @@ pub enum ResolveError {
     #[error("unknown contact '{0}'; add it with `swoosh contact add {0} <key>`")]
     UnknownPetname(Petname),
     /// The petname exists but has no device by that label.
-    #[error(
-        "contact '{petname}' has no device '{device}'; see its devices with `swoosh contact ls {petname}`"
-    )]
+    #[error("contact '{petname}' has no device '{device}'; `swoosh status` lists your contacts")]
     UnknownDevice {
         /// The known petname.
         petname: Petname,

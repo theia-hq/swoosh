@@ -36,7 +36,7 @@ stored your membership badge: this device now reaches your gated services.
 
 An invite is a token, not proof of who sent it: compare that signet with the owner out of band before
 serving. The laptop is now a device your signet vouches for. Repeat once per machine. To keep the secret from
-travelling at all, make the key ON the new machine first (`swoosh identity` prints it) and sign for that
+travelling at all, make the key ON the new machine first (`swoosh status --key` prints it) and sign for that
 key with `swoosh invite add laptop --for <key>` instead.
 
 ## Reach any of them

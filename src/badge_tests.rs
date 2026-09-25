@@ -86,7 +86,7 @@ fn an_unreadable_expiry_is_its_own_state() {
 }
 
 /// The rendered fragment every surface prints, in the same span vocabulary the issuer side already uses
-/// (`grant ls` / `invite ls`), so one badge reads the same on the device and on the signet machine.
+/// (`invite ls`), so one badge reads the same on the device and on the signet machine.
 #[test]
 fn an_expiry_renders_as_a_span_in_the_ledger_vocabulary() {
     assert_eq!(

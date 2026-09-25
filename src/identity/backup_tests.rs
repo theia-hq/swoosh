@@ -38,7 +38,10 @@ fn a_plain_home_exports_a_sealed_backup() {
     .expect("export");
     assert_eq!(exported, node);
     assert_eq!(opens_as(&to, "backup pass"), node, "the backup is sealed");
-    assert_eq!(inspect(&home).expect("inspect").method(), Method::Plain);
+    assert_eq!(
+        inspect(&home).expect("inspect").into_stored().method(),
+        Method::Plain
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

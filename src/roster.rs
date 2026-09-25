@@ -281,6 +281,12 @@ pub fn verify(bytes: &[u8], signet: VerifyKey) -> Result<RosterDoc, RosterVerify
     Ok(RosterDoc::parse_canonical(payload)?)
 }
 
+/// The update this home holds from `root`, verified, or `None` when it holds none that `root` signed.
+/// Reads local files only: this is what a device knows of its fellow devices as of its last sync.
+pub fn held(home: &crate::home::Home, root: VerifyKey) -> Option<RosterDoc> {
+    read_held(&home.roster(), root).map(|(doc, _bytes)| doc)
+}
+
 /// Why a served roster blob could not be trusted: it failed the SIGNATURE seam (forged, foreign, or
 /// truncated at the envelope) or the PAYLOAD parse (not a roster, or a malformed member list).
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

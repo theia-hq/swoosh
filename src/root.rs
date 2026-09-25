@@ -350,6 +350,41 @@ impl fmt::Display for Date {
     }
 }
 
+/// The day a device standing renews from, when it renews on its own: halfway through its last standing.
+/// `None` for a standing too short to renew on its own, or one whose key came in its invite.
+pub fn renew_by(until: u64, duration: u64, seeded: bool) -> Option<u64> {
+    (duration >= SHORTEST_RENEWING && !seeded).then(|| until.saturating_sub(duration / 2))
+}
+
+/// The record a move of the root off this machine leaves: where it went, and the day it went.
+///
+/// `<home>/root-moved` holds two lines, the path and the day in unix seconds, owner-only. It is a note for
+/// a person, never trust: nothing reads it to decide anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moved {
+    /// Where the root was moved to.
+    pub to: PathBuf,
+    /// The day it was moved.
+    pub on: Date,
+}
+
+impl Moved {
+    /// Write the record into `home`.
+    pub async fn write(&self, home: &Home) -> eyre::Result<()> {
+        let text = format!("{}\n{}\n", self.to.display(), self.on.0);
+        crate::config::write_private_atomic(&home.root_moved(), text.as_bytes()).await
+    }
+
+    /// The record in `home`, or `None` when there is none or it is not two lines of a path and a day.
+    pub fn read(home: &Home) -> Option<Self> {
+        let text = std::fs::read_to_string(home.root_moved()).ok()?;
+        let mut lines = text.lines();
+        let to = PathBuf::from(lines.next()?);
+        let on = Date(lines.next()?.trim().parse().ok()?);
+        Some(Self { to, on })
+    }
+}
+
 /// The root, unlocked for one command.
 ///
 /// Not `Clone`, and its `Debug` names only its directory: the key wipes itself when this drops.
@@ -1221,7 +1256,10 @@ async fn make(
     if !prompt.terminal() {
         return Err(RootError::NoTerminal);
     }
-    let own = crate::identity::inspect(home)?.node_id().verify_key()?;
+    let own = crate::identity::inspect(home)?
+        .stored()
+        .node_id()
+        .verify_key()?;
     let _ = writeln!(
         out,
         "This makes your root on this machine: a second key, not a machine, that vouches for all your \
@@ -1295,7 +1333,10 @@ async fn finish(
     let lock = take_lock(&dir, true)?;
     let pin = root_key.verify_key()?;
     let book = Book::from(state::recover(&dir, pin)?);
-    let own = crate::identity::inspect(home)?.node_id().verify_key()?;
+    let own = crate::identity::inspect(home)?
+        .stored()
+        .node_id()
+        .verify_key()?;
     let now = unix_now();
     let ours = |standing: &Link| {
         standing

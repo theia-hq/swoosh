@@ -206,7 +206,7 @@ fn bare_stop_stops_the_resident() {
         "the live table marks a served service on: {ls_out}"
     );
 
-    // Bare `status` is the self-query: the public node shape, never key material.
+    // Bare `status` reads what the running resident serves over the same local socket, and dials nobody.
     let status = swoosh(&scratch, &["status"]);
     let status_out = String::from_utf8_lossy(&status.stdout).into_owned();
     assert!(
@@ -215,20 +215,15 @@ fn bare_stop_stops_the_resident() {
         String::from_utf8_lossy(&status.stderr)
     );
     assert!(
-        status_out.starts_with("node "),
-        "the node id leads: {status_out}"
+        status_out.starts_with("key: "),
+        "the key leads: {status_out}"
     );
-    let pid_line = format!("pid {pid}");
     assert!(
-        status_out.lines().any(|line| line == pid_line),
-        "bare status renders the serving pid directly after the node: {status_out}"
+        status_out
+            .lines()
+            .any(|line| line.starts_with("serving: ") && line.contains("ping")),
+        "the serving line names what the resident serves: {status_out}"
     );
-    assert!(status_out.contains("up "), "{status_out}");
-    assert!(
-        status_out.contains("SERVICE") && status_out.contains("STATE"),
-        "{status_out}"
-    );
-    assert!(status_out.contains("warm"), "{status_out}");
 
     // A bare `--present` is refused, never silently dropped (I.3, MAJOR-1): exit non-zero with the
     // exact teaching line, and the resident is untouched (the later real stop still finds it).

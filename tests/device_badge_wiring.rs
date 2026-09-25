@@ -171,17 +171,17 @@ async fn invite_add_for_binds_a_device_made_key_and_adopt_keeps_that_identity() 
     std::fs::create_dir_all(&device_dir).unwrap();
 
     // 1. The DEVICE makes its key and prints the public half (public: any channel will carry it back).
-    let identity = swoosh(&["identity", "--home", path_str(&device_dir)]);
+    let identity = swoosh(&["status", "--key", "--home", path_str(&device_dir)]);
     assert!(
         identity.status.success(),
-        "identity failed: {}",
+        "status --key failed: {}",
         stderr(&identity)
     );
     let device_key_text = String::from_utf8(identity.stdout).unwrap();
     let device_line = device_key_text.lines().next().unwrap().to_owned();
     let device: NodeId = device_line
         .parse()
-        .expect("identity prints the node id first");
+        .expect("status --key prints the key alone");
     let device_secret_before = std::fs::read(device_dir.join("key")).unwrap();
 
     // 2. The OWNER signs for that key. The token is two fields (signet . badge): no seed, no secret.
@@ -375,10 +375,10 @@ fn adopt_refuses_a_badge_bound_to_another_machine() {
     }
 
     // The intended machine prints its key; the owner signs a badge for that key only.
-    let identity = swoosh(&["identity", "--home", path_str(&intended_dir)]);
+    let identity = swoosh(&["status", "--key", "--home", path_str(&intended_dir)]);
     assert!(
         identity.status.success(),
-        "identity failed: {}",
+        "status --key failed: {}",
         stderr(&identity)
     );
     let intended: NodeId = String::from_utf8(identity.stdout)
@@ -387,7 +387,7 @@ fn adopt_refuses_a_badge_bound_to_another_machine() {
         .next()
         .unwrap()
         .parse()
-        .expect("identity prints the node id first");
+        .expect("status --key prints the key alone");
     let create = swoosh(&[
         "invite",
         "add",
@@ -407,10 +407,10 @@ fn adopt_refuses_a_badge_bound_to_another_machine() {
 
     // A DIFFERENT machine (its own printed key) adopts the same token. The badge binds the intended
     // machine, so the check fails and neither trust file lands.
-    let other_identity = swoosh(&["identity", "--home", path_str(&other_dir)]);
+    let other_identity = swoosh(&["status", "--key", "--home", path_str(&other_dir)]);
     assert!(
         other_identity.status.success(),
-        "identity failed: {}",
+        "status --key failed: {}",
         stderr(&other_identity)
     );
     let adopt = swoosh(&["adopt", &token, "--home", path_str(&other_dir)]);
@@ -444,10 +444,10 @@ fn invite_add_refuses_on_a_machine_that_is_not_its_configured_signet() {
     std::fs::create_dir_all(&owner_dir).unwrap();
     std::fs::create_dir_all(&device_dir).unwrap();
 
-    let identity = swoosh(&["identity", "--home", path_str(&device_dir)]);
+    let identity = swoosh(&["status", "--key", "--home", path_str(&device_dir)]);
     assert!(
         identity.status.success(),
-        "identity failed: {}",
+        "status --key failed: {}",
         stderr(&identity)
     );
     let device: NodeId = String::from_utf8(identity.stdout)
@@ -456,7 +456,7 @@ fn invite_add_refuses_on_a_machine_that_is_not_its_configured_signet() {
         .next()
         .unwrap()
         .parse()
-        .expect("identity prints the node id first");
+        .expect("status --key prints the key alone");
     let create = swoosh(&[
         "invite",
         "add",
@@ -518,7 +518,7 @@ async fn invite_add_refuses_to_reuse_a_label_for_a_different_key() {
         std::fs::create_dir_all(dir).unwrap();
     }
 
-    let first_identity = swoosh(&["identity", "--home", path_str(&first_dir)]);
+    let first_identity = swoosh(&["status", "--key", "--home", path_str(&first_dir)]);
     assert!(
         first_identity.status.success(),
         "{}",
@@ -530,7 +530,7 @@ async fn invite_add_refuses_to_reuse_a_label_for_a_different_key() {
         .next()
         .unwrap()
         .parse()
-        .expect("identity prints the node id first");
+        .expect("status --key prints the key alone");
     let create = swoosh(&[
         "invite",
         "add",
@@ -546,7 +546,7 @@ async fn invite_add_refuses_to_reuse_a_label_for_a_different_key() {
     let cap = Cap::parse(&badge).expect("the badge parses as a cap");
 
     // A second device with its own key asks for the SAME label: refused, with the two-step fix named.
-    let second_identity = swoosh(&["identity", "--home", path_str(&second_dir)]);
+    let second_identity = swoosh(&["status", "--key", "--home", path_str(&second_dir)]);
     assert!(
         second_identity.status.success(),
         "{}",
@@ -558,7 +558,7 @@ async fn invite_add_refuses_to_reuse_a_label_for_a_different_key() {
         .next()
         .unwrap()
         .parse()
-        .expect("identity prints the node id first");
+        .expect("status --key prints the key alone");
     let second_attempt = swoosh(&[
         "invite",
         "add",
@@ -649,7 +649,7 @@ fn adopt_requires_force_to_switch_the_trusted_signet() {
         std::fs::create_dir_all(dir).unwrap();
     }
 
-    let identity = swoosh(&["identity", "--home", path_str(&device_dir)]);
+    let identity = swoosh(&["status", "--key", "--home", path_str(&device_dir)]);
     assert!(identity.status.success(), "{}", stderr(&identity));
     let device: NodeId = String::from_utf8(identity.stdout)
         .unwrap()
@@ -657,7 +657,7 @@ fn adopt_requires_force_to_switch_the_trusted_signet() {
         .next()
         .unwrap()
         .parse()
-        .expect("identity prints the node id first");
+        .expect("status --key prints the key alone");
 
     let first = swoosh(&[
         "invite",
@@ -761,7 +761,7 @@ fn adopt_renews_without_a_flag_and_refuses_a_downgrade() {
     std::fs::create_dir_all(&owner_dir).unwrap();
     std::fs::create_dir_all(&device_dir).unwrap();
 
-    let identity = swoosh(&["identity", "--home", path_str(&device_dir)]);
+    let identity = swoosh(&["status", "--key", "--home", path_str(&device_dir)]);
     assert!(identity.status.success(), "{}", stderr(&identity));
     let device: NodeId = String::from_utf8(identity.stdout)
         .unwrap()
@@ -769,7 +769,7 @@ fn adopt_renews_without_a_flag_and_refuses_a_downgrade() {
         .next()
         .unwrap()
         .parse()
-        .expect("identity prints the node id first");
+        .expect("status --key prints the key alone");
 
     // A helper for the owner's side: sign a badge for this device with an explicit window, and hand back
     // the token and the badge it carries.
@@ -880,9 +880,9 @@ fn adopt_refuses_to_replace_an_identity_this_machine_already_has() {
     std::fs::create_dir_all(&device_dir).unwrap();
     let device_key = device_dir.join("key");
 
-    // The machine makes its own key first (`swoosh identity`), as an operator who served before being
+    // The machine makes its own key first (`swoosh status --key`), as an operator who served before being
     // invited would have.
-    let identity = swoosh(&["identity", "--home", path_str(&device_dir)]);
+    let identity = swoosh(&["status", "--key", "--home", path_str(&device_dir)]);
     assert!(identity.status.success(), "{}", stderr(&identity));
     let held: NodeId = String::from_utf8(identity.stdout)
         .unwrap()
@@ -890,7 +890,7 @@ fn adopt_refuses_to_replace_an_identity_this_machine_already_has() {
         .next()
         .unwrap()
         .parse()
-        .expect("identity prints the node id first");
+        .expect("status --key prints the key alone");
     let held_seed = std::fs::read(&device_key).unwrap();
 
     // The owner cuts a DERIVED invite: it carries a child seed, so adopting it would re-identify this

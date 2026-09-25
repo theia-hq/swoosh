@@ -351,7 +351,7 @@ async fn a_pin_written_under_serve_is_trusted_without_restart() {
 #[test]
 fn a_grant_is_on_disk_before_its_link_prints() {
     let scratch = Scratch::new("print");
-    swoosh(&scratch.0, &["identity"]);
+    swoosh(&scratch.0, &["status", "--key"]);
     let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(&scratch.0)

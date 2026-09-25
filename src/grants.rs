@@ -6,7 +6,7 @@
 //! ledger that cannot be read admits no such link.
 //!
 //! It is also the issuer's index from holder to that root id, which is what revoking a link by naming its
-//! holder, and `grant ls`, read. It is a who-can-reach-what record, so it is written `0600`, and it lives
+//! holder, and `status`, read. It is a who-can-reach-what record, so it is written `0600`, and it lives
 //! in the node home beside the identity so one home moves the whole identity and trust unit together.
 //!
 //! Every writer takes the exclusive flock on `<home>/links.lock`. An [`append`](Grants::append) is one
@@ -83,7 +83,7 @@ impl Grants {
 
     /// Every grant this node has issued, in append order. An absent file is no grants (nothing issued yet).
     ///
-    /// A single corrupt line must NOT wedge the whole ledger, or one bad byte would blind every `grant ls`
+    /// A single corrupt line must NOT wedge the whole ledger, or one bad byte would blind every `status`
     /// and `grant revoke <holder>`: the good rows still matter for revocation. So parsing is per-line, good
     /// rows are kept, and each bad line is reported to stderr (named by file and line number) for the issuer
     /// to fix, never swallowed silently. An unreadable FILE (not a bad line) is still a hard error.
@@ -545,7 +545,7 @@ impl FromStr for Delegation {
 
 /// A duration as its largest whole unit, `<n>d`/`<n>h`/`<n>m`/`<n>s`. Coarse on purpose: a grant lifetime is
 /// a rough "how much longer", not a stopwatch. Shared by `grant issue` (framing the fresh lifetime) and
-/// `grant ls` (a row's remaining lifetime).
+/// `invite ls` (a row's remaining lifetime).
 pub fn humanize(span: Duration) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;

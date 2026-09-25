@@ -20,7 +20,7 @@ Usage: swoosh invite add [OPTIONS] <label>
 ```
 
 **Example.** `swoosh invite add laptop` derives a device identity and prints an invite for it. To keep
-the secret from travelling, make the key on the device first (`swoosh identity` prints it) and sign only
+the secret from travelling, make the key on the device first (`swoosh status --key` prints it) and sign only
 its public half: `swoosh invite add laptop --for <key>` prints an invite with no secret in it.
 `--for alice/laptop` binds a device from your contacts; `swoosh invite add ci --for <key> --expires 365d`
 signs a year-long badge.

@@ -7,7 +7,6 @@ pub mod connect;
 pub mod contact;
 pub mod fetch;
 pub mod grant;
-pub mod grant_ls;
 pub mod identity;
 pub mod invite;
 pub mod ping;

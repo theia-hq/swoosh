@@ -2,8 +2,7 @@
 //!
 //! A local verb (binds no transport, dials nobody). It reads the same `///` one-liners clap renders for
 //! `--help`, so the printed tree can never drift from the help text: that is the whole point. It makes
-//! "what the binary actually exposes" readable in one command, rather than by eyeballing help screens. Rendered with the same two-space indentation as `contact ls`, so there is
-//! one tree idiom across the tool.
+//! "what the binary actually exposes" readable in one command, rather than by eyeballing help screens. Rendered with two-space indentation.
 
 use clap::{Args, Command};
 

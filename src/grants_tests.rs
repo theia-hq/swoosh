@@ -93,7 +93,7 @@ async fn append_then_load_returns_every_record_in_order() {
 
 #[tokio::test]
 async fn a_corrupt_line_is_skipped_and_the_good_rows_survive() {
-    // One bad byte must NOT wedge the whole ledger: `grant ls`/`revoke <holder>` still need the good rows.
+    // One bad byte must NOT wedge the whole ledger: `status`/`revoke <holder>` still need the good rows.
     let (grants, path) = ledger("resilient");
     let good = record(
         "ssh",

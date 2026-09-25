@@ -3,7 +3,7 @@
 //! The device half of `invite add`, one command for both invite shapes:
 //!
 //! - A BOUND invite (`invite:<signet>.<badge>`) was signed for a key this machine made and printed with
-//!   `swoosh identity`. Adopting trusts the signet and stores the badge, KEEPING this machine's identity.
+//!   `swoosh status --key`. Adopting trusts the signet and stores the badge, KEEPING this machine's identity.
 //!   The token carries no secret, so it is safe in transit; it is NOT authenticated, so the badge is
 //!   checked against this machine's key, and the full signet is printed for an out-of-band compare,
 //!   before anything is written.
@@ -92,7 +92,7 @@ impl AdoptCmd {
                 let Some(secret) = identity::load(home).await? else {
                     eyre::bail!(
                         "this invite is bound to a device key, but this machine has no identity yet; run \
-                         `swoosh identity` to make one, then have the owner run `swoosh invite add <label> \
+                         `swoosh status --key` to make one, then have the owner run `swoosh invite add <label> \
                          --for <that key>`"
                     );
                 };

@@ -162,6 +162,11 @@ impl Home {
         self.dir.join("root.revoking")
     }
 
+    /// `<home>/root-moved`: where the root kept here was moved to, and when, so `status` can say.
+    pub fn root_moved(&self) -> PathBuf {
+        self.dir.join("root-moved")
+    }
+
     /// `<home>/revoked`: the revocation denylist the expose gate honors, the next `serve` reads.
     pub fn revoked(&self) -> PathBuf {
         self.dir.join("revoked")

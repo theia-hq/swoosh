@@ -79,7 +79,7 @@ impl ShareCmd {
             );
         }
         // The link roots at swoosh's stable key (the one an exposed service is reached at), so resolve the
-        // persisted identity, creating one on first use exactly as `swoosh identity` would.
+        // persisted identity, creating one on first use exactly as `swoosh status` would.
         let secret = identity::resolve(Identity::Persisted, home).await?;
         // A link signs with this machine's own key in every standing: this machine's gate admits it
         // through the ledger row appended below, whatever root it trusts.
@@ -306,7 +306,7 @@ fn resolve_fleet_root(
         FleetTarget::Named(petname) => {
             let binding = contacts.signet(petname).ok_or_else(|| {
                 eyre::eyre!(
-                    "no signet on file for `{petname}`; ask them for their signet key (`swoosh identity`) \
+                    "no signet on file for `{petname}`; ask them for their signet key (`swoosh status --key`) \
                      and record it with `swoosh contact signet {petname} <key>`, then retry `--for fleet:{petname}`"
                 )
             })?;

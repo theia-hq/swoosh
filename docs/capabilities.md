@@ -51,7 +51,7 @@ The gate checks the link offline, against your key. The holder gets that one ser
 
 ## 3. It expires, or you revoke it
 
-The link stops working at its expiry; `swoosh grant ls` then marks it `expired`. To cut access early,
+The link stops working at its expiry; `swoosh status` lists it with the day it ends. To cut access early,
 revoke it on the node that issued it:
 
 <!-- manual: needs the link you issued -->

@@ -35,17 +35,17 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="service"></a>[`swoosh service`](commands/service.md): list a peer's menu, or enable/disable a service on your node
 - <a id="ping"></a>[`swoosh ping`](commands/ping.md): measure round-trip time to a peer, addressed by key
 - <a id="speed"></a>[`swoosh speed`](commands/speed.md): measure throughput to a peer, addressed by key
-- <a id="status"></a>[`swoosh status`](commands/status.md): show the connection path to a peer (direct or relayed)
+- <a id="status"></a>[`swoosh status`](commands/status.md): show this machine: its key, lock, root, devices, contacts, links and services
 - <a id="fetch"></a>[`swoosh fetch`](commands/fetch.md): mint a local URL that fetches an origin through a named node
 - <a id="reach"></a>[`swoosh reach`](commands/reach.md): reach any service a peer serves, on stdout or a local port
 - <a id="send"></a>[`swoosh send`](commands/send.md): push a file or directory to a peer, verified end to end
 - <a id="sync"></a>[`swoosh sync`](commands/sync.md): bring your device list up to date with your other devices, both ways
 - <a id="contact"></a>[`swoosh contact`](commands/contact.md): manage local petnames for peers (yours alone, plain TOML)
-- <a id="identity"></a>[`swoosh identity`](commands/identity.md): print this machine's key, minting one if there is none
+- <a id="identity"></a>[`swoosh identity`](commands/identity.md): back up, restore, or protect this machine's key
 - <a id="invite"></a>[`swoosh invite`](commands/invite.md): create, list, and cancel device invites; one device per invite
 - <a id="adopt"></a>[`swoosh adopt`](commands/adopt.md): adopt an invite, joining a signet's family as this machine
 - <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a peer's sshd over the overlay using the system ssh
-- <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue, list, narrow, or revoke `swoosh:` capability links
+- <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue, narrow, or revoke `swoosh:` capability links
 - <a id="tree"></a>[`swoosh tree`](commands/tree.md): print the command tree read straight from the parser
 
 ## Next

@@ -87,7 +87,7 @@ impl Secret {
     }
 
     /// The node id this secret binds under: the identity a peer reaches when it dials this key. Derived
-    /// offline (no transport stood up), so `swoosh identity` can print it without serving.
+    /// offline (no transport stood up), so `swoosh status` can print it without serving.
     pub fn node_id(&self) -> NodeId {
         self.0.node_id()
     }
@@ -202,14 +202,39 @@ pub async fn load(home: &Home) -> eyre::Result<Option<Secret>> {
 
 /// What the home's key file is, WITHOUT unlocking it, minting a plain key first when the home has none.
 ///
-/// This is the offline look `swoosh identity` prints: which node the file is for and how it is protected.
+/// This is the offline look `swoosh status` prints: which node the file is for and how it is protected.
 /// For a sealed file the node is what its header claims (see [`keystore::Locked::node_id`]); nothing here
-/// asks for a passphrase, so printing an identity never blocks on a prompt.
-pub fn inspect(home: &Home) -> eyre::Result<Stored> {
+/// asks for a passphrase, so reading a key never blocks on a prompt.
+pub fn inspect(home: &Home) -> eyre::Result<Inspected> {
     let file = key_file(home);
     match file.load()? {
-        Some(stored) => Ok(stored),
-        None => mint(&file).map(|secret| Stored::Plain(secret.0)),
+        Some(stored) => Ok(Inspected::Found(stored)),
+        None => mint(&file).map(|secret| Inspected::Made(Stored::Plain(secret.0))),
+    }
+}
+
+/// The home's key file as [`inspect`] read it: already there, or made by this read.
+#[derive(Debug)]
+pub enum Inspected {
+    /// The key was already in the home.
+    Found(Stored),
+    /// The home had no key, and this read made one, plain: the one write `status` makes.
+    Made(Stored),
+}
+
+impl Inspected {
+    /// The key file, whichever way it came.
+    pub fn stored(&self) -> &Stored {
+        match self {
+            Self::Found(stored) | Self::Made(stored) => stored,
+        }
+    }
+
+    /// The key file, whichever way it came, owned.
+    pub fn into_stored(self) -> Stored {
+        match self {
+            Self::Found(stored) | Self::Made(stored) => stored,
+        }
     }
 }
 
@@ -233,20 +258,32 @@ fn open(file: &KeyFile, prompt: &mut impl Prompt) -> eyre::Result<Option<Secret>
     })
 }
 
-/// Mint a fresh key into the empty key file, plain: the default a home is created with.
+/// Mint a fresh key into the empty key file, plain: the default a home is created with. A home that
+/// cannot be written is named with the system's reason, the one thing a person can act on.
 fn mint(file: &KeyFile) -> eyre::Result<Secret> {
     let secret = keystore::Secret::generate()?;
-    create_dir(file)?;
-    file.write(&secret, Protection::Plain)?;
+    let dir = file.path().parent().unwrap_or(file.path());
+    let cannot = |reason: &dyn core::fmt::Display| {
+        eyre::eyre!(
+            "cannot make this machine's key in {}: {reason}",
+            dir.display()
+        )
+    };
+    create_dir(file).map_err(|error| cannot(&error))?;
+    file.write(&secret, Protection::Plain)
+        .map_err(|error| match &error {
+            keystore::Error::Io { source, .. } => cannot(source),
+            _ => eyre::Report::new(error),
+        })?;
     Ok(Secret(secret))
 }
 
 /// Create the directory the key file lives in, owner-only, as every store file's directory is.
-fn create_dir(file: &KeyFile) -> eyre::Result<()> {
-    if let Some(dir) = file.path().parent() {
-        crate::config::create_store_dir(dir)?;
+fn create_dir(file: &KeyFile) -> std::io::Result<()> {
+    match file.path().parent() {
+        Some(dir) => crate::config::create_store_dir(dir),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Write `seed` as the persisted identity at `<home>/key`, plain, mode 0600, creating the store

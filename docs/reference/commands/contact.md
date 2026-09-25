@@ -10,7 +10,6 @@ TOML beside the identity they belong to. `alice` means whoever you pointed it at
 Usage: swoosh contact [OPTIONS] <COMMAND>
   add <name> <key>       save (or re-point) a name: alice, or alice/laptop for a device
   signet <petname> <key> record a person's signet root, so --for fleet:<petname> binds their fleet
-  ls [petname]           list contacts, or one contact's devices (-q for names only)
   rm <name>              forget a contact or one of its devices
 ```
 
@@ -24,6 +23,6 @@ added desk -> ed01hcq6balrlxwa
 **Things to know.** One person can have several machines: `contact add alice/laptop <key>` files a key
 under `alice`. `swoosh ping alice` then tries each of alice's machines and takes the first that answers.
 `contact signet` is different: it records a person's *signet* (not a device key), which is what
-`--for fleet:<petname>` needs.
+`--for fleet:<petname>` needs. `swoosh status` lists your contacts.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
