@@ -173,7 +173,7 @@ impl SshCmd {
         // against an out-of-band value. First sight is over the already-authenticated overlay, so this is a
         // record, not blind TOFU. Same home seam as the identity (`--home`/`SWOOSH_HOME`), so an isolated
         // run pins into its own book instead of appending to the live one.
-        let known_hosts = home.known_hosts();
+        let known_hosts = known_hosts_path(&home.known_hosts())?;
         prepare_known_hosts(&known_hosts)?;
         if !already_pinned(&known_hosts, &key) {
             eprintln!("swoosh: pinning {key} on first connection (over the authenticated overlay)");
@@ -264,6 +264,40 @@ fn ssh_argv(
     ];
     argv.extend(args.iter().cloned());
     argv
+}
+
+/// `path` made absolute, as ssh's `UserKnownHostsFile` names it: or a refusal when ssh would read it as
+/// some other file.
+///
+/// ssh takes the value inside double quotes, then expands `%` tokens (`%d` is the local home) and `${...}`
+/// environment references in it, reads a backslash before a quote or a backslash as an escape, fails on a
+/// `"`, and stops at a newline; a leading `~` names a home directory. So a path holding `"`, `%`, `$`, `\`
+/// or a control character refuses in one line that names it, before anything is prepared, and the path is
+/// made absolute so it never starts with `~`. Every other character reaches ssh as itself, so the file ssh
+/// pins into is the one [`prepare_known_hosts`] checked. Refusing rather than escaping: `%%` is read back
+/// as `%` only by an ssh that expands this option at all, and `$` and `"` have no escape here.
+fn known_hosts_path(path: &Path) -> eyre::Result<std::path::PathBuf> {
+    let path = std::path::absolute(path)?;
+    let text = path
+        .to_str()
+        .ok_or_else(|| eyre::eyre!("{} is not valid UTF-8", path.display()))?;
+    if let Some(c) = text
+        .chars()
+        .find(|&c| c.is_control() || matches!(c, '"' | '%' | '$' | '\\'))
+    {
+        let what = match c {
+            '"' => "a '\"'",
+            '%' => "a '%'",
+            '$' => "a '$'",
+            '\\' => "a backslash",
+            '\n' => "a newline",
+            _ => "a control character",
+        };
+        eyre::bail!(
+            "{text:?} holds {what}, which ssh reads specially in a known_hosts path; use another home"
+        );
+    }
+    Ok(path)
 }
 
 /// Ensure the private known_hosts directory exists (`0700`) and refuse a file writable by group or other.
@@ -537,6 +571,99 @@ mod tests {
         )
         .expect("the ProxyCommand line is a swoosh verb");
         (parsed, words)
+    }
+
+    /// The `UserKnownHostsFile` real ssh reads from `argv`, through `ssh -G` (which prints the options it
+    /// would use and connects to nothing), with `HOME` at `home` so a `%d` in the value has somewhere to
+    /// point. `None` when ssh refuses the argv.
+    fn ssh_reads_known_hosts(argv: &[String], home: &Path) -> Option<String> {
+        let out = std::process::Command::new(SSH)
+            .arg("-G")
+            .args(argv)
+            .env("HOME", home)
+            .output()
+            .expect("run ssh -G");
+        if !out.status.success() {
+            return None;
+        }
+        String::from_utf8(out.stdout)
+            .expect("UTF-8 ssh -G")
+            .lines()
+            .find_map(|line| line.strip_prefix("userknownhostsfile ").map(str::to_owned))
+    }
+
+    /// Each character ssh would read as something other than itself in a known_hosts path. `$` is
+    /// written as `${HOME}`, the form ssh expands.
+    const READ_SPECIALLY: [(&str, &str); 5] = [
+        ("\"", "a '\"'"),
+        ("%d", "a '%'"),
+        ("${HOME}", "a '$'"),
+        ("\\\\", "a backslash"),
+        ("\n", "a newline"),
+    ];
+
+    /// A home whose path holds a character ssh reads specially refuses, in one line naming the path and
+    /// the character, before the host-key book is prepared: ssh would otherwise pin into a file other than
+    /// the one checked, or fail on its own quoting.
+    #[test]
+    fn a_home_path_ssh_reads_specially_is_refused() {
+        let dir = scratch("special-home");
+        for (part, what) in READ_SPECIALLY {
+            let home_dir = dir.join(format!("a{part}b"));
+            let home = Home::resolve(Some(home_dir.clone())).expect("resolve");
+            let error = parse_ssh(&["swoosh", KEY])
+                .argv(&Contacts::default(), &home)
+                .expect_err("the launch refuses")
+                .to_string();
+            let named = format!("{:?}", home_dir.display().to_string());
+            assert!(
+                error.contains(what) && error.contains(named.trim_end_matches('"')),
+                "names the path and {what}: {error}"
+            );
+            assert!(!error.contains('\n'), "one line: {error}");
+            assert!(!home_dir.exists(), "nothing is prepared: {error}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every path the check lets through is the file real ssh reads, and every path it refuses is one ssh
+    /// would read as another file or not at all. A relative path is made absolute, so a leading `~` never
+    /// names someone's home.
+    #[test]
+    fn a_known_hosts_path_reaches_ssh_as_the_file_checked() {
+        let dir = scratch("ssh-reads");
+        let argv =
+            |path: &Path| ssh_argv(PROXY, KEY, KEY, "ssh", None, "host", path, None, &[], &[]);
+        for part in [" ", "'", "#", "=", "~", "\u{e9}"] {
+            let path = dir.join(format!("a{part}b")).join("known_hosts");
+            let checked = known_hosts_path(&path).expect("a path ssh reads as itself");
+            assert_eq!(
+                ssh_reads_known_hosts(&argv(&checked), &dir).as_deref(),
+                Some(path.to_str().expect("UTF-8")),
+                "ssh reads {path:?} as itself"
+            );
+        }
+        let relative = Path::new("~nobody").join("known_hosts");
+        let checked = known_hosts_path(&relative).expect("a relative path");
+        assert!(checked.is_absolute(), "made absolute: {checked:?}");
+        assert_eq!(
+            ssh_reads_known_hosts(&argv(&checked), &dir).as_deref(),
+            checked.to_str(),
+            "ssh reads the absolute path as itself"
+        );
+        for (part, what) in READ_SPECIALLY {
+            let path = dir.join(format!("a{part}b")).join("known_hosts");
+            let error = known_hosts_path(&path)
+                .expect_err("a path ssh reads specially")
+                .to_string();
+            assert!(error.contains(what), "names {what}: {error}");
+            assert_ne!(
+                ssh_reads_known_hosts(&argv(&path), &dir).as_deref(),
+                path.to_str(),
+                "ssh would not read {path:?} as itself, so the refusal is needed"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -940,16 +1067,18 @@ mod tests {
     /// name is chosen by whoever sent it. Under every shell, a name either reaches the child as exactly
     /// that name (nothing runs, nothing points at another path) or refuses before ssh starts, in one line
     /// naming it: a newline ends a single-quoted word in csh, a backslash escapes a quote in fish's single
-    /// quotes, and `!` is csh history. The home rides the same way.
+    /// quotes, and `!` is csh history. The home rides the same way, and a home ssh would read as another
+    /// known_hosts file refuses too.
     #[test]
     fn a_peer_path_with_shell_or_percent_characters_cannot_escape_the_proxy_command() {
         // (file name, home name, whether a shell here cannot carry it, so it may refuse)
         let cases = [
             (
                 "a$(touch pwned)`touch pwned`\"'%h;touch pwned.link",
-                "h$(touch pwned)%p",
+                "h'`touch pwned`;touch pwned",
                 false,
             ),
+            ("a.link", "h$(touch pwned)%p", true),
             ("a\n;touch pwned\n.link", "h", true),
             ("a\\';touch pwned;#.link", "h", true),
             ("a!!;touch pwned.link", "h", true),
@@ -974,8 +1103,10 @@ mod tests {
                         assert!(!error.contains('\n'), "one line: {error}");
                         assert!(
                             error.contains(&format!("{:?}", file.to_str().expect("UTF-8")))
-                                || error
-                                    .contains(&format!("{:?}", home_dir.to_str().expect("UTF-8"))),
+                                || error.contains(
+                                    format!("{:?}", home_dir.to_str().expect("UTF-8"))
+                                        .trim_end_matches('"')
+                                ),
                             "the refusal names the path: {error}"
                         );
                     }
