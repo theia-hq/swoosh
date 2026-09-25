@@ -347,7 +347,7 @@ mod tests {
 
     /// A real base32 `NodeId` string, so the assembled `ProxyCommand` carries the exact key form a
     /// resolved peer would (parsed through the boundary, not hand-built).
-    const KEY: &str = "ed01aeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaqcaibaeaq";
+    const KEY: &str = "ed015jfgyy7ctrjavpxvkb5rglwf7gkuo5vox27hxescd3vgsfcg2iwa";
 
     /// A stand-in for this binary's own quoted path ([`self_invocation`]'s output), fixed so the argv is
     /// deterministic in tests (the real path is `current_exe()` at runtime).

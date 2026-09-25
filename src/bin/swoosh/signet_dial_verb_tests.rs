@@ -279,7 +279,7 @@ async fn reach_presents_the_member_badge_like_its_siblings() {
         "slot 1 is the member badge as a swoosh: link, got {badge}"
     );
     assert_eq!(
-        badge.dial_node(),
+        badge.dial_node().expect("the badge roots at a key"),
         TestRoot::seeded(ROOT).node_id(),
         "the badge is the stored one, rooted at this device's root"
     );

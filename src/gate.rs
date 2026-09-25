@@ -21,7 +21,7 @@ use nauthy::{
     Cap, DenylistError, DisabledRoots, DisabledRootsError, FileDenylist, FileStamp, Gate, Latch,
     PinSource, Revocations, STAT_DEBOUNCE, VerifyKey,
 };
-use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
+use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{AdmittedChains, LiveCuts};
 
 use crate::grants::IssuedLedger;
@@ -41,7 +41,7 @@ pub async fn anchored(home: &Home, own: NodeId) -> Result<(Gate, AnchorCut), Gat
         KeyedDenylist::load(home).await?,
     ));
     let pin = Arc::new(FilePin::open(home, Arc::clone(&latch)));
-    let own = own.verify_key();
+    let own = own.verify_key()?;
     let gate = Gate::anchored(
         Arc::clone(&pin),
         own,
@@ -63,6 +63,9 @@ pub enum GateError {
     /// The revoked device keys could not be read, or lost keys they once held.
     #[error(transparent)]
     RevokedKeys(#[from] RevokedKeysError),
+    /// This machine's own key is not a usable key.
+    #[error("this machine's key is not a usable key: {0}")]
+    OwnKey(#[from] nauthy::KeyError),
 }
 
 /// Why `<home>/revoked_keys` may not be loaded as it reads.
@@ -234,7 +237,7 @@ fn one_key(text: &str) -> Option<VerifyKey> {
     if body.lines().count() != 1 {
         return None;
     }
-    body.parse::<NodeId>().ok().map(|key| key.verify_key())
+    body.parse::<VerifyKey>().ok()
 }
 
 impl PinSource for FilePin {
@@ -425,7 +428,7 @@ pub fn add_revoked_keys(home: &Home, keys: &[VerifyKey]) -> Result<(), RevokedKe
     if held.len() == before {
         return Ok(());
     }
-    let mut lines: Vec<String> = held.iter().map(|key| key.node_id().to_string()).collect();
+    let mut lines: Vec<String> = held.iter().map(ToString::to_string).collect();
     lines.sort();
     let body = lines.join("\n") + "\n";
     let write = |target: &Path, bytes: &[u8]| -> std::io::Result<()> {
@@ -471,9 +474,9 @@ fn read_keys(path: &Path) -> std::io::Result<Option<(HashSet<VerifyKey>, Option<
         if line.is_empty() {
             continue;
         }
-        match line.parse::<NodeId>() {
+        match line.parse::<VerifyKey>() {
             Ok(key) => {
-                keys.insert(key.verify_key());
+                keys.insert(key);
             }
             Err(error) => tracing::warn!(
                 path = %path.display(),

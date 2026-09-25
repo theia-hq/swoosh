@@ -1576,6 +1576,26 @@ mod tests {
         assert!(filter_enables(&warn, &PROBE_OTHER_ERROR));
     }
 
+    /// A torsioned key is refused as the key an invite admits, at parse, naming the check it failed,
+    /// never read as a person's name.
+    #[test]
+    fn a_torsioned_key_is_refused_as_an_invite_key() {
+        let key = swoosh::testkit::torsioned_text();
+        let error = Cli::try_parse_from(["swoosh", "invite", "add", "desk", "--for", key.as_str()])
+            .expect_err("a torsioned key is refused");
+        assert_eq!(
+            error.exit_code(),
+            2,
+            "a key that is not a key is a usage error"
+        );
+        assert!(
+            error.to_string().contains(&format!(
+                "{key} is not a usable key: carries a torsion component"
+            )),
+            "the refusal names the key and the check: {error}"
+        );
+    }
+
     /// The `invite` group resolves its three leaves, and `--for` is the SHARED `GrantFor` grammar: a raw
     /// key and a `<person>/<device>` are devices, `fleet:` parses (refused at run time, not at parse), and
     /// a bare person is the shared teaching parse error.

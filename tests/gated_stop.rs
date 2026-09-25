@@ -205,7 +205,7 @@ async fn a_control_stop_slip_is_refused_before_ok_and_the_node_keeps_running() {
             let slip = TestRoot::seeded(SIGNET)
                 .bound_slip(
                     &CONTROL_STOP_SERVICE.parse().unwrap(),
-                    delegate.node_id().verify_key(),
+                    delegate.node_id().verify_key().expect("a usable key"),
                     nauthy::Request::expires_in(Duration::from_secs(300)),
                 )
                 .unwrap();

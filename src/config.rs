@@ -36,7 +36,7 @@ pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
 /// disabled".
 pub async fn is_disabled(home: &Home, root: NodeId) -> eyre::Result<bool> {
     let disabled = DisabledRoots::load(home.disabled_roots()).await?;
-    Ok(disabled.is_disabled(root.verify_key()))
+    Ok(disabled.is_disabled(root.verify_key()?))
 }
 
 /// Write this node's signet: the public [`NodeId`] its default gate will trust, as `adopt` sets it from an

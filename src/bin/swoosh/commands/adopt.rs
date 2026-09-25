@@ -82,7 +82,7 @@ impl AdoptCmd {
             swoosh::secret::warn_argv_leak(&mut std::io::stderr(), "invite");
         }
         // The standing's key is the root: the invite carries it once.
-        let signet = invite.standing.dial_node();
+        let signet = invite.standing.dial_node()?;
         let badge = invite.standing;
         match invite.seed {
             None => {
@@ -175,8 +175,8 @@ fn verify_badge(badge: Link, node: NodeId, signet: NodeId) -> eyre::Result<Link>
         .cap()
         .verify_member_at_root_without_revocation(
             SystemTime::now(),
-            node.verify_key(),
-            signet.verify_key(),
+            node.verify_key()?,
+            signet.verify_key()?,
         )
         .wrap_err_with(|| {
             format!(
@@ -285,7 +285,7 @@ fn renews(stored: &Link, incoming: &Link, node: NodeId) -> eyre::Result<bool> {
     // device it always bound.
     Ok(stored
         .cap()
-        .verify_member_at_root_without_revocation(was, node.verify_key(), stored.root())
+        .verify_member_at_root_without_revocation(was, node.verify_key()?, stored.root())
         .is_ok())
 }
 

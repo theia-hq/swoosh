@@ -29,7 +29,16 @@ fn sample_doc() -> RosterDoc {
 }
 
 fn key(n: u8) -> VerifyKey {
-    VerifyKey::new([n; 32])
+    TestNode::seeded(n).verify_key()
+}
+
+/// Seeds 1 and 2, lower key first: the order the wire lists their members in.
+fn ascending() -> (u8, u8) {
+    if key(1).bytes() < key(2).bytes() {
+        (1, 2)
+    } else {
+        (2, 1)
+    }
 }
 
 fn member(node: u8, label: &str) -> Member {
@@ -136,7 +145,9 @@ fn new_sorts_members_by_node() {
     )
     .unwrap();
     let nodes: Vec<_> = doc.members().iter().map(|m| *m.node.bytes()).collect();
-    assert_eq!(nodes, vec![[1u8; 32], [3u8; 32], [5u8; 32]]);
+    let mut sorted = vec![*key(1).bytes(), *key(3).bytes(), *key(5).bytes()];
+    sorted.sort_unstable();
+    assert_eq!(nodes, sorted);
 }
 
 #[test]
@@ -222,13 +233,14 @@ fn two_members_on_the_wire(first: &Member, second: &Member) -> Vec<u8> {
 fn parse_rejects_a_non_canonical_member_order() {
     // A blob whose members are not strictly-ascending-by-node is REJECTED, not silently re-sorted, so the
     // wire is non-malleable.
-    let bytes = two_members_on_the_wire(&member(2, "phone"), &member(1, "desk"));
+    let (low, high) = ascending();
+    let bytes = two_members_on_the_wire(&member(high, "phone"), &member(low, "desk"));
     assert_eq!(
         RosterDoc::parse_canonical(&bytes),
         Err(FormatError::NonCanonicalOrder)
     );
-    let ascending = two_members_on_the_wire(&member(1, "desk"), &member(2, "phone"));
-    assert!(RosterDoc::parse_canonical(&ascending).is_ok());
+    let sorted = two_members_on_the_wire(&member(low, "desk"), &member(high, "phone"));
+    assert!(RosterDoc::parse_canonical(&sorted).is_ok());
 }
 
 #[test]
@@ -391,9 +403,9 @@ fn max_roster_blob_is_computed_from_the_bounds() {
 /// [`MAX_REVOKED`] ids and [`MAX_REVOKED_KEYS`] keys, signed into the envelope a courier serves.
 fn maximal_blob(id: &TestRoot, standing: &Link) -> Vec<u8> {
     let index_key = |nth: usize| {
-        let mut bytes = [0u8; VerifyKey::LEN];
-        bytes[..4].copy_from_slice(&(nth as u32).to_be_bytes());
-        bytes
+        let mut seed = [0u8; 32];
+        seed[..4].copy_from_slice(&(nth as u32).to_be_bytes());
+        TestNode::from_seed(seed).verify_key()
     };
     let full_id = |nth: usize| {
         let mut bytes = vec![0xff; MAX_REVOCATION_ID];
@@ -405,7 +417,7 @@ fn maximal_blob(id: &TestRoot, standing: &Link) -> Vec<u8> {
     };
     let members = (0..MAX_MEMBERS)
         .map(|nth| Member {
-            node: VerifyKey::new(index_key(nth)),
+            node: index_key(nth),
             // Every name at its bound, and no two alike.
             label: DeviceLabel::from_str(&format!(
                 "{}{nth:04x}",
@@ -419,9 +431,7 @@ fn maximal_blob(id: &TestRoot, standing: &Link) -> Vec<u8> {
         })
         .collect();
     let revoked = (0..MAX_REVOKED).map(full_id).collect();
-    let keys = (0..MAX_REVOKED_KEYS)
-        .map(|nth| VerifyKey::new(index_key(nth)))
-        .collect();
+    let keys = (0..MAX_REVOKED_KEYS).map(index_key).collect();
     id.sign_update(&RosterDoc::with_revocations(Epoch(u64::MAX), members, revoked, keys).unwrap())
 }
 
@@ -450,9 +460,31 @@ fn an_update_refuses_two_members_under_one_name() {
         RosterDoc::new(Epoch(7), vec![member(1, "desk"), member(2, "desk")]),
         Err(FormatError::DuplicateLabel(desk.clone()))
     );
-    let bytes = two_members_on_the_wire(&member(1, "desk"), &member(2, "desk"));
+    let (low, high) = ascending();
+    let bytes = two_members_on_the_wire(&member(low, "desk"), &member(high, "desk"));
     assert_eq!(
         RosterDoc::parse_canonical(&bytes),
         Err(FormatError::DuplicateLabel(desk))
+    );
+}
+
+/// A roster update signed by the root, one of whose device keys is torsioned, is refused whole when it
+/// is read, naming the check the key failed.
+#[test]
+fn a_torsioned_key_inside_a_roster_update_is_refused() {
+    let doc = RosterDoc::new(Epoch(3), vec![member(1, "desk")]).unwrap();
+    let mut bytes = doc.canonical_bytes();
+    let real = *key(1).bytes();
+    let at = bytes
+        .windows(real.len())
+        .position(|window| window == real)
+        .expect("the device key is on the wire");
+    bytes[at..at + real.len()].copy_from_slice(&crate::testkit::TORSIONED);
+    let blob = identity(ROOT).sign(&bytes).encode();
+    assert_eq!(
+        super::verify(&blob, identity(ROOT).verify_key()),
+        Err(RosterVerifyError::Payload(FormatError::BadKey(
+            nauthy::KeyError::HasTorsion
+        )))
     );
 }

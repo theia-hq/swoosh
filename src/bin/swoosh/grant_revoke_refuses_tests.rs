@@ -43,7 +43,11 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
 
     // Mint the device-bound link the issuer hands off, then recover the cap and its root revocation id.
     let link = issuer
-        .bound_slip(&service, device.verify_key(), Request::expires_in(HOUR))
+        .bound_slip(
+            &service,
+            device.verify_key().expect("a usable key"),
+            Request::expires_in(HOUR),
+        )
         .unwrap();
     let cap = Cap::parse(link.as_str()).unwrap();
     let root_id = cap.root_revocation_id().unwrap();
@@ -60,7 +64,8 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     Grants::at(home.grants()).append(&record).await.unwrap();
 
     // Before revocation: the cap is a valid grant for the bound device, and nothing revokes it.
-    let request = Request::now(service.clone()).bound_to(device.verify_key());
+    let request =
+        Request::now(service.clone()).bound_to(device.verify_key().expect("a usable key"));
     assert!(
         cap.verify_at_root_without_revocation(&request, issuer.verify_key())
             .is_ok(),
@@ -116,7 +121,11 @@ async fn revoking_a_holder_with_a_badge_plus_a_service_grant_cuts_both() {
     let badge_root = badge.root_revocation_id().unwrap();
     // A service grant, minted the way `grant issue --for` does.
     let link = issuer
-        .bound_slip(&service, device.verify_key(), Request::expires_in(HOUR))
+        .bound_slip(
+            &service,
+            device.verify_key().expect("a usable key"),
+            Request::expires_in(HOUR),
+        )
         .unwrap();
     let cap = Cap::parse(link.as_str()).unwrap();
     let root_id = cap.root_revocation_id().unwrap();

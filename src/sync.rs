@@ -30,7 +30,7 @@ use std::time::SystemTime;
 use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use nauthy::VerifyKey;
 use rand::seq::SliceRandom as _;
-use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
+use tightbeam::identity::AsNodeId as _;
 use tightbeam::tunnel::Connector;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
@@ -120,7 +120,9 @@ pub fn digest(bytes: &[u8]) -> [u8; 32] {
 /// This machine's pin, when it is a device of a root.
 async fn device_pin(home: &Home) -> Result<Option<VerifyKey>, ExchangeError> {
     Ok(match Standing::read(home).await?.standing {
-        Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => Some(pin.verify_key()),
+        Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => {
+            Some(crate::standing::pin_key(home, pin)?)
+        }
         Standing::Unpinned | Standing::PinOnly { .. } | Standing::InterruptedMint { .. } => None,
     })
 }
@@ -339,7 +341,11 @@ pub async fn devices(
     if let Ok(Some(pin)) = device_pin(home).await
         && let Some((doc, _)) = read_held(&home.roster(), pin)
     {
-        revoked.extend(doc.revoked_keys().iter().map(|key| key.node_id()));
+        revoked.extend(
+            doc.revoked_keys()
+                .iter()
+                .filter_map(|key| key.node_id().ok()),
+        );
     }
     let store = ContactsStore::open(home.contacts()).await?;
     let mut mine: Vec<Device> = store
@@ -353,9 +359,12 @@ pub async fn devices(
         })
         .collect();
     mine.shuffle(&mut rand::thread_rng());
-    let also = also.into_iter().map(|(key, name)| Device {
-        key: key.node_id(),
-        name,
+    // A key that is not a usable key cannot be dialed, so it is left out.
+    let also = also.into_iter().filter_map(|(key, name)| {
+        Some(Device {
+            key: key.node_id().ok()?,
+            name,
+        })
     });
     let seed = std::fs::read_to_string(home.roster_seed())
         .ok()

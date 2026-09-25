@@ -22,7 +22,7 @@ use std::time::SystemTime;
 use bifrost::NodeId;
 use keystore::{KeyFile, Method, Protection, Stored};
 use nauthy::{DisabledRoots, Link, RevocationId, VerifyKey};
-use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
+use tightbeam::identity::AsVerifyKey as _;
 
 use crate::codec::{FormatError, Id, MAX_IDS, MAX_MEMBERS, MAX_REVOKED, MAX_REVOKED_KEYS};
 use crate::contacts::DeviceLabel;
@@ -140,6 +140,9 @@ pub enum RootError {
     /// The root's key file could not be read or unlocked.
     #[error(transparent)]
     KeyFile(#[from] keystore::Error),
+    /// A key stored on this machine is not a usable key.
+    #[error("a key stored on this machine is not a usable key ({0}): refusing to use it")]
+    Key(#[from] nauthy::KeyError),
     /// The root's key file is plain.
     #[error(
         "this root key is not sealed, and swoosh never writes one that way: it was changed outside swoosh. \
@@ -242,7 +245,7 @@ pub enum RootError {
     /// A live device already has this name, under another key.
     #[error(
         "me/{name} is {}…. To replace it: swoosh revoke me/{name}, then invite the new key.",
-        .key.node_id().short()
+        crate::credential::short(.key)
     )]
     NameTaken {
         /// The name.
@@ -260,7 +263,7 @@ pub enum RootError {
     #[error(
         "{}… is already your device me/{name} (until {until}). To renew it: swoosh invite {name}. A \
         machine has one name.",
-        .key.node_id().short()
+        crate::credential::short(.key)
     )]
     AlreadyDevice {
         /// The key.
@@ -274,7 +277,7 @@ pub enum RootError {
     #[error(
         "{}… was revoked{}; a revoked key is not re-admitted. On that machine: swoosh leave --new-key, then \
         invite the new key.",
-        .key.node_id().short(),
+        crate::credential::short(.key),
         .on.map(|on| format!(" on {on}")).unwrap_or_default()
     )]
     RevokedKey {
@@ -473,9 +476,9 @@ impl Root {
         let lock = take_lock(&found.dir, verb.writes_source() || place == RootPlace::Home)?;
         // Only an act that writes the copy, and so holds its lock, may promote a staged `state.new`.
         let state = if verb.writes_source() {
-            state::recover(&found.dir, found.header.verify_key())?
+            state::recover(&found.dir, found.header.verify_key()?)?
         } else {
-            state::load(&found.dir, found.header.verify_key())?
+            state::load(&found.dir, found.header.verify_key()?)?
         };
         let book = Book::from(state);
         let mut act = Act {
@@ -516,7 +519,7 @@ impl Root {
         let found = find(home, &place, None).await?;
         Ok(Inspected {
             root: found.header,
-            state: state::load(&found.dir, found.header.verify_key())?,
+            state: state::load(&found.dir, found.header.verify_key()?)?,
             finished: found.finished,
         })
     }
@@ -871,7 +874,7 @@ impl Act {
     /// Bring the records forward from the update this machine holds and any fork of it, carry this
     /// machine's own revocations of the root's devices, then mark every row whose key is revoked.
     fn bring_forward(&mut self, out: &mut impl Write) -> Result<(), RootError> {
-        let pin = self.key.verify_key();
+        let pin = self.key.verify_key()?;
         self.held = read_held(&self.home.roster(), pin);
         let fork = read_held(&self.home.roster_fork(), pin);
         let behind = self
@@ -925,10 +928,9 @@ impl Act {
             }
         }
         for line in read_lines(&self.home.revoked_keys())? {
-            let Ok(key) = line.parse::<NodeId>() else {
+            let Ok(key) = line.parse::<VerifyKey>() else {
                 continue;
             };
-            let key = key.verify_key();
             if self.book.rows.iter().any(|row| row.key == key) {
                 self.book.revoked_keys.insert(*key.bytes(), key);
             }
@@ -956,7 +958,7 @@ impl Act {
             .rows
             .iter()
             .filter(|row| self.due.contains(&row.key))
-            .map(|row| format!("me/{} ({}…)", row.label, row.key.node_id().short()))
+            .map(|row| format!("me/{} ({}…)", row.label, crate::credential::short(&row.key)))
             .collect();
         if !names.is_empty() {
             let count = names.len();
@@ -1055,7 +1057,7 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
     let revoked = DisabledRoots::load(home.disabled_roots())
         .await
         .map_err(StandingError::Revoked)?;
-    if revoked.is_disabled(header.verify_key()) {
+    if revoked.is_disabled(header.verify_key()?) {
         return Err(RootError::Revoked { root: header });
     }
     Ok(Found {
@@ -1132,7 +1134,7 @@ async fn make(
     if !prompt.terminal() {
         return Err(RootError::NoTerminal);
     }
-    let own = crate::identity::inspect(home)?.node_id().verify_key();
+    let own = crate::identity::inspect(home)?.node_id().verify_key()?;
     let _ = writeln!(
         out,
         "This makes your root on this machine: a second key, not a machine, that vouches for all your \
@@ -1204,13 +1206,14 @@ async fn finish(
     let dir = home.root();
     let locked = read_header(&dir)?;
     let lock = take_lock(&dir, true)?;
-    let book = Book::from(state::recover(&dir, root_key.verify_key())?);
-    let own = crate::identity::inspect(home)?.node_id().verify_key();
+    let pin = root_key.verify_key()?;
+    let book = Book::from(state::recover(&dir, pin)?);
+    let own = crate::identity::inspect(home)?.node_id().verify_key()?;
     let now = unix_now();
     let ours = |standing: &Link| {
         standing
             .cap()
-            .verify_member_at_root_without_revocation(at(now), own, root_key.verify_key())
+            .verify_member_at_root_without_revocation(at(now), own, pin)
             .is_ok()
     };
 
@@ -1401,7 +1404,7 @@ impl Brought {
             line.push_str(&format!(
                 " me/{name} ({}…) was also added on another copy of your root; it is revoked here. To keep \
                 that machine: on it, swoosh leave --new-key, then invite the new key under another name.",
-                key.node_id().short()
+                crate::credential::short(key)
             ));
         }
         let _ = writeln!(out, "{line}");
@@ -1695,9 +1698,11 @@ fn read_lines(path: &Path) -> Result<Vec<String>, RootError> {
 
 /// This machine's key, from its key file's header, when it has one.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, RootError> {
-    Ok(KeyFile::device(home.identity_key())
+    KeyFile::device(home.identity_key())
         .load()?
-        .map(|stored| stored.node_id().verify_key()))
+        .map(|stored| stored.node_id().verify_key())
+        .transpose()
+        .map_err(RootError::from)
 }
 
 /// Set the core-dump limit to zero, soft and hard, so a crash with the root unlocked writes no copy of it.

@@ -10,7 +10,7 @@
 
 use core::str::FromStr;
 
-use bifrost::NodeId;
+use bifrost::{NodeId, NodeIdParseError};
 use nauthy::{Link, Service};
 use tightbeam::tunnel::Connector;
 
@@ -50,12 +50,22 @@ impl FromStr for Peer {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         if crate::link::is_prefixed(text) {
             Ok(Self::Capability(crate::link::parse(text)?))
-        } else if let Ok(node) = text.parse::<NodeId>() {
-            Ok(Self::Raw(node))
-        } else if crate::link::looks_bare(text) {
-            Err(PeerParseError::Capability(LinkError::Prefix))
         } else {
-            Ok(Self::Named(text.parse::<ContactRef>()?))
+            match text.parse::<NodeId>() {
+                Ok(node) => return Ok(Self::Raw(node)),
+                Err(NodeIdParseError::Key(error)) => {
+                    return Err(PeerParseError::Key {
+                        text: text.to_owned(),
+                        error,
+                    });
+                }
+                Err(_) => {}
+            }
+            if crate::link::looks_bare(text) {
+                Err(PeerParseError::Capability(LinkError::Prefix))
+            } else {
+                Ok(Self::Named(text.parse::<ContactRef>()?))
+            }
         }
     }
 }
@@ -69,6 +79,14 @@ pub enum PeerParseError {
     /// The text was neither a link nor a raw key, and a part of it was not a name: the name rule's own line.
     #[error(transparent)]
     Contact(#[from] NameError),
+    /// The text spells a key, but not one anyone can hold.
+    #[error("{text} is not a usable key: {error}")]
+    Key {
+        /// The text as typed.
+        text: String,
+        /// Which check the key failed.
+        error: bifrost::KeyError,
+    },
 }
 
 impl Peer {
@@ -90,7 +108,7 @@ impl Peer {
             }]),
             Self::Capability(link) => Ok(vec![Candidate {
                 label: link.short(),
-                node: link.dial_node(),
+                node: link.dial_node()?,
             }]),
         }
     }
@@ -111,7 +129,7 @@ impl Peer {
     ) -> eyre::Result<Connector> {
         let dial = match self {
             Self::Raw(id) => *id,
-            Self::Capability(link) => link.dial_node(),
+            Self::Capability(link) => link.dial_node()?,
             Self::Named(reference) => {
                 contacts
                     .resolve_candidates(reference)?
@@ -266,7 +284,7 @@ mod tests {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a swoosh: link parses");
         let root = match &peer {
-            Peer::Capability(link) => link.dial_node(),
+            Peer::Capability(link) => link.dial_node().expect("a link root is a key"),
             _ => panic!("a swoosh: link parses as a Capability peer"),
         };
 
@@ -356,7 +374,7 @@ mod tests {
         let link = signet_link();
         let peer = link.parse::<Peer>().expect("a link peer");
         let root = match &peer {
-            Peer::Capability(link) => link.dial_node(),
+            Peer::Capability(link) => link.dial_node().expect("a link root is a key"),
             _ => panic!("a swoosh: link parses as a Capability peer"),
         };
         // The two slots come from the resolver, not from the peer link: distinct valid links prove the
