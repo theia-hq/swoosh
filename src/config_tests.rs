@@ -130,7 +130,7 @@ async fn an_absent_or_empty_badge_file_reads_as_none() {
 }
 
 /// The store's round trip: what `write_badge` puts down, `load_badge` gives back as the SAME link, so the
-/// credential a dial presents is byte-identical to the one `adopt` stored (the far gate re-parses the exact
+/// credential a dial presents is byte-identical to the one `join` stored (the far gate re-parses the exact
 /// text, so a decode/re-encode drift would be a refusal nobody could explain).
 #[tokio::test]
 async fn a_written_badge_reads_back_as_the_same_link() {
@@ -154,7 +154,7 @@ async fn a_written_badge_reads_back_as_the_same_link() {
 }
 
 /// A badge file holding something that is not a link FAILS CLOSED at the load, naming the file and
-/// the escape (`adopt --force`, the only adopt that does not itself run this load). Before the parse moved
+/// the way out (`leave`, which removes it without loading it). Before the parse moved
 /// to the edge, the junk travelled the whole reach path and the peer refused it with nothing said.
 #[tokio::test]
 async fn a_corrupt_badge_file_fails_closed_and_names_the_fix() {
@@ -171,8 +171,8 @@ async fn a_corrupt_badge_file_fails_closed_and_names_the_fix() {
         "the message names the file to fix: {chain}"
     );
     assert!(
-        chain.contains("swoosh adopt --force"),
-        "the message names the escape that does not loop back through this same load: {chain}"
+        chain.contains("swoosh leave"),
+        "the message names the way out, which does not loop back through this same load: {chain}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

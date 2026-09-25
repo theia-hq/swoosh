@@ -40,22 +40,33 @@ const SHORT: usize = 12;
 
 /// Make this machine's key if the home has none, then print what `print` asks for.
 pub(crate) async fn run(home: &Home, print: Print) -> eyre::Result<()> {
+    run_to(home, print, &mut std::io::stdout(), &mut std::io::stderr()).await
+}
+
+/// [`run`], printing the report or the key on `out` and every other line on `err`.
+pub(crate) async fn run_to(
+    home: &Home,
+    print: Print,
+    out: &mut impl std::io::Write,
+    err: &mut impl std::io::Write,
+) -> eyre::Result<()> {
     let key = identity::inspect(home)?;
     if let identity::Inspected::Made(_) = key {
-        eprintln!(
+        writeln!(
+            err,
             "made this machine's key (first run): {}",
             home.key().display()
-        );
+        )?;
     }
     if print == Print::Key {
-        println!("{}", key.stored().node_id());
+        writeln!(out, "{}", key.stored().node_id())?;
         return Ok(());
     }
     let report = Report::gather(home, key.stored(), unix_now()).await?;
     for notice in &report.notices {
-        eprintln!("{notice}");
+        writeln!(err, "{notice}")?;
     }
-    print!("{}", report.render());
+    write!(out, "{}", report.render())?;
     Ok(())
 }
 
@@ -122,6 +133,9 @@ impl Report {
         report.sections.push(contacts_section(contacts));
         report.sections.push(links_section(home, now).await?);
         report.serving = report.serving_line(home).await;
+        if let Some(root) = swoosh::joining::AdmitLock::admitted(home) {
+            report.serving = admitting(&report.serving, root);
+        }
         if roster_fork_held(home) {
             report.nags.push(
                 "two copies of your root have been used: your devices hold two different lists. Keep one \
@@ -154,10 +168,6 @@ impl Report {
                 return Ok(());
             }
             Standing::InterruptedMint { .. } => return Ok(()),
-            Standing::PinOnly { pin } => {
-                self.root = vec![not_here(home, pin)];
-                return Ok(());
-            }
             Standing::HoldsRoot { pin, until } => {
                 let inspected = Root::inspect(home, RootPlace::Home).await?;
                 self.notices
@@ -396,6 +406,16 @@ impl Report {
         }
         out
     }
+}
+
+/// `serving:` with the root a running `serve --admit` admits, after what it serves when that is known.
+fn admitting(serving: &str, root: NodeId) -> String {
+    let head = if serving == SERVING_NOTHING {
+        "serving:".to_owned()
+    } else {
+        format!("{serving},")
+    };
+    format!("{head} admitting root root:{root}")
 }
 
 /// `serving:` from a running `serve`'s menu: every service it serves that is not turned off. When the list

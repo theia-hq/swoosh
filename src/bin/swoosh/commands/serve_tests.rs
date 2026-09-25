@@ -3026,3 +3026,108 @@ fn the_update_route_is_control_sync() {
         "an exchange dials control.sync"
     );
 }
+
+/// `serve --admit` takes a root key, and refuses before it serves: this machine's own key, a root revoked
+/// here, a person's root, and on a machine that trusts a root already. What it admits, it holds for the
+/// run, so `join` refuses meanwhile.
+#[tokio::test]
+async fn serve_admit_refuses_what_it_must_not_admit() {
+    use swoosh::testkit::{TestNode, TestRoot};
+    use tightbeam::identity::AsVerifyKey as _;
+
+    let scratch = |tag: &str| {
+        let dir =
+            std::env::temp_dir().join(format!("swoosh-serve-admit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        swoosh::config::create_store_dir(&dir).unwrap();
+        Home::resolve(Some(dir)).unwrap()
+    };
+    let own = TestNode::seeded(0x11).node_id();
+    let root = TestRoot::seeded(0x21).node_id();
+    let refusal = |result: eyre::Result<swoosh::joining::AdmitLock>| match result {
+        Ok(_) => panic!("refused"),
+        Err(error) => format!("{error:#}"),
+    };
+
+    let home = scratch("own");
+    assert_eq!(
+        refusal(super::admitting(&home, own, own).await),
+        "that is this machine's key, not a root."
+    );
+
+    let home = scratch("revoked");
+    nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
+        .disable(root.verify_key().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        refusal(super::admitting(&home, own, root).await).contains("was revoked on this machine")
+    );
+
+    let home = scratch("contact");
+    let mut store = swoosh::contacts::ContactsStore::open(home.contacts())
+        .await
+        .unwrap();
+    store
+        .contacts_mut()
+        .set_signet("alice".parse().unwrap(), root);
+    store.save().await.unwrap();
+    assert!(
+        refusal(super::admitting(&home, own, root).await)
+            .contains("is alice's root: admitting it would admit every one of alice's devices"),
+    );
+
+    let home = scratch("pinned");
+    swoosh::config::write_signet(&home, TestRoot::seeded(0x31).node_id())
+        .await
+        .unwrap();
+    swoosh::config::write_badge(
+        &home,
+        &TestRoot::seeded(0x31)
+            .device_badge(own, nauthy::Request::expires_in(Duration::from_secs(3600)))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut seed = TestNode::seeded(0x11).seed();
+    keystore::KeyFile::device(home.key())
+        .write(
+            &keystore::Secret::take(&mut seed),
+            keystore::Protection::Plain,
+        )
+        .unwrap();
+    assert!(
+        refusal(super::admitting(&home, own, root).await)
+            .contains("--admit is for a machine that trusts no root")
+    );
+
+    let home = scratch("admits");
+    let lock = super::admitting(&home, own, root).await.expect("admits");
+    assert_eq!(swoosh::joining::AdmitLock::admitted(&home), Some(root));
+    assert!(!home.signet().exists(), "no pin is written");
+    drop(lock);
+    assert_eq!(swoosh::joining::AdmitLock::admitted(&home), None);
+}
+
+/// `--admit` takes one key, typed `root:ed01…`, and is not repeated.
+#[test]
+fn serve_admit_takes_one_root_key() {
+    use clap::Parser as _;
+    use swoosh::testkit::TestRoot;
+
+    let root = TestRoot::seeded(0x21).node_id();
+    let typed = format!("root:{root}");
+    let cli = super::super::super::Cli::try_parse_from(["swoosh", "serve", "--admit", &typed])
+        .expect("a root key");
+    let Some(super::super::super::Command::Serve(serve)) = cli.command else {
+        panic!("serve");
+    };
+    assert_eq!(serve.admit, Some(root));
+    assert!(
+        super::super::super::Cli::try_parse_from([
+            "swoosh", "serve", "--admit", &typed, "--admit", &typed
+        ])
+        .is_err(),
+        "one key, not repeated"
+    );
+}

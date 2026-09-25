@@ -83,7 +83,7 @@ async fn a_member_stops_a_gated_node_over_control_stop() {
 
             // A member: a badge the signet signed, rooted at the trusted signet and bound to the member's
             // proven mem id, so the gate admits it (the shape `mint` mints for a device; see `gated_measure`
-            // for why it is signed here rather than run through mint/adopt over mem).
+            // for why it is signed here rather than run through invite/join over mem).
             let member = Node::new(MemTransport::bind(), NoDiscovery);
             let badge = signet_badge(SIGNET, member.node_id());
             let session = Connector::to_node(
@@ -259,7 +259,7 @@ async fn build_exposer(cancel: CancellationToken) -> Exposer {
 
 /// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id):
 /// the shape a signet holder self-signs and `mint` mints for a device. Rooted at the signet it admits; rooted
-/// at a stranger key it is refused. Signed here (not via mint/adopt) so it binds to the mem proven id.
+/// at a stranger key it is refused. Signed here (not via invite/join) so it binds to the mem proven id.
 fn signet_badge(signer: u8, bound: NodeId) -> String {
     TestRoot::seeded(signer)
         .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))

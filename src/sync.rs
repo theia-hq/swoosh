@@ -127,7 +127,7 @@ async fn device_pin(home: &Home) -> Result<Option<VerifyKey>, ExchangeError> {
         Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => {
             Some(crate::standing::pin_key(home, pin)?)
         }
-        Standing::Unpinned | Standing::PinOnly { .. } | Standing::InterruptedMint { .. } => None,
+        Standing::Unpinned | Standing::InterruptedMint { .. } => None,
     })
 }
 

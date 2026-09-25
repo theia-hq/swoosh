@@ -1,7 +1,6 @@
 //! The verb tree. `main` dispatches to a leaf command's `run`; each leaf lives in its own file and owns
 //! an `async fn run(self, ...)` that consumes it.
 
-pub mod adopt;
 pub mod attenuate;
 pub mod connect;
 pub mod contact;
@@ -9,6 +8,8 @@ pub mod fetch;
 pub mod grant;
 pub mod identity;
 pub mod invite;
+pub mod join;
+pub mod leave;
 pub mod ping;
 pub mod reach;
 pub mod revoke;

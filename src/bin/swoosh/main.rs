@@ -34,8 +34,8 @@ use swoosh::{credential, reaching, transport};
 // The verb modules this binary dispatches to, each its own tree beside the composition root. The
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
-    adopt, contact, fetch, grant, identity, invite, ping, reach, send, serve, service, speed, ssh,
-    status, stop, sync, tree,
+    contact, fetch, grant, identity, invite, join, leave, ping, reach, send, serve, service, speed,
+    ssh, status, stop, sync, tree,
 };
 
 mod commands;
@@ -101,8 +101,10 @@ enum Command {
     Identity(identity::IdentityCmd),
     /// Add one of your devices, or renew it. Bare `invite` lists what is due.
     Invite(invite::InviteCmd),
-    /// Adopt an invite: join a signet's family as this machine.
-    Adopt(adopt::AdoptCmd),
+    /// Make this machine one of your devices, from an invite.
+    Join(join::JoinCmd),
+    /// Stop being one of your devices. `--new-key` also gives this machine a new key.
+    Leave(leave::LeaveCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(ssh::SshCmd),
     /// Issue, narrow, or revoke `swoosh:` capability links.
@@ -223,6 +225,9 @@ reaching_verbs! {
     /// `swoosh invite <name> …`: a root act that syncs with your devices before it signs and offers them
     /// its cut after. Presents this machine's standing, like `sync`. A bare `invite` splits to a local read.
     Invite(invite::InviteCmd),
+    /// `swoosh join`'s first exchange, with the machine that made the invite: it presents the standing the
+    /// join just stored, under this machine's key.
+    Join(join::JoinPull),
 }
 
 impl Command {
@@ -239,7 +244,8 @@ impl Command {
                 Some(_) => Verb::Outward(Outward::Invite(cmd)),
                 None => Verb::Invite(cmd),
             },
-            Self::Adopt(cmd) => Verb::Adopt(cmd),
+            Self::Join(cmd) => Verb::Join(cmd),
+            Self::Leave(cmd) => Verb::Leave(cmd),
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Grant(cmd) => Verb::Grant(cmd),
@@ -287,9 +293,10 @@ enum Verb {
     /// A bare `swoosh invite`: what is due, from the root's records; it binds no transport. With a name it is
     /// a reaching verb instead.
     Invite(invite::InviteCmd),
-    /// Adopts an invite: writes the trust + badge (a derived invite also writes the identity); needs the
-    /// home, no store or transport.
-    Adopt(adopt::AdoptCmd),
+    /// Joins a root from an invite: checks and writes locally, then makes one exchange as a reaching verb.
+    Join(join::JoinCmd),
+    /// Leaves the root this machine trusts; needs only the home.
+    Leave(leave::LeaveCmd),
     /// Reads the address book to resolve a peer, then execs the system `ssh` over the overlay. A launcher:
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
@@ -370,8 +377,17 @@ impl Outward {
             // `serve` drives the gated exposer, so it resolves the exposer context; every other verb
             // returns `None`. Nothing is signed here (or anywhere in `serve`): an update it gives or
             // takes was signed by the root.
-            Self::Serve(_) => {
-                let (gate, cut) = swoosh::gate::anchored(home, secret.node_id()).await?;
+            Self::Serve(cmd) => {
+                let admit = match cmd.admit {
+                    Some(root) => Some(serve::admitting(home, secret.node_id(), root).await?),
+                    None => None,
+                };
+                let admitted = cmd
+                    .admit
+                    .map(|root| tightbeam::identity::AsVerifyKey::verify_key(&root))
+                    .transpose()?;
+                let (gate, cut) =
+                    swoosh::gate::anchored_admitting(home, secret.node_id(), admitted).await?;
                 Ok(Some(serve::ExposeContext {
                     #[cfg(feature = "ssh")]
                     host_seed: secret.ssh_host_seed(),
@@ -386,6 +402,7 @@ impl Outward {
                     // The SAME home the root resolved once: the resident socket/lock derive from it, so
                     // a `--resident` serve and its future control clients name the same paths.
                     home: home.clone(),
+                    admit,
                 }))
             }
             _ => Ok(None),
@@ -498,10 +515,20 @@ async fn run() -> eyre::Result<()> {
         Verb::Identity(cmd) => return cmd.run(&home),
         // A bare `swoosh invite`: what is due, read from the root's records with no lock and no prompt.
         Verb::Invite(cmd) => return cmd.run_due(&home).await,
-        // Adopts an invite: a derived invite writes the device identity + signet + badge; a bound invite
-        // keeps the home's identity and writes the signet + badge. Needs only the home; no store, no
-        // transport.
-        Verb::Adopt(cmd) => return cmd.run(&home).await,
+        // Joins a root from an invite: every check and write is local; only the first exchange with the
+        // machine that made the invite binds a transport, under the key the join may just have written.
+        Verb::Join(cmd) => match cmd.run_local(&home).await? {
+            Some(from) => {
+                let pull = Outward::Join(join::JoinPull {
+                    from,
+                    reach: cmd.reach,
+                });
+                pull.reach_args().reject_unused_reach()?;
+                pull
+            }
+            None => return Ok(()),
+        },
+        Verb::Leave(cmd) => return cmd.run(&home).await,
         // The `grant` group: `share` signs a link with the persisted key; `attenuate`/`revoke` are wholly
         // offline. No leaf binds a transport, so the group dispatches here beside the local verbs rather
         // than falling through to the reach path; `issue --for` reads the address book to resolve a device.

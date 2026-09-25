@@ -785,9 +785,7 @@ impl Root {
                     None => Minted::Finished,
                 })
             }
-            Standing::PinOnly { .. } | Standing::Device { .. } | Standing::HoldsRoot { .. } => {
-                Err(RootError::NotMintable)
-            }
+            Standing::Device { .. } | Standing::HoldsRoot { .. } => Err(RootError::NotMintable),
         }
     }
 
@@ -1257,7 +1255,7 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
             return Err(RootError::Unfinished { root: root_key });
         }
         (RootPlace::Home, Standing::Device { .. }) => return Err(RootError::NotOnThisMachine),
-        (RootPlace::Home, Standing::Unpinned | Standing::PinOnly { .. }) => {
+        (RootPlace::Home, Standing::Unpinned) => {
             return Err(RootError::NoRootHere);
         }
         (RootPlace::Dir(_), Standing::HoldsRoot { .. } | Standing::InterruptedMint { .. }) => {
@@ -1267,7 +1265,6 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
             return Err(RootError::HolderOnly);
         }
         (RootPlace::Dir(dir), Standing::Device { pin, .. }) => (dir.clone(), Some(pin), true),
-        (RootPlace::Dir(dir), Standing::PinOnly { pin }) => (dir.clone(), Some(pin), false),
         (RootPlace::Dir(dir), Standing::Unpinned) => (dir.clone(), None, false),
     };
     if verb.is_some_and(RootVerb::cuts) && !device {

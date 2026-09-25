@@ -135,6 +135,26 @@ async fn status_with_no_node_prints_serving_nothing() {
     );
 }
 
+/// While a `serve --admit` runs here, `serving:` names the root it admits.
+#[tokio::test]
+async fn status_names_the_root_a_running_serve_admits() {
+    let home = home("admitting");
+    let root = TestRoot::seeded(ROOT).node_id();
+    let running = swoosh::joining::AdmitLock::admitting(&home, root).expect("the lock");
+    let out = status(&home).await;
+    assert!(
+        out.lines()
+            .any(|line| line == format!("serving: admitting root root:{root}")),
+        "{out}"
+    );
+    drop(running);
+    let out = status(&home).await;
+    assert!(
+        out.lines().any(|line| line == SERVING_NOTHING),
+        "once it stops, nothing: {out}"
+    );
+}
+
 /// A machine with no root names joining one first, then making one, as three lines under `lock:`.
 #[tokio::test]
 async fn status_with_no_root_names_join_first() {
