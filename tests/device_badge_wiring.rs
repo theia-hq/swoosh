@@ -45,11 +45,11 @@ fn invite_add_derives_signs_adopt_stores_and_it_verifies_at_the_signet_root() {
     std::fs::create_dir_all(&signet_dir).unwrap();
     std::fs::create_dir_all(&device_dir).unwrap();
 
-    // `--home <dir>` names the identity+trust unit; the key lives inside it at `identity.key`. `invite
+    // `--home <dir>` names the identity+trust unit; the key lives inside it at `key`. `invite
     // add` reads/creates the signet in the signet holder's home; `adopt` writes the device identity +
     // signet + badge in the device's home. The key file paths are kept for the on-disk assertions below.
-    let signet_key = signet_dir.join("identity.key");
-    let device_key = device_dir.join("identity.key");
+    let signet_key = signet_dir.join("key");
+    let device_key = device_dir.join("key");
 
     // 1. CREATE: run the real `swoosh invite add ci-runner` in the signet holder's home. It derives the
     //    child, signs the device badge, and prints the three-field invite.
@@ -182,7 +182,7 @@ async fn invite_add_for_binds_a_device_made_key_and_adopt_keeps_that_identity() 
     let device: NodeId = device_line
         .parse()
         .expect("identity prints the node id first");
-    let device_secret_before = std::fs::read(device_dir.join("identity.key")).unwrap();
+    let device_secret_before = std::fs::read(device_dir.join("key")).unwrap();
 
     // 2. The OWNER signs for that key. The token is two fields (signet . badge): no seed, no secret.
     let create = swoosh(&[
@@ -257,7 +257,7 @@ async fn invite_add_for_binds_a_device_made_key_and_adopt_keeps_that_identity() 
         "adopt says the signet must be compared out of band: {adopt_out}"
     );
     assert_eq!(
-        std::fs::read(device_dir.join("identity.key")).unwrap(),
+        std::fs::read(device_dir.join("key")).unwrap(),
         device_secret_before,
         "adopting a bound invite keeps the device's identity"
     );
@@ -476,7 +476,7 @@ fn invite_add_refuses_on_a_machine_that_is_not_its_configured_signet() {
     let adopt = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
     assert!(adopt.status.success(), "adopt failed: {}", stderr(&adopt));
 
-    let owner_seed: [u8; 32] = std::fs::read(owner_dir.join("identity.key"))
+    let owner_seed: [u8; 32] = std::fs::read(owner_dir.join("key"))
         .unwrap()
         .try_into()
         .expect("the owner key is 32 bytes");
@@ -629,7 +629,7 @@ fn a_refused_fleet_invite_leaves_no_identity_behind() {
         "the error names the missing door: {message}"
     );
     assert!(
-        !home_dir.join("identity.key").exists(),
+        !home_dir.join("key").exists(),
         "the refusal lands before the identity is created"
     );
 
@@ -672,7 +672,7 @@ fn adopt_requires_force_to_switch_the_trusted_signet() {
     let first_token = first_invite(&String::from_utf8(first.stdout).unwrap()).expect("token");
     let adopt = swoosh(&["adopt", &first_token, "--home", path_str(&device_dir)]);
     assert!(adopt.status.success(), "{}", stderr(&adopt));
-    let first_seed: [u8; 32] = std::fs::read(first_dir.join("identity.key"))
+    let first_seed: [u8; 32] = std::fs::read(first_dir.join("key"))
         .unwrap()
         .try_into()
         .expect("the first owner key is 32 bytes");
@@ -728,7 +728,7 @@ fn adopt_requires_force_to_switch_the_trusted_signet() {
         "--force performs the switch: {}",
         stderr(&forced)
     );
-    let second_seed: [u8; 32] = std::fs::read(second_dir.join("identity.key"))
+    let second_seed: [u8; 32] = std::fs::read(second_dir.join("key"))
         .unwrap()
         .try_into()
         .expect("the second owner key is 32 bytes");
@@ -878,7 +878,7 @@ fn adopt_refuses_to_replace_an_identity_this_machine_already_has() {
     let device_dir = base.join("device");
     std::fs::create_dir_all(&owner_dir).unwrap();
     std::fs::create_dir_all(&device_dir).unwrap();
-    let device_key = device_dir.join("identity.key");
+    let device_key = device_dir.join("key");
 
     // The machine makes its own key first (`swoosh identity`), as an operator who served before being
     // invited would have.
@@ -929,7 +929,7 @@ fn adopt_refuses_to_replace_an_identity_this_machine_already_has() {
 
     // The escape is the operator's own copy: move the key aside and the same invite lands, so the
     // guard is a fork in the road and not a dead end.
-    std::fs::rename(&device_key, device_dir.join("identity.key.bak")).unwrap();
+    std::fs::rename(&device_key, device_dir.join("key.bak")).unwrap();
     let adopted = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
     assert!(adopted.status.success(), "{}", stderr(&adopted));
     assert_ne!(

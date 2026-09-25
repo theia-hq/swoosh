@@ -61,7 +61,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
         root_id,
         expiry: nauthy::Request::expires_in(Duration::from_secs(3600)),
     };
-    Grants::at(home.grants()).append(&record).await.unwrap();
+    Grants::at(home.links()).append(&record).await.unwrap();
 
     // Before revocation: the cap is a valid grant for the bound device, and nothing revokes it.
     let request =
@@ -149,7 +149,7 @@ async fn revoking_a_holder_with_a_badge_plus_a_service_grant_cuts_both() {
             expiry: nauthy::Request::expires_in(Duration::from_secs(3600)),
         },
     ] {
-        Grants::at(home.grants()).append(&record).await.unwrap();
+        Grants::at(home.links()).append(&record).await.unwrap();
     }
 
     let store = ContactsStore::open(home.contacts()).await.unwrap();

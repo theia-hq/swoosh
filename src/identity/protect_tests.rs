@@ -116,7 +116,7 @@ fn a_passphrase_is_changed_by_protecting_again() {
 fn a_wrong_current_passphrase_is_refused_before_asking_for_a_new_one() {
     let (home, dir) = home("protect-wrong");
     sealed(&home, "correct horse");
-    let before = std::fs::read(home.identity_key()).expect("read the key");
+    let before = std::fs::read(home.key()).expect("read the key");
 
     let refused = protect(&home, Method::Passphrase, &mut Scripted::new(["wrong"]));
     let Err(error) = refused else {
@@ -128,7 +128,7 @@ fn a_wrong_current_passphrase_is_refused_before_asking_for_a_new_one() {
         "the unlock refused, not a missing answer: {message}"
     );
     assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
+        std::fs::read(home.key()).expect("read it back"),
         before,
         "the file is untouched"
     );
@@ -142,14 +142,11 @@ fn a_wrong_current_passphrase_is_refused_before_asking_for_a_new_one() {
 fn protect_is_refused_while_a_restore_holds_the_home() {
     let (home, dir) = home("protect-locked");
     resolve_with(Identity::Persisted, &home, &mut Scripted::new([])).expect("a plain key");
-    let before = std::fs::read(home.identity_key()).expect("read the key");
+    let before = std::fs::read(home.key()).expect("read the key");
     let restoring = crate::identity::lock::HomeLock::replacing(&home).expect("a restore holds it");
 
     let refused = protect(&home, Method::Passphrase, &mut Scripted::new(["pass"]));
-    assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
-        before
-    );
+    assert_eq!(std::fs::read(home.key()).expect("read it back"), before);
     assert!(refused.is_err());
     drop(restoring);
 

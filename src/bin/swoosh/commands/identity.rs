@@ -75,7 +75,7 @@ async fn print(home: &Home) -> eyre::Result<()> {
         "{}",
         render(
             stored.node_id(),
-            &home.identity_key(),
+            &home.key(),
             stored.method(),
             signet,
             expiry

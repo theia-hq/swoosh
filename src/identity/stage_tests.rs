@@ -59,7 +59,7 @@ fn a_filesystem_without_hard_links_still_never_clobbers() {
 #[test]
 fn a_target_that_changed_is_not_replaced() {
     let dir = scratch("changed");
-    let target = dir.join("identity.key");
+    let target = dir.join("key");
     std::fs::write(&target, b"compared").expect("the compared file");
     let seen = Seen::of(&target).expect("see it");
     // Replaced meanwhile, the way a racing write replaces a key file.
@@ -78,9 +78,9 @@ fn a_target_that_changed_is_not_replaced() {
 #[test]
 fn a_stray_stage_is_swept_and_a_lookalike_is_not() {
     let dir = scratch("sweep");
-    let target = dir.join("identity.key");
-    let stray = dir.join("identity.key.swoosh.4242.00000000deadbeef");
-    let lookalike = dir.join("identity.key.swoosh.notapid.00000000deadbeef");
+    let target = dir.join("key");
+    let stray = dir.join("key.swoosh.4242.00000000deadbeef");
+    let lookalike = dir.join("key.swoosh.notapid.00000000deadbeef");
     std::fs::write(&stray, b"sealed under an old passphrase").expect("stray");
     std::fs::write(&lookalike, b"not ours").expect("lookalike");
 

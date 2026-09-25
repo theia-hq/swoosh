@@ -77,7 +77,7 @@ impl HomeLock {
     /// answer can be stale by the time it is read, so it only chooses what a line says. The probe holds
     /// the lock for an instant, which [`take`](Self::take) outlasts, so it never makes a holder refuse.
     pub fn is_held(home: &Home) -> bool {
-        let Ok(file) = std::fs::File::open(home.identity_lock()) else {
+        let Ok(file) = std::fs::File::open(home.key_lock()) else {
             return false;
         };
         // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory lock to
@@ -97,7 +97,7 @@ impl HomeLock {
             .create(true)
             .append(true)
             .mode(0o600)
-            .open(home.identity_lock())?;
+            .open(home.key_lock())?;
         let operation = match hold {
             Hold::Shared => libc::LOCK_SH,
             Hold::Exclusive => libc::LOCK_EX,

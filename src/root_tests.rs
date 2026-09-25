@@ -125,7 +125,7 @@ fn home(tag: &str) -> Home {
     config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut seed = TestNode::seeded(OWN).seed();
-    KeyFile::device(home.identity_key())
+    KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
     home
@@ -237,7 +237,7 @@ async fn sibling(home: &Home, seed: u8, until: u64, update: &RosterDoc) -> Home 
     config::create_store_dir(&dir).unwrap();
     let device = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
-    KeyFile::device(device.identity_key())
+    KeyFile::device(device.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
     let root = TestRoot::seeded(ROOT);

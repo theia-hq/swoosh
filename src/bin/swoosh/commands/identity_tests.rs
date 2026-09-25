@@ -22,7 +22,7 @@ fn an_adopted_device_reports_its_signet_and_its_badge_life() {
     let signet = NodeId::from_ed25519_secret(&[8u8; 32]);
     let out = render(
         node(),
-        Path::new("/home/me/.config/swoosh/identity.key"),
+        Path::new("/home/me/.config/swoosh/key"),
         Method::Passphrase,
         Some(signet),
         Some(badge::Expiry::Live { left: 34 * DAY }),
@@ -30,7 +30,7 @@ fn an_adopted_device_reports_its_signet_and_its_badge_life() {
     assert_eq!(
         out,
         format!(
-            "{}\nkey: /home/me/.config/swoosh/identity.key\nprotection: passphrase\nsignet: \
+            "{}\nkey: /home/me/.config/swoosh/key\nprotection: passphrase\nsignet: \
              {signet}\nbadge: expires in 34d\n",
             node()
         )

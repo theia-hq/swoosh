@@ -28,7 +28,7 @@ impl RmCmd {
     /// Revoke every membership badge recorded for the resolved device into the persisted denylist.
     pub async fn run(self, contacts: &Contacts, home: &Home) -> eyre::Result<()> {
         let holder = self.holder(contacts)?;
-        let ledger = Grants::at(home.grants());
+        let ledger = Grants::at(home.links());
         let records: Vec<_> = ledger
             .load()
             .await?

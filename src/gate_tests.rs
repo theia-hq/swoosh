@@ -221,7 +221,7 @@ async fn issued_slip(home: &Home) -> Cap {
     let slip = TestNode::seeded(OWN)
         .slip(&service(), in_an_hour())
         .expect("mint a slip");
-    Grants::at(home.grants())
+    Grants::at(home.links())
         .append(&GrantRecord {
             target: GrantTarget::Service(service()),
             kind: GrantKind::Bearer,
@@ -245,8 +245,8 @@ async fn an_unreadable_ledger_admits_no_self_slip() {
     let unreadable = Scratch::new("ledger-unreadable");
     let slip = issued_slip(&unreadable.home).await;
     // A directory where the file was: it can be statted but not read.
-    std::fs::remove_file(unreadable.home.grants()).expect("remove the ledger");
-    std::fs::create_dir(unreadable.home.grants()).expect("a directory in its place");
+    std::fs::remove_file(unreadable.home.links()).expect("remove the ledger");
+    std::fs::create_dir(unreadable.home.links()).expect("a directory in its place");
     let (gate, _cut) = unreadable.gate().await;
     assert!(
         !admits(&gate, &slip),

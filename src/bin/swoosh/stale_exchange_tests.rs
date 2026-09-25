@@ -37,7 +37,7 @@ async fn device(tag: &str, hours: u64) -> Home {
     swoosh::config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut seed = TestNode::seeded(DESK).seed();
-    KeyFile::device(home.identity_key())
+    KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
     let root = TestRoot::seeded(ROOT);

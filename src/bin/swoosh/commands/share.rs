@@ -150,7 +150,7 @@ impl ShareCmd {
             root_id,
             expiry,
         };
-        Grants::at(home.grants()).append(&record).await?;
+        Grants::at(home.links()).append(&record).await?;
         // Frame the mint on STDERR (what was minted, its blast radius, and how to revoke it) so a person sees
         // the consequence; STDOUT gets ONLY the link, so `swoosh grant issue ... > link.txt` stays clean.
         eprint!("{}", frame(&record, self.service.as_str(), lifetime));

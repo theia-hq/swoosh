@@ -1,12 +1,13 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! A plain `serve` holds its home, end to end: while the compiled binary serves a scratch home, `identity
-//! restore --force` on that home is refused before it reads a backup or asks for anything. Only the exact
-//! spawned pid is ever signalled.
+//! A plain `serve` holds `<home>/key.lock` shared, end to end: while the compiled binary serves a scratch
+//! home, a command that replaces the key on that home is refused before it reads a backup or asks for
+//! anything. Only the exact spawned pid is ever signalled.
 
 use core::time::Duration;
 use std::io::Read as _;
+use std::os::fd::AsRawFd as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
@@ -31,7 +32,7 @@ impl Drop for Scratch {
 }
 
 #[test]
-fn a_plain_serve_refuses_a_restore_of_its_home() {
+fn a_key_is_never_replaced_under_a_running_serve() {
     let scratch = Scratch(std::env::temp_dir().join(format!("sw-lock-{}", std::process::id())));
     let home = scratch.0.join("home");
     std::fs::create_dir_all(&home).expect("scratch home");
@@ -60,6 +61,15 @@ fn a_plain_serve_refuses_a_restore_of_its_home() {
         }
         seen.push(byte[0]);
     }
+
+    // The lock is the home's `key.lock`, not the runtime directory's `control.lock`: an exclusive take on
+    // it fails while the node serves.
+    let lock = std::fs::File::open(home.join("key.lock")).expect("serve made <home>/key.lock");
+    // SAFETY: `lock` owns a valid fd for the whole call; `flock` only attaches an advisory lock, released
+    // when `lock` drops. `LOCK_NB` makes a held lock an error rather than a wait.
+    let taken = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    assert!(!taken, "serve holds <home>/key.lock");
+    drop(lock);
 
     // No backup exists at this path: without the lock, the restore would fail on that instead.
     let restore = Command::new(env!("CARGO_BIN_EXE_swoosh"))

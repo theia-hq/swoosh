@@ -16,7 +16,7 @@
 //! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
 //! key and keeps a stable address across runs (and across transports: `--transport iroh|quirk|quirk+noise`
 //! swaps the backend without changing the key). The outward verbs only dial out, so they mint a throwaway
-//! key each run unless you pin a home with `--home`/`SWOOSH_HOME` (the key then lives at `<home>/identity.key`).
+//! key each run unless you pin a home with `--home`/`SWOOSH_HOME` (the key then lives at `<home>/key`).
 //! The full verb arc (send, tunnel, share, fetch, run, cluster, MagicDNS names) is tracked in the README's
 //! Roadmap; it ticks as it ships.
 
@@ -65,7 +65,7 @@ struct Cli {
     )]
     home: Option<PathBuf>,
     /// Retired: the node is a DIRECTORY now, so `--key <file>` became `--home <dir>` (the key lives at
-    /// `<home>/identity.key`). Kept hidden, with no env and no default, ONLY so a stale `--key` gets a
+    /// `<home>/key`). Kept hidden, with no env and no default, ONLY so a stale `--key` gets a
     /// teaching error that names the replacement, rather than clap's bare "unexpected argument". A clean
     /// break: it selects nothing, it just triggers the forward message in `run`.
     #[arg(
@@ -454,7 +454,7 @@ fn reject_retired_key_env(present: bool) -> eyre::Result<()> {
     if present {
         eyre::bail!(
             "`SWOOSH_KEY` is gone; use `SWOOSH_HOME` (the node is a directory; the key lives at \
-             `$SWOOSH_HOME/identity.key`)"
+             `$SWOOSH_HOME/key`)"
         );
     }
     Ok(())
@@ -493,9 +493,7 @@ async fn run() -> eyre::Result<()> {
     // that names the replacement (the node is a DIRECTORY now), checked before anything else so it fires
     // whatever verb (or no verb) follows. See the `retired_key` field on `Cli`.
     if cli.retired_key.is_some() {
-        eyre::bail!(
-            "`--key` is gone; pass `--home <dir>` (the key lives at `<home>/identity.key`)"
-        );
+        eyre::bail!("`--key` is gone; pass `--home <dir>` (the key lives at `<home>/key`)");
     }
 
     // The retired `SWOOSH_KEY` env var is the SAME clean break as `--key`, and a silent no-op is the danger:

@@ -20,7 +20,7 @@ Commands:
 ```console
 $ swoosh identity
 ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-key: ~/.config/swoosh/identity.key
+key: ~/.config/swoosh/key
 protection: plain
 signet: none
 ```

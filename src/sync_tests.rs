@@ -88,7 +88,7 @@ async fn device_until(tag: &str, seed: u8, until: u64) -> Home {
     config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
-    KeyFile::device(home.identity_key())
+    KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
     config::write_signet(&home, root().node_id()).await.unwrap();

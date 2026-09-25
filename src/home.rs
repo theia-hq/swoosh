@@ -1,7 +1,7 @@
 //! The node home: the one directory every file this node owns derives from.
 //!
 //! A node is a DIRECTORY, not a lone key file. `--home <dir>` (env `SWOOSH_HOME`) names it; with neither,
-//! the default `~/.config/swoosh` applies. The identity key is always `<home>/identity.key`, and the
+//! the default `~/.config/swoosh` applies. The key is always `<home>/key`, and the
 //! signet it gates on, the membership badge it presents, the contacts book, the mint-log ledger, and the
 //! revocation denylist all hang off the SAME dir, so one home moves the whole identity+trust unit together.
 //! This is the `GNUPGHOME` / `CARGO_HOME` model: a home dir is a whole profile, not a key you point at.
@@ -48,7 +48,7 @@ impl Home {
     /// Resolve the home from the optional `--home`/`SWOOSH_HOME` selection: the named dir when given, else
     /// the default `~/.config/swoosh`. Fallible only in the default case (it reads `HOME`), and it rejects
     /// an explicit home that names an existing FILE with a teaching error (the home is a directory; the key
-    /// lives INSIDE it at `identity.key`), the inverse of the old point-at-a-file mistake.
+    /// lives INSIDE it at `key`), the inverse of the old point-at-a-file mistake.
     pub fn resolve(selected: Option<PathBuf>) -> eyre::Result<Self> {
         match selected {
             Some(dir) => {
@@ -77,16 +77,16 @@ impl Home {
         self.selection == Selection::Explicit
     }
 
-    /// `<home>/identity.key`: the ed25519 secret every verb binds under (0600). Always inside the home,
+    /// `<home>/key`: the ed25519 secret every verb binds under (0600). Always inside the home,
     /// never a path the user points at directly.
-    pub fn identity_key(&self) -> PathBuf {
-        self.dir.join("identity.key")
+    pub fn key(&self) -> PathBuf {
+        self.dir.join("key")
     }
 
-    /// `<home>/identity.lock`: the lock that keeps a running node and a restore apart. Separate from
-    /// `identity.key`, because a restore replaces the key's inode, and a lock on a moving inode holds nothing.
-    pub fn identity_lock(&self) -> PathBuf {
-        self.dir.join("identity.lock")
+    /// `<home>/key.lock`: the lock that keeps a running node and a restore apart. Separate from
+    /// `key`, because a restore replaces the key's inode, and a lock on a moving inode holds nothing.
+    pub fn key_lock(&self) -> PathBuf {
+        self.dir.join("key.lock")
     }
 
     /// `<home>/signet`: the public [`NodeId`](bifrost::NodeId) of the signet this node trusts, written by
@@ -211,17 +211,17 @@ impl Home {
         self.dir.join("disabled.lock")
     }
 
-    /// `<home>/grants`: the ledger (0600) of every link this machine signed. The `serve` gate admits a
+    /// `<home>/links`: the ledger (0600) of every link this machine signed. The `serve` gate admits a
     /// link signed by this machine's own key only when its row is here, and revoke-by-holder and `grant
     /// ls` read it too.
-    pub fn grants(&self) -> PathBuf {
-        self.dir.join("grants")
+    pub fn links(&self) -> PathBuf {
+        self.dir.join("links")
     }
 
-    /// `<home>/grants.lock`: the flock every writer of [`grants`](Self::grants) takes, on a stable inode
-    /// because a prune replaces `grants` by rename.
-    pub fn grants_lock(&self) -> PathBuf {
-        self.dir.join("grants.lock")
+    /// `<home>/links.lock`: the flock every writer of [`links`](Self::links) takes, on a stable inode
+    /// because a prune replaces `links` by rename.
+    pub fn links_lock(&self) -> PathBuf {
+        self.dir.join("links.lock")
     }
 
     /// `<home>/contacts.toml`: the address book of petnames this node resolves.
@@ -353,14 +353,14 @@ fn default_dir() -> eyre::Result<PathBuf> {
 
 /// Reject a `--home` that names an existing FILE, with a teaching error instead of the confusing
 /// `Not a directory` the first file IO under it would surface. A home is a DIRECTORY (the key lives inside
-/// it at `identity.key`); pointing it at a file is the inverse of the old point-at-a-key-file mistake, so
+/// it at `key`); pointing it at a file is the inverse of the old point-at-a-key-file mistake, so
 /// name the fix. A no-op for a not-yet-created home (a fresh install creates the dir); it only fires on an
 /// existing file.
 fn reject_home_file(dir: &Path) -> eyre::Result<()> {
     if dir.is_file() {
         return Err(eyre!(
             "--home wants a directory, not a file: {file}. The key lives inside the home at \
-             {file}/identity.key; pass the directory, e.g. {parent}",
+             {file}/key; pass the directory, e.g. {parent}",
             file = dir.display(),
             parent = dir.parent().unwrap_or(dir).display(),
         ));

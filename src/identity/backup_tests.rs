@@ -72,7 +72,7 @@ fn an_empty_home_exports_nothing_and_mints_nothing() {
 
     assert!(export(&home, &to, Existing::Refuse, &mut Scripted::new([])).is_err());
     assert!(!to.exists(), "no backup is written");
-    assert!(!home.identity_key().exists(), "no key is minted");
+    assert!(!home.key().exists(), "no key is minted");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -117,7 +117,7 @@ fn an_existing_backup_is_replaced_only_when_asked() {
 fn a_backup_is_only_ever_a_separate_file() {
     let (home, dir) = home("export-file-only");
     sealed(&home, "home pass");
-    let before = std::fs::read(home.identity_key()).expect("read the key");
+    let before = std::fs::read(home.key()).expect("read the key");
 
     assert!(
         export(
@@ -131,12 +131,12 @@ fn a_backup_is_only_ever_a_separate_file() {
     assert!(!Path::new("-").exists(), "no file named `-` was written");
     let own = export(
         &home,
-        &home.identity_key(),
+        &home.key(),
         Existing::Replace,
         &mut Scripted::new(["home pass"]),
     );
     assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
+        std::fs::read(home.key()).expect("read it back"),
         before,
         "the home's key is untouched"
     );
@@ -168,7 +168,7 @@ fn a_backup_restores_into_an_empty_home_sealed() {
     )
     .expect("restore");
     assert_eq!(restored.node, node);
-    assert_eq!(opens_as(&fresh.identity_key(), "pass"), node);
+    assert_eq!(opens_as(&fresh.key(), "pass"), node);
 
     let _ = std::fs::remove_dir_all(&source_dir);
     let _ = std::fs::remove_dir_all(&fresh_dir);
@@ -188,9 +188,9 @@ fn a_wrong_backup_passphrase_leaves_the_home_untouched() {
         &mut Scripted::new(["pass", "pass"]),
     )
     .expect("export");
-    std::fs::remove_file(home.identity_key()).expect("lose the key");
+    std::fs::remove_file(home.key()).expect("lose the key");
     resolve_with(Identity::Persisted, &home, &mut Scripted::new([])).expect("a different key");
-    let before = std::fs::read(home.identity_key()).expect("read the key");
+    let before = std::fs::read(home.key()).expect("read the key");
 
     let refused = restore(
         &home,
@@ -199,7 +199,7 @@ fn a_wrong_backup_passphrase_leaves_the_home_untouched() {
         &mut Scripted::new(["nope"]),
     );
     assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
+        std::fs::read(home.key()).expect("read it back"),
         before,
         "the home's key is untouched"
     );
@@ -226,7 +226,7 @@ fn a_different_identity_is_replaced_only_when_asked() {
 
     let (home, dir) = home("restore-other-home");
     resolve_with(Identity::Persisted, &home, &mut Scripted::new([])).expect("its own key");
-    let before = std::fs::read(home.identity_key()).expect("read the key");
+    let before = std::fs::read(home.key()).expect("read the key");
 
     let refused = restore(
         &home,
@@ -235,7 +235,7 @@ fn a_different_identity_is_replaced_only_when_asked() {
         &mut Scripted::new(["pass"]),
     );
     assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
+        std::fs::read(home.key()).expect("read it back"),
         before,
         "the different key survives"
     );
@@ -256,7 +256,7 @@ fn a_different_identity_is_replaced_only_when_asked() {
     )
     .expect("replace");
     assert_eq!(restored.node, node);
-    assert_eq!(opens_as(&home.identity_key(), "pass"), node);
+    assert_eq!(opens_as(&home.key(), "pass"), node);
 
     let _ = std::fs::remove_dir_all(&source_dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -273,13 +273,13 @@ fn a_plain_key_file_is_not_a_backup() {
     assert!(
         restore(
             &home,
-            &source.identity_key(),
+            &source.key(),
             Existing::Replace,
             &mut Scripted::new([])
         )
         .is_err()
     );
-    assert!(!home.identity_key().exists(), "nothing was installed");
+    assert!(!home.key().exists(), "nothing was installed");
 
     let _ = std::fs::remove_dir_all(&source_dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -303,8 +303,8 @@ fn an_unreadable_home_key_is_replaced_only_when_asked() {
     .expect("export");
 
     let (home, dir) = home("restore-unreadable-home");
-    std::fs::write(home.identity_key(), [7u8; 16]).expect("a truncated key");
-    std::fs::set_permissions(home.identity_key(), std::fs::Permissions::from_mode(0o600))
+    std::fs::write(home.key(), [7u8; 16]).expect("a truncated key");
+    std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600))
         .expect("owner-only");
 
     let refused = restore(
@@ -314,7 +314,7 @@ fn an_unreadable_home_key_is_replaced_only_when_asked() {
         &mut Scripted::new(["pass"]),
     );
     assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
+        std::fs::read(home.key()).expect("read it back"),
         [7u8; 16],
         "the unreadable file survives"
     );
@@ -327,7 +327,7 @@ fn an_unreadable_home_key_is_replaced_only_when_asked() {
         &mut Scripted::new(["pass"]),
     )
     .expect("replace");
-    assert_eq!(opens_as(&home.identity_key(), "pass"), node);
+    assert_eq!(opens_as(&home.key(), "pass"), node);
 
     let _ = std::fs::remove_dir_all(&source_dir);
     let _ = std::fs::remove_dir_all(&dir);
@@ -361,7 +361,7 @@ fn a_backup_readable_by_all_is_restored_and_reported() {
     .expect("restore");
     assert_eq!(restored.node, node);
     assert_eq!(restored.loose, Some(0o644));
-    let mode = std::fs::metadata(home.identity_key())
+    let mode = std::fs::metadata(home.key())
         .expect("stat")
         .permissions()
         .mode();
@@ -388,7 +388,7 @@ fn a_restore_is_refused_while_a_node_serves_the_home() {
 
     let (home, dir) = home("restore-served-home");
     resolve_with(Identity::Persisted, &home, &mut Scripted::new([])).expect("its own key");
-    let before = std::fs::read(home.identity_key()).expect("read the key");
+    let before = std::fs::read(home.key()).expect("read the key");
     let serving = HomeLock::serving(&home).expect("a node serves the home");
 
     let refused = restore(
@@ -398,7 +398,7 @@ fn a_restore_is_refused_while_a_node_serves_the_home() {
         &mut Scripted::new(["pass"]),
     );
     assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
+        std::fs::read(home.key()).expect("read it back"),
         before,
         "the served key is untouched"
     );
@@ -429,7 +429,7 @@ fn a_sealed_home_claiming_the_same_node_is_replaced_only_when_asked() {
         &mut Scripted::new(["home pass", "backup pass"]),
     )
     .expect("export");
-    let before = std::fs::read(home.identity_key()).expect("read the key");
+    let before = std::fs::read(home.key()).expect("read the key");
 
     let refused = restore(
         &home,
@@ -438,7 +438,7 @@ fn a_sealed_home_claiming_the_same_node_is_replaced_only_when_asked() {
         &mut Scripted::new(["backup pass"]),
     );
     assert_eq!(
-        std::fs::read(home.identity_key()).expect("read it back"),
+        std::fs::read(home.key()).expect("read it back"),
         before,
         "the sealed home survives"
     );

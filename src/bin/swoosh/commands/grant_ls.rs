@@ -25,7 +25,7 @@ impl LsCmd {
     /// `kind  holder  lifetime  caveat`. Membership heads the view (who is in the family before who can
     /// reach what); services follow A to Z. An empty ledger prints a friendly line, not a blank.
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
-        let mut records = Grants::at(home.grants()).load().await?;
+        let mut records = Grants::at(home.links()).load().await?;
         if records.is_empty() {
             println!("no grants issued yet");
             return Ok(());

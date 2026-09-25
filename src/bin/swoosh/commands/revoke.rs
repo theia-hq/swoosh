@@ -79,7 +79,7 @@ impl RevokeCmd {
         contacts: &Contacts,
         home: &Home,
     ) -> eyre::Result<()> {
-        let ledger = Grants::at(home.grants());
+        let ledger = Grants::at(home.links());
         let records = ledger.load().await?;
         // The holder strings that count as a hit: the literal target, plus the canonical node id of every
         // device it resolves to (an unknown petname resolves to nothing, leaving just the literal).

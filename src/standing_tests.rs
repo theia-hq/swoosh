@@ -39,7 +39,7 @@ fn home(tag: &str) -> Home {
     config::create_store_dir(&dir).expect("create the home");
     let home = Home::resolve(Some(dir)).expect("resolve the home");
     let mut seed = TestNode::seeded(OWN).seed();
-    KeyFile::device(home.identity_key())
+    KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .expect("write this machine's key");
     home

@@ -159,7 +159,7 @@ async fn device_home(tag: &str, seed: u8) -> Home {
     swoosh::config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
-    KeyFile::device(home.identity_key())
+    KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
     swoosh::config::write_signet(&home, TestRoot::seeded(ROOT).node_id())
@@ -185,7 +185,7 @@ async fn issue_own_slip(home: &Home) -> nauthy::Link {
             nauthy::Request::expires_in(Duration::from_secs(300)),
         )
         .unwrap();
-    Grants::at(home.grants())
+    Grants::at(home.links())
         .append(&GrantRecord {
             target: GrantTarget::Service(service),
             kind: GrantKind::Bearer,

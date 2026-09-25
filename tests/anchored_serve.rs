@@ -143,7 +143,7 @@ fn issue(home: &Path, args: &[&str]) -> Link {
 
 /// This machine's key, as `serve` created it: the seed a test signs with as the serving machine.
 fn own_seed(home: &Path) -> [u8; 32] {
-    std::fs::read(home.join("identity.key"))
+    std::fs::read(home.join("key"))
         .unwrap()
         .try_into()
         .expect("a plain key file is its 32 bytes")
@@ -368,7 +368,7 @@ fn a_grant_is_on_disk_before_its_link_prints() {
         !status.success(),
         "printing to a closed pipe fails the command, the fault this is about"
     );
-    let rows = std::fs::read_to_string(scratch.0.join("grants")).unwrap_or_default();
+    let rows = std::fs::read_to_string(scratch.0.join("links")).unwrap_or_default();
     assert_eq!(
         rows.lines().count(),
         1,
