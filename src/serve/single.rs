@@ -71,12 +71,10 @@ pub enum SingleError {
 }
 
 /// The held single-instance lock: the flock fd plus the socket it guards and that socket PATH's
-/// identity. Dropping it releases the flock (the crash path); the graceful path unlinks the socket
-/// first via [`release`](InstanceLock::release). Owns the fd for process life.
-///
-/// There is no `Drop` impl that unlinks: a plain drop leaves the socket path behind (the crash
-/// plant the next start recovers through its probe), and only the explicit `release` unlinks, so
-/// the two teardown shapes stay visibly distinct at the call site.
+/// identity. Dropping it unlinks the socket it bound and releases the flock, so a `serve` that
+/// refuses after the claim, or stops, leaves no socket for a later `status` to find. Only a process
+/// that dies without unwinding (a `SIGKILL`, an abort) leaves the path behind, the crash plant the
+/// next start recovers through its probe. Owns the fd for process life.
 pub struct InstanceLock {
     /// The lock fd: held open, flocked, for the life of the resident.
     file: std::fs::File,
@@ -102,18 +100,22 @@ impl InstanceLock {
         &self.socket
     }
 
-    /// Graceful teardown: unlink the socket ONLY while the path still names the socket this instance
-    /// bound (stat without following links, compare `(dev, ino)` against the identity captured at
-    /// bind), release the flock, then drop the fd. A blind by-path unlink could remove a file a
-    /// same-uid process swapped in.
+    /// Graceful teardown, the same as dropping it: see the [`Drop`] impl.
     pub fn release(self) {
+        drop(self);
+    }
+}
+
+impl Drop for InstanceLock {
+    /// Unlink the socket ONLY while the path still names the socket this instance bound (stat
+    /// without following links, compare `(dev, ino)` against the identity captured at bind), then
+    /// release the flock before the fd drops. A blind by-path unlink could remove a file a same-uid
+    /// process swapped in.
+    fn drop(&mut self) {
         if path_identity(&self.socket).is_ok_and(|id| id == self.socket_id) {
             let _ = std::fs::remove_file(&self.socket);
         }
-        // Explicit unlock before the fd drops: the teardown reads the held lock fd, and the flock
-        // release is visible here rather than inferred from Drop.
         release_flock(&self.file);
-        drop(self);
     }
 }
 

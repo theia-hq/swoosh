@@ -31,6 +31,21 @@ pub enum ServingError {
         /// The line, as it is in the file.
         line: String,
     },
+    /// A named service that one line of `<home>/serving` cannot hold as it is: a line break would read back
+    /// as more services, a space at either end is trimmed on the way back, and a path that is not UTF-8
+    /// would be saved as a different path. It is refused, and nothing is saved.
+    #[error(
+        "{} cannot be saved in {}: it has a control character, a space at either end, or a path that is \
+         not UTF-8.",
+        entry.escape_debug(),
+        path.display()
+    )]
+    CannotSave {
+        /// The file the list is saved in.
+        path: PathBuf,
+        /// The service, paths made absolute.
+        entry: String,
+    },
     /// `<home>/serving` exists and could not be read or written.
     #[error("could not use {}", path.display())]
     Io {
@@ -58,12 +73,24 @@ impl Started {
     /// Settle what a `serve` under `home` starts with: `named` (already through the service-entry parser)
     /// with its paths made absolute against `cwd`, else the recorded list, else the default.
     pub fn of(named: &[String], home: &Home, cwd: &Path) -> Result<Self, ServingError> {
-        if !named.is_empty() {
-            return Ok(Self::Named(
-                named.iter().map(|entry| absolute(entry, cwd)).collect(),
-            ));
-        }
         let path = home.serving();
+        if !named.is_empty() {
+            let cannot_save = |entry: String| ServingError::CannotSave {
+                path: path.clone(),
+                entry,
+            };
+            return named
+                .iter()
+                .map(|entry| {
+                    let kept = absolute(entry, cwd).map_err(|()| cannot_save(entry.clone()))?;
+                    if kept.chars().any(char::is_control) || kept.trim() != kept {
+                        return Err(cannot_save(kept));
+                    }
+                    Ok(kept)
+                })
+                .collect::<Result<_, _>>()
+                .map(Self::Named);
+        }
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::Default),
@@ -117,34 +144,44 @@ impl Started {
 }
 
 /// `entry` with a path argument made absolute against `cwd`: `inbox=recv:` becomes `inbox=recv:<cwd>` and
-/// `logs=file:app.log` becomes `logs=file:<cwd>/app.log`. A home-relative `~/…` path, raw `stdin:` and
-/// every non-path target are kept as typed.
-fn absolute(entry: &str, cwd: &Path) -> String {
+/// `logs=file:app.log` becomes `logs=file:<cwd>/app.log`. A `~/…` path is relative like any other, since
+/// nothing expands it when the service binds. Raw `stdin:` and every non-path target are kept as typed.
+/// `Err` when the joined path is not UTF-8, so it cannot be saved as the path it names.
+fn absolute(entry: &str, cwd: &Path) -> Result<String, ()> {
     let Some((name, target)) = entry.split_once('=') else {
-        return entry.to_owned();
+        return Ok(entry.to_owned());
     };
     let Some((scheme, rest)) = target.split_once(':') else {
-        return entry.to_owned();
+        return Ok(entry.to_owned());
     };
-    if !PATH_SCHEMES.contains(&scheme) || rest.starts_with('~') || Path::new(rest).is_absolute() {
-        return entry.to_owned();
+    if !PATH_SCHEMES.contains(&scheme) || Path::new(rest).is_absolute() {
+        return Ok(entry.to_owned());
     }
     let path = if rest.is_empty() {
         cwd.to_owned()
     } else {
         cwd.join(rest)
     };
-    format!("{name}={scheme}:{}", path.display())
+    let path = path.to_str().ok_or(())?;
+    Ok(format!("{name}={scheme}:{path}"))
 }
 
 /// Write `body` to `path` through a temp sibling and a rename, owner-only, so a reader sees the old list
 /// or the new one and never a torn one.
 fn write_atomic(path: &Path, body: &str) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, body)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(body.as_bytes())?;
+    drop(file);
     std::fs::rename(&tmp, path)
 }
 

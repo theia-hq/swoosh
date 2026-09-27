@@ -30,3 +30,20 @@ fn an_unset_or_relative_runtime_dir_is_refused_with_the_fix() {
         PathBuf::from("/run/user/1000/swoosh")
     );
 }
+
+/// A fresh home reached through a symlink hashes the same before it is made as after, so the `serve` that
+/// claims it first and every later `serve`, `stop` or `status` look for one lock.
+#[test]
+fn a_fresh_home_keys_the_same_before_and_after_it_is_made() {
+    let base = std::env::temp_dir().join(format!("swoosh-home-key-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("real")).expect("the real dir");
+    std::os::unix::fs::symlink(base.join("real"), base.join("link")).expect("the link");
+    let dir = base.join("link").join("fresh").join("home");
+    let home = super::Home::resolve(Some(dir.clone())).expect("the home resolves");
+    let before = home.home_key();
+    std::fs::create_dir_all(&dir).expect("the home is made");
+    let after = home.home_key();
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(before, after, "one home, one key");
+}

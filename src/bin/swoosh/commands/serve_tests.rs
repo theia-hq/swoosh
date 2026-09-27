@@ -1971,6 +1971,105 @@ fn serving_is_written_only_after_bind() {
     }
 }
 
+/// `swoosh status` under `scratch`, its `serving:` line.
+fn status_serving(scratch: &ProcessScratch) -> String {
+    let mut command = Command::new(swoosh_binary());
+    command
+        .arg("--home")
+        .arg(&scratch.home_dir)
+        .arg("status")
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .env_remove("SWOOSH_KEY")
+        .stdin(Stdio::null());
+    let output = run_binary_with_deadline(&mut command, Duration::from_secs(30));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "status exits 0: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout
+        .lines()
+        .find(|line| line.starts_with("serving:"))
+        .unwrap_or_else(|| panic!("status prints a serving line: {stdout}"))
+        .to_owned()
+}
+
+/// A `serve` that refuses after it claimed the home leaves no control socket behind, so `status` says
+/// nothing is running rather than that it could not read it.
+#[test]
+fn a_refused_serve_leaves_status_serving_nothing() {
+    let scratch = ProcessScratch::new("refused");
+    let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+    let socket = runtime_leaf(&home, &scratch.xdg).join("control.sock");
+    for args in [
+        &["--local", "ssh", "--public", "ssh"][..],
+        &["--local", "speed", "x=png:"][..],
+    ] {
+        let failed = serve_once(&scratch, args);
+        assert_eq!(failed.status.code(), Some(1), "serve {args:?} refuses");
+        assert!(!socket.exists(), "serve {args:?} leaves no socket");
+        assert_eq!(
+            status_serving(&scratch),
+            "serving: nothing (swoosh serve is not running)",
+            "after serve {args:?}"
+        );
+    }
+}
+
+/// A service manager stops `serve` with SIGTERM: it stops the way a ctrl-c does, and takes its socket with it.
+#[test]
+fn a_terminated_serve_removes_its_socket() {
+    let scratch = ProcessScratch::new("sigterm");
+    let mut running = Running::start(&scratch, &["--local", "--quiet", "ping"]);
+    let pid = libc::pid_t::try_from(running.child.0.id()).expect("a pid");
+    // SAFETY: `kill` only sends a signal to the child this test spawned and still holds.
+    assert_eq!(
+        unsafe { libc::kill(pid, libc::SIGTERM) },
+        0,
+        "SIGTERM is sent"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = running.child.0.try_wait().expect("poll serve") {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "serve exits on SIGTERM");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        status.code().is_some(),
+        "serve exits on SIGTERM, not killed by it: {status}"
+    );
+    assert!(
+        !running.socket.exists(),
+        "a terminated serve removes its socket"
+    );
+    assert_eq!(
+        status_serving(&scratch),
+        "serving: nothing (swoosh serve is not running)"
+    );
+}
+
+/// A `serve` killed outright leaves its socket file with nothing listening on it: `status` reads that as
+/// nothing running.
+#[test]
+fn a_killed_serve_leaves_status_serving_nothing() {
+    let scratch = ProcessScratch::new("sigkill");
+    let mut running = Running::start(&scratch, &["--local", "--quiet", "ping"]);
+    running.child.0.kill().expect("SIGKILL is sent");
+    running.child.0.wait().expect("reap serve");
+    assert!(
+        running.socket.exists(),
+        "a killed serve cannot remove its socket"
+    );
+    assert_eq!(
+        status_serving(&scratch),
+        "serving: nothing (swoosh serve is not running)"
+    );
+}
+
 /// A service named at start is served even if it was turned off before, and a bare `serve` says which of
 /// its services are off rather than turning them on.
 #[test]

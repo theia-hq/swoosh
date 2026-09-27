@@ -319,12 +319,12 @@ fn bare_stop_stops_the_resident() {
     assert_eq!(locked, 0, "the resident's flock is released on exit");
     let _ = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
 
-    // With no resident, the bare stop teaches the fix and exits non-zero.
+    // With no serve running, the bare stop says so and exits non-zero.
     let again = swoosh(&scratch, &["stop"]);
     assert!(!again.status.success(), "no resident exits non-zero");
     let again_err = String::from_utf8_lossy(&again.stderr);
     assert!(
-        again_err.contains("start one with `swoosh serve`"),
-        "the error names the fix: {again_err}"
+        again_err.contains("swoosh serve is not running on this machine."),
+        "the error says nothing is running: {again_err}"
     );
 }

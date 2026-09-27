@@ -532,7 +532,7 @@ impl Response {
 pub enum ControlError {
     /// No resident node is addressable under this home: either no socket exists, or the runtime root
     /// cannot be resolved. The bare control verbs teach from this rather than dialing cold.
-    #[error("no resident node under this home; start one with `swoosh serve`")]
+    #[error("swoosh serve is not running on this machine.")]
     NoResident,
     /// A path exists but is not this user's 0700 runtime dir/socket: never trusted enough to connect.
     #[error("refusing to trust the control path {path}: not this user's 0700 runtime dir/socket")]

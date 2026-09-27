@@ -259,17 +259,11 @@ impl Home {
     /// canonicalized home path, the full 64 bits rendered as 16 lowercase hex chars. Dependency
     /// free and stable across daemon and client because both binaries carry this same function.
     /// Two different homes hash differently (the full-width hash, so collisions need a 2^64
-    /// birthday, not 2^32), so two `--home`s never share a socket or lock.
+    /// birthday, not 2^32), so two `--home`s never share a socket or lock. A home that does not
+    /// exist yet hashes the path it will canonicalize to once made, so a `serve` that claims a fresh
+    /// home and every later verb find the same lock.
     pub fn home_key(&self) -> String {
-        let canonical = std::fs::canonicalize(&self.dir).unwrap_or_else(|_| {
-            if self.dir.is_absolute() {
-                self.dir.clone()
-            } else {
-                std::env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(&self.dir)
-            }
-        });
+        let canonical = canonical_to_be(&self.dir);
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in canonical.as_os_str().as_encoded_bytes() {
             hash ^= u64::from(*byte);
@@ -307,11 +301,46 @@ impl Home {
     }
 }
 
+/// `path` as `canonicalize` will name it once it exists: its deepest existing ancestor canonicalized (a
+/// symlink in it resolved), then the rest joined on, `.` dropped and `..` taken lexically, since nothing
+/// below that ancestor exists to be a link. Relative paths are taken against the cwd first.
+fn canonical_to_be(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
+    };
+    let parts: Vec<std::path::Component<'_>> = absolute.components().collect();
+    let (mut resolved, made) = (0..=parts.len())
+        .rev()
+        .find_map(|kept| {
+            let prefix: PathBuf = parts[..kept].iter().collect();
+            std::fs::canonicalize(prefix)
+                .ok()
+                .map(|found| (found, kept))
+        })
+        .unwrap_or_else(|| (PathBuf::from("/"), 0));
+    for part in &parts[made..] {
+        match part {
+            std::path::Component::CurDir | std::path::Component::RootDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::Normal(_) | std::path::Component::Prefix(_) => {
+                resolved.push(part)
+            }
+        }
+    }
+    resolved
+}
+
 /// The per-user runtime root every `serve`'s socket and lock live under: `$XDG_RUNTIME_DIR/swoosh` on
 /// Linux, `confstr(_CS_DARWIN_USER_TEMP_DIR)` + `swoosh-<uid>` on macOS. Created and verified 0700 by the
 /// single-instance acquire, never assumed. An unset or relative `XDG_RUNTIME_DIR` on Linux is a refusal,
-/// never a fallback under the home, `/tmp` or the cwd: with a fallback, where the lock lives would depend on
-/// the environment, and two `serve`s on one home could both start.
+/// never a fallback under the home, `/tmp` or the cwd. Two `serve`s on one home find each other's lock only
+/// when they resolve the same root, so a fallback would add one more way for them to miss it.
 pub fn runtime_root() -> eyre::Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {

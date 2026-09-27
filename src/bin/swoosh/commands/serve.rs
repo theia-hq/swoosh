@@ -680,6 +680,10 @@ where
 {
     let source = resident.stop_source();
     let control = resident.serve(listener);
+    // A service manager stops `serve` with SIGTERM (`brew services stop`, `systemctl --user stop`): it is
+    // the same graceful stop as a ctrl-c, so the socket goes with the process.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .wrap_err("could not watch for SIGTERM")?;
     let stopped = tokio::select! {
         result = exposer.run(node, cancel.clone()) => {
             result?;
@@ -693,6 +697,12 @@ where
         }
         signalled = tokio::signal::ctrl_c() => {
             signalled?;
+            source.note(StopKind::Interrupted);
+            cancel.cancel();
+            lock.release();
+            classify_stop(source.first())
+        }
+        _ = terminate.recv() => {
             source.note(StopKind::Interrupted);
             cancel.cancel();
             lock.release();

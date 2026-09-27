@@ -92,7 +92,8 @@ fn resumed_list_is_parsed_as_services_never_flags() {
 }
 
 /// A path target is recorded absolute, so a service manager started in another directory serves the
-/// same files; `~/…`, raw `stdin:` and non-path targets are kept as typed.
+/// same files; a `~/…` path is relative like any other (nothing expands it), and raw `stdin:` and non-path
+/// targets are kept as typed.
 #[test]
 fn resumed_paths_are_absolute() {
     let scratch = Scratch::new("paths");
@@ -125,10 +126,48 @@ fn resumed_paths_are_absolute() {
             "logs=file:/work/here/app.log",
             "live=fifo:/work/here/pipe+lossy",
             "abs=file:/etc/motd",
-            "home=file:~/notes",
+            "home=file:/work/here/~/notes",
             "raw=stdin:",
             "web=tcp:127.0.0.1:8080",
         ]
+    );
+}
+
+/// A service one line of the record cannot hold is refused, and nothing is saved: a line break in the
+/// cwd or the typed path would read back as more services, and a space at either end would be trimmed.
+#[test]
+fn a_path_with_a_newline_is_refused_not_recorded() {
+    let scratch = Scratch::new("newline");
+    let home = scratch.home();
+    for (typed, cwd) in [
+        ("inbox=recv:", "/work/dl\nssh=sshd:"),
+        ("inbox=recv:dl\nssh=sshd:", "/work"),
+        ("logs=file:app.log ", "/work"),
+    ] {
+        let refused = Started::of(&[typed.to_owned()], &home, Path::new(cwd));
+        let Err(error @ ServingError::CannotSave { .. }) = refused else {
+            panic!("{typed:?} under {cwd:?} must refuse, not be saved: {refused:?}");
+        };
+        assert!(
+            error.to_string().starts_with("inbox=recv:") || error.to_string().starts_with("logs="),
+            "the refusal names the service: {error}"
+        );
+        assert!(!home.serving().exists(), "nothing is saved");
+    }
+}
+
+/// A path that is not UTF-8 cannot be saved as the path it names, so it is refused.
+#[test]
+fn a_cwd_that_is_not_utf8_is_refused_not_recorded() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let scratch = Scratch::new("utf8");
+    let home = scratch.home();
+    let cwd = Path::new(std::ffi::OsStr::from_bytes(b"/work/\xff"));
+    let refused = Started::of(&["inbox=recv:".to_owned()], &home, cwd);
+    assert!(
+        matches!(refused, Err(ServingError::CannotSave { .. })),
+        "{refused:?}"
     );
 }
 

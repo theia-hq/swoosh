@@ -660,6 +660,19 @@ fn release_unlinks_its_own_socket() {
     drop(listener);
 }
 
+/// A lock dropped without `release` (a `serve` that refuses after its claim, or returns an error) unlinks
+/// its socket too, so nothing is left for a later `status` to connect to.
+#[test]
+fn dropping_the_lock_unlinks_its_own_socket() {
+    let scratch = Scratch::new("drop-own");
+    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("resident start");
+    let socket = lock.socket_path().to_path_buf();
+    drop(listener);
+    drop(lock);
+    assert!(!socket.exists(), "a dropped lock unlinks its own socket");
+    acquire(&scratch.home, &scratch.root).expect("and releases the flock");
+}
+
 /// A same-uid swap must not cost the foreign process its file: `release` compares against the path
 /// identity captured at bind, and a different inode (a second listener renamed onto the path while
 /// both exist, so the inodes are provably distinct) is left alone.
