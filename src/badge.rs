@@ -1,7 +1,7 @@
 //! What a stored membership badge can say about its OWN remaining life, and the one remedy that renews
 //! it.
 //!
-//! The badge `adopt` stores is signed by the signet and stands for its duration ([`DEFAULT_DURATION`] unless the invite said), after which the
+//! The badge `join` stores is signed by the signet and stands for its duration ([`DEFAULT_DURATION`] unless the invite said), after which the
 //! far gate refuses it. That expiry is enforced by a datalog CHECK the gate evaluates over the whole
 //! chain, which no holder can read out; nauthy mints an advisory `expires_at` AUTHORITY fact beside the
 //! check so the device CAN. This module is the single place that fact becomes a decision, so the

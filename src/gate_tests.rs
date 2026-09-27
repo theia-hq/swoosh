@@ -381,3 +381,80 @@ async fn a_missing_revoked_keys_with_no_witness_holds_no_keys() {
         .expect("a fresh home loads");
     assert!(!nauthy::Revocations::is_revoked_peer(&denylist, &device()));
 }
+
+/// A `join --switch` stopped between its writes leaves a standing from one root under a pin to another,
+/// which reads as damaged. The gate still admits a link this machine signed, so its owner can reach it to
+/// run `leave`, which starts it over.
+#[tokio::test]
+async fn a_damaged_server_serves_a_link_it_signed() {
+    let scratch = Scratch::new("damaged-link");
+    let mut seed = TestNode::seeded(OWN).seed();
+    keystore::KeyFile::device(scratch.home.key())
+        .write(
+            &keystore::Secret::take(&mut seed),
+            keystore::Protection::Plain,
+        )
+        .expect("this machine's key");
+    let standing = TestRoot::seeded(OTHER_ROOT)
+        .device_badge(TestNode::seeded(OWN).node_id(), in_an_hour())
+        .expect("a standing");
+    config::write_badge(&scratch.home, &standing)
+        .await
+        .expect("the new root's standing");
+    scratch.pin(ROOT).await;
+    assert!(
+        matches!(
+            crate::standing::Standing::read(&scratch.home).await,
+            Err(crate::standing::StandingError::Damaged(_))
+        ),
+        "the home reads as damaged"
+    );
+
+    let slip = issued_slip(&scratch.home).await;
+    let (gate, _cut) = scratch.gate().await;
+    assert!(admits(&gate, &slip), "the link it signed is admitted");
+
+    crate::joining::leave(&scratch.home).await.expect("leave");
+    assert_eq!(
+        crate::standing::Standing::read(&scratch.home)
+            .await
+            .expect("a readable home")
+            .standing,
+        crate::standing::Standing::Unpinned
+    );
+}
+
+/// `serve --admit` trusts the devices of the root it names for the run, with no pin on disk, and never a
+/// root revoked here.
+#[tokio::test]
+async fn an_admitted_root_is_trusted_for_the_run_and_writes_no_pin() {
+    let scratch = Scratch::new("admitting");
+    let (gate, cut) = super::anchored_admitting(
+        &scratch.home,
+        TestNode::seeded(OWN).node_id(),
+        Some(TestRoot::seeded(ROOT).verify_key()),
+    )
+    .await
+    .expect("the gate builds");
+    assert!(admits(&gate, &badge(ROOT)), "the admitted root's device");
+    assert!(!admits(&gate, &badge(OTHER_ROOT)), "no other root's");
+    assert!(cut.trusts(&TestRoot::seeded(ROOT).verify_key()));
+    assert!(!scratch.home.signet().exists(), "no pin is written");
+
+    let revoked = Scratch::new("admitting-revoked");
+    nauthy::DisabledRoots::open_for_repair(revoked.home.disabled_roots())
+        .disable(TestRoot::seeded(ROOT).verify_key())
+        .await
+        .expect("revoke the root here");
+    let (gate, _cut) = super::anchored_admitting(
+        &revoked.home,
+        TestNode::seeded(OWN).node_id(),
+        Some(TestRoot::seeded(ROOT).verify_key()),
+    )
+    .await
+    .expect("the gate builds");
+    assert!(
+        !admits(&gate, &badge(ROOT)),
+        "a root revoked here is not admitted"
+    );
+}

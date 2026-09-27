@@ -36,7 +36,7 @@ pub struct HomeLock {
 enum Hold {
     /// Reads or rewrites the key without changing it: a serving node, `protect`.
     Shared,
-    /// Replaces the key: `restore`.
+    /// Replaces the key: `restore`, `leave --new-key`.
     Exclusive,
 }
 
@@ -71,6 +71,12 @@ impl HomeLock {
                 home.dir().display()
             )
         })
+    }
+
+    /// Hold the lock while `leave --new-key` replaces the key. Refused while a node serves this home, or
+    /// while anything else holds it.
+    pub fn new_key(home: &Home) -> eyre::Result<Self> {
+        Self::take(home, Hold::Exclusive).map_err(|_| eyre::eyre!("stop swoosh serve first."))
     }
 
     /// Whether a node serves this home now: something holds its lock. Asked without waiting, and the

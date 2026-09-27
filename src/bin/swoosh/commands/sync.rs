@@ -91,7 +91,7 @@ pub(crate) async fn refuse_unless_device(home: &Home) -> eyre::Result<()> {
     }
     match read.standing {
         Standing::Device { .. } | Standing::HoldsRoot { .. } => Ok(()),
-        Standing::Unpinned | Standing::PinOnly { .. } => eyre::bail!(NOT_A_DEVICE),
+        Standing::Unpinned => eyre::bail!(NOT_A_DEVICE),
         Standing::InterruptedMint { root_key } => {
             eyre::bail!("{}", swoosh::standing::unfinished_line(root_key))
         }

@@ -36,11 +36,23 @@ pub type Revoked = Latch<KeyedDenylist>;
 /// The same in every standing: a machine with no pin admits no member, a pin to a root disabled here is
 /// no pin, and a link this machine signed is admitted whatever the pin, while its row is in the ledger.
 pub async fn anchored(home: &Home, own: NodeId) -> Result<(Gate, AnchorCut), GateError> {
+    anchored_admitting(home, own, None).await
+}
+
+/// [`anchored`], admitting the devices of `admit` for this run in place of the pin when it is given: a
+/// `serve --admit` on a machine that trusts no root. Nothing is written.
+pub async fn anchored_admitting(
+    home: &Home,
+    own: NodeId,
+    admit: Option<VerifyKey>,
+) -> Result<(Gate, AnchorCut), GateError> {
     let latch = Arc::new(Latch::new(
         DisabledRoots::load(home.disabled_roots()).await?,
         KeyedDenylist::load(home).await?,
     ));
-    let pin = Arc::new(FilePin::open(home, Arc::clone(&latch)));
+    let mut file_pin = FilePin::open(home, Arc::clone(&latch));
+    file_pin.admit = admit;
+    let pin = Arc::new(file_pin);
     let own = own.verify_key()?;
     let gate = Gate::anchored(
         Arc::clone(&pin),
@@ -121,6 +133,8 @@ pub struct FilePin {
     path: PathBuf,
     latch: Arc<Revoked>,
     state: Mutex<PinState>,
+    /// The root a `serve --admit` admits for its run, read in place of the file.
+    admit: Option<VerifyKey>,
 }
 
 /// What a [`FilePin`] read last.
@@ -156,6 +170,7 @@ impl FilePin {
         Self {
             path: home.signet(),
             latch,
+            admit: None,
             state: Mutex::new(PinState {
                 read: Reading::Missing,
                 stamp: None,
@@ -242,6 +257,9 @@ fn one_key(text: &str) -> Option<VerifyKey> {
 
 impl PinSource for FilePin {
     fn current(&self) -> Option<VerifyKey> {
+        if let Some(admit) = self.admit {
+            return (!self.latch.disabled().is_disabled(admit)).then_some(admit);
+        }
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         let reading = self.refresh(&mut state);
         self.log(&mut state, reading);

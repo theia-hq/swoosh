@@ -13,6 +13,7 @@ Usage: swoosh serve [OPTIONS] [name=target]...
   --expires <duration>   serve for a bounded time, then stop (30m, 2h, 1d)
   --quiet                suppress the readiness banner and activity lines
   --resident             stay resident: hold the home's lock and serve the local control socket
+  --admit <root key>     For this run, let in the devices of another root without joining it (CI).
 ```
 
 **Example.** `swoosh serve ssh=sshd: tv=tcp:127.0.0.1:8096` publishes a shell and a local TCP service, both
@@ -33,6 +34,9 @@ A raw-stream service (`file:`, `fifo:`, `stdin:`) has no auth of its own, so `--
 points at `--public-unsafe`; that flag prints the resolved absolute path in the readiness banner, so name
 only a file you mean to hand out. `--resident` holds the home's lock and serves the local control socket
 a bare `swoosh service ls` reads; backgrounding is the supervisor's job.
+`--admit root:<key>` lets in the devices of that root for this run only, on a machine that trusts no
+root; it writes nothing, and this machine does not get that root's revoked keys. It refuses this machine's
+own key, a root revoked here, and a root saved as a person's, and `swoosh join` refuses while it runs.
 
 See also [Services](../services.md) for every service form and its gate, [Commands index](../commands.md),
 and [Common options](../commands.md#common-options).

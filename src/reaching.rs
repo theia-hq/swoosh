@@ -214,7 +214,7 @@ impl Resolved {
 ///
 /// It presents by standing, and the choice never depends on the peer. On a `Device` or `HoldsRoot` home
 /// the stored badge is slot 1 of a plain dial, and the pin is this device's own fleet, so a `--present`
-/// slip naming that fleet carries the badge in slot 2. On any other standing (`Unpinned`, `PinOnly`,
+/// slip naming that fleet carries the badge in slot 2. On any other standing (`Unpinned`,
 /// `InterruptedMint`, or a damaged home) there is no badge and no own fleet: a plain dial presents
 /// nothing, and a slip dials alone. A delegate's explicit `--present` slip is always slot 1. Reached only
 /// from a [`Dialing`](BindRole::Dialing) verb: a serving verb resolves no slots because it presents none.
@@ -287,7 +287,7 @@ async fn device_badge(home: &Home) -> eyre::Result<Option<(Link, NodeId)>> {
     let pin = match Standing::read(home).await {
         Ok(read) => match read.standing {
             Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => pin,
-            Standing::Unpinned | Standing::PinOnly { .. } | Standing::InterruptedMint { .. } => {
+            Standing::Unpinned | Standing::InterruptedMint { .. } => {
                 return Ok(None);
             }
         },
@@ -397,7 +397,7 @@ mod tests {
     /// `Unpinned` and a plain dial presents nothing.
     ///
     /// A unique empty dir, never the default home: the default is the developer's own
-    /// `~/.config/swoosh`, so on any adopted machine these cases would read that machine's real badge
+    /// `~/.config/swoosh`, so on any joined machine these cases would read that machine's real badge
     /// and the suite would pass or fail by whose laptop it ran on. That was invisible while the
     /// resolver ignored the badge's expiry; now that it refuses a dead one, it would be a suite that
     /// dies on the calendar.
@@ -489,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn family_with_a_signet_bound_slip_attaches_the_membership_badge() {
         let home = provisioned_home("signet-bound");
-        let (secret, root) = adopt_badge(&home, SystemTime::now() + 89 * DAY).await;
+        let (secret, root) = joined_badge(&home, SystemTime::now() + 89 * DAY).await;
         // A real signet-bound slip pinning the DIALER'S OWN fleet, the root its badge roots at. Work
         // issues it.
         let work = crate::testkit::TestNode::seeded(1);
@@ -571,7 +571,7 @@ mod tests {
     #[tokio::test]
     async fn a_signet_bound_link_as_peer_attaches_slot_two() {
         let home = provisioned_home("link-as-peer");
-        let (secret, root) = adopt_badge(&home, SystemTime::now() + 89 * DAY).await;
+        let (secret, root) = joined_badge(&home, SystemTime::now() + 89 * DAY).await;
         let work = crate::testkit::TestNode::seeded(1);
         // Pin the DIALER'S OWN fleet, so the fleet-match slot-2 rule (ADV1) attaches the badge.
         let fleet = root.verify_key();
@@ -644,7 +644,7 @@ mod tests {
     }
 
     /// A store dir unique to one case, resolved as an explicit [`Home`], so a resolver case can write a
-    /// real badge and signet the way `adopt` does instead of reading whatever the developer's own home
+    /// real badge and signet the way `join` does instead of reading whatever the developer's own home
     /// happens to hold.
     fn provisioned_home(tag: &str) -> Home {
         let dir = std::env::temp_dir().join(format!(
@@ -660,7 +660,7 @@ mod tests {
     /// signed for this machine, expiring at `expiry`. The badge is really signed and really parses, so a
     /// case cannot pass against a stand-in string the resolver would never see in the field. Returns this
     /// machine's key and the root.
-    async fn adopt_badge(home: &Home, expiry: SystemTime) -> (Secret, TestRoot) {
+    async fn joined_badge(home: &Home, expiry: SystemTime) -> (Secret, TestRoot) {
         let device = TestNode::seeded(0x52);
         crate::identity::write(&device.seed(), home)
             .await
@@ -687,12 +687,12 @@ mod tests {
 
     /// THE dial-time refusal: a device whose stored badge has expired refuses LOCALLY and never dials.
     /// The far gate's answer for this is the uniform `not admitted`, which is byte-identical to revoked,
-    /// wrong fleet, never adopted and wrong service, so the one machine that can tell the operator which
+    /// wrong fleet, never joined and wrong service, so the one machine that can tell the operator which
     /// of the five it is has to do it before the dial. The message names the cause and the remedy.
     #[tokio::test]
     async fn an_expired_stored_badge_refuses_the_dial_locally() {
         let home = provisioned_home("expired");
-        let (device, _) = adopt_badge(&home, SystemTime::now() - 6 * DAY).await;
+        let (device, _) = joined_badge(&home, SystemTime::now() - 6 * DAY).await;
 
         let mut warned = Vec::new();
         // `let ... else` rather than `expect_err`: that would need `Debug` on `Resolved`, and a
@@ -724,7 +724,7 @@ mod tests {
     #[tokio::test]
     async fn a_badge_inside_the_window_warns_and_still_dials() {
         let home = provisioned_home("inside-window");
-        let (device, _) = adopt_badge(&home, SystemTime::now() + 12 * DAY).await;
+        let (device, _) = joined_badge(&home, SystemTime::now() + 12 * DAY).await;
 
         let mut warned = Vec::new();
         let resolved = resolve_to(
@@ -754,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn a_badge_outside_the_window_says_nothing() {
         let home = provisioned_home("outside-window");
-        let (device, _) = adopt_badge(&home, SystemTime::now() + 89 * DAY).await;
+        let (device, _) = joined_badge(&home, SystemTime::now() + 89 * DAY).await;
 
         let mut warned = Vec::new();
         resolve_to(
@@ -780,7 +780,7 @@ mod tests {
     #[tokio::test]
     async fn an_expired_badge_never_refuses_a_dial_that_does_not_carry_it() {
         let home = provisioned_home("foreign-fleet");
-        let (device, _) = adopt_badge(&home, SystemTime::now() - 6 * DAY).await;
+        let (device, _) = joined_badge(&home, SystemTime::now() - 6 * DAY).await;
         let work = crate::testkit::TestNode::seeded(1);
         let foreign_fleet = crate::testkit::TestRoot::seeded(2).verify_key();
         let slip = work

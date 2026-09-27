@@ -89,8 +89,14 @@ impl Home {
         self.dir.join("key.lock")
     }
 
+    /// `<home>/admit.lock`: held by a `serve --admit` for its whole run, and holding the root it admits, so
+    /// `join` and `status` can tell one runs. `join` holds it too while it writes, so the two never overlap.
+    pub fn admit_lock(&self) -> PathBuf {
+        self.dir.join("admit.lock")
+    }
+
     /// `<home>/signet`: the public [`NodeId`](bifrost::NodeId) of the signet this node trusts, written by
-    /// `adopt`, read by the `serve` gate.
+    /// `join`, read by the `serve` gate.
     pub fn signet(&self) -> PathBuf {
         self.dir.join("signet")
     }
@@ -193,7 +199,7 @@ impl Home {
     }
 
     /// `<home>/disabled_roots`: the root keys this node no longer trusts, one `ed01` key per line, which
-    /// the `serve` gate refuses every cap rooted at and `fleet` and `adopt` refuse to follow. It only ever
+    /// the `serve` gate refuses every cap rooted at and `fleet` and `join` refuse to follow. It only ever
     /// grows, and nothing here removes a key. Deliberately NOT [`disabled`](Self::disabled), the service
     /// toggle, whose list a re-enable shrinks: a root disable is terminal, and the two must never share a
     /// file or a reader.

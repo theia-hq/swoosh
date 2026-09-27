@@ -8,9 +8,9 @@
 #
 # Three identities, each in its own home dir, so this is a real membership story:
 #   - the SERVER runs the node and gates diagnostics behind its signet.
-#   - the MEMBER is invited + adopted, so the server's root trusts it; it
+#   - the MEMBER is invited + joins, so the server's root trusts it; it
 #     reaches the server's gated ping/speed service over iroh and quirk+noise.
-#   - the STRANGER is never adopted, so the gate refuses it.
+#   - the STRANGER never joins, so the gate refuses it.
 #
 # Because the member is a DISTINCT identity (its own key, its own NodeId), the
 # iroh leg has no self-connect: iroh accepts the dial. The old one-key demo
@@ -105,14 +105,14 @@ stop_server() {
 # ---------------------------------------------------------------------------
 # Part 1: admit the member. The server's first invite makes its root (it asks
 # you to choose a passphrase, at this terminal) and prints an invite carrying
-# a new key; the member adopts it, becoming a device the server's root trusts.
+# a new key; the member joins with it, becoming a device the server's root trusts.
 # ---------------------------------------------------------------------------
 banner "server invites the member (choose the root's passphrase when asked)"
 INVITE="$(SWOOSH_HOME="$SERVER" "$BIN" invite laptop --new-key)"
 echo "$INVITE"
 
-banner "member adopts it (distinct home: its own identity + the trusted signet)"
-SWOOSH_HOME="$MEMBER" "$BIN" adopt "$INVITE"
+banner "member joins with it (distinct home: its own key + the trusted root)"
+printf '%s\n' "$INVITE" | SWOOSH_HOME="$MEMBER" "$BIN" join
 
 # ---------------------------------------------------------------------------
 # Part 2: bare quirk refuses the gate. quirk phase 0 announces peer keys in
@@ -155,7 +155,7 @@ fi
 banner "member ping over quirk+noise (direct, wrapper-proven)"
 SWOOSH_HOME="$MEMBER" "$BIN" ping "$SERVER_KEY" --transport quirk+noise --peer "$SERVER_KEY=$SERVER_ADDR" -c 5 -i 0.2
 
-banner "stranger ping over quirk+noise (never adopted: expect REFUSED)"
+banner "stranger ping over quirk+noise (never joined: expect REFUSED)"
 if SWOOSH_HOME="$STRANGER" "$BIN" ping "$SERVER_KEY" --transport quirk+noise --peer "$SERVER_KEY=$SERVER_ADDR" -c 3 -i 0.2; then
   echo "UNEXPECTED: the stranger was admitted over quirk+noise; the gate did not hold." >&2
   exit 1
@@ -188,7 +188,7 @@ if SWOOSH_HOME="$MEMBER" "$BIN" ping "$SERVER_KEY" --transport iroh -c 5 -i 0.2;
   banner "member speed --down over iroh"
   SWOOSH_HOME="$MEMBER" "$BIN" speed "$SERVER_KEY" --transport iroh --down -t 3
 
-  banner "stranger ping over iroh (never adopted: expect REFUSED)"
+  banner "stranger ping over iroh (never joined: expect REFUSED)"
   if SWOOSH_HOME="$STRANGER" "$BIN" ping "$SERVER_KEY" --transport iroh -c 3 -i 0.2; then
     echo "UNEXPECTED: the stranger was admitted over iroh; the gate did not hold." >&2
     exit 1

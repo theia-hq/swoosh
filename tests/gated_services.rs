@@ -213,7 +213,7 @@ async fn build_exposer() -> Exposer {
 
 /// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id):
 /// the shape a signet holder self-signs and `mint` mints for a device. Rooted at the signet it admits; rooted
-/// at a stranger key it is refused. Signed here (not via mint/adopt) so it binds to the mem proven id.
+/// at a stranger key it is refused. Signed here (not via invite/join) so it binds to the mem proven id.
 fn signet_badge(signer: u8, bound: NodeId) -> String {
     TestRoot::seeded(signer)
         .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))

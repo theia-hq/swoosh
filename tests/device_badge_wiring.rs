@@ -2,8 +2,8 @@
 // test-attributed functions); panicking on failed test setup is exactly the intent.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! The invite WIRING proof: an `invite:` line -> `adopt` -> present, end to end through the REAL `swoosh`
-//! binary, so an adopted DEVICE carries the root-signed standing it needs to reach a family-gated service.
+//! The invite WIRING proof: an `invite:` line -> `join` -> present, end to end through the REAL `swoosh`
+//! binary, so a joined DEVICE carries the root-signed standing it needs to reach a family-gated service.
 //!
 //! The invites here are the lines `swoosh invite` prints, built in process from a test root: signing one
 //! takes the root's passphrase at a terminal, which a child process has none of, so the root's half is
@@ -11,16 +11,18 @@
 //! takes both shapes:
 //!
 //! - a key-carrying invite (`invite <name> --new-key`) is five fields, `invite:<seed>.<from>.<name>.<root>.
-//!   <token>`, whose standing is root-signed and bound to the key the seed makes; `adopt` becomes that key;
+//!   <token>`, whose standing is root-signed and bound to the key the seed makes; `join` becomes that key;
 //! - a bound invite (`invite <name> <key>`) is four fields, `invite:<from>.<name>.<root>.<token>`, for a key
-//!   the device made: no secret travels, `adopt` keeps that identity, and the standing verifies at the root
+//!   the device made: no secret travels, `join` keeps that identity, and the standing verifies at the root
 //!   bound to the device.
 //!
-//! The device-adopt-then-DIAL end-to-end reach over a live transport lives in `tier1_invites.rs`.
+//! Every invite goes in on stdin, as `join` reads one. The device-joins-then-DIAL end-to-end reach over a
+//! live transport lives in `tier1_invites.rs`.
 
 use core::time::Duration;
+use std::io::Write as _;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
 use bifrost::NodeId;
@@ -86,10 +88,10 @@ fn device_key(dir: &Path) -> NodeId {
         .expect("status --key prints the key alone")
 }
 
-/// The key-carrying shape: the invite hands over a key; the device adopts it as its own; the stored
+/// The key-carrying shape: the invite hands over a key; the device joins with it as its own; the stored
 /// standing roots at the root and admits exactly that key.
 #[test]
-fn a_keyed_invite_adopts_as_its_key_and_verifies_at_the_root() {
+fn a_keyed_invite_joins_as_its_key_and_verifies_at_the_root() {
     let base = std::env::temp_dir().join(format!("swoosh-keyed-invite-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let device_dir = base.join("device");
@@ -119,15 +121,9 @@ fn a_keyed_invite_adopts_as_its_key_and_verifies_at_the_root() {
         "the root's secret never travels"
     );
 
-    // ADOPT: the seed becomes this machine's key; the root and the standing land beside it.
-    let adopt = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
-    assert!(adopt.status.success(), "adopt failed: {}", stderr(&adopt));
-    // A key-carrying invite IS a secret, so a bare argv token warns (the bound shape below does not).
-    assert!(
-        stderr(&adopt).contains("leaks it"),
-        "a key-carrying invite on argv warns: {}",
-        stderr(&adopt)
-    );
+    // JOIN: the seed becomes this machine's key; the root and the standing land beside it.
+    let joined = join(&device_dir, &token, &[]);
+    assert!(joined.status.success(), "join failed: {}", stderr(&joined));
     let stored_badge = stored_badge(&device_dir);
     assert_eq!(
         stored_badge, badge_field,
@@ -160,7 +156,7 @@ fn a_keyed_invite_adopts_as_its_key_and_verifies_at_the_root() {
 }
 
 /// The bound shape: the DEVICE makes its key and prints it; the root signs for that key; the invite
-/// carries no secret; the device adopts it and keeps its identity; the stored standing verifies at the
+/// carries no secret; the device joins with it and keeps its identity; the stored standing verifies at the
 /// root bound to that device.
 #[test]
 fn a_bound_invite_keeps_the_devices_key_and_verifies_at_the_root() {
@@ -188,26 +184,25 @@ fn a_bound_invite_keeps_the_devices_key_and_verifies_at_the_root() {
         "a bound invite never carries the device's secret"
     );
 
-    let adopt = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
+    let joined = join(&device_dir, &token, &[]);
     assert!(
-        adopt.status.success(),
-        "bound adopt failed: {}",
-        stderr(&adopt)
+        joined.status.success(),
+        "bound join failed: {}",
+        stderr(&joined)
     );
     assert!(
-        !stderr(&adopt).contains("leaks it"),
-        "a bound invite is not a secret, so no argv warning: {}",
-        stderr(&adopt)
+        stderr(&joined).contains(&format!("Check that root:{root} is the root: line")),
+        "join prints the full root for the out-of-band compare: {}",
+        stderr(&joined)
     );
-    let adopt_out = String::from_utf8(adopt.stdout).unwrap();
     assert!(
-        adopt_out.contains(&root.to_string()),
-        "adopt prints the full root for the out-of-band compare: {adopt_out}"
+        joined.stdout.is_empty(),
+        "join makes nothing to print on stdout"
     );
     assert_eq!(
         std::fs::read(device_dir.join("key")).unwrap(),
         device_secret_before,
-        "adopting a bound invite keeps the device's key"
+        "joining a bound invite keeps the device's key"
     );
     assert_eq!(
         std::fs::read_to_string(device_dir.join("signet"))
@@ -232,7 +227,7 @@ fn a_bound_invite_keeps_the_devices_key_and_verifies_at_the_root() {
 
 /// A standing signed for a DIFFERENT machine is refused before anything is written.
 #[test]
-fn adopt_refuses_a_badge_bound_to_another_machine() {
+fn join_refuses_a_standing_bound_to_another_machine() {
     let base = std::env::temp_dir().join(format!("swoosh-wrong-device-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let intended_dir = base.join("intended");
@@ -244,15 +239,15 @@ fn adopt_refuses_a_badge_bound_to_another_machine() {
     let token = bound_invite(ROOT, intended, "laptop", 90 * DAY);
 
     device_key(&other_dir);
-    let adopt = swoosh(&["adopt", &token, "--home", path_str(&other_dir)]);
+    let joined = join(&other_dir, &token, &[]);
     assert!(
-        !adopt.status.success(),
+        !joined.status.success(),
         "a standing bound to another machine must be refused: {}",
-        stderr(&adopt)
+        stderr(&joined)
     );
-    let message = stderr(&adopt);
+    let message = stderr(&joined);
     assert!(
-        message.contains("does not bind this machine"),
+        message.contains("this invite is for another machine's key"),
         "the error names the binding check: {message}"
     );
     assert!(
@@ -263,10 +258,10 @@ fn adopt_refuses_a_badge_bound_to_another_machine() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// Re-rooting takes an explicit acknowledgement: an invite naming a root this machine does not yet trust
-/// switches the root, so a differing one refuses without `--force` and lands with it.
+/// Moving to another root takes `--switch`: an invite from a root this machine does not trust refuses
+/// without it and lands with it.
 #[test]
-fn adopt_requires_force_to_switch_the_trusted_signet() {
+fn join_takes_switch_to_move_to_another_root() {
     let base = std::env::temp_dir().join(format!("swoosh-reroot-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let device_dir = base.join("device");
@@ -274,8 +269,8 @@ fn adopt_requires_force_to_switch_the_trusted_signet() {
     let device = device_key(&device_dir);
 
     let first_token = bound_invite(ROOT, device, "laptop", 90 * DAY);
-    let adopt = swoosh(&["adopt", &first_token, "--home", path_str(&device_dir)]);
-    assert!(adopt.status.success(), "{}", stderr(&adopt));
+    let joined = join(&device_dir, &first_token, &[]);
+    assert!(joined.status.success(), "{}", stderr(&joined));
     let pinned = || {
         std::fs::read_to_string(device_dir.join("signet"))
             .unwrap()
@@ -285,18 +280,18 @@ fn adopt_requires_force_to_switch_the_trusted_signet() {
     let first_root = TestRoot::seeded(ROOT).node_id().to_string();
     assert_eq!(pinned(), first_root);
 
-    // Another root signs for the same device. Adopting would switch the gate's root: refused without
-    // `--force`, and the pin is untouched by the refusal.
+    // Another root signs for the same device. Joining would move this machine to it: refused without
+    // `--switch`, and the pin is untouched by the refusal.
     let second_token = bound_invite(OTHER_ROOT, device, "laptop", 90 * DAY);
-    let refused = swoosh(&["adopt", &second_token, "--home", path_str(&device_dir)]);
+    let refused = join(&device_dir, &second_token, &[]);
     assert!(
         !refused.status.success(),
-        "re-rooting without --force must refuse: {}",
+        "moving without --switch must refuse: {}",
         stderr(&refused)
     );
     assert!(
-        stderr(&refused).contains("--force"),
-        "the refusal names the acknowledgement: {}",
+        stderr(&refused).contains("swoosh join --switch"),
+        "the refusal names the flag: {}",
         stderr(&refused)
     );
     assert_eq!(
@@ -305,32 +300,26 @@ fn adopt_requires_force_to_switch_the_trusted_signet() {
         "the refused switch leaves the root untouched"
     );
 
-    let forced = swoosh(&[
-        "adopt",
-        &second_token,
-        "--force",
-        "--home",
-        path_str(&device_dir),
-    ]);
+    let switched = join(&device_dir, &second_token, &["--switch"]);
     assert!(
-        forced.status.success(),
-        "--force performs the switch: {}",
-        stderr(&forced)
+        switched.status.success(),
+        "--switch moves it: {}",
+        stderr(&switched)
     );
     assert_eq!(
         pinned(),
         TestRoot::seeded(OTHER_ROOT).node_id().to_string(),
-        "--force wrote the new root"
+        "--switch wrote the new root"
     );
 
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A same-root re-adopt turns on ONE question: does the incoming standing outlive the stored one? A
-/// renewal lands with no flag; an older, shorter standing replayed under the same root is refused, and
-/// `--force` keeps its meaning. Re-adopting the same bytes stays silent either way.
+/// A join on the same root turns on ONE question: does the incoming standing end before the stored one?
+/// A later one lands; an earlier one replayed under the same root is refused, with no flag to force it.
+/// Joining the same bytes again changes nothing.
 #[test]
-fn adopt_renews_without_a_flag_and_refuses_a_downgrade() {
+fn join_renews_on_the_same_root_and_refuses_an_earlier_date() {
     let base = std::env::temp_dir().join(format!("swoosh-badge-swap-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let device_dir = base.join("device");
@@ -339,21 +328,21 @@ fn adopt_renews_without_a_flag_and_refuses_a_downgrade() {
 
     let short_token = bound_invite(ROOT, device, "laptop", 30 * DAY);
     let short_badge = standing_field(&short_token);
-    let adopt = swoosh(&["adopt", &short_token, "--home", path_str(&device_dir)]);
-    assert!(adopt.status.success(), "{}", stderr(&adopt));
+    let joined = join(&device_dir, &short_token, &[]);
+    assert!(joined.status.success(), "{}", stderr(&joined));
     assert_eq!(
         stored_badge(&device_dir),
         short_badge,
         "the first standing lands"
     );
 
-    let same = swoosh(&["adopt", &short_token, "--home", path_str(&device_dir)]);
+    let same = join(&device_dir, &short_token, &[]);
     assert!(same.status.success(), "{}", stderr(&same));
 
     let long_token = bound_invite(ROOT, device, "laptop", 90 * DAY);
     let long_badge = standing_field(&long_token);
     assert_ne!(short_badge, long_badge);
-    let renewed = swoosh(&["adopt", &long_token, "--home", path_str(&device_dir)]);
+    let renewed = join(&device_dir, &long_token, &[]);
     assert!(
         renewed.status.success(),
         "a standing that outlives the stored one is a renewal, not a swap: {}",
@@ -361,15 +350,15 @@ fn adopt_renews_without_a_flag_and_refuses_a_downgrade() {
     );
     assert_eq!(stored_badge(&device_dir), long_badge);
 
-    let replay = swoosh(&["adopt", &short_token, "--home", path_str(&device_dir)]);
+    let replay = join(&device_dir, &short_token, &[]);
     assert!(
         !replay.status.success(),
-        "replaying a standing that does not outlive the stored one must refuse: {}",
+        "replaying a standing that ends before the stored one must refuse: {}",
         stderr(&replay)
     );
     assert!(
-        stderr(&replay).contains("--force"),
-        "the refusal names the acknowledgement: {}",
+        stderr(&replay).contains("so it changes nothing here"),
+        "the refusal says why: {}",
         stderr(&replay)
     );
     assert_eq!(
@@ -378,28 +367,13 @@ fn adopt_renews_without_a_flag_and_refuses_a_downgrade() {
         "the stored standing survives"
     );
 
-    let forced = swoosh(&[
-        "adopt",
-        &short_token,
-        "--force",
-        "--home",
-        path_str(&device_dir),
-    ]);
-    assert!(
-        forced.status.success(),
-        "--force performs the downgrade: {}",
-        stderr(&forced)
-    );
-    assert_eq!(stored_badge(&device_dir), short_badge);
-
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A key-carrying invite adopted onto a machine that already has a key is refused, and the key survives
-/// byte-identical, with or without `--force`. Moving the key aside lets the same invite land, and
-/// re-adopting it after is a no-op.
+/// A key-carrying invite joined on a machine that already has a key is refused, and the key survives
+/// byte-identical. Moving the key aside lets the same invite land, and joining it again after is a no-op.
 #[test]
-fn adopt_refuses_to_replace_an_identity_this_machine_already_has() {
+fn join_refuses_to_replace_a_key_this_machine_already_has() {
     let base = std::env::temp_dir().join(format!("swoosh-keep-identity-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let device_dir = base.join("device");
@@ -410,45 +384,40 @@ fn adopt_refuses_to_replace_an_identity_this_machine_already_has() {
     let held_seed = std::fs::read(&device_key_path).unwrap();
     let token = keyed_invite(ROOT, [0x78; 32], "ci-runner");
 
-    for argv in [
-        vec!["adopt", &token, "--home", path_str(&device_dir)],
-        vec!["adopt", &token, "--force", "--home", path_str(&device_dir)],
-    ] {
-        let refused = swoosh(&argv);
-        // FIRST, because it is the assertion the guard exists for.
-        assert_eq!(
-            std::fs::read(&device_key_path).unwrap(),
-            held_seed,
-            "{argv:?} must leave the key nothing can re-issue exactly as it found it"
-        );
-        assert!(
-            !refused.status.success(),
-            "{argv:?} must refuse: {}",
-            stderr(&refused)
-        );
-        let message = stderr(&refused);
-        assert!(
-            message.contains(&held.to_string()),
-            "the refusal names the key this machine already has: {message}"
-        );
-        assert!(
-            !device_dir.join("signet").exists() && !device_dir.join("badge").exists(),
-            "the refusal lands before any write"
-        );
-    }
+    let refused = join(&device_dir, &token, &[]);
+    // FIRST, because it is the assertion the guard exists for.
+    assert_eq!(
+        std::fs::read(&device_key_path).unwrap(),
+        held_seed,
+        "the refusal leaves the key nothing can re-issue exactly as it found it"
+    );
+    assert!(
+        !refused.status.success(),
+        "it refuses: {}",
+        stderr(&refused)
+    );
+    let message = stderr(&refused);
+    assert!(
+        message.contains(&format!("this machine already has one ({held})")),
+        "the refusal names the key this machine already has: {message}"
+    );
+    assert!(
+        !device_dir.join("signet").exists() && !device_dir.join("badge").exists(),
+        "the refusal lands before any write"
+    );
 
     std::fs::rename(&device_key_path, device_dir.join("key.bak")).unwrap();
-    let adopted = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
-    assert!(adopted.status.success(), "{}", stderr(&adopted));
+    let joined = join(&device_dir, &token, &[]);
+    assert!(joined.status.success(), "{}", stderr(&joined));
     assert_ne!(
         std::fs::read(&device_key_path).unwrap(),
         held_seed,
         "the moved-aside machine takes the invite's key"
     );
-    let again = swoosh(&["adopt", &token, "--home", path_str(&device_dir)]);
+    let again = join(&device_dir, &token, &[]);
     assert!(
         again.status.success(),
-        "re-adopting the same invite stays a no-op: {}",
+        "joining the same invite again changes nothing: {}",
         stderr(&again)
     );
 
@@ -467,6 +436,34 @@ fn swoosh(args: &[&str]) -> std::process::Output {
         .expect("the swoosh binary runs")
 }
 
+/// Run `swoosh join` on the machine at `home` with `extra` flags, the invite on stdin, over loopback so its
+/// first exchange with the machine that made the invite, which runs nowhere here, ends at once.
+fn join(home: &Path, invite: &str, extra: &[&str]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+        .args([
+            "join",
+            "--transport",
+            "quirk+noise",
+            "--home",
+            path_str(home),
+        ])
+        .args(extra)
+        .env("HOME", std::env::temp_dir())
+        .env_remove("SWOOSH_HOME")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the swoosh binary runs");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(format!("{invite}\n").as_bytes())
+        .unwrap();
+    child.wait_with_output().expect("join finishes")
+}
+
 /// The `.`-separated fields of an `invite:` token.
 fn invite_fields(token: &str) -> Vec<&str> {
     token
@@ -482,10 +479,10 @@ fn standing_field(token: &str) -> String {
     fields[fields.len() - 2..].join(".")
 }
 
-/// The badge adopt stored in `home`, trimmed of the trailing newline `write_badge` appends.
+/// The badge join stored in `home`, trimmed of the trailing newline `write_badge` appends.
 fn stored_badge(home: &Path) -> String {
     std::fs::read_to_string(home.join("badge"))
-        .expect("adopt stores the badge beside the seed")
+        .expect("join stores the badge beside the key")
         .trim()
         .to_owned()
 }

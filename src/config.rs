@@ -48,7 +48,7 @@ pub async fn is_disabled(home: &Home, root: NodeId) -> eyre::Result<bool> {
     Ok(disabled.is_disabled(root.verify_key()?))
 }
 
-/// Write this node's signet: the public [`NodeId`] its default gate will trust, as `adopt` sets it from an
+/// Write this node's signet: the public [`NodeId`] its default gate will trust, as `join` sets it from an
 /// invite. Overwrites any prior signet (re-provisioning re-trusts), creating the store dir. Written
 /// `0600` beside the secret identity: the signet roots this node's whole trust decision (whose devices it
 /// admits), so it must not be world-readable to a local user who could read or (worse) rewrite it.
@@ -80,8 +80,8 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
             }
             let badge = badge.parse::<Link>().wrap_err_with(|| {
                 format!(
-                    "the stored membership badge {} is not a usable link; re-run `swoosh \
-                     adopt --force <invite>` to replace it, or move the file aside",
+                    "the stored device record {} is not a usable link: run swoosh leave to \
+                     start over",
                     path.display(),
                 )
             })?;
@@ -93,7 +93,7 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
 }
 
 /// Write this device's membership badge: the signet-signed, device-bound link it presents on
-/// connect, as `adopt` stores it from an invite's badge field. Overwrites any prior badge (re-provisioning
+/// connect, as `join` stores it from an invite. Overwrites any prior badge (re-provisioning
 /// re-badges), creating the store dir. It lands beside the identity, mirroring [`write_signet`], and is
 /// written `0600`: though the signet already signed it (it carries no secret), it is a device-bound
 /// membership credential and this store is owner-only throughout, so it is not left world-readable either.

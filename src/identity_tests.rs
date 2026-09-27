@@ -115,9 +115,9 @@ async fn a_write_lands_the_key_atomically_owner_only() {
 }
 
 /// The signet guard: a home that already holds a key is REFUSED, not re-identified. The key is the one
-/// file in the store nothing can re-issue, so `adopt`ing a derived invite onto a provisioned machine
+/// file in the store nothing can re-issue, so joining an invite that carries a key onto a provisioned machine
 /// must leave it exactly as found and say what was at stake. Re-writing the seed already on disk is not
-/// a replacement, so a re-adopt of the same invite stays a silent no-op.
+/// a replacement, so a second join of the same invite stays a silent no-op.
 ///
 /// The file-survives assertion comes FIRST: with the guard deleted the write succeeds, and that
 /// assertion is the one that then fails, naming the protection rather than tripping on a missing error.
@@ -149,7 +149,7 @@ async fn a_write_refuses_a_home_that_already_holds_a_different_key() {
         "the refusal names the file to move aside: {message}"
     );
 
-    // The same seed is not a replacement: re-adopting an invite this machine already adopted writes
+    // The same seed is not a replacement: joining an invite this machine already joined writes
     // nothing and says nothing, so idempotence survives the guard.
     super::write(&provisioned, &home)
         .await
@@ -343,11 +343,11 @@ async fn inspecting_a_sealed_key_asks_for_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Re-adopting the key a home already holds is a no-op even when its owner sealed it: the passphrase
+/// Writing again the key a home already holds is a no-op even when its owner sealed it: the passphrase
 /// proves the sealed file is that key, and the file stays sealed.
 #[tokio::test]
-async fn re_adopting_a_sealed_key_proves_it_and_keeps_it_sealed() {
-    let (home, dir) = home("sealed-readopt");
+async fn rewriting_a_sealed_key_proves_it_and_keeps_it_sealed() {
+    let (home, dir) = home("sealed-rewrite");
     sealed(&home, "correct horse");
     let seed = super::resolve_with(
         super::Identity::Persisted,

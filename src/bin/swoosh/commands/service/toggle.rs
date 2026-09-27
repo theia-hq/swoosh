@@ -60,7 +60,7 @@ impl ServiceToggleCmd {
 /// concurrent toggles serialize (neither loses the other's edit). The disabled set is a [`BTreeSet`] so the
 /// rewritten file is name-sorted and stable (a clean diff, and the same shape the denylist writes).
 fn edit(home: &Home, mutate: impl FnOnce(&mut BTreeSet<String>)) -> eyre::Result<()> {
-    // The home may not exist yet (a toggle before the first `serve`/`adopt`); create it owner-only
+    // The home may not exist yet (a toggle before the first `serve`/`join`); create it owner-only
     // (`0700`), mirroring how the contacts store provisions its parent on first save, so the disabled
     // list and its lock file never sit in a group/world-traversable dir. An already-provisioned dir is
     // left as set, never chmod'd.

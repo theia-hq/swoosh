@@ -39,14 +39,30 @@ impl Drop for Scratch {
 
 /// Run the binary on `home` with `args`, and return its stdout, failing on a refusal.
 fn swoosh(home: &Path, args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+    swoosh_with(home, args, "")
+}
+
+/// Run the binary on `home` with `args` and `input` on stdin, asserting it succeeds; its stdout.
+fn swoosh_with(home: &Path, args: &[&str], input: &str) -> String {
+    use std::io::Write as _;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(home)
         .args(args)
         .env_remove("SWOOSH_HOME")
-        .stdin(Stdio::null())
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("the binary runs");
+    child
+        .stdin
+        .take()
+        .expect("piped stdin")
+        .write_all(input.as_bytes())
+        .expect("write stdin");
+    let output = child.wait_with_output().expect("the binary finishes");
     assert!(
         output.status.success(),
         "`swoosh {}` failed: {}",
@@ -76,7 +92,7 @@ fn share_prints_the_swoosh_prefix() {
     assert!(printed.starts_with("swoosh:ed01"), "{printed}");
 }
 
-/// The files a verb writes hold links bare: the standing `adopt` stores from an invite and the ledger
+/// The files a verb writes hold links bare: the standing `join` stores from an invite and the ledger
 /// `grant issue` appends carry no `swoosh:`.
 #[test]
 fn a_stored_link_carries_no_prefix() {
@@ -98,11 +114,15 @@ fn a_stored_link_carries_no_prefix() {
         standing,
     )
     .to_string();
-    swoosh(&device, &["adopt", &invite]);
+    swoosh_with(
+        &device,
+        &["join", "--transport", "quirk+noise"],
+        &format!("{invite}\n"),
+    );
     swoosh(&owner, &["grant", "issue", "ping"]);
 
     let badge = std::fs::read_to_string(Home::resolve(Some(device)).unwrap().badge())
-        .expect("adopt stores the badge");
+        .expect("join stores the badge");
     let ledger = std::fs::read_to_string(Home::resolve(Some(owner)).unwrap().links())
         .expect("the ledger is written");
     for (file, text) in [("badge", &badge), ("ledger", &ledger)] {

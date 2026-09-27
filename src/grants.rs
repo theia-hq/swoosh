@@ -433,7 +433,7 @@ impl GrantRecord {
 pub enum GrantKind {
     /// Bound to ONE device: theft-resistant, non-delegable, standing access for that device alone.
     Device,
-    /// Bound to a whole fleet (a person's signet): every device that person adopts.
+    /// Bound to a whole fleet (a person's signet): every device of that person.
     Fleet,
     /// An unbound bearer slip: delegable, short-lived, presentable by anyone holding it.
     Bearer,

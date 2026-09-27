@@ -34,11 +34,6 @@ use crate::home::Home;
 pub enum Standing {
     /// This machine trusts no root. A pin to a root revoked here counts as none.
     Unpinned,
-    /// This machine trusts `pin` and is not one of its devices.
-    PinOnly {
-        /// The root this machine trusts.
-        pin: NodeId,
-    },
     /// This machine trusts `pin` and is its device until `until`, and holds no root.
     Device {
         /// The root this machine trusts.
@@ -158,6 +153,11 @@ pub enum Disagreement {
         /// The root held here.
         root: NodeId,
     },
+    /// A pin is here with no device standing and no root: only a crash while leaving leaves one.
+    PinWithoutStanding {
+        /// The root the pin names.
+        pin: NodeId,
+    },
     /// A device standing is here with no pin and no root.
     StandingWithoutPin {
         /// The root that signed the standing.
@@ -211,6 +211,11 @@ impl fmt::Display for Disagreement {
                 formatter,
                 "this machine holds root {}… and has no device record from it",
                 root.short()
+            ),
+            Self::PinWithoutStanding { pin } => write!(
+                formatter,
+                "this machine trusts root {}… and has no device record from it",
+                pin.short()
             ),
             Self::StandingWithoutPin { standing_root } => write!(
                 formatter,
@@ -336,7 +341,7 @@ async fn classify(
             },
         },
         (None, Some(pin)) => match read_badge(home, own, pin).await? {
-            None => Ok(Standing::PinOnly { pin }),
+            None => damaged(Disagreement::PinWithoutStanding { pin }),
             Some(until) => Ok(Standing::Device { pin, until }),
         },
     }
@@ -479,7 +484,7 @@ async fn finish_retirement(
 /// The pin goes last. It is what makes the rest mean anything, so a crash part way leaves a pin with
 /// less beneath it, which the next read finishes, never a device standing with no pin, which reads as
 /// damaged.
-async fn strip(home: &Home) -> Result<(), StandingError> {
+pub(crate) async fn strip(home: &Home) -> Result<(), StandingError> {
     for path in [
         home.badge(),
         home.roster(),
