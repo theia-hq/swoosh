@@ -89,7 +89,7 @@ async fn bare_stop_without_resident_is_teaching() {
         "the error leads with the missing thing: {message}"
     );
     assert!(
-        message.contains("start one with `swoosh serve --resident`"),
+        message.contains("start one with `swoosh serve`"),
         "the error names the fix: {message}"
     );
 

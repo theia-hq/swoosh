@@ -676,3 +676,23 @@ fn release_spares_a_foreign_inode_swapped_onto_the_path() {
     assert!(socket.exists(), "release never unlinks a foreign inode");
     drop(foreign);
 }
+
+/// A runtime root whose socket path `sun_path` cannot hold (104 bytes on macOS, 108 on Linux) refuses
+/// with the fix before anything is created, rather than binding a truncated path another home could share.
+#[test]
+fn serve_refuses_a_socket_path_longer_than_sun_path() {
+    let scratch = Scratch::new("longpath");
+    let root = scratch.root.join("r".repeat(120));
+    let refused = acquire(&scratch.home, &root);
+    let Err(error @ SingleError::SocketPathTooLong { .. }) = refused else {
+        panic!(
+            "a socket path past sun_path must refuse: {:?}",
+            refused.map(|_| ())
+        );
+    };
+    assert_eq!(
+        error.to_string(),
+        "the runtime directory's path is too long for a socket: set XDG_RUNTIME_DIR to a shorter one."
+    );
+    assert!(!root.exists(), "nothing was created under the long root");
+}

@@ -1,4 +1,4 @@
-//! The `--resident` run glue: the live catalog reads plus the control listener arm.
+//! Every `serve`'s control socket glue: the live catalog reads plus the control listener arm.
 //!
 //! `Resident` is the state the accept loop serves from: the pid, the start time, the served catalog
 //! snapshot, the live disabled-list path, and a CLONE of the node's teardown token (the exposer stays
@@ -40,7 +40,7 @@ pub const DISABLED_NAMES_CAP: usize = 1024;
 /// transient resource pressure (EMFILE/ENOBUFS) to clear, short enough that a stop lands promptly.
 pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
-/// The resident state the accept loop serves from. Built once at `--resident` start; every query
+/// The resident state the accept loop serves from. Built once at `serve` start; every query
 /// reads the LIVE disabled file, never a cached copy, so the socket is never a data channel into
 /// the gate.
 pub struct Resident {

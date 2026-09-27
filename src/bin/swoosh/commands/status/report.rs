@@ -431,6 +431,8 @@ fn serving(menu: &ServiceMenu) -> Result<String, String> {
         .catalog
         .entries()
         .map(|entry| entry.name.as_str())
+        // The node's own routes (`control.*`) are no service a person started, so none is listed.
+        .filter(|name| !name.starts_with("control."))
         .filter(|name| !off.iter().any(|off| off == name))
         .collect();
     Ok(match on.as_slice() {

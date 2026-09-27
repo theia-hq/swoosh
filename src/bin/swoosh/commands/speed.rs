@@ -139,9 +139,6 @@ impl SpeedCmd {
             node, contacts, &self.peer, &service, present, membership, bound,
         )
         .await?;
-        // Path at connect. The transfer below is the window where iroh's hole-punch lands, so the
-        // settled path (and any relayed-to-direct upgrade) is read and reported after it, not here.
-        let initial = session.conn_info().path;
         println!(
             "speed test to {label} via {} ({})",
             bound.transport.name(),
@@ -187,7 +184,7 @@ impl SpeedCmd {
 
         // Read the settled path now: the transfer gave hole-punching time to land, and we must read
         // before the transport closes.
-        let path = reach::conn_path(initial, &session.conn_info());
+        let path = reach::conn_path(&session.conn_info());
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;

@@ -152,7 +152,7 @@ async fn bare_ls_without_resident_is_teaching() {
         .expect_err("no resident must refuse, never an empty table");
     let message = format!("{error:#}");
     assert!(
-        message.contains("start one with `swoosh serve --resident`"),
+        message.contains("start one with `swoosh serve`"),
         "the error names the fix: {message}"
     );
 

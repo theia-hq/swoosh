@@ -215,6 +215,13 @@ impl Home {
         self.dir.join("disabled")
     }
 
+    /// `<home>/serving`: the services this home last started with, one service form per line, which a
+    /// bare `serve` resumes. Written only by a `serve` that named its services, and only once its routes
+    /// bound, so a failed start never changes what the next bare `serve` serves.
+    pub fn serving(&self) -> PathBuf {
+        self.dir.join("serving")
+    }
+
     /// `<home>/disabled.lock`: the flock file that serializes concurrent `enable`/`disable` edits so two
     /// racing toggles cannot lose each other's change. Separate from `disabled` itself because the toggle
     /// rewrites `disabled` by atomic rename (a new inode each time), so the lock must sit on a STABLE inode.
@@ -248,7 +255,7 @@ impl Home {
         self.dir.join("known_hosts")
     }
 
-    /// The 16-char hex key scoping this home's resident state: inline 64-bit FNV-1a over the
+    /// The 16-char hex key scoping this home's runtime state: inline 64-bit FNV-1a over the
     /// canonicalized home path, the full 64 bits rendered as 16 lowercase hex chars. Dependency
     /// free and stable across daemon and client because both binaries carry this same function.
     /// Two different homes hash differently (the full-width hash, so collisions need a 2^64
@@ -272,7 +279,7 @@ impl Home {
     }
 
     /// `<runtime>/swoosh-<uid>/<key>` (macOS) or `$XDG_RUNTIME_DIR/swoosh/<key>` (Linux): the
-    /// per-home dir holding this node's resident socket and lock. A pure function of the home
+    /// per-home dir holding this node's control socket and lock. A pure function of the home
     /// (via [`home_key`](Self::home_key)) over the per-user runtime root, so daemon and client
     /// resolve the same paths. Never `~/.config`, never `/tmp`, never an abstract socket.
     pub fn runtime_dir(&self) -> eyre::Result<PathBuf> {
@@ -300,10 +307,11 @@ impl Home {
     }
 }
 
-/// The per-user runtime root resident state lives under: `$XDG_RUNTIME_DIR/swoosh` on Linux,
-/// `confstr(_CS_DARWIN_USER_TEMP_DIR)` + `swoosh-<uid>` on macOS. Created and verified 0700 by the
-/// single-instance acquire, never assumed. An unset or relative `XDG_RUNTIME_DIR` on Linux is a loud
-/// error, never a `/tmp` or cwd fallback.
+/// The per-user runtime root every `serve`'s socket and lock live under: `$XDG_RUNTIME_DIR/swoosh` on
+/// Linux, `confstr(_CS_DARWIN_USER_TEMP_DIR)` + `swoosh-<uid>` on macOS. Created and verified 0700 by the
+/// single-instance acquire, never assumed. An unset or relative `XDG_RUNTIME_DIR` on Linux is a refusal,
+/// never a fallback under the home, `/tmp` or the cwd: with a fallback, where the lock lives would depend on
+/// the environment, and two `serve`s on one home could both start.
 pub fn runtime_root() -> eyre::Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -336,22 +344,26 @@ pub fn runtime_root() -> eyre::Result<PathBuf> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let root = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
-            eyre!(
-                "XDG_RUNTIME_DIR is not set; resident serve needs it (no /tmp fallback). \
-                 Set it, e.g. XDG_RUNTIME_DIR=/run/user/$(id -u)"
-            )
-        })?;
-        let root = PathBuf::from(root);
-        if !root.is_absolute() {
-            return Err(eyre!(
-                "XDG_RUNTIME_DIR must be an absolute path (got {root}); resident serve never \
-                 roots at the cwd",
-                root = root.display()
-            ));
-        }
-        Ok(root.join("swoosh"))
+        xdg_runtime_root(std::env::var_os("XDG_RUNTIME_DIR"))
     }
+}
+
+/// The runtime root under a given `XDG_RUNTIME_DIR`: `<it>/swoosh` when it is set and absolute, else the
+/// refusal that names the variable. Split from [`runtime_root`] so the rule is one pure function over the
+/// value, the same on every platform a test runs on.
+#[cfg_attr(
+    all(target_os = "macos", not(test)),
+    allow(dead_code, reason = "macOS resolves its runtime root through confstr")
+)]
+pub(crate) fn xdg_runtime_root(value: Option<std::ffi::OsString>) -> eyre::Result<PathBuf> {
+    let root = value.map(PathBuf::from).filter(|root| root.is_absolute());
+    let Some(root) = root else {
+        return Err(eyre!(
+            "swoosh serve needs a private runtime directory. Set XDG_RUNTIME_DIR to a directory only you \
+             can use (for example /run/user/$(id -u)), or run it as a systemd --user service."
+        ));
+    };
+    Ok(root.join("swoosh"))
 }
 
 /// The default home, `~/.config/swoosh`. Reads `HOME`, so it fails with a teaching error when unset (a
@@ -378,3 +390,7 @@ fn reject_home_file(dir: &Path) -> eyre::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "home_tests.rs"]
+mod home_tests;

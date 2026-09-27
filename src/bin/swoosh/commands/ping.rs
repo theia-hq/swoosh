@@ -2,17 +2,17 @@
 //! shaped.
 //!
 //! ping is a diagnostic, so a person (`alice`) fans out to ALL her devices and reports each: how do I
-//! reach alice, across every device she has? `alice/macbook` pings the one. Each device's block leads
-//! with the connection path (direct vs relayed, the same source `status` reads) so a slow RTT reads as
-//! "it relayed", not a mystery, then the `ping(8)` counts/loss and RTT distribution.
+//! reach alice, across every device she has? `alice/macbook` pings the one. Each device's block names
+//! the device, then its `path:` (`direct` or `through a relay`, the same source `status` reads) so a slow
+//! RTT reads as "it relayed", not a mystery, then the `ping(8)` counts/loss and RTT distribution.
 //!
 //! With `-v`, it prints a line per probe as each one lands (like `tailscale ping`), sampling the path
-//! beside every pong so you WATCH a relayed iroh link hole-punch to direct: the exact probe where it
-//! flips prints `(upgraded from relayed)`. The `ping(8)` summary still follows the live lines.
+//! beside every pong so you WATCH a relayed iroh link hole-punch to direct on the probe where it flips.
+//! The `ping(8)` summary still follows the live lines.
 
 use core::time::Duration;
 
-use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
+use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
 use clap::Args;
 use measure::{Ping, PingReport, Probe, ProtocolError};
 use nauthy::{Link, Service};
@@ -142,9 +142,6 @@ impl PingCmd {
             .await
             {
                 Ok(session) => {
-                    // Path at connect, so the phrases below can report a relayed-to-direct upgrade that
-                    // the probe's round trips gave iroh's hole-punch time to land.
-                    let initial = session.conn_info().path;
                     // With `-v`, print a line per probe as it lands, sampling the path beside each pong so
                     // the exact probe where a relayed link flips to direct is visible live. The observer
                     // borrows the session read-only, alongside the run's own read-only borrow.
@@ -152,10 +149,7 @@ impl PingCmd {
                         let label = &candidate.label;
                         let name = bound.transport.name();
                         plan.observing(&session, |probe| {
-                            println!(
-                                "{}",
-                                probe_line(label, name, initial, &session.conn_info(), probe)
-                            );
+                            println!("{}", probe_line(label, name, &session.conn_info(), probe));
                         })
                         .await
                     } else {
@@ -164,8 +158,8 @@ impl PingCmd {
                     match report {
                         Ok(report) => {
                             outcome = outcome.max(reach::Outcome::Healthy);
-                            let path = reach::conn_path(initial, &session.conn_info());
-                            print_device(&candidate.label, bound.transport.name(), &path, &report);
+                            let path = reach::conn_path(&session.conn_info());
+                            print_device(&candidate.label, bound.transport.name(), path, &report);
                         }
                         // The node was REACHED but refused this probe: a distinct line that says so (not a
                         // healthy device with 100% loss, and NOT "unreachable"), rendering the typed refusal
@@ -211,10 +205,11 @@ impl PingCmd {
     }
 }
 
-/// Print one device's block: the path line (status-shaped), then the `ping(8)` counts and RTT
+/// Print one device's block: the device, its `path:` line, then the `ping(8)` counts and RTT
 /// distribution indented beneath it.
 fn print_device(label: &str, transport: &str, path: &str, report: &PingReport) {
-    println!("{label} via {transport}: {path}");
+    println!("{label} via {transport}");
+    println!("  path: {path}");
     let loss_pct = report.loss() * 100.0;
     println!(
         "  {} sent, {} received, {loss_pct:.0}% loss",
@@ -234,27 +229,21 @@ fn print_device(label: &str, transport: &str, path: &str, report: &PingReport) {
     }
 }
 
-/// One live probe line: `<label> via <transport>: <path>, seq <n> rtt <x> ms` (or `... lost` for a
-/// dropped reply), `tailscale ping` shaped. `initial` is the path at connect and `info` the path at this
-/// probe, so the path phrase (shared with `status`/`speed` via [`conn_path`](reach::conn_path)) reports
-/// `(upgraded from relayed)` on the exact probe a relayed link first flips to direct, and plain `direct`
-/// or `relayed` otherwise. A direct-from-connect run never claims an upgrade; a stays-relayed run never
-/// does either.
-fn probe_line(
-    label: &str,
-    transport: &str,
-    initial: Path,
-    info: &ConnInfo,
-    probe: Probe,
-) -> String {
-    let path = reach::conn_path(initial, info);
+/// One live probe line: `<label> via <transport>, path: <path>, seq <n> rtt <x> ms` (or `... lost` for a
+/// dropped reply), `tailscale ping` shaped. `info` is the path at this probe, so the line where a relayed
+/// link first flips to `direct` is the probe it happened on.
+fn probe_line(label: &str, transport: &str, info: &ConnInfo, probe: Probe) -> String {
+    let path = reach::conn_path(info);
     match probe.rtt {
         Some(rtt) => format!(
-            "{label} via {transport}: {path}, seq {} rtt {:.3} ms",
+            "{label} via {transport}, path: {path}, seq {} rtt {:.3} ms",
             probe.seq,
             millis(rtt)
         ),
-        None => format!("{label} via {transport}: {path}, seq {} lost", probe.seq),
+        None => format!(
+            "{label} via {transport}, path: {path}, seq {} lost",
+            probe.seq
+        ),
     }
 }
 
@@ -294,6 +283,8 @@ fn causes(error: &ProtocolError) -> String {
 mod tests {
     use core::net::SocketAddr;
 
+    use bifrost::Path;
+
     use super::*;
 
     /// A `ConnInfo` with a given path, and a remote address for the direct cases (so the phrase can name
@@ -312,9 +303,9 @@ mod tests {
     }
 
     /// Render the live lines for a synthetic per-probe path sequence, exactly as the `-v` observer does:
-    /// `initial` is the path at connect, then one `(path, rtt)` per probe. Lets a test drive a
-    /// relayed-then-direct flip without a network and assert on the phrasing.
-    fn lines(initial: Path, probes: &[(Path, Option<Duration>)]) -> Vec<String> {
+    /// one `(path, rtt)` per probe. Lets a test drive a relayed-then-direct flip without a network and
+    /// assert on the phrasing.
+    fn lines(probes: &[(Path, Option<Duration>)]) -> Vec<String> {
         probes
             .iter()
             .enumerate()
@@ -323,7 +314,7 @@ mod tests {
                     seq: seq as u32,
                     rtt,
                 };
-                probe_line("alice/macbook", "iroh", initial, &info(path), probe)
+                probe_line("alice/macbook", "iroh", &info(path), probe)
             })
             .collect()
     }
@@ -363,81 +354,52 @@ mod tests {
     }
 
     #[test]
-    fn a_relayed_to_direct_sequence_shows_the_upgrade_on_the_flip_probe() {
+    fn a_relayed_to_direct_sequence_says_direct_from_the_flip_probe() {
         // Connected relayed, then hole-punched to direct on the third probe: the first two lines read
-        // relayed, and every direct line from the flip on names the upgrade, so the moment is visible.
-        let lines = lines(
-            Path::Relayed,
-            &[
-                (Path::Relayed, RTT),
-                (Path::Relayed, RTT),
-                (Path::Direct, RTT),
-                (Path::Direct, RTT),
-            ],
-        );
+        // through a relay, and every line from the flip on reads direct, so the moment is visible.
+        let lines = lines(&[
+            (Path::Relayed, RTT),
+            (Path::Relayed, RTT),
+            (Path::Direct, RTT),
+            (Path::Direct, RTT),
+        ]);
         assert_eq!(
             lines[0],
-            "alice/macbook via iroh: relayed, seq 0 rtt 24.000 ms"
+            "alice/macbook via iroh, path: through a relay, seq 0 rtt 24.000 ms"
         );
         assert_eq!(
             lines[1],
-            "alice/macbook via iroh: relayed, seq 1 rtt 24.000 ms"
+            "alice/macbook via iroh, path: through a relay, seq 1 rtt 24.000 ms"
         );
         assert_eq!(
             lines[2],
-            "alice/macbook via iroh: direct to 203.0.113.7:41641 (upgraded from relayed), seq 2 rtt 24.000 ms"
+            "alice/macbook via iroh, path: direct, seq 2 rtt 24.000 ms"
         );
-        assert!(
-            lines[2].contains("upgraded from relayed"),
-            "the flip probe must announce the upgrade: {}",
-            lines[2]
-        );
-        assert!(
-            lines[3].contains("upgraded from relayed"),
-            "later direct lines still credit the upgrade: {}",
-            lines[3]
+        assert_eq!(
+            lines[3],
+            "alice/macbook via iroh, path: direct, seq 3 rtt 24.000 ms"
         );
     }
 
     #[test]
-    fn a_stays_relayed_sequence_never_claims_an_upgrade() {
-        let lines = lines(Path::Relayed, &[(Path::Relayed, RTT); 3]);
-        for line in &lines {
-            assert!(line.contains("relayed"), "each line stays relayed: {line}");
+    fn a_path_is_direct_or_through_a_relay() {
+        for (path, said) in [
+            (Path::Direct, "path: direct"),
+            (Path::Relayed, "path: through a relay"),
+            (Path::Mixed, "path: through a relay"),
+        ] {
+            let lines = lines(&[(path, RTT)]);
             assert!(
-                !line.contains("upgraded"),
-                "a run that never punches through must not claim an upgrade: {line}"
-            );
-            assert!(
-                !line.contains("direct"),
-                "a stays-relayed run never reports direct: {line}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_direct_throughout_sequence_stays_direct_and_never_claims_an_upgrade() {
-        // Quirk (and an iroh session already direct at connect): direct from the first probe, and since
-        // it never started relayed, no line claims an upgrade it did not make.
-        let lines = lines(Path::Direct, &[(Path::Direct, RTT); 3]);
-        for line in &lines {
-            assert!(
-                line.contains("direct to 203.0.113.7:41641"),
-                "each line is direct: {line}"
-            );
-            assert!(
-                !line.contains("upgraded"),
-                "direct-from-connect must never claim an upgrade: {line}"
+                lines[0].contains(said),
+                "{path:?} reads {said}: {}",
+                lines[0]
             );
         }
     }
 
     #[test]
     fn a_lost_probe_reports_lost_not_a_zero_rtt() {
-        let lines = lines(Path::Direct, &[(Path::Direct, None)]);
-        assert_eq!(
-            lines[0],
-            "alice/macbook via iroh: direct to 203.0.113.7:41641, seq 0 lost"
-        );
+        let lines = lines(&[(Path::Direct, None)]);
+        assert_eq!(lines[0], "alice/macbook via iroh, path: direct, seq 0 lost");
     }
 }

@@ -2,8 +2,7 @@
 //!
 //! Follows the one control grammar: BARE stops YOUR OWN node over the local control socket,
 //! `--at <peer>` stops a peer's. Bare `stop` resolves the resident's socket, asks it to stop, and prints
-//! the pid that answered; with no resident it teaches (`swoosh serve --resident`) and exits non-zero. A
-//! foreground `serve` without `--resident` is still stopped with Ctrl-C or an `--expires` deadline.
+//! the pid that answered; with no `serve` running it teaches (`swoosh serve`) and exits non-zero.
 //! `stop --at <peer>` is the remote half: you dial the peer's gated `control.stop`
 //! service and, once admitted, trigger a graceful teardown, the same stop a Ctrl-C or a `serve --expires`
 //! deadline gives. It stops the NODE (the node stops serving), it does NOT power off the machine.
@@ -146,7 +145,7 @@ impl StopCmd {
     /// The bare (no-`--at`) path: resolve YOUR OWN node's local control client and stop it over the
     /// socket. Runs BEFORE any transport is composed (dispatched locally in the root), so a bare
     /// `swoosh stop` never binds an endpoint it would not use. With no addressable resident the
-    /// client resolution teaches the fix (`swoosh serve --resident`) and exits non-zero, never a
+    /// client resolution teaches the fix (`swoosh serve`) and exits non-zero, never a
     /// silent success.
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
         // A bare `stop` reaches no peer, so an explicit `--present` has nothing to select: refuse it

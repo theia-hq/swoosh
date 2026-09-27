@@ -74,13 +74,14 @@ impl Drop for Served {
 }
 
 /// Serve `home` with `entries` over `quirk+noise`, and wait for its banner: the key it answers at and its
-/// loopback address.
+/// loopback address, from the transport block `--verbose` adds.
 fn serve(home: &Path, entries: &[&str]) -> Served {
     let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(home)
-        .args(["serve", "--transport", "quirk+noise"])
+        .args(["serve", "--transport", "quirk+noise", "--verbose"])
         .args(entries)
+        .env("XDG_RUNTIME_DIR", runtime_dir(home))
         .env_remove("SWOOSH_HOME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -98,8 +99,8 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
             .expect("serve exited before its banner")
             .expect("read the banner");
         let line = line.trim();
-        if let Ok(parsed) = line.parse::<NodeId>() {
-            key = Some(parsed);
+        if let Some(parsed) = line.strip_prefix("key: ") {
+            key = Some(parsed.parse::<NodeId>().expect("the banner's key"));
         }
         if let Some(found) = line.strip_suffix("(this machine)") {
             addr = Some(found.trim().parse().expect("a loopback address"));
@@ -110,6 +111,16 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
         key: key.unwrap(),
         addr: addr.unwrap(),
     }
+}
+
+/// A private runtime directory for `home`'s `serve`, inside the scratch home so it goes with it.
+fn runtime_dir(home: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = home.join("run");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
 }
 
 /// Run the binary on `home` with `args`, and return its stdout, failing on a refusal.

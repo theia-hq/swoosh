@@ -1,4 +1,4 @@
-//! Single-instance for `serve --resident`: the flock truth plus the socket rendezvous.
+//! Single-instance for `serve`: the flock truth plus the socket rendezvous, one per home.
 //!
 //! The LOCK FILE is the truth; the SOCKET is the rendezvous. Start: create and verify the 0700
 //! runtime chain, take `LOCK_EX | LOCK_NB` on `control.lock`, then connect-probe the socket. The
@@ -22,8 +22,17 @@ use crate::node_client::read_lock_pid;
 /// Why a resident start was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum SingleError {
-    /// Another resident already holds this home's lock: the truth, read off the lock file.
-    #[error("a node is already resident here (pid {pid}); use --home for a second node")]
+    /// The socket path would not fit `sun_path` (104 bytes on macOS, 108 on Linux): binding it would
+    /// truncate it to a path another home could share.
+    #[error(
+        "the runtime directory's path is too long for a socket: set XDG_RUNTIME_DIR to a shorter one."
+    )]
+    SocketPathTooLong {
+        /// The socket path that does not fit.
+        path: PathBuf,
+    },
+    /// Another `serve` already holds this home's lock: the truth, read off the lock file.
+    #[error("swoosh serve is already running for this home (pid {pid})")]
     AlreadyResident {
         /// The pid recorded in the lock file by the holder.
         pid: u32,
@@ -185,6 +194,11 @@ pub fn acquire(
     home: &Home,
     root: &Path,
 ) -> Result<(InstanceLock, std::os::unix::net::UnixListener), SingleError> {
+    // Before anything is created: a path `sun_path` cannot hold would be bound truncated, or not at all.
+    let socket_path = home.runtime_leaf(root).join("control.sock");
+    if sockaddr_un(&socket_path).is_none() {
+        return Err(SingleError::SocketPathTooLong { path: socket_path });
+    }
     let runtime = RuntimeDir::acquire(home, root)?;
     let lock_path = runtime.lock_path();
     let socket_path = runtime.socket_path();

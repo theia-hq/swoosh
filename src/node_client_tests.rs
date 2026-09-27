@@ -492,7 +492,7 @@ fn control_errors_render_through_their_taxonomy() {
         super::control_error_report(ControlError::NoResident)
     );
     assert!(
-        missing.contains("start one with `swoosh serve --resident`"),
+        missing.contains("start one with `swoosh serve`"),
         "the missing-resident error names the fix: {missing}"
     );
 

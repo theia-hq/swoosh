@@ -1,7 +1,7 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! S4 end-to-end: the bare control verbs against a real `serve --resident` child.
+//! S4 end-to-end: the bare control verbs against a real `serve` child.
 //!
 //! One child-process run proves the whole bare-verb seam: spawn the compiled binary as a
 //! foreground resident under a scratch home, wait for its readiness banner, drive `service ls`,
@@ -143,7 +143,7 @@ fn bare_stop_stops_the_resident() {
     command
         .arg("--home")
         .arg(&scratch.home_dir)
-        .args(["serve", "--resident"])
+        .args(["serve", "--local"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
         .env_remove("SWOOSH_KEY")
@@ -169,7 +169,7 @@ fn bare_stop_stops_the_resident() {
         if stdout
             .lock()
             .expect("the capture lock")
-            .contains("swoosh ready")
+            .contains("ctrl-c to stop")
         {
             break;
         }
@@ -324,7 +324,7 @@ fn bare_stop_stops_the_resident() {
     assert!(!again.status.success(), "no resident exits non-zero");
     let again_err = String::from_utf8_lossy(&again.stderr);
     assert!(
-        again_err.contains("start one with `swoosh serve --resident`"),
+        again_err.contains("start one with `swoosh serve`"),
         "the error names the fix: {again_err}"
     );
 }

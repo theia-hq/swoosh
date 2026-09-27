@@ -37,12 +37,18 @@ fn a_key_is_never_replaced_under_a_running_serve() {
     let home = scratch.0.join("home");
     std::fs::create_dir_all(&home).expect("scratch home");
 
-    // Not `--resident`: the plain serve, which answers no control socket, is the case a probe missed.
+    let run = scratch.0.join("run");
+    std::fs::create_dir_all(&run).expect("scratch runtime dir");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).expect("0700 run");
+    }
     let mut serve = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_swoosh"))
             .arg("--home")
             .arg(&home)
             .args(["serve", "--transport", "quirk+noise"])
+            .env("XDG_RUNTIME_DIR", &run)
             .env_remove("SWOOSH_HOME")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -54,7 +60,7 @@ fn a_key_is_never_replaced_under_a_running_serve() {
     let mut seen = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut byte = [0u8; 1];
-    while !String::from_utf8_lossy(&seen).contains("swoosh ready") {
+    while !String::from_utf8_lossy(&seen).contains("ctrl-c to stop") {
         assert!(Instant::now() < deadline, "serve never became ready");
         if stdout.read(&mut byte).expect("read serve's banner") == 0 {
             panic!("serve exited before it was ready");
