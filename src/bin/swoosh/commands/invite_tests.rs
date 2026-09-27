@@ -646,6 +646,19 @@ fn invite_refuses_a_reserved_name() {
 }
 
 #[tokio::test]
+async fn invite_refuses_to_make_a_root_while_serve_admit_runs() {
+    // A machine that trusts no root, admitting another root's devices for this run.
+    let home = scratch("admitting");
+    let _serving =
+        swoosh::joining::AdmitLock::admitting(&home, TestRoot::seeded(0x31).node_id()).unwrap();
+    let before = snapshot(home.dir());
+    let ran = invite(&home, &["tv", &node(0x44).to_string()]).await;
+    refused_before_writing(&ran, "stop swoosh serve first.", &home, &before);
+    assert!(!home.root().exists(), "no root is made");
+    assert!(!home.signet().exists(), "no root is pinned");
+}
+
+#[tokio::test]
 async fn invite_refuses_this_machines_key() {
     let home = scratch("own-key");
     holds(&home, &[live(OWN, "desk")], Vec::new()).await;

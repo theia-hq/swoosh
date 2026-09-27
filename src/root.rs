@@ -127,6 +127,9 @@ pub enum RootError {
     /// A copy presented where a root is already kept.
     #[error("drop `--root`, or move yours off first")]
     HeldHere,
+    /// A root to be made or finished here while a `serve --admit` admits another root's devices.
+    #[error("stop swoosh serve first.")]
+    Admitting,
     /// No root is kept here, and this machine is no root's device.
     #[error("this machine holds no root. Your first `swoosh invite <name> <key>` makes one.")]
     NoRootHere,
@@ -775,6 +778,23 @@ impl Root {
         no_core_dumps()?;
         let read = Standing::read(home).await?;
         report(out, &read.finished);
+        // A machine that pins a root admits no other root's devices, so no `serve --admit` may run while
+        // one is made or finished here.
+        let _admit = match read.standing {
+            Standing::Unpinned | Standing::InterruptedMint { .. } => {
+                match crate::joining::AdmitLock::joining(home) {
+                    Ok(lock) => Some(lock),
+                    Err(crate::joining::AdmitError::Held) => return Err(RootError::Admitting),
+                    Err(crate::joining::AdmitError::Io(source)) => {
+                        return Err(RootError::Io {
+                            path: home.admit_lock(),
+                            source,
+                        });
+                    }
+                }
+            }
+            Standing::Device { .. } | Standing::HoldsRoot { .. } => None,
+        };
         match read.standing {
             Standing::Unpinned => make(home, prompt, out)
                 .await

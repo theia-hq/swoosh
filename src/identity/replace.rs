@@ -14,7 +14,7 @@ use keystore::{KeyFile, Protection, Stored};
 use crate::home::Home;
 use crate::passphrase::Prompt;
 
-/// What [`replace`] did.
+/// What [`NewKey::put`] did.
 #[derive(Debug)]
 pub struct Replaced {
     /// The new key.
@@ -25,46 +25,89 @@ pub struct Replaced {
     pub links_kept: Option<PathBuf>,
 }
 
-/// Write a fresh random key at `<home>/key`, locked with a new passphrase from `prompt` if the old one was
-/// locked, and keep the old key and `links` as `key.replaced-<day>[-n]` and `links.replaced-<day>[-n]`
-/// with the first `n` free for both. `day` is today, as `YYYY-MM-DD`.
-pub fn replace(home: &Home, prompt: &mut impl Prompt, day: &str) -> eyre::Result<Replaced> {
-    let path = home.key();
-    let old = KeyFile::device(&path).load()?;
-    let passphrase = match &old {
-        Some(Stored::Locked(_)) => Some(prompt.choose(&path)?),
-        Some(Stored::Plain(_)) | None => None,
-    };
-    let protection = passphrase
-        .as_ref()
-        .map_or(Protection::Plain, Protection::Passphrase);
-    let secret = keystore::Secret::generate()?;
-    let key = secret.node_id();
-    let staged = home.dir().join("key.new");
-    remove(&staged)?;
-    KeyFile::device(&staged).write(&secret, protection)?;
+/// The refusal when the new key is to be locked and nobody is at a terminal to choose its passphrase.
+pub const CHOOSE_NEEDS_TERMINAL: &str = "the new key is locked like the old one, and choosing its passphrase needs a terminal: run this at one.";
 
-    let (kept, links_kept) = free_names(home, day);
-    let kept = match old {
-        Some(_) => {
+/// A fresh random key written whole at `<home>/key.new`, not yet in place. Staging runs every step that
+/// can ask or fail, so a caller stages first, makes its own writes, then [`put`](Self::put)s it. Dropped
+/// unput, the staged file is removed.
+#[derive(Debug)]
+#[must_use = "the key is staged, not replaced, until it is put"]
+pub struct NewKey {
+    /// The new key.
+    key: NodeId,
+    /// Whether the home had a key to keep aside.
+    had_old: bool,
+    /// `<home>/key.new`.
+    staged: PathBuf,
+    /// Whether it was put, so the drop leaves it.
+    put: bool,
+}
+
+impl NewKey {
+    /// Choose the new passphrase if the old key was locked, and write the new key at `<home>/key.new`.
+    pub fn stage(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Self> {
+        let path = home.key();
+        let old = KeyFile::device(&path).load()?;
+        let locked = matches!(old, Some(Stored::Locked(_)));
+        if locked && !prompt.terminal() {
+            eyre::bail!("{CHOOSE_NEEDS_TERMINAL}");
+        }
+        let passphrase = if locked {
+            Some(prompt.choose(&path)?)
+        } else {
+            None
+        };
+        let protection = passphrase
+            .as_ref()
+            .map_or(Protection::Plain, Protection::Passphrase);
+        let secret = keystore::Secret::generate()?;
+        let staged = home.dir().join("key.new");
+        remove(&staged)?;
+        let new = Self {
+            key: secret.node_id(),
+            had_old: old.is_some(),
+            staged,
+            put: false,
+        };
+        KeyFile::device(&new.staged).write(&secret, protection)?;
+        Ok(new)
+    }
+
+    /// Put the staged key in place, keeping the old key and `links` as `key.replaced-<day>[-n]` and
+    /// `links.replaced-<day>[-n]` with the first `n` free for both. `day` is today, as `YYYY-MM-DD`.
+    pub fn put(mut self, home: &Home, day: &str) -> eyre::Result<Replaced> {
+        let path = home.key();
+        let (kept, links_kept) = free_names(home, day);
+        let kept = if self.had_old {
             std::fs::hard_link(&path, &kept)?;
             Some(kept)
+        } else {
+            None
+        };
+        std::fs::rename(&self.staged, &path)?;
+        self.put = true;
+        let links_kept = if home.links().exists() {
+            std::fs::rename(home.links(), &links_kept)?;
+            Some(links_kept)
+        } else {
+            None
+        };
+        std::fs::File::open(home.dir())?.sync_all()?;
+        Ok(Replaced {
+            key: self.key,
+            kept,
+            links_kept,
+        })
+    }
+}
+
+impl Drop for NewKey {
+    fn drop(&mut self) {
+        if !self.put {
+            let _ = remove(&self.staged);
         }
-        None => None,
-    };
-    std::fs::rename(&staged, &path)?;
-    let links_kept = if home.links().exists() {
-        std::fs::rename(home.links(), &links_kept)?;
-        Some(links_kept)
-    } else {
-        None
-    };
-    std::fs::File::open(home.dir())?.sync_all()?;
-    Ok(Replaced {
-        key,
-        kept,
-        links_kept,
-    })
+    }
 }
 
 /// The first `key.replaced-<day>[-n]` and `links.replaced-<day>[-n]` pair with neither name taken.
@@ -93,7 +136,7 @@ fn free_names(home: &Home, day: &str) -> (PathBuf, PathBuf) {
 /// Remove a file. Already gone is done.
 // `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
 #[allow(clippy::std_instead_of_core)]
-fn remove(path: &Path) -> io::Result<()> {
+pub(super) fn remove(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
         _ => Ok(()),

@@ -417,6 +417,86 @@ async fn bare_join_at_a_terminal_prints_the_key_and_the_invite_command() {
 }
 
 #[tokio::test]
+async fn bare_join_at_a_terminal_on_a_fresh_home_takes_a_keyed_invite() {
+    // The invite pasted carries its own key: it becomes this machine's key over the one printed.
+    let home = empty("bare-fresh-keyed");
+    let seed = [0x7a; 32];
+    let stdin = format!("{}\n", carrying(seed, "runner"));
+    let ran = run(
+        &home,
+        Setup {
+            stdin: &stdin,
+            terminal_stdin: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    ran.joined();
+    let carried = NodeId::from_ed25519_secret(&seed);
+    let printed = ran.err.lines().next().unwrap();
+    assert!(
+        printed.starts_with("This machine's key: ") && !printed.contains(&carried.to_string()),
+        "{}",
+        ran.err
+    );
+    let key = KeyFile::device(home.key())
+        .load()
+        .unwrap()
+        .unwrap()
+        .node_id();
+    assert_eq!(key, carried, "the invite's key is this machine's key");
+    assert!(!home.dir().join("key.new").exists());
+    assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
+}
+
+#[tokio::test]
+async fn the_key_bare_join_prints_outlives_a_paste_that_never_comes() {
+    // The first run is left before any paste: the key it printed is kept, so the invite typed for it
+    // where the root is kept joins the next run.
+    let home = empty("bare-fresh-bound");
+    let first = run(
+        &home,
+        Setup {
+            terminal_stdin: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    let _ = first.refusal();
+    let key = KeyFile::device(home.key())
+        .load()
+        .unwrap()
+        .unwrap()
+        .node_id();
+    assert!(
+        first
+            .err
+            .starts_with(&format!("This machine's key: {key}\n")),
+        "{}",
+        first.err
+    );
+    let stdin = format!("{}\n", bound(ROOT, key, "laptop", now() + 90 * DAY));
+    let second = run(
+        &home,
+        Setup {
+            stdin: &stdin,
+            terminal_stdin: true,
+            ..Setup::default()
+        },
+    )
+    .await;
+    second.joined();
+    assert!(
+        second
+            .err
+            .starts_with(&format!("This machine's key: {key}\n")),
+        "{}",
+        second.err
+    );
+    assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
+}
+
+#[tokio::test]
 async fn piped_join_prints_no_key_lines() {
     let home = scratch("piped");
     let ran = join(&home, &for_me()).await;
@@ -700,6 +780,14 @@ async fn join_refuses_while_serve_admit_runs() {
     let before = snapshot(home.dir());
     let ran = join(&home, &for_me()).await;
     refused_before_writing(&ran, "stop swoosh serve first.", &home, &before);
+}
+
+#[tokio::test]
+async fn a_join_under_way_shows_no_root_an_earlier_admit_left() {
+    let home = scratch("admit-left");
+    drop(AdmitLock::admitting(&home, root(OTHER)).unwrap());
+    let _joining = AdmitLock::joining(&home).unwrap();
+    assert_eq!(AdmitLock::admitted(&home), None);
 }
 
 #[tokio::test]

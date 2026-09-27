@@ -118,9 +118,12 @@ impl AdmitLock {
         Ok(Self { _held: file })
     }
 
-    /// Hold the lock while `join` writes, so no `serve --admit` starts meanwhile.
+    /// Hold the lock while `join` writes, or a root is made here, so no `serve --admit` starts meanwhile.
+    /// It empties the file, so `status` never reads a root an earlier `serve --admit` left in it.
     pub fn joining(home: &Home) -> Result<Self, AdmitError> {
-        Ok(Self { _held: take(home)? })
+        let file = take(home)?;
+        file.set_len(0)?;
+        Ok(Self { _held: file })
     }
 
     /// The root a running `serve --admit` admits, or `None` when none runs. Asked without waiting, so

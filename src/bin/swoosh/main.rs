@@ -516,18 +516,18 @@ async fn run() -> eyre::Result<()> {
         // A bare `swoosh invite`: what is due, read from the root's records with no lock and no prompt.
         Verb::Invite(cmd) => return cmd.run_due(&home).await,
         // Joins a root from an invite: every check and write is local; only the first exchange with the
-        // machine that made the invite binds a transport, under the key the join may just have written.
-        Verb::Join(cmd) => match cmd.run_local(&home).await? {
-            Some(from) => {
-                let pull = Outward::Join(join::JoinPull {
+        // machine that made the invite binds a transport, under the key the join may just have written. A
+        // reach flag that exchange would never read is refused first, before the join writes anything.
+        Verb::Join(cmd) => {
+            cmd.reach.reject_unused_reach()?;
+            match cmd.run_local(&home).await? {
+                Some(from) => Outward::Join(join::JoinPull {
                     from,
                     reach: cmd.reach,
-                });
-                pull.reach_args().reject_unused_reach()?;
-                pull
+                }),
+                None => return Ok(()),
             }
-            None => return Ok(()),
-        },
+        }
         Verb::Leave(cmd) => return cmd.run(&home).await,
         // The `grant` group: `share` signs a link with the persisted key; `attenuate`/`revoke` are wholly
         // offline. No leaf binds a transport, so the group dispatches here beside the local verbs rather

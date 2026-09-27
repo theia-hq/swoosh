@@ -16,6 +16,7 @@ use swoosh::config;
 use swoosh::contacts::{ContactsStore, ME, Petname};
 use swoosh::home::Home;
 use swoosh::identity::HomeLock;
+use swoosh::passphrase::Prompt;
 use swoosh::roster::{Epoch, RosterDoc, fold};
 use swoosh::standing::Standing;
 use swoosh::testkit::{Counting, TestNode, TestRoot};
@@ -149,15 +150,19 @@ impl Ran {
 }
 
 async fn leave(home: &Home, args: &[&str]) -> Ran {
+    leave_asking(home, args, &mut Counting::new([PASS])).await
+}
+
+/// `leave <args>`, asking `prompt` for any passphrase.
+async fn leave_asking(home: &Home, args: &[&str], prompt: &mut (impl Prompt + Events)) -> Ran {
     let cmd = Cli::try_parse_from(core::iter::once("leave").chain(args.iter().copied()))
         .unwrap()
         .leave;
-    let mut prompt = Counting::new([PASS]);
     let (mut out, mut err) = (Vec::new(), Vec::new());
     let result = cmd
         .leave(
             home,
-            &mut prompt,
+            prompt,
             SystemTime::UNIX_EPOCH + Duration::from_secs(TODAY),
             &mut out,
             &mut err,
@@ -168,6 +173,40 @@ async fn leave(home: &Home, args: &[&str]) -> Ran {
         out: String::from_utf8(out).unwrap(),
         err: String::from_utf8(err).unwrap(),
         prompts: prompt.events(),
+    }
+}
+
+/// How many times a prompt was asked.
+trait Events {
+    fn events(&self) -> usize;
+}
+
+impl Events for Counting {
+    fn events(&self) -> usize {
+        Counting::events(self)
+    }
+}
+
+/// A prompt with nobody at a terminal: it asks nothing.
+struct NoTerminal;
+
+impl Prompt for NoTerminal {
+    fn terminal(&self) -> bool {
+        false
+    }
+
+    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        eyre::bail!("no terminal")
+    }
+
+    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        eyre::bail!("no terminal")
+    }
+}
+
+impl Events for NoTerminal {
+    fn events(&self) -> usize {
+        0
     }
 }
 
@@ -357,6 +396,44 @@ async fn leave_new_key_on_a_device_leaves_and_keeps_the_old_key_and_links_aside(
         ran.err
     );
     assert_eq!(ran.out.lines().count(), 1, "stdout is the new key alone");
+    assert!(
+        !ran.err.contains("sessions this machine admitted"),
+        "no serve runs, so no session ends: {}",
+        ran.err
+    );
+}
+
+#[tokio::test]
+async fn leave_new_key_whose_passphrase_is_not_chosen_writes_nothing() {
+    // Two passphrases that do not match, and nobody at a terminal: either way the new key's passphrase is
+    // never chosen, and the machine is still its root's device with its old key.
+    for no_terminal in [false, true] {
+        let home = scratch_with("new-key-unchosen", true);
+        device(&home, now() + 90 * DAY).await;
+        // A home that has served has its lock file already.
+        drop(HomeLock::serving(&home).unwrap());
+        let before = snapshot(home.dir());
+        let ran = if no_terminal {
+            leave_asking(&home, &["--new-key"], &mut NoTerminal).await
+        } else {
+            leave_asking(&home, &["--new-key"], &mut Counting::refusing()).await
+        };
+        let refusal = ran.refusal();
+        if no_terminal {
+            assert_eq!(refusal, swoosh::identity::CHOOSE_NEEDS_TERMINAL);
+        }
+        assert!(
+            snapshot(home.dir()) == before,
+            "nothing is written: {refusal}"
+        );
+        assert!(
+            ran.err.is_empty(),
+            "nothing is said to have left: {}",
+            ran.err
+        );
+        assert!(ran.out.is_empty());
+        assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
+    }
 }
 
 #[tokio::test]

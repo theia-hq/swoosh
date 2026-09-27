@@ -69,7 +69,7 @@ impl JoinCmd {
         home: &Home,
         mut io: Io<'_, I, P, E>,
     ) -> eyre::Result<Option<NodeId>> {
-        let text = self.read_invite(home, &mut io)?;
+        let (text, made) = self.read_invite(home, &mut io)?;
         let invite = Invite::parse(&text)?;
         drop(text);
 
@@ -80,8 +80,10 @@ impl JoinCmd {
         let own = match (&invite.seed, stored_key) {
             (Some(seed), stored) => {
                 let carried = NodeId::from_ed25519_secret(seed);
+                // A key this run made to print is no one's yet: the invite's own key takes its place.
                 if let Some(stored) = stored
                     && stored != carried
+                    && made != Some(stored)
                 {
                     eyre::bail!(
                         "this invite carries its own key, and this machine already has one ({stored}). Use \
@@ -190,7 +192,10 @@ impl JoinCmd {
 
         // Then write.
         if let Some(seed) = &invite.seed {
-            swoosh::identity::write(seed, home).await?;
+            match made.filter(|made| *made != own) {
+                Some(made) => swoosh::identity::replace_made(seed, made, home)?,
+                None => swoosh::identity::write(seed, home).await?,
+            }
         }
         swoosh::joining::join(
             home,
@@ -234,20 +239,30 @@ impl JoinCmd {
     }
 
     /// The invite's text: the argument, or a line of stdin. An argument that carries a key is refused at its
-    /// field count, before anything in it is decoded, and its text is never echoed.
+    /// field count, before anything in it is decoded, and its text is never echoed. Beside it, the key this
+    /// run made to print, when the home had none.
     fn read_invite<I: BufRead, P: Prompt, E: Write>(
         &self,
         home: &Home,
         io: &mut Io<'_, I, P, E>,
-    ) -> eyre::Result<Zeroizing<String>> {
+    ) -> eyre::Result<(Zeroizing<String>, Option<NodeId>)> {
         if let Some(text) = self.invite.as_deref().filter(|text| *text != "-") {
             if fields(text) == 5 {
                 eyre::bail!("this invite contains a private key; pass it on stdin: swoosh join");
             }
-            return Ok(Zeroizing::new(text.to_owned()));
+            return Ok((Zeroizing::new(text.to_owned()), None));
         }
+        let mut made = None;
         if io.input_terminal {
-            let key = swoosh::identity::inspect(home)?.stored().node_id();
+            // Made on disk, as `status` makes it, so the key printed here outlives a paste that never
+            // comes: the invite typed for it on the root's machine still joins it next time.
+            let key = match swoosh::identity::inspect(home)? {
+                swoosh::identity::Inspected::Found(stored) => stored.node_id(),
+                swoosh::identity::Inspected::Made(stored) => {
+                    made = Some(stored.node_id());
+                    stored.node_id()
+                }
+            };
             let name = swoosh::names::suggested_from(io.hostname)
                 .map_or_else(|| "<name>".to_owned(), |name| name.as_str().to_owned());
             writeln!(io.err, "This machine's key: {key}")?;
@@ -260,7 +275,7 @@ impl JoinCmd {
         }
         let mut text = Zeroizing::new(String::new());
         (&mut io.input).take(READ_CAP).read_line(&mut text)?;
-        Ok(text)
+        Ok((text, made))
     }
 }
 

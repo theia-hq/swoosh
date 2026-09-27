@@ -89,13 +89,19 @@ impl LeaveCmd {
             Err(other) => return Err(other.into()),
         };
 
-        // Taken once the standing is read, so a refusal of the standing leaves no lock file behind.
-        let _lock = if self.new_key {
-            Some(HomeLock::new_key(home)?)
+        // Taken once the standing is read, so a refusal of the standing leaves no lock file behind. Held
+        // exclusive, the lock rules out a running `serve`. The new key is staged before anything is left,
+        // so a passphrase that is not chosen leaves the home as it was.
+        let (_lock, new_key) = if self.new_key {
+            let lock = HomeLock::new_key(home)?;
+            (
+                Some(lock),
+                Some(swoosh::identity::NewKey::stage(home, prompt)?),
+            )
         } else {
-            None
+            (None, None)
         };
-        let serving = HomeLock::is_held(home);
+        let serving = !self.new_key && HomeLock::is_held(home);
         let name = match was {
             Was::Device { .. } => own_name(home).await,
             Was::Damaged { .. } | Was::Unpinned => None,
@@ -125,8 +131,8 @@ impl LeaveCmd {
             }
         }
 
-        if self.new_key {
-            let replaced = swoosh::identity::replace(home, prompt, &Date(unix(now)).to_string())?;
+        if let Some(new_key) = new_key {
+            let replaced = new_key.put(home, &Date(unix(now)).to_string())?;
             writeln!(out, "{}", replaced.key)?;
             out.flush()?;
             if let Some(kept) = &replaced.kept {

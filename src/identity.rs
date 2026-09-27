@@ -47,7 +47,7 @@ mod stage;
 pub use backup::{Existing, Restored, export, restore};
 pub use lock::HomeLock;
 pub use protect::{Protected, protect};
-pub use replace::{Replaced, replace};
+pub use replace::{CHOOSE_NEEDS_TERMINAL, NewKey, Replaced};
 
 /// The ed25519 secret key a verb binds under: a [`keystore::Secret`], which wipes itself on drop and never
 /// hands its bytes out by value.
@@ -282,6 +282,30 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
         ),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Write `seed` over `made`, the key [`inspect`] made earlier in this same run and nothing has used yet:
+/// bare `join` printed that key, and the invite pasted after it carries its own. Any other key at
+/// `<home>/key` is refused. Held under the home lock exclusive, so a node that started meanwhile, serving
+/// as `made`, refuses it.
+pub fn replace_made(seed: &[u8; 32], made: NodeId, home: &Home) -> eyre::Result<()> {
+    let _lock = HomeLock::new_key(home)?;
+    let file = key_file(home);
+    match file.load()? {
+        Some(Stored::Plain(stored)) if stored.node_id() == made => {}
+        _ => eyre::bail!(
+            "{} changed while this waited for the invite; nothing was written",
+            file.path().display()
+        ),
+    }
+    let mut copy = Zeroizing::new(*seed);
+    let secret = keystore::Secret::take(&mut copy);
+    let staged = KeyFile::device(home.dir().join("key.new"));
+    replace::remove(staged.path())?;
+    staged.write(&secret, Protection::Plain)?;
+    std::fs::rename(staged.path(), file.path())?;
+    std::fs::File::open(home.dir())?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]
