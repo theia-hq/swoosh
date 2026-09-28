@@ -96,6 +96,16 @@ const MAX_PEER_FILE: u64 = 64 * 1024;
 /// trimmed. The file's mode is not checked. Only a regular file is read, so a device or a FIFO refuses
 /// instead of filling memory or waiting on a writer, and only its first [`MAX_PEER_FILE`] bytes.
 fn read_file(text: &str) -> Result<Peer, PeerParseError> {
+    let (link, path) = read_link_file(text)?;
+    Ok(Peer::Capability {
+        link,
+        file: Some(path),
+    })
+}
+
+/// The one link in the file `text` names, and the file it was read from: what a peer typed as a path
+/// reads, on the same rules ([`read_file`]). Anything else in the file refuses, a root key included.
+pub fn read_link_file(text: &str) -> Result<(Link, PathBuf), PeerParseError> {
     use std::io::Read as _;
 
     let path = expand(text, std::env::var_os("HOME"))?;
@@ -125,13 +135,11 @@ fn read_file(text: &str) -> Result<Peer, PeerParseError> {
             path: text.to_owned(),
         });
     }
-    Ok(Peer::Capability {
-        link: crate::link::parse(held).map_err(|error| PeerParseError::BadLink {
-            path: text.to_owned(),
-            error,
-        })?,
-        file: Some(path),
-    })
+    let link = crate::link::parse(held).map_err(|error| PeerParseError::BadLink {
+        path: text.to_owned(),
+        error,
+    })?;
+    Ok((link, path))
 }
 
 /// The file a peer path names: a leading `~/` joined onto `home`, which an empty value leaves unset (an
@@ -216,7 +224,7 @@ pub enum PeerParseError {
     #[error(transparent)]
     Key(#[from] UnusableKey),
     /// The text is a path, and the file it names holds no link.
-    #[error("{path} holds no swoosh: link")]
+    #[error("{path} holds no swoosh: link.")]
     NoLink {
         /// The path as typed.
         path: String,
@@ -540,7 +548,7 @@ mod tests {
         let error = typed
             .parse::<Peer>()
             .expect_err("a file with no link refuses");
-        assert_eq!(error.to_string(), format!("{typed} holds no swoosh: link"));
+        assert_eq!(error.to_string(), format!("{typed} holds no swoosh: link."));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

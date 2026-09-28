@@ -96,7 +96,7 @@ impl ShareCmd {
             }
             Some(GrantFor::Fleet(target)) => {
                 let fleet = resolve_fleet_root(target, store.contacts())?;
-                // Record the RESOLVED signet key (canonical), so `grant revoke <holder>` matches a pasted
+                // Record the RESOLVED signet key (canonical), so `revoke <holder>` matches a pasted
                 // signet key. Revoking the slip cuts the WHOLE fleet's access at once.
                 (
                     Bind::Fleet(fleet),
@@ -150,19 +150,19 @@ impl ShareCmd {
 }
 
 /// The human-readable framing printed to stderr when a grant is issued: what was minted, who can use it, how
-/// long it lasts, and the recipe to revoke it. A bound grant names its device and the `grant revoke <holder>`
+/// long it lasts, and the recipe to revoke it. A bound grant names its device and the `revoke <holder>`
 /// recipe; a bearer link says anyone holding it may use it and points revocation at the link itself.
 fn frame(record: &GrantRecord, service: &str, lifetime: core::time::Duration) -> String {
     let span = grants::humanize(lifetime);
     match record.kind {
         GrantKind::Device => format!(
             "issued a device-bound grant for `{service}` to {holder}\n  only that device can use it \
-             (theft-resistant, non-delegable); expires in {span}\n  revoke: swoosh grant revoke {holder}\n",
+             (theft-resistant, non-delegable); expires in {span}\n  revoke: swoosh revoke {holder}\n",
             holder = record.holder,
         ),
         GrantKind::Fleet => format!(
             "issued a fleet-bound grant for `{service}` to fleet signet {holder}\n  every device that \
-             signet vouches for can use it (theft-resistant); expires in {span}\n  revoke: swoosh grant \
+             signet vouches for can use it (theft-resistant); expires in {span}\n  revoke: swoosh \
              revoke {holder}\n",
             holder = record.holder,
         ),
@@ -173,7 +173,7 @@ fn frame(record: &GrantRecord, service: &str, lifetime: core::time::Duration) ->
             };
             format!(
                 "issued a bearer grant for `{service}`\n  anyone holding the link can use it; expires in \
-                 {span}.{reshare}\n  revoke: paste the link to `swoosh grant revoke <link>`, or let it expire\n"
+                 {span}.{reshare}\n  revoke: paste the link to `swoosh revoke <link>`, or let it expire\n"
             )
         }
     }
@@ -483,7 +483,7 @@ mod tests {
     }
 
     /// A `--for fleet:` mint's stderr frame echoes the RESOLVED signet key (so the issuer can catch a wrong
-    /// paste), names the fleet posture, and gives the `grant revoke <signet>` recipe keyed by that key.
+    /// paste), names the fleet posture, and gives the `revoke <signet>` recipe keyed by that key.
     #[test]
     fn frame_for_a_fleet_grant_echoes_the_signet_key_and_the_revoke_recipe() {
         let work = swoosh::testkit::TestNode::seeded(1);
@@ -511,7 +511,7 @@ mod tests {
             "the frame echoes the resolved signet key so a wrong paste is visible: {blurb}"
         );
         assert!(
-            blurb.contains("fleet") && blurb.contains("swoosh grant revoke"),
+            blurb.contains("fleet") && blurb.contains("swoosh revoke"),
             "the frame names the fleet posture and the revoke recipe: {blurb}"
         );
     }

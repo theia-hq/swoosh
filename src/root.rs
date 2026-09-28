@@ -204,7 +204,7 @@ pub enum RootError {
     /// The root has revoked as many unexpired ids as one update can carry.
     #[error(
         "your root has revoked {count} links and devices that have not ended yet, the most it can publish at \
-        once. The oldest end on {oldest}; or replace your root (swoosh revoke-root --help)."
+        once. The oldest end on {oldest}; or replace your root (swoosh revoke --help)."
     )]
     TooManyRevoked {
         /// The unexpired revoked ids.
@@ -215,16 +215,14 @@ pub enum RootError {
     /// The root has revoked as many device keys as one update can carry.
     #[error(
         "your root has revoked {count} device keys, the most it can publish at once, and a revoked key never \
-        ends. Replace your root (swoosh revoke-root --help)."
+        ends. Replace your root (swoosh revoke --help)."
     )]
     TooManyKeys {
         /// The revoked keys.
         count: usize,
     },
     /// The update's number cannot move past the last one.
-    #[error(
-        "this root can sign no more lists of your devices: replace it (swoosh revoke-root --help)."
-    )]
+    #[error("this root can sign no more lists of your devices: replace it (swoosh revoke --help).")]
     Exhausted,
     /// Making a root needs a terminal to choose its passphrase at.
     #[error("{}", MINT_NEEDS_TERMINAL)]
@@ -919,12 +917,25 @@ impl Root {
         })
     }
 
-    /// Revoke the live device named `name`: its row, its key and every id it holds.
+    /// Revoke the device named `name`: its row, its key and every id it holds. A row already marked
+    /// revoked, by this machine's own block brought forward or by an earlier act, is revoked again as it
+    /// stands, so running a revoke again with the root publishes it.
     pub fn revoke_device(&mut self, name: &DeviceLabel) -> Result<(), RootError> {
         let act = &mut self.act;
         let now = act.now;
         let Some(row) = act.book.live().find(|row| &row.label == name) else {
-            return Err(RootError::NotYourDevice { name: name.clone() });
+            let revoked = act
+                .book
+                .rows
+                .iter()
+                .filter(|row| row.is_revoked() && &row.label == name)
+                .max_by_key(|row| row.revoked_on);
+            let Some(row) = revoked else {
+                return Err(RootError::NotYourDevice { name: name.clone() });
+            };
+            let until = row.until;
+            act.revoked_until = Some(act.revoked_until.map_or(until, |latest| latest.max(until)));
+            return Ok(());
         };
         let (key, until) = (row.key, row.until);
         let adds = row

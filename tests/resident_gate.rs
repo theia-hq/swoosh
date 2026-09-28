@@ -5,7 +5,7 @@
 //! data channel into the gate. A service disabled by writing `<home>/disabled`, and a member revoked by
 //! writing `<home>/revoked`, are both honored LIVE by the gate on the next stream with ZERO control
 //! connections (the resident's `served()` counter stays at zero). Both are file-writes, exactly as
-//! `swoosh service disable` and `swoosh grant revoke` perform them; the socket carries only reads and a
+//! `swoosh service disable` and `swoosh revoke` perform them; the socket carries only reads and a
 //! stop, so it cannot express either mutation.
 
 use core::time::Duration;
@@ -71,7 +71,7 @@ async fn build_exposer(home: &Home) -> Exposer {
 }
 
 /// A membership badge the signet signed, bound to the dialer's proven mem id: the shape `swoosh invite`
-/// signs for a device, and the cap `swoosh grant revoke` cuts at its root.
+/// signs for a device, and the cap `swoosh revoke` cuts at its root.
 fn signet_badge(bound: NodeId) -> String {
     TestRoot::seeded(SIGNET)
         .device_badge(bound, nauthy::Request::expires_in(Duration::from_secs(300)))
@@ -185,7 +185,7 @@ async fn service_disable_is_file_only_with_the_daemon_running() {
 /// BLOCKER-3 (revocation twin): with the resident control listener running, revoking the member at its
 /// root id refuses the very next stream, monotonically (no re-enable), with ZERO control connections.
 /// The revocation is written to `<home>/revoked` by a separate denylist instance, exactly the file a
-/// separate `swoosh grant revoke` process writes, so the running gate's mtime refresh is what honors it.
+/// separate `swoosh revoke` process writes, so the running gate's mtime refresh is what honors it.
 #[tokio::test]
 async fn revoke_while_resident_refuses_next_stream() {
     let local = tokio::task::LocalSet::new();

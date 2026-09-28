@@ -256,6 +256,34 @@ fn a_damaged_home_lets_no_key_reach_the_door() {
     });
 }
 
+/// A device revoked here while the node serves, though the update held here still lists it live, reaches
+/// no route from then on: the gate refuses its key before the pick-up route's own check and its shared
+/// slots, as it does at every other route.
+#[test]
+fn a_revoked_key_reaches_no_route() {
+    on_a_node(|| async {
+        let nas = device_home("revoked-key", NAS).await;
+        let laptop = Node::new(MemTransport::bind(), NoDiscovery);
+        renewing(&nas, laptop.node_id()).await;
+        let host = Node::new(MemTransport::bind(), NoDiscovery);
+        let host_id = host.node_id();
+        serve(nas.clone(), host);
+        assert!(
+            opens(&laptop, host_id, RENEWAL_SERVICE).await,
+            "before the revoke the laptop reaches the door"
+        );
+
+        swoosh::gate::add_revoked_keys(&nas, &[laptop.node_id().verify_key().unwrap()]).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        for service in [RENEWAL_SERVICE, SYNC_SERVICE, "ping"] {
+            assert!(
+                !opens(&laptop, host_id, service).await,
+                "a revoked key does not reach {service}"
+            );
+        }
+    });
+}
+
 /// A router over `home`'s anchored gate carrying only the pick-up route, bound as `serve` binds it.
 async fn router(home: &Home) -> Router {
     let (gate, _cut) = swoosh::gate::anchored(home, TestNode::seeded(NAS).node_id())

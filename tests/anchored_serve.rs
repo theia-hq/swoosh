@@ -271,7 +271,7 @@ async fn a_self_slip_revoked_mid_session_is_cut() {
     assert!(echoes(&mut write, &mut read).await, "served once admitted");
 
     let shown = swoosh::link::Link::from(Link::clone(&link)).to_string();
-    swoosh(&scratch.0, &["grant", "revoke", &shown]);
+    swoosh(&scratch.0, &["revoke", &shown]);
     let deadline = Instant::now() + 3 * SWEEP;
     while echoes(&mut write, &mut read).await {
         assert!(
