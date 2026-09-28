@@ -498,9 +498,11 @@ impl ServeCmd {
         // The update route, on every `serve` whatever the standing, member-gated: only this root's devices
         // exchange on it. Bound by the node, never by an entry, and dotted, so no typed name reaches it.
         router = router.member_service(SYNC_SERVICE.parse()?, Exchange::new(home.clone()))?;
-        // The pick-up route, on every `serve`, proven-only: a device of this root whose standing ended
-        // takes its renewal here, and only a key the update held here lists live reaches the handler.
-        let (bound, known) = bind_renewal(router, &home)?;
+        // The pick-up route, proven-only: a device of this root whose standing ended takes its renewal
+        // here. Bound on every `serve` so a `join` under a running one needs no restart, but only while
+        // this home is a device or holds its root, and its update verifies under the pin, does any key
+        // reach the handler: a key the update lists live.
+        let (bound, known) = bind_renewal(router, &home).await?;
         router = bound;
         for scoped in fetch.services() {
             // One engine handler per fetch service, holding ONLY its own origin scope. An unconstrained

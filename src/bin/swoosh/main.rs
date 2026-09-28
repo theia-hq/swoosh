@@ -1658,6 +1658,7 @@ mod tests {
             .expect("the gate builds");
         let (router, _known) =
             swoosh::serve::bind_renewal(tightbeam::tunnel::Router::new(gate), &home)
+                .await
                 .expect("the route binds");
         assert!(
             router

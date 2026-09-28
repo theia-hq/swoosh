@@ -110,7 +110,7 @@ fn serve(home: Home, host: Node<MemTransport, NoDiscovery>) {
                 swoosh::serve::Exchange::new(home.clone()),
             )
             .unwrap();
-        let (router, _known) = swoosh::serve::bind_renewal(router, &home).unwrap();
+        let (router, _known) = swoosh::serve::bind_renewal(router, &home).await.unwrap();
         router
             .expose()
             .unwrap()
@@ -235,12 +235,34 @@ fn a_stranger_flood_does_not_hold_a_proven_permit() {
     });
 }
 
+/// A home whose files disagree answers nobody on the route, even where its update still verifies under
+/// the pin and lists the dialer live: the key is refused before the route's shared slots.
+#[test]
+fn a_damaged_home_lets_no_key_reach_the_door() {
+    on_a_node(|| async {
+        let nas = device_home("damaged", NAS).await;
+        let laptop = Node::new(MemTransport::bind(), NoDiscovery);
+        renewing(&nas, laptop.node_id()).await;
+        // A pin with no standing beside it: the home reads as damaged.
+        std::fs::remove_file(nas.badge()).unwrap();
+        let host = Node::new(MemTransport::bind(), NoDiscovery);
+        let host_id = host.node_id();
+        serve(nas, host);
+
+        assert!(
+            !opens(&laptop, host_id, RENEWAL_SERVICE).await,
+            "a damaged home lets no key through to the route"
+        );
+    });
+}
+
 /// A router over `home`'s anchored gate carrying only the pick-up route, bound as `serve` binds it.
 async fn router(home: &Home) -> Router {
     let (gate, _cut) = swoosh::gate::anchored(home, TestNode::seeded(NAS).node_id())
         .await
         .unwrap();
     swoosh::serve::bind_renewal(Router::new(gate), home)
+        .await
         .unwrap()
         .0
 }

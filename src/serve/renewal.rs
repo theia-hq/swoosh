@@ -1,16 +1,16 @@
 use core::time::Duration;
 use std::collections::HashMap;
+use std::io;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::SystemTime;
 
-use bifrost::NodeId;
 use nauthy::{FileStamp, VerifyKey};
-use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::open_policy::ProvenOnly;
 use tightbeam::tunnel::{BoxRead, BoxWrite, Handler, ServeError, Served};
 
 use crate::home::Home;
 use crate::roster::read_held;
+use crate::standing::Standing;
 
 /// How often [`Known::watch`] looks at the pin and the update for a change.
 const REFRESH: Duration = Duration::from_secs(1);
@@ -52,7 +52,8 @@ impl Handler for Renewal {
 
 /// The keys the update held here lists with a standing that has not ended, in memory: what the route asks
 /// for every stream before it takes one of the node's proven slots, so a key this home holds nothing for
-/// costs no slot and no disk read.
+/// costs no slot and no disk read. It lists keys only while this home is a device of a root or holds one,
+/// and its update verifies under the pin: on any other home no key reaches the handler at all.
 #[derive(Clone)]
 pub struct Known {
     home: Home,
@@ -64,22 +65,31 @@ pub struct Known {
 /// What [`Known`] read last.
 #[derive(Default)]
 struct Rows {
-    /// The pin's stamp when it was read.
-    signet: Option<FileStamp>,
-    /// The update's stamp when it was read.
-    roster: Option<FileStamp>,
+    /// The stamps of the files the standing and the update are read from, when they were read.
+    seen: Option<Vec<Seen>>,
     /// Each listed device's key, and when its standing ends.
     live: HashMap<VerifyKey, u64>,
 }
 
+/// One file's state, as far as telling a change goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    /// The file is not there.
+    Absent,
+    /// The file is there, with this stamp.
+    At(FileStamp),
+    /// The file could not be looked at, or its stamp could not be taken: read again next time.
+    Unknown,
+}
+
 impl Known {
     /// Read what `home` holds now.
-    pub fn load(home: &Home) -> Self {
+    pub async fn load(home: &Home) -> Self {
         let known = Self {
             home: home.clone(),
             rows: Arc::default(),
         };
-        known.refresh();
+        known.refresh().await;
         known
     }
 
@@ -94,27 +104,34 @@ impl Known {
             .is_some_and(|until| *until > now)
     }
 
-    /// Read the pin and the update again when either file changed. A pin that is not one key, or an
-    /// update that does not verify under it, lists nothing.
-    pub fn refresh(&self) {
-        let stamp = |path: std::path::PathBuf| {
-            std::fs::metadata(path)
-                .ok()
-                .and_then(|meta| FileStamp::of(&meta))
-        };
-        let (signet, roster) = (stamp(self.home.signet()), stamp(self.home.roster()));
+    /// Read the standing and the update again when a file either is read from changed. A home that is not
+    /// a device of a root and holds none, or whose update does not verify under the pin, lists nothing.
+    pub async fn refresh(&self) {
+        let seen = self.seen().await;
         {
             let rows = self.rows.read().unwrap_or_else(PoisonError::into_inner);
-            if FileStamp::unchanged(rows.signet, signet)
-                && FileStamp::unchanged(rows.roster, roster)
-            {
+            let unchanged = rows.seen.as_ref() == Some(&seen) && !seen.contains(&Seen::Unknown);
+            if unchanged {
                 return;
             }
         }
-        let live = std::fs::read_to_string(self.home.signet())
+        let live = self.listed().await;
+        *self.rows.write().unwrap_or_else(PoisonError::into_inner) = Rows {
+            seen: Some(seen),
+            live,
+        };
+    }
+
+    /// The keys the update lists, with when each standing ends, when this home's standing lets it answer.
+    async fn listed(&self) -> HashMap<VerifyKey, u64> {
+        let pin = match Standing::read(&self.home).await.map(|read| read.standing) {
+            Ok(Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. }) => pin,
+            Ok(Standing::Unpinned | Standing::InterruptedMint { .. }) | Err(_) => {
+                return HashMap::new();
+            }
+        };
+        crate::standing::pin_key(&self.home, pin)
             .ok()
-            .and_then(|text| text.trim().parse::<NodeId>().ok())
-            .and_then(|pin| pin.verify_key().ok())
             .and_then(|pin| read_held(&self.home.roster(), pin))
             .map(|(doc, _)| {
                 doc.members()
@@ -122,19 +139,36 @@ impl Known {
                     .map(|member| (member.node, member.until))
                     .collect()
             })
-            .unwrap_or_default();
-        *self.rows.write().unwrap_or_else(PoisonError::into_inner) = Rows {
-            signet,
-            roster,
-            live,
-        };
+            .unwrap_or_default()
+    }
+
+    /// The stamps of every file this home's standing and its update are read from.
+    async fn seen(&self) -> Vec<Seen> {
+        let home = &self.home;
+        let mut seen = Vec::new();
+        for path in [
+            home.key(),
+            home.signet(),
+            home.badge(),
+            home.roster(),
+            home.disabled_roots(),
+            home.root(),
+            home.root().join("root.key"),
+        ] {
+            seen.push(match tokio::fs::metadata(&path).await {
+                Ok(meta) => FileStamp::of(&meta).map_or(Seen::Unknown, Seen::At),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Seen::Absent,
+                Err(_) => Seen::Unknown,
+            });
+        }
+        seen
     }
 
     /// Refresh every second, for as long as the node runs.
     pub async fn watch(&self) {
         loop {
             tokio::time::sleep(REFRESH).await;
-            self.refresh();
+            self.refresh().await;
         }
     }
 }

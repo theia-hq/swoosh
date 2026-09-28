@@ -124,8 +124,11 @@ pub fn classify_stop(source: Option<StopKind>) -> Stopped {
 /// Bind the pick-up route ([`RENEWAL_SERVICE`]) on `router`, proven-only, answering from `home`. The keys
 /// it knows are read once here into the returned [`Known`]; the caller keeps them fresh with
 /// [`Known::watch`] for as long as it serves.
-pub fn bind_renewal(router: Router, home: &crate::home::Home) -> eyre::Result<(Router, Known)> {
-    let known = Known::load(home);
+pub async fn bind_renewal(
+    router: Router,
+    home: &crate::home::Home,
+) -> eyre::Result<(Router, Known)> {
+    let known = Known::load(home).await;
     let knows = known.clone();
     let router = router.proven_service(
         RENEWAL_SERVICE.parse()?,
