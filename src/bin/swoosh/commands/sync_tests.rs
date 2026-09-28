@@ -5,7 +5,7 @@ use clap::Parser as _;
 use keystore::{KeyFile, Protection};
 use swoosh::home::Home;
 use swoosh::roster::Epoch;
-use swoosh::sync::Answer;
+use swoosh::sync::{Answer, Reply};
 use swoosh::testkit::{TestNode, TestRoot};
 
 use super::{Row, refuse_unless_device, report};
@@ -13,16 +13,20 @@ use super::{Row, refuse_unless_device, report};
 #[test]
 fn sync_reads_each_reply_as_its_row() {
     let cases = [
-        (Some(Answer::Same), Row::InSync),
-        (Some(Answer::Took), Row::Took),
-        (Some(Answer::Gave), Row::Gave),
-        (Some(Answer::Forked), Row::Fork),
-        (Some(Answer::ForkRecorded { floor: Epoch(4) }), Row::Fork),
-        (Some(Answer::Refused), Row::NoAnswer),
-        (None, Row::NoAnswer),
+        (Reply::Answered(Answer::Same), Row::InSync),
+        (Reply::Answered(Answer::Took), Row::Took),
+        (Reply::Answered(Answer::Gave), Row::Gave),
+        (Reply::Answered(Answer::Forked), Row::Fork),
+        (
+            Reply::Answered(Answer::ForkRecorded { floor: Epoch(4) }),
+            Row::Fork,
+        ),
+        (Reply::Answered(Answer::Refused), Row::NoAnswer),
+        (Reply::NotAdmitted, Row::NoAnswer),
+        (Reply::Silent, Row::NoAnswer),
     ];
-    for (answer, row) in cases {
-        assert_eq!(Row::of(answer), row, "{answer:?} reads as {row:?}");
+    for (reply, row) in cases {
+        assert_eq!(Row::of(reply), row, "{reply:?} reads as {row:?}");
     }
 }
 

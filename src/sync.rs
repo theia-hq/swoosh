@@ -107,6 +107,9 @@ pub enum ExchangeError {
     /// The update taken could not be folded.
     #[error(transparent)]
     Fold(#[from] FoldError),
+    /// The other device's gate did not admit this machine: the standing it presented was refused.
+    #[error("the other device did not admit this machine")]
+    NotAdmitted,
     /// The other device could not be reached.
     #[error(transparent)]
     Dial(#[from] eyre::Report),
@@ -356,10 +359,10 @@ impl<T: Transport, D: Discovery> NodeDial<'_, T, D> {
     ) -> Result<(impl AsyncRead + Unpin, impl AsyncWrite + Unpin), ExchangeError> {
         let badge = crate::config::load_badge(self.home).await?;
         let session = connector(peer, badge)?.open_service(self.node).await?;
-        let (writer, reader) = session
-            .open_bi()
-            .await
-            .map_err(|error| eyre::eyre!(error))?;
+        let (writer, reader) = session.open_bi().await.map_err(|error| match error {
+            bifrost::Error::Refused(bifrost::Refusal::NotAdmitted) => ExchangeError::NotAdmitted,
+            other => ExchangeError::Dial(eyre::eyre!(other)),
+        })?;
         Ok((reader, writer))
     }
 }
@@ -405,31 +408,6 @@ pub async fn devices(
     home: &Home,
     also: impl IntoIterator<Item = (VerifyKey, String)>,
 ) -> eyre::Result<Vec<Device>> {
-    let own = keystore::KeyFile::device(home.key())
-        .load()?
-        .map(|stored| stored.node_id());
-    let mut revoked: Vec<NodeId> = revoked_keys_here(home);
-    if let Ok(Some(pin)) = device_pin(home).await
-        && let Some((doc, _)) = read_held(&home.roster(), pin)
-    {
-        revoked.extend(
-            doc.revoked_keys()
-                .iter()
-                .filter_map(|key| key.node_id().ok()),
-        );
-    }
-    let store = ContactsStore::open(home.contacts()).await?;
-    let mut mine: Vec<Device> = store
-        .contacts()
-        .devices(&Petname::stored(crate::contacts::ME)?)
-        .into_iter()
-        .flatten()
-        .map(|(label, key)| Device {
-            key: *key,
-            name: format!("me/{label}"),
-        })
-        .collect();
-    mine.shuffle(&mut rand::thread_rng());
     // A key that is not a usable key cannot be dialed, so it is left out.
     let also = also.into_iter().filter_map(|(key, name)| {
         Some(Device {
@@ -444,8 +422,55 @@ pub async fn devices(
             key,
             name: key.short(),
         });
+    let listed = me_devices(home).await?.into_iter().chain(also).chain(seed);
+    Ok(dialable(home, listed).await?)
+}
+
+/// This machine's `me` devices alone, in the order a round asks them, on the same rules as [`devices`]:
+/// the only machines the pick-up route asks.
+pub async fn mine(home: &Home) -> eyre::Result<Vec<Device>> {
+    let listed = me_devices(home).await?;
+    Ok(dialable(home, listed).await?)
+}
+
+/// The devices `me` names, in random order.
+async fn me_devices(home: &Home) -> eyre::Result<Vec<Device>> {
+    let store = ContactsStore::open(home.contacts()).await?;
+    let mut mine: Vec<Device> = store
+        .contacts()
+        .devices(&Petname::stored(crate::contacts::ME)?)
+        .into_iter()
+        .flatten()
+        .map(|(label, key)| Device {
+            key: *key,
+            name: format!("me/{label}"),
+        })
+        .collect();
+    mine.shuffle(&mut rand::thread_rng());
+    Ok(mine)
+}
+
+/// `listed`, in order, without this machine, a key revoked here or in the update held here, or a key
+/// already kept.
+async fn dialable(
+    home: &Home,
+    listed: impl IntoIterator<Item = Device>,
+) -> Result<Vec<Device>, keystore::Error> {
+    let own = keystore::KeyFile::device(home.key())
+        .load()?
+        .map(|stored| stored.node_id());
+    let mut revoked: Vec<NodeId> = revoked_keys_here(home);
+    if let Ok(Some(pin)) = device_pin(home).await
+        && let Some((doc, _)) = read_held(&home.roster(), pin)
+    {
+        revoked.extend(
+            doc.revoked_keys()
+                .iter()
+                .filter_map(|key| key.node_id().ok()),
+        );
+    }
     let mut out: Vec<Device> = Vec::new();
-    for device in mine.into_iter().chain(also).chain(seed) {
+    for device in listed {
         let skip = Some(device.key) == own
             || revoked.contains(&device.key)
             || out.iter().any(|kept| kept.key == device.key);
@@ -465,6 +490,27 @@ fn revoked_keys_here(home: &Home) -> Vec<NodeId> {
         .collect()
 }
 
+/// How one device's exchange in a round went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reply {
+    /// The exchange ran, and ended so.
+    Answered(Answer),
+    /// The device's gate did not admit this machine: the standing it presented was refused.
+    NotAdmitted,
+    /// The device did not answer in time, or the exchange failed.
+    Silent,
+}
+
+impl Reply {
+    /// The exchange's end, when it ran.
+    pub fn answer(self) -> Option<Answer> {
+        match self {
+            Self::Answered(answer) => Some(answer),
+            Self::NotAdmitted | Self::Silent => None,
+        }
+    }
+}
+
 /// When a round stops.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Until {
@@ -475,42 +521,48 @@ pub enum Until {
 }
 
 /// Exchange with `devices` in order, one at a time, each within [`EACH`] and all within `total`. Each
-/// device's answer, or `None` for one that did not answer in time or failed; a device left unasked when
-/// the round stopped is not listed.
+/// device's [`Reply`]; a device left unasked when the round stopped is not listed.
 ///
 /// On [`Until::Every`], a take makes every device asked before it (one found the same, given this
 /// machine's list, or taken from) hold an older list than this machine now does, so each is asked again,
-/// and its last answer is the one listed.
+/// and its last reply is the one listed.
 pub async fn round(
     dial: &impl Dial,
     devices: &[Device],
     until: Until,
     total: Duration,
-) -> Vec<(Device, Option<Answer>)> {
+) -> Vec<(Device, Reply)> {
     let deadline = tokio::time::Instant::now() + total;
-    let mut answers: Vec<Option<Option<Answer>>> = vec![None; devices.len()];
+    let mut replies: Vec<Option<Reply>> = vec![None; devices.len()];
     let mut queue: VecDeque<usize> = (0..devices.len()).collect();
     while let Some(index) = queue.pop_front() {
         let device = &devices[index];
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let answer = match tokio::time::timeout(EACH.min(left), dial.exchange(device.key)).await {
-            Ok(Ok(answer)) => Some(answer),
+        let reply = match tokio::time::timeout(EACH.min(left), dial.exchange(device.key)).await {
+            Ok(Ok(answer)) => Reply::Answered(answer),
+            Ok(Err(ExchangeError::NotAdmitted)) => {
+                tracing::debug!(device = %device.name, "the device did not admit this machine");
+                Reply::NotAdmitted
+            }
             Ok(Err(error)) => {
                 tracing::debug!(device = %device.name, %error, "an exchange failed");
-                None
+                Reply::Silent
             }
             Err(_) => {
                 tracing::debug!(device = %device.name, "an exchange timed out");
-                None
+                Reply::Silent
             }
         };
-        answers[index] = Some(answer);
-        if answer == Some(Answer::Took) {
+        replies[index] = Some(reply);
+        if reply == Reply::Answered(Answer::Took) {
             if until == Until::Newer {
                 break;
             }
-            for (earlier, got) in answers.iter().enumerate() {
-                let behind = matches!(got, Some(Some(Answer::Same | Answer::Gave | Answer::Took)));
+            for (earlier, got) in replies.iter().enumerate() {
+                let behind = matches!(
+                    got,
+                    Some(Reply::Answered(Answer::Same | Answer::Gave | Answer::Took))
+                );
                 if earlier != index && behind && !queue.contains(&earlier) {
                     queue.push_back(earlier);
                 }
@@ -519,9 +571,17 @@ pub async fn round(
     }
     devices
         .iter()
-        .zip(answers)
-        .filter_map(|(device, answer)| Some((device.clone(), answer?)))
+        .zip(replies)
+        .filter_map(|(device, reply)| Some((device.clone(), reply?)))
         .collect()
+}
+
+/// Whether a round's replies say this machine's own standing was refused: some device's gate did not
+/// admit it. Only then is the pick-up route worth trying ([`crate::renewal`]).
+pub fn refused(replies: &[(Device, Reply)]) -> bool {
+    replies
+        .iter()
+        .any(|(_, reply)| *reply == Reply::NotAdmitted)
 }
 
 /// Whether this machine is a device of a root, one that holds it or not: the only machines that

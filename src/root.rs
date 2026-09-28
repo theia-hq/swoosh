@@ -1153,7 +1153,7 @@ impl Act {
             Ok(devices) => crate::sync::round(dial, &devices, Until::Newer, SYNC_BOUND)
                 .await
                 .iter()
-                .any(|(_, answer)| answer.is_some()),
+                .any(|(_, reply)| reply.answer().is_some()),
             Err(error) => {
                 tracing::debug!(%error, "could not list the devices to sync with");
                 false

@@ -26,6 +26,7 @@ pub mod peer;
 pub mod reach;
 pub mod reach_report;
 pub mod reaching;
+pub mod renewal;
 pub mod root;
 pub mod roster;
 pub mod secret;

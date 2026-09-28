@@ -639,13 +639,36 @@ async fn run() -> eyre::Result<()> {
     // The SERVING verb resolves nothing: it is the gate, so it presents no credential and never mints or
     // loads a badge it would not send. There is no wildcard here and no "present nothing" credential for a
     // dialing verb to reach for: the role it declared decides, and only one of its arms carries slots.
-    let (present, membership) = match &bind_role {
-        BindRole::Serving => (None, None),
-        BindRole::Dialing(dial) => {
+    //
+    // Only a verb that dials a peer of its own resolves slots. `sync`, `invite` and `join` dial your
+    // devices themselves and present this home's standing on each exchange, so they resolve nothing
+    // here: a standing that has passed its date must reach their exchange, whose refusal is what sends
+    // them to the pick-up route.
+    //
+    // A verb that dials its own peer and presents this home's standing, when that standing has passed
+    // its date or was revoked here, first tries the pick-up route at your own devices, once the node is
+    // bound; its slots are resolved after that, so the standing it presents is the one it may just have
+    // taken. An `anyone` link dials under a throwaway key, which must never reach your devices, and a
+    // slip presents its own authority, so neither tries it.
+    let own_peer = reach.dialed().is_some();
+    let renew = match &bind_role {
+        BindRole::Dialing(dial @ credential::Credential::Family { present: None })
+            if own_peer && swoosh::renewal::is_due(&home, std::time::SystemTime::now()).await =>
+        {
+            Some(Renew {
+                credential: credential::Credential::clone(dial),
+                secret: &secret,
+            })
+        }
+        BindRole::Serving | BindRole::Dialing(_) => None,
+    };
+    let (present, membership) = match (&bind_role, &renew) {
+        (BindRole::Dialing(dial), None) if own_peer => {
             reaching::resolve(credential::Credential::clone(dial), &secret, &home)
                 .await?
                 .into_slots()
         }
+        (BindRole::Serving | BindRole::Dialing(_), _) => (None, None),
     };
     let expose = reach.expose_context(&secret, &home).await?;
     // Attach the resolved exposer context to the `serve` verb (a no-op otherwise), so `serve` reads its OWN
@@ -700,7 +723,7 @@ async fn run() -> eyre::Result<()> {
             let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
             let node = Node::new(endpoint, composed.discovery);
             let reach = reach.attach_bound_reach(&bound.reach);
-            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
+            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx, renew).await
         }
         // quirk is direct-only with no internal discovery, so the composed discovery is its only way
         // to learn a peer's address: the `--peer` hints, plus any peer heard over mDNS on the LAN.
@@ -710,7 +733,7 @@ async fn run() -> eyre::Result<()> {
                 .await?;
             let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
             let node = Node::new(endpoint, composed.discovery);
-            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
+            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx, renew).await
         }
         // The sealed spelling: quirk under the wrapper, still one node under one key. The wrapper runs
         // its own Noise handshake over quirk's one stream and proves the peer's `NodeId`, so a
@@ -724,7 +747,7 @@ async fn run() -> eyre::Result<()> {
             let endpoint = secret.with_bytes(|seed| bifrost_noise::Noise::new(endpoint, seed))?;
             let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
             let node = Node::new(endpoint, composed.discovery);
-            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx).await
+            run_and_close(reach.attach_mdns(composed.mdns), &node, ctx, renew).await
         }
     }
 }
@@ -818,16 +841,35 @@ where
 async fn run_and_close<T: Transport, D: Discovery>(
     outward: Outward,
     node: &Node<T, D>,
-    ctx: reaching::ReachCtx<'_>,
+    mut ctx: reaching::ReachCtx<'_>,
+    renew: Option<Renew<'_>>,
 ) -> eyre::Result<()>
 where
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
     let home = ctx.home;
-    let result = run_verb(outward, node, ctx, &swoosh::sync::NodeDial::new(node, home)).await;
+    let result = async {
+        if let Some(renew) = renew {
+            let fetch = swoosh::renewal::NodeFetch::new(node);
+            reaching::renew_before_dial(home, &fetch, &mut std::io::stderr()).await;
+            (ctx.present, ctx.membership) = reaching::resolve(renew.credential, renew.secret, home)
+                .await?
+                .into_slots();
+        }
+        run_verb(outward, node, ctx, &swoosh::sync::NodeDial::new(node, home)).await
+    }
+    .await;
     node.close().await;
     result
+}
+
+/// What a dialing verb that tries the pick-up route first resolves its slots from, after the try.
+struct Renew<'a> {
+    /// The credential the verb declared.
+    credential: credential::Credential,
+    /// The key the verb binds under.
+    secret: &'a swoosh::identity::Secret,
 }
 
 // The CLI-surface proofs that drive a real verb (clap-parsed, exactly as the binary dispatches it):
@@ -1599,6 +1641,39 @@ mod tests {
         let error = Cli::try_parse_from(["swoosh", "mint"]).expect_err("mint is no command");
         assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
         assert_eq!(error.exit_code(), 2);
+    }
+
+    /// The pick-up route is `control.renewal`: every `serve`'s catalog names it, and like every internal
+    /// route it is dotted, so no service name a person types can be it.
+    #[tokio::test]
+    async fn the_pick_up_route_is_control_renewal() {
+        assert_eq!(swoosh::serve::RENEWAL_SERVICE, "control.renewal");
+        let dir = std::env::temp_dir().join(format!("swoosh-pick-up-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        swoosh::config::create_store_dir(&dir).expect("a scratch home");
+        let home = Home::resolve(Some(dir.clone())).expect("the scratch home resolves");
+        let own = swoosh::testkit::TestNode::seeded(0x61).node_id();
+        let (gate, _cut) = swoosh::gate::anchored(&home, own)
+            .await
+            .expect("the gate builds");
+        let (router, _known) =
+            swoosh::serve::bind_renewal(tightbeam::tunnel::Router::new(gate), &home)
+                .expect("the route binds");
+        assert!(
+            router
+                .catalog(None)
+                .entries()
+                .any(|entry| entry.name == swoosh::serve::RENEWAL_SERVICE),
+            "the catalog names the route"
+        );
+        for argv in [
+            vec!["swoosh", "serve", "control.renewal=tcp:localhost:1"],
+            vec!["swoosh", "serve", "--public", "control.renewal"],
+        ] {
+            let error = Cli::try_parse_from(&argv).expect_err("the route's name is never typed");
+            assert_eq!(error.exit_code(), 2, "{argv:?} is a usage error");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A typed service name follows the one name rule, so a dotted internal route (`control.stop`) can never
