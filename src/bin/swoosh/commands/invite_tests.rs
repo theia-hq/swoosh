@@ -1088,6 +1088,23 @@ async fn invite_revives_a_lapsed_device_by_name() {
 }
 
 #[tokio::test]
+async fn a_short_standing_that_ended_under_a_day_after_signing_renews_by_name() {
+    // An hour-long standing signed ninety minutes ago: renewed under a day ago, but ended, so the day
+    // since its signing never holds a renewal back.
+    let home = scratch("ended-short");
+    let laptop = signed(LAPTOP, "laptop", HOUR, &[now() - HOUR / 2]);
+    holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
+    let ran = invite(&home, &["laptop"]).await;
+    let printed = ran.invite();
+    assert_eq!(ran.prompts, 1, "a renewal signs");
+    assert_ne!(printed.standing.as_str(), laptop.standing.as_str());
+    let state = kept(&home).await;
+    let row = row_of(&state, "laptop");
+    assert!(row.until > now(), "the ended device runs again");
+    assert_eq!(printed.standing.as_str(), row.standing.as_str());
+}
+
+#[tokio::test]
 async fn a_named_renewal_of_a_device_revoked_here_prints_no_standing_and_cuts() {
     // Its standing revoked on this machine only: renewing it signs a new one, and the cut carries the
     // revocation.

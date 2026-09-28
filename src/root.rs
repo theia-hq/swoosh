@@ -973,8 +973,9 @@ impl Root {
     }
 
     /// Renew the devices named, whatever their window, a lapsed one included. `duration` becomes each
-    /// one's duration (else its own, or 90 days if it has none). A device renewed under a day ago, holding
-    /// the most renewals in force, or whose date a renewal would not move is left as it is.
+    /// one's duration (else its own, or 90 days if it has none). A device holding the most renewals in
+    /// force, or one still in force that was renewed under a day ago or whose date a renewal would not
+    /// move, is left as it is.
     pub fn renew(
         &mut self,
         names: &[DeviceLabel],
@@ -1866,13 +1867,16 @@ impl Book {
 
     /// Whether a renewal of `row` by name, for `duration`, would leave it as it is: it holds the most
     /// renewals in force, or its standing still stands and it was renewed under a day ago or the renewal
-    /// would not move its date later. A standing whose id is revoked here always takes a new one.
+    /// would not move its date later. A standing whose id is revoked here always takes a new one, and so
+    /// does one that has ended: the day after its signing holds back only a standing still in force, so a
+    /// short one that ended within that day is renewed.
     fn renewal_skips(&self, row: &Row, duration: u64, now: u64) -> bool {
         let newest = row.ids.iter().max_by_key(|id| id.expires);
         let newest_signed = newest.map_or(0, |id| id.expires.saturating_sub(row.duration));
         let standing_revoked = newest.is_some_and(|id| self.revoked.contains_key(id.id.as_bytes()));
         live_ids(row, now) >= MAX_IDS
             || (!standing_revoked
+                && now < row.until
                 && (newest_signed.saturating_add(DAY) > now
                     || now.saturating_add(duration) <= row.until))
     }
