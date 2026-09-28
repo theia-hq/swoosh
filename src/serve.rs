@@ -22,6 +22,7 @@ mod control;
 mod resident;
 mod roster;
 mod services;
+mod serving;
 mod single;
 mod stop;
 pub mod control_codec {
@@ -39,6 +40,7 @@ pub use transfer::Recv;
 
 pub use self::roster::Exchange;
 pub use self::services::ServiceList;
+pub use self::serving::{ServingError, Started};
 pub use self::stop::{STOP_ACK, Stop};
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
@@ -112,15 +114,32 @@ pub fn classify_stop(source: Option<StopKind>) -> Stopped {
     }
 }
 
+/// The services a `serve` with nothing named and nothing to resume serves: the two diagnostics, each its
+/// own service, so a node may later offer one without the other.
+pub const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
+
+/// The services swoosh serves itself, by the name a person types and the target that name stands for:
+/// `swoosh serve ssh ping` is `ssh=sshd: ping=ping:`.
+const BUILT_IN: [(&str, &str); 3] = [("ping", "ping:"), ("speed", "speed:"), ("ssh", "sshd:")];
+
 /// Parse one typed `serve` entry: the name follows the one name rule and is folded, the target passes
 /// through for [`bind_entry`] to read. A typed name is never dotted, so it can never be an internal route
-/// (`control.stop`). A bare `<service>` (no `=`) is a name too, folded the same way; a bare target
-/// (`fetch:`, holding the scheme's `:`) passes through, so the tunnel grammar teaches the `name=target` shape.
+/// (`control.stop`). A bare `<service>` (no `=`) is a name too, folded the same way, and a built-in one
+/// becomes its full form (`ssh` is `ssh=sshd:`); a bare target (`fetch:`, holding the scheme's `:`) passes
+/// through, so the tunnel grammar teaches the `name=target` shape.
 pub fn service_entry(entry: &str) -> Result<String, NameError> {
     match entry.split_once('=') {
         Some((name, target)) => Ok(format!("{}={target}", name.parse::<Name>()?)),
         None if entry.contains(':') => Ok(entry.to_owned()),
-        None => Ok(entry.parse::<Name>()?.into()),
+        None => {
+            let name: String = entry.parse::<Name>()?.into();
+            Ok(
+                match BUILT_IN.iter().find(|(built_in, _)| *built_in == name) {
+                    Some((_, target)) => format!("{name}={target}"),
+                    None => name,
+                },
+            )
+        }
     }
 }
 

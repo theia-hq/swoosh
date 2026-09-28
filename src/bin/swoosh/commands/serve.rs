@@ -1,33 +1,33 @@
-//! `swoosh serve [<name>=<svc>...]`: be a node. Publish named services behind this node's signet gate,
-//! then stay reachable so peers who hold this node's key can reach them.
+//! `swoosh serve [<service>...]`: be the one `serve` for this home. Publish the named services behind
+//! this machine's gate, hold the home's control socket, then stay reachable so your devices, and anyone
+//! you gave a link, reach them.
 //!
-//! This IS the node. `swoosh serve` with no services answers reach diagnostics (`ping`/`speed`) from
-//! peers your signet admits: `ping` (RTT) and `speed` (throughput) are the default services, two
-//! so a node may offer one without the other. `swoosh serve ssh=sshd: ping=ping:` publishes a
-//! shell and a public-able ping responder without exposing speed. Every entry after `serve` names its
-//! service (`ping=ping:`, never a bare `ping:`). It drives tightbeam's tunnel LIBRARY
-//! (`Exposer`) directly under swoosh's OWN persisted identity:
-//! the node binds the same key `swoosh ssh` and a minted `swoosh grant issue` link root at, gates on the
-//! pin read live from swoosh's own store and on the links this machine signed, and derives the ssh host
-//! seed from swoosh's secret, so an `ssh=sshd:` service presents the host key a client pins. swoosh
-//! assembles the whole route table itself (`fetch`/`recv` instances, `ping`/`speed`, the update route,
-//! and `sshd` under the `ssh` feature), takes the gate the composition root built
-//! ([`swoosh::gate::anchored`]), and prints its OWN readiness banner. `--public`
-//! and `--quiet` live on THIS verb (not root), and reach comes via the shared
-//! [`ReachArgs`](swoosh::transport::ReachArgs), flattened like every other reaching verb. `--expires` is a
-//! LOCAL timer with no security surface: when its deadline passes the node ends by itself, the same
-//! graceful teardown a Ctrl-C gives.
+//! Bare, it serves what this home last started with (`<home>/serving`), or `ping` and `speed` when it
+//! never named any. `swoosh serve ssh ping` publishes a shell and the round-trip probe; `ssh`, `ping` and
+//! `speed` name themselves, and every other entry is `name=target`. Only the services are remembered:
+//! `--public`, `--public-unsafe`, `--admit` and `--expires` apply to the run that types them. It drives
+//! tightbeam's tunnel LIBRARY (`Exposer`) directly under swoosh's OWN persisted identity: the node binds
+//! the same key `swoosh ssh` and a signed link root at, gates on the pin read live from swoosh's own
+//! store and on the links this machine signed, and derives the ssh host seed from swoosh's secret, so an
+//! `ssh` service presents the host key a client pins. swoosh assembles the whole route table itself
+//! (`fetch`/`recv` instances, `ping`/`speed`, the update route, and `sshd` under the `ssh` feature),
+//! takes the gate the composition root built ([`swoosh::gate::anchored`]), and prints its OWN banner.
+//! `--expires` is a LOCAL timer with no security surface: when its deadline passes the node ends by
+//! itself, the same graceful teardown a Ctrl-C gives.
 //!
-//! This file owns the VERB: its flags, the readiness banner, and the run loop. The node engine it
-//! drives (the route-table edges, the `control.*` handlers, the resident arm) is the library's `serve`
-//! module, which the integration proofs also assemble their nodes from.
+//! Every `serve` is the one `serve` for its home: before anything binds it takes the home's lock and
+//! control socket under the per-user runtime directory, so a second one refuses with the running one's pid
+//! and the fix, and bare `stop` and `status` always find it.
+//!
+//! This file owns the VERB: its flags, the banner, and the run loop. The node engine it drives (the
+//! route-table edges, the `control.*` handlers, the control socket) is the library's `serve` module, which
+//! the integration proofs also assemble their nodes from.
 
 use core::net::SocketAddr;
 use core::time::Duration;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
-use std::sync::Arc;
+use std::ffi::OsString;
+use std::io::IsTerminal as _;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use bifrost_mdns::{At, Dialable, Expiring, Missing, ScopeClass};
@@ -39,38 +39,32 @@ use swoosh::gate::AnchorCut;
 use swoosh::home::Home;
 use swoosh::identity::Identity;
 use swoosh::joining::{AdmitError, AdmitLock};
+use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::serve::{
     Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope, InstanceLock,
-    RECV_SCHEME, Resident, SYNC_SERVICE, ServiceList, Stop, StopKind, Stopped, acquire_single,
-    bind_entry, bind_recv, classify_stop, extract_recv_services,
+    Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop, StopKind, Stopped,
+    acquire_single, bind_entry, bind_recv, classify_stop, extract_recv_services,
 };
 use swoosh::standing::{Standing, StandingError};
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
 use tightbeam::enabled::FileDisabledList;
-use tightbeam::tunnel::{
-    CancellationToken, Exposer, ManifestEntry, Metering, Posture, RawSource, Router, TargetKind,
-};
+use tightbeam::tunnel::{CancellationToken, Exposer, ManifestEntry, Posture, Router};
 
-/// The default services `serve` publishes when none is named: the gated `ping` and `speed` engine
-/// handlers, under the names a client requests. ping and speed are TWO independent services (cheap
-/// RTT vs bandwidth-eating throughput), so a bare `swoosh serve` answers BOTH behind the signet gate, and a
-/// node that wants to offer only one names just that one (`swoosh serve ping=ping:`). Each may be
-/// made `--public` independently.
-const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
+use super::service::toggle;
 
-/// Be a node: publish these services behind your signet gate, then stay reachable.
+/// Be a node: publish these services behind your gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// publish services as `name=target` (bare: `ping` and `speed`)
+    /// publish services as `name=target` (bare: the last list, else `ping` and `speed`)
     // The long form lists every target scheme, both halves: the three engines swoosh serves and the six
     // forms the tunnel grammar routes. A refusal from either half points here, so this list is the one a
     // mistyped scheme is sent to and it has to be complete.
     #[arg(
         value_name = "name=target",
         value_parser = swoosh::serve::service_entry,
-        long_help = "publish services as `name=target` (bare: `ping` and `speed`)\n\
+        long_help = "publish services as `name=target` (bare: the last list, else `ping` and `speed`)\n\
                      \n\
                      Every target carries a scheme. swoosh serves:\n\
                      \x20 ping:            round-trip probe\n\
@@ -112,23 +106,25 @@ pub struct ServeCmd {
     /// suppress the readiness banner and activity lines
     #[arg(long)]
     pub quiet: bool,
+    /// Also print how peers reach this machine, under the banner.
+    #[arg(long, hide = true, env = "SWOOSH_VERBOSE")]
+    pub verbose: bool,
     /// serve for a bounded time, then stop (`30m`, `2h`, `1d`)
     #[arg(long, value_name = "duration")]
     pub expires: Option<Lifetime>,
-    /// be the resident node: one per home, control socket; stays foreground
-    #[arg(long)]
-    pub resident: bool,
     /// For this run, let in the devices of another root without joining it (CI).
     #[arg(long, value_name = "root key", value_parser = admitted_root)]
     pub admit: Option<NodeId>,
     #[command(flatten)]
     pub reach: ReachArgs,
+    /// The home's lock and control socket and the services this run starts with, taken by
+    /// [`claim`](Self::claim) before anything binds. Not a flag: clap skips it.
+    #[arg(skip)]
+    pub claim: Option<Box<Claim>>,
     /// What `serve` needs beyond the bound node, resolved by the composition root BEFORE the transport
     /// consumes the secret (the ssh host seed derives from it). Not a flag: clap skips it, and the root
     /// fills it in via [`with_expose`](Self::with_expose) before dispatch. Lives HERE, on `ServeCmd`, so
-    /// `serve` reads its OWN context: it is deliberately NOT a `ReachCtx` field, so the reach
-    /// context stays uniform, and the old `Option<ExposeContext>` threaded through the generic reach
-    /// dispatch plus its "internal: serve reached without its expose context" runtime guard are gone.
+    /// `serve` reads its OWN context and the reach context stays uniform.
     // Boxed so the runtime context (which embeds a `FileDenylist`, itself carrying a `Mutex` and its
     // live-reload state) does not bloat `ServeCmd` inline: `Serve(ServeCmd)` is a variant of the clap
     // command enums, and an unboxed context makes that one variant far larger than the rest
@@ -141,7 +137,7 @@ pub struct ServeCmd {
     /// discovery). Not a flag: clap skips it, and the root fills it in via
     /// [`with_mdns`](Self::with_mdns) before dispatch, exactly like [`expose`](Self::expose). `serve`
     /// is the one verb that reports discovery, so the tell lives HERE and the reach context stays
-    /// uniform; the banner reports what started rather than assuming it.
+    /// uniform; the transport block reports what started rather than assuming it.
     #[arg(skip)]
     pub mdns: Option<MdnsState>,
     /// The relay and the resolver this bind actually leaned on, attached by the composition root after
@@ -157,28 +153,42 @@ pub struct ServeCmd {
     pub bound_reach: Box<Reach>,
 }
 
+/// What a `serve` holds for its whole run, taken before anything binds: the home's single-instance lock
+/// and its bound control socket, and the services this run starts with.
+pub struct Claim {
+    /// The services this run starts with, and where they came from.
+    started: Started,
+    /// The flock that makes this the one `serve` for its home, held for the run.
+    lock: InstanceLock,
+    /// The control socket, bound under the lock.
+    listener: std::os::unix::net::UnixListener,
+}
+
+impl core::fmt::Debug for Claim {
+    /// The lock and the listener are not `Debug`; the services are what a reader wants.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Claim")
+            .field("started", &self.started)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What `serve` needs beyond the bound node: swoosh's ssh host seed, and the gate and the live cut beside
-/// it. All resolved in the composition root (the
-/// host seed needs the secret before the transport consumes it), then attached to [`ServeCmd`] via
-/// [`with_expose`](ServeCmd::with_expose). Moved here from `main.rs` so `serve` reads its own context.
-/// The home rides along too: `serve --resident` names its socket/lock off the home, and the SAME `home`
-/// value the root resolved (never a re-derive), so the resident paths and the daemon's future clients
-/// can never disagree on which home they mean.
+/// it. All resolved in the composition root (the host seed needs the secret before the transport consumes
+/// it), then attached to [`ServeCmd`] via [`with_expose`](ServeCmd::with_expose).
 pub struct ExposeContext {
-    /// swoosh's ssh host key seed, derived from the secret so an `ssh=sshd:` service presents the host
-    /// key a client pins.
+    /// swoosh's ssh host key seed, derived from the secret so an `ssh` service presents the host key a
+    /// client pins.
     pub host_seed: [u8; 32],
     /// The one gate this node runs in every standing ([`swoosh::gate::anchored`]): the pin read live,
     /// this machine's own key for the links it signed, and the revocations.
     pub gate: Gate,
     /// The live cut over the same pin and revocations the gate reads, wired beside it.
     pub cut: AnchorCut,
-    /// The live enable/disable oracle the exposer's per-stream gate consults: a `service disable`
-    /// written to `<home>/disabled` refuses the service live, and a `service enable` restores it, both with no
-    /// restart. The exact mtime-watch shape as the denylist, loaded beside it in the composition root.
+    /// The live enable/disable oracle the exposer's per-stream gate consults: a service turned off in
+    /// `<home>/disabled` is refused live, and turned back on, both with no restart.
     pub enabled: FileDisabledList,
-    /// The node home this serve runs under: the resident socket/lock derive from it, and the composition
-    /// root resolves it ONCE, so a `--resident` serve and its future control clients name the same paths.
+    /// The node home this serve runs under, resolved ONCE by the composition root.
     pub home: Home,
     /// Held for the whole run of a `serve --admit`, naming the root it admits.
     pub admit: Option<AdmitLock>,
@@ -276,18 +286,13 @@ impl Reaching for ServeCmd {
 
     /// Serving: `serve` is the process that accepts connections under the home key, so its bind publishes
     /// the key's address record (n0 pkarr/DNS) for peers to dial. The one `Serving` verb, and the one verb
-    /// that states NO dial credential: it is the gate, so it verifies badges and never presents one. There
-    /// is no "not applicable" credential for it to declare, which is why there is none for a dialing verb
-    /// to be transcribed with either.
+    /// that states NO dial credential: it is the gate, so it verifies badges and never presents one.
     fn bind_role(&self) -> BindRole {
         BindRole::Serving
     }
 
-    /// Uniform dispatch: `serve` reads its OWN [`ExposeContext`] (attached by the root via
-    /// [`with_expose`](Self::with_expose)), so it ignores every `ReachCtx` field. This is where the old
-    /// `Option<ExposeContext>` threaded through the generic reach dispatch, and its
-    /// "internal: serve reached without its expose context" guard in `main.rs`, are gone: the context is
-    /// serve's own, attached before dispatch.
+    /// Uniform dispatch: `serve` reads its OWN [`Claim`] and [`ExposeContext`] (attached by the root before
+    /// dispatch), so it ignores every `ReachCtx` field.
     async fn run<T: Transport, D: Discovery>(
         mut self,
         node: &Node<T, D>,
@@ -297,14 +302,12 @@ impl Reaching for ServeCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        // The root always attaches the expose context to a `serve` verb before dispatch (it is the only
-        // caller, and `with_expose` is the only path to a runnable `ServeCmd`), so a missing one is a
-        // composition-root bug, not a user error. Surface it as an internal error rather than panicking:
-        // unlike the OLD guard, this is not a threaded `Option` a whole family of verbs could trip, it is
-        // serve reading its own field, so the failure is local and one verb wide.
-        let Some(expose) = self.expose.take() else {
+        // The root always claims the home and attaches the expose context before dispatch (it is the only
+        // caller), so a missing one is a composition-root bug, not a user error: surface it as an internal
+        // error rather than panicking.
+        let (Some(claim), Some(expose)) = (self.claim.take(), self.expose.take()) else {
             eyre::bail!(
-                "internal: serve reached run without its expose context (composition-root bug)"
+                "internal: serve reached run without its claim or expose context (composition-root bug)"
             );
         };
         let ExposeContext {
@@ -316,7 +319,7 @@ impl Reaching for ServeCmd {
             admit,
         } = *expose;
         let result = self
-            .run_serve(node, host_seed, gate, cut, enabled, home)
+            .run_serve(node, *claim, host_seed, gate, cut, enabled, home)
             .await;
         drop(admit);
         result
@@ -324,42 +327,124 @@ impl Reaching for ServeCmd {
 }
 
 impl ServeCmd {
+    /// Before anything binds or is written: take this home's one lock and control socket, and settle the
+    /// services this run starts with (named, resumed from `<home>/serving`, or the default). A second
+    /// `serve` for the home refuses here with the running one's pid and the fix, and so does a machine with
+    /// no private runtime directory or one whose path a socket cannot hold.
+    pub async fn claim(mut self, home: &Home) -> eyre::Result<Self> {
+        let root = swoosh::home::runtime_root()?;
+        let (lock, listener) = match acquire_single(home, &root) {
+            Ok(held) => held,
+            Err(SingleError::AlreadyResident { pid }) => {
+                let serving = running_services(home).await;
+                eyre::bail!("{}", self.running_refusal(pid, serving.as_deref()));
+            }
+            Err(other) => return Err(eyre::Report::new(other)),
+        };
+        let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
+        let started = Started::of(&self.services, home, &cwd)?;
+        self.claim = Some(Box::new(Claim {
+            started,
+            lock,
+            listener,
+        }));
+        Ok(self)
+    }
+
+    /// The refusal a `serve` prints when one already runs for its home: which one, then the one fix that
+    /// fits what this run asked for, in order. A service it named that the running one serves is turned on
+    /// with `service on`; a flag that changes how the node runs needs a stop first; anything else is a
+    /// second node, which needs a home of its own.
+    fn running_refusal(&self, pid: u32, serving: Option<&[String]>) -> String {
+        let head = match serving {
+            Some(names) if !names.is_empty() => format!(
+                "swoosh serve is already running for this home (pid {pid}, serving {}).",
+                names.join(", ")
+            ),
+            _ => format!("swoosh serve is already running for this home (pid {pid})."),
+        };
+        let started = self
+            .services
+            .iter()
+            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
+            .find(|name| serving.is_some_and(|names| names.iter().any(|served| served == name)));
+        let fix = match started {
+            Some(name) => format!("To turn {name} on: swoosh service on {name}"),
+            None if self.sets_how_it_runs() => {
+                "Stop it first to change how it runs: swoosh stop".to_owned()
+            }
+            None => "A second one needs its own: swoosh --home <dir> serve …".to_owned(),
+        };
+        format!("{head}\n{fix}")
+    }
+
+    /// Whether this run set a flag that changes how the node runs rather than what it serves: exposure,
+    /// a lifetime, an admitted root, or anything about the bind.
+    fn sets_how_it_runs(&self) -> bool {
+        let reach = &self.reach;
+        !self.public.is_empty()
+            || !self.public_unsafe.is_empty()
+            || self.expires.is_some()
+            || self.admit.is_some()
+            || reach.local
+            || !reach.peer.is_empty()
+            || reach.relay.is_some()
+            || reach.resolver.is_some()
+            || reach.transport != swoosh::transport::Transport::default()
+    }
+
     /// Attach the resolved [`ExposeContext`] the composition root cut while the secret was still live, so
-    /// `serve` reads its own context at run time. The ONE path the root uses to make a `ServeCmd`
-    /// runnable, so a `serve` that reached `run` without one is a root bug, not a representable state a
-    /// user hits.
+    /// `serve` reads its own context at run time.
     pub fn with_expose(mut self, expose: ExposeContext) -> Self {
         self.expose = Some(Box::new(expose));
         self
     }
 
     /// Attach the live [`MdnsState`] the composition root read off the composed discovery, so the
-    /// banner reports the discovery that started rather than one it assumed. The root calls this after
-    /// `PeerHint::discovery` and before dispatch; a `serve` that reached its banner without one is a
-    /// root bug, surfaced there rather than defaulted.
+    /// transport block reports the discovery that started rather than one it assumed.
     pub fn with_mdns(mut self, mdns: MdnsState) -> Self {
         self.mdns = Some(mdns);
         self
     }
 
-    /// Attach the [`Reach`] the composition root composed for this bind, so the banner names the relay
-    /// this node offers and the resolver it publishes to rather than promising n0's. Called at the iroh
-    /// arm only, beside [`with_mdns`](Self::with_mdns).
+    /// Attach the [`Reach`] the composition root composed for this bind, so the transport block names the
+    /// relay this node offers and the resolver it publishes to rather than promising n0's. Called at the
+    /// iroh arm only, beside [`with_mdns`](Self::with_mdns).
     pub fn with_bound_reach(mut self, bound_reach: Reach) -> Self {
         self.bound_reach = Box::new(bound_reach);
         self
     }
 }
 
+/// The names the `serve` already running for `home` serves, read over its control socket, internal
+/// routes left out; `None` when it does not answer.
+async fn running_services(home: &Home) -> Option<Vec<String>> {
+    let client = ControlClient::resolve(home).ok()?;
+    let menu = client.services().await.ok()?;
+    Some(
+        menu.catalog
+            .entries()
+            .filter(|entry| !entry.name.starts_with("control."))
+            .map(|entry| entry.name.clone())
+            .collect(),
+    )
+}
+
 impl ServeCmd {
-    /// Serve the named services (default `ping:` + `speed:`) under swoosh's identity by driving the
-    /// tunnel core directly: parse the services, assemble the route table (`fetch`/`recv` instances,
-    /// `ping`/`speed`, the update route, and `sshd` under the `ssh` feature) behind the gate the
-    /// composition root built, print swoosh's banner, and run the exposer with the live cut wired. A
-    /// `sshd:`/`ping:`/`speed:` service stays gated unless `--public` opens it.
+    /// Serve the services this run started with under swoosh's identity by driving the tunnel core
+    /// directly: parse the services, assemble the route table (`fetch`/`recv` instances, `ping`/`speed`,
+    /// the update route, and `sshd` under the `ssh` feature) behind the gate the composition root built,
+    /// record what it serves, print swoosh's banner, and run the exposer and the control socket with the
+    /// live cut wired. A service stays gated unless `--public` opens it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the run is handed the claim and the expose context's parts, each a separate fact the \
+                  composition root resolved; bundling them again would only move the list"
+    )]
     async fn run_serve<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
+        claim: Claim,
         host_seed: [u8; 32],
         gate: Gate,
         cut: AnchorCut,
@@ -370,11 +455,18 @@ impl ServeCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        let mut requested: Vec<String> = if self.services.is_empty() {
-            DEFAULT_SERVICES.iter().map(|s| (*s).to_owned()).collect()
-        } else {
-            self.services.clone()
-        };
+        let Claim {
+            started,
+            lock,
+            listener,
+        } = claim;
+        let mut requested = started.entries();
+        // The served names in the order the person gave them, for the banner and the per-service lines:
+        // read before the fetch and receive services are pulled out below.
+        let names: Vec<String> = requested
+            .iter()
+            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
+            .collect();
         // Every node answers its own `control.stop` and member-only `control.services`, always, whatever
         // else it serves: the node-lifecycle control surface is part of being a node, not a service the
         // operator opts into. Both are MEMBER-only (`.member_service` below): the gate admits a family
@@ -382,35 +474,21 @@ impl ServeCmd {
         // whole-node member BEFORE any `Response::Ok`, so a delegate holding a `control.stop` slip cannot
         // stop the node.
         //
-        // They are bound by VALUE, not named in the `name=addr` set: the scheme namespace left tightbeam's
-        // public API, so a handler route is a `.service(name, value)` call, never a spellable addr.
-        //
         // Pull each fetch service out of the requested set BEFORE the router binds it, and de-merge: every
         // `name=fetch:<origin>` becomes its OWN handler instance holding ONLY its own origin scope. A public
         // fetch handler therefore physically holds only its own origins and cannot reach a gated fetch's
         // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention.
         let fetch = FetchScope::extract(&mut requested)?;
-        // De-merge the receive services the SAME way: every `name=recv:<dir>` becomes its OWN
-        // `Recv` instance bound to ONLY its own output directory, so `a=recv:/x b=recv:/y` writes alice's
-        // pushes into /x and bob's into /y, each scoped to its own service and grant. A public fetch's
-        // SSRF-pivot argument does not apply (recv is always gated), so this is the plain per-instance
-        // de-merge without an open-relay wall. A `name=recv:` (no dir) saves into `.`.
+        // De-merge the receive services the SAME way: every `name=recv:<dir>` becomes its OWN `Recv`
+        // instance bound to ONLY its own output directory.
         let recv = extract_recv_services(&mut requested)?;
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
-        // `--expires` timer, the gated `control.stop` handler, and (under `--resident`) the local socket
-        // `Stop` each hold a CLONE as the node-control capability: they may REQUEST the stop, never tear
-        // the node down themselves. So this one token is the join point for every way the node can stop:
-        // a Ctrl-C, a `--expires` deadline, a remote `swoosh stop`, or the local socket stop.
+        // `--expires` timer, the gated `control.stop` handler, and the local socket `Stop` each hold a
+        // CLONE as the node-control capability: they may REQUEST the stop, never tear the node down
+        // themselves.
         let cancel = CancellationToken::new();
         // The node BASE gate is the one the composition root built, the same in every standing. Opening
         // individual services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
-        //
-        // One `Router`: each route binds a handler VALUE (the engine handlers, roster, stop, the fetch and
-        // recv instances) or tightbeam's own primitives (forwards, raw streams, the `echo:` reflector)
-        // through the `name=addr` grammar. The public overlays prove at `.expose()` below, so
-        // prove-before-announce holds. The operator's `--public` set was parsed at the clap boundary, under
-        // the same name rule and fold as the entries, and drives the overlay, the per-route diagnostic engine (the metered engine for an open name,
-        // the owner engine otherwise), and the per-service fetch posture (one source of truth).
         let public = self.public.clone();
         let mut router = Router::new(gate);
         for entry in &requested {
@@ -420,10 +498,9 @@ impl ServeCmd {
         // exchange on it. Bound by the node, never by an entry, and dotted, so no typed name reaches it.
         router = router.member_service(SYNC_SERVICE.parse()?, Exchange::new(home.clone()))?;
         for scoped in fetch.services() {
-            // One engine handler per fetch service, holding ONLY its own origin scope: the SSRF pivot is
-            // unrepresentable, not merely refused. An unconstrained scope is the NEVER engine (the open
-            // proof refuses to expose it); a non-empty scope is the OPT-IN engine, which applies the
-            // 16 MiB/30s responder bounds by construction.
+            // One engine handler per fetch service, holding ONLY its own origin scope. An unconstrained
+            // scope is the NEVER engine (the open proof refuses to expose it); a non-empty scope is the
+            // OPT-IN engine, which applies the 16 MiB/30s responder bounds by construction.
             let name = scoped.name().parse()?;
             router = if scoped.allow().is_unconstrained() {
                 router.service(name, ::fetch::Fetch)?
@@ -434,180 +511,111 @@ impl ServeCmd {
             };
         }
         // The node's activity renderer, or none at all under `--quiet`: with no renderer no engine gets a
-        // sink, so quiet silences every activity line by construction and no log directive can bring one
-        // back. Activity rides stderr beside the diagnostics, keeping stdout to the banner.
+        // sink, so quiet silences every activity line by construction.
         let activity = self.activity(std::io::stderr())?;
         for service in &recv {
-            // One `Recv` instance per receive service, holding ONLY its own output dir, so a push to one
-            // receive service can never land in another's directory. Its sink carries the route's own
-            // name, so the line says which receive service a file landed through.
+            // One `Recv` instance per receive service, holding ONLY its own output dir.
             let name: Service = service.name().parse()?;
             router = bind_recv(router, name, service.out().to_owned(), activity.as_ref())?;
         }
-        // The two node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the
-        // route's access class after the gate admits and before any `Response::Ok`, so a delegated slip
-        // that grants `control.stop`/`control.services` is refused with the same uniform refusal a gate
-        // miss gives, pre-Ok. Access is a property of the route, declared at the bind.
+        // The node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the route's
+        // access class after the gate admits and before any `Response::Ok`.
         router = router.member_service(CONTROL_STOP_SERVICE.parse()?, Stop::new(cancel.clone()))?;
-        // Refuse an unconstrained PUBLIC fetch per-service: for each fetch service NAMED in `--public`
-        // whose allowlist is unconstrained, bail at build time (an open egress relay). With per-service
-        // scopes in hand this reasons about "is THIS public fetch unconstrained", so a second origin-scoped
-        // fetch can no longer mask a named public one.
+        // Refuse an unconstrained PUBLIC fetch per-service at build time (an open egress relay).
         fetch.refuse_open_relay(&self.public)?;
-        // Declare both open overlays from the operator's raw names: the safe `--public` set and the
-        // distinct, louder `--public-unsafe` raw-stream set. The proof (an unknown name, a `Never` handler,
-        // a raw stream in the safe set, a handler in the unsafe set) runs at `.expose()` below, before any
-        // banner advertises a service it will not serve.
+        // Declare both open overlays from the operator's raw names. The proof runs at `.expose()` below,
+        // before anything is recorded or a banner advertises a service it will not serve.
         router = router
             .public(public)
             .public_unsafe(self.public_unsafe.clone());
-        // Snapshot the served catalog (names + effective PER-SERVICE posture: open iff opened by an
-        // overlay, else gated) ONCE, here, for the `control.services` read handler AND the resident socket
-        // read to serve. Both serve the same snapshot. `self_listing` renders the one row being built:
-        // `control.services` itself, always gated (a `Never` route can never be open).
+        // Snapshot the served catalog ONCE, here, for the `control.services` read handler AND the control
+        // socket read to serve. `self_listing` renders the one row being built: `control.services` itself.
         let catalog = router.catalog(Some(CONTROL_SERVICES_SERVICE.parse()?));
         let router = router.member_service(
             CONTROL_SERVICES_SERVICE.parse()?,
             ServiceList::new(catalog.clone()),
         )?;
-        // Wire the live enable/disable oracle alongside the proven public overlay: a stream for a
-        // service named in `<home>/disabled` is refused at the gate seam, live, and a re-enable restores it
-        // with no restart. `with_enabled` cannot fail (it only stores the oracle), so it tails the chain.
-        //
-        // The live cut reads the one pin and the one revocation instance the gate reads: a session admitted
-        // on a cap since revoked, rooted at a key since disabled, anchored at a root no longer pinned, or
-        // held by a device key since revoked, ends itself within a sweep rather than running on.
+        // Wire the live enable/disable oracle and the live cut beside the proven public overlay.
         let exposer = router.expose()?.with_enabled(enabled).with_live_cuts(cut);
-        // Prove the transport can carry this gate BEFORE announcing readiness or binding the resident
-        // socket: a rooted gate over a transport that does not prove the peer refuses here with the
-        // teaching error, never after a "ready" banner the node cannot honor (and never with a lock or
-        // socket taken for a serve that cannot arm).
+        // Prove the transport can carry this gate BEFORE recording or announcing anything.
         exposer
             .prove_security::<T>()
             .wrap_err(
                 "bare quirk cannot serve: it does not prove the peer's key; use `--transport quirk+noise`",
             )?;
 
-        // ONE expansion of this bind, read by BOTH the resident arm's status address and the banner
-        // below it. Expanding twice put a `getifaddrs` on either side of the flock and the unix bind,
-        // and a VPN or a wifi flap in that window makes the status address and the banner's lead line
-        // name different hosts. Bind truth cannot disagree with itself; the interface list very much
-        // can, so it is read once. Still lazy: a plain quiet serve reads neither, so it performs no
-        // new syscall at all.
-        // Expanded here ONLY for the resident arm, which needs the status address before the
-        // banner runs. The banner expands for itself when this is `None`, so a plain serve is
-        // still one expansion and a quiet non-resident serve is still none. Gating this on
-        // `resident || !quiet` instead would make `None` unreachable at the banner and leave a
-        // state that cannot happen to be handled there anyway.
-        let dialable = self.resident.then(|| Dialable::of(node.bound_sockets()));
+        // The routes bound: only now is a named list recorded for the next bare `serve`, and are the
+        // services it named turned back on. A bare `serve` changes neither, and says which of its services
+        // are off.
+        started.record(&home)?;
+        match &started {
+            Started::Named(_) => toggle::turn_on(&home, names.iter().map(String::as_str))?,
+            Started::Resumed(_) | Started::Default => {
+                let off = toggle::disabled(&home)?;
+                for name in names.iter().filter(|name| off.contains(*name)) {
+                    eprintln!(
+                        "{name} is off (swoosh service off {name}); swoosh service on {name} turns it \
+                         back on."
+                    );
+                }
+            }
+        }
 
-        // The resident listener arm (S4), after the proven overlay so a refused serve never binds
-        // a socket. Order: (1) plain serve acquires nothing (byte-identical, no dir, no lock, no
-        // socket); (2) `--resident` acquires single-instance off the THREADED home (flock truth +
-        // bound listener, held for life); the LIVE catalog snapshot above plus a CLONE of the node's
-        // one teardown token ride the `Resident` state the accept loop serves from. The bound
-        // address rides along as the status `addr`, carried with the arm (no second `local_addr`).
-        let resident = if self.resident {
-            // The per-user runtime root, resolved ONCE here at the serve edge and handed to the lock
-            // module as a value: `single` never reads `XDG_RUNTIME_DIR`/`confstr`, so a test drives
-            // `acquire` with its own temp root and no process-global environment mutation. Resolution
-            // stays inside the `--resident` branch (a plain serve must not need a runtime root) and at
-            // the same point the acquire runs, so the unset/relative-XDG refusal and its timing are
-            // unchanged.
-            let runtime_root = swoosh::home::runtime_root()
-                .map_err(|error| eyre::eyre!("could not resolve the runtime root: {error}"))?;
-            let addr = node.local_addr();
-            // The status address is the first entry of the bind's own dialable set, the address the
-            // banner leads with: a peer elsewhere can route to it where one exists, and it falls back
-            // to loopback on a host that has nothing else. `local_addr().hints` cannot stand in, since
-            // it rewrites every wildcard bind to loopback.
-            let status_addr = dialable
-                .as_ref()
-                .and_then(|dialable| dialable.all().first())
-                .map(|at| at.socket);
-            Some(self.resident_parts(
-                &home,
-                &runtime_root,
-                tightbeam::tunnel::ServiceCatalog::clone(&catalog),
-                addr.node,
-                status_addr,
-                &cancel,
-            )?)
-        } else {
-            None
-        };
+        // ONE expansion of this bind, read by both the control socket's status address and the transport
+        // block, so the two can only ever name the same host.
+        let dialable = Dialable::of(node.bound_sockets());
+        // The status address is the first entry of the bind's own dialable set: a peer elsewhere can route
+        // to it where one exists, and it falls back to loopback on a host that has nothing else.
+        let status_addr = dialable.all().first().map(|at| at.socket);
+        let addr = node.local_addr();
+        let resident = std::sync::Arc::new(Resident::new(
+            addr.node,
+            status_addr,
+            tightbeam::tunnel::ServiceCatalog::clone(&catalog),
+            home.disabled(),
+            cancel.clone(),
+        ));
 
         if !self.quiet {
-            // The id comes from `local_addr`; the addresses to hand over come from the one expansion
-            // above, which the resident arm's status address was read from too, so the two can only
-            // ever name the same host.
-            let addr = node.local_addr();
-            // The resident arm's expansion when there was one, so the status address and the banner
-            // can only ever name the same host; otherwise this is the only one taken.
-            let dialable = dialable.unwrap_or_else(|| Dialable::of(node.bound_sockets()));
-            // A display map of served name -> target address, read off the SAME requested strings the router
-            // bound (fetch already de-merged out), so the banner renders `name -> target` from what the
-            // operator wrote, while tightbeam's manifest declares the load-bearing facts (posture, kind, the
-            // unmetered caveat). Fetch names are handled by gloss (their addr carries the origin scope).
-            let mut addr_by_name = display_targets(&requested)?;
-            for service in &recv {
-                // Receive services are de-merged out of `requested` (their dir is not an addr the router can
-                // read), so re-add each under its served name pointing at the `recv:` scheme. The banner then
-                // renders it through the SAME handler-scheme path as any other handler (`in -> recv`,
-                // "receives pushed files"), never leaking the synthetic scheme.
-                addr_by_name.insert(service.name().to_owned(), format!("{RECV_SCHEME}:"));
-            }
-            let fetch_names: HashSet<String> = fetch
-                .services()
-                .iter()
-                .map(|s| s.name().to_owned())
-                .collect();
-            // Reach-kind is the selected transport, not an inference from whether hints are present (which
-            // conflates the channel with the hint state): iroh routes across the internet, quirk is
-            // direct-only. How far the advertisement reaches is a SEPARATE fact, attached by the
-            // composition root from the SAME `advertise` call that composed discovery, so the banner
-            // reports what was published rather than assuming it.
-            let reach = ReachKind::of(self.reach.transport, self.reach.local);
-            let Some(mdns) = self.mdns.as_ref() else {
-                eyre::bail!(
-                    "internal: serve reached its banner without the mDNS state (composition-root bug)"
-                );
-            };
-            let stop_line = match self.expires {
-                Some(lifetime) => {
-                    format!(
-                        "runs for {}, then stops (or ctrl-c)",
-                        humanize_secs(lifetime.duration().as_secs())
-                    )
-                }
-                None => "ctrl-c to stop".to_owned(),
-            };
             let manifest = exposer.manifest();
-            let resident_socket = resident.as_ref().map(|(_, _, lock)| lock.socket_path());
-            let control_line = self.control_line(resident_socket);
-            print!(
-                "{}",
-                render_ready_banner(
-                    &addr.node.to_string(),
-                    reach,
+            let transport = match (self.verbose, self.mdns.as_ref()) {
+                (false, _) => None,
+                (true, Some(mdns)) => Some(reach_section(
+                    ReachKind::of(self.reach.transport, self.reach.local),
                     mdns,
                     &self.bound_reach,
                     &dialable,
-                    &manifest,
-                    &addr_by_name,
-                    &fetch_names,
+                )),
+                (true, None) => eyre::bail!(
+                    "internal: serve reached its banner without the mDNS state (composition-root bug)"
+                ),
+            };
+            let stop_line = match self.expires {
+                Some(lifetime) => format!(
+                    "runs for {}, then stops (or ctrl-c)",
+                    humanize_secs(lifetime.duration().as_secs())
+                ),
+                None => "ctrl-c to stop".to_owned(),
+            };
+            let keeper = keeper_line(
+                supervised(|name| std::env::var_os(name)),
+                std::io::stderr().is_terminal(),
+                Keeper::here,
+            );
+            print!(
+                "{}",
+                render_banner(
+                    &addr.node.to_string(),
+                    &serving_line(&names, &manifest, started.is_resumed()),
+                    transport.as_deref(),
+                    keeper,
                     &stop_line,
-                    control_line.as_deref(),
                 )
             );
         }
 
-        // The acquire above already ran: nothing new executes here. Plain serve ran nothing at all
-        // (the flag defaults off), so it stays byte-identical: no dir, no lock, no socket.
-        //
         // An `--expires` deadline is a LOCAL timer with no security surface: after it elapses it cancels the
-        // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives. Spawn it
-        // beside the run holding a CLONE of the one token; if no `--expires` is set, no timer is spawned.
+        // node's teardown token, the same graceful stop a Ctrl-C or a remote `control.stop` gives.
         if let Some(lifetime) = self.expires {
             let cancel = cancel.clone();
             let deadline = lifetime.duration();
@@ -617,114 +625,22 @@ impl ServeCmd {
             });
         }
 
-        // Run until a stop, distinguishing a GRACEFUL stop (an owner-requested `control.stop` or a `--expires`
-        // deadline, or a Ctrl-C) from an ERRORED teardown. The exposer returns `Ok` when the token fires and
-        // an `Err` only on a real failure, so `run_until_stopped` maps that into a typed [`Stopped`] reason
-        // for a graceful end and propagates the error otherwise. A requested stop is SUCCESS: a deliberate
-        // `swoosh stop` (or a timer, or a Ctrl-C) must exit 0 so a CI action reads a clean teardown as
-        // green, not a crash; only a genuine error teardown exits non-zero. The resident arm (when `Some`)
-        // joins as the third select arm there; plain serve passes `None`, so nothing new executes.
-        // Beside the run, this node's own exchanges with your devices: they end when the run does.
+        // Run until a stop, distinguishing a GRACEFUL stop from an ERRORED teardown: a requested stop is
+        // SUCCESS (exit 0, so a CI action reads a clean teardown as green); only a genuine error exits
+        // non-zero. Beside the run, this node's own exchanges with your devices: they end when the run does.
         let stopped = tokio::select! {
-            stopped = self.run_until_stopped(exposer, node, cancel, resident) => stopped?,
+            stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock) => stopped?,
             () = sync_rounds(node, &home) => unreachable!("the rounds run until the node stops"),
         };
-        // The teardown line is best-effort: a piped consumer (a supervisor, `swoosh serve | head`) may have
-        // already closed stdout by the time the node stops, so a broken-pipe write must NOT turn a clean stop
-        // into a panic. `println!` panics on a write error, so write directly and ignore a closed pipe.
+        // The teardown line is best-effort: a piped consumer may have already closed stdout by the time
+        // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic.
         {
             use std::io::Write as _;
             let _ = writeln!(std::io::stdout(), "{}", stopped.message());
         }
         // The bound node's teardown (iroh's graceful `Endpoint::close`) is owned by the composition root,
-        // which closes it after every reaching verb returns; `serve` only drives the exposer's own graceful
-        // drain above, then hands back so the root closes once for the whole family.
+        // which closes it after every reaching verb returns.
         Ok(())
-    }
-
-    /// Drive the exposer until it stops, returning WHY it stopped for a graceful end or propagating the
-    /// error for a failed teardown. The one seam that classifies a stop: the exposer's `run` returns `Ok`
-    /// the instant the teardown token fires (an owner's `control.stop`, or a `--expires` deadline) and an `Err`
-    /// only on a real failure, so an `Ok` return is a [`Stopped::Requested`]; a Ctrl-C is a
-    /// [`Stopped::Interrupted`] (the local operator asking for the same graceful stop). A returned `Err` is
-    /// a genuine teardown failure the caller propagates, so the process exits non-zero ONLY then.
-    ///
-    /// Under `--resident` the control listener joins as a THIRD arm beside the exposer and Ctrl-C:
-    /// it serves the local socket until the same token fires, then the teardown unlinks the socket
-    /// and drops the lock. Without `--resident` nothing new executes (the arm is absent, not idle).
-    /// Because the socket `Stop` cancels the SAME token the exposer watches, every resident arm
-    /// classifies its result from the recorded [`StopSource`] rather than from the arm that won
-    /// the poll: a socket stop renders [`Stopped::Local`], a wire
-    /// `control.stop` or a `--expires` deadline renders [`Stopped::Requested`], and a Ctrl-C records
-    /// itself and renders [`Stopped::Interrupted`], so the kinds never collapse into one.
-    #[allow(clippy::too_many_arguments)]
-    async fn run_until_stopped<T: Transport, D: Discovery>(
-        &self,
-        exposer: Exposer,
-        node: &Node<T, D>,
-        cancel: CancellationToken,
-        resident: Option<(
-            Arc<Resident>,
-            std::os::unix::net::UnixListener,
-            InstanceLock,
-        )>,
-    ) -> eyre::Result<Stopped>
-    where
-        <T::Session as Session>::Write: Send + 'static,
-        <T::Session as Session>::Read: Send + 'static,
-    {
-        // The exposer owns the teardown: it returns when the token fires (a `--expires` deadline, or an admitted
-        // `control.stop` caller). A Ctrl-C is the same graceful stop, driven here by cancelling the token so
-        // there is ONE stop path, then letting the run finish.
-        let stopped = match resident {
-            None => {
-                tokio::select! {
-                    result = exposer.run(node, cancel.clone()) => {
-                        // `Ok` here means the token fired (a requested stop): success. An `Err` is a real teardown
-                        // failure, propagated so the process exits non-zero (the one non-zero path).
-                        result?;
-                        Stopped::Requested
-                    }
-                    signalled = tokio::signal::ctrl_c() => {
-                        // A failure INSTALLING the signal handler is a real error (propagate); an actual Ctrl-C is a
-                        // graceful interrupt, so cancel the one token and let the run finish, then report it.
-                        signalled?;
-                        cancel.cancel();
-                        Stopped::Interrupted
-                    }
-                }
-            }
-            Some((state, listener, lock)) => {
-                // The stop source is read AFTER the select, never inferred from the arm that won:
-                // a socket `Stop` records its kind and cancels the same token the exposer watches,
-                // so both the exposer arm and the resident arm become ready together and tokio may
-                // complete either. Classifying from the record keeps the socket stop on the local
-                // line even when the exposer arm wins the poll, while a wire `control.stop` (which
-                // records nothing) still renders as the requested stop.
-                let source = state.stop_source();
-                let resident = state.serve(listener);
-                tokio::select! {
-                    result = exposer.run(node, cancel.clone()) => {
-                        result?;
-                        lock.release();
-                        classify_stop(source.first())
-                    }
-                    output = resident => {
-                        output?;
-                        lock.release();
-                        classify_stop(source.first())
-                    }
-                    signalled = tokio::signal::ctrl_c() => {
-                        signalled?;
-                        source.note(StopKind::Interrupted);
-                        cancel.cancel();
-                        lock.release();
-                        classify_stop(source.first())
-                    }
-                }
-            }
-        };
-        Ok(stopped)
     }
 
     /// The activity renderer this serve writes onto `out`, or `None` under `--quiet`. The one gate for the
@@ -739,50 +655,186 @@ impl ServeCmd {
         let activity = Activity::spawn(out).wrap_err("could not start the activity renderer")?;
         Ok(Some(activity))
     }
+}
 
-    /// The resident control line for the banner, under `--resident` only: `control <socket path>
-    /// (local, this user)`. `None` for a plain serve (no line, byte-identical output). The socket
-    /// path comes from the acquired lock (the threaded home, never a re-derive), so the banner names
-    /// the same path the listener bound and future clients dial.
-    fn control_line(&self, socket: Option<&Path>) -> Option<String> {
-        if !self.resident {
-            return None;
+/// Drive the exposer and the control socket until the node stops, returning WHY it stopped for a graceful
+/// end or propagating the error for a failed teardown.
+///
+/// The control listener runs beside the exposer and Ctrl-C: it serves the local socket until the same
+/// token fires, then the teardown unlinks the socket and drops the lock. Because the socket `Stop` cancels
+/// the SAME token the exposer watches, every arm classifies its result from the recorded [`StopKind`]
+/// rather than from the arm that won the poll: a socket stop renders [`Stopped::Local`], a wire
+/// `control.stop` or a `--expires` deadline renders [`Stopped::Requested`], and a Ctrl-C records itself and
+/// renders [`Stopped::Interrupted`], so the kinds never collapse into one.
+async fn run_until_stopped<T: Transport, D: Discovery>(
+    exposer: Exposer,
+    node: &Node<T, D>,
+    cancel: CancellationToken,
+    resident: std::sync::Arc<Resident>,
+    listener: std::os::unix::net::UnixListener,
+    lock: InstanceLock,
+) -> eyre::Result<Stopped>
+where
+    <T::Session as Session>::Write: Send + 'static,
+    <T::Session as Session>::Read: Send + 'static,
+{
+    let source = resident.stop_source();
+    let control = resident.serve(listener);
+    // A service manager stops `serve` with SIGTERM (`brew services stop`, `systemctl --user stop`): it is
+    // the same graceful stop as a ctrl-c, so the socket goes with the process.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .wrap_err("could not watch for SIGTERM")?;
+    let stopped = tokio::select! {
+        result = exposer.run(node, cancel.clone()) => {
+            result?;
+            lock.release();
+            classify_stop(source.first())
         }
-        let path = socket
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "<socket>".to_owned());
-        Some(format!("control {path} (local, this user)"))
+        output = control => {
+            output?;
+            lock.release();
+            classify_stop(source.first())
+        }
+        signalled = tokio::signal::ctrl_c() => {
+            signalled?;
+            source.note(StopKind::Interrupted);
+            cancel.cancel();
+            lock.release();
+            classify_stop(source.first())
+        }
+        _ = terminate.recv() => {
+            source.note(StopKind::Interrupted);
+            cancel.cancel();
+            lock.release();
+            classify_stop(source.first())
+        }
+    };
+    Ok(stopped)
+}
+
+/// The `serving:` line's body: each served name in the order it was given, with who reaches it, and
+/// " (as last time)" when the list was resumed. A name the run opened to anyone says so, which is how a
+/// `--public` typed on a bare `serve` shows on screen. An internal `control.*` route is never listed.
+fn serving_line(names: &[String], manifest: &[ManifestEntry], resumed: bool) -> String {
+    let mut line = names
+        .iter()
+        .filter(|name| !name.starts_with("control."))
+        .map(|name| {
+            let open = manifest
+                .iter()
+                .any(|entry| entry.name == *name && entry.posture == Posture::Open);
+            let who = if open { "anyone" } else { "your devices" };
+            format!("{name} ({who})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if resumed {
+        line.push_str(" (as last time)");
+    }
+    line
+}
+
+/// The banner, as ONE string printed once: this machine's key, what it serves, the transport block under
+/// `--verbose`, the service-manager line where one applies, and how to stop.
+fn render_banner(
+    key: &str,
+    serving: &str,
+    transport: Option<&str>,
+    keeper: Option<&str>,
+    stop_line: &str,
+) -> String {
+    let mut out = format!("key: {key}\nserving: {serving}\n");
+    if let Some(transport) = transport {
+        out.push('\n');
+        out.push_str(transport);
+        out.push('\n');
+    }
+    if let Some(keeper) = keeper {
+        out.push_str(keeper);
+        out.push('\n');
+    }
+    out.push_str(stop_line);
+    out.push('\n');
+    out
+}
+
+/// Whether a service manager already runs this `serve`: systemd sets `INVOCATION_ID` or `JOURNAL_STREAM`,
+/// and launchd sets `XPC_SERVICE_NAME` to something other than `0` (a Terminal session sets it to `0`).
+fn supervised(var: impl Fn(&str) -> Option<OsString>) -> bool {
+    var("INVOCATION_ID").is_some()
+        || var("JOURNAL_STREAM").is_some()
+        || var("XPC_SERVICE_NAME").is_some_and(|value| value != "0")
+}
+
+/// The line that says how to keep this machine serving after a reboot: printed only by a `serve` that no
+/// service manager runs, started from a terminal. `keeper` is asked only then, since on macOS it runs
+/// `brew --prefix`.
+fn keeper_line(
+    supervised: bool,
+    stderr_terminal: bool,
+    keeper: impl FnOnce() -> Keeper,
+) -> Option<&'static str> {
+    if supervised || !stderr_terminal {
+        return None;
+    }
+    Some(keeper().line())
+}
+
+/// The service manager that keeps a `serve` running on this machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keeper {
+    /// Homebrew's, for a binary installed under `brew --prefix`.
+    Brew,
+    /// systemd's user manager, on Linux.
+    Systemd,
+    /// Anything else: the page that shows how.
+    Elsewhere,
+}
+
+impl Keeper {
+    /// The keeper for this machine and this binary.
+    fn here() -> Self {
+        if cfg!(target_os = "linux") {
+            return Self::Systemd;
+        }
+        if cfg!(target_os = "macos") && under_brew() {
+            return Self::Brew;
+        }
+        Self::Elsewhere
     }
 
-    /// Start the resident arm off the threaded home and the composition edge's resolved runtime
-    /// `root`: the flock truth plus the bound listener (held for process life), the live catalog
-    /// snapshot, and a clone of the node's one teardown token. A method so the acquire reads as part
-    /// of the serve run, not a free helper beside it.
-    fn resident_parts(
-        &self,
-        home: &Home,
-        runtime_root: &Path,
-        catalog: tightbeam::tunnel::ServiceCatalog,
-        node_id: NodeId,
-        addr: Option<SocketAddr>,
-        cancel: &CancellationToken,
-    ) -> eyre::Result<(
-        Arc<Resident>,
-        std::os::unix::net::UnixListener,
-        InstanceLock,
-    )> {
-        let (lock, listener) =
-            acquire_single(home, runtime_root).map_err(|error| eyre::eyre!(error))?;
-        let disabled_path = home.disabled();
-        let state = Arc::new(Resident::new(
-            node_id,
-            addr,
-            catalog,
-            disabled_path,
-            cancel.clone(),
-        ));
-        Ok((state, listener, lock))
+    /// The line naming how to keep this machine serving after a reboot.
+    fn line(self) -> &'static str {
+        match self {
+            Self::Brew => "to keep this machine serving after a reboot: brew services start swoosh",
+            Self::Systemd => {
+                "to keep this machine serving after a reboot: systemctl --user enable --now swoosh"
+            }
+            Self::Elsewhere => {
+                "to keep this machine serving after a reboot: see docs/use-cases/run-at-login.md"
+            }
+        }
     }
+}
+
+/// Whether this binary sits under `brew --prefix`, the one install `brew services` can start.
+fn under_brew() -> bool {
+    let Ok(output) = std::process::Command::new("brew")
+        .arg("--prefix")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let prefix = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let prefix = std::fs::canonicalize(&prefix).unwrap_or(prefix);
+    std::env::current_exe()
+        .and_then(std::fs::canonicalize)
+        .is_ok_and(|exe| exe.starts_with(prefix))
 }
 
 /// When a `serve` first exchanges with your devices after it starts.
@@ -825,25 +877,6 @@ async fn sync_rounds<T: Transport, D: Discovery>(node: &Node<T, D>, home: &Home)
     }
 }
 
-/// Build the `name -> target` display map from the SAME requested strings the router bound: each
-/// `name=addr`. This is swoosh's own render vocabulary; tightbeam's manifest supplies the load-bearing
-/// facts (posture, kind, the unmetered caveat). Fetch entries are already de-merged out of `requested`,
-/// so they never appear here (the banner glosses them by name instead, their addr being an origin scope).
-/// A bare entry (no `=`) is a teaching error, mirroring tightbeam's `name=addr` grammar.
-fn display_targets(requested: &[String]) -> eyre::Result<HashMap<String, String>> {
-    let mut map = HashMap::with_capacity(requested.len());
-    for entry in requested {
-        let Some((name, addr)) = entry.split_once('=') else {
-            eyre::bail!(
-                "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
-                 `ping=ping:`, `web=tcp:127.0.0.1:8080`"
-            );
-        };
-        map.insert(name.to_owned(), addr.to_owned());
-    }
-    Ok(map)
-}
-
 /// How peers reach this node, for the banner's `how peers reach you` section: whether the bound transport
 /// routes across the internet (an `internet` channel) or is local/direct-only. Read off the SELECTED
 /// transport and bind mode at the composition seam, never inferred from whether hints are present (that
@@ -873,173 +906,6 @@ impl ReachKind {
             }
         }
     }
-}
-
-/// The posture group a served service sits under in the banner, safest-first. The security weight lives on the
-/// GROUP and escalates monotonically DOWN the list: `FamilyGated` (no overlay) <
-/// `Public` (an open overlay) < `PublicUnsafe` (the loudest). A per-service caveat (an unmetered one) is quiet inline
-/// prose, never a marker louder than the group above it, so a reader can never conclude a `public` service is
-/// scarier than a `public-UNSAFE` one. Ordered so the derived `Ord` IS the safest-first render order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Group {
-    FamilyGated,
-    Public,
-    PublicUnsafe,
-}
-
-impl Group {
-    /// Which group a service sits under: gated is always family-gated; an OPEN raw stream is the loudest
-    /// (public-UNSAFE: raw bytes to anyone), any other open service is public. Reads the manifest's declared
-    /// posture + kind, so the split is tightbeam's, not a swoosh string match.
-    fn of(entry: &ManifestEntry) -> Self {
-        match (entry.posture, entry.kind) {
-            (Posture::Gated, _) => Self::FamilyGated,
-            (Posture::Open, TargetKind::RawStream) => Self::PublicUnsafe,
-            (Posture::Open, _) => Self::Public,
-        }
-    }
-
-    /// The header this group renders: its name carrying the monotonic danger marker, and its one-line
-    /// audience gloss. The marker escalates down the list and is the ONLY loud danger glyph in the section.
-    fn header(self) -> (&'static str, &'static str) {
-        match self {
-            Self::FamilyGated => ("family-gated", "your devices + peers you've granted"),
-            Self::Public => ("public !", "anyone, unauthenticated"),
-            Self::PublicUnsafe => ("public-UNSAFE !!", "raw bytes to anyone who connects"),
-        }
-    }
-}
-
-/// The gloss for a named engine's scheme, the terse right-column description.
-/// An unrecognized scheme falls back to a plain `<scheme> service`, so a future handler still renders a line.
-fn handler_gloss(scheme: &str) -> String {
-    match scheme {
-        "ping" => "round-trip probe".to_owned(),
-        "speed" => "throughput test".to_owned(),
-        "sshd" => "a shell on this machine".to_owned(),
-        "recv" => "receives pushed files".to_owned(),
-        other => format!("{other} service"),
-    }
-}
-
-/// The rendered `<label>` and `<gloss>` for one service row: `name -> target` when the name points elsewhere
-/// (`ssh -> sshd`, `logs -> file:...`), or just `name` when the name IS the target scheme (`speed`). Fetch
-/// services gloss by name (their synthetic scheme is unspellable). The KIND is tightbeam's declared
-/// [`TargetKind`] (handler vs raw stream); within the handler kind the operator's typed target distinguishes
-/// the built-in forward and the `echo:` reflector from a named engine, because both built-ins are
-/// first-party handlers now and carry no addr tail of their own.
-fn describe(
-    entry: &ManifestEntry,
-    addr_by_name: &HashMap<String, String>,
-    fetch_names: &HashSet<String>,
-) -> (String, String) {
-    let name = entry.name.as_str();
-    // A de-merged fetch's row glosses by name only (its origin is not reconstructed here, the synthetic
-    // scheme being unspellable). `fetches URLs for callers` names the object for parallelism with the
-    // sibling glosses (`receives pushed files`, the round-trip probes).
-    if fetch_names.contains(name) {
-        return (name.to_owned(), "fetches URLs for callers".to_owned());
-    }
-    let addr = addr_by_name
-        .get(name)
-        .map(String::as_str)
-        .unwrap_or_default();
-    match entry.kind {
-        TargetKind::Handler => {
-            // tightbeam's built-in loopback reflector: it opens no host resource and reflects only the
-            // caller's own bytes, so it carries no danger gloss (an open echo sits in the plain `public`
-            // group, never `public-UNSAFE`). The name reads alone (like `speed`), the target being the
-            // built-in itself.
-            if addr == "echo:" {
-                return (name.to_owned(), "echoes your bytes back to you".to_owned());
-            }
-            // tightbeam's built-in local forward (`tcp:<host>:<port>` / `unix:<path>`): a socket the
-            // operator deliberately stood up, glossed as such.
-            if is_forward(addr) {
-                return (format!("{name} -> {addr}"), "local TCP service".to_owned());
-            }
-            let scheme = addr.strip_suffix(':').unwrap_or(addr);
-            let label = if name == scheme {
-                name.to_owned()
-            } else {
-                format!("{name} -> {scheme}")
-            };
-            (label, handler_gloss(scheme))
-        }
-        // The label keeps the operator's typed target (`logs -> file:~/...`); the GLOSS is where the danger
-        // is loud. An OPEN raw stream names the RESOLVED ABSOLUTE source (from tightbeam's declared
-        // `raw_source`, not the un-resolved typed string) so the warning shows the exact bytes at risk; the
-        // loud path is reserved for the actually-open case, so it fires exactly where the danger is. A GATED
-        // raw stream keeps the quiet gloss (the family gate terminates it).
-        TargetKind::RawStream => {
-            let gloss = match (entry.posture, &entry.raw_source) {
-                (Posture::Open, Some(RawSource::Path(absolute))) => {
-                    format!("serving the raw bytes of {absolute} to anyone, no auth")
-                }
-                (Posture::Open, Some(RawSource::Stdin)) => {
-                    "serving this process's piped stdin to anyone, no auth".to_owned()
-                }
-                // Open but no declared source (defensive: a raw stream always declares one) or gated: the
-                // quiet gloss the family-gated case has always shown.
-                (Posture::Open, None) | (Posture::Gated, _) => {
-                    "streams raw bytes to any caller, no auth".to_owned()
-                }
-            };
-            (format!("{name} -> {addr}"), gloss)
-        }
-    }
-}
-
-/// Whether the operator's typed target is tightbeam's built-in local forward (`tcp:<host>:<port>` /
-/// `unix:<path>`) rather than a named engine. Both forwards and the `echo:` reflector are first-party
-/// [`Handler`]s, so the manifest's [`TargetKind`] names only handler-vs-raw-stream; the display map carries
-/// the finer render distinction. Now that every target carries a scheme this is the scheme test it always
-/// wanted to be: no port sniffing, and a host named like an engine can never read as one.
-fn is_forward(addr: &str) -> bool {
-    matches!(addr.split_once(':'), Some(("tcp" | "unix", _)))
-}
-
-/// Render the full readiness banner as ONE string (pure, so it is unit-testable and printed once): the
-/// `swoosh ready` header, the copy-clean node id, the `how peers reach you` section, the grouped `serving`
-/// section, and the stop line. Every line is a tell: no raw dial flags, no split posture, one
-/// monotonic danger vocabulary. Blank-line framed so the id (and any direct address) is copy-paste-clean.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the banner is assembled from independent facts (id, reach kind, mDNS state, the bound \
-              relay and resolver, the bind's dialable set, the declared manifest, swoosh's display map, \
-              the fetch names, the stop line); bundling them into one struct would only move the \
-              argument list, not remove it"
-)]
-fn render_ready_banner(
-    node_id: &str,
-    reach: ReachKind,
-    mdns: &MdnsState,
-    bound_reach: &Reach,
-    dialable: &Dialable,
-    manifest: &[ManifestEntry],
-    addr_by_name: &HashMap<String, String>,
-    fetch_names: &HashSet<String>,
-    stop_line: &str,
-    control_line: Option<&str>,
-) -> String {
-    let mut out = String::new();
-    out.push_str("swoosh ready\n\n");
-    // The FULL node id, alone, indented, blank-framed, no trailing gloss (a trailing label would spoil a
-    // select-to-end-of-line copy). The next section explains what the key is for.
-    out.push_str(&format!("    {node_id}\n\n"));
-    out.push_str(&reach_section(reach, mdns, bound_reach, dialable));
-    out.push('\n');
-    out.push_str(&serving_section(manifest, addr_by_name, fetch_names));
-    out.push('\n');
-    // Under `--resident` only, one extra line after the reach section: `control <socket path>
-    // (local, this user)`. Plain serve passes `None`, so its output is byte-identical to today.
-    if let Some(control) = control_line {
-        out.push_str(control);
-        out.push('\n');
-    }
-    out.push_str(stop_line);
-    out.push('\n');
-    out
 }
 
 /// The `how peers reach you` section: one channel per line with a short label column that scans at a glance.
@@ -1351,68 +1217,6 @@ fn emptied(dropped: &Expiring, chosen: &[&At]) -> Option<ScopeClass> {
 /// One `how peers reach you` line: `  <label padded>   <gloss>`.
 fn reach_line(width: usize, gutter: usize, label: &str, gloss: &str) -> String {
     format!("  {label:<width$}{:gutter$}{gloss}\n", "")
-}
-
-/// The `serving` section: services grouped by posture, safest-first, empty groups omitted. `control.*` folds
-/// to one line, glossed `never public` (it can never be opened with `--public`, unlike the other gated
-/// services). Within a group the gloss column aligns (per group, so a long raw-stream
-/// row never widens the tight family block). The danger weight is monotonic on the GROUP headers; a
-/// per-service unmetered caveat is quiet inline prose, never a marker louder than the group above it.
-fn serving_section(
-    manifest: &[ManifestEntry],
-    addr_by_name: &HashMap<String, String>,
-    fetch_names: &HashSet<String>,
-) -> String {
-    // (label, gloss, optional quiet caveat) rows per group; the manifest is already name-sorted, so rows keep
-    // that order. A BTreeMap keyed by `Group` iterates safest-first (the derived `Ord`).
-    let mut rows: BTreeMap<Group, Vec<(String, String, Option<String>)>> = BTreeMap::new();
-    let mut has_control = false;
-    for entry in manifest {
-        // `control.stop` / `control.services` fold into one row: node plumbing an operator never opts into,
-        // never a hidden service. Detected by the `control.` prefix, the verbatim wire family, which the
-        // update route every serve binds (`control.sync`) is part of.
-        if entry.name.starts_with("control.") {
-            has_control = true;
-            continue;
-        }
-        let (label, gloss) = describe(entry, addr_by_name, fetch_names);
-        let caveat = (entry.posture == Posture::Open
-            && matches!(entry.metering, Some(Metering::Unmetered)))
-        .then(|| "unmetered: a stranger can drain your uplink".to_owned());
-        rows.entry(Group::of(entry))
-            .or_default()
-            .push((label, gloss, caveat));
-    }
-    if has_control {
-        rows.entry(Group::FamilyGated).or_default().push((
-            "control.*".to_owned(),
-            "node control (never public)".to_owned(),
-            None,
-        ));
-    }
-
-    let mut out = String::from("serving\n");
-    for (group, group_rows) in &rows {
-        let (name, audience) = group.header();
-        // The header carries its audience on a fixed short gutter (so a long raw-stream row never shoves the
-        // header audience far to the right); the SERVICE ROWS align their gloss column among THEMSELVES, per
-        // group, so the tight family block is never widened by a long `public-UNSAFE` row below it.
-        out.push_str(&format!("  {name}   {audience}\n"));
-        let col = group_rows
-            .iter()
-            .map(|(label, _, _)| 4 + label.len())
-            .max()
-            .unwrap_or(0)
-            + 3;
-        for (label, gloss, caveat) in group_rows {
-            out.push_str(&format!("{:<col$}{gloss}", format!("    {label}")));
-            if let Some(caveat) = caveat {
-                out.push_str(&format!("   {caveat}"));
-            }
-            out.push('\n');
-        }
-    }
-    out
 }
 
 /// Render a count of seconds as a short human span (`5400` -> `1h 30m`, `3600` -> `1h`), so the

@@ -1,4 +1,4 @@
-//! Single-instance for `serve --resident`: the flock truth plus the socket rendezvous.
+//! Single-instance for `serve`: the flock truth plus the socket rendezvous, one per home.
 //!
 //! The LOCK FILE is the truth; the SOCKET is the rendezvous. Start: create and verify the 0700
 //! runtime chain, take `LOCK_EX | LOCK_NB` on `control.lock`, then connect-probe the socket. The
@@ -22,8 +22,17 @@ use crate::node_client::read_lock_pid;
 /// Why a resident start was refused.
 #[derive(Debug, thiserror::Error)]
 pub enum SingleError {
-    /// Another resident already holds this home's lock: the truth, read off the lock file.
-    #[error("a node is already resident here (pid {pid}); use --home for a second node")]
+    /// The socket path would not fit `sun_path` (104 bytes on macOS, 108 on Linux): binding it would
+    /// truncate it to a path another home could share.
+    #[error(
+        "the runtime directory's path is too long for a socket: set XDG_RUNTIME_DIR to a shorter one."
+    )]
+    SocketPathTooLong {
+        /// The socket path that does not fit.
+        path: PathBuf,
+    },
+    /// Another `serve` already holds this home's lock: the truth, read off the lock file.
+    #[error("swoosh serve is already running for this home (pid {pid})")]
     AlreadyResident {
         /// The pid recorded in the lock file by the holder.
         pid: u32,
@@ -62,12 +71,10 @@ pub enum SingleError {
 }
 
 /// The held single-instance lock: the flock fd plus the socket it guards and that socket PATH's
-/// identity. Dropping it releases the flock (the crash path); the graceful path unlinks the socket
-/// first via [`release`](InstanceLock::release). Owns the fd for process life.
-///
-/// There is no `Drop` impl that unlinks: a plain drop leaves the socket path behind (the crash
-/// plant the next start recovers through its probe), and only the explicit `release` unlinks, so
-/// the two teardown shapes stay visibly distinct at the call site.
+/// identity. Dropping it unlinks the socket it bound and releases the flock, so a `serve` that
+/// refuses after the claim, or stops, leaves no socket for a later `status` to find. Only a process
+/// that dies without unwinding (a `SIGKILL`, an abort) leaves the path behind, the crash plant the
+/// next start recovers through its probe. Owns the fd for process life.
 pub struct InstanceLock {
     /// The lock fd: held open, flocked, for the life of the resident.
     file: std::fs::File,
@@ -93,18 +100,22 @@ impl InstanceLock {
         &self.socket
     }
 
-    /// Graceful teardown: unlink the socket ONLY while the path still names the socket this instance
-    /// bound (stat without following links, compare `(dev, ino)` against the identity captured at
-    /// bind), release the flock, then drop the fd. A blind by-path unlink could remove a file a
-    /// same-uid process swapped in.
+    /// Graceful teardown, the same as dropping it: see the [`Drop`] impl.
     pub fn release(self) {
+        drop(self);
+    }
+}
+
+impl Drop for InstanceLock {
+    /// Unlink the socket ONLY while the path still names the socket this instance bound (stat
+    /// without following links, compare `(dev, ino)` against the identity captured at bind), then
+    /// release the flock before the fd drops. A blind by-path unlink could remove a file a same-uid
+    /// process swapped in.
+    fn drop(&mut self) {
         if path_identity(&self.socket).is_ok_and(|id| id == self.socket_id) {
             let _ = std::fs::remove_file(&self.socket);
         }
-        // Explicit unlock before the fd drops: the teardown reads the held lock fd, and the flock
-        // release is visible here rather than inferred from Drop.
         release_flock(&self.file);
-        drop(self);
     }
 }
 
@@ -185,6 +196,11 @@ pub fn acquire(
     home: &Home,
     root: &Path,
 ) -> Result<(InstanceLock, std::os::unix::net::UnixListener), SingleError> {
+    // Before anything is created: a path `sun_path` cannot hold would be bound truncated, or not at all.
+    let socket_path = home.runtime_leaf(root).join("control.sock");
+    if sockaddr_un(&socket_path).is_none() {
+        return Err(SingleError::SocketPathTooLong { path: socket_path });
+    }
     let runtime = RuntimeDir::acquire(home, root)?;
     let lock_path = runtime.lock_path();
     let socket_path = runtime.socket_path();

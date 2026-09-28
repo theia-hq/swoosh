@@ -14,6 +14,6 @@ Usage: swoosh stop [OPTIONS]
 
 **Things to know.** This stops the serving node, not the machine it runs on. `control.stop` is member-only:
 a stranger is refused at the gate, and a `swoosh:` grant naming it is refused at the route, so only your own
-devices can stop a node. Stopping your own node needs a resident one (`serve --resident`).
+devices can stop a node. Stopping your own node needs a running `serve`.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

@@ -2,7 +2,7 @@
 //!
 //! Bare (`service ls`) reads YOUR OWN running node's menu over the resident daemon's control socket: the
 //! served catalog plus the LIVE disabled list, rendered as a `SERVICE  GATE  STATE` table. With no
-//! resident it teaches (`swoosh serve --resident`) and exits non-zero rather than pretending to read a
+//! resident it teaches (`swoosh serve`) and exits non-zero rather than pretending to read a
 //! node that is not there. `service ls --at <peer>` reads a PEER's node: it
 //! reaches the peer's gated `control.services` and prints a terse `SERVICE  GATE` table (each service name and
 //! whether reaching it needs a member badge, or is open to anyone). A pure READ, the client twin of the node's
@@ -115,7 +115,7 @@ impl ServiceLsCmd {
     /// The bare (no-`--at`) path: read YOUR OWN node's live menu over the local control socket.
     /// Runs BEFORE any transport is composed (dispatched locally in the root), so a bare
     /// `swoosh service ls` never binds an endpoint it would not use. With no addressable resident
-    /// the client resolution teaches the fix (`swoosh serve --resident`) and exits non-zero rather
+    /// the client resolution teaches the fix (`swoosh serve`) and exits non-zero rather
     /// than printing an empty table that reads as "this node serves nothing".
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
         // A bare `service ls` reaches no peer, so an explicit `--present` has nothing to select: refuse

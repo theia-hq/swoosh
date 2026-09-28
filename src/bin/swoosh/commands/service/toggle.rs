@@ -56,6 +56,33 @@ impl ServiceToggleCmd {
     }
 }
 
+/// Turn back on every one of `names` that `<home>/disabled` holds: a `serve` that names a service at
+/// start serves it, so a service turned off yesterday is not refused by today's `serve ssh`. Writes nothing
+/// when none of them is off.
+pub(crate) fn turn_on<'a>(
+    home: &Home,
+    names: impl IntoIterator<Item = &'a str>,
+) -> eyre::Result<()> {
+    let off = disabled(home)?;
+    let names: Vec<&str> = names
+        .into_iter()
+        .filter(|name| off.contains(*name))
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    edit(home, |disabled| {
+        for name in names {
+            disabled.remove(name);
+        }
+    })
+}
+
+/// The service names `<home>/disabled` holds; none when there is no file.
+pub(crate) fn disabled(home: &Home) -> eyre::Result<BTreeSet<String>> {
+    read(&home.disabled())
+}
+
 /// Read `<home>/disabled`, apply `mutate`, and write it back atomically, all under an exclusive flock so two
 /// concurrent toggles serialize (neither loses the other's edit). The disabled set is a [`BTreeSet`] so the
 /// rewritten file is name-sorted and stable (a clean diff, and the same shape the denylist writes).

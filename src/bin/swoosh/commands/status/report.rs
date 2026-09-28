@@ -333,7 +333,8 @@ impl Report {
     }
 
     /// `serving:`, from the running `serve`'s local control socket when there is one. Reading it is not a
-    /// dial: no other machine is contacted.
+    /// dial: no other machine is contacted. A socket nothing listens on (a `serve` that was killed) is
+    /// the same as none.
     async fn serving_line(&mut self, home: &Home) -> String {
         let client = match ControlClient::resolve(home) {
             Ok(client) => client,
@@ -345,6 +346,7 @@ impl Report {
                 Ok(line) => line,
                 Err(why) => self.serving_unknown(&why),
             },
+            Err(ControlError::NoResident) => SERVING_NOTHING.to_owned(),
             Err(error) => self.serving_unknown(&error),
         }
     }
@@ -431,6 +433,8 @@ fn serving(menu: &ServiceMenu) -> Result<String, String> {
         .catalog
         .entries()
         .map(|entry| entry.name.as_str())
+        // The node's own routes (`control.*`) are no service a person started, so none is listed.
+        .filter(|name| !name.starts_with("control."))
         .filter(|name| !off.iter().any(|off| off == name))
         .collect();
     Ok(match on.as_slice() {

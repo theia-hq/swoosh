@@ -3,12 +3,14 @@
 //! so the process exits non-zero). The end-to-end proof that a member `control.stop` makes the exposer
 //! return `Ok` (which the run turns into [`Stopped::Requested`], exit 0) lives in `tests/gated_stop.rs`.
 //!
-//! Two properties only the real composition root can prove are driven by spawning the compiled `swoosh`
-//! binary: plain serve creates no runtime state, and `--resident` stays the foreground process.
+//! What only the real composition root can prove is driven by spawning the compiled `swoosh` binary: one
+//! `serve` per home, the resumed list, the runtime directory, and that a `serve` stays the foreground
+//! process.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -20,8 +22,8 @@ use swoosh::home::Home;
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
-    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope, FetchService,
-    SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry, extract_recv_services,
+    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, DEFAULT_SERVICES, Exchange, FetchScope,
+    FetchService, SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
@@ -31,8 +33,7 @@ use tightbeam::tunnel::{
 };
 
 use super::{
-    DEFAULT_SERVICES, Group, ReachKind, describe, display_targets, reach_section,
-    render_ready_banner, serving_section,
+    Keeper, ReachKind, keeper_line, reach_section, render_banner, serving_line, supervised,
 };
 
 /// n0's relay and n0's discovery: the bind every banner test but the reach-flag one is about, and the
@@ -213,131 +214,147 @@ fn update_route(router: Router) -> Router {
         .expect("the update route binds")
 }
 
-/// The display map the default serve builds (control.* + ping + speed point at their own schemes).
-fn default_targets() -> HashMap<String, String> {
-    display_targets(&[
-        "ping=ping:".to_owned(),
-        "speed=speed:".to_owned(),
-        "control.stop=control.stop:".to_owned(),
-        "control.services=control.services:".to_owned(),
-    ])
-    .expect("explicit entries display")
-}
-
-/// The default iroh + mDNS-on banner: a copy-clean full id, an `internet` channel that says "automatic" and
-/// never names the backend, an mDNS local line, one family-gated group with the `control.*` fold, no public
-/// group, and the plain stop line.
+/// The banner is this machine's key, what it serves and who reaches each, then how to stop: no
+/// transport block unless asked for, and none of the node's own `control.*` routes.
 #[test]
-fn the_default_banner_tells_reach_and_posture_without_backend_jargon() {
-    let banner = render_ready_banner(
+fn the_banner_is_the_key_what_it_serves_and_how_to_stop() {
+    let names = ["ping".to_owned(), "speed".to_owned()];
+    let banner = render_banner(
         "ed01exampleid",
+        &serving_line(&names, &default_manifest(), false),
+        None,
+        None,
+        "ctrl-c to stop",
+    );
+    assert_eq!(
+        banner,
+        "key: ed01exampleid\nserving: ping (your devices), speed (your devices)\nctrl-c to stop\n"
+    );
+
+    // Under `--verbose` the transport block rides between what it serves and how to stop.
+    let transport = reach_section(
         ReachKind::Internet,
         &heard_on_the_network(),
         &n0(),
         &wildcard_bind(),
-        &default_manifest(),
-        &default_targets(),
-        &HashSet::new(),
-        "ctrl-c to stop",
+    );
+    let verbose = render_banner(
+        "ed01exampleid",
+        &serving_line(&names, &default_manifest(), false),
+        Some(&transport),
         None,
+        "ctrl-c to stop",
     );
-
+    assert!(verbose.contains("how peers reach you"), "{verbose}");
     assert!(
-        banner.starts_with("swoosh ready\n\n    ed01exampleid\n\n"),
-        "{banner}"
+        verbose.starts_with("key: ed01exampleid\nserving: ")
+            && verbose.ends_with("ctrl-c to stop\n"),
+        "{verbose}"
     );
-    assert!(banner.contains("how peers reach you"), "{banner}");
-    assert!(
-        banner.contains("internet"),
-        "an iroh node shows the internet channel: {banner}"
-    );
-    assert!(
-        !banner.contains("iroh"),
-        "the backend is never named: {banner}"
-    );
-    // "automatic" leads BOTH auto channels, not just the local one.
-    assert_eq!(banner.matches("automatic").count(), 2, "{banner}");
-    assert!(
-        banner.contains("(mDNS)"),
-        "the local line is an mDNS tell: {banner}"
-    );
-    assert!(
-        !banner.contains("LAN"),
-        "no surface says LAN until the same-host advertise fix lands: {banner}"
-    );
-    assert!(banner.contains("family-gated"), "{banner}");
-    assert!(
-        banner.contains("control.*")
-            && !banner.contains("control.stop")
-            && !banner.contains("control.services"),
-        "the two control reads fold to one control.* line: {banner}"
-    );
-    // "anyone" is the PUBLIC group's danger word, and it is the serving section that must not use it
-    // when nothing is public. The reach section says it of the address records on purpose: they really
-    // are readable by anyone holding the key.
-    let (reach, serving) = banner
-        .split_once("serving\n")
-        .expect("the banner has a serving section");
-    assert!(
-        !serving.contains("anyone"),
-        "no group is opened to anyone when nothing is public: {banner}"
-    );
-    assert!(
-        reach.contains("records"),
-        "a default internet bind discloses that it publishes its addresses: {banner}"
-    );
-    assert!(banner.trim_end().ends_with("ctrl-c to stop"), "{banner}");
 }
 
-/// The mix banner: an open unmetered service carries a QUIET inline caveat (no loud glyph), the public-UNSAFE group
-/// sits last carrying the loudest marker, `name -> target` renders only when they differ, and the danger
-/// vocabulary is monotonic (the `public` marker is strictly shorter/quieter than `public-UNSAFE`).
+/// A service opened with `--public` reads `(anyone)`, the rest `(your devices)`, in the order they were
+/// named; a resumed list says so.
 #[test]
-fn the_mix_banner_keeps_one_monotonic_danger_vocabulary() {
+fn the_serving_line_names_who_reaches_each_service_and_a_resume() {
     let manifest = vec![
         entry_open("logs", TargetKind::RawStream, None),
         entry_gated("ping", TargetKind::Handler, Some(Metering::Unmetered)),
-        entry_open("speed", TargetKind::Handler, Some(Metering::Unmetered)),
+        entry_open("speed", TargetKind::Handler, Some(Metering::Metered)),
         entry_gated("ssh", TargetKind::Handler, None),
     ];
-    let targets = display_targets(&[
-        "ping=ping:".to_owned(),
-        "speed=speed:".to_owned(),
-        "ssh=sshd:".to_owned(),
-        "logs=file:/var/log/app.log".to_owned(),
-    ])
-    .expect("explicit entries display");
-    let section = serving_section(&manifest, &targets, &HashSet::new());
+    let names = ["ssh", "ping", "speed", "logs"].map(str::to_owned);
+    assert_eq!(
+        serving_line(&names, &manifest, false),
+        "ssh (your devices), ping (your devices), speed (anyone), logs (anyone)"
+    );
+    assert_eq!(
+        serving_line(&names[..2], &manifest, true),
+        "ssh (your devices), ping (your devices) (as last time)"
+    );
+}
 
-    // `name -> target` only when they differ: `ssh -> sshd`, but `speed` alone (name == scheme).
-    assert!(section.contains("ssh -> sshd"), "{section}");
-    assert!(
-        section.contains("logs -> file:/var/log/app.log"),
-        "{section}"
+/// The node's own routes are never listed, however they reach the line.
+#[test]
+fn banner_never_lists_an_internal_route() {
+    let names: Vec<String> = default_manifest()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    let banner = render_banner(
+        "ed01exampleid",
+        &serving_line(&names, &default_manifest(), false),
+        None,
+        None,
+        "ctrl-c to stop",
     );
     assert!(
-        section.contains("\n    speed ") || section.contains("\n    speed\n"),
-        "a name that equals its scheme renders without an arrow: {section}"
-    );
-    // The open-unmetered caveat is quiet prose, NOT a competing loud glyph.
-    assert!(
-        section.contains("unmetered: a stranger can drain your uplink"),
-        "{section}"
+        !banner.contains("control."),
+        "no internal route in the banner: {banner}"
     );
     assert!(
-        !section.contains("[!]"),
-        "the unmetered caveat is not a loud glyph: {section}"
+        banner.contains("serving: ping (your devices), speed (your devices)\n"),
+        "{banner}"
     );
+}
 
-    // Groups are safest-first and the danger marker is monotonic down the list.
-    let family = section.find("family-gated").expect("family group present");
-    let public = section.find("public !").expect("public group present");
-    let unsafe_grp = section
-        .find("public-UNSAFE !!")
-        .expect("public-UNSAFE group present");
+/// The line that says how to keep this machine serving prints only where no service manager runs it and
+/// a person started it at a terminal; under systemd or launchd it would be noise in the journal.
+#[test]
+fn banner_names_the_service_manager_line_when_not_supervised() {
+    let env = |set: &'static [(&'static str, &'static str)]| {
+        move |name: &str| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        }
+    };
+    let systemd =
+        "to keep this machine serving after a reboot: systemctl --user enable --now swoosh";
+    // Unsupervised, at a terminal: the line.
+    assert_eq!(
+        keeper_line(supervised(env(&[])), true, || Keeper::Systemd),
+        Some(systemd)
+    );
+    // A Terminal session on macOS sets `XPC_SERVICE_NAME=0`: still unsupervised.
+    assert_eq!(
+        keeper_line(supervised(env(&[("XPC_SERVICE_NAME", "0")])), true, || {
+            Keeper::Brew
+        }),
+        Some("to keep this machine serving after a reboot: brew services start swoosh")
+    );
+    // Under a service manager, or with no terminal, nothing, and the keeper is never asked.
+    for set in [
+        &[("INVOCATION_ID", "5f1c")][..],
+        &[("JOURNAL_STREAM", "8:1234")][..],
+        &[("XPC_SERVICE_NAME", "homebrew.mxcl.swoosh")][..],
+    ] {
+        assert_eq!(
+            keeper_line(supervised(env(set)), true, || panic!("never asked")),
+            None,
+            "supervised by {set:?}: no line"
+        );
+    }
+    assert_eq!(
+        keeper_line(supervised(env(&[])), false, || panic!("never asked")),
+        None,
+        "no terminal: no line"
+    );
+    // The line rides the banner before how to stop.
+    let banner = render_banner(
+        "ed01exampleid",
+        "ping (your devices)",
+        None,
+        Some(systemd),
+        "ctrl-c to stop",
+    );
     assert!(
-        family < public && public < unsafe_grp,
-        "safest-first ordering: {section}"
+        banner.ends_with(&format!("{systemd}\nctrl-c to stop\n")),
+        "{banner}"
+    );
+    assert_eq!(
+        Keeper::Elsewhere.line(),
+        "to keep this machine serving after a reboot: see docs/use-cases/run-at-login.md"
     );
 }
 
@@ -462,44 +479,6 @@ fn a_public_route_cannot_arm_an_uncapped_diagnostic() {
         .public([ping])
         .expose()
         .expect("the capped engine is openable");
-}
-
-/// The banner caveat is DERIVED from what the handler bound, not from a name list: the metered engines
-/// report `Metered` by construction, so even an OPEN diagnostic carries no caveat, while a handler that
-/// reports `Unmetered` on an open route still narrates the quiet caveat.
-#[test]
-fn the_unmetered_caveat_derives_from_the_bound_metering() {
-    let speed = svc("speed");
-    let targets = display_targets(&["speed=speed:".to_owned()]).expect("explicit entries display");
-
-    let open_metered = Router::new(gated())
-        .service(speed.clone(), measure::server::MeteredSpeed::new())
-        .expect("speed binds")
-        .public([speed])
-        .expose()
-        .expect("an open metered speed route assembles");
-    let section = serving_section(
-        open_metered.manifest().as_slice(),
-        &targets,
-        &HashSet::new(),
-    );
-    assert!(
-        !section.contains("unmetered"),
-        "the engine is metered by construction, so an open route carries no caveat: {section}"
-    );
-
-    // The caveat render path is independent of which engine is bound: an open handler that reports
-    // Unmetered still narrates it (the synthetic entry stands in for a future open-unmetered handler).
-    let unmetered = vec![entry_open(
-        "speed",
-        TargetKind::Handler,
-        Some(Metering::Unmetered),
-    )];
-    let section = serving_section(&unmetered, &targets, &HashSet::new());
-    assert!(
-        section.contains("unmetered: a stranger can drain your uplink"),
-        "an open unmetered route narrates the caveat: {section}"
-    );
 }
 
 /// The reach section flips the local line to a next-step down-state when mDNS is unavailable, and a
@@ -1285,25 +1264,14 @@ fn the_reach_section_names_a_relay_and_a_resolver_of_your_own() {
     );
 }
 
-/// A disabled discovery says so plainly: the readiness banner reports mDNS unavailable in both the
+/// A disabled discovery says so plainly: the transport block reports mDNS unavailable in both the
 /// local and the default (internet) glosses, never the `automatic; ... mDNS` lines it prints when the
 /// layer is live. Under direct-only the down-state points at the direct lane unconditionally, because
 /// that lane always renders and always carries at least the bind's loopback address.
 #[test]
 fn a_disabled_discovery_says_so_plainly() {
     for reach in [ReachKind::Internet, ReachKind::DirectOnly] {
-        let banner = render_ready_banner(
-            "ed01exampleid",
-            reach,
-            &MdnsState::Blocked,
-            &n0(),
-            &loopback_bind(),
-            &default_manifest(),
-            &default_targets(),
-            &HashSet::new(),
-            "ctrl-c to stop",
-            None,
-        );
+        let banner = reach_section(reach, &MdnsState::Blocked, &n0(), &loopback_bind());
         assert!(
             banner.contains("off; mDNS unavailable here"),
             "a disabled discovery renders the off-state for {reach:?}: {banner}"
@@ -1513,22 +1481,6 @@ fn a_local_bind_is_direct_only_and_never_says_lan() {
     );
 }
 
-/// A de-merged fetch service glosses by name (its synthetic scheme is unspellable, so it never leaks into the
-/// `name -> target` arrow), while a plain forward shows its address.
-#[test]
-fn a_fetch_service_glosses_by_name_and_never_leaks_its_scope() {
-    let entry = entry_gated("news", TargetKind::Handler, None);
-    let mut fetch_names = HashSet::new();
-    fetch_names.insert("news".to_owned());
-    let (label, gloss) = describe(&entry, &HashMap::new(), &fetch_names);
-    assert_eq!(label, "news", "no synthetic scheme in the label");
-    assert!(gloss.contains("fetches"), "{gloss}");
-    assert!(
-        !label.contains("fetch_"),
-        "the synthetic scheme never appears: {label}"
-    );
-}
-
 /// Every graceful-stop reason reports a distinct, non-empty line, so a CI action log (a CI teardown)
 /// reads a deliberate stop as a clean end rather than a bare exit. The line names WHY the node stopped.
 #[test]
@@ -1730,16 +1682,15 @@ fn collect_service_defaults(cmd: &clap::Command, into: &mut BTreeSet<String>) {
     }
 }
 
-/// BLOCKER-2: the resident control socket adds no service. `--resident` adds only the local socket
-/// arm AFTER the route table and the manifest are cut, so the exposer's manifest is the plain-serve set
-/// exactly (`control.*` folds as always); and the control `Request` enum can express two reads and a
-/// stop, never a toggle/revoke, so the socket can never mutate the gate. Both halves are asserted:
-/// the manifest equality against the plain default, and the legal request set constructed and
-/// round-tripped (the mutate-free guarantee is compile-enforced by the closed enum).
+/// The control socket adds no service: it is served AFTER the route table and the manifest are cut, so
+/// the exposer's manifest is the default set exactly; and the control `Request` enum can express two reads
+/// and a stop, never a toggle or a revoke, so the socket can never mutate the gate. Both halves are
+/// asserted: the manifest equality against the default, and the legal request set (the mutate-free
+/// guarantee is compile-enforced by the closed enum).
 #[test]
-fn resident_manifest_equals_plain_manifest() {
+fn the_control_socket_adds_no_service() {
     let cancel = CancellationToken::new();
-    // The route table the resident path builds: the base ping/speed plus the two member-only control.*
+    // The route table a bare serve builds: the base ping/speed plus the two member-only control.*
     // handlers, one handler value per route (the Router's bind-by-value shape). `bind_entry` binds only the
     // named routes, so `sshd` is absent here exactly as it is from the plain default set.
     let router =
@@ -1758,12 +1709,12 @@ fn resident_manifest_equals_plain_manifest() {
         .expect("control.services binds");
     let exposer = router
         .expose()
-        .expect("the resident service set assembles under the family gate");
+        .expect("the default service set assembles under the family gate");
 
     assert_eq!(
         exposer.manifest(),
         default_manifest(),
-        "the resident manifest is exactly the plain-serve set; the control socket adds no service"
+        "the manifest is exactly the default set; the control socket adds no service"
     );
 
     // The mutate-free guarantee BY TYPE: the socket carries two reads and a stop, and no toggle. A
@@ -1776,65 +1727,419 @@ fn resident_manifest_equals_plain_manifest() {
     }
 }
 
-/// Plain serve creates no runtime state: drive the REAL binary with a temp home, a temp
-/// `XDG_RUNTIME_DIR`, `--quiet`, and a one-second expiry, then assert no `control.sock`, no
-/// `control.lock`, and no runtime root or per-home leaf exists. The production composition root runs
-/// for real; nothing here parses a flag or renders a banner in-process.
-#[test]
-fn plain_serve_creates_no_runtime_state() {
-    let scratch = ProcessScratch::new("plain");
-    let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
-    let leaf = runtime_leaf(&home, &scratch.xdg);
-    // The macOS per-user runtime root is a shared confstr path other processes may own, so record
-    // whether it pre-existed: the post-run assertion holds THIS run to not creating it.
-    #[cfg(target_os = "macos")]
-    let (mac_root, mac_root_existed) = {
-        let root = swoosh::home::runtime_root().expect("the per-user runtime root path resolves");
-        let existed = root.exists();
-        (root, existed)
-    };
+/// A `serve` for `scratch` running in the background: the child, what it printed, and its control socket.
+struct Running {
+    child: KillOnDrop,
+    stdout: std::sync::Arc<std::sync::Mutex<String>>,
+    socket: PathBuf,
+}
 
+impl Running {
+    /// Start `swoosh serve <args>` under `scratch` and wait until its control socket answers.
+    fn start(scratch: &ProcessScratch, args: &[&str]) -> Self {
+        use std::io::Read as _;
+
+        let home =
+            Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+        let socket = runtime_leaf(&home, &scratch.xdg).join("control.sock");
+        let mut command = Command::new(swoosh_binary());
+        command
+            .arg("--home")
+            .arg(&scratch.home_dir)
+            .arg("serve")
+            .args(args)
+            .env("XDG_RUNTIME_DIR", &scratch.xdg)
+            .env_remove("SWOOSH_HOME")
+            .env_remove("SWOOSH_KEY")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = KillOnDrop(command.spawn().expect("serve spawns"));
+        let stdout = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let mut pipe = child.0.stdout.take().expect("piped stdout");
+        let sink = std::sync::Arc::clone(&stdout);
+        std::thread::spawn(move || {
+            let mut byte = [0u8; 256];
+            while let Ok(read @ 1..) = pipe.read(&mut byte) {
+                sink.lock()
+                    .expect("the capture lock")
+                    .push_str(&String::from_utf8_lossy(&byte[..read]));
+            }
+        });
+        let mut running = Self {
+            child,
+            stdout,
+            socket,
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while running.catalog().is_none() {
+            if let Some(status) = running.child.0.try_wait().ok().flatten() {
+                panic!("serve {args:?} exited before its socket answered: {status}");
+            }
+            assert!(Instant::now() < deadline, "serve {args:?} never answered");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        running
+    }
+
+    /// The served catalog, read over the control socket: `(name, posture)` for every route but the
+    /// node's own. `None` while the socket does not answer yet.
+    fn catalog(&self) -> Option<Vec<(String, Posture)>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let reply = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                control_round_trip(&self.socket, Request::Services),
+            )
+            .await
+        });
+        let Ok(Ok(Response::Catalog(menu))) = reply else {
+            return None;
+        };
+        Some(
+            menu.catalog
+                .entries()
+                .filter(|entry| !entry.name.starts_with("control."))
+                .map(|entry| (entry.name.clone(), entry.posture))
+                .collect(),
+        )
+    }
+
+    /// Stop it over its socket and wait for a clean exit; what it printed.
+    fn stop(mut self) -> String {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let _ = runtime.block_on(control_round_trip(&self.socket, Request::Stop));
+        let status = self.child.0.wait().expect("reap serve");
+        assert!(status.success(), "a stopped serve exits 0: {status}");
+        std::thread::sleep(Duration::from_millis(100));
+        self.stdout.lock().expect("the capture lock").clone()
+    }
+}
+
+/// Run `swoosh serve <args>` under `scratch` to its end, with a deadline.
+fn serve_once(scratch: &ProcessScratch, args: &[&str]) -> std::process::Output {
     let mut command = Command::new(swoosh_binary());
     command
         .arg("--home")
         .arg(&scratch.home_dir)
-        .args(["serve", "--quiet", "--expires", "1s"])
+        .arg("serve")
+        .args(args)
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
         .env_remove("SWOOSH_KEY");
+    run_binary_with_deadline(&mut command, Duration::from_secs(60))
+}
+
+/// One `serve` per home: a second one refuses, exit 1, with the running one's pid and what it serves,
+/// then the one fix that fits what it asked for, in order: a service the running one serves is turned on
+/// with `service on`, a flag that changes how it runs needs a stop, and anything else needs its own home.
+#[test]
+fn a_second_serve_for_one_home_refuses_and_names_the_fix() {
+    let scratch = ProcessScratch::new("second");
+    let running = Running::start(&scratch, &["--local", "--quiet", "ping", "speed"]);
+    let pid = running.child.0.id();
+    let head = format!(
+        "swoosh serve is already running for this home (pid {pid}, serving ping, speed).\n"
+    );
+    for (args, fix) in [
+        (&["ping"][..], "To turn ping on: swoosh service on ping"),
+        (
+            &["ping", "--expires", "1h"][..],
+            "To turn ping on: swoosh service on ping",
+        ),
+        (
+            &["--expires", "1h"][..],
+            "Stop it first to change how it runs: swoosh stop",
+        ),
+        (
+            &["--local"][..],
+            "Stop it first to change how it runs: swoosh stop",
+        ),
+        (
+            &["ssh", "--public", "ping"][..],
+            "Stop it first to change how it runs: swoosh stop",
+        ),
+        (
+            &[][..],
+            "A second one needs its own: swoosh --home <dir> serve …",
+        ),
+        (
+            &["ssh"][..],
+            "A second one needs its own: swoosh --home <dir> serve …",
+        ),
+    ] {
+        let second = serve_once(&scratch, args);
+        let stderr = String::from_utf8_lossy(&second.stderr);
+        assert_eq!(
+            second.status.code(),
+            Some(1),
+            "a second serve {args:?} refuses: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("{head}{fix}\n")),
+            "serve {args:?} names the running one and then `{fix}`: {stderr}"
+        );
+    }
+    assert_eq!(
+        running.catalog().map(|catalog| catalog.len()),
+        Some(2),
+        "the running serve is untouched"
+    );
+    running.stop();
+}
+
+/// A bare `serve` serves the list this home last started with, and says so.
+#[test]
+fn bare_serve_resumes_the_last_named_list() {
+    let scratch = ProcessScratch::new("resume");
+    Running::start(&scratch, &["--local", "ssh", "ping"]).stop();
+
+    let resumed = Running::start(&scratch, &["--local"]);
+    assert_eq!(
+        resumed.catalog(),
+        Some(vec![
+            ("ping".to_owned(), Posture::Gated),
+            ("ssh".to_owned(), Posture::Gated)
+        ]),
+        "a restart serves ssh and ping again, and not the default speed"
+    );
+    let stdout = resumed.stop();
+    assert!(
+        stdout.contains("serving: ssh (your devices), ping (your devices) (as last time)\n"),
+        "{stdout}"
+    );
+}
+
+/// Only the services are kept: a service opened to anyone on one run is behind the gate on the next.
+#[test]
+fn bare_serve_never_resumes_public() {
+    let scratch = ProcessScratch::new("public");
+    let first = Running::start(&scratch, &["--local", "ping", "speed", "--public", "ping"]);
+    assert!(
+        first
+            .catalog()
+            .is_some_and(|catalog| catalog.contains(&("ping".to_owned(), Posture::Open))),
+        "the first run opens ping"
+    );
+    first.stop();
+
+    let resumed = Running::start(&scratch, &["--local"]);
+    assert_eq!(
+        resumed.catalog(),
+        Some(vec![
+            ("ping".to_owned(), Posture::Gated),
+            ("speed".to_owned(), Posture::Gated)
+        ]),
+        "a restart serves the same services, none of them open"
+    );
+    resumed.stop();
+}
+
+/// A start that fails leaves what the next bare `serve` resumes as it was.
+#[test]
+fn serving_is_written_only_after_bind() {
+    let scratch = ProcessScratch::new("afterbind");
+    Running::start(&scratch, &["--local", "--quiet", "ping"]).stop();
+    let serving = scratch.home_dir.join("serving");
+    let before = std::fs::read_to_string(&serving).expect("a named run records its list");
+    assert_eq!(before, "ping=ping:\n");
+
+    // A keyless shell cannot be opened to anyone, and a scheme nobody serves cannot bind: both refuse
+    // after the list is known and before anything serves.
+    for args in [
+        &["--local", "ssh", "--public", "ssh"][..],
+        &["--local", "speed", "x=png:"][..],
+    ] {
+        let failed = serve_once(&scratch, args);
+        assert_eq!(
+            failed.status.code(),
+            Some(1),
+            "serve {args:?} refuses: {}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&serving).expect("the record"),
+            before,
+            "a failed serve {args:?} leaves the record as it was"
+        );
+    }
+}
+
+/// `swoosh status` under `scratch`, its `serving:` line.
+fn status_serving(scratch: &ProcessScratch) -> String {
+    let mut command = Command::new(swoosh_binary());
+    command
+        .arg("--home")
+        .arg(&scratch.home_dir)
+        .arg("status")
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .env_remove("SWOOSH_KEY")
+        .stdin(Stdio::null());
     let output = run_binary_with_deadline(&mut command, Duration::from_secs(30));
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
-        "plain serve exits 0 on its expiry: {}\n{}",
-        output.status,
+        "status exits 0: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    stdout
+        .lines()
+        .find(|line| line.starts_with("serving:"))
+        .unwrap_or_else(|| panic!("status prints a serving line: {stdout}"))
+        .to_owned()
+}
 
+/// A `serve` that refuses after it claimed the home leaves no control socket behind, so `status` says
+/// nothing is running rather than that it could not read it.
+#[test]
+fn a_refused_serve_leaves_status_serving_nothing() {
+    let scratch = ProcessScratch::new("refused");
+    let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+    let socket = runtime_leaf(&home, &scratch.xdg).join("control.sock");
+    for args in [
+        &["--local", "ssh", "--public", "ssh"][..],
+        &["--local", "speed", "x=png:"][..],
+    ] {
+        let failed = serve_once(&scratch, args);
+        assert_eq!(failed.status.code(), Some(1), "serve {args:?} refuses");
+        assert!(!socket.exists(), "serve {args:?} leaves no socket");
+        assert_eq!(
+            status_serving(&scratch),
+            "serving: nothing (swoosh serve is not running)",
+            "after serve {args:?}"
+        );
+    }
+}
+
+/// A service manager stops `serve` with SIGTERM: it stops the way a ctrl-c does, and takes its socket with it.
+#[test]
+fn a_terminated_serve_removes_its_socket() {
+    let scratch = ProcessScratch::new("sigterm");
+    let mut running = Running::start(&scratch, &["--local", "--quiet", "ping"]);
+    let pid = libc::pid_t::try_from(running.child.0.id()).expect("a pid");
+    // SAFETY: `kill` only sends a signal to the child this test spawned and still holds.
+    assert_eq!(
+        unsafe { libc::kill(pid, libc::SIGTERM) },
+        0,
+        "SIGTERM is sent"
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = running.child.0.try_wait().expect("poll serve") {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "serve exits on SIGTERM");
+        std::thread::sleep(Duration::from_millis(50));
+    };
     assert!(
-        !leaf.join("control.sock").exists(),
-        "plain serve binds no control socket"
+        status.code().is_some(),
+        "serve exits on SIGTERM, not killed by it: {status}"
     );
     assert!(
-        !leaf.join("control.lock").exists(),
-        "plain serve takes no control lock"
+        !running.socket.exists(),
+        "a terminated serve removes its socket"
+    );
+    assert_eq!(
+        status_serving(&scratch),
+        "serving: nothing (swoosh serve is not running)"
+    );
+}
+
+/// A `serve` killed outright leaves its socket file with nothing listening on it: `status` reads that as
+/// nothing running.
+#[test]
+fn a_killed_serve_leaves_status_serving_nothing() {
+    let scratch = ProcessScratch::new("sigkill");
+    let mut running = Running::start(&scratch, &["--local", "--quiet", "ping"]);
+    running.child.0.kill().expect("SIGKILL is sent");
+    running.child.0.wait().expect("reap serve");
+    assert!(
+        running.socket.exists(),
+        "a killed serve cannot remove its socket"
+    );
+    assert_eq!(
+        status_serving(&scratch),
+        "serving: nothing (swoosh serve is not running)"
+    );
+}
+
+/// A service named at start is served even if it was turned off before, and a bare `serve` says which of
+/// its services are off rather than turning them on.
+#[test]
+fn naming_a_service_at_start_clears_it_from_disabled() {
+    let scratch = ProcessScratch::new("disabled");
+    let disabled = scratch.home_dir.join("disabled");
+    std::fs::write(&disabled, "ping\nspeed\n").expect("two services turned off");
+
+    Running::start(&scratch, &["--local", "--quiet", "ping"]).stop();
+    assert_eq!(
+        std::fs::read_to_string(&disabled).expect("the setting"),
+        "speed\n",
+        "naming ping at start turns it back on, and leaves speed off"
+    );
+
+    std::fs::write(&disabled, "ping\n").expect("ping turned off again");
+    let bare = serve_once(&scratch, &["--local", "--quiet", "--expires", "1s"]);
+    assert!(
+        bare.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bare.stderr)
     );
     assert!(
-        !leaf.exists(),
-        "plain serve creates no per-home runtime leaf: {}",
-        leaf.display()
+        String::from_utf8_lossy(&bare.stderr).contains(
+            "ping is off (swoosh service off ping); swoosh service on ping turns it back on.\n"
+        ),
+        "{}",
+        String::from_utf8_lossy(&bare.stderr)
     );
-    // On Linux the root itself is ours (under the temp XDG); on macOS the shared confstr root is
-    // asserted only against creation by this run.
-    #[cfg(not(target_os = "macos"))]
-    assert!(
-        !scratch.xdg.join("swoosh").exists(),
-        "plain serve creates no runtime root"
+    assert_eq!(
+        std::fs::read_to_string(&disabled).expect("the setting"),
+        "ping\n",
+        "a bare serve leaves the setting as it is"
     );
-    #[cfg(target_os = "macos")]
-    assert!(
-        mac_root_existed || !mac_root.exists(),
-        "plain serve creates no runtime root"
-    );
+}
+
+/// Where no private runtime directory resolves, `serve` refuses with the fix before anything is written
+/// or bound: a fresh home gets no key.
+#[cfg(target_os = "linux")]
+#[test]
+fn serve_without_a_runtime_dir_refuses_before_binding() {
+    for xdg in [None, Some("run/user/1000")] {
+        let scratch = ProcessScratch::new("noxdg");
+        let mut command = Command::new(swoosh_binary());
+        command
+            .arg("--home")
+            .arg(&scratch.home_dir)
+            .args(["serve", "--local"])
+            .env_remove("SWOOSH_HOME")
+            .env_remove("SWOOSH_KEY");
+        match xdg {
+            Some(value) => command.env("XDG_RUNTIME_DIR", value),
+            None => command.env_remove("XDG_RUNTIME_DIR"),
+        };
+        let output = run_binary_with_deadline(&mut command, Duration::from_secs(30));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{xdg:?}: {stderr}");
+        assert!(
+            stderr.contains(
+                "swoosh serve needs a private runtime directory. Set XDG_RUNTIME_DIR to a directory \
+                 only you can use (for example /run/user/$(id -u)), or run it as a systemd --user \
+                 service."
+            ),
+            "{xdg:?}: {stderr}"
+        );
+        assert!(
+            !scratch.home_dir.join("key").exists(),
+            "{xdg:?}: nothing was made or bound"
+        );
+    }
 }
 
 /// `serve` never presents the root. With a root kept here, sealed, and no terminal for a passphrase prompt
@@ -1886,8 +2191,8 @@ fn serve_never_opens_root_key() {
 }
 
 /// `serve --local` must keep the node's address: the bind takes the PERSISTED key, so two runs report
-/// the same key `status --key` prints, never a fresh key per run. The banner also prints only
-/// addresses a peer could dial: never the unspecified socket, and loopback only under the mark that
+/// the same key `status --key` prints, never a fresh key per run. The transport block (`--verbose`) also
+/// prints only addresses a peer could dial: never the unspecified socket, and loopback only under the mark that
 /// says it reaches a peer on this machine. Its local gloss reports the advertisement that actually
 /// happened: one of the started outcomes, or the off-state when the run warned mDNS could not start
 /// (read off the same run's stderr).
@@ -1924,7 +2229,7 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
         command
             .arg("--home")
             .arg(&scratch.home_dir)
-            .args(["serve", "--local", "--expires", "1s"])
+            .args(["serve", "--local", "--verbose", "--expires", "1s"])
             .env("XDG_RUNTIME_DIR", &scratch.xdg)
             // Surface the composition seam's own warning, so the test can hold the banner to the
             // discovery state the SAME run reported instead of assuming which way the box went.
@@ -1940,14 +2245,13 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // The banner's id line: `swoosh ready`, a blank line, then the blank-framed full key.
+        // The banner's first line: `key: ` and the full key.
         let reported = stdout
             .lines()
-            .nth(2)
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
+            .next()
+            .and_then(|line| line.strip_prefix("key: "))
             .unwrap_or_else(|| {
-                panic!("serve --local run {run} prints the banner id line: {stdout}")
+                panic!("serve --local run {run} prints the banner key line: {stdout}")
             });
         assert_eq!(
             reported, key,
@@ -2004,90 +2308,7 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
     }
 }
 
-/// The resident banner differs from the plain one ONLY by the control line, and it is the production
-/// `control_line` that renders: the path appears exactly once and a non-resident call returns `None`.
-#[test]
-fn resident_banner_differs_only_by_the_control_line() {
-    use clap::Parser as _;
-
-    #[derive(clap::Parser)]
-    struct Wrap {
-        #[command(flatten)]
-        serve: super::ServeCmd,
-    }
-
-    let socket = Path::new("/run/swoosh/x/control.sock");
-    let plain_cmd = Wrap::try_parse_from(["x"]).expect("plain serve parses");
-    assert_eq!(
-        plain_cmd.serve.control_line(Some(socket)),
-        None,
-        "a plain serve prints no control line"
-    );
-    let resident_cmd = Wrap::try_parse_from(["x", "--resident"]).expect("--resident parses");
-    let control = resident_cmd
-        .serve
-        .control_line(Some(socket))
-        .expect("a resident serve prints the control line");
-    assert_eq!(
-        control, "control /run/swoosh/x/control.sock (local, this user)",
-        "the control line names the real path and its local-only scope"
-    );
-    assert_eq!(
-        control
-            .matches(socket.to_str().expect("a utf-8 socket path"))
-            .count(),
-        1,
-        "the socket path appears exactly once in the line: {control}"
-    );
-
-    let plain = render_ready_banner(
-        "ed01exampleid",
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-        &default_manifest(),
-        &default_targets(),
-        &HashSet::new(),
-        "ctrl-c to stop",
-        None,
-    );
-    let resident = render_ready_banner(
-        "ed01exampleid",
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-        &default_manifest(),
-        &default_targets(),
-        &HashSet::new(),
-        "ctrl-c to stop",
-        Some(control.as_str()),
-    );
-    assert_eq!(
-        resident.matches(&control).count(),
-        1,
-        "the control line appears exactly once in the banner: {resident}"
-    );
-    assert_eq!(
-        resident
-            .matches(socket.to_str().expect("a utf-8 socket path"))
-            .count(),
-        1,
-        "the real socket path appears exactly once in the banner: {resident}"
-    );
-    let stripped = resident.replacen(&format!("{control}\n"), "", 1);
-    assert_eq!(
-        stripped, plain,
-        "the resident banner is the plain banner plus exactly one control line"
-    );
-    assert!(
-        resident.contains("(local, this user)"),
-        "the control line names its local-only scope: {resident}"
-    );
-}
-
-/// No self-daemonizing: `serve --resident` stays the process the caller spawned. Spawn the real
+/// No self-daemonizing: `serve` stays the process the caller spawned. Spawn the real
 /// binary, wait for its control socket, assert the status reply names the spawned pid (no
 /// double-fork or re-exec), assert the spawned child is still alive, stop it through the control
 /// socket, and reap a normal exit with the socket unlinked.
@@ -2101,7 +2322,7 @@ fn no_self_daemonize() {
     command
         .arg("--home")
         .arg(&scratch.home_dir)
-        .args(["serve", "--resident", "--quiet"])
+        .args(["serve", "--local", "--quiet"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
         .env_remove("SWOOSH_KEY")
@@ -2168,7 +2389,7 @@ fn no_self_daemonize() {
 
 /// The update route is bound on every `serve`, whatever the standing and with no entry naming it: the
 /// real binary serves a home as `Unpinned`, as a `Device`, and as a damaged home, and each run's catalog,
-/// read over the resident control socket, carries it.
+/// read over the control socket, carries it.
 #[test]
 fn a_bare_serve_serves_the_update_route() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2212,7 +2433,7 @@ fn a_bare_serve_serves_the_update_route() {
         command
             .arg("--home")
             .arg(&scratch.home_dir)
-            .args(["serve", "--resident", "--quiet"])
+            .args(["serve", "--local", "--quiet"])
             .env("XDG_RUNTIME_DIR", &scratch.xdg)
             .env_remove("SWOOSH_HOME")
             .stdin(Stdio::null())
@@ -2707,19 +2928,16 @@ fn public_speed_builds_and_public_unknown_is_refused() {
     );
 }
 
-/// `serve logs=file:<path> --public-unsafe logs` lights the `public-UNSAFE` banner tier end-to-end: the raw
-/// stream the operator KNOWINGLY named reaches `Posture::Open`, so `Group::of` sorts it into `PublicUnsafe`,
-/// and the banner carries BOTH the loud `public-UNSAFE !!` marker and the RESOLVED ABSOLUTE path of the
-/// source (the exfil tell: the operator sees the exact bytes a stranger can read). Built through the
-/// real router `expose` + `manifest` path so the posture-union and `raw_source` resolution are exercised, not
-/// a hand-built manifest.
+/// `serve logs=file:<path> --public-unsafe logs` opens the raw stream to anyone, and the banner says so:
+/// the stream the operator KNOWINGLY named reaches `Posture::Open` with its resolved absolute source, so
+/// its row reads `(anyone)`. Built through the real router `expose` + `manifest` path, not a hand-built
+/// manifest.
 #[test]
-fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
+fn public_unsafe_reads_anyone_in_the_banner() {
     let path = std::env::temp_dir().join("swoosh-public-unsafe-banner");
     let entry = format!("logs=file:{}", path.display());
     // A family BASE gate (not `Gate::Open`), so the whole-node raw-stream door never fires; the unsafe
-    // OVERLAY alone opens `logs` (swoosh's per-service model). No handlers are bound: a `file:` source is a
-    // raw stream, not a handler, so it needs nothing registered.
+    // OVERLAY alone opens `logs` (swoosh's per-service model).
     let exposer = Router::new(gated())
         .parse(&[entry])
         .expect("the raw-stream route binds")
@@ -2734,41 +2952,15 @@ fn public_unsafe_reaches_the_public_unsafe_banner_tier() {
     assert_eq!(
         logs.posture,
         Posture::Open,
-        "the unsafe-open raw stream reads Open, so its posture lights the loud tier"
+        "the unsafe-open raw stream reads Open"
+    );
+    assert!(
+        matches!(&logs.raw_source, Some(RawSource::Path(_))),
+        "a file: source resolves to an absolute path: {logs:?}"
     );
     assert_eq!(
-        super::Group::of(logs),
-        Group::PublicUnsafe,
-        "an open raw stream sorts into the loudest group"
-    );
-    let RawSource::Path(absolute) = logs
-        .raw_source
-        .as_ref()
-        .expect("an open raw stream declares its resolved source")
-    else {
-        panic!("a file: source resolves to an absolute Path, not Stdin: {logs:?}");
-    };
-
-    let banner = render_ready_banner(
-        "ed01exampleid",
-        ReachKind::Internet,
-        &heard_on_the_network(),
-        &n0(),
-        &wildcard_bind(),
-        &manifest,
-        &display_targets(&[format!("logs=file:{}", path.display())])
-            .expect("explicit entries display"),
-        &HashSet::new(),
-        "ctrl-c to stop",
-        None,
-    );
-    assert!(
-        banner.contains("public-UNSAFE !!"),
-        "the open raw stream fires the loud banner tier: {banner}"
-    );
-    assert!(
-        banner.contains(absolute.as_str()),
-        "the banner names the RESOLVED ABSOLUTE path of the bytes at risk ({absolute}): {banner}"
+        serving_line(&["logs".to_owned()], &manifest, false),
+        "logs (anyone)"
     );
 }
 

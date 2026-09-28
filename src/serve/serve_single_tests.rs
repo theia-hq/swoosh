@@ -660,6 +660,19 @@ fn release_unlinks_its_own_socket() {
     drop(listener);
 }
 
+/// A lock dropped without `release` (a `serve` that refuses after its claim, or returns an error) unlinks
+/// its socket too, so nothing is left for a later `status` to connect to.
+#[test]
+fn dropping_the_lock_unlinks_its_own_socket() {
+    let scratch = Scratch::new("drop-own");
+    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("resident start");
+    let socket = lock.socket_path().to_path_buf();
+    drop(listener);
+    drop(lock);
+    assert!(!socket.exists(), "a dropped lock unlinks its own socket");
+    acquire(&scratch.home, &scratch.root).expect("and releases the flock");
+}
+
 /// A same-uid swap must not cost the foreign process its file: `release` compares against the path
 /// identity captured at bind, and a different inode (a second listener renamed onto the path while
 /// both exist, so the inodes are provably distinct) is left alone.
@@ -675,4 +688,24 @@ fn release_spares_a_foreign_inode_swapped_onto_the_path() {
     lock.release();
     assert!(socket.exists(), "release never unlinks a foreign inode");
     drop(foreign);
+}
+
+/// A runtime root whose socket path `sun_path` cannot hold (104 bytes on macOS, 108 on Linux) refuses
+/// with the fix before anything is created, rather than binding a truncated path another home could share.
+#[test]
+fn serve_refuses_a_socket_path_longer_than_sun_path() {
+    let scratch = Scratch::new("longpath");
+    let root = scratch.root.join("r".repeat(120));
+    let refused = acquire(&scratch.home, &root);
+    let Err(error @ SingleError::SocketPathTooLong { .. }) = refused else {
+        panic!(
+            "a socket path past sun_path must refuse: {:?}",
+            refused.map(|_| ())
+        );
+    };
+    assert_eq!(
+        error.to_string(),
+        "the runtime directory's path is too long for a socket: set XDG_RUNTIME_DIR to a shorter one."
+    );
+    assert!(!root.exists(), "nothing was created under the long root");
 }

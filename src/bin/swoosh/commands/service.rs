@@ -5,7 +5,7 @@
 //! `--at <peer>` acts on a peer.
 //!
 //! - `service ls [--at <peer>]` reads the served menu: bare reads your own live node over the local
-//!   control socket (needs `serve --resident`), `--at` reaches a peer's `control.services`. See [`ls`].
+//!   control socket (needs a running `serve`), `--at` reaches a peer's `control.services`. See [`ls`].
 //! - `service enable <svc>` / `service disable <svc>` toggle one of YOUR node's services by writing
 //!   `<home>/disabled`, honored LIVE by a running `serve` with no restart. No `--at`: you never remotely
 //!   toggle a peer's service (a wire mutation the design forbids). See [`toggle`].

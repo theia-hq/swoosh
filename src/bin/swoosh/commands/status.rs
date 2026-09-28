@@ -21,7 +21,7 @@
 use core::error::Error as _;
 use core::time::Duration;
 
-use bifrost::{ConnInfo, Discovery, Node, Path, Session, Transport};
+use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
 use clap::Args;
 use measure::{Ping, ProtocolError, Refusal};
 use nauthy::{Link, Service};
@@ -186,10 +186,6 @@ impl StatusCmd {
 /// Probe one reached session for a live RTT and its path, and render its status line under `label` (the
 /// device as the user named it, so a fan-out reads by device, matching `ping`).
 async fn probe<S: Session>(session: &S, label: &str, transport: transport::Transport) -> Line {
-    // Sample the path at connect, before the probe, so we can tell whether iroh's hole-punch upgraded a
-    // relayed path to direct during the round trip below.
-    let initial = session.conn_info().path;
-
     // A single measure ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
     // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.
     let probed = Ping {
@@ -226,7 +222,7 @@ async fn probe<S: Session>(session: &S, label: &str, transport: transport::Trans
     // The probe answered, so its own round trip is the honest number; the transport's estimate stands in
     // only when a received sample carried no timing.
     let rtt = report.avg().or(info.rtt);
-    Line::reached(label.to_owned(), transport.name(), initial, info, rtt)
+    Line::reached(label.to_owned(), transport.name(), info, rtt)
 }
 
 /// A rendered status line for one device: reachable (path + RTT), unreachable, reached-but-refused, or
@@ -243,10 +239,8 @@ struct Line {
 /// healthy path line nor an "unreachable". Making each its own variant is what stops a failure from
 /// rendering as a healthy line with a borrowed transport RTT.
 enum State {
-    /// The device answered the probe: the path at connect, the path after the probe, and the RTT.
-    /// `initial` lets the phrase report a relayed-to-direct upgrade that landed during probing.
+    /// The device answered the probe: the path after the probe, and the RTT.
     Reached {
-        initial: Path,
         info: ConnInfo,
         rtt: Option<Duration>,
     },
@@ -271,14 +265,13 @@ impl Line {
     fn reached(
         label: String,
         transport: &'static str,
-        initial: Path,
         info: ConnInfo,
         rtt: Option<Duration>,
     ) -> Self {
         Self {
             label,
             transport,
-            state: State::Reached { initial, info, rtt },
+            state: State::Reached { info, rtt },
         }
     }
 
@@ -329,16 +322,20 @@ impl Line {
 }
 
 impl core::fmt::Display for Line {
-    /// `<peer> via <transport>: <path>[, rtt <n>]`, Tailscale-status shaped, or `<peer> via <transport>:
+    /// `<peer> via <transport>, path: <direct | through a relay>[, rtt <n>]`, Tailscale-status shaped, or `<peer> via <transport>:
     /// unreachable` for a device that did not answer, or `reached, but refused (<refusal>)` /
     /// `reached, but the probe failed (<cause>)` for a node that answered the dial and then said no or
     /// broke. Both failure lines say it was REACHED (not unreachable) and render their typed cause, so a
     /// gate refusal reads descriptively and is never doubled (`refused (refused)`), and a mid-protocol
-    /// failure names what broke instead of a healthy-looking path. The path phrase (shared with
-    /// `ping`/`speed`) names the remote when a direct address is known, and reports a relayed-to-direct
-    /// upgrade when one landed.
+    /// failure names what broke instead of a healthy-looking path. The path is the one `ping` and `speed`
+    /// print.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{} via {}: ", self.label, self.transport)?;
+        // A reached device's line carries `path:` itself, so its separator is a comma, not a second colon.
+        let separator = match self.state {
+            State::Reached { .. } => ",",
+            _ => ":",
+        };
+        write!(f, "{} via {}{separator} ", self.label, self.transport)?;
         match &self.state {
             State::Unreachable => f.write_str("unreachable"),
             State::Refused { refusal } => write!(f, "reached, but refused ({refusal})"),
@@ -351,8 +348,8 @@ impl core::fmt::Display for Line {
                     "reached, but the probe went unanswered ({sent} sent, 0 back)"
                 )
             }
-            State::Reached { initial, info, rtt } => {
-                write!(f, "{}", reach::conn_path(*initial, info))?;
+            State::Reached { info, rtt } => {
+                write!(f, "path: {}", reach::conn_path(info))?;
                 if let Some(rtt) = rtt {
                     write!(f, ", rtt {:.3} ms", rtt.as_secs_f64() * 1000.0)?;
                 }

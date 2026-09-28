@@ -324,6 +324,15 @@ enum Verb {
 }
 
 impl Outward {
+    /// Claim the home for a `serve` (a no-op for every other verb): its lock and control socket, and the
+    /// services it starts with, taken before anything else is opened, written or bound.
+    async fn claim(self, home: &Home) -> eyre::Result<Self> {
+        match self {
+            Self::Serve(cmd) => Ok(Self::Serve(cmd.claim(home).await?)),
+            verb => Ok(verb),
+        }
+    }
+
     /// Attach the resolved [`serve::ExposeContext`] to the `serve` verb (a no-op for every other verb, which
     /// carries no expose context), so `serve` reads its OWN context at run time. Called once in the root
     /// after the context is cut (while the secret is still live), before dispatch. This is why the reach
@@ -399,8 +408,8 @@ impl Outward {
                     // `service disable`/`enable` written to `<home>/disabled` is honored with no
                     // restart. Loaded here beside the gate because both are home files it reads.
                     enabled: tightbeam::enabled::FileDisabledList::load(home.disabled()).await?,
-                    // The SAME home the root resolved once: the resident socket/lock derive from it, so
-                    // a `--resident` serve and its future control clients name the same paths.
+                    // The SAME home the root resolved once, so the serve and its control clients name
+                    // the same paths.
                     home: home.clone(),
                     admit,
                 }))
@@ -559,7 +568,9 @@ async fn run() -> eyre::Result<()> {
             // here, not after the store is loaded and a key provisioned, so a refused
             // `serve --local --relay` on a fresh home leaves that home exactly as it found it.
             outward.reach_args().reject_unused_reach()?;
-            outward
+            // A `serve` takes its home's lock and control socket before anything is opened or bound, so a
+            // second one for the home refuses leaving everything as the running one has it.
+            outward.claim(&home).await?
         }
     };
 
