@@ -335,6 +335,35 @@ fn into_slot<W: std::io::Write>(badge: Link, node: NodeId, warn: &mut W) -> eyre
     }
 }
 
+/// Before a dialing verb presents this home's standing: when it has passed its date or its id is revoked
+/// here, every gate refuses it (the dial would be `not admitted`, or [`resolve`] refuses it first), so try
+/// the pick-up route once at your own devices ([`crate::renewal::pick_up`]), never at the verb's peer
+/// unless it is one of them. A hit writes the `renewed:` line to `err` before the session, and the verb
+/// then presents the renewed standing; a miss writes nothing, so the verb's own refusal reads unchanged.
+pub async fn renew_before_dial<W: std::io::Write>(
+    home: &Home,
+    fetch: &impl crate::renewal::Fetch,
+    err: &mut W,
+) {
+    if !crate::renewal::is_due(home, SystemTime::now()).await {
+        return;
+    }
+    match crate::renewal::pick_up(home, fetch).await {
+        Ok(Some(renewed)) => {
+            // Discarded on failure, like every other warning: a closed stderr must not fail the dial.
+            let _ = writeln!(
+                err,
+                "renewed: this machine is {} until {} (from {}).",
+                renewed.name,
+                renewed.ends(),
+                renewed.from
+            );
+        }
+        Ok(None) => {}
+        Err(error) => tracing::debug!(%error, "the pick-up could not run"),
+    }
+}
+
 /// Reject `--present` on a BARE (local) invocation: the flag selects the slip to present when reaching
 /// a PEER, and a bare `status`/`stop`/`service ls` reaches no peer (it queries the local resident over
 /// the control socket). The bare arms return before the composition root's

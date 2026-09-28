@@ -9,13 +9,17 @@ use std::io::{self, Read as _, Seek as _, Write as _};
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use bifrost::NodeId;
-use nauthy::Link;
+use nauthy::{Link, Revocations as _};
+use tightbeam::identity::AsVerifyKey as _;
 
 use crate::contacts::{ContactsStore, DeviceLabel};
+use crate::gate::KeyedDenylist;
 use crate::home::Home;
 use crate::roster::RosterLock;
+use crate::standing::Standing;
 
 /// What a join writes: this machine's standing from the root, and the hints the invite carried.
 #[derive(Debug)]
@@ -35,7 +39,8 @@ pub struct Join<'a> {
 }
 
 /// Write a join, under `roster.lock`: on a pin change, the old root's update files and devices go and
-/// `roster.seed` is written; this machine's own entry is laid under `me`; then the standing; then the pin.
+/// `roster.seed` is written; this machine's own entry is laid under `me`; then the standing; then, on a pin
+/// change, the pin. A join to the root already pinned is the same-root write, and leaves the pin as it is.
 pub async fn join(home: &Home, join: Join<'_>) -> eyre::Result<()> {
     let _lock = RosterLock::take(&home.roster_lock()).await?;
     let mut contacts = ContactsStore::open(home.contacts()).await?;
@@ -52,9 +57,52 @@ pub async fn join(home: &Home, join: Join<'_>) -> eyre::Result<()> {
     }
     contacts.contacts_mut().seed_me(join.name, join.own);
     contacts.save().await?;
-    crate::config::write_badge(home, join.standing).await?;
-    crate::config::write_signet(home, join.root).await?;
+    same_root_write(home, join.standing).await?;
+    if join.pin_changes {
+        crate::config::write_signet(home, join.root).await?;
+    }
     Ok(())
+}
+
+/// Take a renewed standing that one of your devices handed this machine, under `roster.lock`, through the
+/// same-root write a join makes: only one bound to this machine's key, rooted at the pin, ending after the
+/// one held, and neither its id nor this key revoked here. When it ends, if it was taken.
+///
+/// It never writes the pin, so a standing fetched from the network can renew this machine and never move
+/// it to another root.
+pub async fn take_renewal(home: &Home, standing: &Link) -> eyre::Result<Option<SystemTime>> {
+    let _lock = RosterLock::take(&home.roster_lock()).await?;
+    let (pin, held) = match Standing::read(home).await?.standing {
+        Standing::Device { pin, until } | Standing::HoldsRoot { pin, until } => (pin, until),
+        Standing::Unpinned | Standing::InterruptedMint { .. } => return Ok(None),
+    };
+    let Some(own) = keystore::KeyFile::device(home.key())
+        .load()?
+        .map(|stored| stored.node_id())
+    else {
+        return Ok(None);
+    };
+    let cap = standing.cap();
+    let Ok(Some(until)) = cap.expiry() else {
+        return Ok(None);
+    };
+    let (own, pin) = (own.verify_key()?, pin.verify_key()?);
+    let bound = cap
+        .verify_member_at_root_without_revocation(SystemTime::now(), own, pin)
+        .is_ok();
+    let revocations = KeyedDenylist::load(home).await?;
+    let blocked = revocations.is_revoked(cap) || revocations.is_revoked_peer(&own);
+    if !bound || until <= held || blocked {
+        return Ok(None);
+    }
+    same_root_write(home, standing).await?;
+    Ok(Some(until))
+}
+
+/// The write a standing from the root already pinned takes: the standing, atomically. The pin already
+/// names that root, so it is not touched.
+async fn same_root_write(home: &Home, standing: &Link) -> eyre::Result<()> {
+    crate::config::write_badge(home, standing).await
 }
 
 /// Leave the root this machine trusts, under `roster.lock`: the standing, the update files and the

@@ -152,7 +152,7 @@ async fn sync_gives_a_held_cut_to_a_reachable_device() {
     )
     .await;
 
-    assert_eq!(answers[0].1, Some(Answer::Gave));
+    assert_eq!(answers[0].1.answer(), Some(Answer::Gave));
     assert!(
         refuses(&nas, STOLEN).await,
         "nas stops admitting the key the cut revoked"
@@ -175,7 +175,7 @@ async fn sync_takes_a_newer_update() {
     )
     .await;
 
-    assert_eq!(answers[0].1, Some(Answer::Took));
+    assert_eq!(answers[0].1.answer(), Some(Answer::Took));
     assert!(
         refuses(&desk, STOLEN).await,
         "this machine stops admitting the key the newer update revoked"
@@ -217,7 +217,7 @@ async fn sync_gives_what_it_took_to_every_device_it_asked_before() {
 
     let read: Vec<(&str, Option<Answer>)> = answers
         .iter()
-        .map(|(device, answer)| (device.name.as_str(), *answer))
+        .map(|(device, answer)| (device.name.as_str(), answer.answer()))
         .collect();
     assert_eq!(
         read,
@@ -330,7 +330,7 @@ async fn a_receipt_triggers_no_further_exchange() {
     )
     .await;
 
-    assert_eq!(answers[0].1, Some(Answer::Gave));
+    assert_eq!(answers[0].1.answer(), Some(Answer::Gave));
     assert_eq!(
         dial.dialed(),
         vec![node(NAS)],
@@ -381,7 +381,7 @@ async fn an_exchange_with_a_fork_keeps_both_revocation_lists() {
     )
     .await;
 
-    assert_eq!(answers[0].1, Some(Answer::Forked));
+    assert_eq!(answers[0].1.answer(), Some(Answer::Forked));
     assert!(revoked(&desk, &id(1)).await && revoked(&desk, &id(2)).await);
     let pin = root().verify_key();
     let kept: Vec<Id> = [desk.roster(), desk.roster_fork()]

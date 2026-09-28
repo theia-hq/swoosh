@@ -773,6 +773,30 @@ async fn join_refuses_an_invite_whose_standing_has_passed() {
     );
 }
 
+/// A per-job home that starts from a key-carrying invite each time: once that invite has ended, `join`
+/// refuses before it writes the key, so the job has no key a device of yours could renew, and never reaches
+/// the pick-up route.
+#[tokio::test]
+async fn a_lapsed_key_carrying_invite_never_reaches_the_door() {
+    let home = empty("carrying-lapsed");
+    let before = snapshot(home.dir());
+    let stdin = format!("{}\n", carrying([0x7a; 32], "runner"));
+    let ran = run(
+        &home,
+        Setup {
+            stdin: &stdin,
+            now: at(now() + 91 * DAY),
+            ..Setup::default()
+        },
+    )
+    .await;
+    refused_before_writing(&ran, "this invite ended on ", &home, &before);
+    assert!(
+        KeyFile::device(home.key()).load().unwrap().is_none(),
+        "no key is written"
+    );
+}
+
 #[tokio::test]
 async fn join_refuses_while_serve_admit_runs() {
     let home = scratch("admitting");

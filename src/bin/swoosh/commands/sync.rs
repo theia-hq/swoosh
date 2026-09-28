@@ -3,15 +3,19 @@
 //! It exchanges with every live device of your root ([`swoosh::sync`]), one at a time, each within 5 s
 //! and all within 20 s, and asks every one: it takes a newer list from any that has one and gives the
 //! newest to any that lacks it, asking again any device it had asked before a take. It prints one report on stdout. It takes no argument, and runs only on a device of a
-//! root, one that holds it or not.
+//! root, one that holds it or not. When your devices refuse this machine because its standing has ended
+//! or was revoked here, it picks up its renewal from one of them ([`swoosh::renewal`]), says so, and
+//! exchanges again.
 
 use core::time::Duration;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
+use swoosh::contacts::DeviceLabel;
 use swoosh::home::Home;
+use swoosh::renewal::{NodeFetch, PickUp, Renewed};
 use swoosh::standing::{Standing, StandingError};
-use swoosh::sync::{Answer, NodeDial, Until};
+use swoosh::sync::{Answer, NodeDial, Reply, Until};
 use swoosh::transport::ReachArgs;
 
 /// How long `sync` spends on all your devices together.
@@ -67,14 +71,48 @@ impl swoosh::reaching::Reaching for SyncCmd {
         refuse_unless_device(ctx.home).await?;
         let devices = swoosh::sync::devices(ctx.home, []).await?;
         let dial = NodeDial::new(node, ctx.home);
-        let answers = swoosh::sync::round(&dial, &devices, Until::Every, TOTAL).await;
-        let rows: Vec<(String, Row)> = answers
+        let mut replies = swoosh::sync::round(&dial, &devices, Until::Every, TOTAL).await;
+        // Refused for a standing that needs a renewal: pick it up from one of your devices, then exchange
+        // again with it.
+        match swoosh::renewal::after_round(ctx.home, &NodeFetch::new(node), &replies).await {
+            PickUp::Skipped => {}
+            PickUp::Took(renewed) => {
+                println!("{}", took(&renewed));
+                replies = swoosh::sync::round(&dial, &devices, Until::Every, TOTAL).await;
+            }
+            PickUp::Missed => {
+                let label = swoosh::renewal::own_label(ctx.home).await;
+                println!("{}", missed(label.as_ref()));
+                return Ok(());
+            }
+        }
+        let rows: Vec<(String, Row)> = replies
             .into_iter()
-            .map(|(device, answer)| (device.name, Row::of(answer)))
+            .map(|(device, reply)| (device.name, Row::of(reply)))
             .collect();
         print!("{}", report(&rows));
         Ok(())
     }
+}
+
+/// The line `sync` prints when it took this machine's renewal from one of your devices.
+pub(crate) fn took(renewed: &Renewed) -> String {
+    format!(
+        "took your renewal from {}: this machine is {} until {}.",
+        renewed.from,
+        renewed.name,
+        renewed.ends()
+    )
+}
+
+/// The line `sync` prints when none of your devices had a renewal for this machine, naming the renewal
+/// to make where your root is kept.
+pub(crate) fn missed(label: Option<&DeviceLabel>) -> String {
+    let name = label.map_or_else(|| "<name>".to_owned(), ToString::to_string);
+    format!(
+        "none of your devices had a renewal for this machine. Where your root is kept: swoosh invite \
+         {name}."
+    )
 }
 
 /// Refuse on every standing but a device's, with `status`'s line for it.
@@ -114,14 +152,15 @@ pub(crate) enum Row {
 }
 
 impl Row {
-    /// The row one answer reads as; `None` is a device that did not answer.
-    pub(crate) fn of(answer: Option<Answer>) -> Self {
-        match answer {
-            Some(Answer::Same) => Self::InSync,
-            Some(Answer::Took) => Self::Took,
-            Some(Answer::Gave) => Self::Gave,
-            Some(Answer::Forked | Answer::ForkRecorded { .. }) => Self::Fork,
-            Some(Answer::Refused) | None => Self::NoAnswer,
+    /// The row one reply reads as; a device that refused this machine, or did not answer, is one that did
+    /// not answer.
+    pub(crate) fn of(reply: Reply) -> Self {
+        match reply {
+            Reply::Answered(Answer::Same) => Self::InSync,
+            Reply::Answered(Answer::Took) => Self::Took,
+            Reply::Answered(Answer::Gave) => Self::Gave,
+            Reply::Answered(Answer::Forked | Answer::ForkRecorded { .. }) => Self::Fork,
+            Reply::Answered(Answer::Refused) | Reply::NotAdmitted | Reply::Silent => Self::NoAnswer,
         }
     }
 }

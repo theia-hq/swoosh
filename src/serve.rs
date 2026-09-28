@@ -19,6 +19,7 @@ use crate::names::{Name, NameError};
 
 mod activity;
 mod control;
+mod renewal;
 mod resident;
 mod roster;
 mod services;
@@ -38,6 +39,7 @@ pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_singl
 // `sshh`, `transfer`) are consumed from the services repo, so the names resolve to those crates.
 pub use transfer::Recv;
 
+pub use self::renewal::{Known, Renewal};
 pub use self::roster::Exchange;
 pub use self::services::ServiceList;
 pub use self::serving::{ServingError, Started};
@@ -69,6 +71,11 @@ pub const CONTROL_SERVICES_SERVICE: &str = "control.services";
 /// its dotted name is one no name a person types can be. Public so every dialer requests the SAME name
 /// the served handler is keyed under.
 pub const SYNC_SERVICE: &str = "control.sync";
+
+/// The pick-up route: every `serve` binds it, proven-only, and hands a device of this root its own newest
+/// standing on it ([`crate::renewal`]), with no token read. Like the update route it is bound by the node,
+/// never named in a `serve` entry, never printed, and dotted, so no name a person types can be it.
+pub const RENEWAL_SERVICE: &str = "control.renewal";
 
 /// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a
 /// decision at every match site (STYLE: prefer enums to bools). Every arm is a SUCCESS: an owner asked the
@@ -112,6 +119,23 @@ pub fn classify_stop(source: Option<StopKind>) -> Stopped {
         Some(StopKind::Interrupted) => Stopped::Interrupted,
         Some(StopKind::Expires | StopKind::Wire) | None => Stopped::Requested,
     }
+}
+
+/// Bind the pick-up route ([`RENEWAL_SERVICE`]) on `router`, proven-only, answering from `home`. The keys
+/// it knows are read once here into the returned [`Known`]; the caller keeps them fresh with
+/// [`Known::watch`] for as long as it serves.
+pub async fn bind_renewal(
+    router: Router,
+    home: &crate::home::Home,
+) -> eyre::Result<(Router, Known)> {
+    let known = Known::load(home).await;
+    let knows = known.clone();
+    let router = router.proven_service(
+        RENEWAL_SERVICE.parse()?,
+        Renewal::new(home.clone()),
+        move |key| knows.knows(key),
+    )?;
+    Ok((router, known))
 }
 
 /// The services a `serve` with nothing named and nothing to resume serves: the two diagnostics, each its

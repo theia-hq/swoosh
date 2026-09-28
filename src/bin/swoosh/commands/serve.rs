@@ -41,10 +41,11 @@ use swoosh::identity::Identity;
 use swoosh::joining::{AdmitError, AdmitLock};
 use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
+use swoosh::renewal::PickUp;
 use swoosh::serve::{
     Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope, InstanceLock,
     Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop, StopKind, Stopped,
-    acquire_single, bind_entry, bind_recv, classify_stop, extract_recv_services,
+    acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop, extract_recv_services,
 };
 use swoosh::standing::{Standing, StandingError};
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
@@ -497,6 +498,12 @@ impl ServeCmd {
         // The update route, on every `serve` whatever the standing, member-gated: only this root's devices
         // exchange on it. Bound by the node, never by an entry, and dotted, so no typed name reaches it.
         router = router.member_service(SYNC_SERVICE.parse()?, Exchange::new(home.clone()))?;
+        // The pick-up route, proven-only: a device of this root whose standing ended takes its renewal
+        // here. Bound on every `serve` so a `join` under a running one needs no restart, but only while
+        // this home is a device or holds its root, and its update verifies under the pin, does any key
+        // reach the handler: a key the update lists live.
+        let (bound, known) = bind_renewal(router, &home).await?;
+        router = bound;
         for scoped in fetch.services() {
             // One engine handler per fetch service, holding ONLY its own origin scope. An unconstrained
             // scope is the NEVER engine (the open proof refuses to expose it); a non-empty scope is the
@@ -631,6 +638,7 @@ impl ServeCmd {
         let stopped = tokio::select! {
             stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock) => stopped?,
             () = sync_rounds(node, &home) => unreachable!("the rounds run until the node stops"),
+            () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
         };
         // The teardown line is best-effort: a piped consumer may have already closed stdout by the time
         // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic.
@@ -845,12 +853,15 @@ const EVERY_ROUND: Duration = Duration::from_secs(60 * 60);
 
 /// Every `serve`'s own exchanges with your devices: 60 s after start, then hourly with a tenth of jitter
 /// either way. Each round reads the standing, the pin, the standing's badge and `me` afresh, runs only on
-/// a device of a root, and stops at the first device that gave this machine a newer update. It never
-/// returns; it ends when the run beside it does.
+/// a device of a root, and stops at the first device that gave this machine a newer update. When your
+/// devices refuse this machine because its standing has ended or was revoked here, the round picks up its
+/// renewal ([`swoosh::renewal`]) and, on a hit, exchanges again. It never returns; it ends when the run
+/// beside it does.
 async fn sync_rounds<T: Transport, D: Discovery>(node: &Node<T, D>, home: &Home) {
     use rand::Rng as _;
 
     let dial = swoosh::sync::NodeDial::new(node, home);
+    let fetch = swoosh::renewal::NodeFetch::new(node);
     let mut wait = FIRST_ROUND;
     loop {
         tokio::time::sleep(wait).await;
@@ -861,14 +872,24 @@ async fn sync_rounds<T: Transport, D: Discovery>(node: &Node<T, D>, home: &Home)
         };
         match devices {
             Ok(devices) => {
-                let answers = swoosh::sync::round(
-                    &dial,
-                    &devices,
-                    swoosh::sync::Until::Newer,
-                    swoosh::sync::EACH * 4,
-                )
-                .await;
-                tracing::debug!(asked = answers.len(), "a sync round finished");
+                let round = || {
+                    swoosh::sync::round(
+                        &dial,
+                        &devices,
+                        swoosh::sync::Until::Newer,
+                        swoosh::sync::EACH * 4,
+                    )
+                };
+                let replies = round().await;
+                tracing::debug!(asked = replies.len(), "a sync round finished");
+                // Refused for a standing that needs a renewal: pick it up, then exchange again with it.
+                if let PickUp::Took(renewed) =
+                    swoosh::renewal::after_round(home, &fetch, &replies).await
+                {
+                    tracing::debug!(from = %renewed.from, "took a renewal");
+                    let replies = round().await;
+                    tracing::debug!(asked = replies.len(), "a sync round finished");
+                }
             }
             Err(error) => tracing::debug!(%error, "no sync round: the devices could not be read"),
         }
