@@ -30,7 +30,7 @@ use crate::contacts::DeviceLabel;
 use crate::home::Home;
 use crate::passphrase::Prompt;
 use crate::reach_report::{Missed, Reach, Why};
-use crate::roster::{ArtifactError, Epoch, FoldError, Member, RosterDoc, read_held};
+use crate::roster::{ArtifactError, Epoch, FoldError, Folded, Member, RosterDoc, read_held};
 use crate::standing::{DirLock, Finished, LockError, Standing, StandingError};
 use crate::state::{self, Row, State, StateError};
 use crate::sync::{Answer, Device, Dial, EACH, Until};
@@ -327,6 +327,12 @@ pub enum RootError {
     /// The update cut could not be folded here.
     #[error(transparent)]
     Fold(#[from] FoldError),
+    /// The act's own cut did not fold here as the newest update: another copy of the root cut while the
+    /// act ran, so nothing was offered.
+    #[error(
+        "your devices' list changed while this ran, so this change was not sent: run it again."
+    )]
+    ListChanged,
     /// A file the act reads or writes failed.
     #[error("{}: {source}", .path.display())]
     Io {
@@ -1052,8 +1058,15 @@ impl Root {
             }
         };
         self.write_state()?;
-        if cut {
-            let _ = crate::roster::fold(&self.act.home, &bytes).await?;
+        // The act's own cut must be the newest update here. Anything else (a fork, or a list another copy
+        // cut past it) means the list moved while this ran, and the cut is not offered.
+        if cut
+            && !matches!(
+                crate::roster::fold(&self.act.home, &bytes).await?,
+                Folded::Newer
+            )
+        {
+            return Err(RootError::ListChanged);
         }
         if self.act.minted {
             self.act.announce_made(out);
