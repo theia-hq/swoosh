@@ -841,6 +841,39 @@ async fn an_old_link_never_revokes_the_device_now_named_for_it() {
 }
 
 #[tokio::test]
+async fn a_link_revoked_alone_still_revokes_its_live_device() {
+    let own = live(OWN, "desk");
+    let laptop = live(LAPTOP, "laptop");
+    let phone = live(PHONE, "phone");
+    let home = scratch("revoke-id-alone");
+    device_of(&home, &own).await;
+    let ran = revoke(&home, &[&typed(&laptop.standing)]).await;
+    assert!(ran.ok().contains("on this machine only"), "{}", ran.err);
+
+    // The next root act carries the link's id, and only its id: laptop's row stays live.
+    let copy_dir = dir("id-alone-copy");
+    copy(
+        &copy_dir,
+        &records(1, &[own, laptop.clone(), phone], Vec::new()),
+    );
+    let root = copy_dir.to_str().unwrap();
+    let ran = revoke(&home, &["me/phone", "--root", root]).await;
+    let _ = ran.ok();
+    let inspect = || swoosh::root::Root::inspect(&home, RootPlace::Dir(copy_dir.clone()));
+    let state = inspect().await.unwrap().state;
+    assert!(state.revoked().contains(&laptop.ids[0]));
+    assert!(!row_of(&state, "laptop").is_revoked());
+
+    // The command the first revoke named revokes the device the link stands for.
+    let ran = revoke(&home, &[&typed(&laptop.standing), "--root", root]).await;
+    let _ = ran.ok();
+    assert_eq!(ran.prompts, 1, "a root act");
+    let state = inspect().await.unwrap().state;
+    assert!(row_of(&state, "laptop").is_revoked());
+    assert!(state.revoked_keys().contains(&key(LAPTOP)));
+}
+
+#[tokio::test]
 async fn a_root_signed_link_is_never_complete_without_the_update() {
     let own = live(OWN, "desk");
     let laptop = live(LAPTOP, "laptop");

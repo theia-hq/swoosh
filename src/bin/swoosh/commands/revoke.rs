@@ -193,9 +193,9 @@ impl RevokeCmd {
     }
 
     /// A link: this machine's own is blocked here, and was only ever admitted here. A standing your root
-    /// signed is the device it stands for, found by the link's id; one your root has revoked already, or
-    /// that no list of your devices here carries, is blocked here and goes no further. Any other issuer's
-    /// refuses.
+    /// signed is the device it stands for, found by the link's id; one whose device your root has revoked
+    /// already, or that no list of your devices here carries, is blocked here and goes no further. Any
+    /// other issuer's refuses.
     async fn link(
         &self,
         home: &Home,
@@ -231,10 +231,13 @@ impl RevokeCmd {
                     .is_some_and(|id| row.ids.iter().any(|held| held.id == *id))
             })
             .cloned();
-        let revoked = id.as_ref().is_some_and(|id| source.revoked.contains(id))
-            || row
-                .as_ref()
-                .is_some_and(|row| source.revoked_keys.contains(&row.key));
+        // A row's key says whether its device is revoked, never its id alone: a root can hold a revoked id
+        // on a live row (a block made here without the root, carried by its next act), and that device
+        // is still to revoke. Only a link no row carries is judged by its id.
+        let revoked = match &row {
+            Some(row) => source.revoked_keys.contains(&row.key),
+            None => id.as_ref().is_some_and(|id| source.revoked.contains(id)),
+        };
         let what = What::Revoked("the link".to_owned());
         if revoked {
             // Your root has revoked the device already: its name may be a new device's now, so this stops
