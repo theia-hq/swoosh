@@ -79,12 +79,13 @@ sides can reach the internet. `swoosh status <peer>` reports the path once a lin
 
 ## A revoke did not take effect
 
-A revoke is **node-local** and lands live: the gate re-reads the denylist when its file changes
+A revoke lands live: the gate re-reads the denylist when its file changes
 (mtime-watched), so a revoke written while a node runs takes effect on the next dial, typically within a
 couple of seconds, no restart. It does not cut a session already in progress; the held connection
 drains. See [revocation](keys.md#revocation).
 
-- It applies to the node you ran it on. If you serve from more than one node, revoke on each.
+- A link is admitted only by the machine that made it: revoke it there. Revoke a device where your root is
+  kept (or with `--root <dir>`); anywhere else it is blocked on that machine only.
 - A fleet-bound grant stays usable from any device that person still holds until it expires or you
   revoke it. Keep fleet grants short-lived.
 

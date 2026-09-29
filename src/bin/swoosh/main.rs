@@ -34,8 +34,8 @@ use swoosh::{credential, reaching, transport};
 // The verb modules this binary dispatches to, each its own tree beside the composition root. The
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
-    contact, fetch, grant, identity, invite, join, leave, ping, reach, send, serve, service, speed,
-    ssh, status, stop, sync, tree,
+    contact, fetch, grant, identity, invite, join, leave, ping, reach, revoke, send, serve,
+    service, speed, ssh, status, stop, sync, tree,
 };
 
 mod commands;
@@ -105,9 +105,11 @@ enum Command {
     Join(join::JoinCmd),
     /// Stop being one of your devices. `--new-key` also gives this machine a new key.
     Leave(leave::LeaveCmd),
+    /// Take back a link, a device, or everything you shared with a contact; or end a root for good.
+    Revoke(revoke::RevokeCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(ssh::SshCmd),
-    /// Issue, narrow, or revoke `swoosh:` capability links.
+    /// Issue or narrow `swoosh:` capability links.
     #[command(subcommand)]
     Grant(grant::GrantCmd),
     /// Print this command tree (spec vs binary).
@@ -228,6 +230,9 @@ reaching_verbs! {
     /// `swoosh join`'s first exchange, with the machine that made the invite: it presents the standing the
     /// join just stored, under this machine's key.
     Join(join::JoinPull),
+    /// `swoosh revoke me/<name>` with your root, once this machine's block is written: a root act that
+    /// syncs with your devices before it signs and offers them its cut after, like `invite`.
+    Revoke(revoke::RevokeRoot),
 }
 
 impl Command {
@@ -246,6 +251,7 @@ impl Command {
             },
             Self::Join(cmd) => Verb::Join(cmd),
             Self::Leave(cmd) => Verb::Leave(cmd),
+            Self::Revoke(cmd) => Verb::Revoke(cmd),
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Grant(cmd) => Verb::Grant(cmd),
@@ -297,6 +303,9 @@ enum Verb {
     Join(join::JoinCmd),
     /// Leaves the root this machine trusts; needs only the home.
     Leave(leave::LeaveCmd),
+    /// Takes back a link, a device, or what was shared with a contact: blocks here first, with no
+    /// transport; a device's part that needs your root then runs as a reaching verb.
+    Revoke(revoke::RevokeCmd),
     /// Reads the address book to resolve a peer, then execs the system `ssh` over the overlay. A launcher:
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
@@ -316,8 +325,8 @@ enum Verb {
     Status(status::StatusCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(tree::TreeCmd),
-    /// Mints, narrows, or revokes a `swoosh:` capability link. `share` signs with the persisted key;
-    /// `attenuate` and `revoke` are wholly offline. No leaf binds a transport or reads the address book.
+    /// Mints or narrows a `swoosh:` capability link. `share` signs with the persisted key; `attenuate` is
+    /// wholly offline. No leaf binds a transport.
     Grant(grant::GrantCmd),
     /// Reaches a peer; binds a transport.
     Outward(Outward),
@@ -447,6 +456,21 @@ fn reject_retired_key_env(present: bool) -> eyre::Result<()> {
     Ok(())
 }
 
+/// Exit as clap does on a usage error of the verb `verb`: `error: <message>`, its usage line, and exit 2.
+/// For a usage error found only once the verb runs, such as stdin that held no link.
+fn usage_error(verb: &str, message: &str) -> ! {
+    let mut cli = Cli::command();
+    cli.build();
+    match cli.find_subcommand_mut(verb) {
+        Some(sub) => sub
+            .error(clap::error::ErrorKind::InvalidValue, message)
+            .exit(),
+        None => cli
+            .error(clap::error::ErrorKind::InvalidValue, message)
+            .exit(),
+    }
+}
+
 /// The default `RUST_LOG` directive: ERROR everywhere. Activity lines do not ride the log at all (a
 /// serving node renders them itself, and `--quiet` withholds them), so no target needs a raised default,
 /// and a dependency's info events never reach a stock node's stderr.
@@ -538,18 +562,34 @@ async fn run() -> eyre::Result<()> {
             }
         }
         Verb::Leave(cmd) => return cmd.run(&home).await,
-        // The `grant` group: `share` signs a link with the persisted key; `attenuate`/`revoke` are wholly
-        // offline. No leaf binds a transport, so the group dispatches here beside the local verbs rather
-        // than falling through to the reach path; `issue --for` reads the address book to resolve a device.
+        // Revokes: the block and its lines are local and come first, before any transport is composed,
+        // so nothing a bind does can delay or stop them. Only a device's part that your root publishes
+        // goes on to bind, to sync and to offer the cut.
+        Verb::Revoke(cmd) => {
+            cmd.reach.reject_unused_reach()?;
+            match cmd
+                .block(&home, std::io::stdin().lock(), &mut std::io::stderr())
+                .await
+            {
+                Ok(Some(publish)) => Outward::Revoke(revoke::RevokeRoot {
+                    publish,
+                    reach: cmd.reach,
+                }),
+                Ok(None) => return Ok(()),
+                Err(report) => match report.downcast_ref::<revoke::Usage>() {
+                    Some(usage) => usage_error("revoke", &usage.0),
+                    None => return Err(report),
+                },
+            }
+        }
+        // The `grant` group: `share` signs a link with the persisted key; `attenuate` is wholly offline.
+        // No leaf binds a transport, so the group dispatches here beside the local verbs rather than
+        // falling through to the reach path; `issue --for` reads the address book to resolve a device.
         Verb::Grant(cmd) => {
             return match cmd {
-                // `issue` and `revoke` read the address book (to resolve a `--for`/holder petname to a
-                // device), so they open the store; neither binds a transport.
+                // `issue` reads the address book (to resolve a `--for` petname to a device), so it opens
+                // the store; it binds no transport.
                 grant::GrantCmd::Issue(cmd) => {
-                    let store = ContactsStore::open(home.contacts()).await?;
-                    cmd.run(store, &home).await
-                }
-                grant::GrantCmd::Revoke(cmd) => {
                     let store = ContactsStore::open(home.contacts()).await?;
                     cmd.run(store, &home).await
                 }
@@ -882,8 +922,8 @@ mod bearer_dial_tests;
 #[path = "grant_issue_fleet_tests.rs"]
 mod grant_issue_fleet_tests;
 #[cfg(test)]
-#[path = "grant_revoke_refuses_tests.rs"]
-mod grant_revoke_refuses_tests;
+#[path = "revoke_by_key_tests.rs"]
+mod revoke_by_key_tests;
 #[cfg(test)]
 #[path = "signet_dial_verb_tests.rs"]
 mod signet_dial_verb_tests;
@@ -912,7 +952,6 @@ mod tests {
         // The bare verbs are gone from the top level; clap rejects them as unknown subcommands.
         assert!(Cli::try_parse_from(["swoosh", "issue", "ssh"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "narrow", "swoosh:x"]).is_err());
-        assert!(Cli::try_parse_from(["swoosh", "revoke", "swoosh:x"]).is_err());
     }
 
     /// I.2 (no aliases, one spelling per act): the five retired spellings do not resolve, and the

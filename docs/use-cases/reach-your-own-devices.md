@@ -101,8 +101,8 @@ or points at an existing sshd with `swoosh serve ssh=tcp:127.0.0.1:22`.
 ## The limit
 
 A device carrying your membership reaches every gated service on any node you run. If a device is lost or
-stolen, revoke it (`swoosh grant revoke me/laptop`) on each node you run. A revoke is node-local and
-lands live: it takes effect on the next dial, typically within a couple of seconds, no restart. It does
+stolen, revoke it where your root is kept: `swoosh revoke me/laptop`. It says which of your devices took
+it and which did not. A revoke lands live: it takes effect on the next dial, typically within a couple of seconds, no restart. It does
 not cut a session already in progress; the held connection drains. See
 [revocation](../keys.md#revocation).
 

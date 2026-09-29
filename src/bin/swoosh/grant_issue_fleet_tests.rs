@@ -69,12 +69,12 @@ async fn issuing_for_a_raw_signet_records_a_fleet_grant_keyed_by_the_signet() {
     );
     assert!(
         !record.root_id.to_hex().is_empty(),
-        "the ledger records a root revocation id so `grant revoke <signet>` can cut it"
+        "the ledger records a root revocation id so `revoke <signet>` can cut it"
     );
     assert_eq!(
         record.holder,
         hire_signet.to_string(),
-        "the holder is the resolved signet key, so `grant revoke <signet>` matches it"
+        "the holder is the resolved signet key, so `revoke <signet>` matches it"
     );
     assert_eq!(
         record.target.as_str(),

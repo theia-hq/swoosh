@@ -46,7 +46,7 @@ recorded mum's signet -> ed01o6vqymgz727g
 $ swoosh grant issue tv --for fleet:mum
 issued a fleet-bound grant for `tv` to fleet signet ed01o6vqymgz727g…
   every device that signet vouches for can use it (theft-resistant); expires in 1h
-  revoke: swoosh grant revoke ed01o6vqymgz727g…
+  revoke: swoosh revoke ed01o6vqymgz727g…
 swoosh:ed01hcq6…
 ```
 
@@ -75,10 +75,10 @@ keeps is the denylist a revoke writes.
 
 Take mum's household off in one step:
 
-<!-- capture: swoosh grant revoke ed01o6vqymgz727g -->
+<!-- capture: swoosh revoke mum -->
 ```console
-$ swoosh grant revoke ed01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
-revoked 1 grant(s) to ed01o6vqymgz727g… (…/revoked)
+$ swoosh revoke mum
+revoked mum: blocked. Only this machine admitted it.
 ```
 
 ## The limits
@@ -95,4 +95,4 @@ revoked 1 grant(s) to ed01o6vqymgz727g… (…/revoked)
 
 - [Keys](../keys.md#grant) what a grant and a fleet are.
 - [Contractor access](contractor-access.md) the same idea, one person, timed.
-- [Commands](../reference/commands.md#grant) issue, list, and revoke capability links.
+- [Commands](../reference/commands.md#grant) issue and narrow capability links; [revoke](../reference/commands.md#revoke) takes them back.

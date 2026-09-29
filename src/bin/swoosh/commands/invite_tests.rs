@@ -34,17 +34,17 @@ use zeroize::Zeroizing;
 use super::InviteCmd;
 
 /// This machine's key.
-const OWN: u8 = 0x11;
+pub(crate) const OWN: u8 = 0x11;
 /// The root this machine keeps, or trusts.
-const ROOT: u8 = 0x21;
+pub(crate) const ROOT: u8 = 0x21;
 /// Other devices of the root.
-const LAPTOP: u8 = 0x41;
-const PHONE: u8 = 0x42;
-const NAS: u8 = 0x43;
+pub(crate) const LAPTOP: u8 = 0x41;
+pub(crate) const PHONE: u8 = 0x42;
+pub(crate) const NAS: u8 = 0x43;
 /// A machine an act adds.
 const TV: u8 = 0x44;
 /// A device whose key came in its invite.
-const CI: u8 = 0x45;
+pub(crate) const CI: u8 = 0x45;
 /// A device the root revoked.
 const OLD: u8 = 0x46;
 /// A device another copy of the root revoked.
@@ -52,37 +52,37 @@ const PAD: u8 = 0x47;
 /// A device revoked on this machine only.
 const WATCH: u8 = 0x48;
 /// A person in the address book.
-const ALICE: u8 = 0x51;
+pub(crate) const ALICE: u8 = 0x51;
 
-const PASS: &str = "correct horse battery staple";
+pub(crate) const PASS: &str = "correct horse battery staple";
 
-const HOUR: u64 = 60 * 60;
-const DAY: u64 = 24 * HOUR;
-const NINETY: u64 = 90 * DAY;
+pub(crate) const HOUR: u64 = 60 * 60;
+pub(crate) const DAY: u64 = 24 * HOUR;
+pub(crate) const NINETY: u64 = 90 * DAY;
 
 static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs()
 }
 
-fn key(seed: u8) -> VerifyKey {
+pub(crate) fn key(seed: u8) -> VerifyKey {
     TestNode::seeded(seed).verify_key()
 }
 
-fn node(seed: u8) -> NodeId {
+pub(crate) fn node(seed: u8) -> NodeId {
     TestNode::seeded(seed).node_id()
 }
 
-fn name(text: &str) -> DeviceLabel {
+pub(crate) fn name(text: &str) -> DeviceLabel {
     text.parse().unwrap()
 }
 
 /// A fresh home holding this machine's key, plain.
-fn scratch(tag: &str) -> Home {
+pub(crate) fn scratch(tag: &str) -> Home {
     let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
     let dir =
         std::env::temp_dir().join(format!("swoosh-invite-{tag}-{}-{seq}", std::process::id()));
@@ -97,7 +97,7 @@ fn scratch(tag: &str) -> Home {
 }
 
 /// A standing `ROOT` signed for the device `seed`, ending at `until`.
-fn standing(seed: u8, until: u64) -> Link {
+pub(crate) fn standing(seed: u8, until: u64) -> Link {
     TestRoot::seeded(ROOT)
         .device_badge(
             node(seed),
@@ -107,7 +107,7 @@ fn standing(seed: u8, until: u64) -> Link {
 }
 
 /// The id `standing` is revoked by, for a standing ending at `until`.
-fn id_of(standing: &Link, until: u64) -> Id {
+pub(crate) fn id_of(standing: &Link, until: u64) -> Id {
     let cap = Cap::parse(standing.as_str()).unwrap();
     Id {
         expires: until,
@@ -117,7 +117,7 @@ fn id_of(standing: &Link, until: u64) -> Id {
 
 /// A row for the device `seed` named `label`, renewed for `duration` once per end in `ends`; its standing
 /// is the one ending last.
-fn signed(seed: u8, label: &str, duration: u64, ends: &[u64]) -> Row {
+pub(crate) fn signed(seed: u8, label: &str, duration: u64, ends: &[u64]) -> Row {
     let mut ids = Vec::new();
     let mut newest = None;
     for until in ends {
@@ -140,12 +140,12 @@ fn signed(seed: u8, label: &str, duration: u64, ends: &[u64]) -> Row {
 }
 
 /// A live device renewed ten days ago: not due, and a renewal by name would move its date.
-fn live(seed: u8, label: &str) -> Row {
+pub(crate) fn live(seed: u8, label: &str) -> Row {
     signed(seed, label, NINETY, &[now() + 80 * DAY])
 }
 
 /// A device inside the last half of its duration: due to renew.
-fn due(seed: u8, label: &str) -> Row {
+pub(crate) fn due(seed: u8, label: &str) -> Row {
     signed(seed, label, NINETY, &[now() + 20 * DAY])
 }
 
@@ -155,12 +155,12 @@ fn fresh(seed: u8, label: &str) -> Row {
 }
 
 /// A device whose date passed five days ago.
-fn lapsed(seed: u8, label: &str) -> Row {
+pub(crate) fn lapsed(seed: u8, label: &str) -> Row {
     signed(seed, label, NINETY, &[now() - 5 * DAY])
 }
 
 /// A device revoked a day ago.
-fn revoked(seed: u8, label: &str) -> Row {
+pub(crate) fn revoked(seed: u8, label: &str) -> Row {
     Row {
         revoked_on: now() - DAY,
         ..due(seed, label)
@@ -168,7 +168,7 @@ fn revoked(seed: u8, label: &str) -> Row {
 }
 
 /// A device whose key came in its invite, which ends when its standing does.
-fn carrying(row: Row) -> Row {
+pub(crate) fn carrying(row: Row) -> Row {
     Row {
         seeded: true,
         invite_until: row.until,
@@ -177,7 +177,7 @@ fn carrying(row: Row) -> Row {
 }
 
 /// The update `row` stands in.
-fn member(row: &Row) -> Member {
+pub(crate) fn member(row: &Row) -> Member {
     Member {
         node: row.key,
         label: row.label.clone(),
@@ -189,7 +189,7 @@ fn member(row: &Row) -> Member {
 }
 
 /// The records `rows` make, with each revoked row's key revoked and `revoked` ids.
-fn records(epoch: u64, rows: &[Row], revoked: Vec<Id>) -> State {
+pub(crate) fn records(epoch: u64, rows: &[Row], revoked: Vec<Id>) -> State {
     let keys = rows
         .iter()
         .filter(|row| row.is_revoked())
@@ -199,7 +199,7 @@ fn records(epoch: u64, rows: &[Row], revoked: Vec<Id>) -> State {
 }
 
 /// The update carrying `state` exactly: its live rows, its revoked ids and keys.
-fn update_of(state: &State) -> RosterDoc {
+pub(crate) fn update_of(state: &State) -> RosterDoc {
     RosterDoc::with_revocations(
         state.last_update(),
         state
@@ -215,7 +215,7 @@ fn update_of(state: &State) -> RosterDoc {
 }
 
 /// `doc`, signed by `ROOT`, as the update `home` holds.
-fn held(home: &Home, doc: &RosterDoc) {
+pub(crate) fn held(home: &Home, doc: &RosterDoc) {
     std::fs::write(home.roster(), TestRoot::seeded(ROOT).sign_update(doc)).unwrap();
 }
 
@@ -246,7 +246,7 @@ fn sealed() -> Vec<u8> {
 }
 
 /// A copy of `ROOT` at `dir`, holding `state`, with its lock file already made.
-fn copy(dir: &Path, state: &State) {
+pub(crate) fn copy(dir: &Path, state: &State) {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     config::create_store_dir(dir).unwrap();
@@ -268,7 +268,7 @@ fn copy(dir: &Path, state: &State) {
 }
 
 /// Make `home` a device of `ROOT`: its pin, and `own` as its standing.
-async fn device_of(home: &Home, own: &Row) {
+pub(crate) async fn device_of(home: &Home, own: &Row) {
     config::write_signet(home, TestRoot::seeded(ROOT).node_id())
         .await
         .unwrap();
@@ -277,7 +277,7 @@ async fn device_of(home: &Home, own: &Row) {
 
 /// Make `home` keep `ROOT` with `rows` (this machine's own row first) and `revoked` ids, holding the update
 /// that carries exactly those records.
-async fn holds(home: &Home, rows: &[Row], revoked: Vec<Id>) {
+pub(crate) async fn holds(home: &Home, rows: &[Row], revoked: Vec<Id>) {
     device_of(home, &rows[0]).await;
     let state = records(1, rows, revoked);
     copy(&home.root(), &state);
@@ -285,7 +285,7 @@ async fn holds(home: &Home, rows: &[Row], revoked: Vec<Id>) {
 }
 
 /// Every file under `dir`, with its bytes.
-fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(crate) fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     let mut files = BTreeMap::new();
     let mut stack = vec![dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -302,12 +302,12 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 }
 
 /// The records kept in `home`, read as `status` reads them.
-async fn kept(home: &Home) -> State {
+pub(crate) async fn kept(home: &Home) -> State {
     Root::inspect(home, RootPlace::Home).await.unwrap().state
 }
 
 /// The row named `label` in `state`.
-fn row_of<'a>(state: &'a State, label: &str) -> &'a Row {
+pub(crate) fn row_of<'a>(state: &'a State, label: &str) -> &'a Row {
     state
         .rows()
         .iter()
@@ -317,19 +317,19 @@ fn row_of<'a>(state: &'a State, label: &str) -> &'a Row {
 
 /// Everything an act printed and asked, in the order it happened.
 #[derive(Clone, Default)]
-struct Tape(Rc<RefCell<String>>);
+pub(crate) struct Tape(Rc<RefCell<String>>);
 
 impl Tape {
-    fn push(&self, text: &str) {
+    pub(crate) fn push(&self, text: &str) {
         self.0.borrow_mut().push_str(text);
     }
 
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         self.0.borrow().clone()
     }
 
     /// Where `needle` first appears, which must be somewhere.
-    fn at(&self, needle: &str) -> usize {
+    pub(crate) fn at(&self, needle: &str) -> usize {
         let text = self.text();
         text.find(needle)
             .unwrap_or_else(|| panic!("{needle:?} is on the tape: {text}"))
@@ -337,9 +337,9 @@ impl Tape {
 }
 
 /// One stream of an act, kept on its own and on the tape.
-struct Stream {
-    bytes: Vec<u8>,
-    tape: Tape,
+pub(crate) struct Stream {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) tape: Tape,
 }
 
 impl Write for Stream {
@@ -355,10 +355,10 @@ impl Write for Stream {
 }
 
 /// The scripted passphrase, marking the tape each time it is asked.
-struct Asked {
-    inner: Counting,
-    terminal: bool,
-    tape: Tape,
+pub(crate) struct Asked {
+    pub(crate) inner: Counting,
+    pub(crate) terminal: bool,
+    pub(crate) tape: Tape,
 }
 
 impl Prompt for Asked {
@@ -412,10 +412,10 @@ fn parse(args: &[&str]) -> InviteCmd {
 }
 
 /// What one `invite` did.
-struct Ran {
-    result: eyre::Result<()>,
-    out: String,
-    err: String,
+pub(crate) struct Ran {
+    pub(crate) result: eyre::Result<()>,
+    pub(crate) out: String,
+    pub(crate) err: String,
     tape: Tape,
     prompts: usize,
 }
@@ -430,7 +430,7 @@ impl Ran {
     }
 
     /// The invite on stdout, which is its only line.
-    fn invite(&self) -> Invite {
+    pub(crate) fn invite(&self) -> Invite {
         assert!(self.result.is_ok(), "{:?}: {}", self.result, self.err);
         assert_eq!(self.out.lines().count(), 1, "one line: {}", self.out);
         Invite::parse(self.out.trim_end()).unwrap()
@@ -438,7 +438,7 @@ impl Ran {
 }
 
 /// Run `swoosh invite <args>` on `home`.
-async fn invite(home: &Home, args: &[&str]) -> Ran {
+pub(crate) async fn invite(home: &Home, args: &[&str]) -> Ran {
     invite_at(home, args, true).await
 }
 

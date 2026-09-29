@@ -94,9 +94,9 @@ deploybox -- <command>` from the job.
 Revokes land live: a [revoke](../keys.md#revocation) written while a node runs takes effect on the next
 dial, no restart:
 
-<!-- capture: swoosh grant revoke me/ci-runner -->
+<!-- manual: asks for the root's passphrase -->
 ```console
-$ swoosh grant revoke me/ci-runner
+$ swoosh revoke me/ci-runner
 ```
 
 To rotate instead of revoke, create a fresh invite, update the CI secret, and revoke the old device.
@@ -104,8 +104,8 @@ To rotate instead of revoke, create a fresh invite, update the CI secret, and re
 ## The limit
 
 Anyone who can read the `THEIA_INVITE` secret can adopt that device identity, so scope the secret to
-the job that needs it and rotate it like any credential. A revoke is node-local: it writes that node's own
-denylist, so revoke on every machine the runner reaches. See [revocation](../keys.md#revocation).
+the job that needs it and rotate it like any credential. Revoke it where your root is kept; it passes to your other devices
+from there. See [revocation](../keys.md#revocation).
 
 ## Next
 

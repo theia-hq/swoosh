@@ -1,21 +1,20 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! Issue a device-bound grant, revoke it BY HOLDER through the mint-log ledger, and prove the gate's
-//! revocation check then refuses the very cap that was issued. This is the load-bearing seam behind
-//! `swoosh grant revoke <holder>`: the link leaves the machine, but its ROOT revocation id is recorded in
-//! the ledger, so naming the holder later cuts the cap off at the gate without ever seeing the link again.
+//! Issue a device-bound grant, revoke it by the key it was given to through the ledger, and prove the gate's
+//! revocation check then refuses the very cap that was issued. The link leaves the machine, but its root
+//! revocation id is recorded in the ledger, so naming the key later cuts the cap off at the gate without ever
+//! seeing the link again.
 //!
-//! The flow mirrors the product path exactly: `grant issue --for` mints a bound link and records the grant;
-//! `grant revoke <holder>` (driven here through the real [`RevokeCmd`](revoke::RevokeCmd)) loads the ledger, finds the root id,
-//! and denylists it. A live exposer's gate consults [`FileDenylist::is_revoked`] on every dial, so asserting it
-//! now refuses the cap is asserting the gate refuses it.
+//! The flow mirrors the product path: `grant issue --for` mints a bound link and records the grant; `swoosh
+//! revoke <key>` (driven here through the real [`RevokeCmd`](revoke::RevokeCmd)) loads the ledger, finds the
+//! root id, and denylists it. A live exposer's gate consults [`FileDenylist::is_revoked`] on every dial, so
+//! asserting it now refuses the cap is asserting the gate refuses it.
 
 use core::time::Duration;
 
 use bifrost::NodeId;
 use nauthy::{Cap, FileDenylist, Request, Service};
-use swoosh::contacts::ContactsStore;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::testkit::TestRoot;
@@ -23,12 +22,18 @@ use tightbeam::identity::AsVerifyKey as _;
 
 use crate::commands::revoke;
 
+#[derive(clap::Parser)]
+struct Revoke {
+    #[command(flatten)]
+    cmd: revoke::RevokeCmd,
+}
+
 /// How long every grant here lives.
 const HOUR: Duration = Duration::from_secs(3600);
 
 #[tokio::test]
 async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
-    let dir = std::env::temp_dir().join(format!("swoosh-grant-revoke-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("swoosh-revoke-by-key-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let home = Home::resolve(Some(dir.clone())).unwrap();
@@ -74,18 +79,16 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     let denylist = FileDenylist::load(home.revoked()).await.unwrap();
     assert!(
         !denylist.is_revoked(&cap),
-        "the cap is not revoked before `grant revoke`"
+        "the cap is not revoked before `revoke`"
     );
 
-    // Revoke BY HOLDER (the raw node id) through the real command path: loads the ledger, finds the root id,
-    // denylists it. An empty address book suffices, since the target is already a canonical node id.
-    let store = ContactsStore::open(home.contacts()).await.unwrap();
-    revoke::RevokeCmd {
-        target: holder.clone(),
-    }
-    .run(store, &home)
-    .await
-    .unwrap();
+    // Revoke by the key through the real command path: loads the ledger, finds the root id, denylists it.
+    let cmd = <Revoke as clap::Parser>::try_parse_from(["revoke", holder.as_str()])
+        .unwrap()
+        .cmd;
+    let mut err = Vec::new();
+    let publish = cmd.block(&home, &b""[..], &mut err).await.unwrap();
+    assert!(publish.is_none(), "a key's links need no root");
 
     // After revocation: the gate's revocation check (the seam a live exposer consults) now refuses the cap.
     let denylist = FileDenylist::load(home.revoked()).await.unwrap();

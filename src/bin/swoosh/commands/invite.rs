@@ -578,4 +578,4 @@ impl swoosh::reaching::Reaching for InviteCmd {
 
 #[cfg(test)]
 #[path = "invite_tests.rs"]
-mod invite_tests;
+pub(crate) mod invite_tests;

@@ -83,8 +83,8 @@ The gate admits you because your machine carries the membership your signet issu
 
 Their machine trusts your signet fully: adoption makes it one of your devices, so you can reach every
 gated service on it. That is the point here, but it means you should only do this on a machine you are
-meant to administer. If you stop being their IT, revoke the device on each node you run:
-`swoosh grant revoke me/grandma-pc`.
+meant to administer. If you stop being their IT, revoke the device where your root is kept:
+`swoosh revoke me/grandma-pc`.
 
 ## Next
 

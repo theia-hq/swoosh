@@ -84,7 +84,7 @@ impl Grants {
     /// Every grant this node has issued, in append order. An absent file is no grants (nothing issued yet).
     ///
     /// A single corrupt line must NOT wedge the whole ledger, or one bad byte would blind every `status`
-    /// and `grant revoke <holder>`: the good rows still matter for revocation. So parsing is per-line, good
+    /// and `revoke <holder>`: the good rows still matter for revocation. So parsing is per-line, good
     /// rows are kept, and each bad line is reported to stderr (named by file and line number) for the issuer
     /// to fix, never swallowed silently. An unreadable FILE (not a bad line) is still a hard error.
     // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
