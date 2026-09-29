@@ -917,18 +917,19 @@ impl Root {
         })
     }
 
-    /// Revoke the device named `name`: its row, its key and every id it holds. A row already marked
-    /// revoked, by this machine's own block brought forward or by an earlier act, is revoked again as it
-    /// stands, so running a revoke again with the root publishes it.
-    pub fn revoke_device(&mut self, name: &DeviceLabel) -> Result<(), RootError> {
+    /// Revoke the device `name` names, found by its key: its row, its key and every id it holds. The key
+    /// finds the row, never the name, since a name can pass to a new device once the old one is revoked.
+    /// A row already marked revoked, by this machine's own block brought forward or by an earlier act, is
+    /// revoked again as it stands, so running a revoke again with the root publishes it.
+    pub fn revoke_device(&mut self, name: &DeviceLabel, key: VerifyKey) -> Result<(), RootError> {
         let act = &mut self.act;
         let now = act.now;
-        let Some(row) = act.book.live().find(|row| &row.label == name) else {
+        let Some(row) = act.book.live().find(|row| row.key == key) else {
             let revoked = act
                 .book
                 .rows
                 .iter()
-                .filter(|row| row.is_revoked() && &row.label == name)
+                .filter(|row| row.is_revoked() && row.key == key)
                 .max_by_key(|row| row.revoked_on);
             let Some(row) = revoked else {
                 return Err(RootError::NotYourDevice { name: name.clone() });

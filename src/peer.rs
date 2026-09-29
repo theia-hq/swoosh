@@ -107,21 +107,27 @@ fn read_file(text: &str) -> Result<Peer, PeerParseError> {
 /// reads, on the same rules ([`read_file`]). Anything else in the file refuses, a root key included.
 pub fn read_link_file(text: &str) -> Result<(Link, PathBuf), PeerParseError> {
     use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     let path = expand(text, std::env::var_os("HOME"))?;
     let unreadable = |error: std::io::Error| PeerParseError::Unreadable {
         path: text.to_owned(),
         reason: io_reason(&error),
     };
-    if !std::fs::metadata(&path).map_err(unreadable)?.is_file() {
+    // Opened without blocking, then checked on the handle: a FIFO opens at once instead of waiting on a
+    // writer, and a file swapped for one after a check by name is still the file refused.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&path)
+        .map_err(unreadable)?;
+    if !file.metadata().map_err(unreadable)?.is_file() {
         return Err(PeerParseError::NotAFile {
             path: text.to_owned(),
         });
     }
     let mut held = String::new();
-    std::fs::File::open(&path)
-        .map_err(unreadable)?
-        .take(MAX_PEER_FILE + 1)
+    file.take(MAX_PEER_FILE + 1)
         .read_to_string(&mut held)
         .map_err(unreadable)?;
     if held.len() as u64 > MAX_PEER_FILE {
@@ -604,6 +610,19 @@ mod tests {
                 .expect_err("a huge file refuses")
                 .to_string(),
             format!("{typed} is too large to hold one swoosh: link"),
+        );
+        // A FIFO with no writer refuses at once: it is opened without waiting, then refused by its type.
+        let fifo = dir.join("fifo.link");
+        let named = std::ffi::CString::new(fifo.to_str().expect("a UTF-8 path")).expect("no NUL");
+        // SAFETY: `named` is a valid NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(named.as_ptr(), 0o600) }, 0, "mkfifo");
+        let typed = fifo.to_str().expect("a UTF-8 path");
+        assert_eq!(
+            typed
+                .parse::<Peer>()
+                .expect_err("a FIFO refuses")
+                .to_string(),
+            format!("{typed} is not a file; name the file that holds the swoosh: link"),
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

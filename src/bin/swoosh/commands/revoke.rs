@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use nauthy::{FileDenylist, Link, RevocationId, VerifyKey};
-use swoosh::contacts::{ContactRef, ContactsStore, DeviceLabel, ME, Petname};
+use swoosh::contacts::{ContactRef, ContactsStore, DeviceLabel, ME, Petname, ResolveError};
 use swoosh::grants::Grants;
 use swoosh::home::Home;
 use swoosh::passphrase::{Prompt, Terminal};
@@ -92,7 +92,7 @@ fn target(text: &str) -> Result<Target, String> {
     if swoosh::link::looks_bare(text) {
         return Err(swoosh::link::LinkError::Prefix.to_string());
     }
-    if text == ME {
+    if text.eq_ignore_ascii_case(ME) {
         return Err(
             "`me` alone names all your devices; revoke one: `swoosh revoke me/<name>`".to_owned(),
         );
@@ -124,6 +124,8 @@ pub struct Usage(pub String);
 pub struct Publish {
     place: RootPlace,
     name: DeviceLabel,
+    /// The device's key, which finds its row: a name can pass to a new device once the old one is revoked.
+    key: VerifyKey,
     /// Whether this machine had given the device's key any link.
     links: bool,
 }
@@ -160,7 +162,10 @@ impl RevokeCmd {
             Target::PersonDevice(device) => {
                 self.no_root()?;
                 let store = ContactsStore::open(home.contacts()).await?;
-                let candidates = store.contacts().resolve_candidates(&device)?;
+                let candidates = store
+                    .contacts()
+                    .resolve_candidates(&device)
+                    .map_err(unknown)?;
                 let keys: Vec<NodeId> = candidates.iter().map(|candidate| candidate.node).collect();
                 let what = match device.device() {
                     Some(name) => format!("{}/{name}", device.petname()),
@@ -188,7 +193,9 @@ impl RevokeCmd {
     }
 
     /// A link: this machine's own is blocked here, and was only ever admitted here. A standing your root
-    /// signed is the device it stands for. Any other issuer's refuses.
+    /// signed is the device it stands for, found by the link's id; one your root has revoked already, or
+    /// that no list of your devices here carries, is blocked here and goes no further. Any other issuer's
+    /// refuses.
     async fn link(
         &self,
         home: &Home,
@@ -215,31 +222,51 @@ impl RevokeCmd {
             );
         }
         let id = link.cap().root_revocation_id();
-        let device = match self.rows(home).await {
-            Ok(rows) => rows.into_iter().find(|row| {
+        let source = self.source(home, &mut io::sink()).await?;
+        let row = source
+            .rows
+            .iter()
+            .find(|row| {
                 id.as_ref()
                     .is_some_and(|id| row.ids.iter().any(|held| held.id == *id))
-            }),
-            Err(_) => None,
-        };
-        match device {
-            Some(row) => {
-                let name = row.label.clone();
-                self.device(home, &name, Some(row), err).await
+            })
+            .cloned();
+        let revoked = id.as_ref().is_some_and(|id| source.revoked.contains(id))
+            || row
+                .as_ref()
+                .is_some_and(|row| source.revoked_keys.contains(&row.key));
+        let what = What::Revoked("the link".to_owned());
+        if revoked {
+            // Your root has revoked the device already: its name may be a new device's now, so this stops
+            // at the link and the key it was signed for.
+            self.no_root()?;
+            let mut denylist = denylist(home).await?;
+            link.revoke(&mut denylist).await?;
+            if let Some(row) = &row {
+                swoosh::gate::add_revoked_keys(home, &[row.key])?;
             }
-            // No row carries it: it has ended, or your root revoked it already. Block it here all the same.
-            None => {
-                self.no_root()?;
-                let mut denylist = denylist(home).await?;
-                link.revoke(&mut denylist).await?;
-                writeln!(
-                    err,
-                    "{}",
-                    Reach::Complete.line(&What::Revoked("the link".to_owned()))
-                )?;
-                Ok(None)
-            }
+            writeln!(err, "{what}: {ALREADY}")?;
+            return Ok(None);
         }
+        if let Some(row) = row {
+            let name = row.label.clone();
+            return self.device(home, &name, Some(row), err).await;
+        }
+        // No list of your devices here carries it: it has ended, or this machine has not seen its device
+        // yet. Until it ends, your other devices may admit it.
+        let Some(ends) = link.cap().expiry().ok().flatten().map(unix_secs) else {
+            eyre::bail!("this link carries no end date; nothing revoked.");
+        };
+        let reach = if ends <= unix_now() {
+            self.no_root()?;
+            Reach::Complete
+        } else {
+            Reach::LocalOnly { until: ends }
+        };
+        let mut denylist = denylist(home).await?;
+        link.revoke(&mut denylist).await?;
+        writeln!(err, "{}", reach.line(&what))?;
+        Ok(None)
     }
 
     /// `me/<name>`: find its row before any write, refuse this machine's own, block its ids, its key and
@@ -289,6 +316,7 @@ impl RevokeCmd {
                 Ok(Some(Publish {
                     place,
                     name: name.clone(),
+                    key: row.key,
                     links,
                 }))
             }
@@ -303,13 +331,9 @@ impl RevokeCmd {
         }
     }
 
-    /// Your devices, read with no lock and no prompt: from your root's records where the root is kept here
-    /// or given with `--root`, else from the update this device holds.
-    async fn rows(&self, home: &Home) -> eyre::Result<Vec<Device>> {
-        Ok(self.source(home, &mut io::sink()).await?.rows)
-    }
-
-    /// Where a device's ids come from, and where the root that publishes its revoke is, if anywhere.
+    /// Where a device's ids come from, and where the root that publishes its revoke is, if anywhere: your
+    /// root's records where the root is kept here or given with `--root`, else the update this device
+    /// holds. Read with no lock and no prompt.
     async fn source(&self, home: &Home, err: &mut impl Write) -> eyre::Result<Source> {
         let read = match Standing::read(home).await {
             Ok(read) => read,
@@ -331,39 +355,50 @@ impl RevokeCmd {
             }
             (None, Standing::Device { .. }) => None,
         };
-        let rows = match (&place, &read.standing) {
-            (Some(place), _) => Root::inspect(home, place.clone())
-                .await?
-                .rows()
-                .iter()
-                .map(|row| Device {
-                    label: row.label.clone(),
-                    key: row.key,
-                    until: row.until,
-                    ids: row.ids.clone(),
-                    revoked: row.is_revoked(),
-                })
-                .collect(),
+        let mut source = Source {
+            place,
+            rows: Vec::new(),
+            revoked: Vec::new(),
+            revoked_keys: Vec::new(),
+        };
+        match (&source.place, &read.standing) {
+            (Some(place), _) => {
+                let inspected = Root::inspect(home, place.clone()).await?;
+                source.rows = inspected
+                    .rows()
+                    .iter()
+                    .map(|row| Device {
+                        label: row.label.clone(),
+                        key: row.key,
+                        until: row.until,
+                        ids: row.ids.clone(),
+                        revoked: row.is_revoked(),
+                    })
+                    .collect();
+                source.revoked = ids(inspected.state.revoked());
+                source.revoked_keys = inspected.state.revoked_keys().to_vec();
+            }
             (None, Standing::Device { pin, .. }) => {
                 let pin = swoosh::standing::pin_key(home, *pin)?;
-                swoosh::roster::held(home, pin)
-                    .map(|doc| {
-                        doc.members()
-                            .iter()
-                            .map(|member| Device {
-                                label: member.label.clone(),
-                                key: member.node,
-                                until: member.until,
-                                ids: member.ids.clone(),
-                                revoked: false,
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
+                if let Some(doc) = swoosh::roster::held(home, pin) {
+                    source.rows = doc
+                        .members()
+                        .iter()
+                        .map(|member| Device {
+                            label: member.label.clone(),
+                            key: member.node,
+                            until: member.until,
+                            ids: member.ids.clone(),
+                            revoked: false,
+                        })
+                        .collect();
+                    source.revoked = ids(doc.revoked());
+                    source.revoked_keys = doc.revoked_keys().to_vec();
+                }
             }
-            (None, _) => Vec::new(),
-        };
-        Ok(Source { place, rows })
+            (None, _) => {}
+        }
+        Ok(source)
     }
 }
 
@@ -386,7 +421,19 @@ struct Device {
 struct Source {
     /// The root that publishes the revoke, when there is one.
     place: Option<RootPlace>,
+    /// Your devices, as the next act that cuts would find them: a row this machine blocked is marked.
     rows: Vec<Device>,
+    /// The ids your root's records, or the update, revoke.
+    revoked: Vec<RevocationId>,
+    /// The keys your root's records, or the update, revoke.
+    revoked_keys: Vec<VerifyKey>,
+}
+
+/// What a link whose device your root revoked already says after "revoked the link: ".
+const ALREADY: &str = "blocked here. Your root revoked the device it stands for already.";
+
+fn ids(held: &[swoosh::roster::Id]) -> Vec<RevocationId> {
+    held.iter().map(|id| RevocationId::clone(&id.id)).collect()
 }
 
 impl Publish {
@@ -400,7 +447,7 @@ impl Publish {
     ) -> eyre::Result<()> {
         let mut root =
             Root::present_to(home, self.place, RootVerb::Revoke, prompt, dial, err).await?;
-        root.revoke_device(&self.name)?;
+        root.revoke_device(&self.name, self.key)?;
         let _ = root.renew_due()?;
         let committed = root.commit_to(err).await?;
         let reach = committed.offer(dial).await;
@@ -427,7 +474,7 @@ async fn person_links(home: &Home, person: &Petname, err: &mut impl Write) -> ey
             .map(|candidate| candidate.node.to_string())
             .collect(),
         Err(_) if contacts.signet(person).is_some() => Vec::new(),
-        Err(error) => return Err(error.into()),
+        Err(error) => return Err(unknown(error)),
     };
     if let Some(root) = contacts.signet(person) {
         holders.push(root.node.to_string());
@@ -442,6 +489,17 @@ async fn person_links(home: &Home, person: &Petname, err: &mut impl Write) -> ey
         Reach::Complete.line(&What::Revoked(person.to_string()))
     )?;
     Ok(())
+}
+
+/// A person this machine has no contact for: adding one is never how a revoke goes on, so the refusal
+/// names where your contacts are listed.
+fn unknown(error: ResolveError) -> eyre::Report {
+    match error {
+        ResolveError::UnknownPetname(person) => {
+            eyre::eyre!("{person} is not one of your contacts (`swoosh status`)")
+        }
+        other => other.into(),
+    }
 }
 
 /// A key, or a contact's device: every link given to it, then what else the key is here.
@@ -477,13 +535,15 @@ async fn key_links(
 }
 
 /// What else `key` is on this machine, one line each: one of your devices, or a root it knows. A root is
-/// never revoked by its bare key, and no line prints a runnable root revoke.
+/// never revoked by its bare key, and no line prints a runnable root revoke. This machine's own key names
+/// no device to revoke, since `revoke me/<own>` refuses.
 async fn also(home: &Home, key: NodeId) -> eyre::Result<Vec<String>> {
     let short = format!("{}…", key.short());
     let verify = key.verify_key()?;
     let mut lines = Vec::new();
     let pin = pin(home).await;
     if let Some(pin) = pin
+        && own_key(home)? != Some(verify)
         && let Some(doc) = swoosh::roster::held(home, pin)
         && let Some(member) = doc.members().iter().find(|member| member.node == verify)
     {
@@ -588,8 +648,11 @@ fn short(key: &VerifyKey) -> String {
 }
 
 fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+    unix_secs(std::time::SystemTime::now())
+}
+
+fn unix_secs(at: std::time::SystemTime) -> u64 {
+    at.duration_since(std::time::SystemTime::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
 }
 

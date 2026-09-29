@@ -24,8 +24,8 @@ use tightbeam::identity::AsVerifyKey as _;
 
 use super::super::invite::invite_tests::{
     Asked, CI, DAY, LAPTOP, NAS, NINETY, OWN, PASS, PHONE, ROOT, Stream, Tape, carrying, copy,
-    device_of, due, held, holds, invite, kept, key, live, node, now, records, row_of, scratch,
-    signed, snapshot, update_of,
+    device_of, due, held, holds, invite, kept, key, live, node, now, records, revoked, row_of,
+    scratch, signed, snapshot, update_of,
 };
 use super::{RevokeCmd, Usage};
 
@@ -355,6 +355,13 @@ fn bare_me_is_refused() {
         error
             .to_string()
             .contains("`me` alone names all your devices; revoke one: `swoosh revoke me/<name>`"),
+        "{error}"
+    );
+    let error = parse(&["ME"]).expect_err("`ME` alone refuses as `me` does");
+    assert!(
+        error
+            .to_string()
+            .contains("`me` alone names all your devices"),
         "{error}"
     );
     for reserved in ["root", "anyone", "me/root", "alice/anyone"] {
@@ -689,6 +696,31 @@ async fn revoke_a_key_with_no_links_here_says_nothing_was_revoked() {
         !blocks_key(&home, LAPTOP).await,
         "a key's form never revokes the device"
     );
+    let ran = revoke(&home, &[&node(OWN).to_string()]).await;
+    assert_eq!(
+        ran.refusal(),
+        format!(
+            "no link from this machine was given to {}; nothing revoked.",
+            short(OWN)
+        ),
+        "this machine's own key names no device to revoke, since `revoke me/desk` refuses"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_person_is_not_one_of_your_contacts() {
+    let home = scratch("revoke-unknown-person");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let before = snapshot(home.dir());
+    for typed in ["carol", "carol/laptop"] {
+        let ran = revoke(&home, &[typed]).await;
+        assert_eq!(
+            ran.refusal(),
+            "carol is not one of your contacts (`swoosh status`)",
+            "{typed}"
+        );
+    }
+    assert!(snapshot(home.dir()) == before, "nothing was written");
 }
 
 #[test]
@@ -763,5 +795,86 @@ async fn revoking_again_with_the_root_publishes_a_local_block() {
             Date(laptop.until)
         )),
         "{err}"
+    );
+}
+
+// --- a standing your root signed ---
+
+#[tokio::test]
+async fn an_old_link_never_revokes_the_device_now_named_for_it() {
+    let old = revoked(LAPTOP, "nas");
+    let new = live(PHONE, "nas");
+    let rows = [live(OWN, "desk"), old.clone(), new.clone()];
+    let line =
+        "revoked the link: blocked here. Your root revoked the device it stands for already.";
+
+    let home = scratch("revoke-old-link");
+    holds(&home, &rows, Vec::new()).await;
+    let ran = revoke(&home, &[&typed(&old.standing)]).await;
+    assert_eq!(ran.ok().trim_end(), line);
+    assert_eq!(ran.prompts, 0, "no root act");
+    assert!(
+        blocks(&home, &old.standing).await,
+        "the old link is blocked here"
+    );
+    assert!(
+        !blocks_key(&home, PHONE).await,
+        "the device now named nas is not"
+    );
+    let state = kept(&home).await;
+    assert!(!state.revoked_keys().contains(&key(PHONE)));
+    assert!(!row_of(&state, "desk").is_revoked());
+    assert!(
+        state
+            .rows()
+            .iter()
+            .any(|row| row.key == key(PHONE) && !row.is_revoked()),
+        "and stays one of your devices"
+    );
+
+    // On a device, the update names the old link's id among the revoked.
+    let home = device("revoke-old-link-device", &[live(OWN, "desk"), new.clone()]).await;
+    held(&home, &update_of(&records(1, &rows, old.ids.clone())));
+    let ran = revoke(&home, &[&typed(&old.standing)]).await;
+    assert_eq!(ran.ok().trim_end(), line);
+    assert!(!blocks_key(&home, PHONE).await);
+}
+
+#[tokio::test]
+async fn a_root_signed_link_is_never_complete_without_the_update() {
+    let own = live(OWN, "desk");
+    let laptop = live(LAPTOP, "laptop");
+    let home = scratch("revoke-no-update");
+    device_of(&home, &own).await;
+    let ran = revoke(&home, &[&typed(&laptop.standing)]).await;
+    assert_eq!(
+        ran.ok().trim_end(),
+        format!(
+            "revoked the link on this machine only. Your other devices admit it until {}. To block it \
+             everywhere, run this again where your root is kept, or here with --root <dir>.",
+            Date(laptop.until)
+        )
+    );
+    assert!(
+        blocks(&home, &laptop.standing).await,
+        "blocked here all the same"
+    );
+}
+
+#[tokio::test]
+async fn a_root_signed_link_refuses_when_your_devices_cannot_be_read() {
+    let laptop = live(LAPTOP, "laptop");
+    let home = scratch("revoke-unreadable");
+    holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
+    std::fs::write(home.root().join(swoosh::state::FILE), b"not a state").unwrap();
+    let ran = revoke(&home, &[&typed(&laptop.standing)]).await;
+    let refusal = ran.refusal();
+    assert!(
+        refusal.contains("records were changed outside swoosh"),
+        "the failed read is the refusal: {refusal}"
+    );
+    assert!(
+        !blocks(&home, &laptop.standing).await,
+        "nothing is blocked on a read that failed"
     );
 }
