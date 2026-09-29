@@ -24,10 +24,10 @@ swoosh:ed01…` takes back one link this machine gave out.
 up without a restart. A link this machine made, and a link it gave a key, were only ever admitted here, so
 that block is the whole revoke. A device is admitted by all your devices: where your root is kept (or with
 `--root <dir>`), the revoke asks for the root's passphrase after the block is written and then passes it to
-your other devices. Without the root, the revoke stays on this machine and prints the date until which your
-other devices still admit the device. A revoked device's key can never be your device again: that machine
+your other devices. Without the root, it stays on this machine and prints when your other devices stop
+admitting the device. A revoked device's key can never be your device again: that machine
 runs `swoosh leave --new-key` at its console to be invited back. A stolen device can stop your other
-machines (`swoosh stop me/<name>`) until they learn it is revoked.
+machines (`swoosh stop --at me/<name>`) until they learn it is revoked.
 
 See also [`swoosh leave`](leave.md), [`swoosh grant`](grant.md), [Commands index](../commands.md) and
 [Common options](../commands.md#common-options).

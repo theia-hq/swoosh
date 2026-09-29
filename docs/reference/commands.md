@@ -45,8 +45,8 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="invite"></a>[`swoosh invite`](commands/invite.md): add one of your devices, or renew it; bare `invite` lists what is due
 - <a id="join"></a>[`swoosh join`](commands/join.md): make this machine one of your devices, from an invite
 - <a id="leave"></a>[`swoosh leave`](commands/leave.md): stop being one of your devices; `--new-key` also gives this machine a new key
-- <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a peer's sshd over the overlay using the system ssh
 - <a id="revoke"></a>[`swoosh revoke`](commands/revoke.md): take back a link, one of your devices, or everything you shared with a contact
+- <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a peer's sshd over the overlay using the system ssh
 - <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue or narrow `swoosh:` capability links
 - <a id="tree"></a>[`swoosh tree`](commands/tree.md): print the command tree read straight from the parser
 

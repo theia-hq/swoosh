@@ -21,7 +21,7 @@ recorded contractor's signet -> ed01o6vqymgz727g
 $ swoosh grant issue ssh --for fleet:contractor --expires 14d
 issued a fleet-bound grant for `ssh` to fleet signet ed01o6vqymgz727g…
   every device that signet vouches for can use it (theft-resistant); expires in 14d
-  revoke: swoosh grant revoke ed01o6vqymgz727g…
+  revoke: swoosh revoke ed01o6vqymgz727g…
 swoosh:ed01hcq6…
 ```
 
@@ -67,17 +67,16 @@ serving: nothing (swoosh serve is not running)
 
 The link expires on its own at the end of the engagement. To cut access early, revoke their fleet:
 
-<!-- capture: swoosh grant revoke ed01o6vqymgz727g -->
+<!-- capture: swoosh revoke contractor -->
 ```console
-$ swoosh grant revoke ed01o6vqymgz727gazsni37uoify447gropuhsuduzd6lbn4q5iscxfq
-revoked 1 grant(s) to ed01o6vqymgz727g… (…/revoked)
+$ swoosh revoke contractor
+revoked contractor: blocked. Only this machine admitted it.
 ```
 
 ## The limit
 
-A revoke is node-local and lands live: it takes effect on the box's next dial, typically within a couple
-of seconds, no restart. It does not cut a session already in progress. If you serve the box from more
-than one node, revoke on each. A fleet-bound grant also stays usable from any device the contractor still
+A revoke lands live: it takes effect on the box's next dial, typically within a couple of seconds, no
+restart. It does not cut a session already in progress. A fleet-bound grant also stays usable from any device the contractor still
 holds until it expires or you revoke it, so keep the expiry short. See
 [revocation](../keys.md#revocation).
 
@@ -85,4 +84,4 @@ holds until it expires or you revoke it, so keep the expiry short. See
 
 - [Keys](../keys.md#the-one-trade) bound versus delegable, and why.
 - [CI runner](ci-runner.md) a machine credential you can revoke, for automation.
-- [Commands](../reference/commands.md#grant) issue, narrow, list, and revoke.
+- [Commands](../reference/commands.md#grant) issue and narrow; [revoke](../reference/commands.md#revoke) takes a link back.

@@ -18,7 +18,7 @@ On the machine that serves:
 $ swoosh grant issue ping --expires 15m
 issued a bearer grant for `ping`
   anyone holding the link can use it; expires in 15m.
-  revoke: paste the link to `swoosh grant revoke <link>`, or let it expire
+  revoke: paste the link to `swoosh revoke <link>`, or let it expire
 swoosh:ed01hcq6…
 ```
 
@@ -56,8 +56,8 @@ revoke it on the node that issued it:
 
 <!-- manual: needs the link you issued -->
 ```console
-$ swoosh grant revoke swoosh:ed01hcq6…
-revoked link (…/revoked)
+$ swoosh revoke swoosh:ed01hcq6…
+revoked the link: blocked. Only this machine admitted it.
 ```
 
 Either way the next dial is refused, with no restart:
@@ -72,12 +72,12 @@ Error: ed01hcq6balrlxwa: reached, but refused
 ## The limit
 
 A bearer link is a bearer token: whoever holds an unexpired, un-revoked one gets that one service until
-it expires or you revoke it. Keep bearer links short-lived, or bind them with `--for`. A revoke is
-node-local and lands on the next dial, no restart; it does not cut a session already in progress. See
+it expires or you revoke it. Keep bearer links short-lived, or bind them with `--for`. A revoke
+lands on the next dial, no restart; it does not cut a session already in progress. See
 [revocation](keys.md#revocation).
 
 ## Next
 
 - [Keys](keys.md#grant) the model: grants, fleets, and the one trade.
 - [Contractor access](use-cases/contractor-access.md) the same loop for ssh, bound to a fleet.
-- [Commands](reference/commands.md#grant) issue, ls, narrow, and revoke.
+- [Commands](reference/commands.md#grant) issue and narrow; [revoke](reference/commands.md#revoke) takes a link back.
