@@ -155,114 +155,169 @@ fn the_owner_line_names_both_users_and_no_command() {
     );
 }
 
-/// The path in the `chmod` is shell-quoted when it needs it, and reads back through `sh` as the path; the
-/// path that leads the line stays bare, and a path that needs no quoting prints bare in both places.
+/// The path in the `chmod` is shell-quoted when it needs it, and reads back through every shell as the
+/// path; the path that leads the line stays bare, and a path that needs no quoting prints bare in both
+/// places. A path no single-quoted word holds in every shell (fish reads `\'`, tcsh expands `!!`, a newline
+/// ends a csh line) gets the lead alone and no command.
 #[test]
 fn the_chmod_path_is_quoted_only_when_it_needs_it() {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let base = std::env::temp_dir().join(format!("swoosh-home-quote-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    for (name, quoted) in [
-        ("plain", false),
-        ("my home", true),
-        ("it's $HOME `x` *", true),
+    let base = std::env::temp_dir().join("swoosh-home-quote");
+    for (name, command) in [
+        ("plain", Some(false)),
+        ("my home", Some(true)),
+        ("$HOME `x` * \"q\" ~", Some(true)),
+        (r"x\'; touch /tmp/pwned-by-fish #", None),
+        ("a!!b", None),
+        ("a\nb", None),
+        ("a'b", None),
+        ("a\u{202e}b", None),
     ] {
-        let dir = base.join(name);
-        std::fs::create_dir_all(&dir).expect("the home");
-        let home = super::Home::resolve(Some(dir.clone())).expect("the home resolves");
-        let path = home.links();
-        std::fs::write(&path, "").expect("the file");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o620))
-            .expect("set the mode");
-        let line = home
-            .check_trust_files()
-            .expect_err("a loose file is refused")
-            .to_string();
-        let lead = format!("{} can be written by others: chmod 600 ", path.display());
+        let path = base.join(name).join("links");
+        let line = super::LooseFile {
+            path: path.clone(),
+            why: super::Loose::Writable,
+        }
+        .to_string();
+        let lead = format!("{} can be written by others", path.display());
+        let Some(quoted) = command else {
+            assert_eq!(line, lead, "{name:?} names no command");
+            continue;
+        };
         let word = line
-            .strip_prefix(&lead)
+            .strip_prefix(&format!("{lead}: chmod 600 "))
             .unwrap_or_else(|| panic!("the line leads with the bare path: {line}"));
         assert_eq!(word.starts_with('\''), quoted, "{line}");
         if !quoted {
             assert_eq!(word, path.display().to_string());
         }
-        let read = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(format!("printf %s {word}"))
-            .output()
-            .expect("sh runs");
-        assert_eq!(
-            String::from_utf8_lossy(&read.stdout),
-            path.display().to_string()
-        );
+        for shell in ["sh", "bash", "zsh", "fish", "csh", "tcsh"] {
+            // A shell not installed here is skipped; CI installs fish, csh and tcsh.
+            let Ok(read) = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(format!("printf %s {word}"))
+                .output()
+            else {
+                continue;
+            };
+            assert_eq!(
+                String::from_utf8_lossy(&read.stdout),
+                path.display().to_string(),
+                "{shell} reads {word} back"
+            );
+        }
     }
-    let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A known_hosts another user owns is refused by the check every command makes when the home resolves,
-/// with the owner line; a missing one is not. The file is a link to a path another user owns, since a test
-/// cannot make a file owned by someone else, and the check follows links as the read does.
+/// A relative home keeps its path as given in the lead, and the `chmod` names the absolute path, so a home
+/// that starts with `-` is never read as an option.
 #[test]
-fn a_known_hosts_another_user_owns_is_refused() {
+fn the_chmod_path_is_absolute() {
+    let line = super::LooseFile {
+        path: PathBuf::from("-x/links"),
+        why: super::Loose::Writable,
+    }
+    .to_string();
+    let full = std::env::current_dir().expect("the cwd").join("-x/links");
+    assert_eq!(
+        line,
+        format!(
+            "-x/links can be written by others: chmod 600 {}",
+            full.display()
+        )
+    );
+}
+
+/// A passwd name prints as itself, and one holding a control, format or bidi character, or none at all,
+/// prints as its uid.
+#[test]
+fn a_user_name_that_would_not_print_as_itself_is_its_uid() {
+    assert_eq!(super::shown_name("alice", 501), "alice");
+    assert_eq!(super::shown_name("jos\u{e9}", 501), "jos\u{e9}");
+    for name in [
+        "a\u{1b}[2Jb",
+        "a\rb",
+        "a\nb",
+        "a\u{202e}b",
+        "a\u{200b}b",
+        "",
+    ] {
+        assert_eq!(super::shown_name(name, 501), "uid 501", "{name:?}");
+    }
+}
+
+/// The rule over owner, mode and this process's user: this user's or root's file loads unless group or
+/// other can write it; another user's file is refused for its owner, whatever its mode, even to root.
+#[test]
+fn a_trust_file_loads_only_when_its_owner_and_mode_are_sound() {
+    use super::Loose::{Owner, Writable};
+
+    let (me, other, root) = (501, 502, 0);
+    for (owner, mode, euid, want) in [
+        (me, 0o600, me, None),
+        (me, 0o644, me, None),
+        (me, 0o620, me, Some(Writable)),
+        (me, 0o602, me, Some(Writable)),
+        (root, 0o644, me, None),
+        (root, 0o666, me, Some(Writable)),
+        (
+            other,
+            0o600,
+            me,
+            Some(Owner {
+                owner: other,
+                euid: me,
+            }),
+        ),
+        (
+            other,
+            0o666,
+            me,
+            Some(Owner {
+                owner: other,
+                euid: me,
+            }),
+        ),
+        (
+            me,
+            0o600,
+            root,
+            Some(Owner {
+                owner: me,
+                euid: root,
+            }),
+        ),
+    ] {
+        assert_eq!(
+            super::loose_by(owner, mode, euid),
+            want,
+            "owner {owner}, mode {mode:o}, euid {euid}"
+        );
+    }
+}
+
+/// known_hosts is a trust file: one group can write is refused by the check every command makes when the
+/// home resolves, by its own path; a missing one is not.
+#[test]
+fn a_loose_known_hosts_is_on_the_trust_list() {
+    use std::os::unix::fs::PermissionsExt as _;
+
     let dir = std::env::temp_dir().join(format!("swoosh-home-hosts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("the home");
     let home = super::Home::resolve(Some(dir.clone())).expect("the home resolves");
     home.check_trust_files()
         .expect("a missing known_hosts is not a refusal");
-    let foreign = owned_by_another_user();
-    std::os::unix::fs::symlink(&foreign, home.known_hosts()).expect("the link");
+    std::fs::write(home.known_hosts(), "").expect("the file");
+    std::fs::set_permissions(home.known_hosts(), std::fs::Permissions::from_mode(0o620))
+        .expect("set the mode");
     let refused = home.check_trust_files();
-    let Err(
-        error @ super::LooseFile {
-            why: super::Loose::Owner { .. },
-            ..
-        },
-    ) = refused
+    let Err(super::LooseFile {
+        path,
+        why: super::Loose::Writable,
+    }) = refused
     else {
-        panic!("a known_hosts another user owns must refuse: {refused:?}");
+        panic!("a known_hosts group can write must refuse: {refused:?}");
     };
-    assert_eq!(error.path, home.known_hosts());
-    assert!(
-        error
-            .to_string()
-            .ends_with("; it will not load another user's file"),
-        "{error}"
-    );
+    assert_eq!(path, home.known_hosts());
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// A path on this machine owned by neither this process's user nor root, found under the system's own
-/// state directories (a service user's), which every test machine has.
-fn owned_by_another_user() -> PathBuf {
-    use std::os::unix::fs::MetadataExt as _;
-
-    // SAFETY: `geteuid` takes no arguments and touches no memory.
-    let euid = unsafe { libc::geteuid() };
-    let mut level = vec![PathBuf::from("/var"), PathBuf::from("/run")];
-    for _ in 0..3 {
-        let mut next = Vec::new();
-        for dir in level {
-            let Ok(entries) = std::fs::read_dir(&dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Ok(meta) = std::fs::metadata(&path) else {
-                    continue;
-                };
-                if meta.uid() != euid && meta.uid() != 0 {
-                    return path;
-                }
-                if meta.is_dir() {
-                    next.push(path);
-                }
-            }
-        }
-        level = next;
-    }
-    panic!(
-        "no path under /var or /run is owned by another user, so the owner check cannot be tried"
-    );
 }

@@ -283,7 +283,7 @@ impl Home {
     ///
     /// # Errors
     ///
-    /// [`LooseFile`] naming the first file that fails, and the command that fixes it.
+    /// [`LooseFile`] naming the first file that fails, and why.
     pub fn check_trust_files(&self) -> Result<(), LooseFile> {
         for path in self.trust_files() {
             let Ok(meta) = std::fs::metadata(&path) else {
@@ -457,12 +457,18 @@ impl core::fmt::Display for LooseFile {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let path = self.path.display();
         match self.why {
+            // The command names the absolute path, so it runs from any directory and a relative home that
+            // starts with `-` or `=` is never read as an option or an expansion. When no word is sure to
+            // read back as the path in every shell, the line names no command (O1).
             Loose::Writable => {
-                write!(
-                    f,
-                    "{path} can be written by others: chmod 600 {}",
-                    shell_word(&self.path)
-                )
+                write!(f, "{path} can be written by others")?;
+                match std::path::absolute(&self.path)
+                    .ok()
+                    .and_then(|full| shell_word(&full))
+                {
+                    Some(word) => write!(f, ": chmod 600 {word}"),
+                    None => Ok(()),
+                }
             }
             // No command: whether the file should be taken back, or swoosh run as its owner, is a judgment
             // only the person can make, and a `chown` needs root.
@@ -476,19 +482,28 @@ impl core::fmt::Display for LooseFile {
     }
 }
 
-/// `path` as one word a POSIX shell reads back as `path`: bare when every character is in
-/// `[A-Za-z0-9_./,:@%+=-]`, characters a shell reads as themselves, else in single quotes, with each
-/// `'` in it written `'\''`. So the command a refusal prints runs as printed from a triple-click.
-fn shell_word(path: &Path) -> String {
-    let text = path.to_string_lossy();
+/// `path` as one word that sh, bash, zsh, fish, csh and tcsh each read back as `path`, or `None` when
+/// there is no such word this function can be sure of. Bare when every character is in
+/// `[A-Za-z0-9_./,:@%+=-]`, which every one of them reads as itself past the first character (the
+/// caller passes an absolute path, so the word starts with `/`). Else in single quotes, which only hold
+/// when every character in them means itself in all six: so `None` for a `'` (no escape is common to
+/// them), a `\` (fish reads `\'` and `\\` as escapes), a `!` (csh and tcsh expand history inside quotes),
+/// and any character `char::escape_debug` escapes other than `"`: controls (a newline ends a csh command),
+/// format and bidi characters, and, since std cannot tell them apart, grapheme-extending marks, which cost
+/// only the command. A path that is not UTF-8 is `None` too, since the line cannot print its bytes as
+/// themselves.
+fn shell_word(path: &Path) -> Option<String> {
+    let text = path.to_str()?;
     let plain = |c: char| c.is_ascii_alphanumeric() || "_./,:@%+=-".contains(c);
     if !text.is_empty() && text.chars().all(plain) {
-        return text.into_owned();
+        return Some(text.to_owned());
     }
-    format!("'{}'", text.replace('\'', r"'\''"))
+    let quotable = |c: char| c == '"' || (c != '!' && c.escape_debug().eq([c]));
+    text.chars().all(quotable).then(|| format!("'{text}'"))
 }
 
-/// The user name `uid` has on this machine, or `uid <n>` when it has none (or one that is not UTF-8).
+/// The user name `uid` has on this machine, or `uid <n>` when it has none, or one [`shown_name`] would not
+/// print.
 fn user_name(uid: u32) -> String {
     #[cfg(unix)]
     {
@@ -510,14 +525,22 @@ fn user_name(uid: u32) -> String {
                 // SAFETY: on success `pw_name` points at a NUL-terminated string inside `buf`, which
                 // outlives this borrow.
                 let name = unsafe { core::ffi::CStr::from_ptr(pwd.pw_name) };
-                if let Ok(name) = name.to_str()
-                    && !name.is_empty()
-                {
-                    return name.to_owned();
+                if let Ok(name) = name.to_str() {
+                    return shown_name(name, uid);
                 }
             }
             break;
         }
+    }
+    format!("uid {uid}")
+}
+
+/// A passwd `name` as the owner line shows it: as itself when every character prints as itself (what
+/// `char::escape_debug` leaves alone), else `uid <n>`. A directory service can hand back any text, and a
+/// control, format or bidi character in it would drive the terminal or the serve log it reaches.
+fn shown_name(name: &str, uid: u32) -> String {
+    if !name.is_empty() && name.chars().all(|c| c.escape_debug().eq([c])) {
+        return name.to_owned();
     }
     format!("uid {uid}")
 }
@@ -547,20 +570,27 @@ fn loose(meta: &std::fs::Metadata) -> Option<Loose> {
         use std::os::unix::fs::MetadataExt as _;
 
         // SAFETY: `geteuid` takes no arguments and touches no memory.
-        let euid = unsafe { libc::geteuid() };
-        if meta.uid() != euid && meta.uid() != 0 {
-            return Some(Loose::Owner {
-                owner: meta.uid(),
-                euid,
-            });
-        }
-        if meta.mode() & 0o022 != 0 {
-            return Some(Loose::Writable);
-        }
+        loose_by(meta.uid(), meta.mode(), unsafe { libc::geteuid() })
     }
     #[cfg(not(unix))]
-    let _ = meta;
-    None
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// The rule [`loose`] applies, over a file's `owner` and `mode` and this process's `euid`: a file owned by
+/// neither `euid` nor root is [`Loose::Owner`] whatever its mode, else one group or other can write is
+/// [`Loose::Writable`]. Split out so a test walks the rule without a file another user owns.
+#[cfg_attr(
+    not(unix),
+    allow(dead_code, reason = "only unix has owners and modes to check")
+)]
+fn loose_by(owner: u32, mode: u32, euid: u32) -> Option<Loose> {
+    if owner != euid && owner != 0 {
+        return Some(Loose::Owner { owner, euid });
+    }
+    (mode & 0o022 != 0).then_some(Loose::Writable)
 }
 
 /// Open the trust file at `path` for reading, and check the open handle as [`loose`] does, so the bytes

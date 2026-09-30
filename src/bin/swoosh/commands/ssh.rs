@@ -40,7 +40,7 @@
 //! `StrictHostKeyChecking=accept-new`: pin on first sight (safe, because first sight is over the
 //! authenticated overlay), reject a later key change. `accept-new` not `yes`, precisely because the
 //! derived key is not client-computable; node id not petname, so a rename never orphans a pin. The private
-//! file is `0600` in a `0700` dir, and a loose one is refused rather than trusted.
+//! file sits in a `0700` dir, and a loose one is refused rather than trusted.
 
 use std::path::Path;
 
@@ -274,7 +274,7 @@ fn ssh_argv(
 /// `"`, and stops at a newline; a leading `~` names a home directory. So a path holding `"`, `%`, `$`, `\`
 /// or a control character refuses in one line that names it, before anything is prepared, and the path is
 /// made absolute so it never starts with `~`. Every other character reaches ssh as itself, so the file ssh
-/// pins into is the one [`prepare_known_hosts`] checked. Refusing rather than escaping: `%%` is read back
+/// pins into is the one the trust-file check vetted. Refusing rather than escaping: `%%` is read back
 /// as `%` only by an ssh that expands this option at all, and `$` and `"` have no escape here.
 fn known_hosts_path(path: &Path) -> eyre::Result<std::path::PathBuf> {
     let path = std::path::absolute(path)?;
@@ -300,31 +300,20 @@ fn known_hosts_path(path: &Path) -> eyre::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-/// Ensure the private known_hosts directory exists (`0700`) and refuse a file writable by group or other,
-/// with the line every loose trust file is refused with.
+/// Ensure the private known_hosts directory exists (`0700`).
 ///
 /// The file is a trust root: anyone who can write it can pre-seed a host-key pin (a silent MITM) or wedge a
-/// peer with a bogus "host key changed". So a loose file fails closed rather than being trusted. ssh itself
-/// creates the file `0600` on the first `accept-new` write; swoosh only guarantees the directory and vets
-/// an existing file. Its owner is checked with the other trust files when the home resolves.
+/// peer with a bogus "host key changed". So a loose file fails closed rather than being trusted, and its
+/// owner and mode are checked with the other trust files when the home resolves, before this verb runs.
+/// ssh itself creates the file on the first `accept-new` write, and never writable by group or other (it
+/// adds `022` to its umask, so the file is `0644` under a usual one); swoosh only guarantees the directory.
 #[cfg(unix)]
 fn prepare_known_hosts(path: &Path) -> eyre::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
 
-    use swoosh::home::{Loose, LooseFile};
-
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    if let Ok(meta) = std::fs::metadata(path)
-        && meta.permissions().mode() & 0o022 != 0
-    {
-        return Err(LooseFile {
-            path: path.to_owned(),
-            why: Loose::Writable,
-        }
-        .into());
     }
     Ok(())
 }
@@ -1199,34 +1188,5 @@ mod tests {
         assert_eq!(proxy_quote("/a'b/swoosh"), r"'/a'\''b/swoosh'");
         // A `%` is doubled, so ssh's token expansion gives it back as itself.
         assert_eq!(proxy_quote("/a%h/swoosh"), "'/a%%h/swoosh'");
-    }
-
-    /// A known_hosts group or other can write is refused with the line every loose trust file gets; a
-    /// missing one, or one others may only read, is not refused.
-    #[test]
-    fn a_loose_known_hosts_is_refused_with_the_trust_file_line() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dir = scratch("hosts-mode");
-        let path = dir.join("known_hosts");
-        prepare_known_hosts(&path).expect("a missing known_hosts is not a refusal");
-        std::fs::write(&path, "").expect("the file");
-        for mode in [0o620, 0o602] {
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
-                .expect("set the mode");
-            let error = prepare_known_hosts(&path).expect_err("a loose known_hosts is refused");
-            assert_eq!(
-                error.to_string(),
-                format!(
-                    "{} can be written by others: chmod 600 {}",
-                    path.display(),
-                    path.display()
-                )
-            );
-        }
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-            .expect("set the mode");
-        prepare_known_hosts(&path).expect("one others may only read is not refused");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
