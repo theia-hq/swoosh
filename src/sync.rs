@@ -564,7 +564,7 @@ async fn dialable(
 
 /// The keys in `<home>/revoked_keys`, skipping any line that is not one.
 fn revoked_keys_here(home: &Home) -> Vec<NodeId> {
-    std::fs::read_to_string(home.revoked_keys())
+    crate::home::read_trust_file(&home.revoked_keys())
         .unwrap_or_default()
         .lines()
         .filter_map(|line| line.trim().parse::<NodeId>().ok())

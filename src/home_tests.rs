@@ -74,7 +74,13 @@ fn every_trust_file_is_refused_when_others_can_write_it() {
         for mode in [0o620, 0o602] {
             set(&path, mode);
             let refused = home.check_trust_files();
-            let Err(error @ super::LooseFile::Writable { .. }) = refused else {
+            let Err(
+                error @ super::LooseFile {
+                    why: super::Loose::Writable,
+                    ..
+                },
+            ) = refused
+            else {
                 panic!("{} at {mode:o} must refuse: {refused:?}", path.display());
             };
             assert_eq!(
@@ -88,5 +94,38 @@ fn every_trust_file_is_refused_when_others_can_write_it() {
         }
         set(&path, 0o600);
     }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A trust file is checked on the handle its bytes are read from: group or other write refuses the read
+/// with the file and the fix, and a file others may only read is read.
+// `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+#[test]
+fn a_trust_file_is_checked_on_the_handle_it_is_read_from() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = std::env::temp_dir().join(format!("swoosh-home-read-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the dir");
+    let path = dir.join("links");
+    std::fs::write(&path, "a row\n").expect("the file");
+    for mode in [0o620, 0o602] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+            .expect("set the mode");
+        let error = super::read_trust_file(&path).expect_err("a loose file is refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(super::loose_in(&error), Some(super::Loose::Writable));
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} can be written by others: chmod 600 {}",
+                path.display(),
+                path.display()
+            )
+        );
+    }
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("set the mode");
+    assert_eq!(super::read_trust_file(&path).expect("read"), "a row\n");
     let _ = std::fs::remove_dir_all(&dir);
 }

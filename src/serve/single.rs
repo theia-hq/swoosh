@@ -153,8 +153,9 @@ impl RuntimeDir {
     /// `root`, which is threaded in as a value by the composition edge: this module never reads
     /// `XDG_RUNTIME_DIR`/`confstr`. An existing dir keeps its mode (verified below, never silently
     /// repaired by the create path): only a dir WE create gets the explicit 0700 set, so a
-    /// pre-loosened dir still refuses.
-    pub fn acquire(home: &Home, root: &Path) -> Result<Self, SingleError> {
+    /// pre-loosened dir still refuses. `None` when the leaf was removed between its create and its verify,
+    /// as a resident on its way out removes it: the caller tries again.
+    pub fn acquire(home: &Home, root: &Path) -> Result<Option<Self>, SingleError> {
         let dir = home.runtime_leaf(root);
         let (root_fresh, leaf_fresh) = (!root.exists(), !dir.exists());
         // SAFETY: `DirBuilder::mode` only sets the mode argument for the mkdir syscall; no raw
@@ -179,8 +180,10 @@ impl RuntimeDir {
         {
             std::fs::create_dir_all(&dir).map_err(|_| insecure(&dir))?;
         }
-        verify_runtime_chain(root, &dir)?;
-        Ok(Self { dir })
+        Ok(match verify_runtime_chain(root, &dir)? {
+            Chain::Verified => Some(Self { dir }),
+            Chain::Vanished => None,
+        })
     }
 
     /// The verified leaf dir.
@@ -222,14 +225,15 @@ pub fn acquire(
     // chain is made again and the lock taken on the file the path names now.
     let mut tries = 0;
     let (runtime, file, lock_id) = loop {
-        let runtime = RuntimeDir::acquire(home, root)?;
-        if let Some(taken) = take_lock(&runtime.lock_path())? {
+        if let Some(runtime) = RuntimeDir::acquire(home, root)?
+            && let Some(taken) = take_lock(&runtime.lock_path())?
+        {
             break (runtime, taken.file, taken.id);
         }
         tries += 1;
         if tries == LOCK_TRIES {
             return Err(SingleError::LockFailed {
-                path: runtime.lock_path(),
+                path: home.runtime_leaf(root).join("control.lock"),
                 source: std::io::Error::other(
                     "the control lock was removed each time it was taken",
                 ),
@@ -490,18 +494,34 @@ fn path_identity(path: &Path) -> std::io::Result<(u64, u64)> {
 /// user with mode 0700. The base is followed (a caller may point `XDG_RUNTIME_DIR` through a
 /// symlink at the real per-user dir); the component is checked with `symlink_metadata` and the leaf
 /// is opened `O_NOFOLLOW | O_DIRECTORY`, so a planted symlink cannot pass by pointing at an
-/// accepted target.
-fn verify_runtime_chain(root: &Path, leaf: &Path) -> Result<(), SingleError> {
+/// accepted target. A leaf that is not there at all is [`Chain::Vanished`], not a refusal.
+// `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+fn verify_runtime_chain(root: &Path, leaf: &Path) -> Result<Chain, SingleError> {
     if let Some(base) = root.parent() {
         verify_dir(std::fs::metadata(base), base)?;
     }
     verify_dir(std::fs::symlink_metadata(root), root)?;
-    let handle = std::fs::OpenOptions::new()
+    let handle = match std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_DIRECTORY)
         .open(leaf)
-        .map_err(|_| insecure(leaf))?;
-    verify_dir(handle.metadata(), leaf)
+    {
+        Ok(handle) => handle,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Chain::Vanished),
+        Err(_) => return Err(insecure(leaf)),
+    };
+    verify_dir(handle.metadata(), leaf)?;
+    Ok(Chain::Verified)
+}
+
+/// What a verify of the runtime chain found, short of a refusal.
+#[derive(Debug, PartialEq, Eq)]
+enum Chain {
+    /// Every component is this user's 0700 directory.
+    Verified,
+    /// The leaf is gone: a resident on its way out removed it after it was made.
+    Vanished,
 }
 
 /// Check one stat result against the chain invariant: a directory, owned by euid, mode 0700. A

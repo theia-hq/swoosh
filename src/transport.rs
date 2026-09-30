@@ -412,7 +412,7 @@ async fn load_reach_url<T: FromStr>(path: &Path, what: &str) -> eyre::Result<Opt
 where
     T::Err: core::error::Error + Send + Sync + 'static,
 {
-    let text = match tokio::fs::read_to_string(path).await {
+    let text = match crate::home::read_trust_file(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         // A directory where the file belongs is the same mistake as a file holding nothing usable, and

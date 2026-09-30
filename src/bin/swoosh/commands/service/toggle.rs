@@ -107,7 +107,7 @@ fn edit(home: &Home, mutate: impl FnOnce(&mut BTreeSet<String>)) -> eyre::Result
 /// Parse `<home>/disabled` into its set of names: one trimmed, non-empty name per line. An absent file is an
 /// empty set (nothing disabled), the first-run case, not an error.
 fn read(path: &Path) -> eyre::Result<BTreeSet<String>> {
-    match std::fs::read_to_string(path) {
+    match swoosh::home::read_trust_file(path) {
         Ok(text) => Ok(text
             .lines()
             .map(str::trim)

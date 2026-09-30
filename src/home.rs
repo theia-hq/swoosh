@@ -275,30 +275,20 @@ impl Home {
     }
 
     /// Refuse a home one of whose [trust files](Self::trust_files) another user owns, or group or other
-    /// can write: the owner and mode check a key file gets, less the read bits, since these files hold no
-    /// secret. Root may own one, as it may own a key file an administrator installed. A file that is
-    /// absent, or that cannot be stat'ed, passes: its reader reports what is wrong with it.
+    /// can write: the check [`read_trust_file`] makes on each read, made on every file before any verb
+    /// runs, so a file read by a library that does not make it is checked too. A file that is absent, or
+    /// that cannot be stat'ed, passes: its reader reports what is wrong with it.
     ///
     /// # Errors
     ///
     /// [`LooseFile`] naming the first file that fails, and the command that fixes it.
     pub fn check_trust_files(&self) -> Result<(), LooseFile> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-
-            // SAFETY: `geteuid` takes no arguments and touches no memory.
-            let euid = unsafe { libc::geteuid() };
-            for path in self.trust_files() {
-                let Ok(meta) = std::fs::metadata(&path) else {
-                    continue;
-                };
-                if meta.uid() != euid && meta.uid() != 0 {
-                    return Err(LooseFile::Owner { path, euid });
-                }
-                if meta.mode() & 0o022 != 0 {
-                    return Err(LooseFile::Writable { path });
-                }
+        for path in self.trust_files() {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if let Some(why) = loose(&meta) {
+                return Err(LooseFile { path, why });
             }
         }
         Ok(())
@@ -453,22 +443,107 @@ fn default_dir() -> eyre::Result<PathBuf> {
 }
 
 /// A trust file this machine will not load, because someone other than its owner could have written it.
-#[derive(Debug, thiserror::Error)]
-pub enum LooseFile {
+#[derive(Debug)]
+pub struct LooseFile {
+    /// The file.
+    pub path: PathBuf,
+    /// What is wrong with it.
+    pub why: Loose,
+}
+
+impl core::fmt::Display for LooseFile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let path = self.path.display();
+        match self.why {
+            Loose::Writable => write!(f, "{path} can be written by others: chmod 600 {path}"),
+            Loose::Owner { euid } => {
+                write!(
+                    f,
+                    "{path} belongs to another user: sudo chown {euid} {path}"
+                )
+            }
+        }
+    }
+}
+
+impl core::error::Error for LooseFile {}
+
+/// What makes a trust file loose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Loose {
     /// Group or other can write the file.
-    #[error("{} can be written by others: chmod 600 {}", path.display(), path.display())]
-    Writable {
-        /// The file.
-        path: PathBuf,
-    },
+    Writable,
     /// Another user, not root, owns the file.
-    #[error("{} belongs to another user: sudo chown {euid} {}", path.display(), path.display())]
     Owner {
-        /// The file.
-        path: PathBuf,
         /// This process's user, who must own it.
         euid: u32,
     },
+}
+
+/// What makes the file `meta` describes loose, or `None` when it is sound: another user owns it, or group
+/// or other can write it. The owner and mode check a key file gets, less the read bits, since a trust file
+/// holds no secret. Root may own one, as it may own a key file an administrator installed.
+fn loose(meta: &std::fs::Metadata) -> Option<Loose> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        // SAFETY: `geteuid` takes no arguments and touches no memory.
+        let euid = unsafe { libc::geteuid() };
+        if meta.uid() != euid && meta.uid() != 0 {
+            return Some(Loose::Owner { euid });
+        }
+        if meta.mode() & 0o022 != 0 {
+            return Some(Loose::Writable);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = meta;
+    None
+}
+
+/// Open the trust file at `path` for reading, and check the open handle as [`loose`] does, so the bytes
+/// read are the bytes checked. A loose file is a `PermissionDenied` error carrying the [`LooseFile`].
+///
+/// # Errors
+///
+/// Whatever the open or its `fstat` returns (`NotFound` for a missing file), or the loose file.
+// `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+pub fn open_trust_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let file = std::fs::File::open(path)?;
+    if let Some(why) = loose(&file.metadata()?) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            LooseFile {
+                path: path.to_owned(),
+                why,
+            },
+        ));
+    }
+    Ok(file)
+}
+
+/// [`std::fs::read_to_string`] for a trust file: the text of the file at `path`, read from a handle
+/// [`open_trust_file`] checked.
+///
+/// # Errors
+///
+/// As [`open_trust_file`], or the read's own.
+pub fn read_trust_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+
+    let mut text = String::new();
+    open_trust_file(path)?.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+/// The [`Loose`] an error from [`open_trust_file`] or [`read_trust_file`] carries, when it is one.
+pub fn loose_in(error: &std::io::Error) -> Option<Loose> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<LooseFile>())
+        .map(|loose| loose.why)
 }
 
 /// Reject a `--home` that names an existing FILE, with a teaching error instead of the confusing

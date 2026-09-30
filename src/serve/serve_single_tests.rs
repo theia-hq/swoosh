@@ -647,6 +647,21 @@ fn runtime_dir_mode_owner_verified() {
     );
 }
 
+/// A leaf removed between its create and its verify, as a resident on its way out removes it, is a
+/// fresh try, not a refusal naming an insecure dir.
+#[test]
+fn a_leaf_removed_before_its_verify_is_tried_again() {
+    let scratch = Scratch::new("vanished");
+    assert!(!scratch.leaf().exists(), "no leaf yet");
+    assert!(
+        matches!(
+            super::verify_runtime_chain(&scratch.root, &scratch.leaf()),
+            Ok(super::Chain::Vanished)
+        ),
+        "a missing leaf is tried again"
+    );
+}
+
 /// Graceful teardown unlinks the socket this instance bound: the path identity captured at bind is
 /// the same filesystem object `release` stats, so the unlink fires.
 #[test]

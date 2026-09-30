@@ -91,7 +91,7 @@ impl Started {
                 .collect::<Result<_, _>>()
                 .map(Self::Named);
         }
-        let text = match std::fs::read_to_string(&path) {
+        let text = match crate::home::read_trust_file(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::Default),
             Err(source) => return Err(ServingError::Io { path, source }),

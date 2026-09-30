@@ -25,7 +25,7 @@ use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{AdmittedChains, LiveCuts};
 
 use crate::grants::IssuedLedger;
-use crate::home::Home;
+use crate::home::{Home, Loose, LooseFile, loose_in, open_trust_file, read_trust_file};
 
 /// The revocations `serve` honors: the disabled roots latched over this machine's [`KeyedDenylist`].
 pub type Revoked = Latch<KeyedDenylist>;
@@ -126,7 +126,8 @@ pub const MAX_REVOKED_KEYS_LEN: u64 = 1 << 20;
 /// changed, so a pin written while `serve` runs is trusted at the next admission with no restart.
 ///
 /// Its failures read as no pin, the inverse of the denylist's: a missing file, a failed stat or read, a
-/// body that is not exactly one key, or a key the latch disabled all read as `None`, and the path is
+/// file another user owns or others can write (checked on the handle each read comes from), a body that
+/// is not exactly one key, or a key the latch disabled all read as `None`, and the path is
 /// logged once per change. It never keeps a pin from an earlier read. The latch is read through the same
 /// instance the gate holds.
 pub struct FilePin {
@@ -156,6 +157,8 @@ enum Reading {
     Missing,
     /// The file could not be statted or read.
     Unreadable,
+    /// Another user owns the file, or group or other can write it.
+    Loose(Loose),
     /// The file is not exactly one key.
     Malformed,
     /// The file names a root disabled here.
@@ -202,10 +205,11 @@ impl FilePin {
                 Ok(meta) => {
                     let stamp = FileStamp::of(&meta);
                     if !FileStamp::unchanged(state.stamp, stamp) {
-                        match std::fs::read_to_string(&self.path) {
-                            Err(_) => {
+                        match read_trust_file(&self.path) {
+                            Err(error) => {
                                 state.stamp = None;
-                                state.read = Reading::Unreadable;
+                                state.read =
+                                    loose_in(&error).map_or(Reading::Unreadable, Reading::Loose);
                             }
                             Ok(text) => {
                                 state.stamp = stamp;
@@ -234,6 +238,13 @@ impl FilePin {
             Reading::Missing => tracing::warn!(path = %path, "no pin: no member is admitted"),
             Reading::Unreadable => {
                 tracing::warn!(path = %path, "the pin cannot be read: no member is admitted");
+            }
+            Reading::Loose(why) => {
+                let error = LooseFile {
+                    path: self.path.clone(),
+                    why,
+                };
+                tracing::warn!(path = %path, %error, "the pin cannot be read: no member is admitted");
             }
             Reading::Malformed => {
                 tracing::warn!(path = %path, "the pin is not one key: no member is admitted");
@@ -265,7 +276,11 @@ impl PinSource for FilePin {
         self.log(&mut state, reading);
         match reading {
             Reading::Pinned(key) => Some(key),
-            Reading::Missing | Reading::Unreadable | Reading::Malformed | Reading::Latched => None,
+            Reading::Missing
+            | Reading::Unreadable
+            | Reading::Loose(_)
+            | Reading::Malformed
+            | Reading::Latched => None,
         }
     }
 }
@@ -467,13 +482,14 @@ pub fn add_revoked_keys(home: &Home, keys: &[VerifyKey]) -> Result<(), RevokedKe
     write(&witness, format!("{}\n", lines.len()).as_bytes()).map_err(io(&witness))
 }
 
-/// Read the keys file at `path` and its stamp from one open handle, or `None` when there is no file. More
+/// Read the keys file at `path` and its stamp from one open handle, checked as a trust file, or `None` when
+/// there is no file. A file another user owns or others can write is refused. More
 /// than [`MAX_REVOKED_KEYS_LEN`] bytes is `FileTooLarge`, found before the excess is buffered. A line that
 /// is not a key is skipped and logged; it counts toward nothing.
 // `core::io::ErrorKind` is still unstable, so the error kinds read from `std`.
 #[allow(clippy::std_instead_of_core)]
 fn read_keys(path: &Path) -> std::io::Result<Option<(HashSet<VerifyKey>, Option<FileStamp>)>> {
-    let mut file = match std::fs::File::open(path) {
+    let mut file = match open_trust_file(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),

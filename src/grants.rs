@@ -90,7 +90,7 @@ impl Grants {
     // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
     #[allow(clippy::std_instead_of_core)]
     pub async fn load(&self) -> Result<Vec<GrantRecord>, LedgerError> {
-        let text = match tokio::fs::read_to_string(&self.path).await {
+        let text = match crate::home::read_trust_file(&self.path) {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(LedgerError::Io(error)),
@@ -155,7 +155,7 @@ fn append_locked(path: &Path, line: &str, prune_at: usize) -> Result<(), LedgerE
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 fn prune_expired(path: &Path, prune_at: usize) -> std::io::Result<()> {
-    let text = match std::fs::read_to_string(path) {
+    let text = match crate::home::read_trust_file(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
@@ -221,9 +221,10 @@ impl LedgerLock {
 /// Live: it re-stats the file at most once per [`STAT_DEBOUNCE`] and re-reads it when its [`FileStamp`]
 /// changed, so a `grant issue` run while `serve` runs is admitted with no restart.
 ///
-/// It fails closed. A file that cannot be opened or read admits no self-anchored link until it can be
-/// read again, and each change between readable and unreadable is logged with the path. A missing file is
-/// readable and holds no links. One malformed line fails only that row.
+/// It fails closed. A file that cannot be opened or read, or that another user owns or others can write
+/// (checked on the handle each read comes from), admits no self-anchored link until it can be read again,
+/// and each change between readable and unreadable is logged with the path. A missing file is readable and
+/// holds no links. One malformed line fails only that row.
 pub struct IssuedLedger {
     path: PathBuf,
     state: Mutex<LedgerState>,
@@ -276,7 +277,7 @@ impl IssuedLedger {
                 if FileStamp::unchanged(state.stamp, stamp) {
                     return;
                 }
-                std::fs::read_to_string(&self.path).map(|text| Some((text, stamp)))
+                crate::home::read_trust_file(&self.path).map(|text| Some((text, stamp)))
             }
         };
         let readable = match read {
