@@ -142,8 +142,9 @@ impl Home {
         self.dir.join("roster.lock")
     }
 
-    /// `<home>/roster.fork`: a second update seen at the number of the one in `roster`, kept as evidence
-    /// that two copies of the root signed.
+    /// `<home>/roster.fork`: an update of the root other than the one in `roster`, kept as evidence that
+    /// two copies of the root signed: one seen at the number of the one in `roster`, or one another device
+    /// passed on in an exchange, at any number.
     pub fn roster_fork(&self) -> PathBuf {
         self.dir.join("roster.fork")
     }

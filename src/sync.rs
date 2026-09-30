@@ -18,11 +18,11 @@
 //! ```
 //!
 //! An `<update>` is its length (u32) and its bytes. A `same` with digest zero ends the exchange: neither
-//! side holds an update, so neither keeps a fork. Whatever side takes an update folds it
-//! ([`fold`](crate::roster::fold)), and a fork passed on folds as one
-//! ([`fold_fork`](crate::roster::fold_fork)), which adds its revocations and never makes it the update
-//! held. A fold never starts another exchange, so a root act is still the only thing that sends an update
-//! to more than one device.
+//! side holds an update. Whatever side takes an update folds it ([`fold`](crate::roster::fold)). Whatever
+//! side takes the other's kept fork folds it with [`fold_fork`](crate::roster::fold_fork), which adds its
+//! revocations and never makes it the update held. A frame that breaks before the forks fails the
+//! exchange; one that breaks while they pass leaves its answer as it is. A fold never starts another
+//! exchange, so a root act is still the only thing that sends an update to more than one device.
 //!
 //! Only a device of a root, one that holds it or not, takes an update. Any other machine answers `same`
 //! with digest zero and never asks for one, so a dialer holding an update never reads that answer as
@@ -200,7 +200,7 @@ async fn dial_with(
                 return Err(ExchangeError::NotHeld);
             }
             if theirs == NONE_YET {
-                // Neither side holds an update, so neither keeps a fork.
+                // Neither side holds an update.
                 touch_synced(home);
                 return Ok(Answer::Same);
             }
@@ -232,9 +232,15 @@ async fn dial_with(
         }
         _ => return Err(ExchangeError::Protocol),
     };
-    write_update(&mut writer, &fork).await?;
-    writer.shutdown().await?;
-    take_fork(home, &mut reader).await?;
+    // The updates have moved: forks that fail to pass leave the answer as it is.
+    let forks = async {
+        write_update(&mut writer, &fork).await?;
+        writer.shutdown().await?;
+        take_fork(home, &mut reader).await
+    };
+    if let Err(error) = forks.await {
+        tracing::debug!(%error, "could not pass the forks kept in an exchange");
+    }
     touch_synced(home);
     Ok(answer)
 }
@@ -267,7 +273,7 @@ pub async fn answer(
         writer.write_all(&[SAME]).await?;
         writer.write_all(&my_digest).await?;
         if my_digest == NONE_YET {
-            // Neither side holds an update, so neither keeps a fork.
+            // Neither side holds an update.
             writer.shutdown().await?;
             touch_synced(home);
             return Ok(());
@@ -301,9 +307,17 @@ pub async fn answer(
         };
         writer.write_all(&reply).await?;
     }
-    take_fork(home, &mut reader).await?;
-    write_update(&mut writer, &fork).await?;
-    writer.shutdown().await?;
+    writer.flush().await?;
+    // The updates have moved: forks that fail to pass are logged, and the exchange still ran.
+    let forks = async {
+        take_fork(home, &mut reader).await?;
+        write_update(&mut writer, &fork).await?;
+        writer.shutdown().await?;
+        Ok::<_, ExchangeError>(())
+    };
+    if let Err(error) = forks.await {
+        tracing::debug!(%error, "could not pass the forks kept in an exchange");
+    }
     touch_synced(home);
     Ok(())
 }

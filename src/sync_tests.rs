@@ -425,7 +425,7 @@ async fn an_exchange_at_one_number_with_two_digests_folds_both_ways() {
 
 /// The stale-fork run: a laptop that holds the root cuts 2, revoking the phone, and reaches nobody; a
 /// desk with another copy of the root, still at 1, cuts its own 2 without that revocation and gives it to
-/// the nas. The laptop and the nas exchange, then the nas and the desk.
+/// the nas. The laptop dials the nas, then the nas dials the desk.
 #[tokio::test]
 async fn a_kept_fork_reaches_the_device_it_is_exchanged_with() {
     let laptop = device("stale-fork", LAPTOP).await;
@@ -451,11 +451,7 @@ async fn a_kept_fork_reaches_the_device_it_is_exchanged_with() {
         laptop_dial.exchange(node(NAS)).await.unwrap(),
         Answer::Forked
     );
-    let nas_dial = Loopback::new(
-        nas.clone(),
-        [(node(LAPTOP), laptop.clone()), (node(DESK), desk.clone())],
-    );
-    nas_dial.exchange(node(LAPTOP)).await.unwrap();
+    let nas_dial = Loopback::new(nas.clone(), [(node(DESK), desk.clone())]);
     assert_eq!(
         nas_dial.exchange(node(DESK)).await.unwrap(),
         Answer::Same,
@@ -502,6 +498,30 @@ async fn a_kept_fork_below_the_held_update_still_adds_its_revocations() {
         laptop.roster_fork().exists(),
         "and is kept, to pass on at the next exchange"
     );
+}
+
+#[tokio::test]
+async fn an_update_taken_is_still_the_answer_when_the_forks_do_not_pass() {
+    let desk = device("forks-break", DESK).await;
+    holding(&desk, &update(1, vec![], vec![])).await;
+    let newer = update(2, vec![], vec![key(STOLEN)]);
+    let sent = newer.clone();
+    let (near, far) = tokio::io::duplex(64 * 1024);
+    let (near_read, near_write) = tokio::io::split(near);
+    let (mut far_read, mut far_write) = tokio::io::split(far);
+    // A server that gives its newer update, then closes before the forks pass.
+    let server = async move {
+        let mut request = [0_u8; 1 + 8 + 32];
+        far_read.read_exact(&mut request).await.unwrap();
+        far_write.write_all(&[0x01]).await.unwrap();
+        let len = u32::try_from(sent.len()).unwrap();
+        far_write.write_all(&len.to_be_bytes()).await.unwrap();
+        far_write.write_all(&sent).await.unwrap();
+        far_write.shutdown().await.unwrap();
+    };
+    let (dialed, ()) = tokio::join!(exchange(&desk, near_read, near_write), server);
+    assert_eq!(dialed.unwrap(), Answer::Took);
+    assert_eq!(std::fs::read(desk.roster()).unwrap(), newer);
 }
 
 #[tokio::test]

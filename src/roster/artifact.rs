@@ -1,7 +1,8 @@
 //! The update held in the node home, `<home>/roster`, and the fork kept beside it, `<home>/roster.fork`.
 //!
-//! Only a fold writes either ([`fold`](super::fold)), and an exchange reads `roster` afresh each time it
-//! answers, so an update folded while `serve` runs is the one it gives next, with no restart.
+//! Only a fold writes either ([`fold`](super::fold), and [`fold_fork`](super::fold_fork) for the fork),
+//! and an exchange reads `roster` afresh each time it answers, so an update folded while `serve` runs is
+//! the one it gives next, with no restart.
 
 use std::io;
 use std::path::Path;
