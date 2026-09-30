@@ -21,6 +21,7 @@ use measure::{
 };
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::Escaped;
 use swoosh::peer::Peer;
 use swoosh::reach::{self, Resolved};
 use swoosh::transport::{self, ReachArgs};
@@ -167,14 +168,10 @@ impl SpeedCmd {
         // itself was refused.
         let report = match outcome {
             Ok(report) => report,
-            Err(ProtocolError::Refused(Refusal::Method { code, detail })) => {
-                node.close().await;
-                let line = refusal_line(&label, code, &detail);
-                eyre::bail!("{line}");
-            }
             Err(ProtocolError::Refused(refusal)) => {
                 node.close().await;
-                eyre::bail!("{label}: reached, but refused: {refusal}");
+                let line = refusal_line(&label, &refusal);
+                eyre::bail!("{line}");
             }
             Err(error) => {
                 node.close().await;
@@ -278,11 +275,20 @@ fn mib(bytes: u64) -> String {
     format!("{:.2} MiB", bytes as f64 / (1024.0 * 1024.0))
 }
 
-/// The one line a post-admission `speed` refusal renders: the typed code chooses the phrase, never the
-/// detail prose. `WrongMethod` names the method the peer does not serve; `RateLimited` and `Busy` name
-/// the bound that stopped the run, so a capped run never reads as a missing service (the render table
-/// in `notes/design/typed-refusal-and-errors.md`). A new code breaks this match at compile time.
-fn refusal_line(label: &str, code: MethodRefusal, detail: impl core::fmt::Display) -> String {
+/// The one line a `speed` refusal renders. After admission the typed code chooses the phrase, never the
+/// detail prose: `WrongMethod` names the method the peer does not serve; `RateLimited` and `Busy` name the
+/// bound that stopped the run, so a capped run never reads as a missing service (the render table in
+/// `notes/design/typed-refusal-and-errors.md`). A new code breaks this match at compile time. A refusal
+/// of the dial itself says it was reached and refused. The detail is the peer's text, so it prints
+/// through the escaper.
+fn refusal_line(label: &str, refusal: &Refusal) -> String {
+    let Refusal::Method { code, detail } = refusal else {
+        return format!(
+            "{label}: reached, but refused: {}",
+            Escaped(&refusal.to_string())
+        );
+    };
+    let detail = Escaped(detail.as_str());
     match code {
         MethodRefusal::WrongMethod => format!("{label} does not serve `speed`: {detail}"),
         MethodRefusal::RateLimited => format!("{label} is rate limited: {detail}"),

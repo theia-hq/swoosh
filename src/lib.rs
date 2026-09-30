@@ -11,6 +11,7 @@ mod codec;
 pub mod config;
 pub mod contacts;
 pub mod credential;
+pub mod escape;
 pub mod gate;
 pub mod grants;
 pub mod home;

@@ -14,9 +14,10 @@ use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
 use clap::Args;
-use measure::{Ping, PingReport, Probe, ProtocolError};
+use measure::{Ping, PingReport, Probe, ProtocolError, Refusal};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::Escaped;
 use swoosh::peer::Peer;
 use swoosh::reach;
 use swoosh::transport::{self, ReachArgs};
@@ -168,9 +169,8 @@ impl PingCmd {
                         Err(ProtocolError::Refused(refusal)) => {
                             outcome = outcome.max(reach::Outcome::Refused);
                             println!(
-                                "{} via {}: reached, but refused ({refusal})",
-                                candidate.label,
-                                bound.transport.name(),
+                                "{}",
+                                refused_line(&candidate.label, bound.transport.name(), &refusal)
                             );
                         }
                         // The node was REACHED and the exchange then broke. One broken device used to
@@ -252,6 +252,15 @@ fn millis(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+/// The line for a device that was reached and refused the probe. The refusal's detail is the peer's
+/// text, so it prints through the escaper.
+fn refused_line(label: &str, transport: &str, refusal: &Refusal) -> String {
+    format!(
+        "{label} via {transport}: reached, but refused ({})",
+        Escaped(&refusal.to_string())
+    )
+}
+
 /// The line for a device that was reached and whose exchange then broke.
 ///
 /// Says it was REACHED, so it is never confused with `unreachable`, and names the cause rather than a
@@ -259,7 +268,7 @@ fn millis(duration: Duration) -> f64 {
 fn failed_line(label: &str, transport: &str, error: &ProtocolError) -> String {
     format!(
         "{label} via {transport}: reached, but the probe failed ({})",
-        causes(error)
+        Escaped(&causes(error))
     )
 }
 
@@ -401,5 +410,25 @@ mod tests {
     fn a_lost_probe_reports_lost_not_a_zero_rtt() {
         let lines = lines(&[(Path::Direct, None)]);
         assert_eq!(lines[0], "alice/macbook via iroh, path: direct, seq 0 lost");
+    }
+
+    /// A peer's refusal detail holding a carriage return, an ESC CSI sequence and a bidi override prints
+    /// as escapes on one line, so a node that refused cannot redraw its line as a healthy probe.
+    #[test]
+    fn a_hostile_refusal_prints_escaped() {
+        let refusal = Refusal::Stream(bifrost::Refusal::Unavailable {
+            detail: bifrost::RefusalDetail::bounded(
+                "no\r\u{1b}[2Kalice/macbook via iroh, path: direct, seq 0 rtt 0.4 ms\u{202e}",
+            ),
+        });
+        let line = refused_line("alice/macbook", "iroh", &refusal);
+        assert_eq!(
+            line,
+            r"alice/macbook via iroh: reached, but refused (unavailable: no\r\u{1b}[2Kalice/macbook via iroh, path: direct, seq 0 rtt 0.4 ms\u{202e})"
+        );
+        assert!(
+            !line.contains(['\r', '\n', '\u{1b}', '\u{202e}']),
+            "no raw byte of the peer's reaches the line: {line:?}"
+        );
     }
 }

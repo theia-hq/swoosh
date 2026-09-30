@@ -17,6 +17,7 @@ use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::Escaped;
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
 use swoosh::peer::Peer;
@@ -176,7 +177,10 @@ impl ServiceLsCmd {
         let (writer, reader) = match session.open_bi().await {
             Ok(halves) => halves,
             Err(bifrost::Error::Refused(refusal)) => {
-                eyre::bail!("{dial}: reached, but refused ({refusal})")
+                eyre::bail!(
+                    "{dial}: reached, but refused ({})",
+                    Escaped(&refusal.to_string())
+                )
             }
             Err(error) => eyre::bail!("could not read services from {dial}: {error}"),
         };
@@ -253,9 +257,15 @@ pub(crate) fn render_catalog(
     catalog: &tunnel::ServiceCatalog,
     disabled: Option<&DisabledList>,
 ) -> String {
-    let service_width = catalog
+    // A name comes from the peer's catalog, so it prints through the escaper, and the column is as wide
+    // as the escaped name.
+    let shown: Vec<String> = catalog
         .entries()
-        .map(|entry| entry.name.len())
+        .map(|entry| Escaped(&entry.name).to_string())
+        .collect();
+    let service_width = shown
+        .iter()
+        .map(|name| name.chars().count())
         .chain([HEADER_SERVICE.len()])
         .max()
         .unwrap_or(HEADER_SERVICE.len());
@@ -275,7 +285,7 @@ pub(crate) fn render_catalog(
             "{HEADER_SERVICE:<service_width$}  {HEADER_GATE}\n"
         ));
     }
-    for entry in catalog.entries() {
+    for (entry, shown) in catalog.entries().zip(&shown) {
         let state = match disabled {
             None => None,
             Some(DisabledList::Known(names)) => {
@@ -287,10 +297,9 @@ pub(crate) fn render_catalog(
         let gate = entry.posture.label();
         match state {
             Some(state) => out.push_str(&format!(
-                "{:<service_width$}  {gate:<gate_width$}  {state}\n",
-                entry.name
+                "{shown:<service_width$}  {gate:<gate_width$}  {state}\n"
             )),
-            None => out.push_str(&format!("{:<service_width$}  {gate}\n", entry.name)),
+            None => out.push_str(&format!("{shown:<service_width$}  {gate}\n")),
         }
     }
     out

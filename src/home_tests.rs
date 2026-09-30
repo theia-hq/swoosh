@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 use super::xdg_runtime_root;
+use crate::escape::Escaped;
 
 /// The refusal a `serve` prints where no private runtime directory resolves.
 const NO_RUNTIME_DIR: &str = "swoosh serve needs a private runtime directory. Set XDG_RUNTIME_DIR to a \
@@ -156,9 +157,9 @@ fn the_owner_line_names_both_users_and_no_command() {
 }
 
 /// The path in the `chmod` is shell-quoted when it needs it, and reads back through every shell as the
-/// path; the path that leads the line stays bare, and a path that needs no quoting prints bare in both
-/// places. A path no single-quoted word holds in every shell (fish reads `\'`, tcsh expands `!!`, a newline
-/// ends a csh line) gets the lead alone and no command.
+/// path; the path that leads the line stays bare (through the shared escaper), and a path that needs no
+/// quoting prints bare in both places. A path no single-quoted word holds in every shell (fish reads `\'`,
+/// tcsh expands `!!`, a newline ends a csh line) gets the lead alone and no command.
 #[test]
 fn the_chmod_path_is_quoted_only_when_it_needs_it() {
     let base = PathBuf::from("/tmp/f5-quote");
@@ -178,7 +179,10 @@ fn the_chmod_path_is_quoted_only_when_it_needs_it() {
             why: super::Loose::Writable,
         }
         .to_string();
-        let lead = format!("{} can be written by others", path.display());
+        let lead = format!(
+            "{} can be written by others",
+            Escaped(&path.to_string_lossy())
+        );
         let Some(quoted) = command else {
             assert_eq!(line, lead, "{name:?} names no command");
             continue;

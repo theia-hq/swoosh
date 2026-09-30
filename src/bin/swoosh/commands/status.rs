@@ -26,6 +26,7 @@ use clap::Args;
 use measure::{Ping, ProtocolError, Refusal};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::Escaped;
 use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::reach;
@@ -338,9 +339,20 @@ impl core::fmt::Display for Line {
         write!(f, "{} via {}{separator} ", self.label, self.transport)?;
         match &self.state {
             State::Unreachable => f.write_str("unreachable"),
-            State::Refused { refusal } => write!(f, "reached, but refused ({refusal})"),
+            // The refusal and the cause chain carry the peer's text, so both print through the escaper.
+            State::Refused { refusal } => {
+                write!(
+                    f,
+                    "reached, but refused ({})",
+                    Escaped(&refusal.to_string())
+                )
+            }
             State::Failed { error } => {
-                write!(f, "reached, but the probe failed ({})", causes(error))
+                write!(
+                    f,
+                    "reached, but the probe failed ({})",
+                    Escaped(&causes(error))
+                )
             }
             State::Unanswered { sent } => {
                 write!(
@@ -665,6 +677,30 @@ mod tests {
         assert!(
             line.contains("not admitted"),
             "the uniform refusal is rendered as a reason a person can act on: {line}"
+        );
+    }
+
+    /// A peer's refusal detail holding a carriage return, an ESC CSI sequence and a bidi override prints
+    /// as escapes on one line, so a node that refused cannot redraw its line as a healthy path.
+    #[test]
+    fn a_hostile_refusal_prints_escaped() {
+        let line = Line::refused(
+            "alice/macbook".to_owned(),
+            "iroh",
+            measure::Refusal::Stream(bifrost::Refusal::BadRequest {
+                detail: bifrost::RefusalDetail::bounded(
+                    "no\r\u{1b}[2Kalice/macbook via iroh, path: direct\u{202e}",
+                ),
+            }),
+        )
+        .to_string();
+        assert_eq!(
+            line,
+            r"alice/macbook via iroh: reached, but refused (bad request: no\r\u{1b}[2Kalice/macbook via iroh, path: direct\u{202e})"
+        );
+        assert!(
+            !line.contains(['\r', '\n', '\u{1b}', '\u{202e}']),
+            "no raw byte of the peer's reaches the line: {line:?}"
         );
     }
 }

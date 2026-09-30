@@ -21,6 +21,7 @@ use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::Escaped;
 use swoosh::peer::Peer;
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
@@ -36,11 +37,6 @@ pub const RECV_SERVICE: &str = Unbound::RECV.name();
 /// Files send concurrently over separate streams, capped so one connection is not flooded. Matches iris's
 /// pipeline depth; a receiver's exposer accepts these streams concurrently too, so both sides fan out.
 const MAX_INFLIGHT: usize = 16;
-
-/// The longest a pushed file's name may render on the sender's own `sent` line, in characters. Mirrors
-/// the receiver's cap for a peer-supplied path (`services/crates/transfer/src/serve.rs`,
-/// `MAX_RENDERED_PATH`), so both ends of one transfer render a hostile name in the same bounded shape.
-const MAX_RENDERED_NAME: usize = 256;
 
 /// Push a file or directory to a peer, addressed by their public key, verified end to end.
 #[derive(Debug, Args)]
@@ -210,38 +206,16 @@ async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre:
         .send(name.as_bytes(), &blob, &mut source)
         .await?;
 
-    println!("sent {} ({} bytes)", render_name(&name), blob.len());
+    println!("sent {} ({} bytes)", Escaped(&name), blob.len());
     Ok(())
 }
 
-/// Render a pushed file's name for the sender's own `sent` line: escape control characters and cap the
-/// rendered length, the same rule the receive engine applies to a peer-supplied path
-/// (`services/crates/transfer/src/serve.rs`, `render_path`). A raw newline forges a line, a carriage
-/// return rewrites one, and ESC drives a terminal, so a directory holding a hostile name must not echo
-/// it raw. That helper is crate-private to the services repo's transfer engine, so the rule is stated
-/// here in the same shape and the two ends of one transfer render a name alike.
-fn render_name(name: &str) -> String {
-    // The cap plus the `...` cut marker: allocation is bounded whatever the file is named.
-    let mut rendered = String::with_capacity(MAX_RENDERED_NAME + 3);
-    let mut written = 0usize;
-    for ch in name.chars() {
-        let width = ch.escape_debug().count();
-        if written + width > MAX_RENDERED_NAME {
-            rendered.push_str("...");
-            break;
-        }
-        rendered.extend(ch.escape_debug());
-        written += width;
-    }
-    rendered
-}
-
-/// Render a PATH for a line or an error context through the SAME escape discipline as a file name.
-/// Every path this verb prints or wraps must come through here, including the paths inside an error
-/// context: the skip line renders its own prefix escaped and then prints the whole error chain, so a
-/// context built with a raw `Path::display` leaks the newline or ESC the prefix just escaped.
+/// Render a path for a line or an error context through the shared escaper, as the `sent` line renders
+/// a file's name. Every path this verb prints or wraps comes through here, including the paths inside an
+/// error context: the skip line renders its own prefix escaped and then prints the whole error chain, so a
+/// context built with a raw `Path::display` would leak the newline or ESC the prefix just escaped.
 fn render_path(path: &Path) -> String {
-    render_name(&path.display().to_string())
+    Escaped(&path.to_string_lossy()).to_string()
 }
 
 /// Collect `(relative name, path)` pairs to send: a file yields itself; a directory yields every file

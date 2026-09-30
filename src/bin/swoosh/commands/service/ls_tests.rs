@@ -130,6 +130,35 @@ fn the_remote_read_keeps_the_two_column_table() {
     assert!(row(&table, "logs").contains("open"), "{table}");
 }
 
+/// A peer's catalog name holding a carriage return, an ESC CSI sequence and a bidi override prints as
+/// escapes in its own row, so a peer cannot draw a row the table does not hold.
+#[test]
+fn a_hostile_service_name_prints_escaped() {
+    let menu = catalog(&[("ping", 0), ("x\r\u{1b}[2Kssh\u{202e}", 0)]);
+    let table = render_catalog(&menu, None);
+
+    assert!(
+        !table.contains(['\r', '\u{1b}', '\u{202e}']),
+        "no raw byte of the peer's reaches the table: {table:?}"
+    );
+    assert_eq!(
+        table.lines().count(),
+        3,
+        "one header and two rows: {table:?}"
+    );
+    let escaped = r"x\r\u{1b}[2Kssh\u{202e}";
+    assert_eq!(
+        row(&table, escaped),
+        format!("{escaped}  gated"),
+        "the name prints escaped"
+    );
+    assert_eq!(
+        row(&table, "ping"),
+        format!("{:<width$}  gated", "ping", width = escaped.len()),
+        "the column is as wide as the escaped name"
+    );
+}
+
 /// A bare `service ls` with no addressable resident is the same teaching error as bare `stop`,
 /// non-zero at the root: never a silent empty table that reads as "this node serves nothing".
 #[tokio::test]

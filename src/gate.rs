@@ -24,6 +24,7 @@ use nauthy::{
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{AdmittedChains, LiveCuts};
 
+use crate::escape::Escaped;
 use crate::grants::IssuedLedger;
 use crate::home::{Home, Loose, LooseFile, loose_in, open_trust_file, read_trust_file};
 
@@ -84,7 +85,7 @@ pub enum GateError {
 #[derive(Debug, thiserror::Error)]
 pub enum RevokedKeysError {
     /// The file, or its `.written` witness, exists but could not be read.
-    #[error("read {}", path.display())]
+    #[error("read {}", Escaped(&path.to_string_lossy()))]
     Io {
         /// The file that could not be read.
         path: PathBuf,
@@ -93,7 +94,7 @@ pub enum RevokedKeysError {
         source: std::io::Error,
     },
     /// The file is larger than [`MAX_REVOKED_KEYS_LEN`].
-    #[error("{} is larger than {MAX_REVOKED_KEYS_LEN} bytes", path.display())]
+    #[error("{} is larger than {MAX_REVOKED_KEYS_LEN} bytes", Escaped(&path.to_string_lossy()))]
     TooLarge {
         /// The file.
         path: PathBuf,
@@ -103,8 +104,8 @@ pub enum RevokedKeysError {
     /// it would admit them again.
     #[error(
         "{} holds {found} revoked keys but held {expected}: restore it, re-revoke what is missing, or remove {}.written to accept the loss",
-        path.display(),
-        path.display()
+        Escaped(&path.to_string_lossy()),
+        Escaped(&path.to_string_lossy())
     )]
     Lost {
         /// The keys file.
@@ -233,7 +234,10 @@ impl FilePin {
             return;
         }
         state.logged = Some(reading);
-        let path = self.path.display();
+        // The home path is escaped here, at the call site: the subscriber passes CR, LF and bidi raw, so a
+        // home whose directory names hold them would forge or rewrite a line of the serve log.
+        let lossy = self.path.to_string_lossy();
+        let path = Escaped(&lossy);
         match reading {
             Reading::Missing => tracing::warn!(path = %path, "no pin: no member is admitted"),
             Reading::Unreadable => {
@@ -413,7 +417,7 @@ impl RevokedKeys {
             }
             Ok(None) => {}
             Err(error) => tracing::warn!(
-                path = %self.path.display(),
+                path = %Escaped(&self.path.to_string_lossy()),
                 %error,
                 "keeping the revoked keys already read"
             ),
@@ -513,7 +517,7 @@ fn read_keys(path: &Path) -> std::io::Result<Option<(HashSet<VerifyKey>, Option<
                 keys.insert(key);
             }
             Err(error) => tracing::warn!(
-                path = %path.display(),
+                path = %Escaped(&path.to_string_lossy()),
                 line = index + 1,
                 %error,
                 "skipping a line that is not a key"

@@ -11,7 +11,8 @@ use std::{io, thread};
 
 use transfer::{Received, ReceivedSink as _};
 
-use super::{Activity, BLANK_LETTERS, MAX_RENDERED_PATH};
+use super::Activity;
+use crate::escape::{BLANK_LETTERS, MAX_ESCAPED};
 
 /// Long enough that a green run never waits on it; a red run fails with a message rather than hanging.
 const PATIENCE: Duration = Duration::from_secs(5);
@@ -142,28 +143,13 @@ fn a_path_of_blank_letters_is_escaped() {
     );
 }
 
-/// A long peer-named path cannot flood the line: the path renders at most [`MAX_RENDERED_PATH`]
+/// A long peer-named path cannot flood the line: the path renders at most [`MAX_ESCAPED`]
 /// characters and marks the cut.
 #[test]
 fn a_long_received_path_is_capped() {
-    let long = "a".repeat(MAX_RENDERED_PATH * 4);
-    let expected = format!(
-        "recv: received {}... (9 bytes)\n",
-        "a".repeat(MAX_RENDERED_PATH)
-    );
+    let long = "a".repeat(MAX_ESCAPED * 4);
+    let expected = format!("recv: received {}... (9 bytes)\n", "a".repeat(MAX_ESCAPED));
     assert_eq!(rendered(&long, 9), expected);
-}
-
-/// The cap cuts between escapes, never inside one: the 6-character ESC escape does not fit the last
-/// slot whole, so the render backs off to the marker instead of writing a malformed half-escape.
-#[test]
-fn a_cap_cut_never_splits_an_escape() {
-    let name = format!("{}\u{1b}", "a".repeat(MAX_RENDERED_PATH - 1));
-    let expected = format!(
-        "recv: received {}... (2 bytes)\n",
-        "a".repeat(MAX_RENDERED_PATH - 1)
-    );
-    assert_eq!(rendered(&name, 2), expected);
 }
 
 /// Two receive routes on one node name themselves: the same path lands on two lines that say which
