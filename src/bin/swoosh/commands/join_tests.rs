@@ -903,8 +903,7 @@ async fn join_refuses_where_the_root_is_kept() {
 
 /// The refusal of `join` and `leave` where a root is kept: the two commands that take the root off, one
 /// per line.
-const KEPT_HERE: &str =
-    "your root is on this machine: swoosh root backup <dir>\nthen: swoosh root forget <dir>";
+const KEPT_HERE: &str = "your root is on this machine, so take it off first: swoosh root backup <dir>\nthen: swoosh root forget <dir>";
 
 /// No printed line tells a person to type a command that will not exist: the lines after a root is first
 /// made, `join` and `leave` where a root is kept, and the root's refusals on a machine that is no device of
@@ -971,7 +970,7 @@ async fn no_printed_line_names_a_retired_root_command() {
         "{}",
         lines[3].1
     );
-    assert_eq!(lines[4].1, "your root is on this machine: drop --root");
+    assert_eq!(lines[4].1, "your root is on this machine, so drop --root");
 }
 
 #[tokio::test]

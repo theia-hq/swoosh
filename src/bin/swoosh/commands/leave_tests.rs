@@ -308,7 +308,7 @@ async fn leave_refuses_where_the_root_is_kept() {
         let ran = leave(&home, args).await;
         assert_eq!(
             ran.refusal(),
-            "your root is on this machine: swoosh root backup <dir>\nthen: swoosh root forget <dir>",
+            "your root is on this machine, so take it off first: swoosh root backup <dir>\nthen: swoosh root forget <dir>",
             "{args:?}"
         );
         assert!(snapshot(home.dir()) == before, "{args:?} writes nothing");
