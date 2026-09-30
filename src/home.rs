@@ -538,6 +538,18 @@ pub fn read_trust_file(path: &Path) -> std::io::Result<String> {
     Ok(text)
 }
 
+/// [`read_trust_file`] on tokio's blocking pool, as `tokio::fs::read_to_string` reads, for an async caller.
+///
+/// # Errors
+///
+/// As [`read_trust_file`].
+pub async fn read_trust_file_async(path: &Path) -> std::io::Result<String> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || read_trust_file(&path))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 /// The [`Loose`] an error from [`open_trust_file`] or [`read_trust_file`] carries, when it is one.
 pub fn loose_in(error: &std::io::Error) -> Option<Loose> {
     error

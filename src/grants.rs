@@ -90,7 +90,7 @@ impl Grants {
     // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
     #[allow(clippy::std_instead_of_core)]
     pub async fn load(&self) -> Result<Vec<GrantRecord>, LedgerError> {
-        let text = match crate::home::read_trust_file(&self.path) {
+        let text = match crate::home::read_trust_file_async(&self.path).await {
             Ok(text) => text,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(LedgerError::Io(error)),

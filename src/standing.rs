@@ -501,7 +501,7 @@ pub(crate) async fn strip(home: &Home) -> Result<(), StandingError> {
 /// The pin, or `None` when there is none. A file that is not exactly one key is damaged.
 async fn read_pin(home: &Home) -> Result<Option<NodeId>, StandingError> {
     let path = home.signet();
-    let Some(text) = text_of(crate::home::read_trust_file(&path), &path)? else {
+    let Some(text) = text_of(crate::home::read_trust_file_async(&path).await, &path)? else {
         return Ok(None);
     };
     match text.and_then(|text| text.trim().parse::<NodeId>().ok()) {

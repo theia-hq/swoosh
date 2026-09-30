@@ -25,7 +25,7 @@ use crate::standing::{Disagreement, damaged_line};
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
-    match crate::home::read_trust_file(&home.signet()) {
+    match crate::home::read_trust_file_async(&home.signet()).await {
         Ok(text) => text.trim().parse::<NodeId>().map(Some).map_err(|_| {
             eyre::eyre!(
                 "{}",
