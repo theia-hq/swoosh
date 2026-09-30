@@ -724,3 +724,18 @@ fn serve_refuses_a_socket_path_longer_than_sun_path() {
     );
     assert!(!root.exists(), "nothing was created under the long root");
 }
+
+/// A start that lost the lock file on every try says so, with the count, and names no fix.
+#[test]
+fn a_lock_lost_on_every_try_says_how_many() {
+    let error = super::lock_lost(PathBuf::from("/run/leaf/control.lock"));
+    assert_eq!(
+        error.to_string(),
+        "could not take the control lock at /run/leaf/control.lock"
+    );
+    let cause = core::error::Error::source(&error).expect("a cause");
+    assert_eq!(
+        cause.to_string(),
+        "another process removed it on each of 3 tries"
+    );
+}

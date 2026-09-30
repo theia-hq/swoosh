@@ -232,12 +232,7 @@ pub fn acquire(
         }
         tries += 1;
         if tries == LOCK_TRIES {
-            return Err(SingleError::LockFailed {
-                path: home.runtime_leaf(root).join("control.lock"),
-                source: std::io::Error::other(
-                    "the control lock was removed each time it was taken",
-                ),
-            });
+            return Err(lock_lost(home.runtime_leaf(root).join("control.lock")));
         }
     };
     let lock_path = runtime.lock_path();
@@ -294,6 +289,17 @@ pub fn acquire(
 
 /// How many times a start takes the lock before it gives up on a file removed under it each time.
 const LOCK_TRIES: u32 = 3;
+
+/// The refusal for a start that lost the lock file at `path` on every one of its [`LOCK_TRIES`]. It names
+/// no fix: why another process keeps removing the file is for the person to find.
+fn lock_lost(path: PathBuf) -> SingleError {
+    SingleError::LockFailed {
+        path,
+        source: std::io::Error::other(format!(
+            "another process removed it on each of {LOCK_TRIES} tries"
+        )),
+    }
+}
 
 /// A lock file taken: the flocked handle and the `(dev, ino)` the path named when it was taken.
 struct Taken {

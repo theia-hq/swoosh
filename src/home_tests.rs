@@ -129,3 +129,140 @@ fn a_trust_file_is_checked_on_the_handle_it_is_read_from() {
     assert_eq!(super::read_trust_file(&path).expect("read"), "a row\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The owner line names the file's owner and this process's user by name, or as `uid <n>` when the uid has
+/// no name here, and names no command.
+#[test]
+fn the_owner_line_names_both_users_and_no_command() {
+    // Root is named on every unix; a uid this high is in no passwd database.
+    let unnamed = 3_999_999_999;
+    let line = |owner, euid| {
+        super::LooseFile {
+            path: PathBuf::from("/h/links"),
+            why: super::Loose::Owner { owner, euid },
+        }
+        .to_string()
+    };
+    assert_eq!(
+        line(unnamed, 0),
+        "/h/links is owned by uid 3999999999, and swoosh is running as root; it will not load another \
+         user's file"
+    );
+    assert_eq!(
+        line(0, unnamed),
+        "/h/links is owned by root, and swoosh is running as uid 3999999999; it will not load another \
+         user's file"
+    );
+}
+
+/// The path in the `chmod` is shell-quoted when it needs it, and reads back through `sh` as the path; the
+/// path that leads the line stays bare, and a path that needs no quoting prints bare in both places.
+#[test]
+fn the_chmod_path_is_quoted_only_when_it_needs_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let base = std::env::temp_dir().join(format!("swoosh-home-quote-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    for (name, quoted) in [
+        ("plain", false),
+        ("my home", true),
+        ("it's $HOME `x` *", true),
+    ] {
+        let dir = base.join(name);
+        std::fs::create_dir_all(&dir).expect("the home");
+        let home = super::Home::resolve(Some(dir.clone())).expect("the home resolves");
+        let path = home.links();
+        std::fs::write(&path, "").expect("the file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o620))
+            .expect("set the mode");
+        let line = home
+            .check_trust_files()
+            .expect_err("a loose file is refused")
+            .to_string();
+        let lead = format!("{} can be written by others: chmod 600 ", path.display());
+        let word = line
+            .strip_prefix(&lead)
+            .unwrap_or_else(|| panic!("the line leads with the bare path: {line}"));
+        assert_eq!(word.starts_with('\''), quoted, "{line}");
+        if !quoted {
+            assert_eq!(word, path.display().to_string());
+        }
+        let read = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf %s {word}"))
+            .output()
+            .expect("sh runs");
+        assert_eq!(
+            String::from_utf8_lossy(&read.stdout),
+            path.display().to_string()
+        );
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A known_hosts another user owns is refused by the check every command makes when the home resolves,
+/// with the owner line; a missing one is not. The file is a link to a path another user owns, since a test
+/// cannot make a file owned by someone else, and the check follows links as the read does.
+#[test]
+fn a_known_hosts_another_user_owns_is_refused() {
+    let dir = std::env::temp_dir().join(format!("swoosh-home-hosts-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("the home");
+    let home = super::Home::resolve(Some(dir.clone())).expect("the home resolves");
+    home.check_trust_files()
+        .expect("a missing known_hosts is not a refusal");
+    let foreign = owned_by_another_user();
+    std::os::unix::fs::symlink(&foreign, home.known_hosts()).expect("the link");
+    let refused = home.check_trust_files();
+    let Err(
+        error @ super::LooseFile {
+            why: super::Loose::Owner { .. },
+            ..
+        },
+    ) = refused
+    else {
+        panic!("a known_hosts another user owns must refuse: {refused:?}");
+    };
+    assert_eq!(error.path, home.known_hosts());
+    assert!(
+        error
+            .to_string()
+            .ends_with("; it will not load another user's file"),
+        "{error}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A path on this machine owned by neither this process's user nor root, found under the system's own
+/// state directories (a service user's), which every test machine has.
+fn owned_by_another_user() -> PathBuf {
+    use std::os::unix::fs::MetadataExt as _;
+
+    // SAFETY: `geteuid` takes no arguments and touches no memory.
+    let euid = unsafe { libc::geteuid() };
+    let mut level = vec![PathBuf::from("/var"), PathBuf::from("/run")];
+    for _ in 0..3 {
+        let mut next = Vec::new();
+        for dir in level {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                if meta.uid() != euid && meta.uid() != 0 {
+                    return path;
+                }
+                if meta.is_dir() {
+                    next.push(path);
+                }
+            }
+        }
+        level = next;
+    }
+    panic!(
+        "no path under /var or /run is owned by another user, so the owner check cannot be tried"
+    );
+}

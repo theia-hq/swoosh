@@ -258,8 +258,9 @@ impl Home {
     }
 
     /// The files whose contents decide whom this machine trusts: the pin, the links it signed, the
-    /// contacts book, everything it refuses for good, and what `serve` runs.
-    fn trust_files(&self) -> [PathBuf; 10] {
+    /// contacts book, everything it refuses for good, what `serve` runs, and the host keys `swoosh ssh`
+    /// pins (a writer who plants a host key there can sit between this machine and a peer).
+    fn trust_files(&self) -> [PathBuf; 11] {
         [
             self.signet(),
             self.links(),
@@ -271,6 +272,7 @@ impl Home {
             self.disabled(),
             self.relay(),
             self.resolver(),
+            self.known_hosts(),
         ]
     }
 
@@ -455,15 +457,69 @@ impl core::fmt::Display for LooseFile {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let path = self.path.display();
         match self.why {
-            Loose::Writable => write!(f, "{path} can be written by others: chmod 600 {path}"),
-            Loose::Owner { euid } => {
+            Loose::Writable => {
                 write!(
                     f,
-                    "{path} belongs to another user: sudo chown {euid} {path}"
+                    "{path} can be written by others: chmod 600 {}",
+                    shell_word(&self.path)
                 )
             }
+            // No command: whether the file should be taken back, or swoosh run as its owner, is a judgment
+            // only the person can make, and a `chown` needs root.
+            Loose::Owner { owner, euid } => write!(
+                f,
+                "{path} is owned by {}, and swoosh is running as {}; it will not load another user's file",
+                user_name(owner),
+                user_name(euid)
+            ),
         }
     }
+}
+
+/// `path` as one word a POSIX shell reads back as `path`: bare when every character is in
+/// `[A-Za-z0-9_./,:@%+=-]`, characters a shell reads as themselves, else in single quotes, with each
+/// `'` in it written `'\''`. So the command a refusal prints runs as printed from a triple-click.
+fn shell_word(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_./,:@%+=-".contains(c);
+    if !text.is_empty() && text.chars().all(plain) {
+        return text.into_owned();
+    }
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// The user name `uid` has on this machine, or `uid <n>` when it has none (or one that is not UTF-8).
+fn user_name(uid: u32) -> String {
+    #[cfg(unix)]
+    {
+        // Grown on `ERANGE`, up to a cap no real passwd entry reaches.
+        let mut buf = vec![0 as libc::c_char; 1024];
+        loop {
+            // SAFETY: `passwd` is plain C data (integers and pointers), for which all zeroes is a value.
+            let mut pwd: libc::passwd = unsafe { core::mem::zeroed() };
+            let mut found: *mut libc::passwd = core::ptr::null_mut();
+            // SAFETY: `pwd` and `found` are live locals, and `buf` is a live buffer of `buf.len()` bytes;
+            // `getpwuid_r` writes the entry's strings into `buf` and points `found` at `pwd` or null.
+            let rc =
+                unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut found) };
+            if rc == libc::ERANGE && buf.len() < 1 << 16 {
+                buf.resize(buf.len() * 2, 0);
+                continue;
+            }
+            if rc == 0 && !found.is_null() && !pwd.pw_name.is_null() {
+                // SAFETY: on success `pw_name` points at a NUL-terminated string inside `buf`, which
+                // outlives this borrow.
+                let name = unsafe { core::ffi::CStr::from_ptr(pwd.pw_name) };
+                if let Ok(name) = name.to_str()
+                    && !name.is_empty()
+                {
+                    return name.to_owned();
+                }
+            }
+            break;
+        }
+    }
+    format!("uid {uid}")
 }
 
 impl core::error::Error for LooseFile {}
@@ -475,6 +531,8 @@ pub enum Loose {
     Writable,
     /// Another user, not root, owns the file.
     Owner {
+        /// The file's owner.
+        owner: u32,
         /// This process's user, who must own it.
         euid: u32,
     },
@@ -491,7 +549,10 @@ fn loose(meta: &std::fs::Metadata) -> Option<Loose> {
         // SAFETY: `geteuid` takes no arguments and touches no memory.
         let euid = unsafe { libc::geteuid() };
         if meta.uid() != euid && meta.uid() != 0 {
-            return Some(Loose::Owner { euid });
+            return Some(Loose::Owner {
+                owner: meta.uid(),
+                euid,
+            });
         }
         if meta.mode() & 0o022 != 0 {
             return Some(Loose::Writable);

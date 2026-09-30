@@ -244,7 +244,7 @@ impl FilePin {
                     path: self.path.clone(),
                     why,
                 };
-                tracing::warn!(path = %path, %error, "the pin cannot be read: no member is admitted");
+                tracing::warn!(path = %path, %error, "the pin is refused: no member is admitted");
             }
             Reading::Malformed => {
                 tracing::warn!(path = %path, "the pin is not one key: no member is admitted");
