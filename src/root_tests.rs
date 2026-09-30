@@ -1992,7 +1992,7 @@ async fn a_root_act_whose_cut_forks_offers_nothing_and_fails() {
         assert!(matches!(error, RootError::ListChanged), "{tag}: {error:?}");
         assert_eq!(
             error.to_string(),
-            "your devices' list changed while this ran, so this change was not sent: run it again."
+            "your devices' list changed while this ran: run it again."
         );
         assert!(out.is_empty(), "{tag}: nothing printed as sent");
         assert!(

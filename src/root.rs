@@ -329,9 +329,7 @@ pub enum RootError {
     Fold(#[from] FoldError),
     /// The act's own cut did not fold here as the newest update: another copy of the root cut while the
     /// act ran, so nothing was offered.
-    #[error(
-        "your devices' list changed while this ran, so this change was not sent: run it again."
-    )]
+    #[error("your devices' list changed while this ran: run it again.")]
     ListChanged,
     /// A file the act reads or writes failed.
     #[error("{}: {source}", .path.display())]
