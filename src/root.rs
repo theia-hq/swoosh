@@ -1708,6 +1708,14 @@ impl Book {
     /// these lack, and for a device in both, its ids and its newer standing.
     fn bring_forward(&mut self, update: &RosterDoc, now: u64, brought: &mut Brought) {
         self.last_update = self.last_update.max(update.epoch());
+        self.bring_revocations(update, now, brought);
+        for member in update.members() {
+            self.take_member(member, now, brought);
+        }
+    }
+
+    /// Bring only `update`'s revoked ids that have not ended and its revoked keys into these records.
+    fn bring_revocations(&mut self, update: &RosterDoc, now: u64, brought: &mut Brought) {
         for id in update.revoked() {
             if id.expires > now && self.revoke_id(id.clone()) {
                 brought.revocations += 1;
@@ -1717,9 +1725,6 @@ impl Book {
             if self.revoked_keys.insert(*key.bytes(), *key).is_none() {
                 brought.revocations += 1;
             }
-        }
-        for member in update.members() {
-            self.take_member(member, now, brought);
         }
     }
 
@@ -1785,7 +1790,9 @@ impl Book {
 
     /// Bring these records forward as an act that cuts does before its prompt: from `held` and `fork` when
     /// they are behind `held` or a fork is held, then this machine's own revocations, then every row whose
-    /// key is revoked marked. What it brought, and whether the records were behind `held`.
+    /// key is revoked marked. A fork below the number of `held` or of these records, and `held` below these
+    /// records, bring only their revocations: their devices and names are older than the ones held. What it
+    /// brought, and whether the records were behind `held`.
     fn forward(
         &mut self,
         home: &Home,
@@ -1794,10 +1801,22 @@ impl Book {
         now: u64,
     ) -> Result<(Brought, bool), RootError> {
         let behind = held.is_some_and(|held| held.epoch() > self.last_update);
+        let floor = held.map_or(self.last_update, |held| held.epoch().max(self.last_update));
         let mut brought = Brought::default();
         if behind || fork.is_some() {
-            for update in held.into_iter().chain(fork) {
-                self.bring_forward(update, now, &mut brought);
+            match held {
+                Some(held) if held.epoch() < self.last_update => {
+                    self.bring_revocations(held, now, &mut brought);
+                }
+                Some(held) => self.bring_forward(held, now, &mut brought),
+                None => {}
+            }
+            match fork {
+                Some(fork) if fork.epoch() < floor => {
+                    self.bring_revocations(fork, now, &mut brought);
+                }
+                Some(fork) => self.bring_forward(fork, now, &mut brought),
+                None => {}
             }
         }
         self.carry_forward(home, held)?;

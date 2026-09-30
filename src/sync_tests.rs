@@ -16,7 +16,7 @@ use keystore::{KeyFile, Protection};
 use nauthy::{RevocationId, Revocations as _, VerifyKey};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
-use super::{Answer, Device, ExchangeError, Until, answer, digest, exchange, round};
+use super::{Answer, Device, Dial as _, ExchangeError, Until, answer, digest, exchange, round};
 use crate::codec::Id;
 use crate::config;
 use crate::contacts::DeviceLabel;
@@ -303,8 +303,9 @@ async fn an_exchange_between_equals_sends_no_update_bytes() {
     );
     answered.unwrap();
     assert_eq!(dialed.unwrap(), Answer::Same);
-    // The request is a byte, a number and a digest; the answer is a byte and a digest. Nothing else crossed.
-    let update_bytes = count.load(Ordering::SeqCst) - (1 + 8 + 32) - (1 + 32);
+    // The request is a byte, a number and a digest; the answer is a byte and a digest; each side's kept
+    // fork, none here, is a zero length. Nothing else crossed.
+    let update_bytes = count.load(Ordering::SeqCst) - (1 + 8 + 32) - (1 + 32) - 2 * 4;
     assert_eq!(update_bytes, 0, "equals send no update");
 }
 
@@ -393,6 +394,134 @@ async fn an_exchange_with_a_fork_keeps_both_revocation_lists() {
         kept.contains(&id(1)) && kept.contains(&id(2)),
         "the updates kept here carry both lists, for the root to bring forward"
     );
+}
+
+#[tokio::test]
+async fn an_exchange_at_one_number_with_two_digests_folds_both_ways() {
+    let desk = device("both-ways", DESK).await;
+    let nas = device("both-ways", NAS).await;
+    holding(&desk, &update(4, vec![id(1)], vec![key(STOLEN)])).await;
+    holding(&nas, &update(4, vec![id(2)], vec![])).await;
+
+    let dial = Loopback::new(desk.clone(), [(node(NAS), nas.clone())]);
+    let answers = round(
+        &dial,
+        &[named(NAS, "me/nas")],
+        Until::Every,
+        Duration::from_secs(20),
+    )
+    .await;
+
+    assert_eq!(answers[0].1.answer(), Some(Answer::Forked));
+    assert!(
+        revoked(&desk, &id(2)).await,
+        "this machine holds the other's revocations"
+    );
+    assert!(
+        revoked(&nas, &id(1)).await && refuses(&nas, STOLEN).await,
+        "and the other device holds this machine's, after one exchange"
+    );
+}
+
+/// The stale-fork run: a laptop that holds the root cuts 2, revoking the phone, and reaches nobody; a
+/// desk with another copy of the root, still at 1, cuts its own 2 without that revocation and gives it to
+/// the nas. The laptop dials the nas, then the nas dials the desk.
+#[tokio::test]
+async fn a_kept_fork_reaches_the_device_it_is_exchanged_with() {
+    let laptop = device("stale-fork", LAPTOP).await;
+    let desk = device("stale-fork", DESK).await;
+    let nas = device("stale-fork", NAS).await;
+    for home in [&laptop, &desk, &nas] {
+        holding(home, &update(1, vec![], vec![])).await;
+    }
+    holding(&laptop, &update(2, vec![], vec![key(STOLEN)])).await;
+    let desk_cut = update(2, vec![], vec![]);
+    holding(&desk, &desk_cut).await;
+    let desk_dial = Loopback::new(desk.clone(), [(node(NAS), nas.clone())]);
+    assert_eq!(
+        desk_dial
+            .offer(node(NAS), Epoch(2), &desk_cut)
+            .await
+            .unwrap(),
+        Answer::Gave
+    );
+
+    let laptop_dial = Loopback::new(laptop.clone(), [(node(NAS), nas.clone())]);
+    assert_eq!(
+        laptop_dial.exchange(node(NAS)).await.unwrap(),
+        Answer::Forked
+    );
+    let nas_dial = Loopback::new(nas.clone(), [(node(DESK), desk.clone())]);
+    assert_eq!(
+        nas_dial.exchange(node(DESK)).await.unwrap(),
+        Answer::Same,
+        "the nas and the desk hold the same update"
+    );
+
+    for (home, name) in [(&laptop, "laptop"), (&desk, "desk"), (&nas, "nas")] {
+        assert!(
+            refuses(home, STOLEN).await,
+            "the {name} refuses the phone once the nas has met both"
+        );
+    }
+    assert_eq!(
+        std::fs::read(desk.roster()).unwrap(),
+        desk_cut,
+        "a fork passed on is never the update held"
+    );
+}
+
+#[tokio::test]
+async fn a_kept_fork_below_the_held_update_still_adds_its_revocations() {
+    let nas = device("fork-below", NAS).await;
+    let laptop = device("fork-below", LAPTOP).await;
+    holding(&nas, &update(2, vec![], vec![])).await;
+    assert_eq!(
+        fold(&nas, &update(2, vec![], vec![key(STOLEN)]))
+            .await
+            .unwrap(),
+        Folded::Fork { floor: Epoch(2) }
+    );
+    let third = update(3, vec![], vec![]);
+    holding(&nas, &third).await;
+    holding(&laptop, &third).await;
+    assert!(nas.roster_fork().exists(), "3 lacks the fork's revocation");
+
+    let dial = Loopback::new(nas.clone(), [(node(LAPTOP), laptop.clone())]);
+    assert_eq!(dial.exchange(node(LAPTOP)).await.unwrap(), Answer::Same);
+
+    assert!(
+        refuses(&laptop, STOLEN).await,
+        "a fork below the update held still revokes"
+    );
+    assert!(
+        laptop.roster_fork().exists(),
+        "and is kept, to pass on at the next exchange"
+    );
+}
+
+#[tokio::test]
+async fn an_update_taken_is_still_the_answer_when_the_forks_do_not_pass() {
+    let desk = device("forks-break", DESK).await;
+    holding(&desk, &update(1, vec![], vec![])).await;
+    let newer = update(2, vec![], vec![key(STOLEN)]);
+    let sent = newer.clone();
+    let (near, far) = tokio::io::duplex(64 * 1024);
+    let (near_read, near_write) = tokio::io::split(near);
+    let (mut far_read, mut far_write) = tokio::io::split(far);
+    // A server that gives its newer update, then closes before the forks pass.
+    let server = async move {
+        let mut request = [0_u8; 1 + 8 + 32];
+        far_read.read_exact(&mut request).await.unwrap();
+        far_write.write_all(&[0x01]).await.unwrap();
+        let len = u32::try_from(sent.len()).unwrap();
+        far_write.write_all(&len.to_be_bytes()).await.unwrap();
+        far_write.write_all(&sent).await.unwrap();
+        far_write.shutdown().await.unwrap();
+    };
+    let (dialed, ()) = tokio::join!(exchange(&desk, near_read, near_write), server);
+    assert_eq!(dialed.unwrap(), Answer::Took);
+    assert_eq!(std::fs::read(desk.roster()).unwrap(), newer);
 }
 
 #[tokio::test]

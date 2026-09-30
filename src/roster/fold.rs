@@ -3,7 +3,8 @@
 //! A root act's own cut, an update taken in an exchange, and one given to this machine in an exchange all
 //! fold here, and nowhere else writes `roster`. The fold verifies the update under the pin, compares it with
 //! the one held, and only ever adds: a revoked id or key it learns is written to the files the gate reads,
-//! and none is ever removed.
+//! and none is ever removed. A fork another device passes on in an exchange folds here too
+//! ([`fold_fork`]), and never becomes the update held.
 //!
 //! Every fold holds `<home>/roster.lock` from the read of the held update to its last write, so two folds
 //! never both read one floor and both write.
@@ -131,6 +132,34 @@ pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
     }
 }
 
+/// Fold `bytes`, the fork another device keeps and passed on in an exchange, into this home.
+///
+/// Folds run only on a device of a root, one that holds it or not. A fork that is the update held here, or
+/// whose revocations the update held here all carries, changes nothing. Any other adds its revocations,
+/// whatever its number, and is kept as `roster.fork` unless a fork is kept already, so the next exchange
+/// here passes it on. It never becomes the update held here.
+pub async fn fold_fork(home: &Home, bytes: &[u8]) -> Result<(), FoldError> {
+    let _lock = RosterLock::take(&home.roster_lock()).await?;
+    let pin = match Standing::read(home).await?.standing {
+        Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => pin,
+        Standing::Unpinned | Standing::InterruptedMint { .. } => {
+            return Err(FoldError::NotADevice);
+        }
+    };
+    let pin = crate::standing::pin_key(home, pin)?;
+    if bytes.len() as u64 > MAX_ROSTER_BLOB {
+        return Err(FoldError::TooLarge);
+    }
+    let fork = super::verify(bytes, pin)?;
+    if let Some((held, held_bytes)) = read_held(&home.roster(), pin)
+        && (held_bytes.as_slice() == bytes || carries(&held, &fork))
+    {
+        return Ok(());
+    }
+    revoke(home, &fork).await?;
+    keep_fork(home, bytes, pin).await
+}
+
 /// The update at `path` and its bytes, if it verifies under `root`; else `None`.
 pub(crate) fn read_held(path: &Path, root: VerifyKey) -> Option<(RosterDoc, Vec<u8>)> {
     use std::io::Read as _;
@@ -211,6 +240,19 @@ fn clear_fork(home: &Home, doc: &RosterDoc, pin: VerifyKey) -> Result<(), FoldEr
     let Some((fork, _)) = read_held(&path, pin) else {
         return Ok(());
     };
+    if carries(doc, &fork) {
+        match std::fs::remove_file(&path) {
+            Err(source) if source.kind() != io::ErrorKind::NotFound => {
+                return Err(FoldError::Io { path, source });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Whether `doc` carries every revoked id of `fork` that has not ended and every revoked key of `fork`.
+fn carries(doc: &RosterDoc, fork: &RosterDoc) -> bool {
     let now = unix_now();
     let ids = fork
         .revoked()
@@ -221,15 +263,7 @@ fn clear_fork(home: &Home, doc: &RosterDoc, pin: VerifyKey) -> Result<(), FoldEr
         .revoked_keys()
         .iter()
         .all(|key| doc.revoked_keys().contains(key));
-    if ids && keys {
-        match std::fs::remove_file(&path) {
-            Err(source) if source.kind() != io::ErrorKind::NotFound => {
-                return Err(FoldError::Io { path, source });
-            }
-            _ => {}
-        }
-    }
-    Ok(())
+    ids && keys
 }
 
 /// The fold's exclusive flock on `<home>/roster.lock`, held while this value lives.

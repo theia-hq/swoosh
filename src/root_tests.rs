@@ -1527,6 +1527,172 @@ async fn a_fork_that_adds_nothing_prints_nothing() {
     assert!(!out.contains("brought forward"), "{out}");
 }
 
+/// A copy at 3 whose `runner` is the nas takes a fork at 2 passed on in an exchange: cut when `runner`
+/// was the laptop, revoking the phone. The laptop was revoked and the name reused (`reused`), or its row
+/// moved to the nas key. Then it invites `tv` and commits.
+#[tokio::test]
+async fn a_fork_below_the_held_update_brings_forward_only_its_revocations() {
+    for reused in [true, false] {
+        let home = home(if reused {
+            "stale-fork-reused"
+        } else {
+            "stale-fork-rekeyed"
+        });
+        let old = row(LAPTOP, "runner", vec![id(LAPTOP, STANDING_UNTIL)]);
+        let new = row(NAS, "runner", vec![id(NAS, STANDING_UNTIL)]);
+        let mut rows = vec![own_row(), new.clone()];
+        let mut keys = Vec::new();
+        if reused {
+            rows.push(Row {
+                revoked_on: now() - DAY,
+                ..old.clone()
+            });
+            keys.push(key(LAPTOP));
+        }
+        holds(&home, &records(3, rows, Vec::new(), keys.clone())).await;
+        held(
+            &home,
+            &RosterDoc::with_revocations(
+                Epoch(3),
+                vec![member(&own_row()), member(&new)],
+                Vec::new(),
+                keys,
+            )
+            .unwrap(),
+        );
+        let fork = RosterDoc::with_revocations(
+            Epoch(2),
+            vec![member(&own_row()), member(&old)],
+            Vec::new(),
+            vec![key(PHONE)],
+        )
+        .unwrap();
+        crate::roster::fold_fork(&home, &TestRoot::seeded(ROOT).sign_update(&fork))
+            .await
+            .unwrap();
+        let (root, out) = present(
+            &home,
+            RootPlace::Home,
+            RootVerb::Invite,
+            &mut Counting::new([PASS]),
+        )
+        .await;
+        let mut root = root.unwrap();
+        root.sign_standing(key(TV), name("tv"), Duration::from_secs(90 * DAY))
+            .unwrap();
+        let (_, update) = commit(root).await;
+
+        assert!(
+            !out.contains("was also added on another copy of your root"),
+            "reused {reused}: {out}"
+        );
+        assert!(
+            update.revoked_keys().contains(&key(PHONE)),
+            "reused {reused}: the fork's revocation is brought forward"
+        );
+        assert!(
+            !update.revoked_keys().contains(&key(NAS)),
+            "reused {reused}: the device under the name now keeps it"
+        );
+        let runner: Vec<_> = update
+            .members()
+            .iter()
+            .filter(|member| member.label.as_str() == "runner")
+            .map(|member| member.node)
+            .collect();
+        assert_eq!(runner, vec![key(NAS)], "reused {reused}");
+    }
+}
+
+/// A device holds update 3, where `runner` is the laptop, and keeps a fork at 3 passed on in an exchange.
+/// A copy of the root at 5, whose `runner` is the nas, is presented from a dir: the laptop was revoked and
+/// the name reused (`reused`), or its row moved to the nas key. The held update revokes the phone, the fork
+/// the tv. Then it invites `other` and commits.
+#[tokio::test]
+async fn a_held_update_below_the_records_brings_forward_only_its_revocations() {
+    for reused in [true, false] {
+        let home = home(if reused {
+            "stale-held-reused"
+        } else {
+            "stale-held-rekeyed"
+        });
+        device_of(&home, ROOT).await;
+        let old = row(LAPTOP, "runner", vec![id(LAPTOP, STANDING_UNTIL)]);
+        let new = row(NAS, "runner", vec![id(NAS, STANDING_UNTIL)]);
+        let mut rows = vec![own_row(), new.clone()];
+        let mut keys = Vec::new();
+        if reused {
+            rows.push(Row {
+                revoked_on: now() - DAY,
+                ..old.clone()
+            });
+            keys.push(key(LAPTOP));
+        }
+        let dir = beside(&home, "copy");
+        copy(&dir, ROOT, &records(5, rows, Vec::new(), keys));
+        held(
+            &home,
+            &RosterDoc::with_revocations(
+                Epoch(3),
+                vec![member(&own_row()), member(&old)],
+                Vec::new(),
+                vec![key(PHONE)],
+            )
+            .unwrap(),
+        );
+        let fork = RosterDoc::with_revocations(
+            Epoch(3),
+            vec![member(&own_row()), member(&old)],
+            Vec::new(),
+            vec![key(TV)],
+        )
+        .unwrap();
+        crate::roster::fold_fork(&home, &TestRoot::seeded(ROOT).sign_update(&fork))
+            .await
+            .unwrap();
+        assert!(
+            home.roster_fork().exists(),
+            "reused {reused}: a fork is kept"
+        );
+        let (root, out) = present(
+            &home,
+            RootPlace::Dir(dir),
+            RootVerb::Invite,
+            &mut Counting::new([PASS]),
+        )
+        .await;
+        let mut root = root.unwrap();
+        root.sign_standing(key(OTHER), name("other"), Duration::from_secs(90 * DAY))
+            .unwrap();
+        let (committed, update) = commit(root).await;
+
+        assert_eq!(committed.number, Epoch(6), "reused {reused}");
+        assert!(
+            !out.contains("was also added on another copy of your root"),
+            "reused {reused}: {out}"
+        );
+        assert!(
+            update.revoked_keys().contains(&key(PHONE)),
+            "reused {reused}: the held update's revocation is brought forward"
+        );
+        assert!(
+            update.revoked_keys().contains(&key(TV)),
+            "reused {reused}: the fork's revocation is brought forward"
+        );
+        assert!(
+            !update.revoked_keys().contains(&key(NAS)),
+            "reused {reused}: the device under the name now keeps it"
+        );
+        let runner: Vec<_> = update
+            .members()
+            .iter()
+            .filter(|member| member.label.as_str() == "runner")
+            .map(|member| member.node)
+            .collect();
+        assert_eq!(runner, vec![key(NAS)], "reused {reused}");
+    }
+}
+
 #[tokio::test]
 async fn a_revocation_only_cut_advances_the_number() {
     let home = home("revocation-only");
