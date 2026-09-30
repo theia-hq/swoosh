@@ -487,8 +487,8 @@ async fn the_first_root_act_announces_before_the_prompt_and_after_the_mint() {
          <prompt>\n\
          made your root root:{}…, kept on this machine, locked with a passphrase.\n\
          This machine is me/{} until {}. me/laptop can join until {}.\n\
-         Back up your root now, off this disk: swoosh backup <dir>\n\
-         To keep it off this machine: swoosh move-root <dir>\n",
+         Back up your root now, off this disk: swoosh root backup <dir>\n\
+         To keep it off this machine, back it up, then: swoosh root forget <dir>\n",
         root.key().short(),
         own.label,
         date(own.label.as_str()),

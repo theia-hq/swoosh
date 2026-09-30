@@ -65,6 +65,11 @@ pub(crate) const MINT_NEEDS_TERMINAL: &str = "making your root asks you to choos
 pub(crate) const UNLOCK_NEEDS_TERMINAL: &str =
     "using your root asks for its passphrase, which needs a terminal: run this at one.";
 
+/// The refusal of an act that only a machine keeping no root may run (`join`, `leave`), where a root is kept:
+/// the two commands that take it off this machine, one per line.
+pub const KEPT_HERE: &str =
+    "your root is on this machine: swoosh root backup <dir>\nthen: swoosh root forget <dir>";
+
 /// Where the root for one command is: kept in this home, or a copy in a directory given with `--root`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootPlace {
@@ -121,11 +126,11 @@ pub enum RootError {
     /// An act that cuts, on a machine that is not a device of the root.
     #[error(
         "this machine is not a device of your root, so nothing it signs reaches your devices. Run this on \
-        one of your devices, or make this one a device: `swoosh restore <dir>`."
+        one of your devices, or make this one a device: swoosh root restore <dir>"
     )]
     NotADevice,
     /// A copy presented where a root is already kept.
-    #[error("drop `--root`, or move yours off first")]
+    #[error("your root is on this machine: drop --root")]
     HeldHere,
     /// A root to be made or finished here while a `serve --admit` admits another root's devices.
     #[error("stop swoosh serve first.")]
@@ -1274,9 +1279,12 @@ impl Act {
         let _ = writeln!(out, "{}", dates.join(" "));
         let _ = writeln!(
             out,
-            "Back up your root now, off this disk: swoosh backup <dir>"
+            "Back up your root now, off this disk: swoosh root backup <dir>"
         );
-        let _ = writeln!(out, "To keep it off this machine: swoosh move-root <dir>");
+        let _ = writeln!(
+            out,
+            "To keep it off this machine, back it up, then: swoosh root forget <dir>"
+        );
     }
 }
 
