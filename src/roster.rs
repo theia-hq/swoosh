@@ -23,7 +23,7 @@ pub use artifact::ArtifactError;
 pub(crate) use artifact::write;
 #[cfg(test)]
 pub(crate) use fold::SLOW;
-pub use fold::{FoldError, Folded, fold};
+pub use fold::{FoldError, Folded, fold, fold_fork};
 pub(crate) use fold::{RosterLock, read_held};
 
 /// The magic the update's payload opens with: `swoosh-` and the file it heads. A payload this key signs

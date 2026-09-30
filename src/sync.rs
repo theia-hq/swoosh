@@ -2,21 +2,27 @@
 //!
 //! One exchange runs on one stream of the `control.sync` route every `serve` binds. The dialer names the
 //! update it holds by its number and digest; the other side answers that it holds the same, that it holds a
-//! newer one (and sends it), or that the dialer should send its own. Bytes cross only in the one direction
-//! that needs them:
+//! newer one (and sends it), that the dialer should send its own, or that both hold another update at one
+//! number (a fork), when each side takes the other's. Then each side passes on the fork it keeps, if any:
 //!
 //! ```text
 //! dialer  -> 0x01 exchange, number (u64), digest (32 bytes, BLAKE3 of the update's bytes; zero for none yet)
 //! server  -> 0x00 same, digest     (equal number, equal digest; the server's digest, zero off a device)
-//!            0x01 mine, <bytes>    (server's number is higher, or equal with a different digest: a fork)
+//!            0x01 mine, <update>   (server's number is higher)
 //!            0x02 send yours       (dialer's number is higher, or server has none yet)
-//! dialer  -> <bytes>               (only after 0x02)
-//! server  -> 0x00 folded | 0x02 refused | 0x03 fork recorded, <floor (u64)>
+//!            0x03 both, <update>   (equal number, different digest: a fork)
+//! dialer  -> <update>              (only after 0x02 or 0x03)
+//! server  -> 0x00 folded | 0x02 refused | 0x03 fork recorded, <floor (u64)>   (only after 0x02)
+//! dialer  -> <update>              (the fork it keeps; empty for none)
+//! server  -> <update>              (the fork it keeps; empty for none)
 //! ```
 //!
-//! An update's bytes run to the end of the sender's half of the stream. Whatever side takes an update folds
-//! it ([`fold`](crate::roster::fold)), and a fold never starts another exchange, so a root act is still the
-//! only thing that sends an update to more than one device.
+//! An `<update>` is its length (u32) and its bytes. A `same` with digest zero ends the exchange: neither
+//! side holds an update, so neither keeps a fork. Whatever side takes an update folds it
+//! ([`fold`](crate::roster::fold)), and a fork passed on folds as one
+//! ([`fold_fork`](crate::roster::fold_fork)), which adds its revocations and never makes it the update
+//! held. A fold never starts another exchange, so a root act is still the only thing that sends an update
+//! to more than one device.
 //!
 //! Only a device of a root, one that holds it or not, takes an update. Any other machine answers `same`
 //! with digest zero and never asks for one, so a dialer holding an update never reads that answer as
@@ -37,7 +43,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::contacts::{ContactsStore, Petname};
 use crate::home::Home;
-use crate::roster::{Epoch, FoldError, Folded, MAX_ROSTER_BLOB, fold, read_held};
+use crate::roster::{Epoch, FoldError, Folded, MAX_ROSTER_BLOB, fold, fold_fork, read_held};
 use crate::serve::SYNC_SERVICE;
 use crate::standing::Standing;
 
@@ -54,6 +60,7 @@ const EXCHANGE: u8 = 0x01;
 const SAME: u8 = 0x00;
 const MINE: u8 = 0x01;
 const SEND_YOURS: u8 = 0x02;
+const BOTH: u8 = 0x03;
 
 /// The server's answers to an update sent after `send yours`.
 const FOLDED: u8 = 0x00;
@@ -70,7 +77,8 @@ pub enum Answer {
     Same,
     /// The other device held a newer update, and this machine took it.
     Took,
-    /// The other device held another update at this machine's number: a fork, recorded here.
+    /// The other device held another update at this machine's number: a fork, recorded here, and this
+    /// machine's update sent to it.
     Forked,
     /// This machine held the newer update, and the other device took it.
     Gave,
@@ -149,7 +157,7 @@ pub async fn exchange(
 ) -> Result<Answer, ExchangeError> {
     let pin = device_pin(home).await?.ok_or(ExchangeError::NotADevice)?;
     let (number, bytes) = held(home, pin);
-    dial_with(home, number, &bytes, reader, writer).await
+    dial_with(home, pin, number, &bytes, reader, writer).await
 }
 
 /// Run one exchange as the dialer naming and sending `bytes`, the update at `number`, rather than the one
@@ -162,13 +170,15 @@ pub async fn offer(
     reader: impl AsyncRead + Unpin,
     writer: impl AsyncWrite + Unpin,
 ) -> Result<Answer, ExchangeError> {
-    device_pin(home).await?.ok_or(ExchangeError::NotADevice)?;
-    dial_with(home, number, bytes, reader, writer).await
+    let pin = device_pin(home).await?.ok_or(ExchangeError::NotADevice)?;
+    dial_with(home, pin, number, bytes, reader, writer).await
 }
 
-/// The dialer's side of one exchange, naming and sending `bytes`, the update at `number`.
+/// The dialer's side of one exchange, naming and sending `bytes`, the update at `number`, as a device of
+/// the root `pin`.
 async fn dial_with(
     home: &Home,
+    pin: VerifyKey,
     number: Epoch,
     bytes: &[u8],
     mut reader: impl AsyncRead + Unpin,
@@ -180,6 +190,8 @@ async fn dial_with(
     request.extend_from_slice(&digest(bytes));
     writer.write_all(&request).await?;
     writer.flush().await?;
+    // The fork kept before this exchange: one taken in it came from the other device.
+    let fork = kept_fork(home, pin);
     let answer = match reader.read_u8().await? {
         SAME => {
             let mut theirs = [0_u8; 32];
@@ -187,10 +199,18 @@ async fn dial_with(
             if theirs != digest(bytes) {
                 return Err(ExchangeError::NotHeld);
             }
+            if theirs == NONE_YET {
+                // Neither side holds an update, so neither keeps a fork.
+                touch_synced(home);
+                return Ok(Answer::Same);
+            }
             Answer::Same
         }
-        MINE => {
+        code @ (MINE | BOTH) => {
             let theirs = read_update(&mut reader).await?;
+            if code == BOTH {
+                write_update(&mut writer, bytes).await?;
+            }
             match fold(home, &theirs).await? {
                 // `mine` means the other device holds another update than the one named; this machine
                 // holding it too (folded since it dialed) is still a take, never `same`.
@@ -200,8 +220,7 @@ async fn dial_with(
             }
         }
         SEND_YOURS => {
-            writer.write_all(bytes).await?;
-            writer.shutdown().await?;
+            write_update(&mut writer, bytes).await?;
             match reader.read_u8().await? {
                 FOLDED => Answer::Gave,
                 REFUSED => Answer::Refused,
@@ -213,6 +232,9 @@ async fn dial_with(
         }
         _ => return Err(ExchangeError::Protocol),
     };
+    write_update(&mut writer, &fork).await?;
+    writer.shutdown().await?;
+    take_fork(home, &mut reader).await?;
     touch_synced(home);
     Ok(answer)
 }
@@ -239,29 +261,39 @@ pub async fn answer(
     };
     let (mine, bytes) = held(home, pin);
     let my_digest = digest(&bytes);
+    // The fork kept before this exchange: one taken in it came from the dialer.
+    let fork = kept_fork(home, pin);
     if theirs == mine && their_digest == my_digest {
         writer.write_all(&[SAME]).await?;
         writer.write_all(&my_digest).await?;
-    } else if mine > theirs || (mine == theirs && !bytes.is_empty()) {
+        if my_digest == NONE_YET {
+            // Neither side holds an update, so neither keeps a fork.
+            writer.shutdown().await?;
+            touch_synced(home);
+            return Ok(());
+        }
+    } else if mine > theirs {
         writer.write_all(&[MINE]).await?;
-        writer.write_all(&bytes).await?;
+        write_update(&mut writer, &bytes).await?;
+    } else if mine == theirs && !bytes.is_empty() {
+        writer.write_all(&[BOTH]).await?;
+        write_update(&mut writer, &bytes).await?;
+        let update = read_update(&mut reader).await?;
+        if let Err(error) = fold(home, &update).await {
+            tracing::debug!(%error, "refused an update in an exchange");
+        }
     } else {
         writer.write_all(&[SEND_YOURS]).await?;
         writer.flush().await?;
-        let reply = match read_update(&mut reader).await {
-            Ok(update) => match fold(home, &update).await {
-                Ok(Folded::Newer | Folded::Same) => vec![FOLDED],
-                Ok(Folded::Fork { floor }) => {
-                    let mut reply = vec![FORK_RECORDED];
-                    reply.extend_from_slice(&floor.0.to_be_bytes());
-                    reply
-                }
-                Ok(Folded::NotNewer) => vec![REFUSED],
-                Err(error) => {
-                    tracing::debug!(%error, "refused an update in an exchange");
-                    vec![REFUSED]
-                }
-            },
+        let update = read_update(&mut reader).await?;
+        let reply = match fold(home, &update).await {
+            Ok(Folded::Newer | Folded::Same) => vec![FOLDED],
+            Ok(Folded::Fork { floor }) => {
+                let mut reply = vec![FORK_RECORDED];
+                reply.extend_from_slice(&floor.0.to_be_bytes());
+                reply
+            }
+            Ok(Folded::NotNewer) => vec![REFUSED],
             Err(error) => {
                 tracing::debug!(%error, "refused an update in an exchange");
                 vec![REFUSED]
@@ -269,22 +301,53 @@ pub async fn answer(
         };
         writer.write_all(&reply).await?;
     }
+    take_fork(home, &mut reader).await?;
+    write_update(&mut writer, &fork).await?;
     writer.shutdown().await?;
     touch_synced(home);
     Ok(())
 }
 
-/// Read an update's bytes to the end of the stream, refusing one larger than any update can be before it
-/// is all buffered.
+/// The fork of the root `pin` this machine keeps, as its bytes, or empty for none.
+fn kept_fork(home: &Home, pin: VerifyKey) -> Vec<u8> {
+    read_held(&home.roster_fork(), pin).map_or_else(Vec::new, |(_, bytes)| bytes)
+}
+
+/// Read the fork the other device keeps, and fold it when there is one. A fork that does not fold is
+/// dropped: the exchange of the updates held has already run.
+async fn take_fork(
+    home: &Home,
+    reader: &mut (impl AsyncRead + Unpin),
+) -> Result<(), ExchangeError> {
+    let fork = read_update(reader).await?;
+    if !fork.is_empty()
+        && let Err(error) = fold_fork(home, &fork).await
+    {
+        tracing::debug!(%error, "dropped a fork passed on in an exchange");
+    }
+    Ok(())
+}
+
+/// Write an update's bytes, after their length.
+async fn write_update(
+    writer: &mut (impl AsyncWrite + Unpin),
+    bytes: &[u8],
+) -> Result<(), ExchangeError> {
+    let len = u32::try_from(bytes.len()).map_err(|_| ExchangeError::TooLarge)?;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(bytes).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Read an update's length and bytes, refusing one larger than any update can be before it is read.
 async fn read_update(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, ExchangeError> {
-    let mut bytes = Vec::new();
-    reader
-        .take(MAX_ROSTER_BLOB + 1)
-        .read_to_end(&mut bytes)
-        .await?;
-    if bytes.len() as u64 > MAX_ROSTER_BLOB {
+    let len = u64::from(reader.read_u32().await?);
+    if len > MAX_ROSTER_BLOB {
         return Err(ExchangeError::TooLarge);
     }
+    let mut bytes = vec![0_u8; usize::try_from(len).map_err(|_| ExchangeError::TooLarge)?];
+    reader.read_exact(&mut bytes).await?;
     Ok(bytes)
 }
 
