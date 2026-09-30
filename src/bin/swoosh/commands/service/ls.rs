@@ -17,7 +17,7 @@ use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::Escaped;
+use swoosh::escape::{Escaped, causes};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
 use swoosh::peer::Peer;
@@ -173,7 +173,12 @@ impl ServiceLsCmd {
         // as the typed `bifrost::Error::Refused` here, rendered as the SAME teaching line the ping/status
         // ladder gives rather than the bare transport word. A refusal is not "the peer serves nothing"; a
         // genuine i/o failure keeps its own message.
-        let session = connector.open_service(node).await?;
+        // The connect chain can carry the peer's text (the reason it gave for closing), so it prints
+        // through the escaper.
+        let session = connector
+            .open_service(node)
+            .await
+            .map_err(|error| eyre::eyre!("{}", Escaped(&format!("{error:#}"))))?;
         let (writer, reader) = match session.open_bi().await {
             Ok(halves) => halves,
             Err(bifrost::Error::Refused(refusal)) => {
@@ -212,10 +217,13 @@ async fn read_catalog(
     dial: NodeId,
 ) -> eyre::Result<tunnel::ServiceCatalog> {
     let mut bytes = Vec::new();
+    // A failed read can carry the peer's text (the reason it gave for closing), so it prints through the
+    // escaper.
     reader
         .take(tunnel::MAX_CATALOG_BLOB + 1)
         .read_to_end(&mut bytes)
-        .await?;
+        .await
+        .map_err(|error| eyre::eyre!("{}", Escaped(&causes(&error))))?;
     if bytes.len() as u64 > tunnel::MAX_CATALOG_BLOB {
         eyre::bail!(
             "{dial} sent more than a service menu can be, so the read stopped at {} bytes rather than \

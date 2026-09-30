@@ -23,7 +23,7 @@ use std::{io, thread};
 use nauthy::Service;
 use transfer::{Received, ReceivedSink};
 
-use crate::escape::Escaped;
+use crate::escape::EscapedPath;
 
 /// How many rendered lines may wait on a stalled writer before new ones are dropped. A line is capped
 /// (a service name plus [`MAX_ESCAPED`](crate::escape::MAX_ESCAPED) characters of escapes), so the
@@ -103,7 +103,7 @@ impl RecvLines {
         format!(
             "{}: received {} ({} bytes)",
             self.service,
-            Escaped(&file.path.to_string_lossy()),
+            EscapedPath(&file.path),
             file.bytes
         )
     }

@@ -28,6 +28,7 @@ use clap::{Args, ValueEnum};
 use eyre::WrapErr as _;
 
 use crate::config;
+use crate::escape::EscapedPath;
 use crate::home::Home;
 use crate::reaching::BindRole;
 
@@ -420,7 +421,7 @@ where
         Err(error) if error.kind() == std::io::ErrorKind::IsADirectory => {
             eyre::bail!(
                 "the {what} file {path} is a directory; remove it, or pass --{what} <url>",
-                path = path.display()
+                path = EscapedPath(path)
             );
         }
         Err(error) => return Err(error.into()),
@@ -429,13 +430,13 @@ where
     if url.is_empty() {
         eyre::bail!(
             "the {what} file {path} is empty; delete it, or pass --{what} <url>",
-            path = path.display()
+            path = EscapedPath(path)
         );
     }
     let url = url.parse::<T>().wrap_err_with(|| {
         format!(
             "the {what} file {path} does not name a usable {what}; delete it, or pass --{what} <url>",
-            path = path.display()
+            path = EscapedPath(path)
         )
     })?;
     Ok(Some(url))

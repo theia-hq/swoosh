@@ -6,6 +6,7 @@
 //! that prints it goes through [`Escaped`]: one escape set, one cap, one cut marker.
 
 use core::fmt;
+use std::path::Path;
 
 /// The longest an escaped text renders, in characters of output. Text from another machine is bounded
 /// only by its frame, so the cap bounds what reaches a line.
@@ -52,6 +53,31 @@ impl fmt::Display for Escaped<'_> {
         }
         Ok(())
     }
+}
+
+/// A path as it may appear on a line: [`Escaped`] over its lossy text. A home's directory names, and the
+/// names of the files in it, are whatever whoever made them chose.
+#[derive(Debug, Clone, Copy)]
+pub struct EscapedPath<'a>(pub &'a Path);
+
+impl fmt::Display for EscapedPath<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Escaped(&self.0.to_string_lossy()).fmt(f)
+    }
+}
+
+/// An error and its full cause chain as one `outer: inner` string, the form a remote error takes before
+/// it goes through [`Escaped`]: the causes carry another machine's text as much as the outer message does
+/// (a refusal detail, the reason a peer gave for closing).
+pub fn causes(error: &dyn core::error::Error) -> String {
+    let mut chain = error.to_string();
+    let mut next = error.source();
+    while let Some(cause) = next {
+        chain.push_str(": ");
+        chain.push_str(&cause.to_string());
+        next = cause.source();
+    }
+    chain
 }
 
 #[cfg(test)]

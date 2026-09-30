@@ -18,7 +18,6 @@
 //! one-shot: each named device is dialed in turn. Listing the whole tailnet of active sessions
 //! (Tailscale's full `status`) needs a long-lived node holding those sessions; that is future work.
 
-use core::error::Error as _;
 use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
@@ -26,7 +25,7 @@ use clap::Args;
 use measure::{Ping, ProtocolError, Refusal};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::Escaped;
+use swoosh::escape::{Escaped, causes};
 use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::reach;
@@ -369,21 +368,6 @@ impl core::fmt::Display for Line {
             }
         }
     }
-}
-
-/// A probe failure's full cause chain, rendered `outer: inner`, the way eyre renders a report for the
-/// verbs that can just bail on one. `status` cannot bail (it owes every device a line), so it renders the
-/// chain itself: the outer message is routinely the useless half, and `read frame` says nothing a person
-/// can act on without the i/o cause underneath it.
-fn causes(error: &ProtocolError) -> String {
-    let mut chain = error.to_string();
-    let mut next = error.source();
-    while let Some(cause) = next {
-        chain.push_str(": ");
-        chain.push_str(&cause.to_string());
-        next = cause.source();
-    }
-    chain
 }
 
 #[cfg(test)]

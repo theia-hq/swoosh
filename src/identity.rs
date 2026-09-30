@@ -35,6 +35,7 @@ use bifrost::NodeId;
 use keystore::{KeyFile, Protection, Stored};
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
+use crate::escape::EscapedPath;
 use crate::home::Home;
 use crate::passphrase::{Prompt, Terminal};
 
@@ -216,7 +217,7 @@ fn mint(file: &KeyFile) -> eyre::Result<Secret> {
     let cannot = |reason: &dyn core::fmt::Display| {
         eyre::eyre!(
             "cannot make this machine's key in {}: {reason}",
-            dir.display()
+            EscapedPath(dir)
         )
     };
     create_dir(file).map_err(|error| cannot(&error))?;
@@ -278,7 +279,7 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
             "this machine is already {existing}; joining this would replace it with {incoming}. {} \
              holds the only copy of that key: nobody can issue another. To replace it: swoosh leave \
              --new-key",
-            path.display(),
+            EscapedPath(&path),
         ),
         Err(error) => Err(error.into()),
     }
@@ -295,7 +296,7 @@ pub fn replace_made(seed: &[u8; 32], made: NodeId, home: &Home) -> eyre::Result<
         Some(Stored::Plain(stored)) if stored.node_id() == made => {}
         _ => eyre::bail!(
             "{} changed while this waited for the invite; nothing was written",
-            file.path().display()
+            EscapedPath(file.path())
         ),
     }
     let mut copy = Zeroizing::new(*seed);

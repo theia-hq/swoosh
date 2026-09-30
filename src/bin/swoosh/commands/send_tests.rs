@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use super::{collect_files, file_name};
+use super::{collect_files, file_name, peer_error};
 
 /// The operator's exact hostile name for the skip shape (`missing\nname\u{1b}[31m.txt`): a path that
 /// cannot be stat'ed is skipped, and the WHOLE line, error chain included, must render escaped. This
@@ -81,5 +81,20 @@ fn a_hostile_path_with_no_file_name_renders_escaped() {
     assert!(
         !message.contains('\n') && !message.contains('\u{1b}'),
         "no raw newline or ESC reaches the skip line: {message:?}"
+    );
+}
+
+/// A receiver that refuses the stream sends its own detail, and the skip line prints it: a carriage
+/// return, an ESC CSI sequence and a bidi override there print as escapes, so the refusal cannot erase
+/// the skip line and draw a `sent` line in its place.
+#[test]
+fn a_hostile_refusal_prints_escaped() {
+    let refused = bifrost::Error::Refused(bifrost::Refusal::Unavailable {
+        detail: bifrost::RefusalDetail::bounded("no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}"),
+    });
+    let line = format!("skip: {:#}", peer_error(&refused));
+    assert_eq!(
+        line,
+        r"skip: stream refused: unavailable: no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}"
     );
 }

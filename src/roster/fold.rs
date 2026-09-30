@@ -21,6 +21,7 @@ use tightbeam::identity::AsVerifyKey as _;
 
 use super::{ArtifactError, Epoch, MAX_ROSTER_BLOB, RosterDoc, RosterVerifyError};
 use crate::contacts::ContactsStore;
+use crate::escape::EscapedPath;
 use crate::gate::RevokedKeysError;
 use crate::home::Home;
 use crate::standing::{Standing, StandingError};
@@ -67,7 +68,7 @@ pub enum FoldError {
     #[error(transparent)]
     Artifact(#[from] ArtifactError),
     /// A file the fold reads or writes failed.
-    #[error("{}: {source}", .path.display())]
+    #[error("{}: {source}", EscapedPath(.path))]
     Io {
         /// The file.
         path: PathBuf,

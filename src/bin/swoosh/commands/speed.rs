@@ -21,7 +21,7 @@ use measure::{
 };
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::Escaped;
+use swoosh::escape::{Escaped, causes};
 use swoosh::peer::Peer;
 use swoosh::reach::{self, Resolved};
 use swoosh::transport::{self, ReachArgs};
@@ -175,7 +175,7 @@ impl SpeedCmd {
             }
             Err(error) => {
                 node.close().await;
-                return Err(error.into());
+                eyre::bail!("{}", failed_line(&error));
             }
         };
 
@@ -294,6 +294,13 @@ fn refusal_line(label: &str, refusal: &Refusal) -> String {
         MethodRefusal::RateLimited => format!("{label} is rate limited: {detail}"),
         MethodRefusal::Busy => format!("{label} is busy: {detail}"),
     }
+}
+
+/// The line for a run that was reached and then broke: the error's cause chain, `outer: inner`, as a
+/// report would print it. A cause can carry the peer's text (the reason it gave for closing), so the
+/// chain prints through the escaper.
+fn failed_line(error: &ProtocolError) -> String {
+    Escaped(&causes(error)).to_string()
 }
 
 #[cfg(test)]

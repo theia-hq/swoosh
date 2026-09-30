@@ -21,6 +21,7 @@ use keystore::{KeyFile, Stored};
 use super::key_file;
 use super::lock::HomeLock;
 use super::stage::{Seen, Stage, read_backup};
+use crate::escape::EscapedPath;
 use crate::home::Home;
 use crate::passphrase::Prompt;
 
@@ -83,7 +84,7 @@ pub fn export(
     let Some(stored) = file.load()? else {
         eyre::bail!(
             "there is no identity at {} to export; run `swoosh status` to create one",
-            file.path().display()
+            EscapedPath(file.path())
         );
     };
     let secret = match stored {
@@ -172,7 +173,7 @@ pub fn restore(
                 eyre::bail!(
                     "{} is sealed and claims to be {incoming}, but only its passphrase can prove that; \
                      pass --force to replace it with the backup",
-                    file.path().display()
+                    EscapedPath(file.path())
                 );
             }
         }
@@ -183,7 +184,7 @@ pub fn restore(
                      only copy of that key: back it up with `swoosh identity export <path>`, then pass \
                      --force to replace it",
                     stored.node_id(),
-                    file.path().display()
+                    EscapedPath(file.path())
                 );
             }
         }

@@ -13,6 +13,7 @@ use bifrost::NodeId;
 use keystore::{Method, Stored};
 use nauthy::{FileDenylist, VerifyKey};
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME};
+use swoosh::escape::EscapedPath;
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _};
@@ -55,7 +56,7 @@ pub(crate) async fn run_to(
         writeln!(
             err,
             "made this machine's key (first run): {}",
-            home.key().display()
+            EscapedPath(&home.key())
         )?;
     }
     if print == Print::Key {
@@ -463,7 +464,7 @@ fn not_here(home: &Home, root: NodeId) -> String {
     match Moved::read(home) {
         Some(moved) => format!(
             "root: root:{root}, not on this machine (you moved it to {} on {}).",
-            moved.to.display(),
+            EscapedPath(&moved.to),
             moved.on
         ),
         None => format!("root: root:{root}, not on this machine."),

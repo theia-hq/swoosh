@@ -159,6 +159,32 @@ fn a_hostile_service_name_prints_escaped() {
     );
 }
 
+/// A peer that breaks off the catalog read gives a reason, and the error prints it: a carriage return, an
+/// ESC CSI sequence and a bidi override there print as escapes, so the reason cannot redraw the line.
+#[tokio::test]
+async fn a_hostile_read_failure_prints_escaped() {
+    struct ClosingPeer;
+    impl io::AsyncRead for ClosingPeer {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::other(
+                "closed by peer: no\r\u{1b}[2Kping  gated\u{202e}",
+            )))
+        }
+    }
+    let dial = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]);
+    let Err(error) = read_catalog(ClosingPeer, dial).await else {
+        panic!("a read the peer broke off is an error");
+    };
+    assert_eq!(
+        format!("{error:#}"),
+        r"closed by peer: no\r\u{1b}[2Kping  gated\u{202e}"
+    );
+}
+
 /// A bare `service ls` with no addressable resident is the same teaching error as bare `stop`,
 /// non-zero at the root: never a silent empty table that reads as "this node serves nothing".
 #[tokio::test]

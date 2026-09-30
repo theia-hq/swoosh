@@ -17,7 +17,7 @@ use clap::Args;
 use measure::{Ping, PingReport, Probe, ProtocolError, Refusal};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::Escaped;
+use swoosh::escape::{Escaped, causes};
 use swoosh::peer::Peer;
 use swoosh::reach;
 use swoosh::transport::{self, ReachArgs};
@@ -270,22 +270,6 @@ fn failed_line(label: &str, transport: &str, error: &ProtocolError) -> String {
         "{label} via {transport}: reached, but the probe failed ({})",
         Escaped(&causes(error))
     )
-}
-
-/// A probe failure's full cause chain, rendered `outer: inner`.
-///
-/// A fan-out owes every device a line, so it cannot bail with a report the way a single-target verb can,
-/// and the outer message is routinely the useless half: a stream failure says only that a stream failed,
-/// and the cause underneath it is the part a person can act on.
-fn causes(error: &ProtocolError) -> String {
-    let mut chain = error.to_string();
-    let mut next = core::error::Error::source(error);
-    while let Some(cause) = next {
-        chain.push_str(": ");
-        chain.push_str(&cause.to_string());
-        next = cause.source();
-    }
-    chain
 }
 
 #[cfg(test)]

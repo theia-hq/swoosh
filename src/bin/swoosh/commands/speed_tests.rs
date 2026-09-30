@@ -5,7 +5,7 @@
 use bifrost::RefusalDetail;
 use measure::{MethodRefusal, Refusal};
 
-use super::refusal_line;
+use super::{failed_line, refusal_line};
 
 /// A method refusal carrying `detail`.
 fn method(code: MethodRefusal, detail: &str) -> Refusal {
@@ -63,4 +63,22 @@ fn a_hostile_refusal_prints_escaped() {
             "no raw byte of the peer's reaches the line: {printed:?}"
         );
     }
+}
+
+/// A run that was reached and then broke prints its cause chain, and a cause can be the peer's own text
+/// (the reason it gave for closing the connection). A carriage return, an ESC CSI sequence and a bidi
+/// override there print as escapes, on one line, with the chain's words as they were.
+#[test]
+fn a_hostile_failure_cause_prints_escaped() {
+    let reason = "closed by peer: no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}";
+    let error = measure::ProtocolError::Io(std::io::Error::other(reason));
+    let printed = failed_line(&error);
+    assert!(
+        printed.ends_with(r"closed by peer: no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}"),
+        "the peer's reason prints escaped at the end of the chain: {printed:?}"
+    );
+    assert!(
+        !printed.contains(['\r', '\n', '\u{1b}', '\u{202e}']),
+        "no raw byte of the peer's reaches the line: {printed:?}"
+    );
 }

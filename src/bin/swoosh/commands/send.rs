@@ -21,7 +21,7 @@ use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::Escaped;
+use swoosh::escape::{Escaped, EscapedPath, causes};
 use swoosh::peer::Peer;
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
@@ -198,16 +198,28 @@ async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre:
         Blob::hash(&mut file).await?
     };
 
-    let (send, recv) = session.open_bi().await?;
+    let (send, recv) = session
+        .open_bi()
+        .await
+        .map_err(|error| peer_error(&error))?;
     let mut source = tokio::fs::File::open(&path)
         .await
         .wrap_err_with(|| format!("open {}", render_path(&path)))?;
     Transfer::new(send, recv)
         .send(name.as_bytes(), &blob, &mut source)
-        .await?;
+        .await
+        .map_err(|error| peer_error(&error))?;
 
     println!("sent {} ({} bytes)", Escaped(&name), blob.len());
     Ok(())
+}
+
+/// A failed stream or transfer as the skip line prints it: the cause chain, `outer: inner`, through the
+/// shared escaper. The chain can carry the receiver's text (a refusal detail, the reason it gave for
+/// closing), so it is escaped here, where it enters, and not on the skip line, which would escape the
+/// paths [`render_path`] already escaped a second time.
+fn peer_error(error: &dyn core::error::Error) -> eyre::Report {
+    eyre::eyre!("{}", Escaped(&causes(error)))
 }
 
 /// Render a path for a line or an error context through the shared escaper, as the `sent` line renders
@@ -215,7 +227,7 @@ async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre:
 /// error context: the skip line renders its own prefix escaped and then prints the whole error chain, so a
 /// context built with a raw `Path::display` would leak the newline or ESC the prefix just escaped.
 fn render_path(path: &Path) -> String {
-    Escaped(&path.to_string_lossy()).to_string()
+    EscapedPath(path).to_string()
 }
 
 /// Collect `(relative name, path)` pairs to send: a file yields itself; a directory yields every file

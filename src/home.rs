@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use eyre::eyre;
 
-use crate::escape::{BLANK_LETTERS, Escaped};
+use crate::escape::{BLANK_LETTERS, EscapedPath};
 
 /// The node home: the directory every file this node owns lives in.
 ///
@@ -459,8 +459,7 @@ impl core::fmt::Display for LooseFile {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         // The lead prints the path through the shared escaper: a home whose directory names hold CR, ESC or
         // a newline would otherwise rewrite this line or forge another, here and in the serve log.
-        let lossy = self.path.to_string_lossy();
-        let path = Escaped(&lossy);
+        let path = EscapedPath(&self.path);
         match self.why {
             // The command names the absolute path, so it runs from any directory and a relative home that
             // starts with `-` or `=` is never read as an option or an expansion. When no word is sure to
@@ -671,8 +670,8 @@ fn reject_home_file(dir: &Path) -> eyre::Result<()> {
         return Err(eyre!(
             "--home wants a directory, not a file: {file}. The key lives inside the home at \
              {file}/key; pass the directory, e.g. {parent}",
-            file = dir.display(),
-            parent = dir.parent().unwrap_or(dir).display(),
+            file = EscapedPath(dir),
+            parent = EscapedPath(dir.parent().unwrap_or(dir)),
         ));
     }
     Ok(())

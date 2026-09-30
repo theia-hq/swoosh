@@ -27,6 +27,7 @@ use zeroize::Zeroizing;
 
 use crate::codec::{FormatError, Id, MAX_IDS, MAX_MEMBERS, MAX_REVOKED, MAX_REVOKED_KEYS};
 use crate::contacts::DeviceLabel;
+use crate::escape::EscapedPath;
 use crate::home::Home;
 use crate::passphrase::Prompt;
 use crate::reach_report::{Missed, Reach, Why};
@@ -186,7 +187,7 @@ pub enum RootError {
     /// The copy cannot be written, and the act records what it signs there.
     #[error(
         "this copy of your root cannot be written ({}); using your root must record what it signs.",
-        .dir.display()
+        EscapedPath(.dir)
     )]
     ReadOnly {
         /// The copy's directory.
@@ -338,7 +339,7 @@ pub enum RootError {
     #[error("your devices' list changed while this ran: run it again.")]
     ListChanged,
     /// A file the act reads or writes failed.
-    #[error("{}: {source}", .path.display())]
+    #[error("{}: {source}", EscapedPath(.path))]
     Io {
         /// The file.
         path: PathBuf,
