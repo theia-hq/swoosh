@@ -1790,9 +1790,9 @@ impl Book {
 
     /// Bring these records forward as an act that cuts does before its prompt: from `held` and `fork` when
     /// they are behind `held` or a fork is held, then this machine's own revocations, then every row whose
-    /// key is revoked marked. A fork below the number of `held` or of these records brings only its
-    /// revocations: its devices and names are older than the ones held. What it brought, and whether the
-    /// records were behind `held`.
+    /// key is revoked marked. A fork below the number of `held` or of these records, and `held` below these
+    /// records, bring only their revocations: their devices and names are older than the ones held. What it
+    /// brought, and whether the records were behind `held`.
     fn forward(
         &mut self,
         home: &Home,
@@ -1804,8 +1804,12 @@ impl Book {
         let floor = held.map_or(self.last_update, |held| held.epoch().max(self.last_update));
         let mut brought = Brought::default();
         if behind || fork.is_some() {
-            if let Some(held) = held {
-                self.bring_forward(held, now, &mut brought);
+            match held {
+                Some(held) if held.epoch() < self.last_update => {
+                    self.bring_revocations(held, now, &mut brought);
+                }
+                Some(held) => self.bring_forward(held, now, &mut brought),
+                None => {}
             }
             match fork {
                 Some(fork) if fork.epoch() < floor => {
