@@ -67,7 +67,7 @@ pub(crate) const UNLOCK_NEEDS_TERMINAL: &str =
 
 /// The refusal of an act that only a machine keeping no root may run (`join`, `leave`), where a root is kept:
 /// the two commands that take it off this machine, one per line.
-pub const KEPT_HERE: &str = "your root is on this machine, so take it off first: swoosh root backup <dir>\nthen: swoosh root forget <dir>";
+pub const KEPT_HERE: &str = "your root is on this machine, and this runs only where no root is kept. Back it up: swoosh root backup <dir>\nthen remove it from this machine: swoosh root forget <dir>";
 
 /// Where the root for one command is: kept in this home, or a copy in a directory given with `--root`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -129,7 +129,7 @@ pub enum RootError {
     )]
     NotADevice,
     /// A copy presented where a root is already kept.
-    #[error("your root is on this machine, so drop --root")]
+    #[error("your root is on this machine, so drop --root.")]
     HeldHere,
     /// A root to be made or finished here while a `serve --admit` admits another root's devices.
     #[error("stop swoosh serve first.")]
@@ -147,7 +147,9 @@ pub enum RootError {
         root: NodeId,
     },
     /// An act on the root kept here, given a copy.
-    #[error("this works only on the root kept on this machine, so drop --root")]
+    #[error(
+        "this works only on the machine that keeps your root, not on a copy. Run it on that machine, without --root."
+    )]
     HolderOnly,
     /// The root's key file could not be read or unlocked.
     #[error(transparent)]
