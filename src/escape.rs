@@ -80,6 +80,14 @@ pub fn causes(error: &dyn core::error::Error) -> String {
     chain
 }
 
+/// A report as `main` prints it, its whole chain flattened into one escaped message. A connect's cause
+/// carries the reason the peer gave for closing and a gate's refusal carries the peer's own detail, and
+/// iroh nests that text several causes deep, so the whole chain is the only boundary: it is escaped here,
+/// where it leaves the reach, with its words as they were.
+pub fn escaped_report(error: eyre::Report) -> eyre::Report {
+    eyre::eyre!("{}", Escaped(&format!("{error:#}")))
+}
+
 #[cfg(test)]
 #[path = "escape_tests.rs"]
 mod escape_tests;

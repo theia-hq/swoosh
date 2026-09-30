@@ -15,6 +15,7 @@ use swoosh::contacts::Contacts;
 use swoosh::home::Home;
 use swoosh::node_client::ControlClient;
 use swoosh::serve::{Resident, StopKind};
+use swoosh::testkit::HostilePeer;
 use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 
 use super::{StopCmd, stop_line};
@@ -308,5 +309,26 @@ fn stop_refuses_a_path() {
             "a link cannot stop a machine; only your own devices can: swoosh stop me/<name>"
         ),
         "{error}"
+    );
+}
+
+/// A peer that closes the dial gives a reason, and `stop --at` prints the connect chain that carries it: a
+/// carriage return, an ESC CSI sequence and a bidi override there print as escapes, so the reason cannot
+/// erase the error and draw a `stopped` line in its place. Driven through `run_stop` over a transport
+/// whose dial fails with that reason, so it is `stop`'s own connect this pins.
+#[tokio::test]
+async fn a_hostile_connect_failure_prints_escaped() {
+    let node = Node::new(
+        HostilePeer::Unreachable("closed by peer: no\r\u{1b}[2Kstopped x.\u{202e}"),
+        NoDiscovery,
+    );
+
+    let error = stop_at(HostilePeer::node_id())
+        .run_stop(&node, &Contacts::default(), None, None)
+        .await
+        .expect_err("a dial the peer closed is an error");
+    assert_eq!(
+        format!("{error:#}"),
+        r"connect to peer: closed by peer: no\r\u{1b}[2Kstopped x.\u{202e}"
     );
 }

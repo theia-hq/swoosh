@@ -99,9 +99,14 @@ fn no_home_path_prints_raw() {
                 .into_owned();
             let text = std::fs::read_to_string(&path).expect("a source file reads");
             // A file's inline test module is its last item and prints nothing a person reads, so the
-            // scan stops there.
-            let product = text.lines().take_while(|line| *line != "mod tests {");
-            for (index, line) in product.enumerate() {
+            // scan stops there: at a column-0 `mod tests {` under `#[cfg(test)]`, so neither a module
+            // that ships under that name nor the line inside a string ends the scan early.
+            let lines: Vec<&str> = text.lines().collect();
+            let end = lines
+                .windows(2)
+                .position(|pair| pair == ["#[cfg(test)]", "mod tests {"])
+                .map_or(lines.len(), |at| at + 1);
+            for (index, line) in lines[..end].iter().enumerate() {
                 if !line.contains(".display()") || line.trim_start().starts_with("//") {
                     continue;
                 }

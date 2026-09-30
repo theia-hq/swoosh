@@ -21,7 +21,7 @@ use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::{Escaped, EscapedPath, causes};
+use swoosh::escape::{Escaped, EscapedPath, causes, escaped_report};
 use swoosh::peer::Peer;
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
@@ -138,8 +138,9 @@ impl SendCmd {
         let dial = connector.dial();
         println!("sending to {dial}...");
         // A service-scoped session: each `open_bi` speaks the `recv:` request and presents the badge, so
-        // every per-file stream is admitted by the receiver's gate on its own merits.
-        let session = connector.open_service(node).await?;
+        // every per-file stream is admitted by the receiver's gate on its own merits. The connect chain can
+        // carry the peer's text (the reason it gave for closing), so it prints through the escaper.
+        let session = connector.open_service(node).await.map_err(escaped_report)?;
 
         // Expand directories, then pipeline up to MAX_INFLIGHT files over concurrent streams.
         let mut files = Vec::new();

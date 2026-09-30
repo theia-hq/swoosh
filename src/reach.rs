@@ -14,7 +14,7 @@ use nauthy::{Link, Service};
 use tightbeam::tunnel::{Connector, ServiceSession};
 
 use crate::contacts::{Candidate, Contacts};
-use crate::escape::Escaped;
+use crate::escape::escaped_report;
 use crate::peer::Peer;
 use crate::transport;
 
@@ -81,7 +81,7 @@ pub async fn dial<T: Transport, D: Discovery>(
     // source rather than inventing a message, note the target, and append the fix this transport needs so
     // the user is told what to do next, not just what went wrong.
     let reached = match last_error {
-        Some(error) => unreached(target, &error),
+        Some(error) => unreached(target, error),
         None => eyre::eyre!("could not reach {target}: no known device"),
     };
     Err(hint(reached, bound))
@@ -90,11 +90,8 @@ pub async fn dial<T: Transport, D: Discovery>(
 /// The error for a target no candidate connected to: the last connect's cause chain under `could not reach
 /// <target>`. The chain can carry the peer's text (the reason it gave for closing), so it prints through
 /// the escaper; the target is this machine's own word for the peer and prints as it is.
-fn unreached(target: &Peer, error: &eyre::Report) -> eyre::Report {
-    eyre::eyre!(
-        "could not reach {target}: {}",
-        Escaped(&format!("{error:#}"))
-    )
+fn unreached(target: &Peer, error: eyre::Report) -> eyre::Report {
+    eyre::eyre!("could not reach {target}: {}", escaped_report(error))
 }
 
 /// Connect to one named candidate under the [`DIAL_TIMEOUT`], mapping a timeout to a plain unreachable
@@ -177,7 +174,7 @@ pub async fn dial_service<T: Transport, D: Discovery>(
     }
 
     let reached = match last_error {
-        Some(error) => unreached(target, &error),
+        Some(error) => unreached(target, error),
         None => eyre::eyre!("could not reach {target}: no known device"),
     };
     Err(hint(reached, bound))

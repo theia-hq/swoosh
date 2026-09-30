@@ -8,9 +8,11 @@
 
 use std::path::Path;
 
+use clap::Parser as _;
+use swoosh::contacts::Contacts;
 use swoosh::testkit::HostilePeer;
 
-use super::{collect_files, file_name, send_one};
+use super::{SendCmd, collect_files, file_name, send_one};
 
 /// The operator's exact hostile name for the skip shape (`missing\nname\u{1b}[31m.txt`): a path that
 /// cannot be stat'ed is skipped, and the WHOLE line, error chain included, must render escaped. This
@@ -103,5 +105,36 @@ async fn a_hostile_refusal_prints_escaped() {
     assert_eq!(
         format!("skip: {error:#}"),
         r"skip: stream refused: unavailable: no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}"
+    );
+}
+
+/// A peer that closes the dial gives a reason, and `send` prints the connect chain that carries it: a
+/// carriage return, an ESC CSI sequence and a bidi override there print as escapes, so the reason cannot
+/// erase the error and draw a `sent` line in its place. Driven through `run_send` over a transport whose
+/// dial fails with that reason, so it is `send`'s own connect this pins.
+#[tokio::test]
+async fn a_hostile_connect_failure_prints_escaped() {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        send: SendCmd,
+    }
+
+    let at = HostilePeer::node_id().to_string();
+    let send = Wrap::try_parse_from(["x", "/etc/hosts", &at])
+        .expect("send <path> <key> parses")
+        .send;
+    let node = bifrost::Node::new(
+        HostilePeer::Unreachable("closed by peer: no\r\u{1b}[2Ksent hosts (1 bytes)\u{202e}"),
+        bifrost::NoDiscovery,
+    );
+
+    let error = send
+        .run_send(&node, &Contacts::default(), None, None)
+        .await
+        .expect_err("a dial the peer closed is an error");
+    assert_eq!(
+        format!("{error:#}"),
+        r"connect to peer: closed by peer: no\r\u{1b}[2Ksent hosts (1 bytes)\u{202e}"
     );
 }

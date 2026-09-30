@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use bifrost::{Discovery, Node, Transport};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::Escaped;
+use swoosh::escape::escaped_report;
 use swoosh::peer::Peer;
 
 /// Where a reached service's bytes go locally: the one `--to` selector, parsed to a closed enum so the
@@ -90,23 +90,19 @@ pub async fn connect<T: Transport, D: Discovery>(
             // Err. So an unauthorized forward fails loudly here (a clear one-line reason, non-zero exit),
             // never a hopeful banner followed by a silent reset.
             let (dial, service) = (connector.dial(), Service::clone(connector.service()));
-            let forward = connector.preflight(node, port).await.map_err(escaped)?;
+            let forward = connector
+                .preflight(node, port)
+                .await
+                .map_err(escaped_report)?;
             println!("forwarding 127.0.0.1:{port} to {dial} ({service})");
             forward.run().await
         }
-        To::Stdout => connector.pipe_stdio(node).await.map_err(escaped),
+        To::Stdout => connector.pipe_stdio(node).await.map_err(escaped_report),
         To::UnixListener(path) => eyre::bail!(
             "--to unix:{} is reserved, not yet built (bind a port and connect to it, or use `--to -`)",
             path.display()
         ),
     }
-}
-
-/// A reach error as `main` prints it: the whole chain through the shared escaper. A gate's refusal carries
-/// the peer's own detail, and a connect's cause the reason it gave for closing, so the chain is escaped
-/// here, where it leaves the reach, with its words as they were.
-fn escaped(error: eyre::Report) -> eyre::Report {
-    eyre::eyre!("{}", Escaped(&format!("{error:#}")))
 }
 
 #[cfg(test)]

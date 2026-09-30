@@ -17,7 +17,7 @@ use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::escape::{Escaped, causes};
+use swoosh::escape::{Escaped, causes, escaped_report};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
 use swoosh::peer::Peer;
@@ -175,10 +175,7 @@ impl ServiceLsCmd {
         // genuine i/o failure keeps its own message.
         // The connect chain can carry the peer's text (the reason it gave for closing), so it prints
         // through the escaper.
-        let session = connector
-            .open_service(node)
-            .await
-            .map_err(|error| eyre::eyre!("{}", Escaped(&format!("{error:#}"))))?;
+        let session = connector.open_service(node).await.map_err(escaped_report)?;
         let (writer, reader) = match session.open_bi().await {
             Ok(halves) => halves,
             Err(bifrost::Error::Refused(refusal)) => {

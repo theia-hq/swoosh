@@ -419,3 +419,34 @@ async fn a_flooding_peer_is_refused_before_it_fills_the_buffer() {
         MAX_CATALOG_BLOB * FLOOD_MULTIPLE
     );
 }
+
+/// A peer that refuses the catalog stream sends its own detail, and `service ls --at` prints it: a carriage
+/// return, an ESC CSI sequence and a bidi override there print as escapes, so the refusal cannot erase the
+/// error and draw a menu row in its place. Driven through the `--at` read over a session that refuses every
+/// stream, so it is the refusal line itself this pins.
+#[tokio::test]
+async fn a_hostile_refusal_prints_escaped() {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        ls: ServiceLsCmd,
+    }
+
+    let at = HostilePeer::node_id().to_string();
+    let ls = Wrap::try_parse_from(["x", "--at", &at])
+        .expect("service ls --at <key> parses")
+        .ls;
+    let node = bifrost::Node::new(
+        HostilePeer::RefusesStreams("no\r\u{1b}[2Kping  gated\u{202e}"),
+        bifrost::NoDiscovery,
+    );
+
+    let error = ls
+        .run_read(&node, &Contacts::default(), None, None)
+        .await
+        .expect_err("a refused read is an error");
+    assert_eq!(
+        format!("{error:#}"),
+        format!(r"{at}: reached, but refused (unavailable: no\r\u{{1b}}[2Kping  gated\u{{202e}})")
+    );
+}
