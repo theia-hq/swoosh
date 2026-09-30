@@ -40,7 +40,7 @@
 //! `StrictHostKeyChecking=accept-new`: pin on first sight (safe, because first sight is over the
 //! authenticated overlay), reject a later key change. `accept-new` not `yes`, precisely because the
 //! derived key is not client-computable; node id not petname, so a rename never orphans a pin. The private
-//! file is `0600` in a `0700` dir, and a loose one is refused rather than trusted.
+//! file sits in a `0700` dir, and a loose one is refused rather than trusted.
 
 use std::path::Path;
 
@@ -274,7 +274,7 @@ fn ssh_argv(
 /// `"`, and stops at a newline; a leading `~` names a home directory. So a path holding `"`, `%`, `$`, `\`
 /// or a control character refuses in one line that names it, before anything is prepared, and the path is
 /// made absolute so it never starts with `~`. Every other character reaches ssh as itself, so the file ssh
-/// pins into is the one [`prepare_known_hosts`] checked. Refusing rather than escaping: `%%` is read back
+/// pins into is the one the trust-file check vetted. Refusing rather than escaping: `%%` is read back
 /// as `%` only by an ssh that expands this option at all, and `$` and `"` have no escape here.
 fn known_hosts_path(path: &Path) -> eyre::Result<std::path::PathBuf> {
     let path = std::path::absolute(path)?;
@@ -300,12 +300,13 @@ fn known_hosts_path(path: &Path) -> eyre::Result<std::path::PathBuf> {
     Ok(path)
 }
 
-/// Ensure the private known_hosts directory exists (`0700`) and refuse a file writable by group or other.
+/// Ensure the private known_hosts directory exists (`0700`).
 ///
 /// The file is a trust root: anyone who can write it can pre-seed a host-key pin (a silent MITM) or wedge a
-/// peer with a bogus "host key changed". So a loose file fails closed rather than being trusted. ssh itself
-/// creates the file `0600` on the first `accept-new` write; swoosh only guarantees the directory and vets
-/// an existing file.
+/// peer with a bogus "host key changed". So a loose file fails closed rather than being trusted, and its
+/// owner and mode are checked with the other trust files when the home resolves, before this verb runs.
+/// ssh itself creates the file on the first `accept-new` write, and never writable by group or other (it
+/// adds `022` to its umask, so the file is `0644` under a usual one); swoosh only guarantees the directory.
 #[cfg(unix)]
 fn prepare_known_hosts(path: &Path) -> eyre::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -313,14 +314,6 @@ fn prepare_known_hosts(path: &Path) -> eyre::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    if let Ok(meta) = std::fs::metadata(path)
-        && meta.permissions().mode() & 0o022 != 0
-    {
-        eyre::bail!(
-            "{} is writable by group or other; refusing to trust it (chmod 600 it)",
-            path.display()
-        );
     }
     Ok(())
 }

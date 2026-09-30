@@ -2188,7 +2188,7 @@ fn read_standing(path: &Path) -> Result<Option<Link>, RootError> {
 
 /// The non-empty lines of a small text file, none when it is absent.
 fn read_lines(path: &Path) -> Result<Vec<String>, RootError> {
-    match std::fs::read_to_string(path) {
+    match crate::home::read_trust_file(path) {
         Ok(text) => Ok(text
             .lines()
             .map(str::trim)

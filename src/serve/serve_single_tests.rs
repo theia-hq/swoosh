@@ -647,6 +647,21 @@ fn runtime_dir_mode_owner_verified() {
     );
 }
 
+/// A leaf removed between its create and its verify, as a resident on its way out removes it, is a
+/// fresh try, not a refusal naming an insecure dir.
+#[test]
+fn a_leaf_removed_before_its_verify_is_tried_again() {
+    let scratch = Scratch::new("vanished");
+    assert!(!scratch.leaf().exists(), "no leaf yet");
+    assert!(
+        matches!(
+            super::verify_runtime_chain(&scratch.root, &scratch.leaf()),
+            Ok(super::Chain::Vanished)
+        ),
+        "a missing leaf is tried again"
+    );
+}
+
 /// Graceful teardown unlinks the socket this instance bound: the path identity captured at bind is
 /// the same filesystem object `release` stats, so the unlink fires.
 #[test]
@@ -708,4 +723,19 @@ fn serve_refuses_a_socket_path_longer_than_sun_path() {
         "the runtime directory's path is too long for a socket: set XDG_RUNTIME_DIR to a shorter one."
     );
     assert!(!root.exists(), "nothing was created under the long root");
+}
+
+/// A start that lost the lock file on every try says so, with the count, and names no fix.
+#[test]
+fn a_lock_lost_on_every_try_says_how_many() {
+    let error = super::lock_lost(PathBuf::from("/run/leaf/control.lock"));
+    assert_eq!(
+        error.to_string(),
+        "could not take the control lock at /run/leaf/control.lock"
+    );
+    let cause = core::error::Error::source(&error).expect("a cause");
+    assert_eq!(
+        cause.to_string(),
+        "another process removed it on each of 3 tries"
+    );
 }

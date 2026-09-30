@@ -458,3 +458,81 @@ async fn an_admitted_root_is_trusted_for_the_run_and_writes_no_pin() {
         "a root revoked here is not admitted"
     );
 }
+
+/// Set the mode of the file at `path`.
+fn set_mode(path: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("set the mode");
+}
+
+/// A pin swapped to another root and left group-writable while `serve` runs is refused at the next
+/// admission: the check runs on each read, not only when the process starts.
+#[tokio::test]
+async fn a_pin_others_can_write_is_refused_while_serve_runs() {
+    let scratch = Scratch::new("pin-loose");
+    scratch.pin(ROOT).await;
+    let (gate, _cut) = scratch.gate().await;
+    assert!(
+        admits(&gate, &badge(ROOT)),
+        "the pinned root's device is admitted"
+    );
+
+    let signet = scratch.home.signet();
+    std::fs::write(
+        &signet,
+        format!("{}\n", TestRoot::seeded(OTHER_ROOT).node_id()),
+    )
+    .expect("swap the pin");
+    set_mode(&signet, 0o620);
+    past_the_debounce();
+    assert!(
+        !admits(&gate, &badge(OTHER_ROOT)),
+        "a pin others can write admits nobody"
+    );
+    assert!(!admits(&gate, &badge(ROOT)), "nor the root it named before");
+
+    set_mode(&signet, 0o600);
+    past_the_debounce();
+    assert!(
+        admits(&gate, &badge(OTHER_ROOT)),
+        "made owner-only again, it is read"
+    );
+}
+
+/// A ledger left group-writable while `serve` runs admits no link this machine signed.
+#[tokio::test]
+async fn a_ledger_others_can_write_admits_no_self_slip() {
+    let scratch = Scratch::new("ledger-loose");
+    let slip = issued_slip(&scratch.home).await;
+    let (gate, _cut) = scratch.gate().await;
+    assert!(admits(&gate, &slip), "a recorded self slip is admitted");
+
+    set_mode(&scratch.home.links(), 0o602);
+    past_the_debounce();
+    assert!(
+        !admits(&gate, &slip),
+        "a ledger others can write admits no self slip"
+    );
+}
+
+/// A revoked keys file others can write refuses the load.
+#[tokio::test]
+async fn a_revoked_keys_others_can_write_refuses_to_load() {
+    let scratch = Scratch::new("keys-loose");
+    std::fs::write(
+        scratch.home.revoked_keys(),
+        format!("{}\n", TestNode::seeded(DEVICE).node_id()),
+    )
+    .expect("the keys file");
+    set_mode(&scratch.home.revoked_keys(), 0o660);
+    let Err(super::GateError::RevokedKeys(super::RevokedKeysError::Io { source, .. })) =
+        KeyedDenylist::load(&scratch.home).await
+    else {
+        panic!("a keys file others can write must refuse the load");
+    };
+    assert_eq!(
+        crate::home::loose_in(&source),
+        Some(crate::home::Loose::Writable)
+    );
+}

@@ -221,3 +221,27 @@ fn status_with_a_root_copy_never_prompts() {
         "the one prompt is the mint's, before either status ran"
     );
 }
+
+/// A trust file group or other can write is refused before any verb reads it: exit 1, one line naming
+/// the file and the fix, and its contents never printed.
+#[test]
+fn a_group_writable_trust_file_is_refused_at_load() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("loose");
+    let home = scratch.home();
+    let first = swoosh(&home, &["status"]);
+    assert!(first.status.success(), "{}", text(&first.stderr));
+    let links = Home::resolve(Some(home.clone())).unwrap().links();
+    std::fs::write(&links, "a-secret-row\n").unwrap();
+    std::fs::set_permissions(&links, std::fs::Permissions::from_mode(0o660)).unwrap();
+
+    let out = swoosh(&home, &["status"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert!(out.stdout.is_empty(), "{}", text(&out.stdout));
+    let path = links.display();
+    assert_eq!(
+        text(&out.stderr),
+        format!("Error: {path} can be written by others: chmod 600 {path}\n")
+    );
+}

@@ -201,7 +201,7 @@ async fn dial_with(
             }
             if theirs == NONE_YET {
                 // Neither side holds an update.
-                touch_synced(home);
+                touch_synced(home).await;
                 return Ok(Answer::Same);
             }
             Answer::Same
@@ -241,7 +241,7 @@ async fn dial_with(
     if let Err(error) = forks.await {
         tracing::debug!(%error, "could not pass the forks kept in an exchange");
     }
-    touch_synced(home);
+    touch_synced(home).await;
     Ok(answer)
 }
 
@@ -275,7 +275,7 @@ pub async fn answer(
         if my_digest == NONE_YET {
             // Neither side holds an update.
             writer.shutdown().await?;
-            touch_synced(home);
+            touch_synced(home).await;
             return Ok(());
         }
     } else if mine > theirs {
@@ -318,7 +318,7 @@ pub async fn answer(
     if let Err(error) = forks.await {
         tracing::debug!(%error, "could not pass the forks kept in an exchange");
     }
-    touch_synced(home);
+    touch_synced(home).await;
     Ok(())
 }
 
@@ -365,11 +365,15 @@ async fn read_update(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, E
     Ok(bytes)
 }
 
-/// Record that an exchange reached another device, now. Best-effort: a failure only makes the next dial
-/// exchange again.
-fn touch_synced(home: &Home) {
+/// Record that an exchange reached another device, now, owner-only through
+/// [`write_private_atomic`](crate::config::write_private_atomic). Best-effort: a failure only makes the
+/// next dial exchange again.
+async fn touch_synced(home: &Home) {
     let now = unix_now();
-    if let Err(error) = std::fs::write(home.roster_synced(), format!("{now}\n")) {
+    let written =
+        crate::config::write_private_atomic(&home.roster_synced(), format!("{now}\n").as_bytes())
+            .await;
+    if let Err(error) = written {
         tracing::debug!(%error, "could not record the sync");
     }
 }
@@ -500,14 +504,14 @@ pub async fn devices(
             name: key.short(),
         });
     let listed = me_devices(home).await?.into_iter().chain(also).chain(seed);
-    Ok(dialable(home, listed).await?)
+    dialable(home, listed).await
 }
 
 /// This machine's `me` devices alone, in the order a round asks them, on the same rules as [`devices`]:
 /// the only machines the pick-up route asks.
 pub async fn mine(home: &Home) -> eyre::Result<Vec<Device>> {
     let listed = me_devices(home).await?;
-    Ok(dialable(home, listed).await?)
+    dialable(home, listed).await
 }
 
 /// The devices `me` names, in random order.
@@ -532,11 +536,11 @@ async fn me_devices(home: &Home) -> eyre::Result<Vec<Device>> {
 async fn dialable(
     home: &Home,
     listed: impl IntoIterator<Item = Device>,
-) -> Result<Vec<Device>, keystore::Error> {
+) -> eyre::Result<Vec<Device>> {
     let own = keystore::KeyFile::device(home.key())
         .load()?
         .map(|stored| stored.node_id());
-    let mut revoked: Vec<NodeId> = revoked_keys_here(home);
+    let mut revoked: Vec<NodeId> = revoked_keys_here(home).await?;
     if let Ok(Some(pin)) = device_pin(home).await
         && let Some((doc, _)) = read_held(&home.roster(), pin)
     {
@@ -558,13 +562,23 @@ async fn dialable(
     Ok(out)
 }
 
-/// The keys in `<home>/revoked_keys`, skipping any line that is not one.
-fn revoked_keys_here(home: &Home) -> Vec<NodeId> {
-    std::fs::read_to_string(home.revoked_keys())
-        .unwrap_or_default()
+/// The keys in `<home>/revoked_keys`, skipping any line that is not one, and none when there is no file.
+///
+/// # Errors
+///
+/// A file this machine cannot read, or one [`read_trust_file`](crate::home::read_trust_file) refuses as
+/// loose. Either fails the list rather than reading as no keys: a list made without the keys revoked here
+/// would dial a device this machine revoked.
+async fn revoked_keys_here(home: &Home) -> io::Result<Vec<NodeId>> {
+    let text = match crate::home::read_trust_file_async(&home.revoked_keys()).await {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    Ok(text
         .lines()
         .filter_map(|line| line.trim().parse::<NodeId>().ok())
-        .collect()
+        .collect())
 }
 
 /// How one device's exchange in a round went.

@@ -501,7 +501,7 @@ pub(crate) async fn strip(home: &Home) -> Result<(), StandingError> {
 /// The pin, or `None` when there is none. A file that is not exactly one key is damaged.
 async fn read_pin(home: &Home) -> Result<Option<NodeId>, StandingError> {
     let path = home.signet();
-    let Some(text) = read_text(&path).await? else {
+    let Some(text) = text_of(crate::home::read_trust_file_async(&path).await, &path)? else {
         return Ok(None);
     };
     match text.and_then(|text| text.trim().parse::<NodeId>().ok()) {
@@ -564,10 +564,15 @@ fn unreadable_badge(home: &Home) -> StandingError {
 }
 
 /// A small text file: `None` when it is absent, `Some(None)` when its bytes are not text.
+async fn read_text(path: &Path) -> Result<Option<Option<String>>, StandingError> {
+    text_of(tokio::fs::read_to_string(path).await, path)
+}
+
+/// What [`read_text`] makes of one read of the file at `path`.
 // `core::io::ErrorKind` is still unstable, so the kinds read from `std`.
 #[allow(clippy::std_instead_of_core)]
-async fn read_text(path: &Path) -> Result<Option<Option<String>>, StandingError> {
-    match tokio::fs::read_to_string(path).await {
+fn text_of(read: io::Result<String>, path: &Path) -> Result<Option<Option<String>>, StandingError> {
+    match read {
         Ok(text) => Ok(Some(Some(text))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) if error.kind() == io::ErrorKind::InvalidData => Ok(Some(None)),

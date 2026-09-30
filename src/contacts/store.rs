@@ -40,7 +40,7 @@ impl ContactsStore {
     ///
     /// It takes no lock: a reader, or a writer that already holds `<home>/roster.lock`, opens this way.
     pub async fn open(path: PathBuf) -> Result<Self, StoreError> {
-        let contacts = match tokio::fs::read_to_string(&path).await {
+        let contacts = match crate::home::read_trust_file_async(&path).await {
             Ok(text) => decode(&text)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Contacts::default(),
             Err(error) => return Err(StoreError::Read(error)),

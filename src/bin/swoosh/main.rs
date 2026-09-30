@@ -519,6 +519,8 @@ async fn run() -> eyre::Result<()> {
     // node path (identity key, signet, badge, contacts, denylist, ledger) derives from it, so a verb never
     // re-derives one and two verbs can never disagree on where the store is.
     let home = Home::resolve(cli.home)?;
+    // Before any verb reads it: a trust file another user could have written is never loaded.
+    home.check_trust_files()?;
 
     // Local verbs run here, before any transport is composed and (for `tree`) before the store is even
     // opened: `tree` is pure introspection over clap's own model, and `contact` only edits the address

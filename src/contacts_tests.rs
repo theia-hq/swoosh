@@ -1,5 +1,7 @@
 //! Contact-store behaviour: petname/device parsing, add/list/remove, resolution, and persistence.
 
+use std::sync::Arc;
+
 use bifrost::NodeId;
 
 use super::*;
@@ -208,12 +210,18 @@ async fn store_roundtrips_across_reload() {
 /// under another: every save lands, the book left is one whole book, and no temp stays behind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_contacts_temp_is_unique_per_write() {
+    const WRITERS: u8 = 8;
+
     let dir = std::env::temp_dir().join(format!("swoosh-contacts-temps-{}", std::process::id()));
     let _ = tokio::fs::remove_dir_all(&dir).await;
     let path = dir.join("contacts.toml");
+    // Every writer opens before any saves, so each opens the empty book and the book left holds one
+    // writer's petname; a writer that opened after another's save would carry two.
+    let opened = Arc::new(tokio::sync::Barrier::new(usize::from(WRITERS)));
 
-    let writers = (0u8..8).map(|writer| {
+    let writers = (0..WRITERS).map(|writer| {
         let path = path.clone();
+        let opened = Arc::clone(&opened);
         tokio::spawn(async move {
             let mut store = ContactsStore::open(path).await.expect("open");
             // A book of some size, so one write takes long enough for another to overlap it.
@@ -224,6 +232,7 @@ async fn the_contacts_temp_is_unique_per_write() {
                     node(writer.saturating_add(1)),
                 );
             }
+            opened.wait().await;
             for _ in 0..25 {
                 store.save().await?;
             }

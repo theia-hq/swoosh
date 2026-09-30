@@ -257,6 +257,45 @@ impl Home {
         self.dir.join("known_hosts")
     }
 
+    /// The files whose contents decide whom this machine trusts: the pin, the links it signed, the
+    /// contacts book, everything it refuses for good, what `serve` runs, and the host keys `swoosh ssh`
+    /// pins (a writer who plants a host key there can sit between this machine and a peer).
+    fn trust_files(&self) -> [PathBuf; 11] {
+        [
+            self.signet(),
+            self.links(),
+            self.contacts(),
+            self.revoked(),
+            self.revoked_keys(),
+            self.disabled_roots(),
+            self.serving(),
+            self.disabled(),
+            self.relay(),
+            self.resolver(),
+            self.known_hosts(),
+        ]
+    }
+
+    /// Refuse a home one of whose [trust files](Self::trust_files) another user owns, or group or other
+    /// can write: the check [`read_trust_file`] makes on each read, made on every file before any verb
+    /// runs, so a file read by a library that does not make it is checked too. A file that is absent, or
+    /// that cannot be stat'ed, passes: its reader reports what is wrong with it.
+    ///
+    /// # Errors
+    ///
+    /// [`LooseFile`] naming the first file that fails, and why.
+    pub fn check_trust_files(&self) -> Result<(), LooseFile> {
+        for path in self.trust_files() {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if let Some(why) = loose(&meta) {
+                return Err(LooseFile { path, why });
+            }
+        }
+        Ok(())
+    }
+
     /// The 16-char hex key scoping this home's runtime state: inline 64-bit FNV-1a over the
     /// canonicalized home path, the full 64 bits rendered as 16 lowercase hex chars. Dependency
     /// free and stable across daemon and client because both binaries carry this same function.
@@ -403,6 +442,222 @@ fn default_dir() -> eyre::Result<PathBuf> {
     let home =
         std::env::var_os("HOME").ok_or_else(|| eyre!("HOME is not set; pass --home <dir>"))?;
     Ok(PathBuf::from(home).join(".config").join("swoosh"))
+}
+
+/// A trust file this machine will not load, because someone other than its owner could have written it.
+#[derive(Debug)]
+pub struct LooseFile {
+    /// The file.
+    pub path: PathBuf,
+    /// What is wrong with it.
+    pub why: Loose,
+}
+
+impl core::fmt::Display for LooseFile {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let path = self.path.display();
+        match self.why {
+            // The command names the absolute path, so it runs from any directory and a relative home that
+            // starts with `-` or `=` is never read as an option or an expansion. When no word is sure to
+            // read back as the path in every shell, the line names no command (O1).
+            Loose::Writable => {
+                write!(f, "{path} can be written by others")?;
+                match std::path::absolute(&self.path)
+                    .ok()
+                    .and_then(|full| shell_word(&full))
+                {
+                    Some(word) => write!(f, ": chmod 600 {word}"),
+                    None => Ok(()),
+                }
+            }
+            // No command: whether the file should be taken back, or swoosh run as its owner, is a judgment
+            // only the person can make, and a `chown` needs root.
+            Loose::Owner { owner, euid } => write!(
+                f,
+                "{path} is owned by {}, and swoosh is running as {}; it will not load another user's file",
+                user_name(owner),
+                user_name(euid)
+            ),
+        }
+    }
+}
+
+/// `path` as one word that sh, bash, zsh, fish, csh and tcsh each read back as `path`, or `None` when
+/// there is no such word this function can be sure of. Bare when every character is in
+/// `[A-Za-z0-9_./,:@%+=-]`, which every one of them reads as itself past the first character (the
+/// caller passes an absolute path, so the word starts with `/`). Else in single quotes, which only hold
+/// when every character in them means itself in all six: so `None` for a `'` (no escape is common to
+/// them), a `\` (fish reads `\'` and `\\` as escapes), a `!` (csh and tcsh expand history inside quotes),
+/// and any character `char::escape_debug` escapes other than `"`: controls (a newline ends a csh command),
+/// format and bidi characters, and, since std cannot tell them apart, grapheme-extending marks, which cost
+/// only the command. A path that is not UTF-8 is `None` too, since the line cannot print its bytes as
+/// themselves.
+fn shell_word(path: &Path) -> Option<String> {
+    let text = path.to_str()?;
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_./,:@%+=-".contains(c);
+    if !text.is_empty() && text.chars().all(plain) {
+        return Some(text.to_owned());
+    }
+    let quotable = |c: char| c == '"' || (c != '!' && c.escape_debug().eq([c]));
+    text.chars().all(quotable).then(|| format!("'{text}'"))
+}
+
+/// The user name `uid` has on this machine, or `uid <n>` when it has none, or one [`shown_name`] would not
+/// print.
+fn user_name(uid: u32) -> String {
+    #[cfg(unix)]
+    {
+        // Grown on `ERANGE`, up to a cap no real passwd entry reaches.
+        let mut buf = vec![0 as libc::c_char; 1024];
+        loop {
+            // SAFETY: `passwd` is plain C data (integers and pointers), for which all zeroes is a value.
+            let mut pwd: libc::passwd = unsafe { core::mem::zeroed() };
+            let mut found: *mut libc::passwd = core::ptr::null_mut();
+            // SAFETY: `pwd` and `found` are live locals, and `buf` is a live buffer of `buf.len()` bytes;
+            // `getpwuid_r` writes the entry's strings into `buf` and points `found` at `pwd` or null.
+            let rc =
+                unsafe { libc::getpwuid_r(uid, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut found) };
+            if rc == libc::ERANGE && buf.len() < 1 << 16 {
+                buf.resize(buf.len() * 2, 0);
+                continue;
+            }
+            if rc == 0 && !found.is_null() && !pwd.pw_name.is_null() {
+                // SAFETY: on success `pw_name` points at a NUL-terminated string inside `buf`, which
+                // outlives this borrow.
+                let name = unsafe { core::ffi::CStr::from_ptr(pwd.pw_name) };
+                if let Ok(name) = name.to_str() {
+                    return shown_name(name, uid);
+                }
+            }
+            break;
+        }
+    }
+    format!("uid {uid}")
+}
+
+/// The characters that print as themselves but read as blank: the same set `serve::activity`'s escaper
+/// treats specially, so a blank owner line never passes as a name.
+const BLANK_LETTERS: [char; 5] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{2800}'];
+
+/// A passwd `name` as the owner line shows it: as itself when every character prints as itself (what
+/// `char::escape_debug` leaves alone), it holds no blank letter, and it carries no leading or trailing
+/// space, else `uid <n>`. A directory service can hand back any text, and a control, format or bidi
+/// character, a blank letter, or a stray edge space in it would drive the terminal, misread as another
+/// name, or reach the serve log unmarked.
+fn shown_name(name: &str, uid: u32) -> String {
+    let plain = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.escape_debug().eq([c]) && !BLANK_LETTERS.contains(&c))
+        && name == name.trim();
+    if plain {
+        return name.to_owned();
+    }
+    format!("uid {uid}")
+}
+
+impl core::error::Error for LooseFile {}
+
+/// What makes a trust file loose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Loose {
+    /// Group or other can write the file.
+    Writable,
+    /// Another user, not root, owns the file.
+    Owner {
+        /// The file's owner.
+        owner: u32,
+        /// This process's user, who must own it.
+        euid: u32,
+    },
+}
+
+/// What makes the file `meta` describes loose, or `None` when it is sound: another user owns it, or group
+/// or other can write it. The owner and mode check a key file gets, less the read bits, since a trust file
+/// holds no secret. Root may own one, as it may own a key file an administrator installed.
+fn loose(meta: &std::fs::Metadata) -> Option<Loose> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        // SAFETY: `geteuid` takes no arguments and touches no memory.
+        loose_by(meta.uid(), meta.mode(), unsafe { libc::geteuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// The rule [`loose`] applies, over a file's `owner` and `mode` and this process's `euid`: a file owned by
+/// neither `euid` nor root is [`Loose::Owner`] whatever its mode, else one group or other can write is
+/// [`Loose::Writable`]. Split out so a test walks the rule without a file another user owns.
+#[cfg_attr(
+    not(unix),
+    allow(dead_code, reason = "only unix has owners and modes to check")
+)]
+fn loose_by(owner: u32, mode: u32, euid: u32) -> Option<Loose> {
+    if owner != euid && owner != 0 {
+        return Some(Loose::Owner { owner, euid });
+    }
+    (mode & 0o022 != 0).then_some(Loose::Writable)
+}
+
+/// Open the trust file at `path` for reading, and check the open handle as [`loose`] does, so the bytes
+/// read are the bytes checked. A loose file is a `PermissionDenied` error carrying the [`LooseFile`].
+///
+/// # Errors
+///
+/// Whatever the open or its `fstat` returns (`NotFound` for a missing file), or the loose file.
+// `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+pub fn open_trust_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let file = std::fs::File::open(path)?;
+    if let Some(why) = loose(&file.metadata()?) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            LooseFile {
+                path: path.to_owned(),
+                why,
+            },
+        ));
+    }
+    Ok(file)
+}
+
+/// [`std::fs::read_to_string`] for a trust file: the text of the file at `path`, read from a handle
+/// [`open_trust_file`] checked.
+///
+/// # Errors
+///
+/// As [`open_trust_file`], or the read's own.
+pub fn read_trust_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read as _;
+
+    let mut text = String::new();
+    open_trust_file(path)?.read_to_string(&mut text)?;
+    Ok(text)
+}
+
+/// [`read_trust_file`] on tokio's blocking pool, as `tokio::fs::read_to_string` reads, for an async caller.
+///
+/// # Errors
+///
+/// As [`read_trust_file`].
+pub async fn read_trust_file_async(path: &Path) -> std::io::Result<String> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || read_trust_file(&path))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+/// The [`Loose`] an error from [`open_trust_file`] or [`read_trust_file`] carries, when it is one.
+pub fn loose_in(error: &std::io::Error) -> Option<Loose> {
+    error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<LooseFile>())
+        .map(|loose| loose.why)
 }
 
 /// Reject a `--home` that names an existing FILE, with a teaching error instead of the confusing
