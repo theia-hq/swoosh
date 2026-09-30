@@ -535,11 +535,22 @@ fn user_name(uid: u32) -> String {
     format!("uid {uid}")
 }
 
+/// The characters that print as themselves but read as blank: the same set `serve::activity`'s escaper
+/// treats specially, so a blank owner line never passes as a name.
+const BLANK_LETTERS: [char; 5] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{2800}'];
+
 /// A passwd `name` as the owner line shows it: as itself when every character prints as itself (what
-/// `char::escape_debug` leaves alone), else `uid <n>`. A directory service can hand back any text, and a
-/// control, format or bidi character in it would drive the terminal or the serve log it reaches.
+/// `char::escape_debug` leaves alone), it holds no blank letter, and it carries no leading or trailing
+/// space, else `uid <n>`. A directory service can hand back any text, and a control, format or bidi
+/// character, a blank letter, or a stray edge space in it would drive the terminal, misread as another
+/// name, or reach the serve log unmarked.
 fn shown_name(name: &str, uid: u32) -> String {
-    if !name.is_empty() && name.chars().all(|c| c.escape_debug().eq([c])) {
+    let plain = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.escape_debug().eq([c]) && !BLANK_LETTERS.contains(&c))
+        && name == name.trim();
+    if plain {
         return name.to_owned();
     }
     format!("uid {uid}")

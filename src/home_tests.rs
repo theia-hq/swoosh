@@ -161,7 +161,7 @@ fn the_owner_line_names_both_users_and_no_command() {
 /// ends a csh line) gets the lead alone and no command.
 #[test]
 fn the_chmod_path_is_quoted_only_when_it_needs_it() {
-    let base = std::env::temp_dir().join("swoosh-home-quote");
+    let base = PathBuf::from("/tmp/f5-quote");
     for (name, command) in [
         ("plain", Some(false)),
         ("my home", Some(true)),
@@ -206,29 +206,46 @@ fn the_chmod_path_is_quoted_only_when_it_needs_it() {
             );
         }
     }
+
+    // A non-UTF-8 path has no byte-for-byte word any shell reads back, so the line names no command.
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/a\xffb/links"));
+    let line = super::LooseFile {
+        path: path.clone(),
+        why: super::Loose::Writable,
+    }
+    .to_string();
+    assert_eq!(
+        line,
+        format!("{} can be written by others", path.display()),
+        "a non-UTF-8 path names no command"
+    );
 }
 
 /// A relative home keeps its path as given in the lead, and the `chmod` names the absolute path, so a home
 /// that starts with `-` is never read as an option.
 #[test]
 fn the_chmod_path_is_absolute() {
+    let path = PathBuf::from("-x/links");
     let line = super::LooseFile {
-        path: PathBuf::from("-x/links"),
+        path: path.clone(),
         why: super::Loose::Writable,
     }
     .to_string();
-    let full = std::env::current_dir().expect("the cwd").join("-x/links");
+    let lead = "-x/links can be written by others: chmod 600 ";
+    let word = line
+        .strip_prefix(lead)
+        .unwrap_or_else(|| panic!("the line leads with the bare path and a command: {line}"));
+    let full = std::path::absolute(&path).expect("the path resolves against the cwd");
     assert_eq!(
-        line,
-        format!(
-            "-x/links can be written by others: chmod 600 {}",
-            full.display()
-        )
+        word,
+        super::shell_word(&full).expect("a cwd-joined path is a plain or quotable word"),
+        "the chmod names the absolute path, however the cwd is spelled"
     );
 }
 
-/// A passwd name prints as itself, and one holding a control, format or bidi character, or none at all,
-/// prints as its uid.
+/// A passwd name prints as itself, and one holding a control, format or bidi character, a blank letter,
+/// a leading or trailing space, or none at all, prints as its uid.
 #[test]
 fn a_user_name_that_would_not_print_as_itself_is_its_uid() {
     assert_eq!(super::shown_name("alice", 501), "alice");
@@ -239,6 +256,13 @@ fn a_user_name_that_would_not_print_as_itself_is_its_uid() {
         "a\nb",
         "a\u{202e}b",
         "a\u{200b}b",
+        "\u{115f}",
+        "\u{1160}",
+        "\u{3164}",
+        "\u{ffa0}",
+        "\u{2800}",
+        " root",
+        "root ",
         "",
     ] {
         assert_eq!(super::shown_name(name, 501), "uid 501", "{name:?}");
