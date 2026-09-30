@@ -138,6 +138,7 @@ impl Home {
     }
 
     /// `<home>/roster.lock`: the flock every fold holds, so two folds never read one floor and both write.
+    /// Every writer of `contacts.toml` holds it too, so no write of the book is lost to another.
     pub fn roster_lock(&self) -> PathBuf {
         self.dir.join("roster.lock")
     }

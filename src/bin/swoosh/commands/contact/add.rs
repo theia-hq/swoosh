@@ -3,6 +3,7 @@
 use bifrost::NodeId;
 use clap::Args;
 use swoosh::contacts::{Added, ContactRef, ContactsStore};
+use swoosh::home::Home;
 
 /// Save a peer's key under a petname, or add a device key under an existing person.
 #[derive(Debug, Args)]
@@ -19,7 +20,8 @@ impl AddCmd {
     /// Add the binding and persist. Idempotent: re-adding the same name updates in place and warns on a
     /// clobber rather than silently replacing a key the user may not mean to lose. A reserved person
     /// (`me`, `root`, `anyone`) never reaches here: [`new_contact`](super::new_contact) refuses it at parse.
-    pub async fn run(self, mut store: ContactsStore) -> eyre::Result<()> {
+    pub async fn run(self, home: &Home) -> eyre::Result<()> {
+        let mut store = ContactsStore::open_to_edit(home).await?;
         let (petname, device) = (self.name.petname().clone(), self.name.device().cloned());
         let outcome = store.contacts_mut().add(petname, device, self.key);
 

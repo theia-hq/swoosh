@@ -539,10 +539,8 @@ async fn run() -> eyre::Result<()> {
         // `serve` via the mtime-watched oracle. Need only the home; bind no transport and touch no store.
         Verb::ServiceEnable(cmd) => return cmd.run_enable(&home),
         Verb::ServiceDisable(cmd) => return cmd.run_disable(&home),
-        Verb::Contact(cmd) => {
-            let store = ContactsStore::open(home.contacts()).await?;
-            return cmd.run(store).await;
-        }
+        // Each `contact` verb opens the book itself, holding `roster.lock` from its read to its save.
+        Verb::Contact(cmd) => return cmd.run(&home).await,
         // Backs up, restores, or protects this machine's key. Needs only the home, not the store or a
         // transport, so it dispatches here beside the other local verbs.
         Verb::Identity(cmd) => return cmd.run(&home),
