@@ -894,11 +894,83 @@ async fn join_refuses_where_the_root_is_kept() {
     assert!(matches!(read(&home).await, Standing::HoldsRoot { .. }));
     let before = snapshot(home.dir());
     let ran = join(&home, &bound(OTHER, node(OWN), "laptop", now() + 90 * DAY)).await;
-    refused_before_writing(&ran, "swoosh move-root <dir>", &home, &before);
+    refused_before_writing(&ran, KEPT_HERE, &home, &before);
     assert!(
         !ran.refusal().contains("--switch"),
-        "it names only move-root"
+        "it names only root backup and root forget"
     );
+}
+
+/// The refusal of `join` and `leave` where a root is kept: the two commands that take the root off, one
+/// per line.
+const KEPT_HERE: &str = "your root is on this machine, and this runs only where no root is kept. Back it up: swoosh root backup <dir>\nthen remove it from this machine: swoosh root forget <dir>";
+
+/// No printed line tells a person to type a command that will not exist: the lines after a root is first
+/// made, `join` and `leave` where a root is kept, and the root's refusals on a machine that is no device of
+/// it and where a root is already kept.
+#[tokio::test]
+async fn no_printed_line_names_a_retired_root_command() {
+    use swoosh::root::RootError;
+
+    use crate::commands::invite::invite_tests;
+    use crate::commands::leave::LeaveCmd;
+
+    let minting = invite_tests::scratch("mint-lines");
+    let made = invite_tests::invite(&minting, &["tv", &node(STRANGER).to_string()]).await;
+    assert!(made.result.is_ok(), "{:?}: {}", made.result, made.err);
+    assert!(
+        made.err.contains(
+            "Back up your root now, off this disk: swoosh root backup <dir>\n\
+             To keep it off this machine, back it up, then: swoosh root forget <dir>\n"
+        ),
+        "{}",
+        made.err
+    );
+
+    let home = scratch("retired-names");
+    keep_root(&home);
+    device_of(&home, ROOT, now() + 90 * DAY).await;
+    let join = join(&home, &bound(OTHER, node(OWN), "laptop", now() + 90 * DAY))
+        .await
+        .refusal();
+    let mut left = Vec::new();
+    let leave = LeaveCmd { new_key: false }
+        .leave(
+            &home,
+            &mut Asks { terminal: true },
+            SystemTime::now(),
+            &mut Vec::new(),
+            &mut left,
+        )
+        .await
+        .expect_err("leave refuses where the root is kept");
+    let leave = format!("{leave:#}");
+    assert_eq!(join, KEPT_HERE);
+    assert_eq!(leave, KEPT_HERE);
+
+    let lines = [
+        ("the lines after a root is made", made.err),
+        ("join where a root is kept", join),
+        ("leave where a root is kept", leave),
+        ("no device", RootError::NotADevice.to_string()),
+        ("a root kept here", RootError::HeldHere.to_string()),
+    ];
+    for (site, text) in &lines {
+        for retired in [
+            "move-root",
+            "swoosh backup",
+            "swoosh restore",
+            "lock --root",
+        ] {
+            assert!(!text.contains(retired), "{site} names {retired}: {text}");
+        }
+    }
+    assert!(
+        lines[3].1.ends_with(": swoosh root restore <dir>"),
+        "{}",
+        lines[3].1
+    );
+    assert_eq!(lines[4].1, "your root is on this machine, so drop --root.");
 }
 
 #[tokio::test]

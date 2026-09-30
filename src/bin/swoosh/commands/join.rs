@@ -176,10 +176,7 @@ impl JoinCmd {
                 }
                 Some(pin)
             }
-            Standing::HoldsRoot { .. } => eyre::bail!(
-                "your root is kept on this machine, and a machine that keeps a root is that root's device \
-                 and no other's. To move your root off it: swoosh move-root <dir>"
-            ),
+            Standing::HoldsRoot { .. } => eyre::bail!("{}", swoosh::root::KEPT_HERE),
             Standing::InterruptedMint { root_key } => {
                 eyre::bail!("{}", swoosh::standing::unfinished_line(root_key))
             }

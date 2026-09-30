@@ -74,10 +74,7 @@ impl LeaveCmd {
                     },
                     Standing::Unpinned if self.new_key => Was::Unpinned,
                     Standing::Unpinned => eyre::bail!("this machine is not one of your devices."),
-                    Standing::HoldsRoot { .. } => eyre::bail!(
-                        "your root is kept on this machine, and a machine that keeps a root is that root's \
-                         device. To move your root off it: swoosh move-root <dir>"
-                    ),
+                    Standing::HoldsRoot { .. } => eyre::bail!("{}", swoosh::root::KEPT_HERE),
                     Standing::InterruptedMint { root_key } => {
                         eyre::bail!("{}", swoosh::standing::unfinished_line(root_key))
                     }

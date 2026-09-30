@@ -306,7 +306,11 @@ async fn leave_refuses_where_the_root_is_kept() {
         assert!(matches!(read(&home).await, Standing::HoldsRoot { .. }));
         let before = snapshot(home.dir());
         let ran = leave(&home, args).await;
-        assert!(ran.refusal().contains("swoosh move-root <dir>"), "{args:?}");
+        assert_eq!(
+            ran.refusal(),
+            "your root is on this machine, and this runs only where no root is kept. Back it up: swoosh root backup <dir>\nthen remove it from this machine: swoosh root forget <dir>",
+            "{args:?}"
+        );
         assert!(snapshot(home.dir()) == before, "{args:?} writes nothing");
         assert!(ran.out.is_empty());
     }
