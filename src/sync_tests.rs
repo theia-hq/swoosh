@@ -425,6 +425,47 @@ async fn every_update_file_is_owner_only() {
     }
 }
 
+/// A `revoked_keys` others can write fails the device list with its refusal, rather than reading as no
+/// keys and dialing a device revoked here; owner-only again, it is read and the device is left out.
+#[tokio::test]
+async fn a_loose_revoked_keys_never_reads_as_empty() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let desk = device("keys-loose", DESK).await;
+    holding(&desk, &update(1, vec![], vec![])).await;
+    std::fs::write(desk.revoked_keys(), format!("{}\n", node(PHONE))).unwrap();
+    let mode = |mode| {
+        std::fs::set_permissions(desk.revoked_keys(), std::fs::Permissions::from_mode(mode))
+            .unwrap();
+    };
+
+    for loose in [0o620, 0o602] {
+        mode(loose);
+        let error = super::devices(&desk, [])
+            .await
+            .expect_err("a loose revoked_keys fails the list");
+        let source = error
+            .downcast_ref::<std::io::Error>()
+            .expect("the refusal is the read's own error");
+        assert_eq!(
+            crate::home::loose_in(source),
+            Some(crate::home::Loose::Writable),
+            "{loose:o} is refused as loose"
+        );
+    }
+
+    mode(0o600);
+    let listed = super::devices(&desk, []).await.unwrap();
+    assert!(
+        listed.iter().any(|device| device.key == node(NAS)),
+        "the list is made"
+    );
+    assert!(
+        listed.iter().all(|device| device.key != node(PHONE)),
+        "a key revoked here is not dialed"
+    );
+}
+
 #[tokio::test]
 async fn an_exchange_at_one_number_with_two_digests_folds_both_ways() {
     let desk = device("both-ways", DESK).await;
