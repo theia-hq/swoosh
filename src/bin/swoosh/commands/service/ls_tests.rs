@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser as _;
+use swoosh::contacts::Contacts;
 use swoosh::home::Home;
 use swoosh::serve::control_codec::DisabledList;
+use swoosh::testkit::HostilePeer;
 use tightbeam::tunnel::{MAX_CATALOG_BLOB, ServiceCatalog};
 use tokio::io;
 
@@ -182,6 +184,37 @@ async fn a_hostile_read_failure_prints_escaped() {
     assert_eq!(
         format!("{error:#}"),
         r"closed by peer: no\r\u{1b}[2Kping  gated\u{202e}"
+    );
+}
+
+/// A peer that closes the dial gives a reason, and `service ls --at` prints the connect chain that carries
+/// it: a carriage return, an ESC CSI sequence and a bidi override there print as escapes. Driven through
+/// the `--at` read over a transport whose dial fails with that reason, so the connect's own error path is
+/// what this pins.
+#[tokio::test]
+async fn a_hostile_connect_failure_prints_escaped() {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        ls: ServiceLsCmd,
+    }
+
+    let at = HostilePeer::node_id().to_string();
+    let ls = Wrap::try_parse_from(["x", "--at", &at])
+        .expect("service ls --at <key> parses")
+        .ls;
+    let node = bifrost::Node::new(
+        HostilePeer::Unreachable("closed by peer: no\r\u{1b}[2Kping  gated\u{202e}"),
+        bifrost::NoDiscovery,
+    );
+
+    let error = ls
+        .run_read(&node, &Contacts::default(), None, None)
+        .await
+        .expect_err("a dial the peer closed is an error");
+    assert_eq!(
+        format!("{error:#}"),
+        r"connect to peer: closed by peer: no\r\u{1b}[2Kping  gated\u{202e}"
     );
 }
 

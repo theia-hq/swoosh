@@ -1,4 +1,4 @@
-//! Keys and prompts for tests, and the only place test code signs anything.
+//! Keys, prompts and peers for tests, and the only place test code signs anything.
 //!
 //! A test that needs a signed badge, slip or document asks a [`TestRoot`] or a [`TestNode`] for it rather
 //! than building a `nauthy::Identity` and minting with it. So signing stays in a few named places: the
@@ -441,6 +441,103 @@ impl Dial for Answering {
     ) -> Result<Answer, ExchangeError> {
         self.exchange(peer).await
     }
+}
+
+/// A peer that answers with text it chose, as both the transport that dials it and the session to it: the
+/// double the tests drive a verb's real reach path with, to show that text reaches the line escaped.
+///
+/// The text is a cause or a refusal detail, the two places another machine's words ride into an error
+/// chain. Each arm fails at one stage, so a test names the stage whose print it guards.
+#[derive(Debug, Clone, Copy)]
+pub enum HostilePeer {
+    /// Every dial fails, with the text as its cause (the reason a peer gave for closing).
+    Unreachable(&'static str),
+    /// The dial lands and every stream is refused as it opens, with the text as the refusal's detail.
+    RefusesStreams(&'static str),
+    /// The dial lands and the stream opens; the gate reads the request and answers with a refusal whose
+    /// detail is the text.
+    RefusesAtTheGate(&'static str),
+}
+
+impl HostilePeer {
+    /// The peer's key, and the key this double binds as: one fixed key, since no test tells them apart.
+    pub fn node_id() -> NodeId {
+        NodeId::from_ed25519_secret(&[0x48; 32])
+    }
+
+    /// The refusal this peer sends, carrying its text.
+    fn refusal(text: &'static str) -> bifrost::Refusal {
+        bifrost::Refusal::Unavailable {
+            detail: bifrost::RefusalDetail::bounded(text),
+        }
+    }
+}
+
+impl bifrost::Transport for HostilePeer {
+    type Security = bifrost::InProcess;
+    type Session = Self;
+
+    fn node_id(&self) -> NodeId {
+        Self::node_id()
+    }
+
+    fn local_addr(&self) -> bifrost::Addr {
+        bifrost::Addr::from_node(Self::node_id())
+    }
+
+    fn bound_sockets(&self) -> Vec<core::net::SocketAddr> {
+        Vec::new()
+    }
+
+    async fn connect(&self, _addr: bifrost::Addr) -> Result<Self, bifrost::Error> {
+        match *self {
+            Self::Unreachable(text) => Err(bifrost::Error::Connect(text.into())),
+            Self::RefusesStreams(_) | Self::RefusesAtTheGate(_) => Ok(*self),
+        }
+    }
+
+    async fn accept(&self) -> Result<Self, bifrost::Error> {
+        Err(bifrost::Error::Closed)
+    }
+
+    async fn close(&self) {}
+}
+
+impl bifrost::Session for HostilePeer {
+    type Security = bifrost::InProcess;
+    /// Swallows the request, so the gate's answer is what the dialer reads next.
+    type Write = tokio::io::Sink;
+    /// The gate's answer, written whole before the stream opens, then the end of the stream.
+    type Read = tokio::io::DuplexStream;
+
+    fn peer(&self) -> NodeId {
+        Self::node_id()
+    }
+
+    async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+        match *self {
+            Self::Unreachable(_) => Err(bifrost::Error::Closed),
+            Self::RefusesStreams(text) => Err(bifrost::Error::Refused(Self::refusal(text))),
+            Self::RefusesAtTheGate(text) => {
+                // Room for the whole frame: a detail is bounded well under this.
+                let (mut gate, read) = tokio::io::duplex(4096);
+                tightbeam::protocol::Response::Refused(Self::refusal(text))
+                    .write(&mut gate)
+                    .await
+                    .map_err(|error| bifrost::Error::Stream(error.into()))?;
+                Ok((tokio::io::sink(), read))
+            }
+        }
+    }
+
+    async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+        Err(bifrost::Error::Closed)
+    }
+
+    async fn wait_closed(&self) {}
+
+    /// A double that carries nothing has nothing to end.
+    fn close(&self) {}
 }
 
 #[cfg(test)]

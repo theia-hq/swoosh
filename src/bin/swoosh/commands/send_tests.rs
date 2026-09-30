@@ -8,7 +8,9 @@
 
 use std::path::Path;
 
-use super::{collect_files, file_name, peer_error};
+use swoosh::testkit::HostilePeer;
+
+use super::{collect_files, file_name, send_one};
 
 /// The operator's exact hostile name for the skip shape (`missing\nname\u{1b}[31m.txt`): a path that
 /// cannot be stat'ed is skipped, and the WHOLE line, error chain included, must render escaped. This
@@ -86,15 +88,20 @@ fn a_hostile_path_with_no_file_name_renders_escaped() {
 
 /// A receiver that refuses the stream sends its own detail, and the skip line prints it: a carriage
 /// return, an ESC CSI sequence and a bidi override there print as escapes, so the refusal cannot erase
-/// the skip line and draw a `sent` line in its place.
-#[test]
-fn a_hostile_refusal_prints_escaped() {
-    let refused = bifrost::Error::Refused(bifrost::Refusal::Unavailable {
-        detail: bifrost::RefusalDetail::bounded("no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}"),
-    });
-    let line = format!("skip: {:#}", peer_error(&refused));
+/// the skip line and draw a `sent` line in its place. Driven through `send_one` over a session that
+/// refuses every stream, so it is the stream's own error path this pins, not the renderer alone.
+#[tokio::test]
+async fn a_hostile_refusal_prints_escaped() {
+    let path = std::env::temp_dir().join(format!("swoosh-send-{}-refused.txt", std::process::id()));
+    std::fs::write(&path, b"a").expect("write the file to send");
+    let session = HostilePeer::RefusesStreams("no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}");
+
+    let error = send_one(&session, "a.txt".to_owned(), path.clone())
+        .await
+        .expect_err("a refused stream is a skip");
+    let _ = std::fs::remove_file(&path);
     assert_eq!(
-        line,
+        format!("skip: {error:#}"),
         r"skip: stream refused: unavailable: no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}"
     );
 }

@@ -65,8 +65,8 @@ fn a_path_and_a_cause_chain_render_escaped() {
 /// Every line that names a file in the home goes through [`EscapedPath`]: a home whose directory names
 /// hold CR, ESC or a newline can otherwise redraw a terminal line or forge a log line. A raw
 /// `Path::display` in the crate's source is allowed only where the path is not a home path: one the person
-/// typed on this machine (a backup, an export, a secret file, a socket), a word handed to `ssh`, or text
-/// written to a file rather than printed.
+/// typed on this machine (a backup, an export, a secret file, a socket), the known-hosts word handed to
+/// `ssh`, or text written to a file rather than printed. Test code is not scanned.
 #[test]
 fn no_home_path_prints_raw() {
     const NOT_A_HOME_PATH: [(&str, &str); 7] = [
@@ -75,7 +75,7 @@ fn no_home_path_prints_raw() {
         ("src/secret.rs", "path.display()"),
         ("src/root.rs", "self.to.display(), self.on.0"),
         ("src/bin/swoosh/commands/connect.rs", "path.display()"),
-        ("src/bin/swoosh/commands/ssh.rs", ".display()"),
+        ("src/bin/swoosh/commands/ssh.rs", "UserKnownHostsFile="),
         ("src/bin/swoosh/commands/identity/", "self.path.display()"),
     ];
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -98,7 +98,10 @@ fn no_home_path_prints_raw() {
                 .to_string_lossy()
                 .into_owned();
             let text = std::fs::read_to_string(&path).expect("a source file reads");
-            for (index, line) in text.lines().enumerate() {
+            // A file's inline test module is its last item and prints nothing a person reads, so the
+            // scan stops there.
+            let product = text.lines().take_while(|line| *line != "mod tests {");
+            for (index, line) in product.enumerate() {
                 if !line.contains(".display()") || line.trim_start().starts_with("//") {
                     continue;
                 }
