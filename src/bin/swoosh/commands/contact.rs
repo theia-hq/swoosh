@@ -2,13 +2,16 @@
 //!
 //! A local verb group: unlike the reach verbs it binds no transport and dials nobody, it just edits the
 //! contacts file beside the identity. `main` dispatches this before composing any transport, since there
-//! is nothing to reach. Each leaf owns an `async fn run(self, ..)` that consumes it and persists.
+//! is nothing to reach. Each leaf owns an `async fn run(self, ..)` that consumes it and persists. Each opens
+//! the book with [`ContactsStore::open_to_edit`](swoosh::contacts::ContactsStore::open_to_edit), which holds
+//! `roster.lock` from the read to the save, so a fold that lands meanwhile never loses the edit.
 //!
 //! `me/` is not edited here: it lists this person's own devices, and their root decides it. `add` and
 //! `rm` refuse it and write nothing.
 
 use clap::Subcommand;
-use swoosh::contacts::{ContactRef, ContactsStore, Petname};
+use swoosh::contacts::{ContactRef, Petname};
+use swoosh::home::Home;
 use swoosh::names::NameError;
 
 pub mod add;
@@ -27,12 +30,12 @@ pub enum ContactCmd {
 }
 
 impl ContactCmd {
-    /// Run the selected contact verb against the loaded store.
-    pub async fn run(self, store: ContactsStore) -> eyre::Result<()> {
+    /// Run the selected contact verb against `home`'s book.
+    pub async fn run(self, home: &Home) -> eyre::Result<()> {
         match self {
-            Self::Add(cmd) => cmd.run(store).await,
-            Self::Signet(cmd) => cmd.run(store).await,
-            Self::Rm(cmd) => cmd.run(store).await,
+            Self::Add(cmd) => cmd.run(home).await,
+            Self::Signet(cmd) => cmd.run(home).await,
+            Self::Rm(cmd) => cmd.run(home).await,
         }
     }
 }

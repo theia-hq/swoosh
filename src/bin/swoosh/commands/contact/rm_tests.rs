@@ -26,11 +26,10 @@ async fn populated_home(tag: &str) -> Home {
 }
 
 async fn remove(home: &Home, name: &str) -> eyre::Result<()> {
-    let store = ContactsStore::open(home.contacts()).await.expect("open");
     RmCmd {
         name: name.parse().expect("a valid contact ref"),
     }
-    .run(store)
+    .run(home)
     .await
 }
 
@@ -51,6 +50,10 @@ async fn contact_rm_me_is_refused() {
         std::fs::read(home.contacts()).expect("read the book"),
         before,
         "nothing is written"
+    );
+    assert!(
+        !home.roster_lock().exists(),
+        "the refusal comes before the book is opened"
     );
     let _ = std::fs::remove_dir_all(home.dir());
 }

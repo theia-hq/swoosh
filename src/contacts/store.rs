@@ -15,7 +15,7 @@ use bifrost::NodeIdParseError;
 use super::{Binding, Contacts, DeviceLabel, Petname, RosterVersion, Source};
 use crate::home::Home;
 use crate::names::NameError;
-use crate::roster::{Epoch, RosterLock};
+use crate::roster::{Epoch, FoldError, RosterLock};
 
 /// A contacts file at a known path, loaded into a mutable [`Contacts`] and saved back atomically.
 ///
@@ -59,9 +59,14 @@ impl ContactsStore {
     pub async fn open_to_edit(home: &Home) -> Result<Self, StoreError> {
         crate::config::create_store_dir(home.dir())
             .map_err(|error| StoreError::Write(error.into()))?;
+        // Only the io error goes on: a lock that cannot be taken reads like any other failed write of the
+        // book, and the lock's path inside the home stays out of the line.
         let lock = RosterLock::take(&home.roster_lock())
             .await
-            .map_err(|error| StoreError::Write(error.into()))?;
+            .map_err(|error| match error {
+                FoldError::Io { source, .. } => StoreError::Write(source.into()),
+                other => StoreError::Write(other.into()),
+            })?;
         let Self { path, contacts, .. } = Self::open(home.contacts()).await?;
         Ok(Self {
             path,

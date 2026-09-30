@@ -246,6 +246,37 @@ async fn the_contacts_temp_is_unique_per_write() {
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
 
+/// A lock that cannot be taken fails the edit the way any failed write of the book does: the one
+/// "writing the contacts file" line and the OS's reason once, with no path inside the home.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_lock_that_cannot_be_taken_fails_like_a_write() {
+    let dir = std::env::temp_dir().join(format!("swoosh-contacts-lock-{}", std::process::id()));
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    let home = crate::home::Home::resolve(Some(dir.clone())).expect("resolve");
+    // A directory where the lock file goes, so opening it fails.
+    tokio::fs::create_dir_all(home.roster_lock())
+        .await
+        .expect("mkdir");
+    let reason = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(home.roster_lock())
+        .expect_err("a directory does not open as the lock");
+
+    let error = ContactsStore::open_to_edit(&home)
+        .await
+        .expect_err("the lock cannot be taken");
+    let line = format!("{:#}", eyre::Report::new(error));
+    assert_eq!(line, format!("writing the contacts file: {reason}"));
+    assert!(
+        !line.contains(&*dir.to_string_lossy()),
+        "no home path: {line}"
+    );
+
+    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_saved_book_is_owner_only_in_an_owner_only_store() {

@@ -30,12 +30,11 @@ async fn home_with_book(tag: &str) -> Home {
 }
 
 async fn add(home: &Home, name: &str, key: NodeId) -> eyre::Result<()> {
-    let store = ContactsStore::open(home.contacts()).await.expect("open");
     AddCmd {
         name: super::super::new_contact(name).expect("a valid contact name"),
         key,
     }
-    .run(store)
+    .run(home)
     .await
 }
 

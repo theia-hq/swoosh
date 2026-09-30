@@ -1,0 +1,114 @@
+// Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+//! Each `contact` edit holds `<home>/roster.lock` from its read of the book to its save, end to end: while
+//! the lock a fold writes the book under is held, the compiled binary's `contact add`, `signet` and `rm`
+//! each wait, and once it is released each lands.
+
+use core::time::Duration;
+use std::os::fd::AsRawFd as _;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::Instant;
+
+/// A spawned child killed and reaped on drop, so a failing test never orphans it.
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// A scratch base removed on drop.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `swoosh --home <home> contact <args>`, spawned with nothing to read and nothing shown.
+fn contact(home: &Path, args: &[&str]) -> KillOnDrop {
+    KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_swoosh"))
+            .arg("--home")
+            .arg(home)
+            .arg("contact")
+            .args(args)
+            .env_remove("SWOOSH_HOME")
+            .env_remove("SWOOSH_KEY")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("contact spawns"),
+    )
+}
+
+#[test]
+fn a_contact_edit_waits_for_the_fold_lock() {
+    let scratch =
+        Scratch(std::env::temp_dir().join(format!("sw-contact-lock-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&scratch.0);
+    let key = bifrost::NodeId::from_ed25519_secret(&[6u8; 32]).to_string();
+
+    // The same edit on a home nobody locks finishes by itself. It also pays the first start of a freshly
+    // built binary, which on some systems takes seconds, so the timed edits below measure only the wait.
+    let free = scratch.0.join("free");
+    std::fs::create_dir_all(&free).expect("scratch home");
+    let status = contact(&free, &["add", "alice", &key])
+        .0
+        .wait()
+        .expect("contact add exits");
+    assert!(status.success(), "contact add lands on an unlocked home");
+
+    for (verb, args) in [
+        ("add", ["add", "alice", key.as_str()].as_slice()),
+        ("signet", ["signet", "alice", key.as_str()].as_slice()),
+        ("rm", ["rm", "alice"].as_slice()),
+    ] {
+        let home = scratch.0.join(verb);
+        std::fs::create_dir_all(&home).expect("scratch home");
+
+        // Hold the lock the way a fold does.
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(home.join("roster.lock"))
+            .expect("open <home>/roster.lock");
+        // SAFETY: `lock` owns a valid fd for the whole call; `flock` only attaches an advisory lock,
+        // released when `lock` drops. `LOCK_NB` makes a held lock an error rather than a wait.
+        let taken = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        assert!(taken, "the test holds <home>/roster.lock");
+
+        let mut edit = contact(&home, args);
+        // An edit that takes no lock finishes well inside this; one that takes it is still waiting.
+        let until = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < until {
+            let exited = edit.0.try_wait().expect("poll the edit");
+            assert!(
+                exited.is_none(),
+                "contact {verb} finished while roster.lock was held: {exited:?}"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !home.join("contacts.toml").exists(),
+            "contact {verb} writes nothing while roster.lock is held"
+        );
+
+        drop(lock);
+        let status = edit.0.wait().expect("the edit exits");
+        assert!(
+            status.success(),
+            "contact {verb} lands once the lock is free"
+        );
+        if verb != "rm" {
+            let book = std::fs::read_to_string(home.join("contacts.toml")).expect("read the book");
+            assert!(book.contains("alice"), "contact {verb} saved alice: {book}");
+        }
+    }
+}
