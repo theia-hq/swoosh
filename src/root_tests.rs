@@ -1955,6 +1955,57 @@ async fn a_forked_offer_reports_behind() {
 }
 
 #[tokio::test]
+async fn a_root_act_whose_cut_forks_offers_nothing_and_fails() {
+    // Between the prompt and the commit, this machine folds a list another copy of the root cut: one at the
+    // number this act's cut takes (its cut forks), and one past it (its cut is not newer).
+    for (tag, number) in [("own-fork", 2), ("own-behind", 3)] {
+        let (home, first, mut root) = revoking(tag, &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
+        let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
+        let other = RosterDoc::with_revocations(
+            Epoch(number),
+            first.members().to_vec(),
+            vec![id(OTHER, STANDING_UNTIL)],
+            Vec::new(),
+        )
+        .unwrap();
+        crate::roster::fold(&home, &TestRoot::seeded(ROOT).sign_update(&other))
+            .await
+            .unwrap();
+        root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+
+        // As `invite` and `revoke` go on: offer the cut only once it is committed.
+        let dial = Loopback::new(
+            home.clone(),
+            [(TestNode::seeded(NAS).node_id(), nas.clone())],
+        );
+        let mut out = Vec::new();
+        let error = match root.commit_to(&mut out).await {
+            Ok(committed) => {
+                let _reach = committed.offer(&dial).await;
+                None
+            }
+            Err(error) => Some(error),
+        };
+
+        assert!(dial.dialed().is_empty(), "{tag}: nothing was offered");
+        let error = error.unwrap_or_else(|| panic!("{tag}: the act went on"));
+        assert!(matches!(error, RootError::ListChanged), "{tag}: {error:?}");
+        assert_eq!(
+            error.to_string(),
+            "your devices' list changed while this ran: run it again."
+        );
+        assert!(out.is_empty(), "{tag}: nothing printed as sent");
+        assert!(
+            !crate::gate::KeyedDenylist::load(&nas)
+                .await
+                .unwrap()
+                .is_revoked_peer(&key(LAPTOP)),
+            "{tag}: me/nas never got the cut"
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_refused_offer_is_never_counted_as_taken() {
     let (_home, _, mut root) = revoking(
         "refused",
