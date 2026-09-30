@@ -6,12 +6,11 @@
 //! One child-process run proves the whole bare-verb seam: spawn the compiled binary as a
 //! foreground resident under a scratch home, wait for its readiness banner, drive `service ls`,
 //! `status`, and `stop` over the real control socket, then assert the resident's clean exit, the
-//! unlinked socket, and the released lock. Only the exact spawned pid is ever signalled.
+//! unlinked socket, and the runtime leaf gone with it. Only the exact spawned pid is ever signalled.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 use std::io::{BufRead as _, BufReader};
-use std::os::fd::AsRawFd as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -130,8 +129,7 @@ fn drain(
 }
 
 /// The full bare-verb loop against one real resident: banner, `service ls`, `status`, `stop`, the
-/// resident's clean local exit, the unlinked socket, the released lock, and the post-stop teaching
-/// error. A stop through any other path would leave the resident running and fail the exit wait.
+/// resident's clean local exit, the unlinked socket, and the post-stop teaching error. A stop through any other path would leave the resident running and fail the exit wait.
 #[test]
 fn bare_stop_stops_the_resident() {
     let scratch = Scratch::new("stop");
@@ -313,12 +311,6 @@ fn bare_stop_stops_the_resident() {
     );
     assert!(!socket.exists(), "the released socket is unlinked");
 
-    // The flock is released: a fresh exclusive lock on the lock file succeeds.
-    let lock = std::fs::File::open(leaf.join("control.lock")).expect("the lock file exists");
-    let locked = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    assert_eq!(locked, 0, "the resident's flock is released on exit");
-    let _ = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) };
-
     // With no serve running, the bare stop says so and exits non-zero.
     let again = swoosh(&scratch, &["stop"]);
     assert!(!again.status.success(), "no resident exits non-zero");
@@ -326,5 +318,86 @@ fn bare_stop_stops_the_resident() {
     assert!(
         again_err.contains("swoosh serve is not running on this machine."),
         "the error says nothing is running: {again_err}"
+    );
+}
+
+/// A `serve` holds an owner-only lock file, and stopped cleanly leaves nothing in the runtime root: the
+/// socket, the lock file and the leaf directory holding them all go.
+#[test]
+fn serve_removes_its_runtime_leaf_on_exit() {
+    let scratch = Scratch::new("leaf");
+    let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
+    let leaf = runtime_leaf(&home, &scratch.xdg);
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_swoosh"));
+    command
+        .arg("--home")
+        .arg(&scratch.home_dir)
+        .args(["serve", "--local"])
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .env_remove("SWOOSH_KEY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = KillOnDrop(command.spawn().expect("the resident serve spawns"));
+    let stdout = Arc::new(Mutex::new(String::new()));
+    let stderr = Arc::new(Mutex::new(String::new()));
+    let out_reader = drain(
+        child.0.stdout.take().expect("piped stdout"),
+        Arc::clone(&stdout),
+    );
+    let err_reader = drain(
+        child.0.stderr.take().expect("piped stderr"),
+        Arc::clone(&stderr),
+    );
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !stdout
+        .lock()
+        .expect("the capture lock")
+        .contains("ctrl-c to stop")
+    {
+        if let Some(status) = child.0.try_wait().expect("poll the resident") {
+            panic!(
+                "the resident exited before its banner: {status}\n{}",
+                stderr.lock().expect("the capture lock")
+            );
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the resident never printed its banner"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        leaf.join("control.sock").exists() && leaf.join("control.lock").exists(),
+        "the running resident holds its socket and lock in the leaf"
+    );
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(leaf.join("control.lock"))
+            .expect("stat the lock")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "the lock file is owner-only");
+    }
+
+    let stop = swoosh(&scratch, &["stop"]);
+    assert!(
+        stop.status.success(),
+        "bare stop exits 0: {}",
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    let status = wait_for_exit(&mut child.0, Duration::from_secs(30));
+    assert!(
+        status.success(),
+        "a socket stop exits the resident 0: {status}"
+    );
+    out_reader.join().expect("the stdout reader joins");
+    err_reader.join().expect("the stderr reader joins");
+    assert!(
+        !leaf.exists(),
+        "the stopped resident leaves no runtime leaf: {}",
+        leaf.display()
     );
 }

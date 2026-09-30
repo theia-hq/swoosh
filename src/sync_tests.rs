@@ -396,6 +396,35 @@ async fn an_exchange_with_a_fork_keeps_both_revocation_lists() {
     );
 }
 
+/// The update a fold writes, the fork it keeps, and the record of the exchange are each owner-only.
+#[tokio::test]
+async fn every_update_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let desk = device("modes", DESK).await;
+    let nas = device("modes", NAS).await;
+    holding(&desk, &update(4, vec![id(1)], vec![])).await;
+    holding(&nas, &update(4, vec![id(2)], vec![])).await;
+    let dial = Loopback::new(desk.clone(), [(node(NAS), nas.clone())]);
+    round(
+        &dial,
+        &[named(NAS, "me/nas")],
+        Until::Every,
+        Duration::from_secs(20),
+    )
+    .await;
+
+    for home in [&desk, &nas] {
+        for path in [home.roster(), home.roster_fork(), home.roster_synced()] {
+            let mode = std::fs::metadata(&path)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{} is owner-only", path.display());
+        }
+    }
+}
+
 #[tokio::test]
 async fn an_exchange_at_one_number_with_two_digests_folds_both_ways() {
     let desk = device("both-ways", DESK).await;

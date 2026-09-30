@@ -257,6 +257,53 @@ impl Home {
         self.dir.join("known_hosts")
     }
 
+    /// The files whose contents decide whom this machine trusts: the pin, the links it signed, the
+    /// contacts book, everything it refuses for good, and what `serve` runs.
+    fn trust_files(&self) -> [PathBuf; 10] {
+        [
+            self.signet(),
+            self.links(),
+            self.contacts(),
+            self.revoked(),
+            self.revoked_keys(),
+            self.disabled_roots(),
+            self.serving(),
+            self.disabled(),
+            self.relay(),
+            self.resolver(),
+        ]
+    }
+
+    /// Refuse a home one of whose [trust files](Self::trust_files) another user owns, or group or other
+    /// can write: the owner and mode check a key file gets, less the read bits, since these files hold no
+    /// secret. Root may own one, as it may own a key file an administrator installed. A file that is
+    /// absent, or that cannot be stat'ed, passes: its reader reports what is wrong with it.
+    ///
+    /// # Errors
+    ///
+    /// [`LooseFile`] naming the first file that fails, and the command that fixes it.
+    pub fn check_trust_files(&self) -> Result<(), LooseFile> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+
+            // SAFETY: `geteuid` takes no arguments and touches no memory.
+            let euid = unsafe { libc::geteuid() };
+            for path in self.trust_files() {
+                let Ok(meta) = std::fs::metadata(&path) else {
+                    continue;
+                };
+                if meta.uid() != euid && meta.uid() != 0 {
+                    return Err(LooseFile::Owner { path, euid });
+                }
+                if meta.mode() & 0o022 != 0 {
+                    return Err(LooseFile::Writable { path });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The 16-char hex key scoping this home's runtime state: inline 64-bit FNV-1a over the
     /// canonicalized home path, the full 64 bits rendered as 16 lowercase hex chars. Dependency
     /// free and stable across daemon and client because both binaries carry this same function.
@@ -403,6 +450,25 @@ fn default_dir() -> eyre::Result<PathBuf> {
     let home =
         std::env::var_os("HOME").ok_or_else(|| eyre!("HOME is not set; pass --home <dir>"))?;
     Ok(PathBuf::from(home).join(".config").join("swoosh"))
+}
+
+/// A trust file this machine will not load, because someone other than its owner could have written it.
+#[derive(Debug, thiserror::Error)]
+pub enum LooseFile {
+    /// Group or other can write the file.
+    #[error("{} can be written by others: chmod 600 {}", path.display(), path.display())]
+    Writable {
+        /// The file.
+        path: PathBuf,
+    },
+    /// Another user, not root, owns the file.
+    #[error("{} belongs to another user: sudo chown {euid} {}", path.display(), path.display())]
+    Owner {
+        /// The file.
+        path: PathBuf,
+        /// This process's user, who must own it.
+        euid: u32,
+    },
 }
 
 /// Reject a `--home` that names an existing FILE, with a teaching error instead of the confusing

@@ -201,7 +201,7 @@ async fn dial_with(
             }
             if theirs == NONE_YET {
                 // Neither side holds an update.
-                touch_synced(home);
+                touch_synced(home).await;
                 return Ok(Answer::Same);
             }
             Answer::Same
@@ -241,7 +241,7 @@ async fn dial_with(
     if let Err(error) = forks.await {
         tracing::debug!(%error, "could not pass the forks kept in an exchange");
     }
-    touch_synced(home);
+    touch_synced(home).await;
     Ok(answer)
 }
 
@@ -275,7 +275,7 @@ pub async fn answer(
         if my_digest == NONE_YET {
             // Neither side holds an update.
             writer.shutdown().await?;
-            touch_synced(home);
+            touch_synced(home).await;
             return Ok(());
         }
     } else if mine > theirs {
@@ -318,7 +318,7 @@ pub async fn answer(
     if let Err(error) = forks.await {
         tracing::debug!(%error, "could not pass the forks kept in an exchange");
     }
-    touch_synced(home);
+    touch_synced(home).await;
     Ok(())
 }
 
@@ -365,11 +365,15 @@ async fn read_update(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, E
     Ok(bytes)
 }
 
-/// Record that an exchange reached another device, now. Best-effort: a failure only makes the next dial
-/// exchange again.
-fn touch_synced(home: &Home) {
+/// Record that an exchange reached another device, now, owner-only through
+/// [`write_private_atomic`](crate::config::write_private_atomic). Best-effort: a failure only makes the
+/// next dial exchange again.
+async fn touch_synced(home: &Home) {
     let now = unix_now();
-    if let Err(error) = std::fs::write(home.roster_synced(), format!("{now}\n")) {
+    let written =
+        crate::config::write_private_atomic(&home.roster_synced(), format!("{now}\n").as_bytes())
+            .await;
+    if let Err(error) = written {
         tracing::debug!(%error, "could not record the sync");
     }
 }
