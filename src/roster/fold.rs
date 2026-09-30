@@ -267,6 +267,7 @@ fn carries(doc: &RosterDoc, fork: &RosterDoc) -> bool {
 }
 
 /// The fold's exclusive flock on `<home>/roster.lock`, held while this value lives.
+#[derive(Debug)]
 pub(crate) struct RosterLock {
     /// Held, never read: the lock lives exactly as long as this open file does.
     _held: std::fs::File,

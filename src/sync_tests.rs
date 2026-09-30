@@ -19,7 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Re
 use super::{Answer, Device, Dial as _, ExchangeError, Until, answer, digest, exchange, round};
 use crate::codec::Id;
 use crate::config;
-use crate::contacts::DeviceLabel;
+use crate::contacts::{ContactsStore, DeviceLabel};
 use crate::gate::KeyedDenylist;
 use crate::home::Home;
 use crate::roster::{Epoch, Folded, Member, RosterDoc, fold};
@@ -633,5 +633,46 @@ async fn concurrent_folds_never_lose_a_revocation() {
     assert!(
         kept.contains(&id(1)) && kept.contains(&id(2)),
         "both updates' revocations are kept"
+    );
+}
+
+/// A `contact add` holds `roster.lock` from its read of the book to its save, so a fold that lands meanwhile
+/// waits, and the book keeps both the added contact and the devices the fold wrote.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_contact_writers_never_lose_an_update() {
+    let desk = device("contact-writers", DESK).await;
+    holding(&desk, &update(1, vec![], vec![])).await;
+    let mut devices = members();
+    devices.push(root().member(key(LAPTOP), name("laptop")).unwrap());
+    let newer = root()
+        .sign_update(&RosterDoc::with_revocations(Epoch(2), devices, vec![], vec![]).unwrap());
+
+    let mut book = ContactsStore::open_to_edit(&desk).await.unwrap();
+    let folding = tokio::spawn({
+        let desk = desk.clone();
+        async move { fold(&desk, &newer).await.unwrap() }
+    });
+    // Long enough for a fold that takes no notice of the edit to finish and write the book first.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let _ = book
+        .contacts_mut()
+        .add("alice".parse().unwrap(), None, node(PHONE));
+    book.save().await.unwrap();
+    drop(book);
+    assert_eq!(folding.await.unwrap(), Folded::Newer);
+
+    let book = ContactsStore::open(desk.contacts()).await.unwrap();
+    let contacts = book.contacts();
+    assert!(
+        contacts
+            .petnames()
+            .any(|petname| petname.as_str() == "alice"),
+        "the added contact is kept"
+    );
+    assert!(
+        contacts
+            .devices(&"me".parse().unwrap())
+            .is_some_and(|mut devices| devices.any(|(label, _)| label.as_str() == "laptop")),
+        "the device the fold wrote is kept"
     );
 }

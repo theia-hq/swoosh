@@ -13,17 +13,23 @@ use std::path::PathBuf;
 use bifrost::NodeIdParseError;
 
 use super::{Binding, Contacts, DeviceLabel, Petname, RosterVersion, Source};
+use crate::home::Home;
 use crate::names::NameError;
-use crate::roster::Epoch;
+use crate::roster::{Epoch, RosterLock};
 
 /// A contacts file at a known path, loaded into a mutable [`Contacts`] and saved back atomically.
 ///
 /// Own the path once, then [`save`](Self::save) after each mutation. The store creates the parent config
-/// dir on first save, mirroring how the identity key is provisioned lazily beside it.
+/// dir on first save, mirroring how the identity key is provisioned lazily beside it. A writer holds
+/// `<home>/roster.lock` from the read to the save: [`open_to_edit`](Self::open_to_edit) takes it, and a
+/// fold or a join already holds it when it opens the book.
 #[derive(Debug)]
 pub struct ContactsStore {
     path: PathBuf,
     contacts: Contacts,
+    /// `<home>/roster.lock`, held until this store drops, when [`open_to_edit`](Self::open_to_edit) opened
+    /// it.
+    _lock: Option<RosterLock>,
 }
 
 impl ContactsStore {
@@ -31,13 +37,37 @@ impl ContactsStore {
     ///
     /// A missing file is the first-run case, not an error: an empty address book. A present-but-corrupt
     /// file IS an error, surfaced rather than silently discarding what the user saved.
+    ///
+    /// It takes no lock: a reader, or a writer that already holds `<home>/roster.lock`, opens this way.
     pub async fn open(path: PathBuf) -> Result<Self, StoreError> {
         let contacts = match tokio::fs::read_to_string(&path).await {
             Ok(text) => decode(&text)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Contacts::default(),
             Err(error) => return Err(StoreError::Read(error)),
         };
-        Ok(Self { path, contacts })
+        Ok(Self {
+            path,
+            contacts,
+            _lock: None,
+        })
+    }
+
+    /// Open `home`'s book to change it: take `<home>/roster.lock`, then read the book under it.
+    ///
+    /// The lock is held until the store drops, so the read, the change and the [`save`](Self::save) are
+    /// one write that no fold and no other editor interleaves with, and none of them loses an update.
+    pub async fn open_to_edit(home: &Home) -> Result<Self, StoreError> {
+        crate::config::create_store_dir(home.dir())
+            .map_err(|error| StoreError::Write(error.into()))?;
+        let lock = RosterLock::take(&home.roster_lock())
+            .await
+            .map_err(|error| StoreError::Write(error.into()))?;
+        let Self { path, contacts, .. } = Self::open(home.contacts()).await?;
+        Ok(Self {
+            path,
+            contacts,
+            _lock: Some(lock),
+        })
     }
 
     /// The loaded address book, to read.
@@ -52,35 +82,14 @@ impl ContactsStore {
 
     /// Write the current contacts back to disk, creating the config dir on first save.
     ///
-    /// Writes to a sibling temp file and renames it over the target, so a crash mid-write never leaves a
-    /// half-written, unparseable address book: the rename is atomic, the reader sees the old file or the
-    /// new one, never a torn one.
+    /// Writes through [`config::write_private_atomic`](crate::config::write_private_atomic): a temp unique
+    /// to this write, owner-only (`0600`) and synced, renamed over the target. A crash mid-write never
+    /// leaves a half-written book, and two writes never share a temp.
     pub async fn save(&self) -> Result<(), StoreError> {
         let text = encode(&self.contacts)?;
-        if let Some(parent) = self.path.parent() {
-            // The address book is this node's trust graph (which petname maps to which key), as sensitive as
-            // the identity it sits beside, so the store dir is created owner-only (`0700`); see
-            // [`config::create_store_dir`](crate::config).
-            crate::config::create_store_dir(parent).map_err(StoreError::Write)?;
-        }
-        let temp = self.path.with_extension("toml.tmp");
-        tokio::fs::write(&temp, text)
+        crate::config::write_private_atomic(&self.path, text.as_bytes())
             .await
-            .map_err(StoreError::Write)?;
-        // Tighten the temp to `0600` before the rename carries that mode onto the target, so the book is
-        // owner-only; the `0700` dir already keeps the transient temp unreadable to other local users.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            tokio::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
-                .await
-                .map_err(StoreError::Write)?;
-        }
-        tokio::fs::rename(&temp, &self.path)
-            .await
-            .map_err(StoreError::Write)?;
-        Ok(())
+            .map_err(StoreError::Write)
     }
 }
 
@@ -255,7 +264,7 @@ pub enum StoreError {
     Read(#[source] io::Error),
     /// The contacts file could not be written.
     #[error("writing the contacts file")]
-    Write(#[source] io::Error),
+    Write(#[source] eyre::Report),
     /// The contacts file was not valid TOML.
     #[error("the contacts file is not valid TOML")]
     Parse(#[source] toml::de::Error),
