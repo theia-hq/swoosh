@@ -13,13 +13,17 @@
 //! `tightbeam` binary on PATH), so the bridge an operator debugs by hand is the one ssh runs.
 
 use core::str::FromStr;
+use std::io::Read as _;
 use std::path::PathBuf;
 
-use bifrost::{Discovery, Node, Transport};
+use bifrost::{Discovery, Node, Session as _, Transport};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::escape::escaped_report;
 use swoosh::peer::Peer;
+use tightbeam::tunnel::Connector;
+use tokio::io::{self, AsyncWriteExt as _};
+use tokio::sync::mpsc;
 
 /// Where a reached service's bytes go locally: the one `--to` selector, parsed to a closed enum so the
 /// three sinks are disjoint and "two sinks at once" is unrepresentable (no `ArgGroup`, no two-bool trap).
@@ -97,12 +101,83 @@ pub async fn connect<T: Transport, D: Discovery>(
             println!("forwarding 127.0.0.1:{port} to {dial} ({service})");
             forward.run().await
         }
-        To::Stdout => connector.pipe_stdio(node).await.map_err(escaped_report),
+        To::Stdout => pipe_stdio(connector, node).await.map_err(escaped_report),
         To::UnixListener(path) => eyre::bail!(
             "--to unix:{} is reserved, not yet built (bind a port and connect to it, or use `--to -`)",
             path.display()
         ),
     }
+}
+
+/// Reach the service over one stream and pipe it against this process's stdin and stdout: the bridge
+/// `swoosh ssh` runs as its `ProxyCommand`.
+///
+/// The pump ends on the host's half: when the stream from the host ends or errors (the remote command
+/// exited, or the host cut the session on a revoke or an expiry), the run is over, whatever stdin is
+/// doing. stdin is read on its own thread (see [`stdin_chunks`]), so nothing waits on a read that, at a
+/// terminal or under ssh, only returns when the person types again.
+async fn pipe_stdio<T: Transport, D: Discovery>(
+    connector: Connector,
+    node: &Node<T, D>,
+) -> eyre::Result<()> {
+    // Held for the whole pump: the stream rides this session, which closes when it drops.
+    let session = connector.open_service(node).await?;
+    let (mut writer, mut reader) = session.open_bi().await?;
+    let mut input = stdin_chunks()?;
+    let mut output = io::stdout();
+    let upstream = async {
+        while let Some(chunk) = input.recv().await {
+            writer.write_all(&chunk?).await?;
+        }
+        writer.shutdown().await
+    };
+    let downstream = async {
+        io::copy(&mut reader, &mut output).await?;
+        output.flush().await
+    };
+    tokio::select! {
+        // The host's half ended or failed: the run is over. The stdin pump is dropped, never awaited.
+        result = downstream => result?,
+        // stdin ended first (a piped, finite input), or the write toward the host failed. A clean end
+        // half-closes toward the host, then the host's remaining output still drains to stdout.
+        result = upstream => {
+            result?;
+            io::copy(&mut reader, &mut output).await?;
+            output.flush().await?;
+        }
+    }
+    Ok(())
+}
+
+/// This process's stdin, read on a thread of its own and handed over in chunks; the channel closes at
+/// the end of input or after a read error.
+///
+/// Not tokio's stdin: that reads on the runtime's blocking pool, and the runtime waits for every blocking
+/// read before the process can exit, so a run that has ended would hang until the next keystroke. This
+/// thread is never joined: a read it is parked in ends with the process.
+fn stdin_chunks() -> eyre::Result<mpsc::Receiver<io::Result<Vec<u8>>>> {
+    // One chunk in flight: the reader waits for the stream to take a chunk before reading the next, so
+    // a slow host holds back stdin rather than this process buffering it.
+    let (sender, receiver) = mpsc::channel(1);
+    std::thread::Builder::new()
+        .name("stdin".to_owned())
+        .spawn(move || {
+            let mut stdin = std::io::stdin().lock();
+            let mut buffer = vec![0_u8; 16 * 1024];
+            loop {
+                let chunk = match stdin.read(&mut buffer) {
+                    Ok(0) => return,
+                    Ok(read) => Ok(buffer[..read].to_vec()),
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => Err(error),
+                };
+                let failed = chunk.is_err();
+                if sender.blocking_send(chunk).is_err() || failed {
+                    return;
+                }
+            }
+        })?;
+    Ok(receiver)
 }
 
 #[cfg(test)]
