@@ -357,6 +357,10 @@ impl ServeCmd {
             .filter(|user_home| !user_home.is_empty())
             .map(std::path::PathBuf::from);
         refuse_recv_into_home(&recv, home, user_home.as_deref())?;
+        // The inbox is made here too, so a run that cannot make it stops before the machine key is made.
+        for service in &recv {
+            service.create_inbox()?;
+        }
         self.claim = Some(Box::new(Claim {
             started,
             recv,
@@ -536,9 +540,8 @@ impl ServeCmd {
         let activity = self.activity(std::io::stderr())?;
         for service in &recv {
             // One `Recv` instance per receive service, holding ONLY its own output dir: de-merged the SAME way
-            // as fetch, at the claim, where each dir was checked.
+            // as fetch, at the claim, where each dir was checked and the inbox made.
             let name: Service = service.name().parse()?;
-            service.create_inbox()?;
             router = bind_recv(router, name, service.out().to_owned(), activity.as_ref())?;
         }
         // The node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the route's

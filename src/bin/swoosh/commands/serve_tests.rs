@@ -2777,9 +2777,9 @@ fn a_gated_bare_fetch_is_allowed() {
     );
 }
 
-/// The inbox for an extraction with no dirless `recv:`: it is never asked for.
-fn no_inbox() -> eyre::Result<PathBuf> {
-    Err(eyre::eyre!("no `recv:` here is dirless"))
+/// The inbox when `HOME` is unset: there is none.
+fn no_inbox() -> Option<PathBuf> {
+    None
 }
 
 /// Two `name=recv:<dir>` services de-merge into TWO separate `RecvService`s, each with its own served name
@@ -2848,6 +2848,21 @@ fn non_recv_services_pass_through_and_only_recv_is_removed() {
         recv.len(),
         1,
         "only the one receive service is de-merged out"
+    );
+}
+
+/// With no `HOME` there is no inbox, so a dirless `recv:` is refused with the fix that names a directory,
+/// spelled with the service's own name.
+#[test]
+fn a_dirless_recv_with_no_home_teaches_its_own_name() {
+    let mut requested = vec!["drop=recv:".to_owned()];
+    let Err(error) = extract_recv_services(&mut requested, no_inbox) else {
+        panic!("a dirless `recv:` with no inbox should be refused");
+    };
+    assert_eq!(
+        error.to_string(),
+        "HOME is not set, so recv: has no inbox to save into; name a directory: \
+         swoosh serve drop=recv:<dir>"
     );
 }
 

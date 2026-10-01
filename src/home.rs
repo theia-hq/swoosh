@@ -450,29 +450,23 @@ fn default_dir() -> eyre::Result<PathBuf> {
 /// `~/Library/Application Support/swoosh/inbox` on macOS, else `$XDG_DATA_HOME/swoosh/inbox` when that is set
 /// and absolute, else `~/.local/share/swoosh/inbox`. Never the directory `serve` was started in: a push names
 /// its own path under the output directory, so a `serve` started in `$HOME` would put the home's files in
-/// reach of every sender.
-pub fn inbox() -> eyre::Result<PathBuf> {
+/// reach of every sender. `None` when there is no `HOME` to place it under.
+pub fn inbox() -> Option<PathBuf> {
     #[cfg(not(target_os = "macos"))]
     if let Some(data) = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|data| data.is_absolute())
     {
-        return Ok(data.join("swoosh").join("inbox"));
+        return Some(data.join("swoosh").join("inbox"));
     }
     let home = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            eyre!(
-                "HOME is not set, so recv: has no inbox to save into; name a directory: \
-                 swoosh serve inbox=recv:<dir>"
-            )
-        })?;
+        .map(PathBuf::from)?;
     #[cfg(target_os = "macos")]
     let data = home.join("Library").join("Application Support");
     #[cfg(not(target_os = "macos"))]
     let data = home.join(".local").join("share");
-    Ok(data.join("swoosh").join("inbox"))
+    Some(data.join("swoosh").join("inbox"))
 }
 
 /// A trust file this machine will not load, because someone other than its owner could have written it.

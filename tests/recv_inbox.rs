@@ -266,10 +266,11 @@ async fn a_dirless_recv_saves_into_the_inbox() {
     );
 }
 
-/// A `recv:` into `$HOME`, the swoosh home, or a directory holding it is refused at start with the line
-/// naming the directory, and nothing starts. `.` in `$HOME` is the case the rule is for (the start directory
-/// is read canonical, so the line names it that way); a symlink into the
-/// swoosh home is caught because the check compares canonical paths.
+/// A `recv:` into `$HOME`, the swoosh home, a directory holding it, or a directory inside it is refused at
+/// start with the line naming the directory, and nothing starts. `.` in `$HOME` is the case the rule is for
+/// (the start directory is read canonical, so the line names it that way, `.` dropped); a symlink into the
+/// swoosh home is caught because the check compares canonical paths, and on macOS another spelling of the
+/// same directory through the `/System/Volumes/Data` firmlink because it compares device and inode too.
 #[test]
 fn a_recv_into_home_is_refused() {
     let scratch = Scratch::new("named");
@@ -278,14 +279,17 @@ fn a_recv_into_home_is_refused() {
     let link = scratch.work.join("link");
     std::os::unix::fs::symlink(&scratch.home, &link).unwrap();
     let link = link.display().to_string();
+    let inside = scratch.home.join("root");
+    std::fs::create_dir_all(&inside).unwrap();
+    let inside = inside.display().to_string();
 
     scratch.assert_refused(
         &scratch.user,
         &["inbox=recv:."],
-        &format!(
-            "{}/.",
-            std::fs::canonicalize(&scratch.user).unwrap().display()
-        ),
+        &std::fs::canonicalize(&scratch.user)
+            .unwrap()
+            .display()
+            .to_string(),
         "it is your home directory",
     );
     scratch.assert_refused(
@@ -306,10 +310,61 @@ fn a_recv_into_home_is_refused() {
         &base,
         "it holds the swoosh home",
     );
+    scratch.assert_refused(
+        &scratch.work,
+        &[&format!("inbox=recv:{inside}")],
+        &inside,
+        "it is inside the swoosh home",
+    );
+    #[cfg(target_os = "macos")]
+    for (dir, why) in [
+        (&scratch.user, "it is your home directory"),
+        (&scratch.base, "it holds the swoosh home"),
+        (&scratch.home.join("root"), "it is inside the swoosh home"),
+    ] {
+        // `realpath` keeps this spelling: the firmlink is not a symlink, so only the identity matches.
+        let other = Path::new("/System/Volumes/Data")
+            .join(
+                std::fs::canonicalize(dir)
+                    .unwrap()
+                    .strip_prefix("/")
+                    .unwrap(),
+            )
+            .display()
+            .to_string();
+        scratch.assert_refused(
+            &scratch.work,
+            &[&format!("inbox=recv:{other}")],
+            &other,
+            why,
+        );
+    }
     assert!(
         !scratch.home.join("serving").exists(),
         "a refused start saves no list"
     );
+}
+
+/// An inbox that cannot be made stops `serve` before anything is written to the home, the machine key
+/// among them.
+#[test]
+fn an_inbox_that_cannot_be_made_stops_before_the_key() {
+    let scratch = Scratch::new("unmade");
+    let data_root = scratch
+        .inbox()
+        .ancestors()
+        .find(|above| above.parent() == Some(scratch.user.as_path()))
+        .unwrap()
+        .to_owned();
+    std::fs::write(&data_root, b"not a directory").unwrap();
+
+    let Some(output) = scratch.refused(&scratch.work, &["inbox=recv:"]) else {
+        panic!("serve started with an inbox it could not make");
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.starts_with("error: could not create "), "{stderr}");
+    assert!(!scratch.home.join("key").exists(), "serve made no key");
 }
 
 /// A saved list that names such a directory is refused at resume the same way, and nothing starts.
