@@ -325,13 +325,16 @@ pub enum RootError {
     },
     /// The key is revoked, and a revoked key is never admitted again.
     #[error(
-        "{}… was revoked; a revoked key is not re-admitted. Make that machine a new key and invite that one. \
-        On that machine: swoosh leave --new-key",
+        "{}… is the key of me/{name}, which was revoked; a revoked key is not re-admitted. Make that machine \
+        a new key and invite that one. On that machine: swoosh leave --new-key",
         crate::credential::short(.key)
     )]
     RevokedKey {
         /// The key.
         key: VerifyKey,
+        /// The name the revoked device had. The short key stays beside it: the name may now be a live
+        /// device's, and the key says which `me/{name}` is meant.
+        name: DeviceLabel,
     },
     /// The passphrase could not be asked for.
     #[error("{0}")]
@@ -2229,8 +2232,11 @@ impl Records<'_> {
     /// its mint cut, the name the mint gave this machine is free: this machine moves off it.
     pub fn check_add(&self, key: VerifyKey, name: &DeviceLabel) -> Result<(), RootError> {
         let book = self.book;
-        if book.revoked_keys.contains_key(key.bytes()) {
-            return Err(RootError::RevokedKey { key });
+        if let Some(revoked) = book.revoked_keys.get(key.bytes()) {
+            return Err(RootError::RevokedKey {
+                key,
+                name: revoked.label.clone(),
+            });
         }
         if let Some(row) = book.rows.iter().find(|row| row.node == key) {
             if Some(key) == self.own {

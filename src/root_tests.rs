@@ -1349,8 +1349,8 @@ async fn the_device_refusals_print_their_lines() {
     assert_eq!(
         line,
         format!(
-            "{}… was revoked; a revoked key is not re-admitted. Make that machine a new key and invite that \
-             one. On that machine: swoosh leave --new-key",
+            "{}… is the key of me/gone, which was revoked; a revoked key is not re-admitted. Make that \
+             machine a new key and invite that one. On that machine: swoosh leave --new-key",
             short(LAPTOP)
         )
     );

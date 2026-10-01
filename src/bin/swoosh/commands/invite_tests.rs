@@ -1425,8 +1425,8 @@ async fn a_revoked_key_is_not_re_admitted() {
     refused_before_writing(
         &ran,
         &format!(
-            "{}… was revoked; a revoked key is not re-admitted. Make that machine a new key and invite \
-             that one. On that machine: swoosh leave --new-key",
+            "{}… is the key of me/old, which was revoked; a revoked key is not re-admitted. Make that \
+             machine a new key and invite that one. On that machine: swoosh leave --new-key",
             swoosh::credential::short(&key(OLD)),
         ),
         &home,
@@ -1447,14 +1447,21 @@ async fn a_key_in_revoked_keys_is_not_re_admitted() {
             Epoch(2),
             vec![member(&own)],
             Vec::new(),
-            vec![swoosh::testkit::revoked(key(LAPTOP))],
+            vec![RevokedDevice {
+                node: key(LAPTOP),
+                label: revoked(LAPTOP, "laptop").label,
+            }],
         )
         .unwrap(),
     );
-    let ran = invite(&home, &["laptop", &node(LAPTOP).to_string()]).await;
+    let ran = invite(&home, &["new", &node(LAPTOP).to_string()]).await;
+    // With no row to read, the name comes from the update's entry for the key.
     let refusal = ran.refusal();
     assert!(
-        refusal.contains("a revoked key is not re-admitted"),
+        refusal.contains(&format!(
+            "{}… is the key of me/laptop, which was revoked; a revoked key is not re-admitted.",
+            swoosh::credential::short(&key(LAPTOP)),
+        )),
         "{refusal}"
     );
     assert_eq!(ran.prompts, 0);
