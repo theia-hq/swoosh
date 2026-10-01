@@ -45,7 +45,7 @@ mod commands;
     name = "swoosh",
     version,
     about = "Work with a machine addressed by its public key: reach it, measure it, and more.",
-    // A bare `swoosh` is a mistake, not a default action: print the full help and exit non-zero. This
+    // A bare `swoosh` is a mistake, not a default action: print the help on stderr and exit 2. This
     // must hold even with `SWOOSH_HOME` set, but an env-backed global `--home` counts as an arg to clap,
     // so `arg_required_else_help` would fall to a terse "subcommand required" line there instead of the
     // help. So the subcommand is `Option` and the no-verb case is handled in `run`, one behavior whether
@@ -54,13 +54,15 @@ mod commands;
 )]
 struct Cli {
     /// the node home: key, contacts, trust (default `~/.config/swoosh`)
-    // clap appends the `[env: SWOOSH_HOME=]` annotation itself from `env` below, so the help must NOT
+    // clap appends the `[env: SWOOSH_HOME]` annotation itself from `env` below, so the help must NOT
     // spell the env var again (doing so double-prints it).
     #[arg(
         long = "home",
         id = "node-home",
         value_name = "dir",
         env = "SWOOSH_HOME",
+        // Help names the variable, never its value: a home the user set is not printed back.
+        hide_env_values = true,
         global = true
     )]
     home: Option<PathBuf>,
@@ -437,7 +439,7 @@ async fn main() -> std::process::ExitCode {
     match run().await {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(report) => {
-            eprintln!("Error: {report:#}");
+            eprintln!("error: {report:#}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -506,12 +508,11 @@ async fn run() -> eyre::Result<()> {
     // error, whatever its value.
     reject_retired_key_env(std::env::var_os("SWOOSH_KEY").is_some())?;
 
-    // No verb given (a bare `swoosh`, even with `SWOOSH_HOME` set): print the full help and exit non-zero,
-    // the same way clap's own `arg_required_else_help` does (full help, non-zero exit, no `Error:` line).
+    // No verb given (a bare `swoosh`, even with `SWOOSH_HOME` set): a mistake, so the help goes to stderr
+    // with exit 2, as clap's own `arg_required_else_help` does (stdout stays empty, no `error:` line).
     // See the note on `Cli` for why this is handled here rather than by that attribute alone.
     let Some(command) = cli.command else {
-        let mut help = Cli::command();
-        help.print_help()?;
+        eprint!("{}", Cli::command().render_help());
         std::process::exit(2);
     };
 
