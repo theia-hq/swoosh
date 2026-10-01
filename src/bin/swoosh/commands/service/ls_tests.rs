@@ -8,8 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser as _;
+use swoosh::contacts::Contacts;
 use swoosh::home::Home;
 use swoosh::serve::control_codec::DisabledList;
+use swoosh::testkit::HostilePeer;
 use tightbeam::tunnel::{MAX_CATALOG_BLOB, ServiceCatalog};
 use tokio::io;
 
@@ -128,6 +130,92 @@ fn the_remote_read_keeps_the_two_column_table() {
     );
     assert!(row(&table, "ping").contains("gated"), "{table}");
     assert!(row(&table, "logs").contains("open"), "{table}");
+}
+
+/// A peer's catalog name holding a carriage return, an ESC CSI sequence and a bidi override prints as
+/// escapes in its own row, so a peer cannot draw a row the table does not hold.
+#[test]
+fn a_hostile_service_name_prints_escaped() {
+    let menu = catalog(&[("ping", 0), ("x\r\u{1b}[2Kssh\u{202e}", 0)]);
+    let table = render_catalog(&menu, None);
+
+    assert!(
+        !table.contains(['\r', '\u{1b}', '\u{202e}']),
+        "no raw byte of the peer's reaches the table: {table:?}"
+    );
+    assert_eq!(
+        table.lines().count(),
+        3,
+        "one header and two rows: {table:?}"
+    );
+    let escaped = r"x\r\u{1b}[2Kssh\u{202e}";
+    assert_eq!(
+        row(&table, escaped),
+        format!("{escaped}  gated"),
+        "the name prints escaped"
+    );
+    assert_eq!(
+        row(&table, "ping"),
+        format!("{:<width$}  gated", "ping", width = escaped.len()),
+        "the column is as wide as the escaped name"
+    );
+}
+
+/// A peer that breaks off the catalog read gives a reason, and the error prints it: a carriage return, an
+/// ESC CSI sequence and a bidi override there print as escapes, so the reason cannot redraw the line.
+#[tokio::test]
+async fn a_hostile_read_failure_prints_escaped() {
+    struct ClosingPeer;
+    impl io::AsyncRead for ClosingPeer {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(io::Error::other(
+                "closed by peer: no\r\u{1b}[2Kping  gated\u{202e}",
+            )))
+        }
+    }
+    let dial = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]);
+    let Err(error) = read_catalog(ClosingPeer, dial).await else {
+        panic!("a read the peer broke off is an error");
+    };
+    assert_eq!(
+        format!("{error:#}"),
+        r"closed by peer: no\r\u{1b}[2Kping  gated\u{202e}"
+    );
+}
+
+/// A peer that closes the dial gives a reason, and `service ls --at` prints the connect chain that carries
+/// it: a carriage return, an ESC CSI sequence and a bidi override there print as escapes. Driven through
+/// the `--at` read over a transport whose dial fails with that reason, so the connect's own error path is
+/// what this pins.
+#[tokio::test]
+async fn a_hostile_connect_failure_prints_escaped() {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        ls: ServiceLsCmd,
+    }
+
+    let at = HostilePeer::node_id().to_string();
+    let ls = Wrap::try_parse_from(["x", "--at", &at])
+        .expect("service ls --at <key> parses")
+        .ls;
+    let node = bifrost::Node::new(
+        HostilePeer::Unreachable("closed by peer: no\r\u{1b}[2Kping  gated\u{202e}"),
+        bifrost::NoDiscovery,
+    );
+
+    let error = ls
+        .run_read(&node, &Contacts::default(), None, None)
+        .await
+        .expect_err("a dial the peer closed is an error");
+    assert_eq!(
+        format!("{error:#}"),
+        r"connect to peer: closed by peer: no\r\u{1b}[2Kping  gated\u{202e}"
+    );
 }
 
 /// A bare `service ls` with no addressable resident is the same teaching error as bare `stop`,
@@ -329,5 +417,36 @@ async fn a_flooding_peer_is_refused_before_it_fills_the_buffer() {
         "the client took {} bytes of the {} the peer offered; the read is not bounded",
         delivered.load(Ordering::Relaxed),
         MAX_CATALOG_BLOB * FLOOD_MULTIPLE
+    );
+}
+
+/// A peer that refuses the catalog stream sends its own detail, and `service ls --at` prints it: a carriage
+/// return, an ESC CSI sequence and a bidi override there print as escapes, so the refusal cannot erase the
+/// error and draw a menu row in its place. Driven through the `--at` read over a session that refuses every
+/// stream, so it is the refusal line itself this pins.
+#[tokio::test]
+async fn a_hostile_refusal_prints_escaped() {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        ls: ServiceLsCmd,
+    }
+
+    let at = HostilePeer::node_id().to_string();
+    let ls = Wrap::try_parse_from(["x", "--at", &at])
+        .expect("service ls --at <key> parses")
+        .ls;
+    let node = bifrost::Node::new(
+        HostilePeer::RefusesStreams("no\r\u{1b}[2Kping  gated\u{202e}"),
+        bifrost::NoDiscovery,
+    );
+
+    let error = ls
+        .run_read(&node, &Contacts::default(), None, None)
+        .await
+        .expect_err("a refused read is an error");
+    assert_eq!(
+        format!("{error:#}"),
+        format!(r"{at}: reached, but refused (unavailable: no\r\u{{1b}}[2Kping  gated\u{{202e}})")
     );
 }

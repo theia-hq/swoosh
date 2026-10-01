@@ -47,6 +47,7 @@ use std::path::Path;
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::EscapedPath;
 use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::transport;
@@ -280,7 +281,7 @@ fn known_hosts_path(path: &Path) -> eyre::Result<std::path::PathBuf> {
     let path = std::path::absolute(path)?;
     let text = path
         .to_str()
-        .ok_or_else(|| eyre::eyre!("{} is not valid UTF-8", path.display()))?;
+        .ok_or_else(|| eyre::eyre!("{} is not valid UTF-8", EscapedPath(&path)))?;
     if let Some(c) = text
         .chars()
         .find(|&c| c.is_control() || matches!(c, '"' | '%' | '$' | '\\'))
@@ -362,7 +363,7 @@ fn self_invocation() -> eyre::Result<String> {
 fn proxy_path(path: &Path) -> eyre::Result<String> {
     proxy_word(
         path.to_str()
-            .ok_or_else(|| eyre::eyre!("{} is not valid UTF-8", path.display()))?,
+            .ok_or_else(|| eyre::eyre!("{} is not valid UTF-8", EscapedPath(path)))?,
     )
 }
 

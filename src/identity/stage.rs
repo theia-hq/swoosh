@@ -20,6 +20,8 @@ use eyre::WrapErr as _;
 use keystore::{KeyFile, Passphrase, Protection};
 use zeroize::Zeroizing;
 
+use crate::escape::EscapedPath;
+
 /// The most a backup is read before it is refused: far above a sealed file's length, far below anything
 /// that costs a restore to hold.
 const READ_CAP: u64 = 4096;
@@ -92,7 +94,7 @@ impl Stage {
             Err(error) if no_hard_links(&error) => create_verified(target, bytes)?,
             Err(error) => {
                 return Err(error)
-                    .wrap_err_with(|| format!("could not write {}", target.display()));
+                    .wrap_err_with(|| format!("could not write {}", EscapedPath(target)));
             }
         }
         // In place under its own name, so the stage's name goes before the directory is synced.
@@ -108,11 +110,11 @@ impl Stage {
         if Seen::of(target)? != expected {
             eyre::bail!(
                 "{} changed while it was being replaced; it was left as it now is",
-                target.display()
+                EscapedPath(target)
             );
         }
         fs::rename(&self.path, target)
-            .wrap_err_with(|| format!("could not replace {}", target.display()))?;
+            .wrap_err_with(|| format!("could not replace {}", EscapedPath(target)))?;
         self.published = true;
         sync_dir(target)
     }
@@ -152,7 +154,9 @@ impl Seen {
                 changed: (metadata.ctime(), metadata.ctime_nsec()),
             }),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Self::Absent),
-            Err(error) => Err(error).wrap_err_with(|| format!("could not read {}", path.display())),
+            Err(error) => {
+                Err(error).wrap_err_with(|| format!("could not read {}", EscapedPath(path)))
+            }
         }
     }
 }
@@ -168,27 +172,27 @@ pub(super) struct Backup {
 /// is what protects it, and the removable media backups live on (FAT, exFAT) report every file as readable
 /// by all, with no `chmod` that changes it. A loose mode is returned so the caller can say so.
 pub(super) fn read_backup(path: &Path) -> eyre::Result<Backup> {
-    let unreadable = || format!("could not read the backup {}", path.display());
+    let unreadable = || format!("could not read the backup {}", EscapedPath(path));
     // Judged before opening: opening a pipe for reading blocks until a writer appears.
     if !fs::metadata(path).wrap_err_with(unreadable)?.is_file() {
-        eyre::bail!("{} is not a regular file", path.display());
+        eyre::bail!("{} is not a regular file", EscapedPath(path));
     }
     let mut file = File::open(path).wrap_err_with(unreadable)?;
     let metadata = file.metadata().wrap_err_with(unreadable)?;
     if !metadata.is_file() {
-        eyre::bail!("{} is not a regular file", path.display());
+        eyre::bail!("{} is not a regular file", EscapedPath(path));
     }
     let owner = metadata.uid();
     if owner != crate::node_client::euid() && owner != 0 {
         eyre::bail!(
             "the backup {} is owned by uid {owner}, not by this user or root",
-            path.display()
+            EscapedPath(path)
         );
     }
     if metadata.len() > READ_CAP {
         eyre::bail!(
             "{} is {} bytes, far larger than a backup",
-            path.display(),
+            EscapedPath(path),
             metadata.len()
         );
     }
@@ -216,7 +220,7 @@ fn create_verified(path: &Path, bytes: &[u8]) -> eyre::Result<()> {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Err(occupied(path)),
         Err(error) => {
-            return Err(error).wrap_err_with(|| format!("could not write {}", path.display()));
+            return Err(error).wrap_err_with(|| format!("could not write {}", EscapedPath(path)));
         }
     };
     // From here the file is this call's own, so removing it on failure removes nothing else.
@@ -230,19 +234,19 @@ fn create_verified(path: &Path, bytes: &[u8]) -> eyre::Result<()> {
             let _ = fs::remove_file(path);
             eyre::bail!(
                 "{} did not read back as written; it was removed",
-                path.display()
+                EscapedPath(path)
             )
         }
         Err(error) => {
             let _ = fs::remove_file(path);
-            Err(error).wrap_err_with(|| format!("could not write {}", path.display()))
+            Err(error).wrap_err_with(|| format!("could not write {}", EscapedPath(path)))
         }
     }
 }
 
 /// A file that appeared at a path being written into absence.
 fn occupied(path: &Path) -> eyre::Report {
-    eyre::eyre!("{} already exists; it was left as it is", path.display())
+    eyre::eyre!("{} already exists; it was left as it is", EscapedPath(path))
 }
 
 /// Whether a hard link failed because the filesystem has none, rather than for a reason worth reporting.
@@ -273,7 +277,7 @@ fn sync_dir(target: &Path) -> eyre::Result<()> {
     };
     File::open(dir)
         .and_then(|dir| dir.sync_all())
-        .wrap_err_with(|| format!("could not sync {}", dir.display()))
+        .wrap_err_with(|| format!("could not sync {}", EscapedPath(dir)))
 }
 
 /// Remove stages a killed run left beside `target`. A stage is only ever sealed, but it is sealed under

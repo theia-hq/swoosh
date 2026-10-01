@@ -27,6 +27,7 @@ use keystore::KeyFile;
 use nauthy::{DisabledRoots, DisabledRootsError, Link, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 
+use crate::escape::EscapedPath;
 use crate::home::Home;
 
 /// What this machine is to a root. Built only by [`Standing::read`].
@@ -112,7 +113,7 @@ pub enum StandingError {
     #[error("could not read the roots revoked on this machine")]
     Revoked(#[source] DisabledRootsError),
     /// A file the standing is read from could not be read.
-    #[error("could not read {}", path.display())]
+    #[error("could not read {}", EscapedPath(path))]
     Read {
         /// The file.
         path: PathBuf,
@@ -122,7 +123,7 @@ pub enum StandingError {
     },
     /// A crash state could not be finished. What was removed before the failure stays removed, and the
     /// next read goes on from there.
-    #[error("could not finish an interrupted change at {}", path.display())]
+    #[error("could not finish an interrupted change at {}", EscapedPath(path))]
     Finish {
         /// The path that could not be removed or renamed.
         path: PathBuf,
@@ -229,20 +230,24 @@ impl fmt::Display for Disagreement {
                 pin.short()
             ),
             Self::UnreadablePin { path } => {
-                write!(formatter, "{} is not one root key", path.display())
+                write!(formatter, "{} is not one root key", EscapedPath(path))
             }
             Self::UnreadableStanding { path } => write!(
                 formatter,
                 "{} is not a device record with an end date",
-                path.display()
+                EscapedPath(path)
             ),
             Self::StandingForAnotherKey { path } => write!(
                 formatter,
                 "{} is a device record for a key other than this machine's",
-                path.display()
+                EscapedPath(path)
             ),
             Self::UnreadableRoot { path } => {
-                write!(formatter, "{} is not a readable root key", path.display())
+                write!(
+                    formatter,
+                    "{} is not a readable root key",
+                    EscapedPath(path)
+                )
             }
         }
     }

@@ -13,6 +13,7 @@
 use std::io;
 use std::os::fd::AsRawFd as _;
 
+use crate::escape::EscapedPath;
 use crate::home::Home;
 
 /// How many times a holder tries a lock someone else holds before refusing.
@@ -46,7 +47,7 @@ impl HomeLock {
         Self::take(home, Hold::Shared).map_err(|_| {
             eyre::eyre!(
                 "an identity restore is running on {}; start the node when it has finished",
-                home.dir().display()
+                EscapedPath(home.dir())
             )
         })
     }
@@ -56,7 +57,7 @@ impl HomeLock {
         Self::take(home, Hold::Shared).map_err(|_| {
             eyre::eyre!(
                 "an identity restore is running on {}; try again when it has finished",
-                home.dir().display()
+                EscapedPath(home.dir())
             )
         })
     }
@@ -68,7 +69,7 @@ impl HomeLock {
             eyre::eyre!(
                 "a node is running on {}, or another identity command is; stop it (`swoosh stop`, or \
                  Ctrl-C where it runs), then restore",
-                home.dir().display()
+                EscapedPath(home.dir())
             )
         })
     }

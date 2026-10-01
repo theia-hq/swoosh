@@ -1,6 +1,5 @@
-//! The sender's own lines render a hostile file name the same way the receiver renders a
-//! peer-supplied path, so a newline in a name cannot forge a second line on this terminal and an ESC
-//! cannot drive it. The rule mirrors `services/crates/transfer/src/serve.rs` (`render_path`).
+//! The sender's own lines render a hostile file name through the shared escaper, so a newline in a name
+//! cannot forge a second line on this terminal and an ESC cannot drive it.
 //!
 //! The name is not the only surface: the skip line prints the whole error chain beside the escaped
 //! prefix, so a path-bearing context built with a raw `Path::display` (the `stat`/`read` walk and the
@@ -9,47 +8,11 @@
 
 use std::path::Path;
 
-use super::{MAX_RENDERED_NAME, collect_files, file_name, render_name};
+use clap::Parser as _;
+use swoosh::contacts::Contacts;
+use swoosh::testkit::HostilePeer;
 
-/// A hostile filename cannot forge a line or drive the terminal: the newline, escape byte, carriage
-/// return, C1 control, bidi override, and zero-width space in these names all render escaped.
-#[test]
-fn a_hostile_filename_renders_escaped() {
-    assert_eq!(
-        render_name("evil\nname\u{1b}[31m\r.txt"),
-        r"evil\nname\u{1b}[31m\r.txt",
-        "a newline, an escape byte, and a carriage return never reach the line raw"
-    );
-    assert_eq!(
-        render_name("a\u{85}b\u{202e}c\u{200b}d"),
-        r"a\u{85}b\u{202e}c\u{200b}d",
-        "a C1 control, a bidi override, and a zero-width space never reach the line raw"
-    );
-}
-
-/// A long name cannot flood the line: the render caps at [`MAX_RENDERED_NAME`] characters and marks
-/// the cut.
-#[test]
-fn a_long_filename_renders_capped() {
-    let long = "a".repeat(MAX_RENDERED_NAME * 4);
-    assert_eq!(
-        render_name(&long),
-        format!("{}...", "a".repeat(MAX_RENDERED_NAME)),
-        "the render holds the cap and marks the cut"
-    );
-}
-
-/// The cap cuts between escapes, never inside one: the ESC escape does not fit the last slot whole, so
-/// the render backs off to the marker instead of emitting a malformed half-escape.
-#[test]
-fn a_cap_cut_never_splits_an_escape_sequence() {
-    let name = format!("{}\u{1b}", "a".repeat(MAX_RENDERED_NAME - 1));
-    assert_eq!(
-        render_name(&name),
-        format!("{}...", "a".repeat(MAX_RENDERED_NAME - 1)),
-        "the cut lands before the incomplete escape"
-    );
-}
+use super::{SendCmd, collect_files, file_name, send_one};
 
 /// The operator's exact hostile name for the skip shape (`missing\nname\u{1b}[31m.txt`): a path that
 /// cannot be stat'ed is skipped, and the WHOLE line, error chain included, must render escaped. This
@@ -122,5 +85,56 @@ fn a_hostile_path_with_no_file_name_renders_escaped() {
     assert!(
         !message.contains('\n') && !message.contains('\u{1b}'),
         "no raw newline or ESC reaches the skip line: {message:?}"
+    );
+}
+
+/// A receiver that refuses the stream sends its own detail, and the skip line prints it: a carriage
+/// return, an ESC CSI sequence and a bidi override there print as escapes, so the refusal cannot erase
+/// the skip line and draw a `sent` line in its place. Driven through `send_one` over a session that
+/// refuses every stream, so it is the stream's own error path this pins, not the renderer alone.
+#[tokio::test]
+async fn a_hostile_refusal_prints_escaped() {
+    let path = std::env::temp_dir().join(format!("swoosh-send-{}-refused.txt", std::process::id()));
+    std::fs::write(&path, b"a").expect("write the file to send");
+    let session = HostilePeer::RefusesStreams("no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}");
+
+    let error = send_one(&session, "a.txt".to_owned(), path.clone())
+        .await
+        .expect_err("a refused stream is a skip");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        format!("skip: {error:#}"),
+        r"skip: stream refused: unavailable: no\r\u{1b}[2Ksent a.txt (1 bytes)\u{202e}"
+    );
+}
+
+/// A peer that closes the dial gives a reason, and `send` prints the connect chain that carries it: a
+/// carriage return, an ESC CSI sequence and a bidi override there print as escapes, so the reason cannot
+/// erase the error and draw a `sent` line in its place. Driven through `run_send` over a transport whose
+/// dial fails with that reason, so it is `send`'s own connect this pins.
+#[tokio::test]
+async fn a_hostile_connect_failure_prints_escaped() {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        send: SendCmd,
+    }
+
+    let at = HostilePeer::node_id().to_string();
+    let send = Wrap::try_parse_from(["x", "/etc/hosts", &at])
+        .expect("send <path> <key> parses")
+        .send;
+    let node = bifrost::Node::new(
+        HostilePeer::Unreachable("closed by peer: no\r\u{1b}[2Ksent hosts (1 bytes)\u{202e}"),
+        bifrost::NoDiscovery,
+    );
+
+    let error = send
+        .run_send(&node, &Contacts::default(), None, None)
+        .await
+        .expect_err("a dial the peer closed is an error");
+    assert_eq!(
+        format!("{error:#}"),
+        r"connect to peer: closed by peer: no\r\u{1b}[2Ksent hosts (1 bytes)\u{202e}"
     );
 }

@@ -20,6 +20,7 @@ use crate::codec::{
     canonicalize, check_device, check_ids, unique_labels,
 };
 use crate::contacts::DeviceLabel;
+use crate::escape::EscapedPath;
 use crate::roster::{ENVELOPE_LEN, Epoch, MAX_ID_LEN, MAX_MEMBER_LEN};
 
 /// The magic the payload opens with: `swoosh-` and the file it heads.
@@ -288,14 +289,14 @@ pub enum StateError {
     /// Neither `state` nor `state.new` holds valid records of this root.
     #[error(
         "this root's records were changed outside swoosh ({}): refusing to sign with them. Use another copy.",
-        dir.display()
+        EscapedPath(dir)
     )]
     Damaged {
         /// The root's directory.
         dir: PathBuf,
     },
     /// A file could not be read, or the promotion of `state.new` could not be written.
-    #[error("reading the root's records in {}", dir.display())]
+    #[error("reading the root's records in {}", EscapedPath(dir))]
     Io {
         /// The root's directory.
         dir: PathBuf,

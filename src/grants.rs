@@ -26,6 +26,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use nauthy::{FileStamp, IssuedIds, RevocationId, STAT_DEBOUNCE, Service, ServiceParseError};
 
+use crate::escape::EscapedPath;
+
 /// How many expired rows an [`append`](Grants::append) lets gather before it prunes them. A prune rewrites
 /// the whole file, so it waits until the rewrite removes enough to be worth it.
 pub const PRUNE_AT: usize = 64;
@@ -106,7 +108,7 @@ impl Grants {
                 Err(error) => eprintln!(
                     "warning: skipping malformed grant ledger line {} in {}: {error}",
                     index + 1,
-                    self.path.display()
+                    EscapedPath(&self.path)
                 ),
             }
         }
@@ -296,7 +298,7 @@ impl IssuedLedger {
                 state.stamp = None;
                 if state.readable != Some(false) {
                     tracing::error!(
-                        path = %self.path.display(),
+                        path = %EscapedPath(&self.path),
                         %error,
                         "the grants ledger cannot be read; no link this machine signed is admitted until it can"
                     );
@@ -305,7 +307,10 @@ impl IssuedLedger {
             }
         };
         if readable && state.readable == Some(false) {
-            tracing::warn!(path = %self.path.display(), "the grants ledger can be read again");
+            tracing::warn!(
+                path = %EscapedPath(&self.path),
+                "the grants ledger can be read again"
+            );
         }
         state.readable = Some(readable);
     }
@@ -323,7 +328,7 @@ impl IssuedLedger {
                     ids.insert(record.root_id);
                 }
                 Err(error) => tracing::warn!(
-                    path = %self.path.display(),
+                    path = %EscapedPath(&self.path),
                     line = index + 1,
                     %error,
                     "skipping a malformed grants ledger line"

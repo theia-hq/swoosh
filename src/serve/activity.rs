@@ -1,9 +1,9 @@
 //! A serving node's activity lines: the one place an engine's fact becomes text.
 //!
 //! An engine reports what it did as a typed value through a sink the root installs when it constructs
-//! the engine, and never prints. This module is that sink and its renderer. It owns the line's shape,
-//! the escaping and capping of every peer-named string on it, and the writer it lands on, so a hostile
-//! name is neutralised in exactly one place whichever engine carried it.
+//! the engine, and never prints. This module is that sink and its renderer. It owns the line's shape and
+//! the writer it lands on, and every peer-named string on it goes through the shared
+//! [`Escaped`](crate::escape::Escaped), whichever engine carried it.
 //!
 //! The renderer runs on a thread of its own, behind a bounded queue. An engine's report call only
 //! renders a capped line and offers it to the queue, so a slow or wedged writer (a terminal paused
@@ -14,10 +14,8 @@
 //! The root decides whether activity is shown at all by whether it builds an [`Activity`]: a node that
 //! builds none installs no sink, and its engines stay silent whatever the environment says.
 
-use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError, TrySendError};
 use std::{io, thread};
@@ -25,26 +23,18 @@ use std::{io, thread};
 use nauthy::Service;
 use transfer::{Received, ReceivedSink};
 
-/// How many rendered lines may wait on a stalled writer before new ones are dropped. A line is capped
-/// (a service name plus [`MAX_RENDERED_PATH`] characters of escapes), so the queue's memory is bounded
-/// however many streams a sender opens, and a burst of small files still fits while the writer catches
-/// up.
-const ACTIVITY_BACKLOG: usize = 256;
+use crate::escape::EscapedPath;
 
-/// The longest a peer-named path renders on a line, in characters. The path is unbounded up to the wire
-/// frame, so the render caps what reaches the queue and the writer.
-const MAX_RENDERED_PATH: usize = 256;
+/// How many rendered lines may wait on a stalled writer before new ones are dropped. A line is capped
+/// (a service name plus [`MAX_ESCAPED`](crate::escape::MAX_ESCAPED) characters of escapes), so the
+/// queue's memory is bounded however many streams a sender opens, and a burst of small files still fits
+/// while the writer catches up.
+const ACTIVITY_BACKLOG: usize = 256;
 
 /// How long an idle renderer waits before it looks at the drop count again. A drop is counted just after
 /// the queue refuses a line, so a fast writer can drain the queue and go idle between that refusal and
 /// the count; this tick is what reports such a drop without waiting for a later file to land.
 const DROP_CHECK: Duration = Duration::from_secs(1);
-
-/// Letters that render as blank space on a terminal. `char::escape_debug` treats them as printable and
-/// passes them raw, so a name made only of them would print as an empty path and two such names would
-/// look alike. They cannot forge a line or drive a terminal; they are escaped so a name is never
-/// invisible.
-const BLANK_LETTERS: [char; 5] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{2800}'];
 
 /// A node's activity renderer: the queue its engines' sinks feed and the thread that drains it onto one
 /// writer. Build one per node, then hand each reporting engine the sink for its route.
@@ -113,7 +103,7 @@ impl RecvLines {
         format!(
             "{}: received {} ({} bytes)",
             self.service,
-            Escaped(&file.path),
+            EscapedPath(&file.path),
             file.bytes
         )
     }
@@ -186,42 +176,6 @@ impl<W: io::Write> Renderer<W> {
     /// Write one line. A failed write loses the line and nothing else: there is nowhere to report it.
     fn write(&mut self, line: &str) {
         let _ = writeln!(self.out, "{line}").and_then(|()| self.out.flush());
-    }
-}
-
-/// A peer-named path as it may appear on a line: control characters escaped and the length capped. A
-/// raw newline forges a line, a carriage return rewrites one, and ESC drives a terminal, so none reaches
-/// the writer as-is. `char::escape_debug` escapes C0 and C1 controls, DEL, and the format characters
-/// that reorder or hide text (a bidi override, a zero-width space), and leaves printable text alone
-/// except grapheme-extended marks, which it also escapes (a combining accent renders as `\u{...}`).
-/// [`BLANK_LETTERS`] render as `\u{...}` too.
-///
-/// Escapes are written whole: when the next complete escape would pass the cap, the render writes the
-/// `...` cut marker and stops, so the cut never lands inside a sequence.
-struct Escaped<'a>(&'a Path);
-
-impl fmt::Display for Escaped<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut written = 0usize;
-        for ch in self.0.to_string_lossy().chars() {
-            let blank = BLANK_LETTERS.contains(&ch);
-            // The width is the whole escape's, so the cap check below never admits half of one.
-            let width = if blank {
-                ch.escape_unicode().len()
-            } else {
-                ch.escape_debug().len()
-            };
-            if written + width > MAX_RENDERED_PATH {
-                return f.write_str("...");
-            }
-            if blank {
-                write!(f, "{}", ch.escape_unicode())?;
-            } else {
-                write!(f, "{}", ch.escape_debug())?;
-            }
-            written += width;
-        }
-        Ok(())
     }
 }
 

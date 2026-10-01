@@ -15,6 +15,7 @@ use eyre::WrapErr as _;
 use nauthy::{DisabledRoots, Link};
 use tightbeam::identity::AsVerifyKey as _;
 
+use crate::escape::EscapedPath;
 use crate::home::Home;
 use crate::standing::{Disagreement, damaged_line};
 
@@ -82,7 +83,7 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
                 format!(
                     "the stored device record {} is not a usable link: run swoosh leave to \
                      start over",
-                    path.display(),
+                    EscapedPath(&path),
                 )
             })?;
             Ok(Some(badge))

@@ -500,6 +500,74 @@ async fn a_pin_others_can_write_is_refused_while_serve_runs() {
     );
 }
 
+/// A writer the log lands in, read back by the test.
+struct LogCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogCapture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("the capture lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A home whose directory name holds CR, ESC and a newline prints that path escaped, in the loose-file
+/// refusal and in the serve log, so neither can be rewritten or given a forged line.
+#[tokio::test]
+async fn a_home_path_with_control_bytes_prints_escaped() {
+    let raw = "home\r\u{1b}[8m\nfake";
+    let escaped = r"home\r\u{1b}[8m\nfake";
+    let scratch = Scratch::new(raw);
+    scratch.pin(ROOT).await;
+    set_mode(&scratch.home.signet(), 0o620);
+
+    let refusal = crate::home::LooseFile {
+        path: scratch.home.signet(),
+        why: crate::home::Loose::Writable,
+    }
+    .to_string();
+    assert!(
+        refusal.contains(escaped) && !refusal.contains(raw),
+        "the refusal prints the home path escaped: {refusal:?}"
+    );
+
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let writer = std::sync::Arc::clone(&log);
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || LogCapture(std::sync::Arc::clone(&writer)))
+        .finish();
+    let _capturing = tracing::subscriber::set_default(subscriber);
+    let (gate, _cut) = scratch.gate().await;
+    assert!(!admits(&gate, &badge(ROOT)), "a loose pin admits nobody");
+
+    let log =
+        String::from_utf8(log.lock().expect("the capture lock").clone()).expect("the log is utf-8");
+    let refused = log
+        .lines()
+        .find(|line| line.contains("the pin is refused"))
+        .unwrap_or_else(|| panic!("the loose pin is logged: {log:?}"));
+    assert!(
+        refused.contains(escaped),
+        "the log names the home path escaped: {log:?}"
+    );
+    assert!(
+        !log.contains(['\r', '\u{1b}']) && !log.contains(raw),
+        "no raw byte of the path reaches the log: {log:?}"
+    );
+    assert_eq!(
+        log.lines().filter(|line| line.contains("fake")).count(),
+        1,
+        "the path's newline forges no second line: {log:?}"
+    );
+}
+
 /// A ledger left group-writable while `serve` runs admits no link this machine signed.
 #[tokio::test]
 async fn a_ledger_others_can_write_admits_no_self_slip() {

@@ -31,6 +31,7 @@ use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::escaped_report;
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
 use swoosh::peer::Peer;
@@ -203,7 +204,9 @@ impl StopCmd {
         // A service-scoped session whose one `open_bi` speaks the `control.stop` request and presents the
         // badge. On admission the node cancels its teardown token and writes one ack byte; a refusal maps to
         // a loud stream error here (the false-success fix: a refusal is a typed loud error, never silent).
-        let session = connector.open_service(node).await?;
+        // The connect chain can carry the peer's text (the reason it gave for closing), so it prints
+        // through the escaper.
+        let session = connector.open_service(node).await.map_err(escaped_report)?;
         let (writer, mut reader) = match session.open_bi().await {
             Ok(stream) => stream,
             // The stream-open can lose the race with the very teardown the request triggered: the node

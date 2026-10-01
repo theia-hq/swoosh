@@ -13,6 +13,7 @@ use std::time::SystemTime;
 use bifrost::NodeId;
 use clap::Args;
 use swoosh::contacts::{ContactsStore, ME, Petname};
+use swoosh::escape::EscapedPath;
 use swoosh::home::Home;
 use swoosh::identity::HomeLock;
 use swoosh::passphrase::{Prompt, Terminal};
@@ -133,7 +134,7 @@ impl LeaveCmd {
             writeln!(out, "{}", replaced.key)?;
             out.flush()?;
             if let Some(kept) = &replaced.kept {
-                writeln!(err, "kept the old key at {}", kept.display())?;
+                writeln!(err, "kept the old key at {}", EscapedPath(kept))?;
             }
             writeln!(
                 err,

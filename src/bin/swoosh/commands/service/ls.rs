@@ -17,6 +17,7 @@ use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::{Escaped, causes, escaped_report};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
 use swoosh::peer::Peer;
@@ -172,11 +173,16 @@ impl ServiceLsCmd {
         // as the typed `bifrost::Error::Refused` here, rendered as the SAME teaching line the ping/status
         // ladder gives rather than the bare transport word. A refusal is not "the peer serves nothing"; a
         // genuine i/o failure keeps its own message.
-        let session = connector.open_service(node).await?;
+        // The connect chain can carry the peer's text (the reason it gave for closing), so it prints
+        // through the escaper.
+        let session = connector.open_service(node).await.map_err(escaped_report)?;
         let (writer, reader) = match session.open_bi().await {
             Ok(halves) => halves,
             Err(bifrost::Error::Refused(refusal)) => {
-                eyre::bail!("{dial}: reached, but refused ({refusal})")
+                eyre::bail!(
+                    "{dial}: reached, but refused ({})",
+                    Escaped(&refusal.to_string())
+                )
             }
             Err(error) => eyre::bail!("could not read services from {dial}: {error}"),
         };
@@ -208,10 +214,13 @@ async fn read_catalog(
     dial: NodeId,
 ) -> eyre::Result<tunnel::ServiceCatalog> {
     let mut bytes = Vec::new();
+    // A failed read can carry the peer's text (the reason it gave for closing), so it prints through the
+    // escaper.
     reader
         .take(tunnel::MAX_CATALOG_BLOB + 1)
         .read_to_end(&mut bytes)
-        .await?;
+        .await
+        .map_err(|error| eyre::eyre!("{}", Escaped(&causes(&error))))?;
     if bytes.len() as u64 > tunnel::MAX_CATALOG_BLOB {
         eyre::bail!(
             "{dial} sent more than a service menu can be, so the read stopped at {} bytes rather than \
@@ -253,9 +262,15 @@ pub(crate) fn render_catalog(
     catalog: &tunnel::ServiceCatalog,
     disabled: Option<&DisabledList>,
 ) -> String {
-    let service_width = catalog
+    // A name comes from the peer's catalog, so it prints through the escaper, and the column is as wide
+    // as the escaped name.
+    let shown: Vec<String> = catalog
         .entries()
-        .map(|entry| entry.name.len())
+        .map(|entry| Escaped(&entry.name).to_string())
+        .collect();
+    let service_width = shown
+        .iter()
+        .map(|name| name.chars().count())
         .chain([HEADER_SERVICE.len()])
         .max()
         .unwrap_or(HEADER_SERVICE.len());
@@ -275,7 +290,7 @@ pub(crate) fn render_catalog(
             "{HEADER_SERVICE:<service_width$}  {HEADER_GATE}\n"
         ));
     }
-    for entry in catalog.entries() {
+    for (entry, shown) in catalog.entries().zip(&shown) {
         let state = match disabled {
             None => None,
             Some(DisabledList::Known(names)) => {
@@ -287,10 +302,9 @@ pub(crate) fn render_catalog(
         let gate = entry.posture.label();
         match state {
             Some(state) => out.push_str(&format!(
-                "{:<service_width$}  {gate:<gate_width$}  {state}\n",
-                entry.name
+                "{shown:<service_width$}  {gate:<gate_width$}  {state}\n"
             )),
-            None => out.push_str(&format!("{:<service_width$}  {gate}\n", entry.name)),
+            None => out.push_str(&format!("{shown:<service_width$}  {gate}\n")),
         }
     }
     out

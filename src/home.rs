@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use eyre::eyre;
 
+use crate::escape::{BLANK_LETTERS, EscapedPath};
+
 /// The node home: the directory every file this node owns lives in.
 ///
 /// Construct it once at the composition root from the `--home`/`SWOOSH_HOME` selection ([`Home::resolve`]),
@@ -455,7 +457,9 @@ pub struct LooseFile {
 
 impl core::fmt::Display for LooseFile {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let path = self.path.display();
+        // The lead prints the path through the shared escaper: a home whose directory names hold CR, ESC or
+        // a newline would otherwise rewrite this line or forge another, here and in the serve log.
+        let path = EscapedPath(&self.path);
         match self.why {
             // The command names the absolute path, so it runs from any directory and a relative home that
             // starts with `-` or `=` is never read as an option or an expansion. When no word is sure to
@@ -534,10 +538,6 @@ fn user_name(uid: u32) -> String {
     }
     format!("uid {uid}")
 }
-
-/// The characters that print as themselves but read as blank: the same set `serve::activity`'s escaper
-/// treats specially, so a blank owner line never passes as a name.
-const BLANK_LETTERS: [char; 5] = ['\u{115f}', '\u{1160}', '\u{3164}', '\u{ffa0}', '\u{2800}'];
 
 /// A passwd `name` as the owner line shows it: as itself when every character prints as itself (what
 /// `char::escape_debug` leaves alone), it holds no blank letter, and it carries no leading or trailing
@@ -670,8 +670,8 @@ fn reject_home_file(dir: &Path) -> eyre::Result<()> {
         return Err(eyre!(
             "--home wants a directory, not a file: {file}. The key lives inside the home at \
              {file}/key; pass the directory, e.g. {parent}",
-            file = dir.display(),
-            parent = dir.parent().unwrap_or(dir).display(),
+            file = EscapedPath(dir),
+            parent = EscapedPath(dir.parent().unwrap_or(dir)),
         ));
     }
     Ok(())

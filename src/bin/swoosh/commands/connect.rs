@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use bifrost::{Discovery, Node, Transport};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
+use swoosh::escape::escaped_report;
 use swoosh::peer::Peer;
 
 /// Where a reached service's bytes go locally: the one `--to` selector, parsed to a closed enum so the
@@ -89,11 +90,14 @@ pub async fn connect<T: Transport, D: Discovery>(
             // Err. So an unauthorized forward fails loudly here (a clear one-line reason, non-zero exit),
             // never a hopeful banner followed by a silent reset.
             let (dial, service) = (connector.dial(), Service::clone(connector.service()));
-            let forward = connector.preflight(node, port).await?;
+            let forward = connector
+                .preflight(node, port)
+                .await
+                .map_err(escaped_report)?;
             println!("forwarding 127.0.0.1:{port} to {dial} ({service})");
             forward.run().await
         }
-        To::Stdout => connector.pipe_stdio(node).await,
+        To::Stdout => connector.pipe_stdio(node).await.map_err(escaped_report),
         To::UnixListener(path) => eyre::bail!(
             "--to unix:{} is reserved, not yet built (bind a port and connect to it, or use `--to -`)",
             path.display()
@@ -103,7 +107,53 @@ pub async fn connect<T: Transport, D: Discovery>(
 
 #[cfg(test)]
 mod tests {
-    use super::To;
+    use swoosh::contacts::Contacts;
+    use swoosh::testkit::HostilePeer;
+
+    use super::{To, connect};
+
+    /// A gate's refusal detail holding a carriage return, an ESC CSI sequence and a bidi override.
+    const HOSTILE: &str = "no\r\u{1b}[2Kforwarding 127.0.0.1:1 to x\u{202e}";
+    /// [`HOSTILE`] as it prints.
+    const ESCAPED: &str = r"no\r\u{1b}[2Kforwarding 127.0.0.1:1 to x\u{202e}";
+
+    /// Reach a peer whose gate refuses with [`HOSTILE`], sinking the bytes into `to`.
+    async fn refused(to: To) -> eyre::Report {
+        let node = bifrost::Node::new(HostilePeer::RefusesAtTheGate(HOSTILE), bifrost::NoDiscovery);
+        let peer = HostilePeer::node_id()
+            .to_string()
+            .parse()
+            .expect("a raw key parses as a Peer");
+        let service = "db".parse().expect("db is a service name");
+        connect(&node, &Contacts::default(), &peer, service, None, None, to)
+            .await
+            .expect_err("a refused reach is an error")
+    }
+
+    // A forward whose gate refuses prints the refusal, and its detail is the peer's text: escaped, on one
+    // line, so it cannot erase the error and draw a `forwarding` line in its place.
+    #[tokio::test]
+    async fn a_hostile_forward_refusal_prints_escaped() {
+        let error = refused(To::Port(1)).await;
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "reached {}, but refused: unavailable: {ESCAPED}",
+                HostilePeer::node_id()
+            )
+        );
+    }
+
+    // The stdio bridge (`--to -`, and `swoosh ssh`'s ProxyCommand through it) prints the same refusal the
+    // same way.
+    #[tokio::test]
+    async fn a_hostile_stdio_refusal_prints_escaped() {
+        let error = refused(To::Stdout).await;
+        assert_eq!(
+            format!("{error:#}"),
+            format!("stream refused: unavailable: {ESCAPED}")
+        );
+    }
 
     #[test]
     fn to_parses_each_of_the_three_forms_and_rejects_the_rest() {

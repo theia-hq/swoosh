@@ -14,6 +14,7 @@ use nauthy::{Link, Service};
 use tightbeam::tunnel::{Connector, ServiceSession};
 
 use crate::contacts::{Candidate, Contacts};
+use crate::escape::escaped_report;
 use crate::peer::Peer;
 use crate::transport;
 
@@ -80,10 +81,17 @@ pub async fn dial<T: Transport, D: Discovery>(
     // source rather than inventing a message, note the target, and append the fix this transport needs so
     // the user is told what to do next, not just what went wrong.
     let reached = match last_error {
-        Some(error) => error.wrap_err(format!("could not reach {target}")),
+        Some(error) => unreached(target, error),
         None => eyre::eyre!("could not reach {target}: no known device"),
     };
     Err(hint(reached, bound))
+}
+
+/// The error for a target no candidate connected to: the last connect's cause chain under `could not reach
+/// <target>`. The chain can carry the peer's text (the reason it gave for closing), so it prints through
+/// the escaper; the target is this machine's own word for the peer and prints as it is.
+fn unreached(target: &Peer, error: eyre::Report) -> eyre::Report {
+    eyre::eyre!("could not reach {target}: {}", escaped_report(error))
 }
 
 /// Connect to one named candidate under the [`DIAL_TIMEOUT`], mapping a timeout to a plain unreachable
@@ -166,7 +174,7 @@ pub async fn dial_service<T: Transport, D: Discovery>(
     }
 
     let reached = match last_error {
-        Some(error) => error.wrap_err(format!("could not reach {target}")),
+        Some(error) => unreached(target, error),
         None => eyre::eyre!("could not reach {target}: no known device"),
     };
     Err(hint(reached, bound))
@@ -300,6 +308,7 @@ pub fn conn_path(info: &ConnInfo) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testkit::HostilePeer;
 
     /// A bind over the named backend with n0's two reach services: what every fan-out test about the
     /// TRANSPORT remedy is bound as, so no reach line joins its message.
@@ -445,5 +454,63 @@ mod tests {
             );
             assert_eq!(outcome.max(Outcome::Healthy), Outcome::Healthy);
         }
+    }
+
+    /// The reason a peer gives for closing the dial, holding a carriage return, an ESC CSI sequence and a
+    /// bidi override.
+    const HOSTILE: &str = "closed by peer: no\r\u{1b}[2Kalice: 900 MiB/s\u{202e}";
+
+    /// A node whose every dial fails with [`HOSTILE`] as the cause, and the raw key it is asked to reach.
+    fn unreachable() -> (Node<HostilePeer, bifrost::NoDiscovery>, Peer) {
+        let node = Node::new(HostilePeer::Unreachable(HOSTILE), bifrost::NoDiscovery);
+        let target = HostilePeer::node_id()
+            .to_string()
+            .parse::<Peer>()
+            .expect("a raw key parses as a Peer");
+        (node, target)
+    }
+
+    /// The line a target no device connected to prints: the last connect's cause chain, the peer's reason
+    /// escaped, on one line, with the words as they were.
+    fn escaped_unreached(target: &Peer) -> String {
+        format!(
+            r"could not reach {target}: connect to peer: closed by peer: no\r\u{{1b}}[2Kalice: 900 MiB/s\u{{202e}}"
+        )
+    }
+
+    // `dial`, the raw reach `fetch` takes: a target no device connected to prints the last connect's
+    // cause chain, and a cause can be the peer's own text.
+    #[tokio::test]
+    async fn a_hostile_connect_failure_prints_escaped() {
+        let (node, target) = unreachable();
+        let bound = bound(transport::Transport::Iroh, false);
+        let Err(error) = dial(&node, &Contacts::default(), &target, &bound).await else {
+            panic!("a dial every device closed is an error");
+        };
+        assert_eq!(format!("{error:#}"), escaped_unreached(&target));
+    }
+
+    // `dial_service`, the gated reach `speed` takes: the same chain, through its own failure path.
+    #[tokio::test]
+    async fn a_hostile_service_connect_failure_prints_escaped() {
+        let (node, target) = unreachable();
+        let bound = bound(transport::Transport::Iroh, false);
+        let service = PING_SERVICE
+            .parse::<Service>()
+            .expect("ping is a service name");
+        let Err(error) = dial_service(
+            &node,
+            &Contacts::default(),
+            &target,
+            &service,
+            None,
+            None,
+            &bound,
+        )
+        .await
+        else {
+            panic!("a dial every device closed is an error");
+        };
+        assert_eq!(format!("{error:#}"), escaped_unreached(&target));
     }
 }

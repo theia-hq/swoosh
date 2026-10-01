@@ -22,6 +22,7 @@ use std::path::Path;
 
 use clap::Args;
 use nauthy::Service;
+use swoosh::escape::EscapedPath;
 use swoosh::home::Home;
 
 /// Turn a service off (`disable`) or back on (`enable`); the leaf carries only the service name, the verb
@@ -92,7 +93,10 @@ fn edit(home: &Home, mutate: impl FnOnce(&mut BTreeSet<String>)) -> eyre::Result
     // list and its lock file never sit in a group/world-traversable dir. An already-provisioned dir is
     // left as set, never chmod'd.
     swoosh::config::create_store_dir(home.dir()).map_err(|error| {
-        eyre::eyre!("cannot create store dir {}: {error}", home.dir().display())
+        eyre::eyre!(
+            "cannot create store dir {}: {error}",
+            EscapedPath(home.dir())
+        )
     })?;
     // Hold the lock across the WHOLE read-modify-write. Dropped at function end (and released for free on the
     // fd close), so a crash never strands the lock.

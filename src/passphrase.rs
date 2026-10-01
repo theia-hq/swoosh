@@ -14,6 +14,8 @@ use std::path::Path;
 use keystore::Passphrase;
 use zeroize::Zeroizing;
 
+use crate::escape::EscapedPath;
+
 /// The longest passphrase line read, in bytes. A cap, so a stuck key or a pasted file cannot grow the
 /// buffer, and growing it is what would leave a copy of the passphrase behind in freed memory.
 const MAX_LINE: usize = 1024;
@@ -46,7 +48,7 @@ impl Prompt for Terminal {
             let tty = Tty::open().map_err(|_| eyre::eyre!(crate::root::UNLOCK_NEEDS_TERMINAL))?;
             return passphrase(tty.ask("root passphrase: ")?);
         }
-        passphrase(Tty::open()?.ask(&format!("passphrase for {}: ", path.display()))?)
+        passphrase(Tty::open()?.ask(&format!("passphrase for {}: ", EscapedPath(path)))?)
     }
 
     fn choose(&mut self, path: &Path) -> eyre::Result<Passphrase> {
@@ -54,7 +56,7 @@ impl Prompt for Terminal {
             ("root passphrase: ".to_owned(), "again: ")
         } else {
             (
-                format!("new passphrase for {}: ", path.display()),
+                format!("new passphrase for {}: ", EscapedPath(path)),
                 "repeat the new passphrase: ",
             )
         };

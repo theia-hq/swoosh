@@ -10,6 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{DEFAULT_SERVICES, service_entry};
+use crate::escape::EscapedPath;
 use crate::home::Home;
 
 /// The targets whose argument is a path on this machine: stored absolute, because a service manager
@@ -23,7 +24,7 @@ pub enum ServingError {
     /// into the command line.
     #[error(
         "{} has a line that is not a service: {line}. Name the services: swoosh serve ssh ping …",
-        path.display()
+        EscapedPath(path)
     )]
     NotAService {
         /// The file the line was read from.
@@ -38,7 +39,7 @@ pub enum ServingError {
         "{} cannot be saved in {}: it has a control character, a space at either end, or a path that is \
          not UTF-8.",
         entry.escape_debug(),
-        path.display()
+        EscapedPath(path)
     )]
     CannotSave {
         /// The file the list is saved in.
@@ -47,7 +48,7 @@ pub enum ServingError {
         entry: String,
     },
     /// `<home>/serving` exists and could not be read or written.
-    #[error("could not use {}", path.display())]
+    #[error("could not use {}", EscapedPath(path))]
     Io {
         /// The file.
         path: PathBuf,
