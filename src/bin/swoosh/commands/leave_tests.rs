@@ -519,7 +519,7 @@ async fn a_join_during_leaves_prompt_stops_the_leave() {
     assert_eq!(ran.prompts, 1);
     assert_eq!(
         ran.refusal(),
-        "this machine's standing changed while this ran: run it again."
+        "this machine's records changed while this ran: run it again."
     );
     assert!(
         matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(OTHER)),

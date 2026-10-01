@@ -2515,7 +2515,7 @@ async fn a_join_during_a_mints_prompt_stops_the_mint() {
     assert!(matches!(error, RootError::StandingChanged), "{error:?}");
     assert_eq!(
         error.to_string(),
-        "this machine's standing changed while this ran: run it again."
+        "this machine's records changed while this ran: run it again."
     );
     assert_eq!(
         config::load_signet(&home).await.unwrap(),

@@ -273,7 +273,7 @@ pub fn damaged_line(what: &Disagreement) -> String {
 
 /// The line a command prints when this machine's standing moved between its check and its write: a `join`,
 /// `leave` or mint ran meanwhile, and nothing was written.
-pub const CHANGED: &str = "this machine's standing changed while this ran: run it again.";
+pub const CHANGED: &str = "this machine's records changed while this ran: run it again.";
 
 impl Standing {
     /// Whether `other` is this standing to the same root, whatever either's end: what a command checked
