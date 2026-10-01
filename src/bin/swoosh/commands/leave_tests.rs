@@ -233,12 +233,11 @@ fn keep_root(home: &Home) {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    config::create_store_dir(&home.root()).unwrap();
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(home.root().join("root.key"))
+        .open(home.root_key())
         .unwrap()
         .write_all(&TestRoot::seeded(ROOT).seed())
         .unwrap();
@@ -335,7 +334,7 @@ async fn leave_on_a_damaged_home_removes_the_standing_and_the_pin_and_keeps_the_
     let ran = leave(&home, &[]).await;
     ran.left();
     assert!(!home.root_pub().exists());
-    assert!(home.root().join("root.key").exists(), "the root stays");
+    assert!(home.root_key().exists(), "the root stays");
     assert!(matches!(
         read(&home).await,
         Standing::InterruptedMint { .. }

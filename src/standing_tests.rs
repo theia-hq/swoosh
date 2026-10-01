@@ -1,13 +1,12 @@
-//! `Standing::read` over every standing, every damaged shape, and every crash state it finishes.
+//! `Standing::read` over every standing, every damaged shape, and the pin to a revoked root it removes.
 //!
 //! Each home is built on disk the way the product leaves it: a device key file, a pin, a badge a root
-//! signed, a root directory whose key file has a header, and the latch of roots revoked here. The root
-//! key files are plain 32-byte files, which load with their key and no header to seal, except in the one
-//! test that proves a sealed header is read without a prompt.
+//! signed, a `root.key` whose key file has a header, and the latch of roots revoked here. The root key
+//! files are plain 32-byte files, which load with their key and no header to seal, except in the one test
+//! that proves a sealed header is read without a prompt.
 
 use core::time::Duration;
-use std::os::fd::AsRawFd as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
 use bifrost::NodeId;
@@ -15,7 +14,7 @@ use keystore::{KeyFile, Protection};
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
-use super::{Disagreement, Finished, SEAM, Seam, Standing, StandingError};
+use super::{Disagreement, Finished, Standing, StandingError};
 use crate::config;
 use crate::home::Home;
 use crate::testkit::{TestNode, TestRoot, hand_signed};
@@ -81,21 +80,17 @@ async fn self_signed_badge(home: &Home) {
     config::write_badge(&crate::testkit::lock(), home, &badge).expect("write the device standing");
 }
 
-/// A root directory at `dir` whose `root.key` holds the root seeded `seed`, plain, with a `state` and a
-/// `lock` beside it.
-fn root_dir(dir: &Path, seed: u8) {
+/// A `root.key` in `home` holding the root seeded `seed`, plain.
+fn root_key(home: &Home, seed: u8) {
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    config::create_store_dir(dir).expect("create the root directory");
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(dir.join("root.key"))
+        .open(home.root_key())
         .expect("create root.key");
     std::io::Write::write_all(&mut file, &[seed; 32]).expect("write root.key");
-    std::fs::write(dir.join("state"), b"state").expect("write state");
-    std::fs::write(dir.join("lock"), b"").expect("write lock");
 }
 
 async fn revoke(home: &Home, key: NodeId) {
@@ -121,47 +116,6 @@ fn update_files(home: &Home) -> [PathBuf; 4] {
         std::fs::write(file, b"update").expect("write an update file");
     }
     files
-}
-
-/// Hold `<dir>/lock` as a command working on `dir` does. Released on drop.
-fn hold(dir: &Path) -> std::fs::File {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join("lock"))
-        .expect("open the lock");
-    // SAFETY: `file` owns a valid fd for the whole call.
-    let taken = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    assert_eq!(taken, 0, "take the lock");
-    file
-}
-
-/// Run `step` once, the first time the read reaches `at` on `dir`, on this thread. Cleared on drop.
-fn at_seam(at: Seam, dir: PathBuf, step: impl FnOnce() + 'static) -> SeamGuard {
-    let mut step = Some(step);
-    SEAM.set(Some(Box::new(move |reached, path| {
-        if reached == at
-            && path == dir
-            && let Some(step) = step.take()
-        {
-            step();
-        }
-    })));
-    SeamGuard
-}
-
-struct SeamGuard;
-
-impl Drop for SeamGuard {
-    fn drop(&mut self) {
-        SEAM.set(None);
-    }
-}
-
-/// Replace the key in a root directory's `root.key` with the root seeded `seed`, keeping the directory
-/// and its `lock`.
-fn rekey(dir: &Path, seed: u8) {
-    std::fs::write(dir.join("root.key"), [seed; 32]).expect("rewrite root.key");
 }
 
 async fn read(home: &Home) -> super::Read {
@@ -220,7 +174,7 @@ async fn a_pin_and_a_standing_from_it_is_a_device_until_the_standings_end() {
 #[tokio::test]
 async fn a_held_pinned_root_with_its_standing_holds_the_root() {
     let home = home("holds-root");
-    root_dir(&home.root(), ROOT);
+    root_key(&home, ROOT);
     pin(&home, root()).await;
     badge(&home, ROOT).await;
     assert!(matches!(
@@ -233,7 +187,7 @@ async fn a_held_pinned_root_with_its_standing_holds_the_root() {
 async fn a_root_with_no_pin_is_an_interrupted_mint_whatever_the_badge_holds() {
     for (tag, write_badge) in [("none", None), ("same", Some(ROOT)), ("other", Some(OTHER))] {
         let home = home(&format!("mint-{tag}"));
-        root_dir(&home.root(), ROOT);
+        root_key(&home, ROOT);
         if let Some(by) = write_badge {
             badge(&home, by).await;
         }
@@ -244,7 +198,7 @@ async fn a_root_with_no_pin_is_an_interrupted_mint_whatever_the_badge_holds() {
         );
     }
     let home = home("mint-torn");
-    root_dir(&home.root(), ROOT);
+    root_key(&home, ROOT);
     std::fs::write(home.key_cert(), b"torn").expect("tear the badge");
     assert_eq!(
         read(&home).await.standing,
@@ -255,11 +209,10 @@ async fn a_root_with_no_pin_is_an_interrupted_mint_whatever_the_badge_holds() {
 #[tokio::test]
 async fn a_sealed_root_key_is_read_by_its_header_without_a_prompt() {
     let home = home("sealed");
-    config::create_store_dir(&home.root()).expect("create root/");
     let passphrase = crate::passphrase::passphrase(Zeroizing::new("correct horse".to_owned()))
         .expect("a passphrase");
     let mut seed = TestRoot::seeded(ROOT).seed();
-    KeyFile::root(home.root().join("root.key"))
+    KeyFile::root(home.root_key())
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),
@@ -347,7 +300,7 @@ async fn a_standing_not_rooted_at_the_pin_reads_damaged() {
 #[tokio::test]
 async fn a_root_pinned_to_another_key_reads_damaged() {
     let home = home("root-other-pin");
-    root_dir(&home.root(), ROOT);
+    root_key(&home, ROOT);
     pin(&home, other()).await;
     assert_eq!(
         damaged(&home).await,
@@ -361,7 +314,7 @@ async fn a_root_pinned_to_another_key_reads_damaged() {
 #[tokio::test]
 async fn a_held_root_with_no_standing_reads_damaged() {
     let home = home("root-no-badge");
-    root_dir(&home.root(), ROOT);
+    root_key(&home, ROOT);
     pin(&home, root()).await;
     assert_eq!(
         damaged(&home).await,
@@ -397,7 +350,7 @@ async fn a_standing_for_another_key_reads_damaged() {
         }
     );
     // Held here too.
-    root_dir(&home.root(), ROOT);
+    root_key(&home, ROOT);
     assert_eq!(
         damaged(&home).await,
         Disagreement::StandingForAnotherKey {
@@ -456,110 +409,34 @@ async fn a_malformed_pin_reads_damaged() {
 }
 
 #[tokio::test]
-async fn a_root_with_no_key_file_reads_damaged() {
+async fn a_root_key_with_no_readable_header_reads_damaged() {
     let home = home("root-no-key");
-    config::create_store_dir(&home.root()).expect("create root/");
+    std::fs::write(home.root_key(), b"not a key").expect("write root.key");
     assert_eq!(
         damaged(&home).await,
         Disagreement::UnreadableRoot {
-            path: home.root().join("root.key")
+            path: home.root_key()
         }
     );
 }
 
-// Crash states.
+// A root revoked here.
 
 #[tokio::test]
-async fn standing_read_finishes_an_interrupted_move() {
-    let home = home("move");
-    root_dir(&home.root_moving(), ROOT);
-    pin(&home, root()).await;
-    badge(&home, ROOT).await;
-    let read = read(&home).await;
-    assert!(!home.root_moving().exists(), "root.moving/ is deleted");
-    assert_eq!(read.finished, [Finished::Moved]);
-    assert!(matches!(read.standing, Standing::Device { pin, .. } if pin == root()));
-}
-
-#[tokio::test]
-async fn a_move_still_under_way_is_left_alone() {
-    let home = home("move-held");
-    root_dir(&home.root_moving(), ROOT);
-    pin(&home, root()).await;
-    badge(&home, ROOT).await;
-    let _held = hold(&home.root_moving());
-    let read = read(&home).await;
-    assert!(home.root_moving().join("root.key").exists());
-    assert!(read.finished.is_empty());
-    assert!(matches!(read.standing, Standing::Device { pin, .. } if pin == root()));
-}
-
-#[tokio::test]
-async fn an_interrupted_retirement_is_finished_by_the_read() {
-    let home = home("retire");
-    root_dir(&home.root_revoking(), ROOT);
-    pin(&home, root()).await;
-    badge(&home, ROOT).await;
-    let files = update_files(&home);
-    revoke(&home, root()).await;
-    let read = read(&home).await;
-    assert_eq!(read.standing, Standing::Unpinned);
-    assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
-    assert!(!home.root_revoking().exists());
-    for gone in files.iter().chain([&home.key_cert(), &home.root_pub()]) {
-        assert!(!gone.exists(), "{} is removed", gone.display());
-    }
-}
-
-#[tokio::test]
-async fn a_retirement_still_under_way_is_left_alone() {
-    let home = home("retire-held");
-    root_dir(&home.root_revoking(), ROOT);
-    let _held = hold(&home.root_revoking());
-    let read = read(&home).await;
-    assert!(home.root_revoking().join("root.key").exists());
-    assert!(read.finished.is_empty());
-    assert_eq!(read.standing, Standing::Unpinned);
-}
-
-#[tokio::test]
-async fn a_retirement_keeps_a_pin_to_another_root() {
-    let home = home("retire-other-pin");
-    root_dir(&home.root_revoking(), ROOT);
-    pin(&home, other()).await;
-    badge(&home, OTHER).await;
-    let read = read(&home).await;
-    assert!(!home.root_revoking().exists());
-    assert!(matches!(read.standing, Standing::Device { pin, .. } if pin == other()));
-}
-
-#[tokio::test]
-async fn a_revoked_root_left_in_the_home_is_never_finished_as_a_mint() {
+async fn a_revoked_root_left_in_the_home_is_never_read_as_a_mint() {
     let home = home("revoked-root");
-    root_dir(&home.root(), ROOT);
+    root_key(&home, ROOT);
     revoke(&home, root()).await;
     let read = read(&home).await;
     assert_eq!(read.standing, Standing::Unpinned);
-    assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
-    assert!(!home.root().exists());
-    assert!(!home.root_revoking().exists());
+    assert!(read.finished.is_empty());
+    assert!(home.root_key().exists(), "a read deletes no root key");
 }
 
 #[tokio::test]
-async fn a_revoked_root_in_use_is_never_read_as_a_mint() {
-    let home = home("revoked-root-held");
-    root_dir(&home.root(), ROOT);
-    revoke(&home, root()).await;
-    let _held = hold(&home.root());
-    let read = read(&home).await;
-    assert_eq!(read.standing, Standing::Unpinned);
-    assert!(home.root().join("root.key").exists(), "a held root is left");
-}
-
-#[tokio::test]
-async fn a_held_revoked_root_is_retired_with_its_standing() {
+async fn a_held_revoked_root_reads_as_no_root_and_its_pin_is_removed() {
     let home = home("revoked-holder");
-    root_dir(&home.root(), ROOT);
+    root_key(&home, ROOT);
     pin(&home, root()).await;
     badge(&home, ROOT).await;
     let files = update_files(&home);
@@ -567,10 +444,7 @@ async fn a_held_revoked_root_is_retired_with_its_standing() {
     let read = read(&home).await;
     assert_eq!(read.standing, Standing::Unpinned);
     assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
-    for gone in files
-        .iter()
-        .chain([&home.key_cert(), &home.root_pub(), &home.root()])
-    {
+    for gone in files.iter().chain([&home.key_cert(), &home.root_pub()]) {
         assert!(!gone.exists(), "{} is removed", gone.display());
     }
 }
@@ -616,174 +490,10 @@ async fn a_retirement_removes_the_standing_first_and_the_pin_last() {
     assert!(!home.root_pub().exists());
 }
 
-// Races: another command changes the home between two of the read's steps.
-
-#[tokio::test]
-async fn a_lock_opened_on_a_directory_since_replaced_is_not_taken() {
-    let home = home("race-move");
-    root_dir(&home.root_moving(), ROOT);
-    pin(&home, root()).await;
-    badge(&home, ROOT).await;
-    // Between the read's open and its lock, the move finishes elsewhere and a new move starts, holding
-    // its own `root.moving/`.
-    let held = std::rc::Rc::new(core::cell::RefCell::new(None));
-    let _seam = at_seam(Seam::LockOpened, home.root_moving(), {
-        let dir = home.root_moving();
-        let held = std::rc::Rc::clone(&held);
-        move || {
-            std::fs::remove_dir_all(&dir).expect("finish the first move");
-            root_dir(&dir, OTHER);
-            *held.borrow_mut() = Some(hold(&dir));
-        }
-    });
-    let read = read(&home).await;
-    assert!(held.borrow().is_some(), "the seam ran");
-    assert!(
-        home.root_moving().join("root.key").exists(),
-        "the new move's root.moving/ is left"
-    );
-    assert!(read.finished.is_empty());
-}
-
-#[tokio::test]
-async fn a_root_minted_in_place_of_one_retired_under_the_read_is_left() {
-    let home = home("race-mint");
-    root_dir(&home.root(), ROOT);
-    revoke(&home, root()).await;
-    // Between the read's open and its lock, another read retires the revoked root and a mint puts a new
-    // live root at `root/`.
-    let _seam = at_seam(Seam::LockOpened, home.root(), {
-        let dir = home.root();
-        move || {
-            std::fs::remove_dir_all(&dir).expect("retire the revoked root");
-            root_dir(&dir, OTHER);
-        }
-    });
-    let read = read(&home).await;
-    assert_eq!(
-        read.standing,
-        Standing::InterruptedMint { root_key: other() }
-    );
-    assert!(read.finished.is_empty());
-    assert!(
-        home.root().join("root.key").exists(),
-        "the new root is left"
-    );
-    assert!(!home.root_revoking().exists());
-}
-
-#[tokio::test]
-async fn a_root_is_checked_again_once_its_lock_is_held() {
-    let home = home("race-rekey");
-    root_dir(&home.root(), ROOT);
-    revoke(&home, root()).await;
-    // The same directory and lock, now holding a live root: only the check under the lock sees it.
-    let _seam = at_seam(Seam::LockOpened, home.root(), {
-        let dir = home.root();
-        move || rekey(&dir, OTHER)
-    });
-    let read = read(&home).await;
-    assert_eq!(
-        read.standing,
-        Standing::InterruptedMint { root_key: other() }
-    );
-    assert!(read.finished.is_empty());
-    assert!(!home.root_revoking().exists());
-}
-
-#[tokio::test]
-async fn a_revoked_root_gone_before_its_rename_is_already_done() {
-    let home = home("race-gone");
-    root_dir(&home.root(), ROOT);
-    revoke(&home, root()).await;
-    let _seam = at_seam(Seam::BeforeRetireRename, home.root(), {
-        let dir = home.root();
-        move || std::fs::remove_dir_all(&dir).expect("remove root/")
-    });
-    let read = read(&home).await;
-    assert_eq!(read.standing, Standing::Unpinned);
-    assert!(read.finished.is_empty());
-    assert!(!home.root().exists());
-    assert!(!home.root_revoking().exists());
-}
-
-// A retirement whose key file is unreadable: only a standing under a revoked key is removed.
-
-/// A `root.revoking/` with a lock and no key file.
-fn keyless_revoking(home: &Home) {
-    config::create_store_dir(&home.root_revoking()).expect("create root.revoking/");
-    std::fs::write(home.root_revoking().join("lock"), b"").expect("write lock");
-}
-
-#[tokio::test]
-async fn a_keyless_retirement_keeps_a_live_pin_to_another_root() {
-    let home = home("keyless-pin");
-    keyless_revoking(&home);
-    pin(&home, other()).await;
-    badge(&home, OTHER).await;
-    let read = read(&home).await;
-    assert!(!home.root_revoking().exists());
-    assert_eq!(read.finished, [Finished::Retired { root: None }]);
-    assert!(matches!(read.standing, Standing::Device { pin, .. } if pin == other()));
-}
-
-#[tokio::test]
-async fn a_keyless_retirement_keeps_a_live_badge_with_no_pin_so_it_reads_damaged() {
-    let home = home("keyless-badge");
-    keyless_revoking(&home);
-    badge(&home, OTHER).await;
-    assert_eq!(
-        damaged(&home).await,
-        Disagreement::StandingWithoutPin {
-            standing_root: other()
-        }
-    );
-    assert!(!home.root_revoking().exists());
-}
-
-#[tokio::test]
-async fn a_keyless_retirement_removes_a_standing_under_a_revoked_key() {
-    let home = home("keyless-revoked");
-    keyless_revoking(&home);
-    pin(&home, root()).await;
-    badge(&home, ROOT).await;
-    revoke(&home, root()).await;
-    let read = read(&home).await;
-    assert_eq!(read.standing, Standing::Unpinned);
-    assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
-    assert!(!home.key_cert().exists());
-    assert!(!home.root_pub().exists());
-}
-
-// Stray files.
-
-#[tokio::test]
-async fn a_stray_root_new_beside_a_root_is_removed() {
-    let home = home("stray");
-    root_dir(&home.root(), ROOT);
-    root_dir(&home.root_new(), OTHER);
-    let read = read(&home).await;
-    assert!(!home.root_new().exists());
-    assert!(read.finished.is_empty(), "removed silently");
-    assert!(home.root().join("root.key").exists());
-}
-
-#[tokio::test]
-async fn a_root_new_alone_is_left_for_the_next_mint() {
-    let home = home("root-new-alone");
-    root_dir(&home.root_new(), ROOT);
-    assert_eq!(read(&home).await.standing, Standing::Unpinned);
-    assert!(home.root_new().join("root.key").exists());
-}
-
 // The lines.
 
 #[test]
 fn each_finished_state_prints_its_line() {
-    assert_eq!(
-        Finished::Moved.to_string(),
-        "finished moving your root off this machine."
-    );
     assert_eq!(
         Finished::Retired { root: Some(root()) }.to_string(),
         format!(

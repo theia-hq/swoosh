@@ -332,7 +332,8 @@ fn a_member_over_a_field_bound_neither_builds_nor_parses() {
     let mut bytes = RosterDoc::new(Epoch(1), vec![member(1, "desk")])
         .unwrap()
         .canonical_bytes();
-    let id_count = FIRST_LABEL + 2 + "desk".len() + 16;
+    // After the name: `until`, `duration` and `invite_until`.
+    let id_count = FIRST_LABEL + 2 + "desk".len() + 24;
     bytes[id_count] = MAX_IDS as u8 + 1;
     assert_eq!(
         RosterDoc::parse_canonical(&bytes),
@@ -346,7 +347,7 @@ fn a_standing_that_is_not_a_bare_link_refuses() {
     let bytes = RosterDoc::new(Epoch(1), vec![member(1, "desk")])
         .unwrap()
         .canonical_bytes();
-    let standing = FIRST_LABEL + 2 + "desk".len() + 16 + 1;
+    let standing = FIRST_LABEL + 2 + "desk".len() + 24 + 1;
     let mut damaged = bytes.clone();
     let last = damaged.len() - 9;
     damaged[last] ^= 0x01;
@@ -389,7 +390,7 @@ fn a_real_standing_fits_max_badge() {
 fn max_roster_blob_is_computed_from_the_bounds() {
     // The formula over the bounds, spelled out field by field.
     let id = 8 + 2 + MAX_REVOCATION_ID;
-    let member = 32 + (2 + DeviceLabel::MAX_LEN) + 8 + 8 + 1 + MAX_IDS * id + (2 + MAX_BADGE);
+    let member = 32 + (2 + DeviceLabel::MAX_LEN) + 8 + 8 + 8 + 1 + MAX_IDS * id + (2 + MAX_BADGE);
     let payload = (b"swoosh-roster".len() + 1 + 8 + 4)
         + MAX_MEMBERS * member
         + (4 + MAX_REVOKED * id)
@@ -426,6 +427,7 @@ fn maximal_blob(id: &TestRoot, standing: &Link) -> Vec<u8> {
             .unwrap(),
             until: u64::MAX,
             duration: u64::MAX,
+            invite_until: u64::MAX,
             ids: (0..MAX_IDS).map(full_id).collect(),
             standing: standing.clone(),
         })

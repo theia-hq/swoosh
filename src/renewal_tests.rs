@@ -71,6 +71,7 @@ fn row(seed: u8, label: &str, until: u64) -> Member {
         label: label.parse::<DeviceLabel>().unwrap(),
         until,
         duration: 0,
+        invite_until: 0,
         ids: Vec::new(),
         standing: standing(&root(), seed, until),
     }

@@ -2,12 +2,17 @@
 //!
 //! A [`Root`] is built only by [`Root::present`] (a root kept on this machine, or a copy given with
 //! `--root <dir>`) and [`Root::mint`] (this machine's first root). Both run every check before they ask for
-//! the passphrase, so a refusal never costs a prompt. The root's records ([`State`]) travel with its key and
-//! are written back before anything prints. [`Root::inspect`] reads the same records with no lock, no
-//! prompt and no write, for a command that only reports.
+//! the passphrase, so a refusal never costs a prompt.
 //!
-//! Every signature the root makes is made here: a device's standing, the update, and `state`. Nothing
-//! outside this module holds an unlocked root, and `serve` never reaches it.
+//! A root is its key and the last list of your devices it signed, kept beside it: `<home>/root.key` beside
+//! the home's own `devices`, or a copy, a directory holding `root.key` and `devices` and nothing else. That
+//! list is also its counter: an act reads its records forward from the newest of the list beside the key,
+//! the home's `devices`, `devices.conflict` and `revoked`, and writes its cut beside the key before the
+//! home's `devices` and before anything is offered. [`Root::inspect`] reads the same records with no lock,
+//! no prompt and no write, for a command that only reports.
+//!
+//! Every signature the root makes is made here: a device's standing and the update. Nothing outside this
+//! module holds an unlocked root, and `serve` never reaches it.
 //!
 //! The key is unlocked in the process that runs the command. It wipes itself on drop, and every root act
 //! sets the core-dump limit to zero first, so a crash leaves no copy of it on disk.
@@ -31,19 +36,17 @@ use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite, ServeLock};
 use crate::passphrase::Prompt;
 use crate::reach_report::{Missed, Reach, Why};
-use crate::roster::{ArtifactError, Epoch, FoldError, Folded, Member, RosterDoc, read_held};
-use crate::standing::{DirLock, Finished, LockError, Standing, StandingError};
-use crate::state::{self, Row, State, StateError};
+use crate::roster::{
+    ArtifactError, Epoch, FoldError, Folded, MAX_ROSTER_BLOB, Member, RosterDoc, read_held,
+};
+use crate::standing::{Finished, Standing, StandingError};
 use crate::sync::{Answer, Device, Dial, EACH, Until};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
 pub const KEY_FILE: &str = "root.key";
 
-/// This machine's standing, left in a root being made until the pin is written.
-const STANDING_FILE: &str = "standing";
-
-/// The file a write probe creates and removes, to learn whether a copy can be written.
-const PROBE_FILE: &str = "lock.probe";
+/// The last list of your devices the root signed, beside its key in a copy.
+pub const LIST_FILE: &str = "devices";
 
 /// How long a device's standing runs when nothing else says: 90 days.
 pub const DEFAULT_DURATION: Duration = Duration::from_secs(90 * DAY);
@@ -52,6 +55,9 @@ pub const DEFAULT_DURATION: Duration = Duration::from_secs(90 * DAY);
 const SHORTEST_RENEWING: u64 = 30 * DAY;
 
 const DAY: u64 = 24 * 60 * 60;
+
+/// The number of the list a mint cuts: the root's first, listing only the machine that made it.
+const MINTED: Epoch = Epoch(1);
 
 /// How long an act that cuts spends asking your devices for a newer update before it signs.
 const SYNC_BOUND: Duration = Duration::from_secs(10);
@@ -73,7 +79,7 @@ pub const KEPT_HERE: &str = "your root is on this machine, and this runs only wh
 /// Where the root for one command is: kept in this home, or a copy in a directory given with `--root`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootPlace {
-    /// `<home>/root/`.
+    /// `<home>/root.key`, beside the home's own `devices`.
     Home,
     /// A copy, from `--root <dir>`.
     Dir(PathBuf),
@@ -111,7 +117,7 @@ impl RootVerb {
         matches!(self, Self::MoveRoot | Self::RevokeRoot)
     }
 
-    /// Whether the act writes the root's directory, so a copy that cannot be written is refused.
+    /// Whether the act writes beside the root's key, so a copy that cannot be written is refused.
     fn writes_source(self) -> bool {
         !matches!(self, Self::Backup | Self::Restore)
     }
@@ -197,12 +203,15 @@ pub enum RootError {
         /// The copy's directory.
         dir: PathBuf,
     },
-    /// Another command holds the root's lock.
-    #[error("another swoosh command is using your root: wait for it.")]
-    InUse,
-    /// The root's records could not be read, or were changed outside swoosh.
-    #[error(transparent)]
-    State(#[from] StateError),
+    /// The list beside the root's key is not one this root signed.
+    #[error(
+        "this root's records were changed outside swoosh ({}): refusing to sign with them. Use another copy.",
+        EscapedPath(.dir)
+    )]
+    Damaged {
+        /// The directory the root's key is in.
+        dir: PathBuf,
+    },
     /// The root lists as many devices as one update can carry.
     #[error(
         "your root lists {count} devices, the most one root can publish. Revoke some first: swoosh revoke \
@@ -312,16 +321,13 @@ pub enum RootError {
     },
     /// The key is revoked, and a revoked key is never admitted again.
     #[error(
-        "{}… was revoked{}; a revoked key is not re-admitted. On that machine: swoosh leave --new-key, then \
+        "{}… was revoked; a revoked key is not re-admitted. On that machine: swoosh leave --new-key, then \
         invite the new key.",
-        crate::credential::short(.key),
-        .on.map(|on| format!(" on {on}")).unwrap_or_default()
+        crate::credential::short(.key)
     )]
     RevokedKey {
         /// The key.
         key: VerifyKey,
-        /// The day its row was marked revoked, when a row carries it.
-        on: Option<Date>,
     },
     /// The passphrase could not be asked for.
     #[error("{0}")]
@@ -329,7 +335,7 @@ pub enum RootError {
     /// A standing could not be signed.
     #[error("signing a standing")]
     Sign(#[source] nauthy::CapError),
-    /// The records would not form a valid `state` or update.
+    /// The records would not form a valid update.
     #[error("the root's records are malformed")]
     Format(#[source] FormatError),
     /// The update could not be written here.
@@ -409,39 +415,6 @@ pub fn renew_by(until: u64, duration: u64, seeded: bool) -> Option<u64> {
     (duration >= SHORTEST_RENEWING && !seeded).then(|| until.saturating_sub(duration / 2))
 }
 
-/// The record a move of the root off this machine leaves: where it went, and the day it went.
-///
-/// `<home>/root-moved` holds two lines, the path and the day in unix seconds, owner-only. It is a note for
-/// a person, never trust: nothing reads it to decide anything.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Moved {
-    /// Where the root was moved to.
-    pub to: PathBuf,
-    /// The day it was moved.
-    pub on: Date,
-}
-
-impl Moved {
-    /// Write the record into `home`.
-    ///
-    /// # Errors
-    ///
-    /// The record could not be written.
-    pub fn write(&self, home_lock: &HomeWrite, home: &Home) -> io::Result<()> {
-        let text = format!("{}\n{}\n", self.to.display(), self.on.0);
-        crate::config::write_private_atomic(home_lock, &home.root_moved(), text.as_bytes())
-    }
-
-    /// The record in `home`, or `None` when there is none or it is not two lines of a path and a day.
-    pub fn read(home: &Home) -> Option<Self> {
-        let text = std::fs::read_to_string(home.root_moved()).ok()?;
-        let mut lines = text.lines();
-        let to = PathBuf::from(lines.next()?);
-        let on = Date(lines.next()?.trim().parse().ok()?);
-        Some(Self { to, on })
-    }
-}
-
 /// The root, unlocked for one command.
 ///
 /// Not `Clone`, and its `Debug` names only its directory: the key wipes itself when this drops.
@@ -454,11 +427,13 @@ pub struct Root {
 /// what the act has done so far.
 struct Act {
     key: NodeId,
-    dir: PathBuf,
+    /// The copy's directory, for a root given with `--root`; `None` for the root kept in this home, whose
+    /// list is the home's own `devices`.
+    copy: Option<PathBuf>,
+    /// The number of the list beside the key as the act read it: a copy's list is only ever replaced by a
+    /// higher one.
+    beside: Epoch,
     home: Home,
-    /// Held, never read: the copy's `lock`, for as long as the act lives. `None` only for a copy this act
-    /// never writes and whose lock could be neither opened nor created.
-    _lock: Option<DirLock>,
     book: Book,
     /// The update this machine holds from this root, and its bytes: the floor the next cut must pass.
     held: Option<(RosterDoc, Vec<u8>)>,
@@ -487,35 +462,56 @@ struct Act {
 impl fmt::Debug for Root {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Root")
-            .field("dir", &self.act.dir)
+            .field("key_file", &self.act.key_file())
             .finish_non_exhaustive()
     }
 }
 
-/// What [`Root::inspect`] read: the root's records and its key, with no secret.
+/// What [`Root::inspect`] read: the root's key and records, with no secret.
 #[derive(Debug)]
 pub struct Inspected {
     /// The root's key, from its key file's header.
     pub root: NodeId,
-    /// Its verified records.
-    pub state: State,
     /// The crash states the standing read finished on the way, for the command to print.
     pub finished: Vec<Finished>,
-    /// The rows as the next act that cuts would find them before its prompt, read-only: brought forward
+    /// The list beside the key, as signed.
+    list: Book,
+    /// The records as the next act that cuts would find them before its prompt, read-only: brought forward
     /// from the update held here and any fork of it, with this machine's own revocations, and every row
     /// whose key is revoked marked.
-    forward: Vec<Row>,
+    forward: Book,
 }
 
 impl Inspected {
-    /// The rows as the next act that cuts would sign from them: the records brought forward, read-only.
-    pub fn rows(&self) -> &[Row] {
-        &self.forward
+    /// The live devices as the next act that cuts would sign from them: the records brought forward,
+    /// read-only.
+    pub fn rows(&self) -> &[Member] {
+        &self.forward.rows
+    }
+
+    /// The devices the records brought forward mark revoked: listed beside the key, and revoked since.
+    pub fn marked(&self) -> &[Member] {
+        &self.forward.marked
+    }
+
+    /// The device keys the records brought forward revoke.
+    pub fn revoked_keys(&self) -> impl Iterator<Item = &VerifyKey> {
+        self.forward.revoked_keys.values()
+    }
+
+    /// The ids the list beside the key revokes, as signed.
+    pub fn listed_revoked(&self) -> impl Iterator<Item = &Id> {
+        self.list.revoked.values()
+    }
+
+    /// The device keys the list beside the key revokes, as signed.
+    pub fn listed_revoked_keys(&self) -> impl Iterator<Item = &VerifyKey> {
+        self.list.revoked_keys.values()
     }
 
     /// The rows due to renew at `now`: what the next act that cuts renews on its own.
-    pub fn due(&self, now: u64) -> impl Iterator<Item = &Row> {
-        self.forward.iter().filter(move |row| due(row, now))
+    pub fn due(&self, now: u64) -> impl Iterator<Item = &Member> {
+        self.forward.rows.iter().filter(move |row| due(row, now))
     }
 }
 
@@ -702,30 +698,19 @@ impl Root {
         no_core_dumps()?;
         let found = find(home, &place, Some(verb)).await?;
         report(out, &found.finished);
-        if verb.writes_source() {
-            probe(&found.dir)?;
+        if verb.writes_source()
+            && let Some(dir) = &found.copy
+        {
+            writable(dir)?;
         }
-        let lock = take_lock(&found.dir, verb.writes_source() || place == RootPlace::Home)?;
-        let state = state::load(&found.dir, found.header.verify_key()?)?;
-        let book = Book::from(state);
-        let mut act = Act {
-            key: found.header,
-            dir: found.dir,
-            home: home.clone(),
-            _lock: lock,
-            book,
-            held: None,
-            fork: None,
-            due: Vec::new(),
-            now: unix_now(),
-            own: own_key(home)?,
-            added: Vec::new(),
-            replaced: Vec::new(),
-            renewed: Vec::new(),
-            revoked_until: None,
-            revoked: Vec::new(),
-            minted: false,
-        };
+        let list = read_list(home, found.copy.as_deref(), found.header.verify_key()?)?;
+        let mut act = Act::new(
+            home,
+            found.header,
+            found.copy,
+            list.as_ref(),
+            own_key(home)?,
+        );
         if verb.cuts() {
             act.sync(dial, out).await;
             act.bring_forward(out)?;
@@ -736,9 +721,7 @@ impl Root {
         if !prompt.terminal() {
             return Err(RootError::NoTerminalToUnlock);
         }
-        let passphrase = prompt
-            .unlock(&act.dir.join(KEY_FILE))
-            .map_err(prompt_error)?;
+        let passphrase = prompt.unlock(&act.key_file()).map_err(prompt_error)?;
         let root = Self {
             secret: found.locked.unlock(&passphrase)?,
             act,
@@ -761,7 +744,7 @@ impl Root {
     ) -> Result<Option<(VerifyKey, u64, Link)>, RootError> {
         let found = find(home, &place, None).await?;
         let pin = found.header.verify_key()?;
-        let book = Book::from(state::load(&found.dir, pin)?);
+        let book = Book::of(read_list(home, found.copy.as_deref(), pin)?.as_ref());
         let now = unix_now();
         let (forward, held) = book.read_forward(home, pin, now)?;
         let Some(held) = held else {
@@ -771,34 +754,35 @@ impl Root {
         {
             return Ok(None);
         }
-        let Some(row) = book.live().find(|row| &row.label == name) else {
+        let Some(row) = book.rows.iter().find(|row| &row.label == name) else {
             return Ok(None);
         };
         let duration = duration.map_or_else(|| own_duration(row), |duration| duration.as_secs());
         Ok(book
             .renewal_skips(row, duration, now)
-            .then(|| (row.key, row.until, row.standing.clone())))
+            .then(|| (row.node, row.until, row.standing.clone())))
     }
 
     /// Read the root at `place` with no lock, no prompt and no write: its key and verified records.
     pub async fn inspect(home: &Home, place: RootPlace) -> Result<Inspected, RootError> {
         let found = find(home, &place, None).await?;
         let pin = found.header.verify_key()?;
-        let state = state::load(&found.dir, pin)?;
-        let (forward, _) = Book::from(state.clone()).read_forward(home, pin, unix_now())?;
+        let list = Book::of(read_list(home, found.copy.as_deref(), pin)?.as_ref());
+        let (forward, _) = list.read_forward(home, pin, unix_now())?;
         Ok(Inspected {
             root: found.header,
-            state,
             finished: found.finished,
-            forward: forward.rows,
+            list,
+            forward,
         })
     }
 
-    /// The records of the root whose making or restore was interrupted here, the one `root_key` names.
+    /// The records of the root whose making or restore was interrupted here, the one `root_key` names: the
+    /// list it left beside its key, if it got that far.
     pub fn half_made(home: &Home, root_key: NodeId) -> Result<HalfMade, RootError> {
-        let state = state::load(&home.root(), root_key.verify_key()?)?;
+        let list = read_list(home, None, root_key.verify_key()?)?;
         Ok(HalfMade {
-            book: Book::from(state),
+            book: Book::of(list.as_ref()),
             own: own_key(home)?,
             now: unix_now(),
         })
@@ -846,8 +830,8 @@ impl Root {
         self.act.key
     }
 
-    /// Every row of the root's records as this act has them so far.
-    pub fn rows(&self) -> &[Row] {
+    /// The live devices of the root's records as this act has them so far.
+    pub fn rows(&self) -> &[Member] {
         &self.act.book.rows
     }
 
@@ -858,9 +842,9 @@ impl Root {
 
     /// Sign a standing for a new device `key` named `name`, running `duration` from now, and add its row.
     ///
-    /// Before the root's first update, `name` may be the one its mint gave this machine: no device has
-    /// seen that name yet, so this machine moves to the next free `-2`, `-3` and the new device keeps the
-    /// name it was asked for.
+    /// While the root's list holds only the one its mint cut, `name` may be the one the mint gave this
+    /// machine: no other device has seen that name yet, so this machine moves to the next free `-2`, `-3`
+    /// and the new device keeps the name it was asked for.
     pub fn sign_standing(
         &mut self,
         key: VerifyKey,
@@ -869,27 +853,21 @@ impl Root {
     ) -> Result<Link, RootError> {
         self.act.records().check_add(key, &name)?;
         let book = &self.act.book;
-        if let Some(index) = book
-            .rows
-            .iter()
-            .position(|row| !row.is_revoked() && row.label == name)
-        {
+        if let Some(index) = book.rows.iter().position(|row| row.label == name) {
             // `check_add` let the name through only as the one this machine's mint gave it.
             let moved = fresh_name(name.as_str(), |label| {
-                book.live().any(|row| &row.label == label)
+                book.rows.iter().any(|row| &row.label == label)
             });
             self.act.book.rows[index].label = moved;
         }
         let until = self.act.now.saturating_add(duration.as_secs());
         let (standing, id) = self.sign_member(key, until)?;
-        self.act.book.rows.push(Row {
-            key,
+        self.act.book.rows.push(Member {
+            node: key,
             label: name,
             until,
             duration: duration.as_secs(),
-            seeded: false,
             invite_until: 0,
-            revoked_on: 0,
             ids: vec![id],
             standing: standing.clone(),
         });
@@ -907,8 +885,7 @@ impl Root {
     ) -> Result<(Link, Zeroizing<[u8; 32]>), RootError> {
         let (seed, key) = fresh_key()?;
         let standing = self.sign_standing(key, name, duration)?;
-        if let Some(row) = self.act.book.rows.iter_mut().find(|row| row.key == key) {
-            row.seeded = true;
+        if let Some(row) = self.act.book.rows.iter_mut().find(|row| row.node == key) {
             row.invite_until = row.until;
         }
         Ok((standing, seed))
@@ -919,13 +896,7 @@ impl Root {
     /// invite works to its own date and a revoke of the device still ends it.
     pub fn rekey(&mut self, name: &DeviceLabel, duration: Duration) -> Result<Rekeyed, RootError> {
         self.act.records().check_rekey(name)?;
-        let Some(index) = self
-            .act
-            .book
-            .rows
-            .iter()
-            .position(|row| !row.is_revoked() && &row.label == name)
-        else {
+        let Some(index) = self.act.book.rows.iter().position(|row| &row.label == name) else {
             return Err(RootError::NoDeviceToRenew { name: name.clone() });
         };
         let (seed, key) = fresh_key()?;
@@ -934,8 +905,8 @@ impl Root {
         let (standing, id) = self.sign_member(key, until)?;
         let row = &mut self.act.book.rows[index];
         let old_invite_until = row.invite_until;
-        self.act.replaced.push(row.key);
-        row.key = key;
+        self.act.replaced.push(row.node);
+        row.node = key;
         row.ids.retain(|id| id.expires > now);
         row.ids.push(id);
         row.until = until;
@@ -954,8 +925,8 @@ impl Root {
 
     /// Revoke the device `name` names, found by its key: its row, its key and every id it holds. The key
     /// finds the row, never the name, since a name can pass to a new device once the old one is revoked.
-    /// A row already marked revoked, by this machine's own block brought forward or by an earlier act, is
-    /// revoked again as it stands, so running a revoke again with the root publishes it.
+    /// A row the records brought forward mark revoked, by this machine's own block, is revoked again as it
+    /// stands, so running a revoke again with the root publishes it.
     ///
     /// `listed` is every key `name` held live when the caller resolved it, before this act brought its
     /// records forward. When the records now list the device under a key outside `listed` and `key`, the
@@ -972,19 +943,14 @@ impl Root {
         let seen: Vec<VerifyKey> = listed.iter().copied().chain([key]).collect();
         if act
             .book
-            .live()
-            .any(|row| &row.label == name && !seen.contains(&row.key))
+            .rows
+            .iter()
+            .any(|row| &row.label == name && !seen.contains(&row.node))
         {
             return Err(RootError::NameMoved { name: name.clone() });
         }
-        let Some(row) = act.book.live().find(|row| row.key == key) else {
-            let revoked = act
-                .book
-                .rows
-                .iter()
-                .filter(|row| row.is_revoked() && row.key == key)
-                .max_by_key(|row| row.revoked_on);
-            let Some(row) = revoked else {
+        let Some(row) = act.book.rows.iter().find(|row| row.node == key) else {
+            let Some(row) = act.book.marked.iter().find(|row| row.node == key) else {
                 return Err(RootError::NotYourDevice { name: name.clone() });
             };
             let until = row.until;
@@ -992,7 +958,7 @@ impl Root {
             act.revoked.push((name.clone(), seen));
             return Ok(());
         };
-        let (key, until) = (row.key, row.until);
+        let (key, until) = (row.node, row.until);
         let adds = row
             .ids
             .iter()
@@ -1030,7 +996,7 @@ impl Root {
     pub fn renew_due(&mut self) -> Result<RenewalList, RootError> {
         let mut list = RenewalList::default();
         for key in core::mem::take(&mut self.act.due) {
-            let Some(index) = self.act.book.rows.iter().position(|row| row.key == key) else {
+            let Some(index) = self.act.book.rows.iter().position(|row| row.node == key) else {
                 continue;
             };
             let duration = self.act.book.rows[index].duration;
@@ -1051,13 +1017,7 @@ impl Root {
         let mut list = RenewalList::default();
         let now = self.act.now;
         for name in names {
-            let Some(index) = self
-                .act
-                .book
-                .rows
-                .iter()
-                .position(|row| !row.is_revoked() && &row.label == name)
-            else {
+            let Some(index) = self.act.book.rows.iter().position(|row| &row.label == name) else {
                 return Err(RootError::NoDeviceToRenew { name: name.clone() });
             };
             let row = &self.act.book.rows[index];
@@ -1068,7 +1028,7 @@ impl Root {
                     .push((row.label.clone(), row.until, row.standing.clone()));
                 continue;
             }
-            let key = row.key;
+            let key = row.node;
             // Renewed by name here, so the renewal of what is due does not sign it a second time.
             self.act.due.retain(|due| *due != key);
             list.renewed.push(self.renew_row(index, duration)?);
@@ -1076,8 +1036,8 @@ impl Root {
         Ok(list)
     }
 
-    /// Write `state`, cut the update whenever `state` holds anything the held one lacks, and keep the cut
-    /// here as this machine's update.
+    /// Cut the update whenever the records hold anything the held one lacks, write it beside the key, and
+    /// keep it here as this machine's update.
     ///
     /// Only the root signs an update, and only here: any device may serve one, but none may cut one, so
     /// two updates share a number only when two copies of one root both cut.
@@ -1091,6 +1051,10 @@ impl Root {
     /// `devices.conflict` again, brings its records forward from them when either moved since it read
     /// them, and checks its changes again against what they brought, so a list folded while the act waited
     /// at its prompt is carried by the cut and never forked or undone by it.
+    ///
+    /// It writes, in order: the list beside a copy's key, then the home's `devices`, through the fold. At
+    /// home the two are one file. A copy's list is also brought up to an update held here that is newer
+    /// than it, when there was nothing new to cut.
     pub async fn commit_to(&mut self, out: &mut impl Write) -> Result<Committed, RootError> {
         let home_lock = HomeWrite::take(&self.act.home).await?;
         self.act.again(out)?;
@@ -1113,7 +1077,11 @@ impl Root {
                 (self.sign(&doc.canonical_bytes())?, number, true)
             }
         };
-        self.write_state(&home_lock)?;
+        if let Some(dir) = &self.act.copy
+            && number > self.act.beside
+        {
+            crate::roster::write(&home_lock, &dir.join(LIST_FILE), &bytes)?;
+        }
         // The act's own cut must be the newest update here. Anything else (a fork, or a list another copy
         // cut past it) means the list moved while this ran, and the cut is not offered.
         if cut
@@ -1130,14 +1098,15 @@ impl Root {
         let act = &self.act;
         let targets = act
             .book
-            .live()
-            // A revoked key's row is always revoked (the records just written refuse a live row with a
-            // revoked key), so `live` already leaves every revoked key out.
-            .filter(|row| Some(row.key) != act.own && !act.added.contains(&row.key))
+            .rows
+            .iter()
+            // A row whose key is revoked is marked, never live, so the rows already leave every revoked
+            // key out.
+            .filter(|row| Some(row.node) != act.own && !act.added.contains(&row.node))
             // A key nobody can hold cannot be dialed, so it is left out.
             .filter_map(|row| {
                 Some(Device {
-                    key: row.key.node_id().ok()?,
+                    key: row.node.node_id().ok()?,
                     name: format!("me/{}", row.label),
                 })
             })
@@ -1149,21 +1118,6 @@ impl Root {
             until: act.revoked_until,
             home: act.home.clone(),
         })
-    }
-
-    /// Write `state` only, and cut nothing, under `home.lock`.
-    pub async fn commit_state(mut self) -> Result<(), RootError> {
-        let home_lock = HomeWrite::take(&self.act.home).await?;
-        self.act.book.prune(self.act.now);
-        self.write_state(&home_lock)
-    }
-
-    /// Sign and write the records as `state`, under `home.lock`.
-    fn write_state(&self, home_lock: &HomeWrite) -> Result<(), RootError> {
-        let state = self.act.book.state(self.act.now)?;
-        let signed = self.sign(&state.canonical_bytes())?;
-        state::write(home_lock, &self.act.dir, &signed)
-            .map_err(io_at(&self.act.dir.join(state::FILE)))
     }
 
     /// `bytes`, signed as a document of this root.
@@ -1194,7 +1148,7 @@ impl Root {
     /// A new standing for the row at `index`, running `duration` from now.
     fn renew_row(&mut self, index: usize, duration: u64) -> Result<Renewed, RootError> {
         let now = self.act.now;
-        let key = self.act.book.rows[index].key;
+        let key = self.act.book.rows[index].node;
         let until = now.saturating_add(duration);
         let (standing, id) = self.sign_member(key, until)?;
         self.act.renewed.push(key);
@@ -1214,6 +1168,42 @@ impl Root {
 }
 
 impl Act {
+    /// An act on the root `key`, kept in `home` or the copy at `copy`, whose records start from `list`, the
+    /// list beside its key; `own` is this machine's key.
+    fn new(
+        home: &Home,
+        key: NodeId,
+        copy: Option<PathBuf>,
+        list: Option<&RosterDoc>,
+        own: Option<VerifyKey>,
+    ) -> Self {
+        Self {
+            key,
+            copy,
+            beside: list.map_or(Epoch::UNVERSIONED, RosterDoc::epoch),
+            home: home.clone(),
+            book: Book::of(list),
+            held: None,
+            fork: None,
+            due: Vec::new(),
+            now: unix_now(),
+            own,
+            added: Vec::new(),
+            replaced: Vec::new(),
+            renewed: Vec::new(),
+            revoked_until: None,
+            revoked: Vec::new(),
+            minted: false,
+        }
+    }
+
+    /// The root's key file.
+    fn key_file(&self) -> PathBuf {
+        self.copy
+            .as_ref()
+            .map_or_else(|| self.home.root_key(), |dir| dir.join(KEY_FILE))
+    }
+
     /// The records as this act has them, for a check before the prompt.
     fn records(&self) -> Records<'_> {
         Records {
@@ -1230,8 +1220,9 @@ impl Act {
     async fn sync(&self, dial: &impl Dial, out: &mut impl Write) {
         let also: Vec<(VerifyKey, String)> = self
             .book
-            .live()
-            .map(|row| (row.key, format!("me/{}", row.label)))
+            .rows
+            .iter()
+            .map(|row| (row.node, format!("me/{}", row.label)))
             .collect();
         let checked = match crate::sync::devices(&self.home, also).await {
             Ok(devices) if devices.is_empty() => return,
@@ -1307,8 +1298,9 @@ impl Act {
         let mut touched = self.added.iter().chain(&self.replaced).chain(&self.renewed);
         if let Some((name, _)) = self.revoked.iter().find(|(name, seen)| {
             self.book
-                .live()
-                .any(|row| &row.label == name && !seen.contains(&row.key))
+                .rows
+                .iter()
+                .any(|row| &row.label == name && !seen.contains(&row.node))
         }) {
             return Err(RootError::NameMoved { name: name.clone() });
         }
@@ -1324,7 +1316,7 @@ impl Act {
         let mut skipped = Vec::new();
         for row in &self.book.rows {
             if due(row, self.now) {
-                self.due.push(row.key);
+                self.due.push(row.node);
             } else if Book::renews_on_its_own(row, self.now) {
                 let live = row.ids.iter().filter(|id| id.expires > self.now);
                 let newest = live.map(|id| id.expires).max().unwrap_or(row.until);
@@ -1335,8 +1327,14 @@ impl Act {
             .book
             .rows
             .iter()
-            .filter(|row| self.due.contains(&row.key))
-            .map(|row| format!("me/{} ({}…)", row.label, crate::credential::short(&row.key)))
+            .filter(|row| self.due.contains(&row.node))
+            .map(|row| {
+                format!(
+                    "me/{} ({}…)",
+                    row.label,
+                    crate::credential::short(&row.node)
+                )
+            })
             .collect();
         if !names.is_empty() {
             let count = names.len();
@@ -1361,7 +1359,7 @@ impl Act {
         let mut dates = Vec::new();
         let own = self
             .own
-            .and_then(|own| self.book.live().find(|row| row.key == own));
+            .and_then(|own| self.book.rows.iter().find(|row| row.node == own));
         if let Some(own) = own {
             dates.push(format!(
                 "This machine is me/{} until {}.",
@@ -1369,7 +1367,12 @@ impl Act {
                 Date(own.until)
             ));
         }
-        for row in self.book.live().filter(|row| self.added.contains(&row.key)) {
+        for row in self
+            .book
+            .rows
+            .iter()
+            .filter(|row| self.added.contains(&row.node))
+        {
             dates.push(format!(
                 "me/{} can join until {}.",
                 row.label,
@@ -1393,10 +1396,11 @@ impl Act {
     }
 }
 
-/// What [`find`] found: the root's directory, its key, its locked key file, and the crash states the
-/// standing read finished.
+/// What [`find`] found: where the root is, its key, its locked key file, and the crash states the standing
+/// read finished.
 struct Found {
-    dir: PathBuf,
+    /// The copy's directory; `None` for the root kept in this home.
+    copy: Option<PathBuf>,
     header: NodeId,
     locked: keystore::Locked,
     finished: Vec<Finished>,
@@ -1406,8 +1410,8 @@ struct Found {
 /// machine may present the root at `place`, and the root's key file read to its header.
 async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<Found, RootError> {
     let read = Standing::read(home).await?;
-    let (dir, pin, device) = match (place, read.standing) {
-        (RootPlace::Home, Standing::HoldsRoot { pin, .. }) => (home.root(), Some(pin), true),
+    let (copy, pin, device) = match (place, read.standing) {
+        (RootPlace::Home, Standing::HoldsRoot { pin, .. }) => (None, Some(pin), true),
         (RootPlace::Home, Standing::InterruptedMint { root_key }) => {
             return Err(RootError::Unfinished { root: root_key });
         }
@@ -1421,13 +1425,16 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
         (RootPlace::Dir(_), _) if verb.is_some_and(RootVerb::holder_only) => {
             return Err(RootError::HolderOnly);
         }
-        (RootPlace::Dir(dir), Standing::Device { pin, .. }) => (dir.clone(), Some(pin), true),
-        (RootPlace::Dir(dir), Standing::Unpinned) => (dir.clone(), None, false),
+        (RootPlace::Dir(dir), Standing::Device { pin, .. }) => (Some(dir.clone()), Some(pin), true),
+        (RootPlace::Dir(dir), Standing::Unpinned) => (Some(dir.clone()), None, false),
     };
     if verb.is_some_and(RootVerb::cuts) && !device {
         return Err(RootError::NotADevice);
     }
-    let locked = read_header(&dir)?;
+    let key_file = copy
+        .as_ref()
+        .map_or_else(|| home.root_key(), |dir| dir.join(KEY_FILE));
+    let locked = read_header(&key_file)?;
     let header = locked.node_id();
     if let Some(pin) = pin
         && pin != header
@@ -1439,16 +1446,16 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
         return Err(RootError::Revoked { root: header });
     }
     Ok(Found {
-        dir,
+        copy,
         header,
         locked,
         finished: read.finished,
     })
 }
 
-/// The root's key file at `dir`: sealed, and of the root kind.
-fn read_header(dir: &Path) -> Result<keystore::Locked, RootError> {
-    let file = KeyFile::root(dir.join(KEY_FILE));
+/// The root's key file at `path`: sealed, and of the root kind.
+fn read_header(path: &Path) -> Result<keystore::Locked, RootError> {
+    let file = KeyFile::root(path);
     match file.load() {
         Ok(Some(Stored::Locked(locked))) => match locked.method() {
             Method::Passphrase => Ok(locked),
@@ -1466,44 +1473,57 @@ fn read_header(dir: &Path) -> Result<keystore::Locked, RootError> {
     }
 }
 
-/// Present step 6: create and remove a file in `dir`, so a copy that cannot be written is refused before
-/// anything is signed. Whatever is at the name first is removed, never opened: a link planted there by
-/// someone who can write the copy is not followed.
-fn probe(dir: &Path) -> Result<(), RootError> {
-    let path = dir.join(PROBE_FILE);
-    match std::fs::remove_file(&path) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
+/// The list beside the root's key, `devices`, verified under `root`: in the copy at `copy`, or in this home
+/// for the root kept here. `None` when there is none yet; one that is not a list this root signed is
+/// refused, so an act never signs from records changed outside swoosh.
+fn read_list(
+    home: &Home,
+    copy: Option<&Path>,
+    root: VerifyKey,
+) -> Result<Option<RosterDoc>, RootError> {
+    use std::io::Read as _;
+
+    let (dir, path) = match copy {
+        Some(dir) => (dir.to_path_buf(), dir.join(LIST_FILE)),
+        None => (home.dir().to_path_buf(), home.devices()),
+    };
+    let file = match std::fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(RootError::Io { path, source }),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_ROSTER_BLOB + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_at(&path))?;
+    if bytes.len() as u64 > MAX_ROSTER_BLOB {
+        return Err(RootError::Damaged { dir });
     }
-    .and_then(|()| {
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-    })
-    .and_then(|_| std::fs::remove_file(&path))
-    .map_err(|_| RootError::ReadOnly {
+    crate::roster::verify(&bytes, root)
+        .map(Some)
+        .map_err(|_| RootError::Damaged { dir })
+}
+
+/// Present step 6: refuse a copy this act cannot write, before anything is signed, since it writes what it
+/// signs beside the key. Asked of the filesystem, so nothing is created in the copy to learn it.
+fn writable(dir: &Path) -> Result<(), RootError> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let read_only = || RootError::ReadOnly {
         dir: dir.to_path_buf(),
-    })
-}
-
-/// Present step 7: take `<dir>/lock` without waiting. A copy the act never writes proceeds with no lock
-/// when the lock can be neither opened nor created (`required` is false).
-fn take_lock(dir: &Path, required: bool) -> Result<Option<DirLock>, RootError> {
-    match DirLock::take(dir) {
-        Ok(lock) => Ok(Some(lock)),
-        Err(LockError::Held) => Err(RootError::InUse),
-        Err(LockError::Io(_)) if !required => Ok(None),
-        Err(LockError::Io(source)) => Err(RootError::Io {
-            path: dir.join("lock"),
-            source,
-        }),
+    };
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes()).map_err(|_| read_only())?;
+    // SAFETY: `path` is a NUL-terminated string that outlives the call, which only reads it.
+    if unsafe { libc::access(path.as_ptr(), libc::W_OK) } != 0 {
+        return Err(read_only());
     }
+    Ok(())
 }
 
-/// Make a root on an `Unpinned` home: choose its passphrase, write it with its records and this machine's
-/// standing to `root.new/`, rename that to `root/`, then take the standing as this machine's and pin the
-/// root. The pin is the commit point: a crash before it leaves an interrupted mint the next one finishes.
+/// Make a root on an `Unpinned` home: choose its passphrase, then under `home.lock` write `root.key`, sign
+/// this machine's standing into the root's first list and write it as `devices`, then take the standing
+/// as this machine's and pin the root. The pin is the commit point: a crash before it leaves an
+/// interrupted mint the next one finishes.
 async fn make(
     home: &Home,
     prompt: &mut impl Prompt,
@@ -1525,61 +1545,30 @@ async fn make(
         out,
         "It is locked with a passphrase, which you type whenever you add, renew or revoke a device."
     );
-    let staging = home.root_new();
-    let passphrase = prompt
-        .choose(&staging.join(KEY_FILE))
-        .map_err(prompt_error)?;
+    let key_file = home.root_key();
+    let passphrase = prompt.choose(&key_file).map_err(prompt_error)?;
     let secret =
         keystore::Secret::generate().map_err(|source| RootError::Write(Box::new(source)))?;
 
     let home_lock = HomeWrite::take(home).await?;
     still(&home_lock, home, Standing::Unpinned, out).await?;
     not_admitting(&home_lock, home)?;
-    remove_staging(&staging)?;
-    crate::config::create_store_dir(&staging).map_err(io_at(&staging))?;
-    let lock = take_lock(&staging, true)?;
-    KeyFile::root(staging.join(KEY_FILE)).write(&secret, Protection::Passphrase(&passphrase))?;
+    // An unpinned home keeps no root but a revoked one, which is no root: the new one takes its place.
+    remove_file(&key_file)?;
+    KeyFile::root(&key_file).write(&secret, Protection::Passphrase(&passphrase))?;
+    seam(Seam::Keyed)?;
     let mut root = Root {
-        act: Act {
-            key: secret.node_id(),
-            dir: staging.clone(),
-            home: home.clone(),
-            _lock: lock,
-            book: Book::default(),
-            held: None,
-            fork: None,
-            due: Vec::new(),
-            now: unix_now(),
-            own: Some(own),
-            added: Vec::new(),
-            replaced: Vec::new(),
-            renewed: Vec::new(),
-            revoked_until: None,
-            revoked: Vec::new(),
-            minted: true,
-        },
+        act: Act::new(home, secret.node_id(), None, None, Some(own)),
         secret,
     };
-    let standing = root.sign_own(own)?;
-    root.write_state(&home_lock)?;
-    let staged = staging.join(STANDING_FILE);
-    crate::config::write_private_atomic(&home_lock, &staged, format!("{standing}\n").as_bytes())
-        .map_err(io_at(&staged))?;
-    sync_dir(&staging)?;
-    std::fs::rename(&staging, home.root()).map_err(io_at(&staging))?;
-    sync_dir(home.dir())?;
-    root.act.dir = home.root();
-    // The own row is this machine's, not a device this act invites.
-    root.act.added.clear();
-    seam(Seam::Renamed)?;
-
-    take_standing(&home_lock, home, root.act.key, &standing)?;
+    root.act.minted = true;
+    root.take_own(&home_lock, own)?;
     Ok(root)
 }
 
-/// Finish a root whose making stopped after `root/` was renamed into place and before the pin: take this
-/// machine's standing as the stopped mint left it, or keep a live one, or sign one from its row under one
-/// prompt; then pin the root. A standing is taken only if it is this root's, for this machine's key.
+/// Finish a root whose making or restore stopped after `root.key` was written and before the pin. When
+/// the list beside the key carries a standing of this root for this machine's key, take it and pin the
+/// root, with no prompt. Else sign one under one prompt, as a mint does.
 ///
 /// When it prompts, it returns the root unlocked, brought forward and checked as `present` leaves it for
 /// an act that cuts, so the command goes on without asking again; else `None`, and the command presents.
@@ -1589,25 +1578,24 @@ async fn finish(
     prompt: &mut impl Prompt,
     out: &mut impl Write,
 ) -> Result<Option<Root>, RootError> {
-    let dir = home.root();
-    let locked = read_header(&dir)?;
-    let lock = take_lock(&dir, true)?;
+    let locked = read_header(&home.root_key())?;
     let pin = root_key.verify_key()?;
-    let book = Book::from(state::load(&dir, pin)?);
+    let list = read_list(home, None, pin)?;
     let own = crate::identity::inspect(home)?
         .stored()
         .node_id()
         .verify_key()?;
-    let now = unix_now();
-    let ours = |standing: &Link| {
-        standing
+    let listed = list.as_ref().and_then(|list| {
+        list.members()
+            .iter()
+            .find(|member| member.node == own)
+            .map(|member| member.standing.clone())
+    });
+    if let Some(standing) = listed
+        && standing
             .cap()
-            .verify_member_at_root_without_revocation(at(now), own, pin)
+            .verify_member_at_root_without_revocation(at(unix_now()), own, pin)
             .is_ok()
-    };
-
-    if let Some(standing) = read_standing(&dir.join(STANDING_FILE))?
-        && ours(&standing)
     {
         let home_lock = HomeWrite::take(home).await?;
         still(
@@ -1621,54 +1609,19 @@ async fn finish(
         take_standing(&home_lock, home, root_key, &standing)?;
         return Ok(None);
     }
-    if let Some(badge) = crate::config::load_badge(home).await.ok().flatten()
-        && ours(&badge)
-    {
-        let home_lock = HomeWrite::take(home).await?;
-        still(
-            &home_lock,
-            home,
-            Standing::InterruptedMint { root_key },
-            out,
-        )
-        .await?;
-        not_admitting(&home_lock, home)?;
-        take_standing(&home_lock, home, root_key, &badge)?;
-        return Ok(None);
-    }
 
-    let mut act = Act {
-        key: root_key,
-        dir,
-        home: home.clone(),
-        _lock: lock,
-        book,
-        held: None,
-        fork: None,
-        due: Vec::new(),
-        now,
-        own: Some(own),
-        added: Vec::new(),
-        replaced: Vec::new(),
-        renewed: Vec::new(),
-        revoked_until: None,
-        revoked: Vec::new(),
-        minted: false,
-    };
+    let mut act = Act::new(home, root_key, None, list.as_ref(), Some(own));
     act.bring_forward(out)?;
-    act.book.check_bounds(now)?;
+    act.book.check_bounds(act.now)?;
     act.list_renewals(out);
     if !prompt.terminal() {
         return Err(RootError::NoTerminalToUnlock);
     }
-    let passphrase = prompt
-        .unlock(&act.dir.join(KEY_FILE))
-        .map_err(prompt_error)?;
+    let passphrase = prompt.unlock(&act.key_file()).map_err(prompt_error)?;
     let mut root = Root {
         secret: locked.unlock(&passphrase)?,
         act,
     };
-    let standing = root.sign_own(own)?;
     let home_lock = HomeWrite::take(home).await?;
     still(
         &home_lock,
@@ -1678,21 +1631,42 @@ async fn finish(
     )
     .await?;
     not_admitting(&home_lock, home)?;
-    root.write_state(&home_lock)?;
-    take_standing(&home_lock, home, root_key, &standing)?;
+    root.take_own(&home_lock, own)?;
     Ok(Some(root))
 }
 
 impl Root {
+    /// Sign this machine's standing, cut it into a list and write that list as `devices`, then take the
+    /// standing as this machine's and pin the root, under `home.lock`: the steps a mint and its finish
+    /// share, in the order a crash is finished from.
+    fn take_own(&mut self, home_lock: &HomeWrite, own: VerifyKey) -> Result<(), RootError> {
+        let standing = self.sign_own(own)?;
+        let act = &mut self.act;
+        let number = act
+            .book
+            .last_update
+            .0
+            .checked_add(1)
+            .map(Epoch)
+            .ok_or(RootError::Exhausted)?;
+        let doc = act.book.update(number, act.now)?;
+        let bytes = self.sign(&doc.canonical_bytes())?;
+        let act = &mut self.act;
+        crate::roster::write(home_lock, &act.home.devices(), &bytes)?;
+        act.book.last_update = number;
+        act.held = Some((doc, bytes));
+        // This machine's row is in the list now: not a device this act invites or renews.
+        act.added.clear();
+        act.renewed.clear();
+        act.due.retain(|due| *due != own);
+        seam(Seam::Listed)?;
+        take_standing(home_lock, &act.home, act.key, &standing)
+    }
+
     /// Sign this machine's standing: from its live row for its duration, or on a new row under the
     /// suggested name for 90 days when it has none.
     fn sign_own(&mut self, own: VerifyKey) -> Result<Link, RootError> {
-        let row = self
-            .act
-            .book
-            .rows
-            .iter()
-            .position(|row| !row.is_revoked() && row.key == own);
+        let row = self.act.book.rows.iter().position(|row| row.node == own);
         match row {
             Some(index) => {
                 let duration = own_duration(&self.act.book.rows[index]);
@@ -1701,7 +1675,7 @@ impl Root {
             None => {
                 let book = &self.act.book;
                 let name = fresh_name(crate::names::suggest().as_str(), |name| {
-                    book.live().any(|row| &row.label == name)
+                    book.rows.iter().any(|row| &row.label == name)
                 });
                 self.sign_standing(own, name, DEFAULT_DURATION)
             }
@@ -1735,8 +1709,8 @@ fn not_admitting(home_lock: &HomeWrite, home: &Home) -> Result<(), RootError> {
     }
 }
 
-/// Take `standing` as this machine's device standing, pin `root`, and drop the staged copy, under
-/// `home.lock`. The pin is written last: it is what makes the rest this machine's standing.
+/// Take `standing` as this machine's device standing, then pin `root`, under `home.lock`. The pin is
+/// written last: it is what makes the rest this machine's standing.
 fn take_standing(
     home_lock: &HomeWrite,
     home: &Home,
@@ -1745,24 +1719,18 @@ fn take_standing(
 ) -> Result<(), RootError> {
     crate::config::write_badge(home_lock, home, standing).map_err(io_at(&home.key_cert()))?;
     seam(Seam::Badged)?;
-    crate::config::write_signet(home_lock, home, root).map_err(io_at(&home.root_pub()))?;
-    let staged = home.root().join(STANDING_FILE);
-    match std::fs::remove_file(&staged) {
+    crate::config::write_signet(home_lock, home, root).map_err(io_at(&home.root_pub()))
+}
+
+/// Remove the file at `path`. Already gone is done.
+fn remove_file(path: &Path) -> Result<(), RootError> {
+    match std::fs::remove_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(RootError::Io {
-            path: staged,
+            path: path.to_path_buf(),
             source: error,
         }),
         _ => Ok(()),
     }
-}
-
-/// Remove a `root.new/` a mint left with no `root/`, unless a command holds it.
-fn remove_staging(staging: &Path) -> Result<(), RootError> {
-    if !staging.exists() {
-        return Ok(());
-    }
-    let _lock = take_lock(staging, true)?;
-    std::fs::remove_dir_all(staging).map_err(io_at(staging))
 }
 
 /// `base`, then `base-2`, `base-3` and on while `taken` says the name is held.
@@ -1788,27 +1756,38 @@ fn fresh_name(base: &str, taken: impl Fn(&DeviceLabel) -> bool) -> DeviceLabel {
     }
 }
 
-/// The root's working records: `state` as this act changes it. A plain structure, so a bound can be
-/// crossed here and refused with its count, rather than being unrepresentable in [`State`].
+/// The root's working records: the list beside its key as this act changes it. A plain structure, so a
+/// bound can be crossed here and refused with its count, rather than being unrepresentable in a
+/// [`RosterDoc`].
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Book {
+    /// The number of the last update this root signed that these records have seen.
     last_update: Epoch,
-    rows: Vec<Row>,
+    /// The live devices, at most one per name.
+    rows: Vec<Member>,
+    /// The devices revoked since the list was read, by key: kept for this act only, so a revoke of one
+    /// still finds it. An update never lists them.
+    marked: Vec<Member>,
     revoked: BTreeMap<Vec<u8>, Id>,
     revoked_keys: BTreeMap<[u8; 32], VerifyKey>,
 }
 
-impl From<State> for Book {
-    fn from(state: State) -> Self {
+impl Book {
+    /// The records `list` holds, or none when there is no list.
+    fn of(list: Option<&RosterDoc>) -> Self {
+        let Some(list) = list else {
+            return Self::default();
+        };
         Self {
-            last_update: state.last_update(),
-            rows: state.rows().to_vec(),
-            revoked: state
+            last_update: list.epoch(),
+            rows: list.members().to_vec(),
+            marked: Vec::new(),
+            revoked: list
                 .revoked()
                 .iter()
                 .map(|id| (id.id.as_bytes().to_vec(), id.clone()))
                 .collect(),
-            revoked_keys: state
+            revoked_keys: list
                 .revoked_keys()
                 .iter()
                 .map(|key| (*key.bytes(), *key))
@@ -1863,11 +1842,6 @@ impl Brought {
 }
 
 impl Book {
-    /// The rows that are not revoked.
-    fn live(&self) -> impl Iterator<Item = &Row> {
-        self.rows.iter().filter(|row| !row.is_revoked())
-    }
-
     /// Add a revoked id, keeping the later expiry of two copies.
     fn revoke_id(&mut self, id: Id) -> bool {
         match self.revoked.get_mut(id.id.as_bytes()) {
@@ -1908,35 +1882,32 @@ impl Book {
 
     /// Bring one device from an update into these records.
     fn take_member(&mut self, member: &Member, now: u64, brought: &mut Brought) {
-        // The update's device wins its name: a different live row under it is revoked here.
-        if let Some(index) = self.rows.iter().position(|row| {
-            !row.is_revoked() && row.label == member.label && row.key != member.node
-        }) {
-            let key = self.rows[index].key;
+        // The update's device wins its name: a different live row under it is revoked here, and leaves the
+        // rows at once, so the name is held once.
+        if let Some(index) = self
+            .rows
+            .iter()
+            .position(|row| row.label == member.label && row.node != member.node)
+        {
+            let key = self.rows[index].node;
             self.revoked_keys.insert(*key.bytes(), key);
             brought.clashed.push((member.label.clone(), key));
+            brought.marked += self.follow_keys(now);
         }
-        let Some(index) = self.rows.iter().position(|row| row.key == member.node) else {
-            self.rows.push(Row {
-                key: member.node,
-                label: member.label.clone(),
-                until: member.until,
-                duration: member.duration,
-                seeded: false,
-                invite_until: 0,
-                revoked_on: 0,
-                ids: member
-                    .ids
-                    .iter()
-                    .filter(|id| id.expires > now)
-                    .cloned()
-                    .collect(),
-                standing: member.standing.clone(),
-            });
+        // A revoked key's device stays revoked, whatever an update lists.
+        if self.revoked_keys.contains_key(member.node.bytes()) {
+            return;
+        }
+        let Some(index) = self.rows.iter().position(|row| row.node == member.node) else {
+            let mut row = member.clone();
+            row.ids.retain(|id| id.expires > now);
+            self.rows.push(row);
             brought.devices += 1;
             return;
         };
         let row = &mut self.rows[index];
+        // A key that came in an invite stays one that came in an invite, from whichever list says so.
+        row.invite_until = row.invite_until.max(member.invite_until);
         for id in &member.ids {
             if id.expires > now && !row.ids.iter().any(|held| held.id == id.id) {
                 row.ids.push(id.clone());
@@ -2041,7 +2012,7 @@ impl Book {
         let keys: Vec<VerifyKey> = self
             .rows
             .iter()
-            .map(|row| row.key)
+            .map(|row| row.node)
             .filter(|key| revoked.is_revoked_key(key))
             .collect();
         for key in keys {
@@ -2050,34 +2021,30 @@ impl Book {
         Ok(())
     }
 
-    /// Mark revoked every row whose key is revoked, and revoke its live ids. A revoked id alone never
-    /// marks a row. Returns how many rows it marked.
+    /// Move every row whose key is revoked to the marked rows, and revoke its live ids. A revoked id alone
+    /// never marks a row. Returns how many rows it marked.
     fn follow_keys(&mut self, now: u64) -> usize {
-        let mut marked = 0;
-        let mut ids = Vec::new();
-        for row in &mut self.rows {
-            if !self.revoked_keys.contains_key(row.key.bytes()) {
-                continue;
+        let (revoked, live): (Vec<Member>, Vec<Member>) = core::mem::take(&mut self.rows)
+            .into_iter()
+            .partition(|row| self.revoked_keys.contains_key(row.node.bytes()));
+        self.rows = live;
+        let marked = revoked.len();
+        for row in revoked {
+            for id in row.ids.iter().filter(|id| id.expires > now) {
+                self.revoke_id(id.clone());
             }
-            if row.revoked_on == 0 {
-                row.revoked_on = now.max(1);
-                marked += 1;
-            }
-            ids.extend(row.ids.iter().filter(|id| id.expires > now).cloned());
-        }
-        for id in ids {
-            self.revoke_id(id);
+            self.marked.retain(|held| held.node != row.node);
+            self.marked.push(row);
         }
         marked
     }
 
-    /// Whether `row` renews on its own at `now`: it runs at least 30 days, is not revoked, did not come
-    /// with its key, has not lapsed, and is in the last half of its duration. Read after rows follow keys,
-    /// so a row whose key is revoked is a revoked row here.
-    fn renews_on_its_own(row: &Row, now: u64) -> bool {
+    /// Whether `row` renews on its own at `now`: it runs at least 30 days, did not come with its key, has
+    /// not lapsed, and is in the last half of its duration. Read after rows follow keys, so a row whose key
+    /// is revoked is marked, never a row here.
+    fn renews_on_its_own(row: &Member, now: u64) -> bool {
         row.duration >= SHORTEST_RENEWING
-            && !row.is_revoked()
-            && !row.seeded
+            && !row.seeded()
             && now < row.until
             && row.until - now < row.duration / 2
     }
@@ -2087,7 +2054,7 @@ impl Book {
     /// would not move its date later. A standing whose id is revoked here always takes a new one, and so
     /// does one that has ended: the day after its signing holds back only a standing still in force, so a
     /// short one that ended within that day is renewed.
-    fn renewal_skips(&self, row: &Row, duration: u64, now: u64) -> bool {
+    fn renewal_skips(&self, row: &Member, duration: u64, now: u64) -> bool {
         let newest = row.ids.iter().max_by_key(|id| id.expires);
         let newest_signed = newest.map_or(0, |id| id.expires.saturating_sub(row.duration));
         let standing_revoked = newest.is_some_and(|id| self.revoked.contains_key(id.id.as_bytes()));
@@ -2108,7 +2075,7 @@ impl Book {
 
     /// Refuse, before the prompt, records one update cannot carry.
     fn check_bounds(&self, now: u64) -> Result<(), RootError> {
-        let devices = self.live().count();
+        let devices = self.rows.len();
         if devices > MAX_MEMBERS {
             return Err(RootError::TooManyDevices { count: devices });
         }
@@ -2138,12 +2105,13 @@ impl Book {
 
     /// Whether these records hold a live device, a revoked id or a revoked key that `held` lacks.
     fn lacks(&self, held: &RosterDoc, now: u64) -> bool {
-        let rows = self.live().any(|row| {
+        let rows = self.rows.iter().any(|row| {
             !held.members().iter().any(|member| {
-                member.node == row.key
+                member.node == row.node
                     && member.label == row.label
                     && member.until == row.until
                     && member.duration == row.duration
+                    && member.invite_until == row.invite_until
                     && member.standing.as_str() == row.standing.as_str()
                     && row
                         .ids
@@ -2168,19 +2136,12 @@ impl Book {
     /// revoked id that has not ended, and every revoked key for good.
     fn update(&self, number: Epoch, now: u64) -> Result<RosterDoc, RootError> {
         let members = self
-            .live()
-            .map(|row| Member {
-                node: row.key,
-                label: row.label.clone(),
-                until: row.until,
-                duration: row.duration,
-                ids: row
-                    .ids
-                    .iter()
-                    .filter(|id| id.expires > now)
-                    .cloned()
-                    .collect(),
-                standing: row.standing.clone(),
+            .rows
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                row.ids.retain(|id| id.expires > now);
+                row
             })
             .collect();
         let revoked = self
@@ -2197,30 +2158,6 @@ impl Book {
         )
         .map_err(RootError::Format)
     }
-
-    /// These records as `state`.
-    fn state(&self, now: u64) -> Result<State, RootError> {
-        let rows = self
-            .rows
-            .iter()
-            .cloned()
-            .map(|mut row| {
-                row.ids.retain(|id| id.expires > now);
-                row
-            })
-            .collect();
-        State::new(
-            self.last_update,
-            rows,
-            self.revoked
-                .values()
-                .filter(|id| id.expires > now)
-                .cloned()
-                .collect(),
-            self.revoked_keys.values().copied().collect(),
-        )
-        .map_err(RootError::Format)
-    }
 }
 
 /// The root's records as an act will sign from them, brought forward, for a check before the prompt.
@@ -2233,8 +2170,8 @@ pub struct Records<'a> {
 
 impl Records<'_> {
     /// The device named `name` that is not revoked, lapsed or live.
-    pub fn device(&self, name: &DeviceLabel) -> Option<&Row> {
-        self.book.live().find(|row| &row.label == name)
+    pub fn device(&self, name: &DeviceLabel) -> Option<&Member> {
+        self.book.rows.iter().find(|row| &row.label == name)
     }
 
     /// When the act runs, in unix seconds.
@@ -2243,19 +2180,14 @@ impl Records<'_> {
     }
 
     /// Refuse adding the device `key` as `name`: a revoked key, a key that is already a device, a name a
-    /// device already has, or one device more than an update can carry. Before the root's first update,
-    /// the name its mint gave this machine is free: this machine moves off it.
+    /// device already has, or one device more than an update can carry. While the root's list is the one
+    /// its mint cut, the name the mint gave this machine is free: this machine moves off it.
     pub fn check_add(&self, key: VerifyKey, name: &DeviceLabel) -> Result<(), RootError> {
         let book = self.book;
         if book.revoked_keys.contains_key(key.bytes()) {
-            let on = book
-                .rows
-                .iter()
-                .find(|row| row.key == key && row.revoked_on != 0)
-                .map(|row| Date(row.revoked_on));
-            return Err(RootError::RevokedKey { key, on });
+            return Err(RootError::RevokedKey { key });
         }
-        if let Some(row) = book.live().find(|row| row.key == key) {
+        if let Some(row) = book.rows.iter().find(|row| row.node == key) {
             if Some(key) == self.own {
                 return Err(RootError::OwnKey {
                     name: row.label.clone(),
@@ -2267,15 +2199,16 @@ impl Records<'_> {
                 until: Date(row.until),
             });
         }
+        // The mint's list is the root's first, and lists only this machine: no other device has seen it.
         if let Some(row) = self.device(name)
-            && (Some(row.key) != self.own || book.last_update != Epoch(0))
+            && (Some(row.node) != self.own || book.last_update > MINTED)
         {
             return Err(RootError::NameTaken {
                 name: name.clone(),
-                key: row.key,
+                key: row.node,
             });
         }
-        let count = book.live().count();
+        let count = book.rows.len();
         if count >= MAX_MEMBERS {
             return Err(RootError::TooManyDevices { count });
         }
@@ -2288,7 +2221,7 @@ impl Records<'_> {
         let Some(row) = self.device(name) else {
             return Err(RootError::NoDeviceToRenew { name: name.clone() });
         };
-        if !row.seeded {
+        if !row.seeded() {
             return Err(RootError::KeepsOwnKey { name: name.clone() });
         }
         if live_ids(row, self.now) >= MAX_IDS {
@@ -2331,25 +2264,13 @@ fn fresh_key() -> Result<(Zeroizing<[u8; 32]>, VerifyKey), RootError> {
 
 /// Whether `row` is due to renew at this act: it renews on its own, and it holds fewer than the most
 /// renewals in force. The one test the renewal list, bare `invite`'s list and [`Root::unchanged`] share.
-fn due(row: &Row, now: u64) -> bool {
+fn due(row: &Member, now: u64) -> bool {
     Book::renews_on_its_own(row, now) && live_ids(row, now) < MAX_IDS
 }
 
 /// How many of `row`'s standings have not ended at `now`.
-fn live_ids(row: &Row, now: u64) -> usize {
+fn live_ids(row: &Member, now: u64) -> usize {
     row.ids.iter().filter(|id| id.expires > now).count()
-}
-
-/// A standing left at `path`, or `None` when there is none or it is not one.
-fn read_standing(path: &Path) -> Result<Option<Link>, RootError> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => Ok(text.trim().parse::<Link>().ok()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(RootError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
 }
 
 /// This machine's key, from its key file's header, when it has one.
@@ -2377,13 +2298,6 @@ fn no_core_dumps() -> Result<(), RootError> {
     Ok(())
 }
 
-/// Make the entries in `dir` durable.
-fn sync_dir(dir: &Path) -> Result<(), RootError> {
-    std::fs::File::open(dir)
-        .and_then(|dir| dir.sync_all())
-        .map_err(io_at(dir))
-}
-
 fn io_at(path: &Path) -> impl Fn(io::Error) -> RootError + use<> {
     let path = path.to_path_buf();
     move |source| RootError::Io {
@@ -2398,7 +2312,7 @@ fn prompt_error(report: eyre::Report) -> RootError {
 }
 
 /// A row's own renewal length, or 90 days when it has none.
-fn own_duration(row: &Row) -> u64 {
+fn own_duration(row: &Member) -> u64 {
     match row.duration {
         0 => DEFAULT_DURATION.as_secs(),
         own => own,
@@ -2425,8 +2339,10 @@ fn at(unix: u64) -> SystemTime {
 /// A point in a mint where a test stops it, as a crash would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Seam {
-    /// `root/` is in place, and this machine has no standing from it yet.
-    Renamed,
+    /// `root.key` is written, and no list beside it yet.
+    Keyed,
+    /// The list beside `root.key` is written, and this machine has no standing from it yet.
+    Listed,
     /// This machine's standing is written, and the pin is not.
     Badged,
 }

@@ -305,12 +305,11 @@ pub(super) fn keep_root(home: &Home) {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    config::create_store_dir(&home.root()).unwrap();
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(home.root().join("root.key"))
+        .open(home.root_key())
         .unwrap()
         .write_all(&TestRoot::seeded(ROOT).seed())
         .unwrap();

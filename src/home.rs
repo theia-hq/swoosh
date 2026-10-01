@@ -129,8 +129,10 @@ impl Home {
         self.dir.join("serve.toml")
     }
 
-    /// `<home>/devices`: the newest list of your devices this machine has seen, signed by your root. Only a
-    /// fold writes it: a root act's own cut, or one taken in an exchange with another device.
+    /// `<home>/devices`: the newest list of your devices this machine has seen, signed by your root; where the
+    /// root is kept, also the last list it signed, from which its next number and its records are read. A
+    /// fold writes it (a root act's own cut, or one taken in an exchange with another device), and so does
+    /// the making of a root, before this machine trusts it.
     pub fn devices(&self) -> PathBuf {
         self.dir.join("devices")
     }
@@ -153,29 +155,10 @@ impl Home {
         self.dir.join("devices.conflict")
     }
 
-    /// `<home>/root/`: the root, held here only by a machine that holds it.
-    pub fn root(&self) -> PathBuf {
-        self.dir.join("root")
-    }
-
-    /// `<home>/root.new/`: a root being written, before it is renamed to [`root`](Self::root).
-    pub fn root_new(&self) -> PathBuf {
-        self.dir.join("root.new")
-    }
-
-    /// `<home>/root.moving/`: a root renamed away by a move off this machine, before it is deleted.
-    pub fn root_moving(&self) -> PathBuf {
-        self.dir.join("root.moving")
-    }
-
-    /// `<home>/root.revoking/`: a root renamed away by its retirement here, before it is deleted.
-    pub fn root_revoking(&self) -> PathBuf {
-        self.dir.join("root.revoking")
-    }
-
-    /// `<home>/root-moved`: where the root kept here was moved to, and when, so `status` can say.
-    pub fn root_moved(&self) -> PathBuf {
-        self.dir.join("root-moved")
+    /// `<home>/root.key`: your root, locked with its passphrase, when it is kept on this machine. The home's
+    /// own [`devices`](Self::devices) is the list beside it: the root is the two together.
+    pub fn root_key(&self) -> PathBuf {
+        self.dir.join("root.key")
     }
 
     /// `<home>/revoked`: everything this machine refuses for good, in one grow-only file: the links it

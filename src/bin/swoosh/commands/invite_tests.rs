@@ -25,7 +25,6 @@ use swoosh::invite::Invite;
 use swoosh::passphrase::Prompt;
 use swoosh::root::{Date, Root, RootPlace};
 use swoosh::roster::{Epoch, Id, Member, RosterDoc};
-use swoosh::state::{self, Row, State};
 use swoosh::sync::{Answer, Dial, ExchangeError};
 use swoosh::testkit::{Answering, Counting, TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
@@ -132,7 +131,6 @@ pub(crate) fn signed(seed: u8, label: &str, duration: u64, ends: &[u64]) -> Row 
         label: name(label),
         until,
         duration,
-        seeded: false,
         invite_until: 0,
         revoked_on: 0,
         ids,
@@ -168,51 +166,75 @@ pub(crate) fn revoked(seed: u8, label: &str) -> Row {
     }
 }
 
+/// One device of the root as a test sets it up: live, or revoked (`revoked_on` set), whose key a list
+/// revokes and whose row it no longer carries.
+#[derive(Debug, Clone)]
+pub(crate) struct Row {
+    pub(crate) key: VerifyKey,
+    pub(crate) label: DeviceLabel,
+    pub(crate) until: u64,
+    pub(crate) duration: u64,
+    pub(crate) invite_until: u64,
+    pub(crate) revoked_on: u64,
+    pub(crate) ids: Vec<Id>,
+    pub(crate) standing: Link,
+}
+
+impl Row {
+    /// Whether the device is revoked.
+    pub(crate) fn is_revoked(&self) -> bool {
+        self.revoked_on != 0
+    }
+
+    /// A live device as a list carries it.
+    fn of(member: &Member, revoked: bool) -> Self {
+        Self {
+            key: member.node,
+            label: member.label.clone(),
+            until: member.until,
+            duration: member.duration,
+            invite_until: member.invite_until,
+            revoked_on: u64::from(revoked),
+            ids: member.ids.clone(),
+            standing: member.standing.clone(),
+        }
+    }
+}
+
 /// A device whose key came in its invite, which ends when its standing does.
 pub(crate) fn carrying(row: Row) -> Row {
     Row {
-        seeded: true,
         invite_until: row.until,
         ..row
     }
 }
 
-/// The update `row` stands in.
+/// The member a list carries for the live `row`.
 pub(crate) fn member(row: &Row) -> Member {
     Member {
         node: row.key,
         label: row.label.clone(),
         until: row.until,
         duration: row.duration,
+        invite_until: row.invite_until,
         ids: row.ids.clone(),
         standing: row.standing.clone(),
     }
 }
 
-/// The records `rows` make, with each revoked row's key revoked and `revoked` ids.
-pub(crate) fn records(epoch: u64, rows: &[Row], revoked: Vec<Id>) -> State {
+/// The list `rows` make at `epoch`: each live row, each revoked row's key, and `revoked` ids.
+pub(crate) fn records(epoch: u64, rows: &[Row], revoked: Vec<Id>) -> RosterDoc {
     let keys = rows
         .iter()
         .filter(|row| row.is_revoked())
         .map(|row| row.key)
         .collect();
-    State::new(Epoch(epoch), rows.to_vec(), revoked, keys).unwrap()
-}
-
-/// The update carrying `state` exactly: its live rows, its revoked ids and keys.
-pub(crate) fn update_of(state: &State) -> RosterDoc {
-    RosterDoc::with_revocations(
-        state.last_update(),
-        state
-            .rows()
-            .iter()
-            .filter(|row| !row.is_revoked())
-            .map(member)
-            .collect(),
-        state.revoked().to_vec(),
-        state.revoked_keys().to_vec(),
-    )
-    .unwrap()
+    let members = rows
+        .iter()
+        .filter(|row| !row.is_revoked())
+        .map(member)
+        .collect();
+    RosterDoc::with_revocations(Epoch(epoch), members, revoked, keys).unwrap()
 }
 
 /// `doc`, signed by `ROOT`, as the update `home` holds.
@@ -246,31 +268,37 @@ fn sealed() -> Vec<u8> {
         .clone()
 }
 
-/// A copy of `ROOT` at `dir`, holding `state`, with its lock file already made.
-pub(crate) fn copy(dir: &Path, state: &State) {
+/// `ROOT`'s key, sealed, written at `path`.
+fn root_key_at(path: &Path) {
     use std::os::unix::fs::OpenOptionsExt as _;
 
-    config::create_store_dir(dir).unwrap();
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(dir.join("root.key"))
+        .open(path)
         .unwrap()
         .write_all(&sealed())
         .unwrap();
-    state::write(
-        &swoosh::testkit::lock(),
-        dir,
-        &TestRoot::seeded(ROOT).sign_state(state),
+}
+
+/// A copy of `ROOT` at `dir`: its key, and `list` beside it as the list it signed last.
+pub(crate) fn copy(dir: &Path, list: &RosterDoc) {
+    config::create_store_dir(dir).unwrap();
+    root_key_at(&dir.join("root.key"));
+    std::fs::write(
+        dir.join("devices"),
+        TestRoot::seeded(ROOT).sign_update(list),
     )
     .unwrap();
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(dir.join("lock"))
-        .unwrap();
+}
+
+/// A copy of `ROOT` holding `list`, in a directory beside `home`: its path, as `--root` takes it.
+pub(crate) fn copy_beside(home: &Home, list: &RosterDoc) -> String {
+    let dir = home.dir().with_extension("copy");
+    let _ = std::fs::remove_dir_all(&dir);
+    copy(&dir, list);
+    dir.to_str().unwrap().to_owned()
 }
 
 /// Make `home` a device of `ROOT`: its pin, and `own` as its standing.
@@ -284,13 +312,12 @@ pub(crate) async fn device_of(home: &Home, own: &Row) {
     config::write_badge(&swoosh::testkit::lock(), home, &own.standing).unwrap();
 }
 
-/// Make `home` keep `ROOT` with `rows` (this machine's own row first) and `revoked` ids, holding the update
-/// that carries exactly those records.
+/// Make `home` keep `ROOT` with `rows` (this machine's own row first) and `revoked` ids: its key beside the
+/// list those records make, the home's own `devices`.
 pub(crate) async fn holds(home: &Home, rows: &[Row], revoked: Vec<Id>) {
     device_of(home, &rows[0]).await;
-    let state = records(1, rows, revoked);
-    copy(&home.root(), &state);
-    held(home, &update_of(&state));
+    root_key_at(&home.root_key());
+    held(home, &records(1, rows, revoked));
 }
 
 /// Every file under `dir`, with its bytes.
@@ -310,16 +337,26 @@ pub(crate) fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     files
 }
 
-/// The records kept in `home`, read as `status` reads them.
-pub(crate) async fn kept(home: &Home) -> State {
-    Root::inspect(home, RootPlace::Home).await.unwrap().state
-}
-
-/// The row named `label` in `state`.
-pub(crate) fn row_of<'a>(state: &'a State, label: &str) -> &'a Row {
-    state
+/// The devices kept in `home`, read as `status` reads them: the live ones, then the ones the records
+/// brought forward mark revoked.
+pub(crate) async fn kept(home: &Home) -> Vec<Row> {
+    let inspected = Root::inspect(home, RootPlace::Home).await.unwrap();
+    inspected
         .rows()
         .iter()
+        .map(|row| Row::of(row, false))
+        .chain(inspected.marked().iter().map(|row| Row::of(row, true)))
+        .collect()
+}
+
+/// The list kept beside the root's key in `home`.
+pub(crate) fn kept_list(home: &Home) -> RosterDoc {
+    swoosh::roster::held(home, TestRoot::seeded(ROOT).verify_key()).unwrap()
+}
+
+/// The row named `label` in `rows`.
+pub(crate) fn row_of<'a>(rows: &'a [Row], label: &str) -> &'a Row {
+    rows.iter()
         .find(|row| row.label.as_str() == label)
         .unwrap_or_else(|| panic!("a row named {label}"))
 }
@@ -667,7 +704,7 @@ async fn invite_refuses_to_make_a_root_while_serve_admit_runs() {
         &home,
         &before,
     );
-    assert!(!home.root().exists(), "no root is made");
+    assert!(!home.root_key().exists(), "no root is made");
     assert!(!home.root_pub().exists(), "no root is pinned");
 }
 
@@ -690,7 +727,7 @@ async fn invite_refuses_on_a_device_without_the_root() {
     let home = scratch("device");
     let own = live(OWN, "desk");
     device_of(&home, &own).await;
-    held(&home, &update_of(&records(1, &[own], Vec::new())));
+    held(&home, &records(1, &[own], Vec::new()));
     let before = snapshot(home.dir());
     let ran = invite(&home, &["tv", &node(TV).to_string()]).await;
     refused_before_writing(
@@ -706,8 +743,9 @@ async fn invite_refuses_on_a_device_without_the_root() {
 #[tokio::test]
 async fn invite_refuses_on_a_half_made_root_before_the_prompt() {
     let home = scratch("half-made");
-    copy(
-        &home.root(),
+    root_key_at(&home.root_key());
+    held(
+        &home,
         &records(0, &[live(OWN, "desk"), live(LAPTOP, "laptop")], Vec::new()),
     );
     let before = snapshot(home.dir());
@@ -883,9 +921,14 @@ async fn a_seeded_row_is_never_renewed_on_its_own() {
 async fn renewal_skips_a_revoked_device() {
     let home = scratch("skip-revoked");
     let old = revoked(OLD, "old");
-    holds(&home, &[live(OWN, "desk"), old.clone()], Vec::new()).await;
+    holds(&home, &[live(OWN, "desk"), old], Vec::new()).await;
     add_tv(&home).await;
-    assert_eq!(row_of(&kept(&home).await, "old").until, old.until);
+    let list = kept_list(&home);
+    assert!(
+        list.members().iter().all(|member| member.node != key(OLD)),
+        "a revoked device is never renewed back onto the list"
+    );
+    assert!(list.revoked_keys().contains(&key(OLD)));
 }
 
 #[tokio::test]
@@ -900,10 +943,14 @@ async fn renewal_skips_a_row_whose_key_is_revoked() {
             .unwrap();
     held(&home, &elsewhere);
     add_tv(&home).await;
-    let state = kept(&home).await;
-    let row = row_of(&state, "laptop");
-    assert_eq!(row.until, laptop.until, "a revoked key is never renewed");
-    assert!(row.is_revoked());
+    let list = kept_list(&home);
+    assert!(
+        list.members()
+            .iter()
+            .all(|member| member.node != key(LAPTOP)),
+        "a revoked key is never renewed"
+    );
+    assert!(list.revoked_keys().contains(&key(LAPTOP)));
 }
 
 #[tokio::test]
@@ -962,14 +1009,20 @@ async fn a_replayed_update_never_shortens_a_standing() {
     let home = scratch("replayed");
     let own = live(OWN, "desk");
     let laptop = live(LAPTOP, "laptop");
-    holds(&home, &[own.clone(), laptop.clone()], Vec::new()).await;
-    // A newer update that carries an older, shorter standing for the laptop.
+    device_of(&home, &own).await;
+    // A newer update held here that carries an older, shorter standing for the laptop than the copy's.
     let shorter = signed(LAPTOP, "laptop", NINETY, &[now() + 30 * DAY]);
     let replay = RosterDoc::new(Epoch(2), vec![member(&own), member(&shorter)]).unwrap();
     held(&home, &replay);
-    add_tv(&home).await;
-    let state = kept(&home).await;
-    let row = row_of(&state, "laptop");
+    let dir = copy_beside(&home, &records(1, &[own, laptop.clone()], Vec::new()));
+    let ran = invite(&home, &["tv", &node(TV).to_string(), "--root", &dir]).await;
+    assert!(ran.result.is_ok(), "{:?}: {}", ran.result, ran.err);
+    let list = kept_list(&home);
+    let row = list
+        .members()
+        .iter()
+        .find(|member| member.node == key(LAPTOP))
+        .unwrap();
     assert_eq!(row.until, laptop.until);
     assert_eq!(row.standing.as_str(), laptop.standing.as_str());
 }
@@ -1176,7 +1229,7 @@ async fn a_capped_oldest_id_on_an_offline_device_rejoins_by_named_renew() {
         now + 65 * DAY,
     ];
     let laptop = signed(LAPTOP, "laptop", NINETY, &ends);
-    holds(&home, &[own.clone(), laptop.clone()], Vec::new()).await;
+    device_of(&home, &own).await;
     // Another copy renewed it once more, and its update carries its four newest: bringing that forward
     // holds five, and caps the oldest.
     let elsewhere = signed(
@@ -1189,14 +1242,15 @@ async fn a_capped_oldest_id_on_an_offline_device_rejoins_by_named_renew() {
         &home,
         &RosterDoc::new(Epoch(2), vec![member(&own), member(&elsewhere)]).unwrap(),
     );
-    let ran = invite(&home, &["laptop"]).await;
+    let dir = copy_beside(&home, &records(1, &[own, laptop.clone()], Vec::new()));
+    let ran = invite(&home, &["laptop", "--root", &dir]).await;
     let printed = ran.invite();
     assert_eq!(
         printed.standing.as_str(),
         elsewhere.standing.as_str(),
         "the newest standing, which the cap kept"
     );
-    let state = kept(&home).await;
+    let state = kept_list(&home);
     assert!(
         state
             .revoked()
@@ -1310,9 +1364,10 @@ async fn invite_new_key_leaves_the_old_invite_valid_to_its_date() {
         row.ids.contains(&ci.ids[0]),
         "the old key's id stays in the row"
     );
-    assert!(!state.revoked().contains(&ci.ids[0]), "and is not revoked");
+    let list = kept_list(&home);
+    assert!(!list.revoked().contains(&ci.ids[0]), "and is not revoked");
     assert!(
-        !state.revoked_keys().contains(&key(CI)),
+        !list.revoked_keys().contains(&key(CI)),
         "the old key is not revoked"
     );
     assert!(
@@ -1360,17 +1415,15 @@ async fn a_bound_renewal_of_a_key_carrying_row_keeps_the_warning() {
 #[tokio::test]
 async fn a_revoked_key_is_not_re_admitted() {
     let home = scratch("revoked-key");
-    let old = revoked(OLD, "old");
-    holds(&home, &[live(OWN, "desk"), old.clone()], Vec::new()).await;
+    holds(&home, &[live(OWN, "desk"), revoked(OLD, "old")], Vec::new()).await;
     let before = snapshot(home.dir());
     let ran = invite(&home, &["new", &node(OLD).to_string()]).await;
     refused_before_writing(
         &ran,
         &format!(
-            "{}… was revoked on {}; a revoked key is not re-admitted. On that machine: swoosh leave \
+            "{}… was revoked; a revoked key is not re-admitted. On that machine: swoosh leave \
              --new-key, then invite the new key.",
             swoosh::credential::short(&key(OLD)),
-            Date(old.revoked_on)
         ),
         &home,
         &before,
@@ -1527,15 +1580,14 @@ async fn a_presented_root_leaves_no_root_record_here() {
     let own = live(OWN, "desk");
     device_of(&home, &own).await;
     let state = records(1, &[own], Vec::new());
-    held(&home, &update_of(&state));
+    held(&home, &state);
     let dir = home.dir().with_extension("copy");
     let _ = std::fs::remove_dir_all(&dir);
     copy(&dir, &state);
     let dir_text = dir.to_str().unwrap().to_owned();
     let ran = invite(&home, &["tv", &node(TV).to_string(), "--root", &dir_text]).await;
     assert!(ran.result.is_ok(), "{:?}", ran.result);
-    assert!(!home.root().exists(), "no root.key here");
-    assert!(!home.dir().join(state::FILE).exists(), "no state here");
+    assert!(!home.root_key().exists(), "no root.key here");
     assert!(home.devices().is_file(), "the cut is kept here");
 }
 
@@ -1754,10 +1806,6 @@ const RULED: &[&str] = &[
     "known_hosts",
 ];
 
-/// Names a home still holds that a later change to the home cuts: the root's directory that becomes
-/// `root.key` beside `devices`.
-const NOT_YET: &[&str] = &["root/"];
-
 /// What `home` holds, by name: each entry of the home, a directory with a `/`, and each entry of `machine/`
 /// under it.
 fn names_in(home: &Home) -> Vec<String> {
@@ -1793,7 +1841,7 @@ async fn a_fresh_home_has_only_the_ruled_names() {
         let names = names_in(home);
         for name in &names {
             assert!(
-                RULED.contains(&name.as_str()) || NOT_YET.contains(&name.as_str()),
+                RULED.contains(&name.as_str()),
                 "after {after}, the home holds {name}: {names:?}"
             );
         }
@@ -1807,5 +1855,160 @@ async fn a_fresh_home_has_only_the_ruled_names() {
     assert!(
         names_in(&device).contains(&"invited-by".to_owned()),
         "a joined device holds the machine to ask first, until its first sync"
+    );
+}
+
+// --- the root: its key, and the last list it signed beside it ---
+
+/// The names `dir` holds, sorted.
+fn listing(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The list at `path`, as `ROOT` signed it.
+fn list_at(path: &Path) -> RosterDoc {
+    swoosh::roster::verify(
+        &std::fs::read(path).unwrap(),
+        TestRoot::seeded(ROOT).verify_key(),
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_root_on_this_machine_is_root_key_beside_devices() {
+    let home = scratch("root-beside-devices");
+    let ran = invite(&home, &["laptop", &node(LAPTOP).to_string()]).await;
+    let _ = ran.invite();
+    let names = names_in(&home);
+    assert!(
+        names.contains(&"root.key".to_owned()) && names.contains(&"devices".to_owned()),
+        "the root is root.key beside devices, at the top: {names:?}"
+    );
+    assert!(
+        names
+            .iter()
+            .all(|name| !name.ends_with('/') || name == "machine/"),
+        "no directory but machine/: {names:?}"
+    );
+    let root = match KeyFile::root(home.root_key()).load().unwrap() {
+        Some(stored) => stored.node_id(),
+        None => panic!("root.key holds the root"),
+    };
+    let list = swoosh::roster::held(&home, root.verify_key().unwrap()).unwrap();
+    assert_eq!(
+        list.epoch(),
+        Epoch(2),
+        "the mint's list, then the invite's cut"
+    );
+    assert!(
+        list.members()
+            .iter()
+            .any(|member| member.node == key(LAPTOP)),
+        "devices is the last list the root signed"
+    );
+}
+
+#[tokio::test]
+async fn a_copy_is_a_directory_of_two_files() {
+    let home = scratch("copy-two-files");
+    let own = live(OWN, "desk");
+    device_of(&home, &own).await;
+    held(&home, &records(3, core::slice::from_ref(&own), Vec::new()));
+    // The copy signed list 5, which this machine has not seen.
+    let laptop = live(LAPTOP, "laptop");
+    let dir = copy_beside(&home, &records(5, &[own, laptop], Vec::new()));
+    assert_eq!(listing(Path::new(&dir)), ["devices", "root.key"]);
+
+    let ran = invite(&home, &["tv", &node(TV).to_string(), "--root", &dir]).await;
+    let _ = ran.invite();
+    let cut = list_at(&Path::new(&dir).join("devices"));
+    assert_eq!(cut.epoch(), Epoch(6), "read from the list beside the key");
+    assert!(
+        cut.members()
+            .iter()
+            .any(|member| member.node == key(LAPTOP)),
+        "carrying what the copy's list carries"
+    );
+    assert_eq!(
+        listing(Path::new(&dir)),
+        ["devices", "root.key"],
+        "the copy still holds those two files and nothing else"
+    );
+    assert_eq!(
+        kept_list(&home).epoch(),
+        Epoch(6),
+        "and this machine took the cut"
+    );
+}
+
+#[tokio::test]
+async fn seeded_survives_a_bring_forward() {
+    let home = scratch("seeded-forward");
+    let own = live(OWN, "desk");
+    device_of(&home, &own).await;
+    // Another copy added me/ci with a key it made, so its invite carried the key; ci is in the last half
+    // of its standing. This copy's list is older, and has no row for it.
+    let ci = carrying(due(CI, "ci"));
+    held(&home, &records(2, &[own.clone(), ci.clone()], Vec::new()));
+    let dir = copy_beside(&home, &records(1, &[own], Vec::new()));
+
+    let ran = invite(&home, &["--root", &dir]).await;
+    assert!(ran.result.is_ok(), "{:?}: {}", ran.result, ran.err);
+    assert_eq!(
+        ran.out, "",
+        "a key that came in its invite never renews on its own"
+    );
+
+    let ran = invite(&home, &["tv", &node(TV).to_string(), "--root", &dir]).await;
+    let _ = ran.invite();
+    let cut = list_at(&Path::new(&dir).join("devices"));
+    let carried = cut
+        .members()
+        .iter()
+        .find(|member| member.node == key(CI))
+        .unwrap();
+    assert_eq!(
+        carried.invite_until, ci.invite_until,
+        "still came with its key"
+    );
+    assert_eq!(carried.until, ci.until, "and was not renewed");
+}
+
+#[tokio::test]
+async fn a_mint_killed_before_its_pin_is_finished_by_the_next_invite() {
+    let home = scratch("mint-killed");
+    // A mint that stopped after its list: `root.key`, and the root's first list carrying this machine's
+    // standing, with no standing taken here and no pin.
+    let own = live(OWN, "desk");
+    root_key_at(&home.root_key());
+    held(&home, &records(1, core::slice::from_ref(&own), Vec::new()));
+    assert!(!home.key_cert().exists() && !home.root_pub().exists());
+
+    let ran = invite(&home, &["tv", &node(TV).to_string()]).await;
+    let _ = ran.invite();
+    assert_eq!(
+        ran.prompts, 1,
+        "one prompt: the invite's, none for the finish"
+    );
+    let taken = config::load_badge(&home).await.unwrap().unwrap();
+    assert_eq!(
+        taken.as_str(),
+        own.standing.as_str(),
+        "the finish took this machine's standing from the list"
+    );
+    assert_eq!(
+        config::load_signet(&home).await.unwrap(),
+        Some(TestRoot::seeded(ROOT).node_id()),
+        "and pinned the root"
+    );
+    assert_eq!(
+        kept_list(&home).epoch(),
+        Epoch(2),
+        "the invite cut above the list"
     );
 }

@@ -1,7 +1,6 @@
-//! The field codecs the root's two signed documents share: the update ([`crate::roster`]) and `state`
-//! ([`crate::state`]).
+//! The field codecs of the root's signed document, the update ([`crate::roster`]).
 //!
-//! Both are big-endian, length-prefixed and canonical: every list is strictly ascending by its own key, so
+//! It is big-endian, length-prefixed and canonical: every list is strictly ascending by its own key, so
 //! one document has one byte-string and a parser refuses any other order rather than re-sorting it. Each
 //! reader here checks its bound before it allocates, so untrusted bytes are a clean [`FormatError`], never
 //! a panic or a large allocation.
@@ -90,21 +89,15 @@ pub enum FormatError {
     /// A standing was not a bare link.
     #[error("a standing is not a link")]
     BadStanding,
-    /// A flag byte was neither 0 nor 1.
-    #[error("a flag is neither 0 nor 1")]
-    BadFlag,
     /// A device key is not a key anyone can hold.
     #[error("a device key is not a usable key: {0}")]
     BadKey(nauthy::KeyError),
     /// Two devices share one key.
     #[error("the document lists device {0} twice")]
     DuplicateNode(VerifyKey),
-    /// Two devices that are not revoked share one name.
+    /// Two devices share one name.
     #[error("the document lists the name {0} twice")]
     DuplicateLabel(DeviceLabel),
-    /// A device's row is revoked but its key is not a revoked key, or its row is live and its key is.
-    #[error("device {0} is revoked in one list and not the other")]
-    RevokedMismatch(VerifyKey),
     /// A list was not strictly ascending, or held one entry twice.
     #[error("the document's entries are not in canonical order")]
     NonCanonicalOrder,
@@ -272,15 +265,6 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn u64(&mut self) -> Result<u64, FormatError> {
         Ok(u64::from_be_bytes(self.array()?))
-    }
-
-    /// A flag byte: 0 or 1, nothing else, so one document has one byte-string.
-    pub(crate) fn flag(&mut self) -> Result<bool, FormatError> {
-        match self.u8()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(FormatError::BadFlag),
-        }
     }
 
     /// A count, refused over `max` before anything is allocated for it.

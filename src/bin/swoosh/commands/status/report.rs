@@ -17,10 +17,10 @@ use swoosh::escape::EscapedPath;
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _};
-use swoosh::root::{Date, Moved, Root, RootPlace};
+use swoosh::root::{Date, Root, RootPlace};
+use swoosh::roster::Member;
 use swoosh::serve::control_codec::{ControlError, DisabledList, ServiceMenu};
 use swoosh::standing::{Standing, StandingError};
-use swoosh::state::Row;
 use swoosh::{badge, identity, roster, standing, sync};
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -184,41 +184,46 @@ impl Report {
                         .to_owned(),
                 ];
                 // Another copy of the root, or this machine, may have revoked a device since the last act
-                // here: the records as the next act would bring them forward say so before the stored ones do.
-                let revoked_forward = |key: VerifyKey| {
-                    inspected
-                        .rows()
-                        .iter()
-                        .any(|row| row.key == key && row.is_revoked())
+                // here: the records as the next act would bring them forward say so before the list does.
+                let device = |row: &Member, revoked| DeviceRow {
+                    label: Some(row.label.clone()),
+                    key: row.node,
+                    until: row.until,
+                    duration: row.duration,
+                    seeded: row.seeded(),
+                    revoked,
                 };
-                let rows: Vec<DeviceRow> = inspected
-                    .state
+                let marked = inspected.marked().iter().map(|row| device(row, true));
+                let listed: Vec<VerifyKey> = inspected
                     .rows()
                     .iter()
-                    .map(|row| DeviceRow {
-                        label: Some(row.label.clone()),
-                        key: row.key,
-                        until: row.until,
-                        duration: row.duration,
-                        seeded: row.seeded,
-                        revoked: row.revoked_on != 0
-                            || inspected.state.revoked_keys().contains(&row.key)
-                            || revoked_forward(row.key),
-                        revoked_on: row.revoked_on,
-                    })
+                    .chain(inspected.marked())
+                    .map(|row| row.node)
+                    .collect();
+                // A revoked device the list carries no row for has only its key: the name is the one
+                // saved under `me/`, if any.
+                let unlisted = inspected
+                    .revoked_keys()
+                    .filter(|key| !listed.contains(key))
+                    .map(|key| revoked_key(contacts, *key));
+                let rows: Vec<DeviceRow> = inspected
+                    .rows()
+                    .iter()
+                    .map(|row| device(row, false))
+                    .chain(marked)
+                    .chain(unlisted)
                     .collect();
                 self.devices("devices:".to_owned(), &rows, now);
                 due = inspected.due(now).count();
-                carrying = rows
+                carrying = inspected
+                    .rows()
                     .iter()
-                    .zip(inspected.state.rows())
-                    .filter(|(shown, _)| !shown.revoked)
-                    .filter_map(|(_, row)| invite_ends(row, now))
+                    .filter_map(|row| invite_ends(row, now))
                     .collect();
                 (rows, until)
             }
             Standing::Device { pin, until } => {
-                self.root = vec![not_here(home, pin)];
+                self.root = vec![not_here(pin)];
                 let rows: Vec<DeviceRow> = pin
                     .verify_key()
                     .ok()
@@ -229,21 +234,15 @@ impl Report {
                             key: member.node,
                             until: member.until,
                             duration: member.duration,
-                            seeded: false,
+                            seeded: member.seeded(),
                             revoked: false,
-                            revoked_on: 0,
                         });
                         // The update carries no row for a revoked device, only its key and no date: the name
                         // is the one saved under `me/`, if any.
-                        let revoked = update.revoked_keys().iter().map(|key| DeviceRow {
-                            label: me_name(contacts, *key),
-                            key: *key,
-                            until: 0,
-                            duration: 0,
-                            seeded: false,
-                            revoked: true,
-                            revoked_on: 0,
-                        });
+                        let revoked = update
+                            .revoked_keys()
+                            .iter()
+                            .map(|key| revoked_key(contacts, *key));
                         members.chain(revoked).collect()
                     })
                     .unwrap_or_default();
@@ -304,11 +303,7 @@ impl Report {
             .iter()
             .map(|row| {
                 let (state, date) = if row.revoked {
-                    let on = match row.revoked_on {
-                        0 => String::new(),
-                        on => Date(on).to_string(),
-                    };
-                    ("revoked".to_owned(), on)
+                    ("revoked".to_owned(), String::new())
                 } else if row.until <= now {
                     ("ended".to_owned(), Date(row.until).to_string())
                 } else {
@@ -457,20 +452,23 @@ struct DeviceRow {
     seeded: bool,
     /// Revoked, by these records or by an update another copy of the root signed.
     revoked: bool,
-    /// The day it was revoked, 0 when the records here do not say.
-    revoked_on: u64,
 }
 
-/// The `root:` line where the root is not kept: where it went, when this machine moved it.
-fn not_here(home: &Home, root: NodeId) -> String {
-    match Moved::read(home) {
-        Some(moved) => format!(
-            "root: root:{root}, not on this machine (you moved it to {} on {}).",
-            EscapedPath(&moved.to),
-            moved.on
-        ),
-        None => format!("root: root:{root}, not on this machine."),
+/// A revoked device with no row, only its key: the name is the one saved under `me/`, if any.
+fn revoked_key(contacts: &Contacts, key: VerifyKey) -> DeviceRow {
+    DeviceRow {
+        label: me_name(contacts, key),
+        key,
+        until: 0,
+        duration: 0,
+        seeded: false,
+        revoked: true,
     }
+}
+
+/// The `root:` line where the root is not kept.
+fn not_here(root: NodeId) -> String {
+    format!("root: root:{root}, not on this machine.")
 }
 
 /// "use your root by <date>", the earliest day a device of the root falls due to renew; or, while `due`
@@ -497,10 +495,11 @@ fn use_your_root(rows: &[DeviceRow], now: u64, due: usize) -> Option<String> {
 /// For a device whose key came in its invite, in the 14 days before that invite ends: what to do if it
 /// starts from that invite each time. Read from `invite_until`, never `until`: a bound renewal moves the
 /// row's date, not the date its invite stops working.
-fn invite_ends(row: &Row, now: u64) -> Option<String> {
+fn invite_ends(row: &Member, now: u64) -> Option<String> {
     let ends = row.invite_until;
-    let warns =
-        row.seeded && ends.saturating_sub(badge::DEVICE_WARN_WINDOW.as_secs()) <= now && now < ends;
+    let warns = row.seeded()
+        && ends.saturating_sub(badge::DEVICE_WARN_WINDOW.as_secs()) <= now
+        && now < ends;
     warns.then(|| {
         format!(
             "me/{name}'s key came in its invite, which ends on {}. If it starts from that invite each time \
