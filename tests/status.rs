@@ -242,6 +242,6 @@ fn a_group_writable_trust_file_is_refused_at_load() {
     let path = links.display();
     assert_eq!(
         text(&out.stderr),
-        format!("Error: {path} can be written by others: chmod 600 {path}\n")
+        format!("error: {path} can be written by others: chmod 600 {path}\n")
     );
 }

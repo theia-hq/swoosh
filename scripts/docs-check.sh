@@ -5,7 +5,7 @@
 # fenced block that shows a command or its output carries exactly ONE marker from five closed
 # states, the marker binds to the fenced block that follows it, and the checker accounts for
 # every marker: checked + listed + manual + pending == markers found, per page. A fenced block
-# with a `$ ` prompt (or an `Error:` line) and no marker fails. The grammar is total: every
+# with a `$ ` prompt (or an `error:` line) and no marker fails. The grammar is total: every
 # marker lands on exactly one verdict, and a malformed marker fails the coverage equation
 # instead of passing quietly.
 #
@@ -123,12 +123,12 @@ analyze_file() {
         }
 
         # Pair fences, and flag the output-bearing ones: a console/sh/bash block whose body shows
-        # a `$ ` prompt or an `Error:` line. Only those carry the exactly-one-marker obligation.
+        # a `$ ` prompt or an `error:` line. Only those carry the exactly-one-marker obligation.
         inf = 0; op = 0; consolen = 0
         for (i = 1; i <= n; i++) {
             if (inf) {
                 if (isclose(L[i])) { inf = 0 }
-                else if (L[i] ~ /^\$ / || L[i] ~ /^Error:/) { ob[op] = 1 }
+                else if (L[i] ~ /^\$ / || L[i] ~ /^error:/) { ob[op] = 1 }
             } else if (isfence(L[i])) {
                 inf = 1; op = i; opened[i] = 1
                 tag = substr(L[i], 4); sub(/[ \t]+$/, "", tag)

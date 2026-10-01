@@ -247,7 +247,7 @@ fn bare_stop_stops_the_resident() {
         );
         assert_eq!(
             String::from_utf8_lossy(&refused.stderr).trim_end(),
-            "Error: --present only applies when reaching a peer; drop it or name one",
+            "error: --present only applies when reaching a peer; drop it or name one",
             "the refusal names the rule: {args:?}"
         );
     }
@@ -278,7 +278,7 @@ fn bare_stop_stops_the_resident() {
         );
         assert_eq!(
             String::from_utf8_lossy(&refused.stderr).trim_end(),
-            format!("Error: {flag} only applies when reaching a peer; drop it or name one"),
+            format!("error: {flag} only applies when reaching a peer; drop it or name one"),
             "the refusal names the ignored flag: {args:?}"
         );
     }
