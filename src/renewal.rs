@@ -315,8 +315,8 @@ pub async fn own_name(home: &Home) -> String {
         )
 }
 
-/// The name `me` gives this machine, when it gives one; before a list of your devices lands, the name the
-/// invite it joined gave it.
+/// The name `me` gives this machine, when it gives one: only the name a verified list of your devices
+/// holds, never the unsigned name an invite carried, so a command built on it never names another device.
 pub async fn own_label(home: &Home) -> Option<DeviceLabel> {
     let own = keystore::KeyFile::device(home.key())
         .load()
@@ -325,12 +325,11 @@ pub async fn own_label(home: &Home) -> Option<DeviceLabel> {
         .node_id();
     let store = ContactsStore::open(home).await.ok()?;
     let me = Petname::stored(ME).ok()?;
-    let listed = store
+    store
         .contacts()
         .devices(&me)
         .and_then(|mut devices| devices.find(|(_, key)| **key == own))
-        .map(|(label, _)| label.clone());
-    listed.or_else(|| crate::joining::InvitedBy::read(home).and_then(|invited| invited.name))
+        .map(|(label, _)| label.clone())
 }
 
 #[cfg(test)]

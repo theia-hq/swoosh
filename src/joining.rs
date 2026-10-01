@@ -3,7 +3,7 @@
 //!
 //! The pin is written last on a join and removed last on a leave. It is what makes the other files mean
 //! anything, so a crash part way leaves a home [`Standing::read`](crate::standing::Standing::read) reads as
-//! damaged, naming `swoosh leave`, never one that trusts a root with a standing from another.
+//! an act that did not finish, naming the verb that finishes it, never as a standing.
 
 use std::io;
 use std::path::PathBuf;
@@ -125,19 +125,18 @@ fn same_root_write(home_lock: &HomeWrite, home: &Home, standing: &Link) -> io::R
 
 /// Leave the root this machine trusts, under `home.lock`: the standing and the lists go, and with them
 /// the devices under `me`, then the pin, last. The revocations this machine learned stay, and so does a
-/// root kept here.
+/// root kept here: while `root.key` is on this machine, `devices` and `devices.conflict` are its list and
+/// what its next number is read from, so they stay with it.
 ///
 /// # Errors
 ///
-/// A file could not be removed.
+/// A file could not be removed, or whether a root is kept here could not be told.
 pub fn leave(_home_lock: &HomeWrite, home: &Home) -> io::Result<()> {
-    for path in [
-        home.key_cert(),
-        home.devices(),
-        home.synced(),
-        home.invited_by(),
-        home.devices_conflict(),
-    ] {
+    let mut gone = vec![home.key_cert(), home.synced(), home.invited_by()];
+    if !home.root_key().try_exists()? {
+        gone.extend([home.devices(), home.devices_conflict()]);
+    }
+    for path in gone {
         remove(path)?;
     }
     remove(home.root_pub())?;

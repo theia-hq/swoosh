@@ -310,6 +310,20 @@ async fn a_root_pinned_to_another_key_reads_damaged() {
     );
 }
 
+/// Beside a root kept here, a standing from another root is no stopped switch (`join` never runs where a
+/// root is kept): it reads as no standing from the root, which `join` refuses.
+#[tokio::test]
+async fn a_held_root_with_a_standing_from_another_reads_as_no_standing() {
+    let home = home("root-other-badge");
+    root_key(&home, ROOT);
+    pin(&home, root()).await;
+    badge(&home, OTHER).await;
+    assert_eq!(
+        damaged(&home).await,
+        Disagreement::RootWithoutStanding { root: root() }
+    );
+}
+
 #[tokio::test]
 async fn a_held_root_with_no_standing_reads_damaged() {
     let home = home("root-no-badge");

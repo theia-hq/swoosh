@@ -1131,13 +1131,8 @@ async fn join_refuses_a_locked_key_over_pipes() {
 #[tokio::test]
 async fn join_refuses_a_damaged_home() {
     let home = scratch("damaged");
-    // A standing from one root under a pin to another: a switch that stopped between its writes.
-    config::write_badge(
-        &swoosh::testkit::lock(),
-        &home,
-        &standing(OTHER, node(OWN), now() + 90 * DAY),
-    )
-    .unwrap();
+    // A pin beside a standing that is not one: no act leaves this.
+    std::fs::write(home.key_cert(), "not a standing").unwrap();
     config::write_signet(&swoosh::testkit::lock(), &home, root(ROOT)).unwrap();
     let before = snapshot(home.dir());
     let ran = join_with(&home, &for_me(), &["--switch"]).await;
@@ -1152,39 +1147,121 @@ async fn join_refuses_text_that_is_not_an_invite() {
     refused_before_writing(&ran, "this is not a swoosh invite", &home, &before);
 }
 
-/// A join that stopped after its standing and before its pin reads as "joining did not finish", and running
-/// `join` again finishes it.
+/// The line `status` ends with on `home`, when an act there did not finish.
+async fn unfinished(home: &Home) -> String {
+    match Standing::read(home).await {
+        Err(swoosh::standing::StandingError::Damaged(what)) => {
+            swoosh::standing::damaged_line(&what)
+        }
+        Ok(Standing::InterruptedMint { .. }) => swoosh::standing::UNFINISHED_MINT.to_owned(),
+        other => panic!("an act that did not finish: {other:?}"),
+    }
+}
+
+/// Each act that stopped part way reads as not finished, naming its verb, and running that verb again
+/// finishes it: a first join and a switch by `join`, a leave by `leave`, a mint by `invite`. (`revoke
+/// root:<key>` joins them when that form lands.)
 #[tokio::test]
-async fn a_join_that_stopped_is_finished_by_join() {
-    let home = scratch("stopped");
+async fn each_unfinished_act_is_finished_by_its_verb() {
+    use crate::commands::invite::invite_tests;
+    use crate::commands::leave::leave_tests;
+
+    // A first join, stopped after its standing and before its pin.
+    let joining = scratch("stopped-join");
     config::write_badge(
         &swoosh::testkit::lock(),
-        &home,
+        &joining,
         &standing(ROOT, node(OWN), now() + 90 * DAY),
     )
     .unwrap();
-    std::fs::write(home.invited_by(), format!("{}\nlaptop\n", node(FROM))).unwrap();
-    match Standing::read(&home).await {
-        Err(swoosh::standing::StandingError::Damaged(what)) => assert_eq!(
-            swoosh::standing::damaged_line(&what),
-            "joining did not finish; to finish it: swoosh join"
-        ),
-        other => panic!("a stopped join: {other:?}"),
-    }
-    join(&home, &for_me()).await.joined();
-    assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
+    std::fs::write(joining.invited_by(), format!("{}\nlaptop\n", node(FROM))).unwrap();
+    assert_eq!(
+        unfinished(&joining).await,
+        "joining did not finish; to finish it: swoosh join"
+    );
+    join(&joining, &for_me()).await.joined();
+    assert!(matches!(read(&joining).await, Standing::Device { pin, .. } if pin == root(ROOT)));
+
+    // A switch from `OTHER` to `ROOT`, stopped after its standing and before its pin. `join` finishes it
+    // without `--switch`: the switch was asked for when it began.
+    let switching = scratch("stopped-switch");
+    device_of(&switching, OTHER, now() + 90 * DAY).await;
+    config::write_badge(
+        &swoosh::testkit::lock(),
+        &switching,
+        &standing(ROOT, node(OWN), now() + 90 * DAY),
+    )
+    .unwrap();
+    assert_eq!(
+        unfinished(&switching).await,
+        "joining did not finish; to finish it: swoosh join"
+    );
+    let ran = join(&switching, &for_me()).await;
+    ran.joined();
+    assert!(matches!(read(&switching).await, Standing::Device { pin, .. } if pin == root(ROOT)));
+    assert!(
+        ran.err.contains(&format!(
+            "this machine now trusts root root:{} (was root:{}).",
+            root(ROOT),
+            root(OTHER)
+        )),
+        "{}",
+        ran.err
+    );
+
+    // A leave, stopped after its standing went and before its pin did.
+    let leaving = scratch("stopped-leave");
+    config::write_signet(&swoosh::testkit::lock(), &leaving, root(ROOT)).unwrap();
+    assert_eq!(
+        unfinished(&leaving).await,
+        "leaving did not finish; to finish it: swoosh leave"
+    );
+    leave_tests::leave(&leaving, &[]).await.left();
+    assert!(!leaving.root_pub().exists(), "the pin went");
+    assert_eq!(read(&leaving).await, Standing::Unpinned);
+
+    // A mint, stopped after its list: `root.key` and the root's first list carrying this machine's
+    // standing, with no standing taken here and no pin.
+    let minting = invite_tests::scratch("stopped-mint");
+    let own = invite_tests::live(OWN, "desk");
+    invite_tests::root_key_at(&minting.root_key());
+    invite_tests::held(
+        &minting,
+        &invite_tests::records(1, core::slice::from_ref(&own), Vec::new()),
+    );
+    assert_eq!(
+        unfinished(&minting).await,
+        "making your root did not finish; to finish it: swoosh invite <name> <key>"
+    );
+    let ran = invite_tests::invite(&minting, &["tv", &node(STRANGER).to_string()]).await;
+    let _ = ran.invite();
+    assert_eq!(
+        ran.prompts, 1,
+        "one prompt: the invite's, none for the finish"
+    );
+    assert_eq!(
+        invite_tests::kept_list(&minting).epoch(),
+        Epoch(2),
+        "the invite cut above the list"
+    );
+    assert_eq!(
+        config::load_badge(&minting)
+            .await
+            .unwrap()
+            .unwrap()
+            .as_str(),
+        own.standing.as_str(),
+        "the finish took this machine's standing from the list"
+    );
+    assert!(matches!(read(&minting).await, Standing::HoldsRoot { pin, .. } if pin == root(ROOT)));
 }
 
-/// Before a list of your devices lands, the name a joined device goes by is the one its invite gave it.
+/// The name an invite gives this machine is an unsigned hint: before a list of your devices lands, this
+/// machine has no name a command takes, so nothing builds a `revoke` or an `invite` on it.
 #[tokio::test]
-async fn a_joined_device_is_named_by_its_invite_before_its_first_sync() {
+async fn an_invites_name_is_no_name_before_the_first_sync() {
     let home = scratch("named");
     join(&home, &for_me()).await.joined();
     assert!(!home.devices().exists(), "no list has landed");
-    assert_eq!(
-        swoosh::renewal::own_label(&home)
-            .await
-            .map(|label| label.to_string()),
-        Some("laptop".to_owned())
-    );
+    assert_eq!(swoosh::renewal::own_label(&home).await, None);
 }

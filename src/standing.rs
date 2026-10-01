@@ -7,7 +7,8 @@
 //!
 //! A root kept here is `root.key`, read by its header alone. The read writes nothing: a file rooted at a key
 //! this machine has revoked reads as absent, so a revoked `root.key` is no root and a revoked pin, with the
-//! standing it signed, is no pin. Each crash state is finished by running again the verb that left it.
+//! standing it signed, is no pin. Each crash state is finished by running again the verb that left it: a
+//! mint by `invite`, a first join or a switch by `join`, a leave by `leave`.
 //!
 //! **Any other disagreement is refused** as [`StandingError::Damaged`], naming what disagrees. Among them
 //! is a home made before a root had its own key: its badge was signed by this machine's own key, with no
@@ -109,7 +110,8 @@ pub enum Disagreement {
         /// The root that signed the standing.
         standing_root: NodeId,
     },
-    /// The device standing was signed by a root other than the one pinned.
+    /// The device standing was signed by a root other than the one pinned: a `join --switch` writes the
+    /// standing before the pin, so only a switch that stopped between them leaves one.
     StandingFromAnotherRoot {
         /// The root that signed the standing.
         standing_root: NodeId,
@@ -149,53 +151,59 @@ impl fmt::Display for Disagreement {
             ),
             Self::RootNotPinned { root, pin } => write!(
                 formatter,
-                "this machine holds root {}, and trusts {}",
-                crate::credential::short(root),
-                crate::credential::short(pin)
+                "this machine keeps {}, and trusts {}",
+                root_short(root),
+                root_short(pin)
             ),
             Self::RootWithoutStanding { root } => write!(
                 formatter,
-                "this machine holds root {} and has no device record from it",
-                crate::credential::short(root)
+                "this machine keeps {} and has no device record from it",
+                root_short(root)
             ),
             Self::PinWithoutStanding { pin } => write!(
                 formatter,
-                "this machine trusts root {} and has no device record from it",
-                crate::credential::short(pin)
+                "this machine trusts {} and has no device record from it",
+                root_short(pin)
             ),
             Self::StandingWithoutPin { standing_root } => write!(
                 formatter,
-                "this machine's device record is from root {}, and this machine trusts no root",
-                crate::credential::short(standing_root)
+                "this machine's device record is from {}, and this machine trusts no root",
+                root_short(standing_root)
             ),
             Self::StandingFromAnotherRoot { standing_root, pin } => write!(
                 formatter,
-                "this machine's device record is from root {}, and this machine trusts {}",
-                crate::credential::short(standing_root),
-                crate::credential::short(pin)
+                "this machine's device record is from {}, and this machine trusts {}",
+                root_short(standing_root),
+                root_short(pin)
             ),
             Self::UnreadablePin { path } => {
-                write!(formatter, "{} is not one root key", EscapedPath(path))
+                write!(formatter, "{} is not one root key", file_name(path))
             }
             Self::UnreadableStanding { path } => write!(
                 formatter,
                 "{} is not a device record with an end date",
-                EscapedPath(path)
+                file_name(path)
             ),
             Self::StandingForAnotherKey { path } => write!(
                 formatter,
                 "{} is a device record for a key other than this machine's",
-                EscapedPath(path)
+                file_name(path)
             ),
             Self::UnreadableRoot { path } => {
-                write!(
-                    formatter,
-                    "{} is not a readable root key",
-                    EscapedPath(path)
-                )
+                write!(formatter, "{} is not a readable root key", file_name(path))
             }
         }
     }
+}
+
+/// A root key in prose: `root:` and the short key.
+fn root_short(key: &NodeId) -> String {
+    format!("root:{}", crate::credential::short(key))
+}
+
+/// A home file by its name alone: `status` prints the home on `home:`, and no other line names a path in it.
+fn file_name(path: &Path) -> EscapedPath<'_> {
+    EscapedPath(Path::new(path.file_name().unwrap_or(path.as_os_str())))
 }
 
 /// The line for a root made on this machine whose making did not finish: `status`'s, and the refusal of
@@ -203,7 +211,8 @@ impl fmt::Display for Disagreement {
 pub const UNFINISHED_MINT: &str =
     "making your root did not finish; to finish it: swoosh invite <name> <key>";
 
-/// The line for a join that stopped after its standing and before its pin. Running `join` again finishes it.
+/// The line for a join that stopped after its standing and before its pin: a first join, or a switch to
+/// another root. Running `join` again finishes it.
 pub const UNFINISHED_JOIN: &str = "joining did not finish; to finish it: swoosh join";
 
 /// The line for a leave that stopped after its standing went and before its pin did. Running `leave` again
@@ -211,11 +220,13 @@ pub const UNFINISHED_JOIN: &str = "joining did not finish; to finish it: swoosh 
 pub const UNFINISHED_LEAVE: &str = "leaving did not finish; to finish it: swoosh leave";
 
 /// The line for a home whose records disagree: `status`'s, and the refusal of every verb that needs to
-/// know which root this machine trusts. The two shapes a stopped `join` or `leave` leaves name the verb
-/// that finishes them; every other names `leave`, which starts over.
+/// know which root this machine trusts. The shapes a stopped `join` (a first join or a switch) or a stopped
+/// `leave` leaves name the verb that finishes them; every other names `leave`, which starts over.
 pub fn damaged_line(what: &Disagreement) -> String {
     match what {
-        Disagreement::StandingWithoutPin { .. } => UNFINISHED_JOIN.to_owned(),
+        Disagreement::StandingWithoutPin { .. } | Disagreement::StandingFromAnotherRoot { .. } => {
+            UNFINISHED_JOIN.to_owned()
+        }
         Disagreement::PinWithoutStanding { .. } => UNFINISHED_LEAVE.to_owned(),
         what => format!(
             "root: this machine's records disagree ({what}): swoosh cannot tell which root it trusts. A \
@@ -260,20 +271,22 @@ impl Standing {
     }
 
     /// The root kept on this machine that this machine has revoked: its `root.key` stays until a `revoke`
-    /// of that root deletes it, and every read takes it for no root. `None` when no root is kept here, or
-    /// the one kept here is live. Never prompts and never writes.
+    /// of that root deletes it, and every read takes it for no root. `None` when no root is kept here, the
+    /// one kept here is live, or its key file has no header to read: [`read`](Self::read) reports that home
+    /// as damaged. Never prompts and never writes.
     ///
     /// # Errors
     ///
-    /// The revocations or the key file could not be read.
+    /// The revocations could not be read, or whether a key file is there could not be told.
     pub async fn revoked_root(home: &Home) -> Result<Option<NodeId>, StandingError> {
         let path = home.root_key();
         if !exists(&path).await? {
             return Ok(None);
         }
         let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
-        let root = root_key(path).map_err(StandingError::Damaged)?;
-        Ok(is_revoked(&revoked, root).then_some(root))
+        Ok(root_key(path)
+            .ok()
+            .filter(|root| is_revoked(&revoked, *root)))
     }
 }
 
@@ -295,9 +308,15 @@ async fn classify(
         (Some(root), Some(pin)) if root != pin => {
             damaged(Disagreement::RootNotPinned { root, pin })
         }
-        (Some(root), Some(pin)) => match read_badge(home, own, pin).await? {
-            None => damaged(Disagreement::RootWithoutStanding { root }),
-            Some(until) => Ok(Standing::HoldsRoot { pin, until }),
+        // A standing from another root beside a root kept here is no stopped switch: `join` never runs
+        // where a root is kept.
+        (Some(root), Some(pin)) => match read_badge(home, own, pin).await {
+            Ok(None)
+            | Err(StandingError::Damaged(Disagreement::StandingFromAnotherRoot { .. })) => {
+                damaged(Disagreement::RootWithoutStanding { root })
+            }
+            Ok(Some(until)) => Ok(Standing::HoldsRoot { pin, until }),
+            Err(other) => Err(other),
         },
         (None, None) => match load_badge(home).await? {
             None => Ok(Standing::Unpinned),

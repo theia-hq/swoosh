@@ -21,23 +21,34 @@ use crate::standing::{Disagreement, damaged_line};
 
 /// Load this node's signet: the [`NodeId`] it was provisioned to trust, or `None` if it was never
 /// provisioned. The file is a single public node id; an absent file means this machine trusts no root,
-/// and `serve`'s gate then admits no member at all. A file that is not exactly one usable key refuses with
-/// the damaged-home line [`Standing`](crate::standing::Standing) reads it as, naming the file.
+/// and `serve`'s gate then admits no member at all. A pin to a root revoked on this machine is no pin, as
+/// [`Standing`](crate::standing::Standing) reads it: `None`, so nothing that root listed is followed. A
+/// file that is not exactly one usable key refuses with the damaged-home line `Standing` reads it as,
+/// naming the file.
+///
+/// # Errors
+///
+/// The pin is not one key, or it or the revocations could not be read: fails closed, never "no pin".
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
-    match crate::home::read_trust_file_async(&home.root_pub()).await {
-        Ok(text) => text.trim().parse::<NodeId>().map(Some).map_err(|_| {
+    let pin = match crate::home::read_trust_file_async(&home.root_pub()).await {
+        Ok(text) => text.trim().parse::<NodeId>().map_err(|_| {
             eyre::eyre!(
                 "{}",
                 damaged_line(&Disagreement::UnreadablePin {
                     path: home.root_pub()
                 })
             )
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let revoked = crate::revoked::open(home)?;
+    let revoked_here = pin
+        .verify_key()
+        .is_ok_and(|key| revoked.is_revoked_key(&key));
+    Ok((!revoked_here).then_some(pin))
 }
 
 /// Whether this home has revoked `root`: the question a verb asks before it follows a key it did not

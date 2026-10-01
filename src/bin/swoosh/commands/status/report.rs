@@ -267,7 +267,7 @@ impl Report {
         };
         let own = key.verify_key().ok();
         let own_row = rows.iter().find(|row| Some(row.key) == own);
-        // Named by the list once it lands; before that, by the name the invite gave this machine.
+        // Named by the list once it lands. A line that gives a command takes only that name.
         let name = match own_row {
             Some(row) => Some(row.label.clone()),
             None => swoosh::renewal::own_label(home).await,
@@ -276,8 +276,14 @@ impl Report {
             .as_ref()
             .map_or_else(|| short(&key), |name| format!("me/{name}"));
         if own_row.is_none() {
+            // Before the list lands, `this machine:` names it by the name its invite gave it: a hint that
+            // only this line prints.
+            let hinted = name.clone().or_else(|| {
+                swoosh::joining::InvitedBy::read(home).and_then(|invited| invited.name)
+            });
+            let shown = hinted.map_or_else(|| short(&key), |name| format!("me/{name}"));
             self.this_machine = Some(format!(
-                "this machine: {me}, your device until {}",
+                "this machine: {shown}, your device until {}",
                 Date(until)
             ));
         }

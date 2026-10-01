@@ -29,6 +29,8 @@ const ROOT: u8 = 0x21;
 const LAPTOP: u8 = 0x41;
 /// A device the root revoked.
 const OLD: u8 = 0x42;
+/// Another root.
+const OTHER: u8 = 0x31;
 
 const DAY: u64 = 24 * 60 * 60;
 
@@ -623,11 +625,17 @@ async fn every_state() -> Vec<(&'static str, Home)> {
 
     let ended = home("state-ended");
     device_until(&ended, now - DAY).await;
-    std::fs::write(
-        ended.invited_by(),
-        format!("{}\ndesk\n", TestNode::seeded(LAPTOP).node_id()),
-    )
-    .expect("invited-by");
+    list(
+        &ended,
+        &RosterDoc::new(
+            Epoch(2),
+            vec![Member {
+                until: now - DAY,
+                ..row(OWN, "desk")
+            }],
+        )
+        .expect("a list"),
+    );
     homes.push(("ended", ended));
 
     let restored = home("state-restored");
@@ -668,6 +676,36 @@ async fn every_state() -> Vec<(&'static str, Home)> {
     std::fs::write(damaged.root_pub(), b"not a key").expect("a torn pin");
     homes.push(("damaged", damaged));
 
+    let torn_root = home("state-torn-root");
+    std::fs::write(torn_root.root_key(), b"not a key").expect("a torn root key");
+    homes.push(("torn root", torn_root));
+
+    let keyless_torn_root = keyless("state-keyless-torn-root");
+    std::fs::write(keyless_torn_root.root_key(), b"not a key").expect("a torn root key");
+    homes.push(("keyless torn root", keyless_torn_root));
+
+    let another = home("state-another-root");
+    root_key(&another);
+    config::write_signet(
+        &swoosh::testkit::lock(),
+        &another,
+        TestRoot::seeded(OTHER).node_id(),
+    )
+    .expect("a pin to another root");
+    homes.push(("another root", another));
+
+    // A `join --switch` writes the standing before the pin: one that stopped between them.
+    let switch = home("state-switch");
+    device_of(&switch).await;
+    let badge = TestRoot::seeded(OTHER)
+        .device_badge(
+            TestNode::seeded(OWN).node_id(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL),
+        )
+        .expect("a standing");
+    config::write_badge(&swoosh::testkit::lock(), &switch, &badge).expect("the standing");
+    homes.push(("switch", switch));
+
     homes
 }
 
@@ -698,6 +736,21 @@ async fn status_writes_nothing() {
         let before = tree(home.dir());
         let _ = status(&home).await;
         assert_eq!(tree(home.dir()), before, "status wrote in the {state} home");
+    }
+}
+
+/// `status` names no path inside the home but on `home:`: in every state, no other line holds the home's
+/// directory.
+#[tokio::test]
+async fn status_prints_no_path_in_the_home_but_home() {
+    for (state, home) in every_state().await {
+        let dir = home.dir().display().to_string();
+        let out = status(&home).await;
+        let named: Vec<&str> = out
+            .lines()
+            .filter(|line| !line.starts_with("home: ") && line.contains(&dir))
+            .collect();
+        assert!(named.is_empty(), "the {state} home names its path: {out}");
     }
 }
 
@@ -876,24 +929,38 @@ async fn status_prints_every_state_verbatim() {
         .concat()
     );
 
-    let restored = home("restored");
-    assert_eq!(
-        status(restored).await,
-        [
-            "key: none yet".to_owned(),
-            home_line(restored),
-            String::new(),
-            "this machine's key is not in this home, because system backups leave it out. To start \
-             over: swoosh leave"
-                .to_owned(),
-            "then: swoosh join".to_owned(),
-        ]
-        .map(|line| line + "\n")
-        .concat()
-    );
+    for restored in ["restored", "keyless torn root"] {
+        let restored = home(restored);
+        assert_eq!(
+            status(restored).await,
+            [
+                "key: none yet".to_owned(),
+                home_line(restored),
+                String::new(),
+                "this machine's key is not in this home, because system backups leave it out. To start \
+                 over: swoosh leave"
+                    .to_owned(),
+                "then: swoosh join".to_owned(),
+            ]
+            .map(|line| line + "\n")
+            .concat()
+        );
+    }
 
     let ended = Date(now - DAY);
-    let last: [(&str, &[String]); 8] = [
+    let disagree = |what: &str| {
+        format!(
+            "root: this machine's records disagree ({what}): swoosh cannot tell which root it trusts. A \
+             root kept on this machine stays. To start over: swoosh leave"
+        )
+    };
+    let root_short = |seed: u8| {
+        format!(
+            "root:{}",
+            swoosh::credential::short(&TestRoot::seeded(seed).node_id())
+        )
+    };
+    let last: [(&str, &[String]); 11] = [
         (
             "conflict",
             &["two copies of your root have been used: your devices hold two different lists. Keep one \
@@ -931,6 +998,10 @@ async fn status_prints_every_state_verbatim() {
             &["joining did not finish; to finish it: swoosh join".to_owned()],
         ),
         (
+            "switch",
+            &["joining did not finish; to finish it: swoosh join".to_owned()],
+        ),
+        (
             "leave",
             &["leaving did not finish; to finish it: swoosh leave".to_owned()],
         ),
@@ -940,13 +1011,15 @@ async fn status_prints_every_state_verbatim() {
                 "a revoked root is still on this machine; to delete it: swoosh revoke root:{root}"
             )],
         ),
+        ("damaged", &[disagree("root.pub is not one root key")]),
+        ("torn root", &[disagree("root.key is not a readable root key")]),
         (
-            "damaged",
-            &[format!(
-                "root: this machine's records disagree ({} is not one root key): swoosh cannot tell \
-                 which root it trusts. A root kept on this machine stays. To start over: swoosh leave",
-                home("damaged").root_pub().display()
-            )],
+            "another root",
+            &[disagree(&format!(
+                "this machine keeps {}, and trusts {}",
+                root_short(ROOT),
+                root_short(OTHER)
+            ))],
         ),
     ];
     for (state, lines) in last {
@@ -979,6 +1052,33 @@ async fn a_device_before_its_first_sync_is_named_by_its_invite() {
             )),
         "{out}"
     );
+
+    // The invite's name is an unsigned hint: no line that gives a command takes it.
+    let ended = self::home("first-sync-ended");
+    let now = unix_now();
+    device_until(&ended, now - DAY).await;
+    std::fs::write(
+        ended.invited_by(),
+        format!("{}\nb\n", TestNode::seeded(LAPTOP).node_id()),
+    )
+    .expect("invited-by");
+    let out = status(&ended).await;
+    assert!(
+        out.lines().any(
+            |line| line == format!("this machine: me/b, your device until {}", Date(now - DAY))
+        ),
+        "{out}"
+    );
+    assert!(
+        out.lines().any(|line| line
+            == format!(
+                "{} ended on {}; your devices refuse it. Where your root is kept: swoosh invite <name>",
+                short_key(OWN),
+                Date(now - DAY)
+            )),
+        "{out}"
+    );
+    assert!(!out.contains("invite b"), "{out}");
 
     std::fs::remove_file(home.invited_by()).expect("no invite to name it");
     let out = status(&home).await;

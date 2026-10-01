@@ -135,7 +135,7 @@ struct Cli {
 }
 
 /// What one `leave` did.
-struct Ran {
+pub(crate) struct Ran {
     result: eyre::Result<()>,
     out: String,
     err: String,
@@ -150,14 +150,14 @@ impl Ran {
         }
     }
 
-    fn left(&self) {
+    pub(crate) fn left(&self) {
         if let Err(error) = &self.result {
             panic!("leave left: {error:#}\n{}", self.err);
         }
     }
 }
 
-async fn leave(home: &Home, args: &[&str]) -> Ran {
+pub(crate) async fn leave(home: &Home, args: &[&str]) -> Ran {
     leave_asking(home, args, &mut Counting::new([PASS])).await
 }
 
@@ -562,20 +562,82 @@ async fn leave_under_a_running_serve_says_its_sessions_end() {
     );
 }
 
-/// A leave that stopped after the standing went and before the pin did reads as "leaving did not finish",
-/// and running `leave` again finishes it.
+/// `leave --new-key` on a home with no key makes one, and says nothing of an old key's links: there was
+/// no old key.
 #[tokio::test]
-async fn a_leave_that_stopped_is_finished_by_leave() {
-    let home = scratch("stopped");
+async fn leave_new_key_on_a_home_with_no_key_names_no_old_links() {
+    let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
+    let dir =
+        std::env::temp_dir().join(format!("swoosh-leave-keyless-{}-{seq}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    config::create_store_dir(&dir).unwrap();
+    let home = Home::resolve(Some(dir)).unwrap();
+    let ran = leave(&home, &["--new-key"]).await;
+    ran.left();
+    assert_eq!(
+        ran.out,
+        format!("{}\n", stored_key(&home)),
+        "stdout is the new key alone"
+    );
+    assert!(!ran.err.contains("old key"), "{}", ran.err);
+}
+
+/// Before a list of your devices lands, `leave` names no `revoke` command: the only name it has is the
+/// one the invite carried, unsigned, and it may name another device.
+#[tokio::test]
+async fn leave_builds_no_revoke_on_the_invites_name() {
+    let home = scratch("hinted");
+    let root = TestRoot::seeded(ROOT);
+    config::write_badge(
+        &swoosh::testkit::lock(),
+        &home,
+        &root
+            .device_badge(
+                node(OWN),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(now() + 90 * DAY),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    config::write_signet(&swoosh::testkit::lock(), &home, root.node_id()).unwrap();
+    std::fs::write(home.invited_by(), format!("{}\ndesk\n", node(0x41))).unwrap();
+    let ran = leave(&home, &[]).await;
+    ran.left();
+    assert_eq!(
+        ran.err.trim(),
+        format!(
+            "this machine no longer trusts root root:{}.",
+            root.node_id()
+        )
+    );
+}
+
+/// Where `root.key` is kept, `devices` and `devices.conflict` are the root's list and what its next number
+/// is read from: `leave` from a damaged home there takes the standing and the pin, and keeps them.
+#[tokio::test]
+async fn leave_keeps_the_list_of_a_root_kept_here() {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let home = scratch("root-list");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(home.root_key())
+        .unwrap()
+        .write_all(&TestRoot::seeded(ROOT).seed())
+        .unwrap();
     config::write_signet(&swoosh::testkit::lock(), &home, root(ROOT)).unwrap();
-    match Standing::read(&home).await {
-        Err(swoosh::standing::StandingError::Damaged(what)) => assert_eq!(
-            swoosh::standing::damaged_line(&what),
-            "leaving did not finish; to finish it: swoosh leave"
-        ),
-        other => panic!("a stopped leave: {other:?}"),
-    }
+    std::fs::write(home.key_cert(), "not a standing").unwrap();
+    std::fs::write(home.devices(), b"the root's list").unwrap();
+    std::fs::write(home.devices_conflict(), b"the other list").unwrap();
     leave(&home, &[]).await.left();
-    assert!(!home.root_pub().exists(), "the pin went");
-    assert_eq!(read(&home).await, Standing::Unpinned);
+    assert!(!home.key_cert().exists() && !home.root_pub().exists());
+    assert_eq!(std::fs::read(home.devices()).unwrap(), b"the root's list");
+    assert_eq!(
+        std::fs::read(home.devices_conflict()).unwrap(),
+        b"the other list"
+    );
+    assert!(home.root_key().exists(), "the root stays");
 }

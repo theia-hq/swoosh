@@ -272,7 +272,7 @@ fn sealed() -> Vec<u8> {
 }
 
 /// `ROOT`'s key, sealed, written at `path`.
-fn root_key_at(path: &Path) {
+pub(crate) fn root_key_at(path: &Path) {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     std::fs::OpenOptions::new()
@@ -466,7 +466,7 @@ pub(crate) struct Ran {
     pub(crate) out: String,
     pub(crate) err: String,
     tape: Tape,
-    prompts: usize,
+    pub(crate) prompts: usize,
 }
 
 impl Ran {
@@ -1989,38 +1989,4 @@ async fn seeded_survives_a_bring_forward() {
         "still came with its key"
     );
     assert_eq!(carried.until, ci.until, "and was not renewed");
-}
-
-#[tokio::test]
-async fn a_mint_killed_before_its_pin_is_finished_by_the_next_invite() {
-    let home = scratch("mint-killed");
-    // A mint that stopped after its list: `root.key`, and the root's first list carrying this machine's
-    // standing, with no standing taken here and no pin.
-    let own = live(OWN, "desk");
-    root_key_at(&home.root_key());
-    held(&home, &records(1, core::slice::from_ref(&own), Vec::new()));
-    assert!(!home.key_cert().exists() && !home.root_pub().exists());
-
-    let ran = invite(&home, &["tv", &node(TV).to_string()]).await;
-    let _ = ran.invite();
-    assert_eq!(
-        ran.prompts, 1,
-        "one prompt: the invite's, none for the finish"
-    );
-    let taken = config::load_badge(&home).await.unwrap().unwrap();
-    assert_eq!(
-        taken.as_str(),
-        own.standing.as_str(),
-        "the finish took this machine's standing from the list"
-    );
-    assert_eq!(
-        config::load_signet(&home).await.unwrap(),
-        Some(TestRoot::seeded(ROOT).node_id()),
-        "and pinned the root"
-    );
-    assert_eq!(
-        kept_list(&home).epoch(),
-        Epoch(2),
-        "the invite cut above the list"
-    );
 }

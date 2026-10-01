@@ -131,13 +131,14 @@ impl LeaveCmd {
             let replaced = new_key.put(&home_lock, home, &Date(unix(now)).to_string())?;
             writeln!(out, "{}", replaced.key)?;
             out.flush()?;
+            // A home with no key had no old key, and no link made under one.
             if let Some(kept) = &replaced.kept {
                 writeln!(err, "kept the old key at {}", EscapedPath(kept))?;
+                writeln!(
+                    err,
+                    "links this machine made under its old key stop working."
+                )?;
             }
-            writeln!(
-                err,
-                "links this machine made under its old key stop working."
-            )?;
             if matches!(was, Was::Device { .. }) {
                 writeln!(
                     err,
@@ -182,4 +183,4 @@ fn unix(when: SystemTime) -> u64 {
 
 #[cfg(test)]
 #[path = "leave_tests.rs"]
-mod leave_tests;
+pub(crate) mod leave_tests;
