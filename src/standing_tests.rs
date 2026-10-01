@@ -12,7 +12,6 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use keystore::{KeyFile, Protection};
-use nauthy::DisabledRoots;
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
@@ -100,13 +99,14 @@ fn root_dir(dir: &Path, seed: u8) {
 }
 
 async fn revoke(home: &Home, key: NodeId) {
-    let mut latch = DisabledRoots::load(home.disabled_roots())
-        .await
-        .expect("load the latch");
-    latch
-        .disable(key.verify_key().expect("a usable key"))
-        .await
-        .expect("revoke the root here");
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        home,
+        [nauthy::Revocation::Key(
+            key.verify_key().expect("a usable key"),
+        )],
+    )
+    .expect("revoke the root here");
 }
 
 /// The update files, as a device that has synced holds them.

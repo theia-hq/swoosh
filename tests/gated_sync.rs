@@ -18,9 +18,8 @@ use std::time::SystemTime;
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use keystore::{KeyFile, Protection};
-use nauthy::{Revocations as _, VerifyKey};
+use nauthy::VerifyKey;
 use swoosh::contacts::DeviceLabel;
-use swoosh::gate::KeyedDenylist;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::roster::{Epoch, RosterDoc, fold};
@@ -118,10 +117,9 @@ async fn proof() {
         .unwrap();
     assert_eq!(answer, Answer::Gave);
     assert!(
-        KeyedDenylist::load(&nas_home)
-            .await
+        swoosh::revoked::open(&nas_home)
             .unwrap()
-            .is_revoked_peer(&key(STOLEN)),
+            .is_revoked_key(&key(STOLEN)),
         "the serving device refuses the key the update revoked"
     );
 

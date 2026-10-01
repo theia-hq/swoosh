@@ -2,7 +2,7 @@
 //! without ever connecting.
 
 use core::sync::atomic::{AtomicU32, Ordering};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bifrost::NodeId;
@@ -34,13 +34,14 @@ fn empty_catalog() -> ServiceCatalog {
     ServiceCatalog::decode(&0u32.to_be_bytes()).expect("an empty catalog decodes")
 }
 
-/// A resident over temp state holding `cancel`, with `disabled` as its live disabled path.
-fn test_resident(cancel: CancellationToken, disabled: PathBuf) -> Resident {
+/// A resident over temp state holding `cancel`, reading the services off from the home at `home`.
+fn test_resident(cancel: CancellationToken, home: &Path) -> Resident {
+    let home = crate::home::Home::resolve(Some(home.to_owned())).expect("a scratch home");
     Resident::new(
         NodeId::from_ed25519_secret(&[9u8; 32]),
         None,
         empty_catalog(),
-        disabled,
+        crate::serve_toml::ServicesOff::load(&home).expect("the services off load"),
         cancel,
     )
 }
@@ -54,11 +55,10 @@ async fn backends_agree() {
     let socket = leaf.join("control.sock");
     let listener =
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
-    let disabled = leaf.join("disabled");
-    std::fs::write(&disabled, "speed\n").expect("write the disabled file");
+    std::fs::write(leaf.join("serve.toml"), "off = [\"speed\"]\n").expect("write serve.toml");
 
     let cancel = CancellationToken::new();
-    let resident = Arc::new(test_resident(cancel.clone(), disabled));
+    let resident = Arc::new(test_resident(cancel.clone(), &leaf));
     let serving = tokio::spawn({
         let this = Arc::clone(&resident);
         async move { this.serve(listener).await }
@@ -107,10 +107,7 @@ async fn services_is_one_round_trip() {
     let socket = leaf.join("control.sock");
     let listener =
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
-    let resident = Arc::new(test_resident(
-        CancellationToken::new(),
-        leaf.join("disabled"),
-    ));
+    let resident = Arc::new(test_resident(CancellationToken::new(), &leaf));
     let serving = tokio::spawn({
         let this = Arc::clone(&resident);
         async move { this.serve(listener).await }

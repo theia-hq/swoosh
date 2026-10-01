@@ -22,7 +22,7 @@ use bifrost::{NoDiscovery, Node, NodeId};
 use bifrost_noise::Noise;
 use bifrost_quirk::Endpoint;
 use measure::Ping;
-use nauthy::FileDenylist;
+use nauthy::Denylist;
 use swoosh::credential::Credential;
 use swoosh::reaching::BindRole;
 use swoosh::testkit::TestRoot;
@@ -63,13 +63,11 @@ fn signet_badge(bound: NodeId) -> String {
 /// An empty revocation denylist: this test exercises membership admission, not revocation, so the gate
 /// loads from a path that does not exist (an absent file is an empty set). `tag` keeps parallel tests'
 /// paths apart.
-async fn empty_denylist(tag: &str) -> FileDenylist {
+async fn empty_denylist(tag: &str) -> Denylist {
     let path =
         std::env::temp_dir().join(format!("swoosh-sealed-quirk-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    FileDenylist::load(path)
-        .await
-        .expect("load the empty denylist")
+    Denylist::load(path).expect("load the empty denylist")
 }
 
 /// The rooted gate both cases share: the same assembly `swoosh serve` binds for its diagnostics.

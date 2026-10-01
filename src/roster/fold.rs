@@ -15,13 +15,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use nauthy::{DenylistError, FileDenylist, VerifyKey};
+use nauthy::{Revocation, VerifyKey};
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::{ArtifactError, Epoch, MAX_ROSTER_BLOB, RosterDoc, RosterVerifyError};
 use crate::escape::EscapedPath;
-use crate::gate::RevokedKeysError;
 use crate::home::{Home, HomeWrite};
+use crate::revoked::RevokedError;
 use crate::standing::{Standing, StandingError};
 
 /// What a fold did with an update.
@@ -56,12 +56,9 @@ pub enum FoldError {
     /// The update is not one the pinned root signed.
     #[error(transparent)]
     Verify(#[from] RosterVerifyError),
-    /// The revoked links could not be read or written.
+    /// The revocations could not be read or written.
     #[error(transparent)]
-    Denylist(#[from] DenylistError),
-    /// The revoked device keys could not be read or written.
-    #[error(transparent)]
-    RevokedKeys(#[from] RevokedKeysError),
+    Revoked(#[from] RevokedError),
     /// The update could not be written.
     #[error(transparent)]
     Artifact(#[from] ArtifactError),
@@ -116,13 +113,13 @@ pub async fn fold(home_lock: &HomeWrite, home: &Home, bytes: &[u8]) -> Result<Fo
             None => Ok(Folded::NotNewer),
             Some((_, held)) if held.as_slice() == bytes => Ok(Folded::Same),
             Some(_) => {
-                revoke(home_lock, home, &doc).await?;
+                revoke(home_lock, home, &doc)?;
                 keep_fork(home_lock, home, bytes, pin)?;
                 Ok(Folded::Fork { floor })
             }
         },
         core::cmp::Ordering::Greater => {
-            revoke(home_lock, home, &doc).await?;
+            revoke(home_lock, home, &doc)?;
             pick_up(home_lock, home, &doc, pin, badge_until)?;
             super::write(home_lock, &home.devices(), bytes)?;
             forget_invited_by(home);
@@ -169,7 +166,7 @@ pub async fn fold_fork(home_lock: &HomeWrite, home: &Home, bytes: &[u8]) -> Resu
     {
         return Ok(());
     }
-    revoke(home_lock, home, &fork).await?;
+    revoke(home_lock, home, &fork)?;
     keep_fork(home_lock, home, bytes, pin)
 }
 
@@ -190,18 +187,28 @@ pub(crate) fn read_held(path: &Path, root: VerifyKey) -> Option<(RosterDoc, Vec<
     Some((doc, bytes))
 }
 
-/// Add the update's revoked ids that have not ended to `<home>/revoked`, and its revoked keys to
-/// `<home>/revoked_keys`.
-async fn revoke(home_lock: &HomeWrite, home: &Home, doc: &RosterDoc) -> Result<(), FoldError> {
+/// Add the update's revoked ids that have not ended, and its revoked keys, to `<home>/revoked`, in one
+/// write. The writer leaves out this machine's own key (see [`crate::revoked::add`]); the pick-up still
+/// refuses a standing whose key the update revokes.
+fn revoke(home_lock: &HomeWrite, home: &Home, doc: &RosterDoc) -> Result<(), FoldError> {
     let now = unix_now();
-    let mut denylist = FileDenylist::load(home.revoked()).await?;
-    for id in doc.revoked().iter().filter(|id| id.expires > now) {
-        if !denylist.is_revoked_any([&id.id]) {
-            denylist.revoke_id(id.id.clone()).await?;
-        }
-    }
-    crate::gate::add_revoked_keys(home_lock, home, doc.revoked_keys())?;
+    let ids = doc
+        .revoked()
+        .iter()
+        .filter(|id| id.expires > now)
+        .map(|id| Revocation::Id(id.id.clone()));
+    let keys = doc.revoked_keys().iter().map(|key| Revocation::Key(*key));
+    crate::revoked::add(home_lock, home, ids.chain(keys))?;
     Ok(())
+}
+
+/// This machine's key, from its key file's header; `None` when it has none, or the header is not a usable
+/// key.
+fn own_key(home: &Home) -> Result<Option<VerifyKey>, FoldError> {
+    Ok(keystore::KeyFile::device(home.key())
+        .load()
+        .map_err(|error| eyre::eyre!(error))?
+        .and_then(|stored| stored.node_id().verify_key().ok()))
 }
 
 /// Take this machine's standing from the update when it is bound to this machine's key, rooted at the
@@ -213,11 +220,7 @@ fn pick_up(
     pin: VerifyKey,
     badge_until: SystemTime,
 ) -> Result<(), FoldError> {
-    let own = keystore::KeyFile::device(home.key())
-        .load()
-        .map_err(|error| eyre::eyre!(error))?
-        .map(|stored| stored.node_id().verify_key());
-    let Some(Ok(own)) = own else {
+    let Some(own) = own_key(home)? else {
         return Ok(());
     };
     let Some(member) = doc.members().iter().find(|member| member.node == own) else {

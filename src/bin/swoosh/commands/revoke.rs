@@ -8,7 +8,7 @@
 //! revoke <key>                 every link given to that key
 //! ```
 //!
-//! Every form blocks here first, in this machine's own `revoked` and `revoked_keys`, which a running
+//! Every form blocks here first, in this machine's own `revoked`, which a running
 //! `serve` reads live. A link this machine signed, and a link it gave a key, were only ever admitted here,
 //! so that block is the whole revoke. A device is admitted by all your devices: with your root (kept here,
 //! or `--root <dir>`) the revoke then presents it, cuts, and offers the cut; without it, it stays on this
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
-use nauthy::{FileDenylist, Link, RevocationId, VerifyKey};
+use nauthy::{Link, Revocation, RevocationId, VerifyKey};
 use swoosh::contacts::{ContactRef, ContactsStore, DeviceLabel, ME, Petname, ResolveError};
 use swoosh::grants::Grants;
 use swoosh::home::{Home, HomeWrite};
@@ -126,6 +126,9 @@ pub struct Publish {
     name: DeviceLabel,
     /// The device's key, which finds its row: a name can pass to a new device once the old one is revoked.
     key: VerifyKey,
+    /// Every key the name held live when this machine found the device, so the act refuses a device that
+    /// got a new key it never saw.
+    listed: Vec<VerifyKey>,
     /// Whether this machine had given the device's key any link.
     links: bool,
 }
@@ -205,9 +208,8 @@ impl RevokeCmd {
         let issuer = link.root();
         if own_key(home)?.is_some_and(|own| own == issuer) {
             self.no_root()?;
-            let _home_lock = HomeWrite::take(home).await?;
-            let mut denylist = denylist(home).await?;
-            link.revoke(&mut denylist).await?;
+            let home_lock = HomeWrite::take(home).await?;
+            revoke_link(&home_lock, home, link)?;
             writeln!(
                 err,
                 "{}",
@@ -245,10 +247,9 @@ impl RevokeCmd {
             // at the link and the key it was signed for.
             self.no_root()?;
             let home_lock = HomeWrite::take(home).await?;
-            let mut denylist = denylist(home).await?;
-            link.revoke(&mut denylist).await?;
+            revoke_link(&home_lock, home, link)?;
             if let Some(row) = &row {
-                swoosh::gate::add_revoked_keys(&home_lock, home, &[row.key])?;
+                swoosh::revoked::add(&home_lock, home, [Revocation::Key(row.key)])?;
             }
             writeln!(err, "{what}: {ALREADY}")?;
             return Ok(None);
@@ -268,9 +269,8 @@ impl RevokeCmd {
         } else {
             Reach::LocalOnly { until: ends }
         };
-        let _home_lock = HomeWrite::take(home).await?;
-        let mut denylist = denylist(home).await?;
-        link.revoke(&mut denylist).await?;
+        let home_lock = HomeWrite::take(home).await?;
+        revoke_link(&home_lock, home, link)?;
         writeln!(err, "{}", reach.line(&what))?;
         Ok(None)
     }
@@ -303,14 +303,16 @@ impl RevokeCmd {
 
         let now = unix_now();
         let home_lock = HomeWrite::take(home).await?;
-        let mut denylist = denylist(home).await?;
-        for id in row.ids.iter().filter(|id| id.expires > now) {
-            if !denylist.is_revoked_any([&id.id]) {
-                denylist.revoke_id(RevocationId::clone(&id.id)).await?;
-            }
-        }
-        swoosh::gate::add_revoked_keys(&home_lock, home, &[row.key])?;
-        let links = revoke_links(home, &mut denylist, &[row.key.to_string()]).await? > 0;
+        let given = given_to(home, &[row.key.to_string()]).await?;
+        let links = !given.is_empty();
+        let ids = row
+            .ids
+            .iter()
+            .filter(|id| id.expires > now)
+            .map(|id| RevocationId::clone(&id.id))
+            .chain(given)
+            .map(Revocation::Id);
+        swoosh::revoked::add(&home_lock, home, ids.chain([Revocation::Key(row.key)]))?;
         let device = format!("me/{name}");
 
         match source.place {
@@ -320,10 +322,17 @@ impl RevokeCmd {
                     "revoked {device}: blocked here now. This key can never be your device again; {name} will \
                      need `swoosh leave --new-key` at its console."
                 )?;
+                let listed = source
+                    .rows
+                    .iter()
+                    .filter(|listed| &listed.label == name && !listed.revoked)
+                    .map(|listed| listed.key)
+                    .collect();
                 Ok(Some(Publish {
                     place,
                     name: name.clone(),
                     key: row.key,
+                    listed,
                     links,
                 }))
             }
@@ -454,7 +463,7 @@ impl Publish {
     ) -> eyre::Result<()> {
         let mut root =
             Root::present_to(home, self.place, RootVerb::Revoke, prompt, dial, err).await?;
-        root.revoke_device(&self.name, self.key)?;
+        root.revoke_device(&self.name, self.key, &self.listed)?;
         let _ = root.renew_due()?;
         let committed = root.commit_to(err).await?;
         let reach = committed.offer(dial).await;
@@ -486,11 +495,12 @@ async fn person_links(home: &Home, person: &Petname, err: &mut impl Write) -> ey
     if let Some(root) = contacts.signet(person) {
         holders.push(root.node.to_string());
     }
-    let _home_lock = HomeWrite::take(home).await?;
-    let mut denylist = denylist(home).await?;
-    if revoke_links(home, &mut denylist, &holders).await? == 0 {
+    let home_lock = HomeWrite::take(home).await?;
+    let given = given_to(home, &holders).await?;
+    if given.is_empty() {
         eyre::bail!("no link from this machine was given to {person}; nothing revoked.");
     }
+    swoosh::revoked::add(&home_lock, home, given.into_iter().map(Revocation::Id))?;
     writeln!(
         err,
         "{}",
@@ -518,9 +528,10 @@ async fn key_links(
     err: &mut impl Write,
 ) -> eyre::Result<()> {
     let holders: Vec<String> = keys.iter().map(ToString::to_string).collect();
-    let _home_lock = HomeWrite::take(home).await?;
-    let mut denylist = denylist(home).await?;
-    let revoked = revoke_links(home, &mut denylist, &holders).await?;
+    let home_lock = HomeWrite::take(home).await?;
+    let given = given_to(home, &holders).await?;
+    let revoked = given.len();
+    swoosh::revoked::add(&home_lock, home, given.into_iter().map(Revocation::Id))?;
     let mut trailing = Vec::new();
     for key in keys {
         trailing.extend(also(home, *key).await?);
@@ -585,36 +596,22 @@ async fn also(home: &Home, key: NodeId) -> eyre::Result<Vec<String>> {
     Ok(lines)
 }
 
-/// Revoke every link this machine's ledger records as given to one of `holders`, at its root id. How many.
-async fn revoke_links(
-    home: &Home,
-    denylist: &mut FileDenylist,
-    holders: &[String],
-) -> eyre::Result<usize> {
+/// The root id of every link this machine's ledger records as given to one of `holders`, one per link.
+async fn given_to(home: &Home, holders: &[String]) -> eyre::Result<Vec<RevocationId>> {
     let records = Grants::at(home.links()).load().await?;
-    let mut count = 0;
-    for record in records
+    Ok(records
         .iter()
         .filter(|record| holders.contains(&record.holder))
-    {
-        if !denylist.is_revoked_any([&record.root_id]) {
-            denylist
-                .revoke_id(RevocationId::clone(&record.root_id))
-                .await?;
-        }
-        count += 1;
-    }
-    Ok(count)
+        .map(|record| RevocationId::clone(&record.root_id))
+        .collect())
 }
 
-/// This machine's revoked links, its store made first so the first write to a fresh home has somewhere
-/// to go.
-async fn denylist(home: &Home) -> eyre::Result<FileDenylist> {
-    let revoked = home.revoked();
-    if let Some(parent) = revoked.parent() {
-        swoosh::config::create_store_dir(parent)?;
-    }
-    Ok(FileDenylist::load(revoked).await?)
+/// Block `link` in this machine's `revoked` at its narrowest id, so it and everything narrowed from it are
+/// refused and the wider link it was narrowed from is not. Under `home.lock`, which the caller holds.
+fn revoke_link(home_lock: &HomeWrite, home: &Home, link: &Link) -> eyre::Result<()> {
+    let narrowest = link.cap().revocation_ids().pop();
+    swoosh::revoked::add(home_lock, home, narrowest.map(Revocation::Id))?;
+    Ok(())
 }
 
 /// One link from stdin, and nothing else.

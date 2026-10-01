@@ -172,50 +172,50 @@ async fn a_corrupt_badge_file_fails_closed_and_names_the_fix() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Disable `key` in `home`'s latch the way a writer on this machine would.
-async fn disable(home: &Home, dir: &std::path::Path, key: bifrost::NodeId) {
+/// Revoke `key` in `home`'s `revoked` the way a writer on this machine would.
+fn disable(home: &Home, dir: &std::path::Path, key: bifrost::NodeId) {
     use tightbeam::identity::AsVerifyKey as _;
 
     super::create_store_dir(dir).expect("create the store dir");
-    nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
-        .disable(key.verify_key().expect("a usable key"))
-        .await
-        .expect("disable the key");
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        home,
+        [nauthy::Revocation::Key(
+            key.verify_key().expect("a usable key"),
+        )],
+    )
+    .expect("revoke the key");
 }
 
 #[tokio::test]
-async fn a_disabled_key_reads_disabled_and_no_other_does() {
-    let (home, dir) = store("disabled-roots");
+async fn a_revoked_key_reads_revoked_and_no_other_does() {
+    let (home, dir) = store("revoked-roots");
     let (disabled, other) = (Secret::ephemeral().node_id(), Secret::ephemeral().node_id());
     assert!(
-        !super::is_disabled(&home, disabled)
-            .await
-            .expect("no latch reads"),
-        "a home that never disabled anything disables nothing"
+        !super::is_revoked(&home, disabled).expect("no file reads"),
+        "a home that never revoked anything revokes nothing"
     );
-    disable(&home, &dir, disabled).await;
+    disable(&home, &dir, disabled);
     assert!(
-        super::is_disabled(&home, disabled).await.expect("read"),
-        "the disabled key"
+        super::is_revoked(&home, disabled).expect("read"),
+        "the revoked key"
     );
     assert!(
-        !super::is_disabled(&home, other).await.expect("read"),
+        !super::is_revoked(&home, other).expect("read"),
         "and only that key"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
-async fn an_unreadable_latch_is_an_error_not_an_empty_set() {
-    // Fail closed: a verb that cannot tell whether a key is disabled must not follow it.
-    let (home, dir) = store("disabled-roots-bad");
+async fn an_unreadable_revoked_is_an_error_not_an_empty_set() {
+    // Fail closed: a verb that cannot tell whether a key is revoked must not follow it.
+    let (home, dir) = store("revoked-roots-bad");
     super::create_store_dir(&dir).expect("create the store dir");
-    std::fs::write(home.disabled_roots(), "not a key\n").expect("write a bad latch");
+    std::fs::write(home.revoked(), "not a key\n").expect("write a bad file");
     assert!(
-        super::is_disabled(&home, Secret::ephemeral().node_id())
-            .await
-            .is_err(),
-        "a malformed latch refuses rather than reading as nothing disabled"
+        super::is_revoked(&home, Secret::ephemeral().node_id()).is_err(),
+        "a malformed file refuses rather than reading as nothing revoked"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }

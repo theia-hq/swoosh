@@ -13,14 +13,13 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use keystore::{KeyFile, Protection};
-use nauthy::{RevocationId, Revocations as _, VerifyKey};
+use nauthy::{RevocationId, VerifyKey};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, ReadBuf};
 
 use super::{Answer, Device, Dial as _, ExchangeError, Until, answer, digest, exchange, round};
 use crate::codec::Id;
 use crate::config;
 use crate::contacts::{ContactsStore, DeviceLabel};
-use crate::gate::KeyedDenylist;
 use crate::home::Home;
 use crate::roster::{Epoch, Folded, Member, RosterDoc, fold};
 use crate::testkit::{Loopback, STANDING_UNTIL, TestNode, TestRoot};
@@ -123,18 +122,14 @@ async fn holding(home: &Home, bytes: &[u8]) {
 
 /// Whether `home`'s gate refuses the device `seed` whatever it presents.
 async fn refuses(home: &Home, seed: u8) -> bool {
-    KeyedDenylist::load(home)
-        .await
+    crate::revoked::open(home)
         .unwrap()
-        .is_revoked_peer(&key(seed))
+        .is_revoked_key(&key(seed))
 }
 
 /// Whether `home` has revoked `id`.
 async fn revoked(home: &Home, id: &Id) -> bool {
-    nauthy::FileDenylist::load(home.revoked())
-        .await
-        .unwrap()
-        .is_revoked_any([&id.id])
+    crate::revoked::open(home).unwrap().is_revoked_any([&id.id])
 }
 
 fn named(seed: u8, text: &str) -> Device {
@@ -435,31 +430,37 @@ async fn every_update_file_is_owner_only() {
     }
 }
 
-/// A `revoked_keys` others can write fails the device list with its refusal, rather than reading as no
-/// keys and dialing a device revoked here; owner-only again, it is read and the device is left out.
+/// A `revoked` others can write fails the device list with its refusal, rather than reading as no keys
+/// and dialing a device revoked here; owner-only again, it is read and the device is left out.
 #[tokio::test]
-async fn a_loose_revoked_keys_never_reads_as_empty() {
+async fn a_loose_revoked_never_reads_as_empty() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let desk = device("keys-loose", DESK).await;
     holding(&desk, &update(1, vec![], vec![])).await;
-    std::fs::write(desk.revoked_keys(), format!("{}\n", node(PHONE))).unwrap();
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &desk,
+        [nauthy::Revocation::Key(key(PHONE))],
+    )
+    .unwrap();
     let mode = |mode| {
-        std::fs::set_permissions(desk.revoked_keys(), std::fs::Permissions::from_mode(mode))
-            .unwrap();
+        std::fs::set_permissions(desk.revoked(), std::fs::Permissions::from_mode(mode)).unwrap();
     };
 
     for loose in [0o620, 0o602] {
         mode(loose);
         let error = super::devices(&desk, [])
             .await
-            .expect_err("a loose revoked_keys fails the list");
-        let source = error
-            .downcast_ref::<std::io::Error>()
-            .expect("the refusal is the read's own error");
+            .expect_err("a loose revoked fails the list");
+        let Some(crate::revoked::RevokedError::Loose(refused)) =
+            error.downcast_ref::<crate::revoked::RevokedError>()
+        else {
+            panic!("the refusal is the loose file: {error:#}");
+        };
         assert_eq!(
-            crate::home::loose_in(source),
-            Some(crate::home::Loose::Writable),
+            refused.why,
+            crate::home::Loose::Writable,
             "{loose:o} is refused as loose"
         );
     }
@@ -904,4 +905,107 @@ async fn contacts_toml_has_no_me_table() {
         .map(|(label, _)| label.to_string())
         .collect();
     assert_eq!(mine, ["desk", "nas", "phone"], "me is the list's devices");
+}
+
+/// A verified update that revokes this machine's own key: the fold writes every other revocation, but
+/// never this machine's key, since a key in `revoked` closes every link rooted at it and the links this
+/// machine signed let people reach it. A link it signed is still admitted by its gate. The root still ends
+/// the membership: the pick-up refuses the newer standing the update lists for the revoked key.
+#[tokio::test]
+async fn a_fold_never_revokes_this_machines_own_key() {
+    use nauthy::{Decision, ProvenPeer};
+
+    let desk = device_until("own-key", DESK, crate::testkit::STANDING_UNTIL - 1000).await;
+    holding(&desk, &update(1, vec![], vec![])).await;
+    let service: nauthy::Service = "demo".parse().unwrap();
+    let until = SystemTime::now() + Duration::from_secs(3600);
+    let slip = TestNode::seeded(DESK).slip(&service, until).unwrap();
+    crate::grants::Grants::at(desk.links())
+        .append(
+            &crate::testkit::lock(),
+            &crate::grants::GrantRecord {
+                target: service.clone(),
+                kind: crate::grants::GrantKind::Bearer,
+                delegation: crate::grants::Delegation::Delegable,
+                holder: crate::grants::ANYONE.to_owned(),
+                root_id: slip.root_revocation_id().unwrap(),
+                expiry: until,
+            },
+        )
+        .unwrap();
+    let badge = std::fs::read(desk.key_cert()).unwrap();
+
+    assert_eq!(
+        fold(
+            &crate::home::HomeWrite::take(&desk).await.unwrap(),
+            &desk,
+            &update(2, vec![id(1)], vec![key(DESK), key(STOLEN)])
+        )
+        .await
+        .unwrap(),
+        Folded::Newer
+    );
+
+    let revoked = crate::revoked::open(&desk).unwrap();
+    assert!(revoked.is_revoked_key(&key(STOLEN)), "the fold wrote");
+    assert!(
+        !revoked.is_revoked_key(&key(DESK)),
+        "but never this machine's own key"
+    );
+    let (gate, _cut) = crate::gate::anchored(&desk, node(DESK)).await.unwrap();
+    assert!(
+        matches!(
+            gate.admit(
+                ProvenPeer::from_handshake(key(LAPTOP)),
+                Some(&slip),
+                &service
+            ),
+            Decision::Admit
+        ),
+        "a link this machine signed is still admitted"
+    );
+    assert_eq!(
+        std::fs::read(desk.key_cert()).unwrap(),
+        badge,
+        "the pick-up refuses the standing of a revoked key"
+    );
+}
+
+/// A `revoked` that lost entries (shorter than its witness) fails the list of devices to dial, which
+/// `sync` reads before it asks anyone: the round is refused rather than dialing a device revoked here.
+#[tokio::test]
+async fn a_damaged_revoked_stops_sync_from_dialing() {
+    let desk = device("revoked-damaged", DESK).await;
+    holding(&desk, &update(1, vec![], vec![])).await;
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &desk,
+        [
+            nauthy::Revocation::Key(key(PHONE)),
+            nauthy::Revocation::Key(key(STOLEN)),
+        ],
+    )
+    .unwrap();
+    assert!(
+        super::devices(&desk, []).await.is_ok(),
+        "the list is made while the file holds what its witness says"
+    );
+
+    let text = std::fs::read_to_string(desk.revoked()).unwrap();
+    let kept = text.lines().last().unwrap();
+    std::fs::write(desk.revoked(), format!("{kept}\n")).unwrap();
+    let error = super::devices(&desk, [])
+        .await
+        .expect_err("a revoked that lost entries refuses the round");
+    assert!(
+        matches!(
+            error.downcast_ref::<crate::revoked::RevokedError>(),
+            Some(crate::revoked::RevokedError::Lost {
+                expected: 2,
+                found: 1,
+                ..
+            })
+        ),
+        "{error:#}"
+    );
 }

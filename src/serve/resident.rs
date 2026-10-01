@@ -1,14 +1,13 @@
 //! Every `serve`'s control socket glue: the live catalog reads plus the control listener arm.
 //!
 //! `Resident` is the state the accept loop serves from: the pid, the start time, the served catalog
-//! snapshot, the live disabled-list path, and a CLONE of the node's teardown token (the exposer stays
+//! snapshot, the live list of services off the gate reads, and a CLONE of the node's teardown token (the exposer stays
 //! the single teardown owner; this arm only REQUESTS the stop, never tears anything down itself).
 
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicU64, Ordering};
 use core::time::Duration;
 use std::os::unix::io::AsRawFd as _;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use bifrost::NodeId;
@@ -16,10 +15,9 @@ use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
-use super::control::{
-    ControlError, DisabledList, MAX_STATUS_STRING, Request, Response, ServiceMenu, StatusReply,
-};
+use super::control::{ControlError, DisabledList, Request, Response, ServiceMenu, StatusReply};
 use crate::node_client::{NodeClient, euid, real_peer_uid};
+use crate::serve_toml::ServicesOff;
 
 /// Seconds a control connection may sit idle before it is reaped (the slow-loris bound).
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -27,10 +25,6 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Concurrent control connections served at once; past the cap, connections queue at the listener
 /// (the `MAX_SESSIONS` backpressure pattern), so a flood queues rather than pinning a task each.
 pub const MAX_CONTROL_CONNS: usize = 8;
-
-/// The largest slice of `<home>/disabled` one status read inspects: enough for any legitimate
-/// disable list, bounded so a same-uid writer cannot make the daemon allocate on demand.
-pub const DISABLED_BYTES_CAP: u64 = 64 * 1024;
 
 /// The most disabled names one status reply reports, mirroring the codec's decode cap
 /// (`control.rs`), so a grown file can never produce a reply the client refuses to decode.
@@ -40,9 +34,9 @@ pub const DISABLED_NAMES_CAP: usize = 1024;
 /// transient resource pressure (EMFILE/ENOBUFS) to clear, short enough that a stop lands promptly.
 pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
-/// The resident state the accept loop serves from. Built once at `serve` start; every query
-/// reads the LIVE disabled file, never a cached copy, so the socket is never a data channel into
-/// the gate.
+/// The resident state the accept loop serves from. Built once at `serve` start; every query reads
+/// the services off through the gate's own [`ServicesOff`], so the status and the gate never
+/// disagree, and the socket is never a data channel into the gate.
 pub struct Resident {
     /// The resident's pid, reported in the status reply.
     pid: u32,
@@ -54,8 +48,8 @@ pub struct Resident {
     addr: Option<SocketAddr>,
     /// The served catalog snapshot (the same snapshot `run_serve` cuts for `control.services`).
     catalog: ServiceCatalog,
-    /// `<home>/disabled`: re-read per query, the sole toggle mechanism.
-    disabled_path: PathBuf,
+    /// The services off, read live: the same instance the gate asks per stream.
+    off: ServicesOff,
     /// A CLONE of the node's teardown token: firing it REQUESTS the stop; the exposer acts on it.
     cancel: CancellationToken,
     /// How the node stopped, once a path fires the token (ctrl-c, expires, wire stop, socket stop).
@@ -72,7 +66,7 @@ impl Resident {
         node_id: NodeId,
         addr: Option<SocketAddr>,
         catalog: ServiceCatalog,
-        disabled_path: PathBuf,
+        off: ServicesOff,
         cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -81,7 +75,7 @@ impl Resident {
             node_id,
             addr,
             catalog,
-            disabled_path,
+            off,
             cancel,
             stop_source: Arc::new(StopSource::new()),
             conns: Arc::new(Semaphore::new(MAX_CONTROL_CONNS)),
@@ -137,17 +131,21 @@ impl Resident {
         }
     }
 
-    /// The live service menu: the served catalog snapshot plus the disabled list re-read live.
+    /// The live service menu: the served catalog snapshot plus the services off, as the gate reads them.
     fn menu(&self) -> ServiceMenu {
         ServiceMenu {
             catalog: self.catalog.clone(),
-            disabled: read_disabled_names(&self.disabled_path),
+            disabled: self.disabled_names(),
         }
     }
 
-    /// The live disabled list, re-read per query.
+    /// The services off, as the gate reads them now, at most [`DISABLED_NAMES_CAP`] of them so the reply
+    /// always decodes. A file that went missing or cannot be read reports the set read last, as the gate
+    /// refuses it.
     pub fn disabled_names(&self) -> DisabledList {
-        read_disabled_names(&self.disabled_path)
+        let mut names = self.off.names();
+        names.truncate(DISABLED_NAMES_CAP);
+        DisabledList::Known(names)
     }
 
     /// Serve the bound std listener until the teardown token fires: the third arm of the serve
@@ -301,49 +299,6 @@ impl NodeClient for Resident {
         self.fire_stop();
         Ok(())
     }
-}
-
-/// Read the live disabled names from `<home>/disabled`: one trimmed non-empty name per line, an
-/// absent file meaning none. Total (any name is a valid thing to disable), mirroring the oracle's
-/// decode without depending on its debounce state.
-///
-/// Bounded and honest: at most [`DISABLED_BYTES_CAP`] bytes are read, at most
-/// [`DISABLED_NAMES_CAP`] names reported, and every name must fit the reply's own
-/// [`MAX_STATUS_STRING`] cap; a read failure, an oversized file, or an oversize name is an
-/// explicit [`DisabledList::Unknown`], never an empty "nothing disabled" the gate would contradict
-/// or a frame the client refuses to decode.
-fn read_disabled_names(path: &std::path::Path) -> DisabledList {
-    use std::io::Read as _;
-
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
-            return DisabledList::Known(Vec::new());
-        }
-        Err(error) => return DisabledList::Unknown(error.to_string()),
-    };
-    // Read one byte past the cap so an oversized file is detectable, not silently truncated: a
-    // truncated list would under-report exactly like the false empty this fix removes.
-    let mut reader = file.take(DISABLED_BYTES_CAP + 1);
-    let mut text = String::new();
-    if let Err(error) = reader.read_to_string(&mut text) {
-        return DisabledList::Unknown(error.to_string());
-    }
-    if text.len() as u64 > DISABLED_BYTES_CAP {
-        return DisabledList::Unknown("the disabled file exceeds the read cap".to_owned());
-    }
-    let mut names = Vec::new();
-    for name in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        if name.len() > MAX_STATUS_STRING {
-            return DisabledList::Unknown(format!(
-                "a disabled name exceeds the {MAX_STATUS_STRING}-byte reply cap"
-            ));
-        }
-        names.push(name.to_owned());
-    }
-    names.sort();
-    names.truncate(DISABLED_NAMES_CAP);
-    DisabledList::Known(names)
 }
 
 /// Wait one bounded [`ACCEPT_BACKOFF`] before retrying a recoverable accept error. A named helper so

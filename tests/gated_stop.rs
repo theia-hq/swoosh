@@ -27,7 +27,7 @@ use core::time::Duration;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::FileDenylist;
+use nauthy::Denylist;
 use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop, Stopped};
 use swoosh::testkit::TestRoot;
 use tightbeam::identity::AsVerifyKey as _;
@@ -269,8 +269,8 @@ fn signet_badge(signer: u8, bound: NodeId) -> String {
 
 /// An empty revocation denylist: this proof exercises membership admission, not revocation, so the gate
 /// loads from a path that does not exist (an absent file is an empty set).
-async fn empty_denylist() -> FileDenylist {
+async fn empty_denylist() -> Denylist {
     let path = std::env::temp_dir().join(format!("swoosh-gated-stop-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    FileDenylist::load(path).await.unwrap()
+    Denylist::load(path).unwrap()
 }

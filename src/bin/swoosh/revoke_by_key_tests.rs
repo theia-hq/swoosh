@@ -8,13 +8,13 @@
 //!
 //! The flow mirrors the product path: `grant issue --for` mints a bound link and records the grant; `swoosh
 //! revoke <key>` (driven here through the real [`RevokeCmd`](revoke::RevokeCmd)) loads the ledger, finds the
-//! root id, and denylists it. A live exposer's gate consults [`FileDenylist::is_revoked`] on every dial, so
+//! root id, and denylists it. A live exposer's gate consults [`Denylist::is_revoked`] on every dial, so
 //! asserting it now refuses the cap is asserting the gate refuses it.
 
 use core::time::Duration;
 
 use bifrost::NodeId;
-use nauthy::{Cap, FileDenylist, Request, Service};
+use nauthy::{Cap, Denylist, Request, Revocations as _, Service};
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::testkit::TestRoot;
@@ -78,7 +78,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
             .is_ok(),
         "the freshly minted device-bound cap grants its service to its device"
     );
-    let denylist = FileDenylist::load(home.revoked()).await.unwrap();
+    let denylist: Denylist = swoosh::revoked::open(&home).unwrap();
     assert!(
         !denylist.is_revoked(&cap),
         "the cap is not revoked before `revoke`"
@@ -93,7 +93,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     assert!(publish.is_none(), "a key's links need no root");
 
     // After revocation: the gate's revocation check (the seam a live exposer consults) now refuses the cap.
-    let denylist = FileDenylist::load(home.revoked()).await.unwrap();
+    let denylist = swoosh::revoked::open(&home).unwrap();
     assert!(
         denylist.is_revoked(&cap),
         "once the holder is revoked, the gate refuses the very cap that was issued"

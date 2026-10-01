@@ -24,7 +24,7 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use keystore::KeyFile;
-use nauthy::{DisabledRoots, DisabledRootsError, Link, VerifyKey};
+use nauthy::{Denylist, Link, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 
 use crate::escape::EscapedPath;
@@ -110,8 +110,8 @@ pub enum StandingError {
     #[error("could not read this machine's key")]
     OwnKey(#[source] keystore::Error),
     /// The roots revoked here could not be read. Fails closed: a revoked root is never read as live.
-    #[error("could not read the roots revoked on this machine")]
-    Revoked(#[source] DisabledRootsError),
+    #[error("could not read the revocations on this machine")]
+    Revoked(#[source] crate::revoked::RevokedError),
     /// A file the standing is read from could not be read.
     #[error("could not read {}", EscapedPath(path))]
     Read {
@@ -304,9 +304,7 @@ impl Standing {
     /// 5. A pin whose key is revoked here is removed, after the device standing and the update files.
     pub async fn read(home: &Home) -> Result<Read, StandingError> {
         let own = own_key(home)?;
-        let revoked = DisabledRoots::load(home.disabled_roots())
-            .await
-            .map_err(StandingError::Revoked)?;
+        let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
         let mut finished = Vec::new();
 
         remove_stray_root_new(home).await?;
@@ -382,8 +380,9 @@ pub fn pin_key(home: &Home, pin: NodeId) -> Result<VerifyKey, StandingError> {
 
 /// Whether `revoked` holds `key`. A key that is not a usable key is no root's, so it is not revoked here;
 /// every use of it refuses on its own.
-fn is_revoked(revoked: &DisabledRoots, key: NodeId) -> bool {
-    key.verify_key().is_ok_and(|key| revoked.is_disabled(key))
+fn is_revoked(revoked: &Denylist, key: NodeId) -> bool {
+    key.verify_key()
+        .is_ok_and(|key| revoked.is_revoked_key(&key))
 }
 
 /// This machine's own key, from its key file's header. `None` when the home has no key yet.
@@ -397,7 +396,7 @@ fn own_key(home: &Home) -> Result<Option<NodeId>, StandingError> {
 /// The key the root held here names, or `None` when no root is held here or the one held here is
 /// revoked. A revoked root is only ever here while the command retiring it holds its lock, and it is
 /// that command's to remove, never a standing.
-async fn held_root(home: &Home, revoked: &DisabledRoots) -> Result<Option<NodeId>, StandingError> {
+async fn held_root(home: &Home, revoked: &Denylist) -> Result<Option<NodeId>, StandingError> {
     let dir = home.root();
     if !exists(&dir).await? {
         return Ok(None);
@@ -443,7 +442,7 @@ async fn finish_move(home: &Home) -> Result<bool, StandingError> {
 /// `root.revoking/` rather than a root that could read as an interrupted mint.
 async fn retire_revoked_root(
     home: &Home,
-    revoked: &DisabledRoots,
+    revoked: &Denylist,
 ) -> Result<Option<Finished>, StandingError> {
     let dir = home.root();
     if !exists(&dir).await? {
@@ -482,7 +481,7 @@ async fn retire_revoked_root(
 /// damage the read must still report, and a leftover directory is no reason to drop either.
 async fn finish_retirement(
     home: &Home,
-    revoked: &DisabledRoots,
+    revoked: &Denylist,
     _lock: DirLock,
 ) -> Result<Finished, StandingError> {
     let root = root_key(&home.root_revoking()).ok();

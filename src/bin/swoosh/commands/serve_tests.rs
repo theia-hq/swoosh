@@ -1944,9 +1944,9 @@ fn bare_serve_never_resumes_public() {
 fn serving_is_written_only_after_bind() {
     let scratch = ProcessScratch::new("afterbind");
     Running::start(&scratch, &["--local", "--quiet", "ping"]).stop();
-    let serving = scratch.home_dir.join("serving");
+    let serving = scratch.home_dir.join("serve.toml");
     let before = std::fs::read_to_string(&serving).expect("a named run records its list");
-    assert_eq!(before, "ping=ping:\n");
+    assert_eq!(before, "services = [\"ping=ping:\"]\n");
 
     // A keyless shell cannot be opened to anyone, and a scheme nobody serves cannot bind: both refuse
     // after the list is known and before anything serves.
@@ -2072,17 +2072,17 @@ fn a_killed_serve_leaves_status_serving_nothing() {
 #[test]
 fn naming_a_service_at_start_clears_it_from_disabled() {
     let scratch = ProcessScratch::new("disabled");
-    let disabled = scratch.home_dir.join("disabled");
-    std::fs::write(&disabled, "ping\nspeed\n").expect("two services turned off");
+    let disabled = scratch.home_dir.join("serve.toml");
+    std::fs::write(&disabled, "off = [\"ping\", \"speed\"]\n").expect("two services turned off");
 
     Running::start(&scratch, &["--local", "--quiet", "ping"]).stop();
     assert_eq!(
         std::fs::read_to_string(&disabled).expect("the setting"),
-        "speed\n",
+        "off = [\"speed\"]\nservices = [\"ping=ping:\"]\n",
         "naming ping at start turns it back on, and leaves speed off"
     );
 
-    std::fs::write(&disabled, "ping\n").expect("ping turned off again");
+    std::fs::write(&disabled, "off = [\"ping\"]\n").expect("ping turned off again");
     let bare = serve_once(&scratch, &["--local", "--quiet", "--expires", "1s"]);
     assert!(
         bare.status.success(),
@@ -2098,7 +2098,7 @@ fn naming_a_service_at_start_clears_it_from_disabled() {
     );
     assert_eq!(
         std::fs::read_to_string(&disabled).expect("the setting"),
-        "ping\n",
+        "off = [\"ping\"]\n",
         "a bare serve leaves the setting as it is"
     );
 }
@@ -2862,7 +2862,8 @@ fn a_dirless_recv_with_no_home_teaches_its_own_name() {
 fn gated() -> nauthy::Gate {
     nauthy::Gate::rooted(
         swoosh::testkit::TestRoot::seeded(7).verify_key(),
-        nauthy::FileDenylist::empty(std::path::PathBuf::new()),
+        nauthy::Denylist::load(std::env::temp_dir().join("swoosh-serve-tests-no-revocations"))
+            .expect("an absent denylist loads empty"),
     )
 }
 
@@ -3268,10 +3269,12 @@ async fn serve_admit_refuses_what_it_must_not_admit() {
 
     let home = scratch("revoked");
     let held = serving(home.clone()).await;
-    nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
-        .disable(root.verify_key().unwrap())
-        .await
-        .unwrap();
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(root.verify_key().unwrap())],
+    )
+    .unwrap();
     assert!(
         refusal(super::admitting(&held, &home, own, root).await)
             .contains("was revoked on this machine")

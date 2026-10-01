@@ -36,7 +36,7 @@ points at `--public-unsafe`, so name only a file you mean to hand out.
 Every `serve` holds its home's lock and control socket, so `swoosh stop`, `swoosh status` and a bare
 `swoosh service ls` find it, and a second `serve` for the same home refuses; backgrounding is the
 supervisor's job. On Linux it needs `XDG_RUNTIME_DIR` set to a private directory.
-Only the services are kept for the next bare `serve`, in `<home>/serving`: `--public`, `--public-unsafe`,
+Only the services are kept for the next bare `serve`: `--public`, `--public-unsafe`,
 `--admit` and `--expires` apply only to the run that types them.
 `--admit root:<key>` lets in the devices of that root for this run only, on a machine that trusts no
 root; it writes nothing, and this machine does not get that root's revoked keys. It refuses this machine's

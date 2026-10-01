@@ -10,13 +10,12 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use clap::{CommandFactory as _, Parser};
-use nauthy::{DisabledRoots, FileDenylist, Link, Revocations as _, Service};
+use nauthy::{Link, Revocations as _, Service};
 use swoosh::contacts::ContactsStore;
-use swoosh::gate::KeyedDenylist;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::root::{Date, RootPlace};
-use swoosh::roster::Epoch;
+use swoosh::roster::{Epoch, RosterDoc};
 use swoosh::state::Row;
 use swoosh::sync::{Answer, Dial, ExchangeError};
 use swoosh::testkit::{Counting, TestNode, TestRoot};
@@ -124,7 +123,7 @@ async fn run(
     args: &[&str],
     stdin: &[u8],
     prompt: Counting,
-    dial: Devices,
+    dial: impl Dial,
     tape: Tape,
 ) -> Ran {
     let mut err = Stream {
@@ -152,24 +151,19 @@ async fn run(
 
 /// Whether `home` blocks the device key `seed` here now.
 async fn blocks_key(home: &Home, seed: u8) -> bool {
-    KeyedDenylist::load(home)
-        .await
+    swoosh::revoked::open(home)
         .unwrap()
-        .is_revoked_peer(&key(seed))
+        .is_revoked_key(&key(seed))
 }
 
 /// Whether `home`'s own block refuses `link`.
 async fn blocks(home: &Home, link: &Link) -> bool {
-    FileDenylist::load(home.revoked())
-        .await
-        .unwrap()
-        .is_revoked(link.cap())
+    swoosh::revoked::open(home).unwrap().is_revoked(link.cap())
 }
 
 /// Whether `home`'s own block holds `id`.
 async fn blocks_id(home: &Home, id: &swoosh::roster::Id) -> bool {
-    FileDenylist::load(home.revoked())
-        .await
+    swoosh::revoked::open(home)
         .unwrap()
         .is_revoked_any([&id.id])
 }
@@ -650,12 +644,15 @@ async fn revoke_a_bare_key_that_is_a_root_takes_back_only_links() {
     for line in err.lines().chain(mine.lines()) {
         assert!(!line.contains("swoosh revoke root:"), "{line}");
     }
-    let disabled = DisabledRoots::load(home.disabled_roots()).await.unwrap();
+    let revoked = swoosh::revoked::open(&home).unwrap();
     assert!(
-        !disabled.is_disabled(key(ALICE_ROOT)),
+        !revoked.is_revoked_key(&key(ALICE_ROOT)),
         "alice's root stays trusted"
     );
-    assert!(!disabled.is_disabled(key(ROOT)), "your root stays trusted");
+    assert!(
+        !revoked.is_revoked_key(&key(ROOT)),
+        "your root stays trusted"
+    );
     assert!(
         matches!(
             swoosh::standing::Standing::read(&home)
@@ -911,5 +908,222 @@ async fn a_root_signed_link_refuses_when_your_devices_cannot_be_read() {
     assert!(
         !blocks(&home, &laptop.standing).await,
         "nothing is blocked on a read that failed"
+    );
+}
+
+// --- one store, and a device that moved before the prompt ---
+
+/// Devices where `from` holds `bytes`, a list newer than this machine's, and hands it over in an
+/// exchange, as a real exchange folds it; every other device holds what it is offered.
+struct Handing {
+    home: Home,
+    from: NodeId,
+    bytes: Vec<u8>,
+    tape: Tape,
+}
+
+impl Dial for Handing {
+    async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
+        if peer != self.from {
+            return Ok(Answer::Same);
+        }
+        let home_lock = swoosh::home::HomeWrite::take(&self.home).await.unwrap();
+        match swoosh::roster::fold(&home_lock, &self.home, &self.bytes)
+            .await
+            .unwrap()
+        {
+            swoosh::roster::Folded::Newer => Ok(Answer::Took),
+            _ => Ok(Answer::Same),
+        }
+    }
+
+    async fn offer(
+        &self,
+        _peer: NodeId,
+        _number: Epoch,
+        _bytes: &[u8],
+    ) -> Result<Answer, ExchangeError> {
+        self.tape.push("<offer>\n");
+        Ok(Answer::Same)
+    }
+}
+
+/// `revoke me/laptop` found laptop's key before its prompt, and the act's own sync, before the prompt,
+/// took a list another copy of the root cut, which hands me/laptop a new key. Revoking the key it found
+/// would leave the device live under the new one, so the act stops: nothing is cut or offered.
+#[tokio::test]
+async fn a_revoke_never_leaves_live_a_device_its_own_sync_rekeyed() {
+    let home = scratch("revoke-rekeyed-by-sync");
+    let rows = [live(OWN, "desk"), live(LAPTOP, "laptop"), live(NAS, "nas")];
+    holds(&home, &rows, Vec::new()).await;
+    let rekeyed = [rows[0].clone(), live(STRANGER, "laptop"), rows[2].clone()];
+    let elsewhere = update_of(&records(2, &rekeyed, Vec::new()));
+    let tape = Tape::default();
+    let dial = Handing {
+        home: home.clone(),
+        from: node(NAS),
+        bytes: TestRoot::seeded(ROOT).sign_update(&elsewhere),
+        tape: tape.clone(),
+    };
+
+    let ran = run(
+        &home,
+        &["me/laptop"],
+        b"",
+        Counting::new([PASS]),
+        dial,
+        tape,
+    )
+    .await;
+    assert_eq!(
+        ran.refusal(),
+        "me/laptop is now listed under a key this revoke did not see, so your root did not revoke it",
+        "the refusal names no command: running the revoke again would take the name's new key"
+    );
+    assert!(!ran.tape.text().contains("<offer>"), "nothing is offered");
+    assert!(
+        !ran.err.contains("revoked me/laptop: me/"),
+        "no line says the device was revoked everywhere: {}",
+        ran.err
+    );
+    let held = swoosh::roster::held(&home, TestRoot::seeded(ROOT).verify_key()).unwrap();
+    assert_eq!(held.epoch(), Epoch(2), "nothing was cut");
+    assert!(
+        held.members()
+            .iter()
+            .any(|member| member.node == key(STRANGER)),
+        "the device is listed under its new key, for the next revoke to name"
+    );
+}
+
+/// `revoke <this machine's own standing>`, on a machine whose root already revoked it: the link is blocked
+/// here, but this machine's own key never lands in `revoked`, so every link it signed still admits.
+#[tokio::test]
+async fn revoking_this_machines_own_standing_never_blocks_its_key() {
+    let own = revoked(OWN, "desk");
+    let home = scratch("revoke-own-standing");
+    holds(&home, &[own.clone(), live(LAPTOP, "laptop")], Vec::new()).await;
+    let given = gave(&home, node(STRANGER), GrantKind::Device).await;
+
+    let ran = revoke(&home, &[&typed(&own.standing)]).await;
+    assert_eq!(
+        ran.ok().trim_end(),
+        "revoked the link: blocked here. Your root revoked the device it stands for already."
+    );
+    assert!(blocks(&home, &own.standing).await, "the link is blocked");
+    assert!(
+        !blocks_key(&home, OWN).await,
+        "this machine's own key is never revoked here"
+    );
+    assert!(
+        !blocks(&home, &given).await,
+        "a link this machine signed still admits"
+    );
+}
+
+/// A revoke, a fold and a root revoked here all land in the one `revoked`, beside its one witness, and
+/// no other file of revocations appears in the home.
+#[tokio::test]
+async fn revoked_holds_ids_device_keys_and_roots_in_one_file() {
+    let laptop = live(LAPTOP, "laptop");
+    let home = device(
+        "revoke-one-file",
+        &[live(OWN, "desk"), laptop.clone(), live(PHONE, "phone")],
+    )
+    .await;
+    let _ = revoke(&home, &["me/laptop"]).await.ok().to_owned();
+
+    let folded = RosterDoc::with_revocations(
+        Epoch(2),
+        [live(OWN, "desk"), laptop]
+            .iter()
+            .map(super::super::invite::invite_tests::member)
+            .collect(),
+        Vec::new(),
+        vec![key(PHONE)],
+    )
+    .unwrap();
+    let home_lock = swoosh::home::HomeWrite::take(&home).await.unwrap();
+    swoosh::roster::fold(
+        &home_lock,
+        &home,
+        &TestRoot::seeded(ROOT).sign_update(&folded),
+    )
+    .await
+    .unwrap();
+    // A root revoked here, through the one writer a root's revoke uses.
+    swoosh::revoked::add(
+        &home_lock,
+        &home,
+        [nauthy::Revocation::Key(key(ALICE_ROOT))],
+    )
+    .unwrap();
+    drop(home_lock);
+
+    let text = std::fs::read_to_string(home.revoked()).unwrap();
+    for (kind, value) in [
+        ("key", key(LAPTOP).to_string()),
+        ("key", key(PHONE).to_string()),
+        ("key", key(ALICE_ROOT).to_string()),
+    ] {
+        assert!(
+            text.lines().any(|line| line == format!("{kind} {value}")),
+            "{value} is in revoked: {text}"
+        );
+    }
+    assert!(
+        text.lines().any(|line| line.starts_with("id ")),
+        "and the ids: {text}"
+    );
+    let entries = text.lines().count();
+    assert_eq!(
+        std::fs::read_to_string(home.revoked_written())
+            .unwrap()
+            .trim(),
+        entries.to_string(),
+        "one witness counts every entry"
+    );
+    for gone in ["revoked_keys", "revoked_keys.written", "disabled_roots"] {
+        assert!(!home.dir().join(gone).exists(), "no {gone}");
+    }
+}
+
+/// Every write to `revoked` is made under `home.lock`, which excludes its other writers, so none takes
+/// the store's own lock and none leaves a `revoked.lock` in the home.
+#[tokio::test]
+async fn no_nauthy_lock_file_is_made_in_the_home() {
+    let laptop = live(LAPTOP, "laptop");
+    let home = device(
+        "revoke-no-lock",
+        &[live(OWN, "desk"), laptop.clone(), live(PHONE, "phone")],
+    )
+    .await;
+    gave(&home, node(STRANGER), GrantKind::Device).await;
+    let _ = revoke(&home, &["me/laptop"]).await.ok().to_owned();
+    let _ = revoke(&home, &[&node(STRANGER).to_string()])
+        .await
+        .ok()
+        .to_owned();
+    let folded = RosterDoc::with_revocations(
+        Epoch(2),
+        [live(OWN, "desk"), laptop]
+            .iter()
+            .map(super::super::invite::invite_tests::member)
+            .collect(),
+        Vec::new(),
+        vec![key(PHONE)],
+    )
+    .unwrap();
+    swoosh::roster::fold(
+        &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &TestRoot::seeded(ROOT).sign_update(&folded),
+    )
+    .await
+    .unwrap();
+    assert!(blocks_key(&home, PHONE).await, "the fold wrote");
+    assert!(
+        !home.dir().join("revoked.lock").exists(),
+        "no revoked.lock in the home"
     );
 }

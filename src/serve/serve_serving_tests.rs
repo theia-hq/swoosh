@@ -48,7 +48,7 @@ fn first_bare_serve_serves_the_default() {
         .record(&crate::testkit::lock(), &home)
         .expect("recording the default is a no-op");
     assert!(
-        !home.serving().exists(),
+        !home.serve_toml().exists(),
         "a default start writes no list for the next one"
     );
 }
@@ -71,14 +71,18 @@ fn a_named_list_is_what_the_next_bare_serve_resumes() {
     );
 }
 
-/// Every line of the record goes through the service-entry parser, never the flag parser: a line that
-/// starts with `-` is refused with the file and the line named, and nothing is served from it.
+/// Every entry of the record goes through the service-entry parser, never the flag parser: an entry that
+/// starts with `-` is refused with the file and the entry named, and nothing is served from it.
 #[test]
 fn resumed_list_is_parsed_as_services_never_flags() {
     let scratch = Scratch::new("flags");
     let home = scratch.home();
     for line in ["--public=ssh", "-q", "not a service"] {
-        std::fs::write(home.serving(), format!("ssh=sshd:\n{line}\n")).expect("a planted list");
+        std::fs::write(
+            home.serve_toml(),
+            format!("services = [\"ssh=sshd:\", \"{line}\"]\n"),
+        )
+        .expect("a planted list");
         let refused = Started::of(&[], &home, Path::new("/"));
         let Err(error @ ServingError::NotAService { .. }) = refused else {
             panic!("a `{line}` line must refuse, not serve: {refused:?}");
@@ -86,9 +90,10 @@ fn resumed_list_is_parsed_as_services_never_flags() {
         assert_eq!(
             error.to_string(),
             format!(
-                "{} has a line that is not a service: {line}. Name the services: swoosh serve ssh ping …",
-                home.serving().display()
-            )
+                "{} lists {line} as a service, and it is not one, so serve will not start unless you name its services",
+                home.serve_toml().display()
+            ),
+            "the refusal says what it saw and names no command: which services to serve is the person's call"
         );
     }
 }
@@ -120,9 +125,11 @@ fn resumed_paths_are_absolute() {
     started
         .record(&crate::testkit::lock(), &home)
         .expect("recorded");
-    let recorded = std::fs::read_to_string(home.serving()).expect("the record");
+    let recorded = crate::serve_toml::ServeToml::read(&home)
+        .expect("the record")
+        .services;
     assert_eq!(
-        recorded.lines().collect::<Vec<_>>(),
+        recorded,
         [
             "inbox=recv:",
             "drop=recv:/work/here/.",
@@ -137,8 +144,8 @@ fn resumed_paths_are_absolute() {
     );
 }
 
-/// A service one line of the record cannot hold is refused, and nothing is saved: a line break in the
-/// cwd or the typed path would read back as more services, and a space at either end would be trimmed.
+/// A service the record cannot hold as typed is refused, and nothing is saved: a line break in the cwd or
+/// the typed path, or a space at either end.
 #[test]
 fn a_path_with_a_newline_is_refused_not_recorded() {
     let scratch = Scratch::new("newline");
@@ -156,7 +163,7 @@ fn a_path_with_a_newline_is_refused_not_recorded() {
             error.to_string().starts_with("inbox=recv:") || error.to_string().starts_with("logs="),
             "the refusal names the service: {error}"
         );
-        assert!(!home.serving().exists(), "nothing is saved");
+        assert!(!home.serve_toml().exists(), "nothing is saved");
     }
 }
 
@@ -186,7 +193,7 @@ fn the_record_is_owner_only() {
         .expect("named")
         .record(&crate::testkit::lock(), &home)
         .expect("recorded");
-    let mode = std::fs::metadata(home.serving())
+    let mode = std::fs::metadata(home.serve_toml())
         .expect("the record")
         .permissions()
         .mode();

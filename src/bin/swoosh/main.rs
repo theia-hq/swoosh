@@ -280,7 +280,7 @@ impl Command {
             },
             // The `service` group: `ls --at <peer>` reaches a peer's `control.services`; bare `ls` reads your
             // own node over the local control socket, and `enable`/`disable` are LOCAL file-writes on
-            // `<home>/disabled`. Split each here so the local arms never compose a transport they would not use.
+            // `<home>/serve.toml`. Split each here so the local arms never compose a transport they would not use.
             Self::Service(cmd) => match cmd {
                 service::ServiceCmd::Ls(ls) => match ls.at {
                     Some(_) => Verb::Outward(Outward::Service(*ls)),
@@ -326,9 +326,11 @@ enum Verb {
     /// A bare `swoosh service ls` (no `--at`): read YOUR OWN node's live menu over the local control
     /// socket, no transport or store. With `--at` it is a reaching verb instead.
     ServiceLs(service::ServiceLsCmd),
-    /// `swoosh service enable <svc>`: a LOCAL file-write on `<home>/disabled` (remove a name), no transport.
+    /// `swoosh service enable <svc>`: a LOCAL file-write on `<home>/serve.toml` (remove a name), no
+    /// transport.
     ServiceEnable(service::ServiceToggleCmd),
-    /// `swoosh service disable <svc>`: a LOCAL file-write on `<home>/disabled` (add a name), no transport.
+    /// `swoosh service disable <svc>`: a LOCAL file-write on `<home>/serve.toml` (add a name), no
+    /// transport.
     ServiceDisable(service::ServiceToggleCmd),
     /// A bare `swoosh stop` (no `--at`): stop YOUR OWN node over the local control socket, no transport
     /// or store. With `--at` it is a reaching verb instead.
@@ -426,9 +428,9 @@ impl Outward {
                     gate,
                     cut,
                     // The live enable/disable oracle: the running exposer consults it per stream, so a
-                    // `service disable`/`enable` written to `<home>/disabled` is honored with no
+                    // `service disable`/`enable` written to `<home>/serve.toml` is honored with no
                     // restart. Loaded here beside the gate because both are home files it reads.
-                    enabled: tightbeam::enabled::FileDisabledList::load(home.disabled()).await?,
+                    enabled: swoosh::serve_toml::ServicesOff::load(home)?,
                     // The SAME home the root resolved once, so the serve and its control clients name
                     // the same paths.
                     home: home.clone(),
@@ -530,8 +532,8 @@ async fn run() -> eyre::Result<()> {
         // A bare `swoosh status` (no peer): this machine, from its own files. It never dials; with a
         // peer it is a reach verb.
         Verb::Status(cmd) => return cmd.run_local(&home).await,
-        // `service enable`/`disable`: LOCAL file-writes on `<home>/disabled`, honored live by a running
-        // `serve` via the mtime-watched oracle. Need only the home; bind no transport and touch no store.
+        // `service enable`/`disable`: LOCAL file-writes on `<home>/serve.toml`, honored live by a running
+        // `serve` via the watched set its gate reads. Need only the home; bind no transport and touch no store.
         Verb::ServiceEnable(cmd) => return cmd.run_enable(&home).await,
         Verb::ServiceDisable(cmd) => return cmd.run_disable(&home).await,
         // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save.
@@ -1131,11 +1133,11 @@ mod tests {
         );
     }
 
-    /// The gate `serve` builds refuses a pin to a root this home disabled, as if there were no pin, and
-    /// the context fails to resolve at all over a latch it cannot read, rather than serving as if nothing
-    /// were disabled.
+    /// The gate `serve` builds refuses a pin to a root this home revoked, as if there were no pin, and
+    /// the context fails to resolve at all over a `revoked` it cannot read, rather than serving as if
+    /// nothing were revoked.
     #[tokio::test]
-    async fn the_serve_gate_honors_the_homes_disabled_roots() {
+    async fn the_serve_gate_honors_the_homes_revoked_roots() {
         let dir = std::env::temp_dir().join(format!("swoosh-latch-ctx-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create an empty config dir");
@@ -1165,10 +1167,12 @@ mod tests {
                 nauthy::Decision::Admit
             )
         };
-        nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
-            .disable(disabled.verify_key())
-            .await
-            .expect("disable a root");
+        swoosh::revoked::add(
+            &swoosh::testkit::lock(),
+            &home,
+            [nauthy::Revocation::Key(disabled.verify_key())],
+        )
+        .expect("revoke a root");
 
         swoosh::config::write_signet(&swoosh::testkit::lock(), &home, disabled.node_id())
             .expect("pin the disabled root");
@@ -1191,10 +1195,10 @@ mod tests {
             .expect("serve carries an expose context");
         assert!(admits(&expose.gate, &live), "a live pin admits its devices");
 
-        std::fs::write(home.disabled_roots(), "not a key\n").expect("corrupt the latch");
+        std::fs::write(home.revoked(), "not a key\n").expect("corrupt the revocations");
         assert!(
             serve_verb().expose_context(&secret, &home).await.is_err(),
-            "an unreadable latch stops the serve rather than trusting every root"
+            "an unreadable revoked stops the serve rather than trusting every root"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

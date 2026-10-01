@@ -131,7 +131,7 @@ pub const MAX_DISABLED_NAMES: usize = 1024;
 pub const MAX_WARM_ENTRIES: usize = 64;
 
 /// The only requests a local control client can make: two reads and a stop. There is deliberately
-/// NO toggle/revoke variant: enabling or disabling a service is a file-write on `<home>/disabled`,
+/// NO toggle/revoke variant: enabling or disabling a service is a file-write on `<home>/serve.toml`,
 /// never a socket RPC, so the compiler enforces the mutate-free rule at every match site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {

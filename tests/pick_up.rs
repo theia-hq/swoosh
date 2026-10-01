@@ -281,10 +281,12 @@ fn a_revoked_key_reaches_no_route() {
             "before the revoke the laptop reaches the door"
         );
 
-        swoosh::gate::add_revoked_keys(
+        swoosh::revoked::add(
             &swoosh::testkit::lock(),
             &nas,
-            &[laptop.node_id().verify_key().unwrap()],
+            [nauthy::Revocation::Key(
+                laptop.node_id().verify_key().unwrap(),
+            )],
         )
         .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;

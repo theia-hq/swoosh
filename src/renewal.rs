@@ -26,7 +26,6 @@ use tightbeam::tunnel::Connector;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::contacts::{ContactsStore, DeviceLabel, ME, Petname};
-use crate::gate::KeyedDenylist;
 use crate::home::Home;
 use crate::roster::{MAX_BADGE, read_held};
 use crate::serve::RENEWAL_SERVICE;
@@ -49,7 +48,7 @@ enum Miss {
     NotADevice,
     /// The revocations here could not be read, so nothing is handed out.
     Unreadable,
-    /// The peer's key is in `revoked_keys`.
+    /// The peer's key is in `revoked`.
     KeyRevoked,
     /// The update held here lists no device for the key, or none verifies under the pin.
     NoRow,
@@ -104,9 +103,7 @@ async fn standing_for(home: &Home, peer: VerifyKey, now: SystemTime) -> Result<L
         }
     };
     let pin = crate::standing::pin_key(home, pin).map_err(|_| Miss::NotADevice)?;
-    let revocations = KeyedDenylist::load(home)
-        .await
-        .map_err(|_| Miss::Unreadable)?;
+    let revocations = crate::revoked::open(home).map_err(|_| Miss::Unreadable)?;
     if revocations.is_revoked_peer(&peer) {
         return Err(Miss::KeyRevoked);
     }
@@ -217,9 +214,7 @@ pub async fn is_due(home: &Home, now: SystemTime) -> bool {
     let Ok(Some(badge)) = crate::config::load_badge(home).await else {
         return false;
     };
-    KeyedDenylist::load(home)
-        .await
-        .is_ok_and(|revoked| revoked.is_revoked(badge.cap()))
+    crate::revoked::open(home).is_ok_and(|revoked| revoked.is_revoked(badge.cap()))
 }
 
 /// A standing this machine took from one of your devices.

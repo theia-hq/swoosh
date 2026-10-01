@@ -122,18 +122,11 @@ impl Home {
         self.dir.join("key.cert")
     }
 
-    /// `<home>/relay`: the relay this node offers as its home relay, written by `serve --relay` and read
-    /// by every later iroh bind under this home. A per-NODE setting: a peer dials you through whatever
-    /// relay your published record names, so each node names its own.
-    pub fn relay(&self) -> PathBuf {
-        self.dir.join("relay")
-    }
-
-    /// `<home>/resolver`: the pkarr base this node publishes its address record to and looks peers up
-    /// through, written by `serve --resolver` and read by every later iroh bind under this home. A
-    /// FLEET-wide setting: two nodes find each other only through the same resolver.
-    pub fn resolver(&self) -> PathBuf {
-        self.dir.join("resolver")
+    /// `<home>/serve.toml`: what `serve` runs. The services a bare `serve` resumes, the ones turned off, the
+    /// relay this machine offers and the resolver it publishes to, each written under
+    /// [`home_lock`](Self::home_lock) by the command that sets it. Not meant to be opened by a person.
+    pub fn serve_toml(&self) -> PathBuf {
+        self.dir.join("serve.toml")
     }
 
     /// `<home>/devices`: the newest list of your devices this machine has seen, signed by your root. Only a
@@ -185,48 +178,17 @@ impl Home {
         self.dir.join("root-moved")
     }
 
-    /// `<home>/revoked`: the revocation denylist the expose gate honors, the next `serve` reads.
+    /// `<home>/revoked`: everything this machine refuses for good, in one grow-only file: the links it
+    /// took back, the device keys it no longer admits, and the roots it no longer trusts. A running `serve`
+    /// reads it live. Read and written only through [`crate::revoked`].
     pub fn revoked(&self) -> PathBuf {
         self.dir.join("revoked")
     }
 
-    /// `<home>/revoked_keys`: the device keys this machine no longer admits, one key per line, which the
-    /// `serve` gate refuses whatever the device presents and whose open sessions the live cut ends. It
-    /// only ever grows, like [`revoked`](Self::revoked), and is written on the same rules: under
-    /// [`home_lock`](Self::home_lock), with the count of keys it holds in
-    /// [`revoked_keys_written`](Self::revoked_keys_written).
-    pub fn revoked_keys(&self) -> PathBuf {
-        self.dir.join("revoked_keys")
-    }
-
-    /// `<home>/revoked_keys.written`: how many keys [`revoked_keys`](Self::revoked_keys) held after its
-    /// last write, so a file that lost keys reads as lost rather than as fewer revocations.
-    pub fn revoked_keys_written(&self) -> PathBuf {
-        self.dir.join("revoked_keys.written")
-    }
-
-    /// `<home>/disabled_roots`: the root keys this node no longer trusts, one `ed01` key per line, which
-    /// the `serve` gate refuses every cap rooted at and `fleet` and `join` refuse to follow. It only ever
-    /// grows, and nothing here removes a key. Deliberately NOT [`disabled`](Self::disabled), the service
-    /// toggle, whose list a re-enable shrinks: a root disable is terminal, and the two must never share a
-    /// file or a reader.
-    pub fn disabled_roots(&self) -> PathBuf {
-        self.dir.join("disabled_roots")
-    }
-
-    /// `<home>/disabled`: the newline list of DISABLED service names a running `serve` honors live (an
-    /// mtime-watched oracle, the exact shape as [`revoked`](Self::revoked)). `service disable <svc>` adds a
-    /// name and `service enable <svc>` removes one; a disable persists (fail-closed across a restart) and a
-    /// disabled service refuses on the next stream with no restart.
-    pub fn disabled(&self) -> PathBuf {
-        self.dir.join("disabled")
-    }
-
-    /// `<home>/serving`: the services this home last started with, one service form per line, which a
-    /// bare `serve` resumes. Written only by a `serve` that named its services, and only once its routes
-    /// bound, so a failed start never changes what the next bare `serve` serves.
-    pub fn serving(&self) -> PathBuf {
-        self.dir.join("serving")
+    /// `<home>/revoked.written`: how many entries [`revoked`](Self::revoked) held after its last write, so a
+    /// file that lost entries reads as damaged rather than as fewer revocations.
+    pub fn revoked_written(&self) -> PathBuf {
+        self.dir.join("revoked.written")
     }
 
     /// `<home>/links`: the ledger (0600) of every link this machine signed. The `serve` gate admits a
@@ -251,18 +213,14 @@ impl Home {
     /// The files whose contents decide whom this machine trusts: the pin, the links it signed, the
     /// contacts book, everything it refuses for good, what `serve` runs, and the host keys `swoosh ssh`
     /// pins (a writer who plants a host key there can sit between this machine and a peer).
-    fn trust_files(&self) -> [PathBuf; 11] {
+    fn trust_files(&self) -> [PathBuf; 7] {
         [
             self.root_pub(),
             self.links(),
             self.contacts(),
             self.revoked(),
-            self.revoked_keys(),
-            self.disabled_roots(),
-            self.serving(),
-            self.disabled(),
-            self.relay(),
-            self.resolver(),
+            self.revoked_written(),
+            self.serve_toml(),
             self.known_hosts(),
         ]
     }

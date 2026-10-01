@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use bifrost::wire::{Blob, Transfer};
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::FileDenylist;
+use nauthy::Denylist;
 use swoosh::serve::{Activity, Recv, bind_recv};
 use swoosh::testkit::TestRoot;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
@@ -526,8 +526,8 @@ fn signet_badge(signer: u8, bound: NodeId) -> String {
 }
 
 /// An empty revocation denylist (an absent file is an empty set). `tag` keeps parallel tests' paths apart.
-async fn empty_denylist(tag: &str) -> FileDenylist {
+async fn empty_denylist(tag: &str) -> Denylist {
     let path = std::env::temp_dir().join(format!("swoosh-gated-send-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    FileDenylist::load(path).await.unwrap()
+    Denylist::load(path).unwrap()
 }

@@ -13,7 +13,6 @@ use bifrost::NodeId;
 use nauthy::{Link, Revocations as _};
 use tightbeam::identity::AsVerifyKey as _;
 
-use crate::gate::KeyedDenylist;
 use crate::home::{Home, HomeWrite};
 use crate::standing::Standing;
 
@@ -84,7 +83,7 @@ pub async fn take_renewal(
     let bound = cap
         .verify_member_at_root_without_revocation(SystemTime::now(), own, pin)
         .is_ok();
-    let revocations = KeyedDenylist::load(home).await?;
+    let revocations = crate::revoked::open(home)?;
     let blocked = revocations.is_revoked(cap) || revocations.is_revoked_peer(&own);
     if !bound || until <= held || blocked {
         return Ok(None);

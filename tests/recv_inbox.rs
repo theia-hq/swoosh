@@ -303,8 +303,8 @@ async fn a_dirless_recv_saves_into_the_inbox() {
         "nothing lands in the directory serve was started in"
     );
     assert_eq!(
-        std::fs::read_to_string(scratch.home.join("serving")).unwrap(),
-        "inbox=recv:\n",
+        std::fs::read_to_string(scratch.home.join("serve.toml")).unwrap(),
+        "services = [\"inbox=recv:\"]\n",
         "the saved list keeps the inbox, not the start directory"
     );
 }
@@ -414,7 +414,7 @@ fn a_recv_into_home_is_refused() {
         );
     }
     assert!(
-        !scratch.home.join("serving").exists(),
+        !scratch.home.join("serve.toml").exists(),
         "a refused start saves no list"
     );
 }
@@ -455,7 +455,7 @@ fn a_saved_recv_into_the_home_is_refused_at_resume() {
         (&scratch.user, "it is your home directory"),
     ] {
         let dir = dir.display().to_string();
-        let saved = scratch.home.join("serving");
+        let saved = scratch.home.join("serve.toml");
         let _ = std::fs::remove_file(&saved);
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -463,7 +463,9 @@ fn a_saved_recv_into_the_home_is_refused_at_resume() {
             .mode(0o600)
             .open(&saved)
             .unwrap();
-        std::io::Write::write_all(&mut file, format!("inbox=recv:{dir}\n").as_bytes()).unwrap();
+        let entry = format!("inbox=recv:{dir}");
+        std::io::Write::write_all(&mut file, format!("services = [{entry:?}]\n").as_bytes())
+            .unwrap();
         drop(file);
 
         scratch.assert_refused(&scratch.work, &[], &dir, why);

@@ -14,8 +14,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use super::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident};
 use crate::serve::control::ControlError;
 use crate::serve::control_codec::{
-    DisabledList, MAX_DISABLED_NAMES, MAX_FRAME, MAX_STATUS_STRING, Request, Response, ServiceMenu,
-    StatusReply,
+    DisabledList, MAX_DISABLED_NAMES, MAX_FRAME, Request, Response, ServiceMenu, StatusReply,
 };
 
 /// The four magic bytes a well-formed control frame opens with, spelled out rather than imported, so
@@ -58,11 +57,17 @@ fn test_resident() -> Resident {
 /// observe the shared teardown token.
 fn test_resident_with(cancel: CancellationToken) -> Resident {
     let dir = scratch_dir("state");
+    resident_over(&dir, cancel)
+}
+
+/// A resident whose services off are read from the `serve.toml` of the home at `dir`.
+fn resident_over(dir: &std::path::Path, cancel: CancellationToken) -> Resident {
+    let home = crate::home::Home::resolve(Some(dir.to_owned())).expect("a scratch home");
     Resident::new(
         NodeId::from_ed25519_secret(&[9u8; 32]),
         None,
         empty_catalog(),
-        dir.join("disabled"),
+        crate::serve_toml::ServicesOff::load(&home).expect("the services off load"),
         cancel,
     )
 }
@@ -711,62 +716,28 @@ async fn recoverable_accept_error_waits_one_bounded_backoff() {
     .expect("the backoff is bounded and completes");
 }
 
-/// m1/m2: the disabled read is bounded and honest. An absent file means an empty `Known` list; a
-/// read failure or an oversized file is an explicit `Unknown` (never a false "nothing disabled");
-/// and past the count cap the list truncates rather than write a reply the client refuses.
+/// m1/m2: the services off a status reports are bounded: a home with no `serve.toml` reports an empty
+/// known list, and past the count cap the list truncates rather than write a reply the client refuses.
 #[test]
-fn disabled_read_is_bounded_and_reports_errors() {
-    use super::{DISABLED_BYTES_CAP, DISABLED_NAMES_CAP, read_disabled_names};
+fn disabled_read_is_bounded() {
+    use super::DISABLED_NAMES_CAP;
 
     let dir = scratch_dir("disabled");
     assert_eq!(
-        read_disabled_names(&dir.join("absent")),
+        resident_over(&dir, CancellationToken::new()).disabled_names(),
         DisabledList::Known(Vec::new()),
-        "an absent file means nothing is disabled"
+        "no file means nothing is disabled"
     );
 
-    let path = dir.join("disabled");
-    std::fs::write(&path, "speed\n\n ping \nspeed\n").expect("write disabled");
-    assert_eq!(
-        read_disabled_names(&path),
-        DisabledList::Known(vec![
-            "ping".to_owned(),
-            "speed".to_owned(),
-            "speed".to_owned(),
-        ]),
-        "names are trimmed, dropped when empty, and sorted"
-    );
-
-    // Invalid UTF-8: the read itself fails, so the reply must say unknown, never empty.
-    std::fs::write(&path, [0xff, 0xfe, 0xfd]).expect("write invalid utf8");
-    assert!(
-        matches!(read_disabled_names(&path), DisabledList::Unknown(_)),
-        "a read failure is an explicit unknown"
-    );
-
-    // Over the byte cap: unknown, never a truncated list that under-reports.
-    let oversized = "x\n".repeat((DISABLED_BYTES_CAP as usize / 2) + 1);
-    std::fs::write(&path, oversized).expect("write oversized disabled");
-    assert!(
-        matches!(read_disabled_names(&path), DisabledList::Unknown(_)),
-        "an oversized file is an explicit unknown"
-    );
-
-    // A name over the reply's own string cap: unknown, never a frame the client refuses to decode.
-    let long_name = "n".repeat(MAX_STATUS_STRING + 1);
-    std::fs::write(&path, format!("{long_name}\n")).expect("write long disabled name");
-    assert!(
-        matches!(read_disabled_names(&path), DisabledList::Unknown(_)),
-        "a name over the reply cap is an explicit unknown"
-    );
-
-    // Over the count cap: the reply truncates to the decode cap instead of writing names a
-    // conforming client would refuse to decode.
-    let many: String = (0..DISABLED_NAMES_CAP + 8)
-        .map(|i| format!("svc{i:05}\n"))
+    let many: Vec<String> = (0..DISABLED_NAMES_CAP + 8)
+        .map(|i| format!("\"svc{i:05}\""))
         .collect();
-    std::fs::write(&path, many).expect("write many disabled");
-    match read_disabled_names(&path) {
+    std::fs::write(
+        dir.join("serve.toml"),
+        format!("off = [{}]\n", many.join(", ")),
+    )
+    .expect("write many disabled");
+    match resident_over(&dir, CancellationToken::new()).disabled_names() {
         DisabledList::Known(names) => {
             assert_eq!(
                 names.len(),
