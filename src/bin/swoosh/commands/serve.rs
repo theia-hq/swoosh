@@ -232,14 +232,14 @@ pub(crate) async fn admitting(
     }
     let home_lock = HomeWrite::take(home).await?;
     match Standing::read(home).await {
-        Ok(read) => match read.standing {
+        Ok(standing) => match standing {
             Standing::Unpinned => {}
             Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => eyre::bail!(
                 "this machine trusts root:{pin}, and admits its devices already: --admit is for a machine \
                  that trusts no root."
             ),
-            Standing::InterruptedMint { root_key } => {
-                eyre::bail!("{}", swoosh::standing::unfinished_line(root_key))
+            Standing::InterruptedMint { .. } => {
+                eyre::bail!("{}", swoosh::standing::UNFINISHED_MINT)
             }
         },
         Err(StandingError::Damaged(what)) => {

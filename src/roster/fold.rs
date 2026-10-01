@@ -91,7 +91,7 @@ pub enum FoldError {
 /// with it, and `devices.conflict` goes only once an update carries everything the fork revoked. Under
 /// `home.lock`, which the caller holds.
 pub async fn fold(home_lock: &HomeWrite, home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
-    let (pin, badge_until) = match Standing::read(home).await?.standing {
+    let (pin, badge_until) = match Standing::read(home).await? {
         Standing::Device { pin, until } | Standing::HoldsRoot { pin, until } => (pin, until),
         Standing::Unpinned | Standing::InterruptedMint { .. } => {
             return Err(FoldError::NotADevice);
@@ -150,7 +150,7 @@ fn forget_invited_by(home: &Home) {
 /// whatever its number, and is kept as `devices.conflict` unless a fork is kept already, so the next exchange
 /// here passes it on. It never becomes the update held here. Under `home.lock`, which the caller holds.
 pub async fn fold_fork(home_lock: &HomeWrite, home: &Home, bytes: &[u8]) -> Result<(), FoldError> {
-    let pin = match Standing::read(home).await?.standing {
+    let pin = match Standing::read(home).await? {
         Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => pin,
         Standing::Unpinned | Standing::InterruptedMint { .. } => {
             return Err(FoldError::NotADevice);

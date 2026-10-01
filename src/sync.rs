@@ -134,7 +134,7 @@ pub fn digest(bytes: &[u8]) -> [u8; 32] {
 
 /// This machine's pin, when it is a device of a root.
 async fn device_pin(home: &Home) -> Result<Option<VerifyKey>, ExchangeError> {
-    Ok(match Standing::read(home).await?.standing {
+    Ok(match Standing::read(home).await? {
         Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => {
             Some(crate::standing::pin_key(home, pin)?)
         }
@@ -518,13 +518,10 @@ pub async fn devices(
             name,
         })
     });
-    let seed = std::fs::read_to_string(home.invited_by())
-        .ok()
-        .and_then(|text| text.trim().parse::<NodeId>().ok())
-        .map(|key| Device {
-            key,
-            name: key.short(),
-        });
+    let seed = crate::joining::InvitedBy::read(home).map(|invited| Device {
+        key: invited.from,
+        name: crate::credential::short(&invited.from),
+    });
     let listed = me_devices(home).await?.into_iter().chain(also).chain(seed);
     dialable(home, listed).await
 }

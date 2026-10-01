@@ -133,19 +133,11 @@ impl InviteCmd {
     /// The bare `invite`: one `swoosh invite <name>` line on `out` for each device due to renew, read with
     /// no lock and no prompt, writing nothing.
     pub async fn run_due(self, home: &Home) -> eyre::Result<()> {
-        self.due(home, &mut io::stdout(), &mut io::stderr()).await
+        self.due(home, &mut io::stdout()).await
     }
 
-    pub(crate) async fn due(
-        &self,
-        home: &Home,
-        out: &mut impl Write,
-        err: &mut impl Write,
-    ) -> eyre::Result<()> {
+    pub(crate) async fn due(&self, home: &Home, out: &mut impl Write) -> eyre::Result<()> {
         let inspected = Root::inspect(home, self.place()).await?;
-        for line in &inspected.finished {
-            writeln!(err, "{line}")?;
-        }
         for row in inspected.due(unix_now()) {
             writeln!(out, "swoosh invite {}", row.label)?;
         }
@@ -173,7 +165,7 @@ impl InviteCmd {
         };
         refuse_a_contact(home, &name).await?;
         let standing = match Standing::read(home).await {
-            Ok(read) => read.standing,
+            Ok(standing) => standing,
             Err(StandingError::Damaged(what)) => {
                 eyre::bail!("{}", swoosh::standing::damaged_line(&what))
             }

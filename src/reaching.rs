@@ -285,7 +285,7 @@ async fn resolve_to<W: std::io::Write>(
 /// error, never a dial with nothing.
 async fn device_badge(home: &Home) -> eyre::Result<Option<(Link, NodeId)>> {
     let pin = match Standing::read(home).await {
-        Ok(read) => match read.standing {
+        Ok(standing) => match standing {
             Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => pin,
             Standing::Unpinned | Standing::InterruptedMint { .. } => {
                 return Ok(None);

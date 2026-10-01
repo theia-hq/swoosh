@@ -74,10 +74,10 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
     std::fs::create_dir_all(&device_dir).unwrap();
 
     // 1. The device makes its key and prints it.
-    let identity = swoosh(&["status", "--key", "--home", path_str(&device_dir)]);
+    let identity = swoosh(&["leave", "--new-key", "--home", path_str(&device_dir)]);
     assert!(
         identity.status.success(),
-        "status --key failed: {}",
+        "leave --new-key failed: {}",
         stderr(&identity)
     );
     let device_id: NodeId = String::from_utf8(identity.stdout)
@@ -86,14 +86,14 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .next()
         .unwrap()
         .parse()
-        .expect("status --key prints the key alone");
+        .expect("leave --new-key prints the new key alone");
 
     // 2. The root signs for that key: no seed travels. The owner's machine is where the invite says it
     //    came from.
-    let owner = swoosh(&["status", "--key", "--home", path_str(&signet_dir)]);
+    let owner = swoosh(&["leave", "--new-key", "--home", path_str(&signet_dir)]);
     assert!(
         owner.status.success(),
-        "status --key failed: {}",
+        "leave --new-key failed: {}",
         stderr(&owner)
     );
     let owner_id: NodeId = String::from_utf8(owner.stdout)
@@ -102,7 +102,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .next()
         .unwrap()
         .parse()
-        .expect("status --key prints the key alone");
+        .expect("leave --new-key prints the new key alone");
     let root = TestRoot::seeded(0x21);
     let standing = root
         .device_badge(

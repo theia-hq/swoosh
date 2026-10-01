@@ -14,7 +14,7 @@
 //! two reads swoosh needs of a link that nauthy does not owe a consumer.
 
 use bifrost::NodeId;
-use nauthy::{Link, Request, Service, VerifyKey};
+use nauthy::{Link, Request, Service};
 use tightbeam::identity::AsNodeId as _;
 
 use crate::peer::Peer;
@@ -49,10 +49,16 @@ impl LinkExt for Link {
     }
 }
 
-/// The short form of a key for output: the first 16 characters of its text, as [`NodeId::short`] prints
-/// the same key.
-pub fn short(key: &VerifyKey) -> String {
-    key.to_string().chars().take(16).collect()
+/// How many characters of a key's text its short form keeps: `ed01` and 8 more.
+const SHORT: usize = 12;
+
+/// The short form of a key for output: `ed01`, the next 8 characters, and `…`. One form for every key a
+/// line prints short. A line that gives a command prints the whole key instead: a short key is never
+/// accepted as input.
+pub fn short(key: &impl core::fmt::Display) -> String {
+    let mut short: String = key.to_string().chars().take(SHORT).collect();
+    short.push('…');
+    short
 }
 
 /// How a reaching verb authenticates to the service it dials.

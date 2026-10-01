@@ -21,7 +21,7 @@ fn leave_new_is_a_usage_error_not_new_key() {
             .output()
             .expect("the binary runs")
     };
-    assert!(swoosh(&["status", "--key"]).status.success());
+    assert!(swoosh(&["leave", "--new-key"]).status.success());
     let key = std::fs::read(home.join("machine").join("key")).unwrap();
 
     let output = swoosh(&["leave", "--new"]);

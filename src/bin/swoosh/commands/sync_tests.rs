@@ -117,27 +117,18 @@ async fn sync_refuses_each_standing_that_is_not_a_device() {
     let error = refuse_unless_device(&interrupted).await.unwrap_err();
     assert_eq!(
         error.to_string(),
-        format!(
-            "root: root:{}… made here, not finished: the next swoosh invite finishes it.",
-            root.node_id().short()
-        )
+        "making your root did not finish; to finish it: swoosh invite <name> <key>"
     );
 
     let damaged = home("damaged");
-    let badge = root
-        .device_badge(
-            TestNode::seeded(0x11).node_id(),
-            std::time::SystemTime::now() + core::time::Duration::from_secs(3600),
-        )
-        .unwrap();
-    swoosh::config::write_badge(&swoosh::testkit::lock(), &damaged, &badge).unwrap();
+    std::fs::write(damaged.root_pub(), b"not a key").unwrap();
     let error = refuse_unless_device(&damaged).await.unwrap_err();
     let line = error.to_string();
     assert!(
-        line.starts_with("root: this machine's records disagree (")
+        line.starts_with("this machine's records disagree (")
             && line.ends_with(
-                "): swoosh cannot tell which root it trusts. Run swoosh leave to start over; a root \
-                 kept here stays."
+                "): swoosh cannot tell which root it trusts. A root kept on this machine stays. To \
+                 start over: swoosh leave"
             ),
         "{line}"
     );

@@ -451,3 +451,48 @@ async fn a_signet_only_person_survives_tidy_up_and_reload() {
 
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
+
+/// A pin to a root revoked on this machine is no pin: the list that root signed names no device under
+/// `me`, so `me/<name>` reaches nothing it listed.
+#[tokio::test]
+async fn a_revoked_pin_lists_no_device_under_me() {
+    let dir = std::env::temp_dir().join(format!(
+        "swoosh-contacts-revoked-pin-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::config::create_store_dir(&dir).expect("the home");
+    let home = crate::home::Home::resolve(Some(dir.clone())).expect("a home");
+    let root = crate::testkit::TestRoot::seeded(0x21);
+    crate::config::write_signet(&crate::testkit::lock(), &home, root.node_id()).expect("the pin");
+    let member = root
+        .member(
+            crate::testkit::TestNode::seeded(0x41).verify_key(),
+            device("desk"),
+        )
+        .expect("a row");
+    let list =
+        crate::roster::RosterDoc::new(crate::roster::Epoch(1), vec![member]).expect("a list");
+    std::fs::write(home.devices(), root.sign_update(&list)).expect("the list");
+    let desk: ContactRef = "me/desk".parse().expect("an address");
+
+    let live = ContactsStore::open(&home).await.expect("open");
+    assert_eq!(resolve(live.contacts(), &desk), Ok(vec![node(0x41)]));
+
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(root.verify_key())],
+    )
+    .expect("revoke the root here");
+    assert_eq!(
+        crate::config::load_signet(&home)
+            .await
+            .expect("the pin reads"),
+        None
+    );
+    let revoked = ContactsStore::open(&home).await.expect("open");
+    assert!(resolve(revoked.contacts(), &desk).is_err());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

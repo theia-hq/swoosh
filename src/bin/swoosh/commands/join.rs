@@ -21,7 +21,7 @@ use swoosh::invite::{Invite, PREFIX};
 use swoosh::joining::Join;
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::root::Date;
-use swoosh::standing::{Standing, StandingError};
+use swoosh::standing::{Disagreement, Standing, StandingError};
 use swoosh::sync::{Dial, NodeDial};
 use swoosh::transport::ReachArgs;
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
@@ -143,20 +143,11 @@ impl JoinCmd {
             );
         }
 
-        // Then this machine's standing.
-        let read = match Standing::read(home).await {
-            Ok(read) => read,
-            Err(StandingError::Damaged(what)) => {
-                eyre::bail!("{}", swoosh::standing::damaged_line(&what))
-            }
-            Err(other) => return Err(other.into()),
-        };
-        for line in &read.finished {
-            writeln!(io.err, "{line}")?;
-        }
-        let standing = read.standing;
+        // Then this machine's standing. A switch that stopped before its pin left this machine trusting
+        // the root it was leaving: this join finishes the switch, whichever invite it is given.
+        let (standing, switching) = standing(home).await?;
         let was = match standing {
-            Standing::Unpinned => None,
+            Standing::Unpinned => switching,
             Standing::Device { pin, until: held } => {
                 if pin == root && until < held {
                     eyre::bail!(
@@ -177,9 +168,7 @@ impl JoinCmd {
                 Some(pin)
             }
             Standing::HoldsRoot { .. } => eyre::bail!("{}", swoosh::root::KEPT_HERE),
-            Standing::InterruptedMint { root_key } => {
-                eyre::bail!("{}", swoosh::standing::unfinished_line(root_key))
-            }
+            Standing::InterruptedMint { .. } => eyre::bail!(swoosh::standing::UNFINISHED_MINT),
         };
         // No `serve --admit` may run while this machine pins a root: asked under `home.lock` before any
         // write, and again under it for the writes, which a `serve --admit` records its root under.
@@ -198,7 +187,7 @@ impl JoinCmd {
         }
         let home_lock = HomeWrite::take(home).await?;
         refuse_if_admitting(&home_lock, home)?;
-        still(&home_lock, home, standing, &mut io.err).await?;
+        still(&home_lock, home, standing, switching).await?;
         swoosh::joining::join(
             &home_lock,
             home,
@@ -206,7 +195,9 @@ impl JoinCmd {
                 root,
                 standing: &invite.standing,
                 from: invite.from,
-                pin_changes: was != Some(root),
+                name: &invite.name,
+                // A stopped switch left the lists and `invited-by` of the root it was joining: written anew.
+                pin_changes: was != Some(root) || switching.is_some(),
             },
         )?;
         drop(home_lock);
@@ -255,8 +246,8 @@ impl JoinCmd {
         }
         let mut made = None;
         if io.input_terminal {
-            // Made on disk, as `status` makes it, so the key printed here outlives a paste that never
-            // comes: the invite typed for it on the root's machine still joins it next time.
+            // Made on disk, so the key printed here outlives a paste that never comes: the invite typed for
+            // it on the root's machine still joins it next time.
             let key = match swoosh::identity::inspect(home)? {
                 swoosh::identity::Inspected::Found(stored) => stored.node_id(),
                 swoosh::identity::Inspected::Made(stored) => {
@@ -300,19 +291,36 @@ fn refuse_if_admitting(home_lock: &HomeWrite, home: &Home) -> eyre::Result<()> {
     Ok(())
 }
 
+/// This machine's standing as `join` reads it, and the root a stopped switch was leaving. A join that
+/// stopped after its standing and before its pin is no standing yet, so running `join` again finishes it:
+/// a first join reads as no standing, and a switch as no standing beside the root its pin still names.
+/// Every other damaged home refuses with its line.
+async fn standing(home: &Home) -> eyre::Result<(Standing, Option<NodeId>)> {
+    match Standing::read(home).await {
+        Ok(standing) => Ok((standing, None)),
+        Err(StandingError::Damaged(Disagreement::StandingWithoutPin { .. })) => {
+            Ok((Standing::Unpinned, None))
+        }
+        Err(StandingError::Damaged(Disagreement::StandingFromAnotherRoot { pin, .. })) => {
+            Ok((Standing::Unpinned, Some(pin)))
+        }
+        Err(StandingError::Damaged(what)) => {
+            eyre::bail!("{}", swoosh::standing::damaged_line(&what))
+        }
+        Err(other) => Err(other.into()),
+    }
+}
+
 /// Refuse, under `home.lock`, when this machine's standing is no longer `was`, the one checked before the
 /// key write and any prompt: another `join`, a `leave` or a mint ran meanwhile.
 async fn still(
     _home_lock: &HomeWrite,
     home: &Home,
     was: Standing,
-    err: &mut impl Write,
+    switching: Option<NodeId>,
 ) -> eyre::Result<()> {
-    let read = Standing::read(home).await?;
-    for line in &read.finished {
-        writeln!(err, "{line}")?;
-    }
-    if !read.standing.same(&was) {
+    let (now, now_switching) = standing(home).await?;
+    if !now.same(&was) || now_switching != switching {
         eyre::bail!("{}", swoosh::standing::CHANGED);
     }
     Ok(())

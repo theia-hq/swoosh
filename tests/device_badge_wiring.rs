@@ -75,9 +75,9 @@ fn keyed_invite(root: u8, seed: [u8; 32], name: &str) -> String {
     .to_string()
 }
 
-/// Make the key of the machine at `dir`, and print it, as `swoosh status --key` does.
+/// Make the key of the machine at `dir`, and print it, as `swoosh leave --new-key` does on a home with none.
 fn device_key(dir: &Path) -> NodeId {
-    let identity = swoosh(&["status", "--key", "--home", path_str(dir)]);
+    let identity = swoosh(&["leave", "--new-key", "--home", path_str(dir)]);
     assert!(identity.status.success(), "{}", stderr(&identity));
     String::from_utf8(identity.stdout)
         .unwrap()
@@ -85,7 +85,7 @@ fn device_key(dir: &Path) -> NodeId {
         .next()
         .unwrap()
         .parse()
-        .expect("status --key prints the key alone")
+        .expect("leave --new-key prints the new key alone")
 }
 
 /// The key-carrying shape: the invite hands over a key; the device joins with it as its own; the stored

@@ -179,7 +179,7 @@ impl RevokeCmd {
             }
             Target::Key(key) => {
                 self.no_root()?;
-                let short = format!("{}…", key.short());
+                let short = swoosh::credential::short(&key);
                 key_links(home, &[key], &short, err).await?;
                 Ok(None)
             }
@@ -220,12 +220,12 @@ impl RevokeCmd {
         let pin = pin(home).await;
         if pin.is_none_or(|pin| pin != issuer) {
             eyre::bail!(
-                "this link was issued by {}…, not by this machine or your root. Revoke it where it was issued.",
+                "this link was issued by {}, not by this machine or your root. Revoke it where it was issued.",
                 short(&issuer)
             );
         }
         let id = link.cap().root_revocation_id();
-        let source = self.source(home, &mut io::sink()).await?;
+        let source = self.source(home).await?;
         let row = source
             .rows
             .iter()
@@ -284,7 +284,7 @@ impl RevokeCmd {
         found: Option<Device>,
         err: &mut impl Write,
     ) -> eyre::Result<Option<Publish>> {
-        let source = self.source(home, err).await?;
+        let source = self.source(home).await?;
         let row = match found {
             Some(row) => row,
             None => source
@@ -350,18 +350,15 @@ impl RevokeCmd {
     /// Where a device's ids come from, and where the root that publishes its revoke is, if anywhere: your
     /// root's records where the root is kept here or given with `--root`, else the update this device
     /// holds. Read with no lock and no prompt.
-    async fn source(&self, home: &Home, err: &mut impl Write) -> eyre::Result<Source> {
-        let read = match Standing::read(home).await {
-            Ok(read) => read,
+    async fn source(&self, home: &Home) -> eyre::Result<Source> {
+        let standing = match Standing::read(home).await {
+            Ok(standing) => standing,
             Err(StandingError::Damaged(what)) => {
                 eyre::bail!("{}", swoosh::standing::damaged_line(&what))
             }
             Err(other) => return Err(other.into()),
         };
-        for line in &read.finished {
-            writeln!(err, "{line}")?;
-        }
-        let place = match (&self.root, &read.standing) {
+        let place = match (&self.root, &standing) {
             (Some(_), Standing::Unpinned) => return Err(RootError::NotADevice.into()),
             (Some(dir), _) => Some(RootPlace::Dir(dir.clone())),
             // A machine that trusts no root has no devices to name.
@@ -377,7 +374,7 @@ impl RevokeCmd {
             revoked: Vec::new(),
             revoked_keys: Vec::new(),
         };
-        match (&source.place, &read.standing) {
+        match (&source.place, &standing) {
             (Some(place), _) => {
                 let inspected = Root::inspect(home, place.clone()).await?;
                 let device = |row: &swoosh::roster::Member, revoked| Device {
@@ -563,7 +560,7 @@ async fn key_links(
 /// never revoked by its bare key, and no line prints a runnable root revoke. This machine's own key names
 /// no device to revoke, since `revoke me/<own>` refuses.
 async fn also(home: &Home, key: NodeId) -> eyre::Result<Vec<String>> {
-    let short = format!("{}…", key.short());
+    let short = swoosh::credential::short(&key);
     let verify = key.verify_key()?;
     let mut lines = Vec::new();
     let pin = pin(home).await;
@@ -646,7 +643,7 @@ fn own_key(home: &Home) -> eyre::Result<Option<VerifyKey>> {
 
 /// The root this machine trusts, when it trusts one.
 async fn pin(home: &Home) -> Option<VerifyKey> {
-    match Standing::read(home).await.ok()?.standing {
+    match Standing::read(home).await.ok()? {
         Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => {
             swoosh::standing::pin_key(home, pin).ok()
         }

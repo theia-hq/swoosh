@@ -152,7 +152,7 @@ pub async fn load(home: &Home) -> eyre::Result<Option<Secret>> {
 
 /// What the home's key file is, WITHOUT unlocking it, minting a plain key first when the home has none.
 ///
-/// This is the offline look `swoosh status` prints: which node the file is for and how it is protected.
+/// `join` and `invite` read the key this way before they use it: which node it is and how it is protected.
 /// For a sealed file the node is what its header claims (see [`keystore::Locked::node_id`]); nothing here
 /// asks for a passphrase, so reading a key never blocks on a prompt.
 pub fn inspect(home: &Home) -> eyre::Result<Inspected> {
@@ -168,7 +168,7 @@ pub fn inspect(home: &Home) -> eyre::Result<Inspected> {
 pub enum Inspected {
     /// The key was already in the home.
     Found(Stored),
-    /// The home had no key, and this read made one, plain: the one write `status` makes.
+    /// The home had no key, and this read made one, plain.
     Made(Stored),
 }
 

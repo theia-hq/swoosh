@@ -117,22 +117,17 @@ pub(crate) fn missed(label: Option<&DeviceLabel>) -> String {
 
 /// Refuse on every standing but a device's, with `status`'s line for it.
 pub(crate) async fn refuse_unless_device(home: &Home) -> eyre::Result<()> {
-    let read = match Standing::read(home).await {
-        Ok(read) => read,
+    let standing = match Standing::read(home).await {
+        Ok(standing) => standing,
         Err(StandingError::Damaged(what)) => {
             eyre::bail!("{}", swoosh::standing::damaged_line(&what))
         }
         Err(other) => return Err(other.into()),
     };
-    for line in &read.finished {
-        eprintln!("{line}");
-    }
-    match read.standing {
+    match standing {
         Standing::Device { .. } | Standing::HoldsRoot { .. } => Ok(()),
         Standing::Unpinned => eyre::bail!(NOT_A_DEVICE),
-        Standing::InterruptedMint { root_key } => {
-            eyre::bail!("{}", swoosh::standing::unfinished_line(root_key))
-        }
+        Standing::InterruptedMint { .. } => eyre::bail!(swoosh::standing::UNFINISHED_MINT),
     }
 }
 

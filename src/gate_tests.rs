@@ -469,8 +469,7 @@ async fn a_damaged_server_serves_a_link_it_signed() {
     assert_eq!(
         crate::standing::Standing::read(&scratch.home)
             .await
-            .expect("a readable home")
-            .standing,
+            .expect("a readable home"),
         crate::standing::Standing::Unpinned
     );
 }

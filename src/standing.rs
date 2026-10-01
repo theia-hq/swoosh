@@ -5,9 +5,10 @@
 //! verbs can read one home two ways. The read never prompts: it looks only at public files and at the
 //! header of a root key, never inside a sealed one.
 //!
-//! A root kept here is `root.key`, read by its header alone. One this machine has revoked is no root: it
-//! reads as absent. A pin to a revoked root is removed by the read, after the standing under it, and the
-//! read says so through [`Read::finished`].
+//! A root kept here is `root.key`, read by its header alone. The read writes nothing: a file rooted at a key
+//! this machine has revoked reads as absent, so a revoked `root.key` is no root and a revoked pin, with the
+//! standing it signed, is no pin. Each crash state is finished by running again the verb that left it: a
+//! mint by `invite`, a first join or a switch by `join`, a leave by `leave`.
 //!
 //! **Any other disagreement is refused** as [`StandingError::Damaged`], naming what disagrees. Among them
 //! is a home made before a root had its own key: its badge was signed by this machine's own key, with no
@@ -53,43 +54,6 @@ pub enum Standing {
     },
 }
 
-/// What [`Standing::read`] found, and each crash state it finished on the way. A verb prints every
-/// [`Finished`] line on stderr before it goes on.
-#[derive(Debug)]
-#[must_use = "a finished crash state must be reported, and the standing matched on"]
-pub struct Read {
-    /// The standing this home reads as, once finished.
-    pub standing: Standing,
-    /// The crash states the read finished, in the order it finished them.
-    pub finished: Vec<Finished>,
-}
-
-/// A crash state the read finished. Its [`Display`](fmt::Display) is the line a verb prints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Finished {
-    /// This machine trusted `root`, which is revoked here. The read removed this machine's device
-    /// standing, the update files and the pin, the pin last.
-    Retired {
-        /// The retired root, when its key file or the pin still named it.
-        root: Option<NodeId>,
-    },
-}
-
-impl fmt::Display for Finished {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Retired { root: Some(root) } => write!(
-                formatter,
-                "finished retiring root {}… on this machine.",
-                root.short()
-            ),
-            Self::Retired { root: None } => {
-                formatter.write_str("finished retiring a root on this machine.")
-            }
-        }
-    }
-}
-
 /// Why a standing could not be read.
 #[derive(thiserror::Error, Debug)]
 pub enum StandingError {
@@ -108,16 +72,6 @@ pub enum StandingError {
     #[error("could not read {}", EscapedPath(path))]
     Read {
         /// The file.
-        path: PathBuf,
-        /// Why.
-        #[source]
-        source: io::Error,
-    },
-    /// A crash state could not be finished. What was removed before the failure stays removed, and the
-    /// next read goes on from there.
-    #[error("could not finish an interrupted change at {}", EscapedPath(path))]
-    Finish {
-        /// The path that could not be removed.
         path: PathBuf,
         /// Why.
         #[source]
@@ -156,7 +110,8 @@ pub enum Disagreement {
         /// The root that signed the standing.
         standing_root: NodeId,
     },
-    /// The device standing was signed by a root other than the one pinned.
+    /// The device standing was signed by a root other than the one pinned: a `join --switch` writes the
+    /// standing before the pin, so only a switch that stopped between them leaves one.
     StandingFromAnotherRoot {
         /// The root that signed the standing.
         standing_root: NodeId,
@@ -191,76 +146,93 @@ impl fmt::Display for Disagreement {
         match self {
             Self::OwnKeyPinned { key } => write!(
                 formatter,
-                "this machine trusts its own key {}… as a root",
-                key.short()
+                "this machine trusts its own key {} as a root",
+                crate::credential::short(key)
             ),
             Self::RootNotPinned { root, pin } => write!(
                 formatter,
-                "this machine holds root {}…, and trusts {}…",
-                root.short(),
-                pin.short()
+                "this machine keeps {}, and trusts {}",
+                root_short(root),
+                root_short(pin)
             ),
             Self::RootWithoutStanding { root } => write!(
                 formatter,
-                "this machine holds root {}… and has no device record from it",
-                root.short()
+                "this machine keeps {} and has no device record from it",
+                root_short(root)
             ),
             Self::PinWithoutStanding { pin } => write!(
                 formatter,
-                "this machine trusts root {}… and has no device record from it",
-                pin.short()
+                "this machine trusts {} and has no device record from it",
+                root_short(pin)
             ),
             Self::StandingWithoutPin { standing_root } => write!(
                 formatter,
-                "this machine's device record is from root {}…, and this machine trusts no root",
-                standing_root.short()
+                "this machine's device record is from {}, and this machine trusts no root",
+                root_short(standing_root)
             ),
             Self::StandingFromAnotherRoot { standing_root, pin } => write!(
                 formatter,
-                "this machine's device record is from root {}…, and this machine trusts {}…",
-                standing_root.short(),
-                pin.short()
+                "this machine's device record is from {}, and this machine trusts {}",
+                root_short(standing_root),
+                root_short(pin)
             ),
             Self::UnreadablePin { path } => {
-                write!(formatter, "{} is not one root key", EscapedPath(path))
+                write!(formatter, "{} is not one root key", file_name(path))
             }
             Self::UnreadableStanding { path } => write!(
                 formatter,
                 "{} is not a device record with an end date",
-                EscapedPath(path)
+                file_name(path)
             ),
             Self::StandingForAnotherKey { path } => write!(
                 formatter,
                 "{} is a device record for a key other than this machine's",
-                EscapedPath(path)
+                file_name(path)
             ),
             Self::UnreadableRoot { path } => {
-                write!(
-                    formatter,
-                    "{} is not a readable root key",
-                    EscapedPath(path)
-                )
+                write!(formatter, "{} is not a readable root key", file_name(path))
             }
         }
     }
 }
 
-/// The line for a root made here whose making did not finish: `status`'s, and the refusal of every verb
-/// that needs the root finished first.
-pub fn unfinished_line(root: NodeId) -> String {
-    format!(
-        "root: root:{}… made here, not finished: the next swoosh invite finishes it.",
-        root.short()
-    )
+/// A root key in prose: `root:` and the short key.
+fn root_short(key: &NodeId) -> String {
+    format!("root:{}", crate::credential::short(key))
 }
 
+/// A home file by its name alone: `status` prints the home on `home:`, and no other line names a path in it.
+fn file_name(path: &Path) -> EscapedPath<'_> {
+    EscapedPath(Path::new(path.file_name().unwrap_or(path.as_os_str())))
+}
+
+/// The line for a root made on this machine whose making did not finish: `status`'s, and the refusal of
+/// every verb that needs the root finished first. The next `invite` finishes it.
+pub const UNFINISHED_MINT: &str =
+    "making your root did not finish; to finish it: swoosh invite <name> <key>";
+
+/// The line for a join that stopped after its standing and before its pin: a first join, or a switch to
+/// another root. Running `join` again finishes it.
+pub const UNFINISHED_JOIN: &str = "joining did not finish; to finish it: swoosh join";
+
+/// The line for a leave that stopped after its standing went and before its pin did. Running `leave` again
+/// finishes it.
+pub const UNFINISHED_LEAVE: &str = "leaving did not finish; to finish it: swoosh leave";
+
 /// The line for a home whose records disagree: `status`'s, and the refusal of every verb that needs to
-/// know which root this machine trusts.
+/// know which root this machine trusts. The shapes a stopped `join` (a first join or a switch) or a stopped
+/// `leave` leaves name the verb that finishes them; every other names `leave`, which starts over.
 pub fn damaged_line(what: &Disagreement) -> String {
-    format!(
-        "root: this machine's records disagree ({what}): swoosh cannot tell which root it trusts. Run swoosh \
-        leave to start over; a root kept here stays."
-    )
+    match what {
+        Disagreement::StandingWithoutPin { .. } | Disagreement::StandingFromAnotherRoot { .. } => {
+            UNFINISHED_JOIN.to_owned()
+        }
+        Disagreement::PinWithoutStanding { .. } => UNFINISHED_LEAVE.to_owned(),
+        what => format!(
+            "this machine's records disagree ({what}): swoosh cannot tell which root it trusts. A root \
+             kept on this machine stays. To start over: swoosh leave"
+        ),
+    }
 }
 
 /// The line a command prints when this machine's standing moved between its check and its write: a `join`,
@@ -283,39 +255,52 @@ impl Standing {
         }
     }
 
-    /// Read this home's standing. Never prompts. A pin whose key is revoked here is removed first, after
-    /// the device standing and the update files.
-    pub async fn read(home: &Home) -> Result<Read, StandingError> {
+    /// Read this home's standing. Never prompts and never writes: a pin whose key is revoked here reads
+    /// as no pin, and a standing that key signed as no standing.
+    pub async fn read(home: &Home) -> Result<Self, StandingError> {
         let own = own_key(home)?;
         let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
-        let mut finished = Vec::new();
-
-        let mut pin = read_pin(home).await?;
-        if let Some(key) = pin {
-            if own == Some(key) {
+        let pin = match read_pin(home).await? {
+            Some(key) if own == Some(key) => {
                 return Err(StandingError::Damaged(Disagreement::OwnKeyPinned { key }));
             }
-            if is_revoked(&revoked, key) {
-                strip(home).await?;
-                finished.push(Finished::Retired { root: Some(key) });
-                pin = None;
-            }
-        }
+            Some(key) if is_revoked(&revoked, key) => None,
+            pin => pin,
+        };
+        classify(home, own, pin, held_root(home, &revoked).await?, &revoked).await
+    }
 
-        let standing = classify(home, own, pin, held_root(home, &revoked).await?).await?;
-        Ok(Read { standing, finished })
+    /// The root kept on this machine that this machine has revoked: its `root.key` stays until a `revoke`
+    /// of that root deletes it, and every read takes it for no root. `None` when no root is kept here, the
+    /// one kept here is live, or its key file has no header to read: [`read`](Self::read) reports that home
+    /// as damaged. Never prompts and never writes.
+    ///
+    /// # Errors
+    ///
+    /// The revocations could not be read, or whether a key file is there could not be told.
+    pub async fn revoked_root(home: &Home) -> Result<Option<NodeId>, StandingError> {
+        let path = home.root_key();
+        if !exists(&path).await? {
+            return Ok(None);
+        }
+        let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
+        Ok(root_key(path)
+            .ok()
+            .filter(|root| is_revoked(&revoked, *root)))
     }
 }
 
-/// Classify a home whose crash states are finished, from its pin and the root held here.
+/// Classify a home from its pin and the root held here, each already read as absent when revoked.
 ///
 /// A root with no pin is an interrupted mint whatever the badge holds, so the badge is read only where
-/// it decides something: a torn badge beside an interrupted mint is the mint's to replace.
+/// it decides something: a torn badge beside an interrupted mint is the mint's to replace. With no pin and
+/// no root, a badge a revoked root signed is what that root's pin left, and reads as absent with it.
 async fn classify(
     home: &Home,
     own: Option<NodeId>,
     pin: Option<NodeId>,
     root: Option<NodeId>,
+    revoked: &Denylist,
 ) -> Result<Standing, StandingError> {
     let damaged = |disagreement| Err(StandingError::Damaged(disagreement));
     match (root, pin) {
@@ -323,13 +308,20 @@ async fn classify(
         (Some(root), Some(pin)) if root != pin => {
             damaged(Disagreement::RootNotPinned { root, pin })
         }
-        (Some(root), Some(pin)) => match read_badge(home, own, pin).await? {
-            None => damaged(Disagreement::RootWithoutStanding { root }),
-            Some(until) => Ok(Standing::HoldsRoot { pin, until }),
+        // A standing from another root beside a root kept here is no stopped switch: `join` never runs
+        // where a root is kept.
+        (Some(root), Some(pin)) => match read_badge(home, own, pin).await {
+            Ok(None)
+            | Err(StandingError::Damaged(Disagreement::StandingFromAnotherRoot { .. })) => {
+                damaged(Disagreement::RootWithoutStanding { root })
+            }
+            Ok(Some(until)) => Ok(Standing::HoldsRoot { pin, until }),
+            Err(other) => Err(other),
         },
         (None, None) => match load_badge(home).await? {
             None => Ok(Standing::Unpinned),
             Some(badge) => match badge.root().node_id() {
+                Ok(standing_root) if is_revoked(revoked, standing_root) => Ok(Standing::Unpinned),
                 Ok(standing_root) => damaged(Disagreement::StandingWithoutPin { standing_root }),
                 Err(_) => Err(unreadable_badge(home)),
             },
@@ -382,25 +374,6 @@ fn root_key(path: PathBuf) -> Result<NodeId, Disagreement> {
         Ok(Some(stored)) => Ok(stored.node_id()),
         Ok(None) | Err(_) => Err(Disagreement::UnreadableRoot { path }),
     }
-}
-
-/// Remove this machine's standing under its root: the device standing, the update files, then the pin.
-///
-/// The pin goes last. It is what makes the rest mean anything, so a crash part way leaves a pin with
-/// less beneath it, which the next read finishes, never a device standing with no pin, which reads as
-/// damaged.
-pub(crate) async fn strip(home: &Home) -> Result<(), StandingError> {
-    for path in [
-        home.key_cert(),
-        home.devices(),
-        home.synced(),
-        home.invited_by(),
-        home.devices_conflict(),
-        home.root_pub(),
-    ] {
-        remove_file(path).await?;
-    }
-    Ok(())
 }
 
 /// The pin, or `None` when there is none. A file that is not exactly one key is damaged.
@@ -499,19 +472,6 @@ async fn exists(path: &Path) -> Result<bool, StandingError> {
             path: path.to_owned(),
             source,
         })
-}
-
-/// Remove a file. Already gone is done: a command racing this one may have removed it first.
-// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
-#[allow(clippy::std_instead_of_core)]
-async fn remove_file(path: PathBuf) -> Result<(), StandingError> {
-    match tokio::fs::remove_file(&path).await {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(StandingError::Finish {
-            path,
-            source: error,
-        }),
-        _ => Ok(()),
-    }
 }
 
 #[cfg(test)]

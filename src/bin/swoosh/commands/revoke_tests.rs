@@ -210,7 +210,7 @@ fn typed(link: &Link) -> String {
 }
 
 fn short(seed: u8) -> String {
-    format!("{}…", swoosh::credential::short(&key(seed)))
+    swoosh::credential::short(&key(seed))
 }
 
 fn dir(tag: &str) -> std::path::PathBuf {
@@ -656,10 +656,7 @@ async fn revoke_a_bare_key_that_is_a_root_takes_back_only_links() {
     );
     assert!(
         matches!(
-            swoosh::standing::Standing::read(&home)
-                .await
-                .unwrap()
-                .standing,
+            swoosh::standing::Standing::read(&home).await.unwrap(),
             swoosh::standing::Standing::HoldsRoot { .. }
         ),
         "this machine still holds your root"
@@ -1250,12 +1247,12 @@ async fn status_names_a_device_revoked_here() {
     let _ = revoke(&home, &["me/laptop"]).await.ok().to_owned();
 
     let stored = swoosh::identity::inspect(&home).unwrap().into_stored();
-    let out = super::super::status::report::Report::gather(&home, &stored, now())
+    let out = super::super::status::report::Report::gather(&home, Some(&stored), now())
         .await
         .unwrap()
         .render();
-    // A row's short key: `ed01` and 8 more characters.
-    let short: String = key(LAPTOP).to_string().chars().take(12).collect();
+    // A row's short key: `ed01`, 8 more characters and `…`.
+    let short = swoosh::credential::short(&key(LAPTOP));
     let rows: Vec<&str> = out.lines().filter(|line| line.contains(&short)).collect();
     let [laptop] = rows.as_slice() else {
         panic!("one row names the laptop's key: {out}");

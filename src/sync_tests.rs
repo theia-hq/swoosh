@@ -1015,3 +1015,54 @@ async fn a_damaged_revoked_stops_sync_from_dialing() {
         "{error:#}"
     );
 }
+
+/// Every file in `home`, by name, with its length and modification time.
+fn listing(home: &Home) -> Vec<(String, u64, SystemTime)> {
+    let mut files: Vec<_> = std::fs::read_dir(home.dir())
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let meta = entry.metadata().unwrap();
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                meta.len(),
+                meta.modified().unwrap(),
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+/// An offer to a machine whose root it has revoked takes nothing there, and the read under it renames and
+/// deletes nothing: the pin, the standing and the list the revoked root left all stay as they were. Only
+/// running a verb again changes them.
+#[tokio::test]
+async fn a_fold_on_network_input_writes_only_what_it_takes() {
+    let desk = device("offer-revoked", DESK).await;
+    let nas = device("offer-revoked", NAS).await;
+    holding(&nas, &update(1, vec![], vec![])).await;
+    holding(&desk, &update(2, vec![], vec![key(STOLEN)])).await;
+    std::fs::write(nas.invited_by(), format!("{}\n", node(DESK))).unwrap();
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &nas,
+        [nauthy::Revocation::Key(root().verify_key())],
+    )
+    .unwrap();
+    let before = listing(&nas);
+
+    let (near, far) = tokio::io::duplex(64 * 1024);
+    let (near_read, near_write) = tokio::io::split(near);
+    let (far_read, far_write) = tokio::io::split(far);
+    let (_dialed, answered) = tokio::join!(
+        exchange(&desk, near_read, near_write),
+        answer(&nas, far_read, far_write)
+    );
+    answered.unwrap();
+    assert_eq!(
+        listing(&nas),
+        before,
+        "the answer renamed or deleted nothing"
+    );
+}

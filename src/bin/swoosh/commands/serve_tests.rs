@@ -1969,8 +1969,9 @@ fn serving_is_written_only_after_bind() {
     }
 }
 
-/// `swoosh status` under `scratch`, its `serving:` line.
-fn status_serving(scratch: &ProcessScratch) -> String {
+/// `swoosh status` under `scratch`, its `serving:` line, or `None` when it prints none: a machine that is no
+/// device with no `serve` running has nothing served to say.
+fn status_serving(scratch: &ProcessScratch) -> Option<String> {
     let mut command = Command::new(swoosh_binary());
     command
         .arg("--home")
@@ -1989,8 +1990,7 @@ fn status_serving(scratch: &ProcessScratch) -> String {
     stdout
         .lines()
         .find(|line| line.starts_with("serving:"))
-        .unwrap_or_else(|| panic!("status prints a serving line: {stdout}"))
-        .to_owned()
+        .map(str::to_owned)
 }
 
 /// A `serve` that refuses after it claimed the home leaves no control socket behind, so `status` says
@@ -2009,8 +2009,8 @@ fn a_refused_serve_leaves_status_serving_nothing() {
         assert!(!socket.exists(), "serve {args:?} leaves no socket");
         assert_eq!(
             status_serving(&scratch),
-            "serving: nothing (swoosh serve is not running)",
-            "after serve {args:?}"
+            None,
+            "after serve {args:?}, nothing runs"
         );
     }
 }
@@ -2043,10 +2043,7 @@ fn a_terminated_serve_removes_its_socket() {
         !running.socket.exists(),
         "a terminated serve removes its socket"
     );
-    assert_eq!(
-        status_serving(&scratch),
-        "serving: nothing (swoosh serve is not running)"
-    );
+    assert_eq!(status_serving(&scratch), None, "nothing runs");
 }
 
 /// A `serve` killed outright leaves its socket file with nothing listening on it: `status` reads that as
@@ -2061,10 +2058,7 @@ fn a_killed_serve_leaves_status_serving_nothing() {
         running.socket.exists(),
         "a killed serve cannot remove its socket"
     );
-    assert_eq!(
-        status_serving(&scratch),
-        "serving: nothing (swoosh serve is not running)"
-    );
+    assert_eq!(status_serving(&scratch), None, "nothing runs");
 }
 
 /// A service named at start is served even if it was turned off before, and a bare `serve` says which of
@@ -2199,13 +2193,13 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
     identity
         .arg("--home")
         .arg(&scratch.home_dir)
-        .args(["status", "--key"])
+        .args(["leave", "--new-key"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME");
     let output = run_binary_with_deadline(&mut identity, Duration::from_secs(30));
     assert!(
         output.status.success(),
-        "status --key exits 0: {}\n{}",
+        "leave --new-key exits 0: {}\n{}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );

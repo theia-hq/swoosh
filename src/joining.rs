@@ -3,7 +3,7 @@
 //!
 //! The pin is written last on a join and removed last on a leave. It is what makes the other files mean
 //! anything, so a crash part way leaves a home [`Standing::read`](crate::standing::Standing::read) reads as
-//! damaged, naming `swoosh leave`, never one that trusts a root with a standing from another.
+//! an act that did not finish, naming the verb that finishes it, never as a standing.
 
 use std::io;
 use std::path::PathBuf;
@@ -13,10 +13,12 @@ use bifrost::NodeId;
 use nauthy::{Link, Revocations as _};
 use tightbeam::identity::AsVerifyKey as _;
 
+use crate::contacts::DeviceLabel;
 use crate::home::{Home, HomeWrite};
 use crate::standing::Standing;
 
-/// What a join writes: this machine's standing from the root, and the machine that made the invite.
+/// What a join writes: this machine's standing from the root, and the machine that made the invite with
+/// the name it gave this one.
 #[derive(Debug)]
 pub struct Join<'a> {
     /// The root the standing is from: the pin.
@@ -25,6 +27,8 @@ pub struct Join<'a> {
     pub standing: &'a Link,
     /// The machine that made the invite: the first device a sync asks.
     pub from: NodeId,
+    /// The name the invite gives this machine: what it is called until a list of your devices lands.
+    pub name: &'a DeviceLabel,
     /// Whether the pin changes: a first join, or a switch to another root.
     pub pin_changes: bool,
 }
@@ -44,7 +48,7 @@ pub fn join(home_lock: &HomeWrite, home: &Home, join: Join<'_>) -> io::Result<()
         crate::config::write_private_atomic(
             home_lock,
             &home.invited_by(),
-            format!("{}\n", join.from).as_bytes(),
+            format!("{}\n{}\n", join.from, join.name).as_bytes(),
         )?;
     }
     same_root_write(home_lock, home, join.standing)?;
@@ -52,6 +56,27 @@ pub fn join(home_lock: &HomeWrite, home: &Home, join: Join<'_>) -> io::Result<()
         crate::config::write_signet(home_lock, home, join.root)?;
     }
     Ok(())
+}
+
+/// What `invited-by` holds: the machine whose invite this machine joined, and the name that invite gave
+/// this machine. Both are the invite's unsigned hints; a list of your devices replaces them once it lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvitedBy {
+    /// The machine that made the invite.
+    pub from: NodeId,
+    /// The name the invite gave this machine, when the file holds a usable one.
+    pub name: Option<DeviceLabel>,
+}
+
+impl InvitedBy {
+    /// Read `invited-by`. `None` when it is absent, or its first line is not a key.
+    pub fn read(home: &Home) -> Option<Self> {
+        let text = std::fs::read_to_string(home.invited_by()).ok()?;
+        let mut lines = text.lines();
+        let from = lines.next()?.trim().parse::<NodeId>().ok()?;
+        let name = lines.next().and_then(|name| name.trim().parse().ok());
+        Some(Self { from, name })
+    }
 }
 
 /// Take a renewed standing that one of your devices handed this machine, under `home.lock`, through the
@@ -65,7 +90,7 @@ pub async fn take_renewal(
     home: &Home,
     standing: &Link,
 ) -> eyre::Result<Option<SystemTime>> {
-    let (pin, held) = match Standing::read(home).await?.standing {
+    let (pin, held) = match Standing::read(home).await? {
         Standing::Device { pin, until } | Standing::HoldsRoot { pin, until } => (pin, until),
         Standing::Unpinned | Standing::InterruptedMint { .. } => return Ok(None),
     };
@@ -100,19 +125,18 @@ fn same_root_write(home_lock: &HomeWrite, home: &Home, standing: &Link) -> io::R
 
 /// Leave the root this machine trusts, under `home.lock`: the standing and the lists go, and with them
 /// the devices under `me`, then the pin, last. The revocations this machine learned stay, and so does a
-/// root kept here.
+/// root kept here: while `root.key` is on this machine, `devices` and `devices.conflict` are its list and
+/// what its next number is read from, so they stay with it.
 ///
 /// # Errors
 ///
-/// A file could not be removed.
+/// A file could not be removed, or whether a root is kept here could not be told.
 pub fn leave(_home_lock: &HomeWrite, home: &Home) -> io::Result<()> {
-    for path in [
-        home.key_cert(),
-        home.devices(),
-        home.synced(),
-        home.invited_by(),
-        home.devices_conflict(),
-    ] {
+    let mut gone = vec![home.key_cert(), home.synced(), home.invited_by()];
+    if !home.root_key().try_exists()? {
+        gone.extend([home.devices(), home.devices_conflict()]);
+    }
+    for path in gone {
         remove(path)?;
     }
     remove(home.root_pub())?;

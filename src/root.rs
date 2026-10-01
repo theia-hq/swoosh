@@ -42,7 +42,7 @@ use crate::reach_report::{Missed, Reach, Why};
 use crate::roster::{
     ArtifactError, Epoch, FoldError, Folded, MAX_ROSTER_BLOB, Member, RosterDoc, read_held,
 };
-use crate::standing::{Finished, Standing, StandingError};
+use crate::standing::{Standing, StandingError};
 use crate::sync::{Answer, Device, Dial, EACH, Until};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
@@ -155,7 +155,7 @@ pub enum RootError {
     #[error("your root is not on this machine: run this where it is, or add --root <dir>.")]
     NotOnThisMachine,
     /// A root is here, and making it did not finish.
-    #[error("{}", crate::standing::unfinished_line(*.root))]
+    #[error("{}", crate::standing::UNFINISHED_MINT)]
     Unfinished {
         /// The root being made.
         root: NodeId,
@@ -184,7 +184,7 @@ pub enum RootError {
         found: u8,
     },
     /// The root is not the one this machine trusts.
-    #[error("this root is root:{}…, and this machine trusts root:{}…", .root.short(), .pin.short())]
+    #[error("this root is root:{}, and this machine trusts root:{}", crate::credential::short(.root), crate::credential::short(.pin))]
     Mismatch {
         /// The root presented.
         root: NodeId,
@@ -192,7 +192,7 @@ pub enum RootError {
         pin: NodeId,
     },
     /// The root was revoked on this machine.
-    #[error("root root:{}… was revoked on this machine; recovery is a new root", .root.short())]
+    #[error("root root:{} was revoked on this machine; recovery is a new root", crate::credential::short(.root))]
     Revoked {
         /// The revoked root.
         root: NodeId,
@@ -294,7 +294,7 @@ pub enum RootError {
     },
     /// A live device already has this name, under another key.
     #[error(
-        "me/{name} is {}…. To replace it: swoosh revoke me/{name}, then invite the new key.",
+        "me/{name} is {}. To replace it: swoosh revoke me/{name}, then invite the new key.",
         crate::credential::short(.key)
     )]
     NameTaken {
@@ -311,7 +311,7 @@ pub enum RootError {
     },
     /// The key is already a live device.
     #[error(
-        "{}… is already your device me/{name} (until {until}). To renew it: swoosh invite {name}. A \
+        "{} is already your device me/{name} (until {until}). To renew it: swoosh invite {name}. A \
         machine has one name.",
         crate::credential::short(.key)
     )]
@@ -325,7 +325,7 @@ pub enum RootError {
     },
     /// The key is revoked, and a revoked key is never admitted again.
     #[error(
-        "{}… was me/{name}'s key and is revoked; a revoked key is not re-admitted. Give that machine a new \
+        "{} was me/{name}'s key and is revoked; a revoked key is not re-admitted. Give that machine a new \
         key and invite that one. On that machine: swoosh leave --new-key",
         crate::credential::short(.key)
     )]
@@ -479,8 +479,6 @@ impl fmt::Debug for Root {
 pub struct Inspected {
     /// The root's key, from its key file's header.
     pub root: NodeId,
-    /// The crash states the standing read finished on the way, for the command to print.
-    pub finished: Vec<Finished>,
     /// The list beside the key, as signed.
     list: Book,
     /// The records as the next act that cuts would find them before its prompt, read-only: brought forward
@@ -704,7 +702,6 @@ impl Root {
     ) -> Result<(Self, T), RootError> {
         no_core_dumps()?;
         let found = find(home, &place, Some(verb)).await?;
-        report(out, &found.finished);
         if verb.writes_source()
             && let Some(dir) = &found.copy
         {
@@ -778,7 +775,6 @@ impl Root {
         let (forward, _) = list.read_forward(home, pin, unix_now())?;
         Ok(Inspected {
             root: found.header,
-            finished: found.finished,
             list,
             forward,
         })
@@ -807,18 +803,17 @@ impl Root {
         out: &mut impl Write,
     ) -> Result<Minted, RootError> {
         no_core_dumps()?;
-        let read = Standing::read(home).await?;
-        report(out, &read.finished);
+        let standing = Standing::read(home).await?;
         // A machine that pins a root admits no other root's devices, so no root is made or finished here
         // while a `serve --admit` runs: asked here, before any prompt, and again under `home.lock` before
         // the pin is written.
         if matches!(
-            read.standing,
+            standing,
             Standing::Unpinned | Standing::InterruptedMint { .. }
         ) {
             not_admitting(&HomeWrite::take(home).await?, home)?;
         }
-        match read.standing {
+        match standing {
             Standing::Unpinned => make(home, prompt, out)
                 .await
                 .map(|root| Minted::Made(Box::new(root))),
@@ -1335,13 +1330,7 @@ impl Act {
             .rows
             .iter()
             .filter(|row| self.due.contains(&row.node))
-            .map(|row| {
-                format!(
-                    "me/{} ({}…)",
-                    row.label,
-                    crate::credential::short(&row.node)
-                )
-            })
+            .map(|row| format!("me/{} ({})", row.label, crate::credential::short(&row.node)))
             .collect();
         if !names.is_empty() {
             let count = names.len();
@@ -1388,8 +1377,8 @@ impl Act {
         }
         let _ = writeln!(
             out,
-            "made your root root:{}…, kept on this machine, locked with a passphrase.",
-            self.key.short()
+            "made your root root:{}, kept on this machine, locked with a passphrase.",
+            crate::credential::short(&self.key)
         );
         let _ = writeln!(out, "{}", dates.join(" "));
         let _ = writeln!(
@@ -1403,21 +1392,18 @@ impl Act {
     }
 }
 
-/// What [`find`] found: where the root is, its key, its locked key file, and the crash states the standing
-/// read finished.
+/// What [`find`] found: where the root is, its key, and its locked key file.
 struct Found {
     /// The copy's directory; `None` for the root kept in this home.
     copy: Option<PathBuf>,
     header: NodeId,
     locked: keystore::Locked,
-    finished: Vec<Finished>,
 }
 
 /// Present steps 1 to 5, for `verb`, or for a read that cuts nothing when `verb` is `None`: whether this
 /// machine may present the root at `place`, and the root's key file read to its header.
 async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<Found, RootError> {
-    let read = Standing::read(home).await?;
-    let (copy, pin, device) = match (place, read.standing) {
+    let (copy, pin, device) = match (place, Standing::read(home).await?) {
         (RootPlace::Home, Standing::HoldsRoot { pin, .. }) => (None, Some(pin), true),
         (RootPlace::Home, Standing::InterruptedMint { root_key }) => {
             return Err(RootError::Unfinished { root: root_key });
@@ -1456,7 +1442,6 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
         copy,
         header,
         locked,
-        finished: read.finished,
     })
 }
 
@@ -1558,7 +1543,7 @@ async fn make(
         keystore::Secret::generate().map_err(|source| RootError::Write(Box::new(source)))?;
 
     let home_lock = HomeWrite::take(home).await?;
-    still(&home_lock, home, Standing::Unpinned, out).await?;
+    still(&home_lock, home, Standing::Unpinned).await?;
     not_admitting(&home_lock, home)?;
     // An unpinned home keeps no root but a revoked one, which is no root: the new one takes its place.
     remove_file(&key_file)?;
@@ -1605,13 +1590,7 @@ async fn finish(
             .is_ok()
     {
         let home_lock = HomeWrite::take(home).await?;
-        still(
-            &home_lock,
-            home,
-            Standing::InterruptedMint { root_key },
-            out,
-        )
-        .await?;
+        still(&home_lock, home, Standing::InterruptedMint { root_key }).await?;
         not_admitting(&home_lock, home)?;
         take_standing(&home_lock, home, root_key, &standing)?;
         return Ok(None);
@@ -1630,13 +1609,7 @@ async fn finish(
         act,
     };
     let home_lock = HomeWrite::take(home).await?;
-    still(
-        &home_lock,
-        home,
-        Standing::InterruptedMint { root_key },
-        out,
-    )
-    .await?;
+    still(&home_lock, home, Standing::InterruptedMint { root_key }).await?;
     not_admitting(&home_lock, home)?;
     root.take_own(&home_lock, own)?;
     Ok(Some(root))
@@ -1692,15 +1665,8 @@ impl Root {
 
 /// Refuse, under `home.lock`, when this home's standing is no longer `was`, the standing the mint or its
 /// finish checked before its prompt: a `join`, `leave` or another mint ran while it waited.
-async fn still(
-    _home_lock: &HomeWrite,
-    home: &Home,
-    was: Standing,
-    out: &mut impl Write,
-) -> Result<(), RootError> {
-    let read = Standing::read(home).await?;
-    report(out, &read.finished);
-    if read.standing.same(&was) {
+async fn still(_home_lock: &HomeWrite, home: &Home, was: Standing) -> Result<(), RootError> {
+    if Standing::read(home).await?.same(&was) {
         Ok(())
     } else {
         Err(RootError::StandingChanged)
@@ -1841,7 +1807,7 @@ impl Brought {
         }
         for (name, key) in &self.clashed {
             line.push_str(&format!(
-                " me/{name} ({}…) was also added on another copy of your root; it is revoked here. To keep \
+                " me/{name} ({}) was also added on another copy of your root; it is revoked here. To keep \
                 that machine: on it, swoosh leave --new-key, then invite the new key under another name.",
                 crate::credential::short(key)
             ));
@@ -2367,13 +2333,6 @@ fn own_duration(row: &Member) -> u64 {
     match row.duration {
         0 => DEFAULT_DURATION.as_secs(),
         own => own,
-    }
-}
-
-/// Print each crash state the standing read finished.
-fn report(out: &mut impl Write, finished: &[Finished]) {
-    for line in finished {
-        let _ = writeln!(out, "{line}");
     }
 }
 

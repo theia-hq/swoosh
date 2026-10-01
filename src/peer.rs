@@ -282,7 +282,7 @@ impl Peer {
         match self {
             Self::Named(reference) => Ok(contacts.resolve_candidates(reference)?),
             Self::Raw(node) => Ok(vec![Candidate {
-                label: node.short(),
+                label: crate::credential::short(node),
                 node: *node,
             }]),
             Self::Capability { link, .. } => Ok(vec![Candidate {
@@ -368,7 +368,7 @@ impl core::fmt::Display for Peer {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Named(reference) => reference.fmt(f),
-            Self::Raw(node) => f.write_str(&node.short()),
+            Self::Raw(node) => f.write_str(&crate::credential::short(node)),
             Self::Capability { link, .. } => f.write_str(&link.short()),
         }
     }

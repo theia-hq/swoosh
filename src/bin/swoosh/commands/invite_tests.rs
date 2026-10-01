@@ -272,7 +272,7 @@ fn sealed() -> Vec<u8> {
 }
 
 /// `ROOT`'s key, sealed, written at `path`.
-fn root_key_at(path: &Path) {
+pub(crate) fn root_key_at(path: &Path) {
     use std::os::unix::fs::OpenOptionsExt as _;
 
     std::fs::OpenOptions::new()
@@ -466,7 +466,7 @@ pub(crate) struct Ran {
     pub(crate) out: String,
     pub(crate) err: String,
     tape: Tape,
-    prompts: usize,
+    pub(crate) prompts: usize,
 }
 
 impl Ran {
@@ -516,7 +516,7 @@ async fn invite_at(home: &Home, args: &[&str], terminal: bool) -> Ran {
         cmd.issue(home, &mut prompt, &dial, &mut out, &mut err)
             .await
     } else {
-        cmd.due(home, &mut out, &mut err).await
+        cmd.due(home, &mut out).await
     };
     Ran {
         result,
@@ -570,7 +570,7 @@ async fn invite_live_label_other_key_refuses() {
     refused_before_writing(
         &ran,
         &format!(
-            "me/laptop is {}…. To replace it: swoosh revoke me/laptop, then invite the new key.",
+            "me/laptop is {}. To replace it: swoosh revoke me/laptop, then invite the new key.",
             swoosh::credential::short(&key(LAPTOP))
         ),
         &home,
@@ -1045,7 +1045,7 @@ async fn renewal_prints_its_list_before_the_prompt() {
     .await;
     let ran = add_tv(&home).await;
     let listed = format!(
-        "renewing 1 device: me/laptop ({}…)",
+        "renewing 1 device: me/laptop ({})",
         swoosh::credential::short(&key(LAPTOP))
     );
     assert!(ran.tape.at(&listed) < ran.tape.at("<prompt>"));
@@ -1401,7 +1401,7 @@ async fn a_bound_renewal_of_a_key_carrying_row_keeps_the_warning() {
     assert!(row.until > ci.until, "renewed");
     assert_eq!(row.invite_until, ci.invite_until, "its invite's end stays");
     let stored = swoosh::identity::inspect(&home).unwrap().into_stored();
-    let report = crate::commands::status::report::Report::gather(&home, &stored, now)
+    let report = crate::commands::status::report::Report::gather(&home, Some(&stored), now)
         .await
         .unwrap()
         .render();
@@ -1425,7 +1425,7 @@ async fn a_revoked_key_is_not_re_admitted() {
     refused_before_writing(
         &ran,
         &format!(
-            "{}… was me/old's key and is revoked; a revoked key is not re-admitted. Give that machine a \
+            "{} was me/old's key and is revoked; a revoked key is not re-admitted. Give that machine a \
              new key and invite that one. On that machine: swoosh leave --new-key",
             swoosh::credential::short(&key(OLD)),
         ),
@@ -1459,7 +1459,7 @@ async fn a_key_in_revoked_keys_is_not_re_admitted() {
     let refusal = ran.refusal();
     assert!(
         refusal.contains(&format!(
-            "{}… was me/laptop's key and is revoked; a revoked key is not re-admitted.",
+            "{} was me/laptop's key and is revoked; a revoked key is not re-admitted.",
             swoosh::credential::short(&key(LAPTOP)),
         )),
         "{refusal}"
@@ -1507,7 +1507,7 @@ async fn invite_for_a_key_under_another_name_is_refused() {
     refused_before_writing(
         &ran,
         &format!(
-            "{}… is already your device me/laptop (until {}). To renew it: swoosh invite laptop. A machine \
+            "{} is already your device me/laptop (until {}). To renew it: swoosh invite laptop. A machine \
              has one name.",
             swoosh::credential::short(&key(LAPTOP)),
             Date(laptop.until)
@@ -1675,11 +1675,7 @@ async fn join(home: &Home, invite: &str) -> eyre::Result<String> {
 
 /// When `home`'s device standing ends, in unix seconds, if it is a device.
 async fn device_until(home: &Home) -> Option<u64> {
-    match swoosh::standing::Standing::read(home)
-        .await
-        .unwrap()
-        .standing
-    {
+    match swoosh::standing::Standing::read(home).await.unwrap() {
         swoosh::standing::Standing::Device { until, .. } => Some(
             until
                 .duration_since(SystemTime::UNIX_EPOCH)
@@ -1993,38 +1989,4 @@ async fn seeded_survives_a_bring_forward() {
         "still came with its key"
     );
     assert_eq!(carried.until, ci.until, "and was not renewed");
-}
-
-#[tokio::test]
-async fn a_mint_killed_before_its_pin_is_finished_by_the_next_invite() {
-    let home = scratch("mint-killed");
-    // A mint that stopped after its list: `root.key`, and the root's first list carrying this machine's
-    // standing, with no standing taken here and no pin.
-    let own = live(OWN, "desk");
-    root_key_at(&home.root_key());
-    held(&home, &records(1, core::slice::from_ref(&own), Vec::new()));
-    assert!(!home.key_cert().exists() && !home.root_pub().exists());
-
-    let ran = invite(&home, &["tv", &node(TV).to_string()]).await;
-    let _ = ran.invite();
-    assert_eq!(
-        ran.prompts, 1,
-        "one prompt: the invite's, none for the finish"
-    );
-    let taken = config::load_badge(&home).await.unwrap().unwrap();
-    assert_eq!(
-        taken.as_str(),
-        own.standing.as_str(),
-        "the finish took this machine's standing from the list"
-    );
-    assert_eq!(
-        config::load_signet(&home).await.unwrap(),
-        Some(TestRoot::seeded(ROOT).node_id()),
-        "and pinned the root"
-    );
-    assert_eq!(
-        kept_list(&home).epoch(),
-        Epoch(2),
-        "the invite cut above the list"
-    );
 }
