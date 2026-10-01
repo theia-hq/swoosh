@@ -90,7 +90,7 @@ fn resumed_list_is_parsed_as_services_never_flags() {
         assert_eq!(
             error.to_string(),
             format!(
-                "the services in {} hold {line}, which is not a service, so serve will not start from them",
+                "{} lists {line} as a service, and it is not one, so serve will not start unless you name its services",
                 home.serve_toml().display()
             ),
             "the refusal says what it saw and names no command: which services to serve is the person's call"

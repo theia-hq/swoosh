@@ -24,7 +24,7 @@ pub enum ServingError {
     /// refused, never spliced into the command line. Which services to serve instead is the person's call,
     /// so the line names no command.
     #[error(
-        "the services in {} hold {}, which is not a service, so serve will not start from them",
+        "{} lists {} as a service, and it is not one, so serve will not start unless you name its services",
         EscapedPath(path),
         line.escape_debug()
     )]
@@ -39,7 +39,7 @@ pub enum ServingError {
     /// saved as a different path. It is refused, and nothing is saved.
     #[error(
         "{} cannot be saved in {}: it has a control character, a space at either end, or a path that is \
-         not UTF-8.",
+         not UTF-8",
         entry.escape_debug(),
         EscapedPath(path)
     )]

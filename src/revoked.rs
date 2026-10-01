@@ -51,7 +51,7 @@ pub enum RevokedError {
     /// admit them again. Whether to restore the file or accept the loss is the person's call, so the line
     /// names no command.
     #[error(
-        "{} holds {found} of the {expected} revocations it held, and swoosh will not read it with entries missing",
+        "{} has lost revocations: it holds {found} where it held {expected}, and swoosh will not read it with entries missing",
         EscapedPath(path)
     )]
     Lost {

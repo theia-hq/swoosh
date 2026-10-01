@@ -110,7 +110,7 @@ pub enum StandingError {
     #[error("could not read this machine's key")]
     OwnKey(#[source] keystore::Error),
     /// The roots revoked here could not be read. Fails closed: a revoked root is never read as live.
-    #[error("could not read the roots revoked on this machine")]
+    #[error("could not read the revocations on this machine")]
     Revoked(#[source] crate::revoked::RevokedError),
     /// A file the standing is read from could not be read.
     #[error("could not read {}", EscapedPath(path))]

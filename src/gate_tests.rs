@@ -383,7 +383,7 @@ async fn a_revoked_that_lost_entries_reads_as_damaged() {
     assert_eq!(
         error.to_string(),
         format!(
-            "{} holds 1 of the 3 revocations it held, and swoosh will not read it with entries missing",
+            "{} has lost revocations: it holds 1 where it held 3, and swoosh will not read it with entries missing",
             scratch.home.revoked().display()
         ),
         "the refusal names the file and no command: restoring it or accepting the loss is the person's call"
