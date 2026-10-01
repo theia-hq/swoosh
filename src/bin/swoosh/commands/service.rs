@@ -27,8 +27,8 @@ pub enum ServiceCmd {
     // value; inline, every `service enable`/`disable` would pay for them
     // (`clippy::large_enum_variant`). One run-once allocation on a path that parses a command line.
     Ls(Box<ls::ServiceLsCmd>),
-    /// Re-enable a disabled service (a file-write on `<home>/serve.toml`, honored live, no restart).
+    /// Re-enable a disabled service
     Enable(toggle::ServiceToggleCmd),
-    /// Disable a service (a file-write on `<home>/serve.toml`, persisted fail-closed, honored live).
+    /// Disable a service
     Disable(toggle::ServiceToggleCmd),
 }

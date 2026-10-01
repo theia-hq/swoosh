@@ -977,7 +977,8 @@ async fn a_revoke_never_leaves_live_a_device_its_own_sync_rekeyed() {
     .await;
     assert_eq!(
         ran.refusal(),
-        "your devices' list changed while this ran: run it again."
+        "me/laptop is now listed under a key this revoke did not see, so your root did not revoke it",
+        "the refusal names no command: running the revoke again would take the name's new key"
     );
     assert!(!ran.tape.text().contains("<offer>"), "nothing is offered");
     assert!(
@@ -992,6 +993,31 @@ async fn a_revoke_never_leaves_live_a_device_its_own_sync_rekeyed() {
             .iter()
             .any(|member| member.node == key(STRANGER)),
         "the device is listed under its new key, for the next revoke to name"
+    );
+}
+
+/// `revoke <this machine's own standing>`, on a machine whose root already revoked it: the link is blocked
+/// here, but this machine's own key never lands in `revoked`, so every link it signed still admits.
+#[tokio::test]
+async fn revoking_this_machines_own_standing_never_blocks_its_key() {
+    let own = revoked(OWN, "desk");
+    let home = scratch("revoke-own-standing");
+    holds(&home, &[own.clone(), live(LAPTOP, "laptop")], Vec::new()).await;
+    let given = gave(&home, node(STRANGER), GrantKind::Device).await;
+
+    let ran = revoke(&home, &[&typed(&own.standing)]).await;
+    assert_eq!(
+        ran.ok().trim_end(),
+        "revoked the link: blocked here. Your root revoked the device it stands for already."
+    );
+    assert!(blocks(&home, &own.standing).await, "the link is blocked");
+    assert!(
+        !blocks_key(&home, OWN).await,
+        "this machine's own key is never revoked here"
+    );
+    assert!(
+        !blocks(&home, &given).await,
+        "a link this machine signed still admits"
     );
 }
 

@@ -21,10 +21,12 @@ const PATH_SCHEMES: [&str; 4] = ["recv", "unix", "file", "fifo"];
 #[derive(Debug, thiserror::Error)]
 pub enum ServingError {
     /// An entry of the services `<home>/serve.toml` keeps is not a service form, a flag above all: it is
-    /// refused, never spliced into the command line.
+    /// refused, never spliced into the command line. Which services to serve instead is the person's call,
+    /// so the line names no command.
     #[error(
-        "{} has a line that is not a service: {line}. Name the services: swoosh serve ssh ping …",
-        EscapedPath(path)
+        "the services in {} hold {}, which is not a service, so serve will not start from them",
+        EscapedPath(path),
+        line.escape_debug()
     )]
     NotAService {
         /// The file the entry was read from.

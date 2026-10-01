@@ -330,7 +330,8 @@ async fn a_flag_overrides_the_file_for_one_run() {
     );
 }
 
-/// A relay or resolver in `serve.toml` that is not a usable one REFUSES, naming the file and the fix. It
+/// A relay or resolver in `serve.toml` that is not a usable one REFUSES, naming the file, in swoosh's own
+/// line alone: no parser text after it, and no command, since which server to use is the person's call. It
 /// never shrugs back to n0: the operator set it to keep this node off n0's servers, so a silent fallback
 /// would put it back there without a word.
 #[tokio::test]
@@ -338,20 +339,19 @@ async fn an_unusable_kept_relay_or_resolver_refuses_with_the_file_named() {
     let home = home("refuse");
     std::fs::create_dir_all(home.dir()).expect("create the home dir");
 
-    for kept in ["", "http://relay.example"] {
+    for kept in ["", "not a url", "http://relay.example"] {
         std::fs::write(home.serve_toml(), format!("relay = \"{kept}\"\n"))
             .expect("write serve.toml");
         let error = no_flags()
             .reach(&home)
             .await
             .expect_err("a kept relay that is no relay is a refusal, not a shrug back to n0");
-        let message = format!("{error:#}");
-        assert!(
-            message.contains(&format!(
-                "the relay in {} is not a usable relay; pass --relay <url>",
+        assert_eq!(
+            format!("{error:#}"),
+            format!(
+                "the relay in {} is not a usable relay, and swoosh will not fall back to the default one",
                 home.serve_toml().display()
-            )),
-            "the message names the file and the fix: {message}"
+            ),
         );
     }
 
@@ -364,17 +364,12 @@ async fn an_unusable_kept_relay_or_resolver_refuses_with_the_file_named() {
         .reach(&home)
         .await
         .expect_err("a kept resolver that is no resolver refuses too");
-    let message = format!("{error:#}");
-    assert!(
-        message.contains(&format!(
-            "the resolver in {} is not a usable resolver; pass --resolver <url>",
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "the resolver in {} is not a usable resolver, and swoosh will not fall back to the default one",
             home.serve_toml().display()
-        )),
-        "{message}"
-    );
-    assert!(
-        message.contains("only https is accepted"),
-        "the parse fault rides the source chain, so the reader is told WHY: {message}"
+        ),
     );
 }
 

@@ -380,11 +380,13 @@ async fn a_revoked_that_lost_entries_reads_as_damaged() {
         ),
         "a repeated entry counts once: {error}"
     );
-    assert!(
-        error
-            .to_string()
-            .contains(&scratch.home.revoked().display().to_string()),
-        "the refusal names the file: {error}"
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "{} holds 1 of the 3 revocations it held, and swoosh will not read it with entries missing",
+            scratch.home.revoked().display()
+        ),
+        "the refusal names the file and no command: restoring it or accepting the loss is the person's call"
     );
 
     std::fs::remove_file(scratch.home.revoked()).expect("remove the revocations");

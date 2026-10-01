@@ -157,3 +157,31 @@ async fn serve_toml_holds_services_off_relay_and_resolver() {
     }
     let _ = std::fs::remove_dir_all(home.dir());
 }
+
+/// `service --help` lists `enable` and `disable` on rows of at most 100 columns, and names no home file:
+/// a person is never meant to open `serve.toml`.
+#[test]
+fn enable_and_disable_help_rows_fit_and_name_no_file() {
+    use clap::CommandFactory as _;
+
+    let mut cli = crate::Cli::command();
+    let help = cli
+        .find_subcommand_mut("service")
+        .expect("service is a top-level verb")
+        .render_help()
+        .to_string();
+    for verb in ["enable", "disable"] {
+        let row = help
+            .lines()
+            .find(|line| line.trim_start().starts_with(verb))
+            .unwrap_or_else(|| panic!("a {verb} row: {help}"));
+        assert!(
+            row.chars().count() <= 100,
+            "{verb}'s row is too wide: {row}"
+        );
+        assert!(
+            !row.contains("serve.toml"),
+            "{verb}'s row names a file: {row}"
+        );
+    }
+}

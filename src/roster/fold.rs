@@ -188,25 +188,16 @@ pub(crate) fn read_held(path: &Path, root: VerifyKey) -> Option<(RosterDoc, Vec<
 }
 
 /// Add the update's revoked ids that have not ended, and its revoked keys, to `<home>/revoked`, in one
-/// write.
-///
-/// Never this machine's own key: a key in `revoked` refuses every link rooted at it, and the links this
-/// machine signed let people reach it, whoever revoked it as a device. A copy of an old root could
-/// otherwise close every one of them, the way back in included. The root still ends the membership: the
-/// pick-up refuses a standing whose key the update revokes.
+/// write. The writer leaves out this machine's own key (see [`crate::revoked::add`]); the pick-up still
+/// refuses a standing whose key the update revokes.
 fn revoke(home_lock: &HomeWrite, home: &Home, doc: &RosterDoc) -> Result<(), FoldError> {
     let now = unix_now();
-    let own = own_key(home)?;
     let ids = doc
         .revoked()
         .iter()
         .filter(|id| id.expires > now)
         .map(|id| Revocation::Id(id.id.clone()));
-    let keys = doc
-        .revoked_keys()
-        .iter()
-        .filter(|key| Some(**key) != own)
-        .map(|key| Revocation::Key(*key));
+    let keys = doc.revoked_keys().iter().map(|key| Revocation::Key(*key));
     crate::revoked::add(home_lock, home, ids.chain(keys))?;
     Ok(())
 }

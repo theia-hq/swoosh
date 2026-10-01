@@ -2426,7 +2426,12 @@ async fn a_device_the_list_handed_a_new_key_meanwhile_is_never_left_live_by_a_re
 
     let mut out = Vec::new();
     let error = root.commit_to(&mut out).await.map(|_| ()).unwrap_err();
-    assert!(matches!(error, RootError::ListChanged), "{error:?}");
+    assert!(matches!(error, RootError::NameMoved { .. }), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "me/laptop is now listed under a key this revoke did not see, so your root did not revoke it",
+        "the refusal names no command: running the revoke again would take the name's new key"
+    );
     assert!(
         out.is_empty(),
         "a stopped act prints nothing it did not write: {}",

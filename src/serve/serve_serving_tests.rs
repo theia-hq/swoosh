@@ -90,9 +90,10 @@ fn resumed_list_is_parsed_as_services_never_flags() {
         assert_eq!(
             error.to_string(),
             format!(
-                "{} has a line that is not a service: {line}. Name the services: swoosh serve ssh ping …",
+                "the services in {} hold {line}, which is not a service, so serve will not start from them",
                 home.serve_toml().display()
-            )
+            ),
+            "the refusal says what it saw and names no command: which services to serve is the person's call"
         );
     }
 }

@@ -417,19 +417,19 @@ impl FromStr for PeerHint {
 }
 
 /// The `what` (`relay` or `resolver`) `serve.toml` at `path` keeps, parsed, or `None` when it keeps none.
-fn kept_url<T: FromStr>(kept: Option<&str>, path: &Path, what: &str) -> eyre::Result<Option<T>>
-where
-    T::Err: core::error::Error + Send + Sync + 'static,
-{
+///
+/// One that does not parse refuses with swoosh's own line, never the parser's text, and names no command:
+/// which server to use is the person's call, and swoosh never falls back to the default one.
+fn kept_url<T: FromStr>(kept: Option<&str>, path: &Path, what: &str) -> eyre::Result<Option<T>> {
     let Some(url) = kept else {
         return Ok(None);
     };
-    let url = url.parse::<T>().wrap_err_with(|| {
-        format!(
-            "the {what} in {path} is not a usable {what}; pass --{what} <url>",
+    let Ok(url) = url.parse::<T>() else {
+        eyre::bail!(
+            "the {what} in {path} is not a usable {what}, and swoosh will not fall back to the default one",
             path = EscapedPath(path)
-        )
-    })?;
+        );
+    };
     Ok(Some(url))
 }
 

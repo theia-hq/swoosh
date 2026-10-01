@@ -11,7 +11,8 @@
 use std::io;
 use std::path::PathBuf;
 
-use nauthy::{Denylist, DenylistError, Revocation};
+use nauthy::{Denylist, DenylistError, Revocation, VerifyKey};
+use tightbeam::identity::AsVerifyKey as _;
 
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite, LooseFile};
@@ -47,10 +48,10 @@ pub enum RevokedError {
     },
     /// The file holds fewer entries than its witness says a write left there (an absent file holds none).
     /// No write shrinks it, so entries were lost to a deletion, a truncation or a crash, and reading it would
-    /// admit them again.
+    /// admit them again. Whether to restore the file or accept the loss is the person's call, so the line
+    /// names no command.
     #[error(
-        "{} holds {found} revocations but held {expected}: restore it, re-revoke what is missing, or remove {}.written to accept the loss",
-        EscapedPath(path),
+        "{} holds {found} of the {expected} revocations it held, and swoosh will not read it with entries missing",
         EscapedPath(path)
     )]
     Lost {
@@ -121,15 +122,29 @@ pub fn open(home: &Home) -> Result<Denylist, RevokedError> {
 /// while [`open`] goes on refusing the file until it holds what it once did. An entry the file holds already
 /// writes nothing.
 ///
+/// Never this machine's own key, whichever writer names it: a key in `revoked` refuses every link rooted at
+/// it, and the links this machine signed let people reach it, whoever revoked it as a device. A copy of an
+/// old root folded here, or a revoke of this machine's own standing, could otherwise close every one of
+/// them, the way back in included. The root still ends the membership: the pick-up refuses a standing whose
+/// key an update revokes.
+///
 /// # Errors
 ///
-/// The file could not be read or written, or the union would be larger than the file can be.
+/// The file could not be read or written, or the union would be larger than the file can be; or an entry
+/// is a key and this machine's key file could not be read.
 pub fn add(
     home_lock: &HomeWrite,
     home: &Home,
     entries: impl IntoIterator<Item = Revocation>,
 ) -> Result<(), RevokedError> {
-    let entries: Vec<Revocation> = entries.into_iter().collect();
+    let mut entries: Vec<Revocation> = entries.into_iter().collect();
+    if entries
+        .iter()
+        .any(|entry| matches!(entry, Revocation::Key(_)))
+        && let Some(own) = own_key(home)?
+    {
+        entries.retain(|entry| !matches!(entry, Revocation::Key(key) if *key == own));
+    }
     if entries.is_empty() {
         return Ok(());
     }
@@ -137,6 +152,18 @@ pub fn add(
     Denylist::for_repair(path.clone())
         .revoke(home_lock, entries)
         .map_err(|error| RevokedError::of(path, error))
+}
+
+/// This machine's key, from its key file's header; `None` when it has none, or the header is not a usable
+/// key.
+fn own_key(home: &Home) -> Result<Option<VerifyKey>, RevokedError> {
+    let stored = keystore::KeyFile::device(home.key())
+        .load()
+        .map_err(|error| RevokedError::Io {
+            path: home.key(),
+            source: io::Error::other(error),
+        })?;
+    Ok(stored.and_then(|stored| stored.node_id().verify_key().ok()))
 }
 
 /// The [`LooseFile`] an error from [`open_trust_file`](crate::home::open_trust_file) carries, or the error.

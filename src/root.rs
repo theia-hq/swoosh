@@ -344,6 +344,17 @@ pub enum RootError {
     /// offered.
     #[error("your devices' list changed while this ran: run it again.")]
     ListChanged,
+    /// A device the act revokes is listed, since its caller resolved it, under a key the caller never saw:
+    /// the device got a new key, or its name passed to another device. Revoking the key the caller found
+    /// would leave the device live, and running the revoke again would take whatever the name holds now,
+    /// so the refusal names no command. Nothing was cut or offered.
+    #[error(
+        "me/{name} is now listed under a key this revoke did not see, so your root did not revoke it"
+    )]
+    NameMoved {
+        /// The device's name.
+        name: DeviceLabel,
+    },
     /// A file the act reads or writes failed.
     #[error("{}: {source}", EscapedPath(.path))]
     Io {
@@ -949,7 +960,7 @@ impl Root {
     /// `listed` is every key `name` held live when the caller resolved it, before this act brought its
     /// records forward. When the records now list the device under a key outside `listed` and `key`, the
     /// device got a new key the caller never saw, and revoking `key` would leave it live under that one, so
-    /// the act stops with [`RootError::ListChanged`].
+    /// the act stops with [`RootError::NameMoved`].
     pub fn revoke_device(
         &mut self,
         name: &DeviceLabel,
@@ -964,7 +975,7 @@ impl Root {
             .live()
             .any(|row| &row.label == name && !seen.contains(&row.key))
         {
-            return Err(RootError::ListChanged);
+            return Err(RootError::NameMoved { name: name.clone() });
         }
         let Some(row) = act.book.live().find(|row| row.key == key) else {
             let revoked = act
@@ -1294,12 +1305,14 @@ impl Act {
             !before.contains_key(key.bytes()) && self.book.revoked_keys.contains_key(key.bytes())
         };
         let mut touched = self.added.iter().chain(&self.replaced).chain(&self.renewed);
-        let rekeyed = self.revoked.iter().any(|(name, seen)| {
+        if let Some((name, _)) = self.revoked.iter().find(|(name, seen)| {
             self.book
                 .live()
                 .any(|row| &row.label == name && !seen.contains(&row.key))
-        });
-        if listed || rekeyed || touched.any(revoked) {
+        }) {
+            return Err(RootError::NameMoved { name: name.clone() });
+        }
+        if listed || touched.any(revoked) {
             return Err(RootError::ListChanged);
         }
         let _ = out.write_all(&brought);
