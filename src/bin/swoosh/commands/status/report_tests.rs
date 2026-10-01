@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use keystore::{KeyFile, Passphrase, Protection};
 use nauthy::{FileDenylist, RevocationId, VerifyKey};
 use swoosh::config;
-use swoosh::contacts::{ContactsStore, DeviceLabel, ME};
+use swoosh::contacts::DeviceLabel;
 use swoosh::grants::{ANYONE, Delegation, GrantKind, GrantRecord};
 use swoosh::home::Home;
 use swoosh::root::Date;
@@ -43,6 +43,7 @@ fn home(tag: &str) -> Home {
     config::create_store_dir(&dir).expect("the scratch home");
     let home = Home::resolve(Some(dir)).expect("the scratch home resolves");
     let mut seed = TestNode::seeded(OWN).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .expect("this machine's key");
@@ -172,7 +173,7 @@ async fn status_with_no_root_names_join_first() {
     );
 }
 
-/// While `roster.fork` holds an update, the warning prints and names `revoke --help`; with it empty or
+/// While `devices.conflict` holds an update, the warning prints and names `revoke --help`; with it empty or
 /// gone, it does not.
 #[tokio::test]
 async fn status_warns_while_two_copies_disagree() {
@@ -183,7 +184,7 @@ async fn status_warns_while_two_copies_disagree() {
                    your root may be stolen: swoosh revoke --help";
     assert!(!status(&home).await.contains("two copies"));
 
-    std::fs::write(home.roster_fork(), b"").expect("an empty fork file");
+    std::fs::write(home.devices_conflict(), b"").expect("an empty fork file");
     assert!(
         !status(&home).await.contains("two copies"),
         "an empty file holds no update"
@@ -191,7 +192,7 @@ async fn status_warns_while_two_copies_disagree() {
 
     let fork = RosterDoc::new(Epoch(3), Vec::new()).expect("an update");
     std::fs::write(
-        home.roster_fork(),
+        home.devices_conflict(),
         TestRoot::seeded(ROOT).sign_update(&fork),
     )
     .expect("the fork");
@@ -296,20 +297,14 @@ async fn status_shows_a_device_revoked_by_another_copy_as_revoked() {
 
     let device = home("revoked-elsewhere-device");
     device_of(&device).await;
-    let mut store = ContactsStore::open(device.contacts())
-        .await
-        .expect("contacts");
-    store.contacts_mut().add(
-        ME.parse().expect("me"),
-        Some("old".parse().expect("a name")),
-        TestNode::seeded(OLD).node_id(),
-    );
-    store.save().await.expect("contacts saved");
     swoosh::roster::fold(&device, &revoking(2, vec![key(OLD), key(LAPTOP)]))
         .await
         .expect("the device holds the update");
     let out = status(&device).await;
-    for start in ["  me/old ".to_owned(), format!("  {} ", short_key(LAPTOP))] {
+    for start in [
+        format!("  {} ", short_key(OLD)),
+        format!("  {} ", short_key(LAPTOP)),
+    ] {
         assert!(
             out.lines()
                 .any(|line| line.starts_with(&start) && line.contains("revoked")),
@@ -322,7 +317,7 @@ async fn status_shows_a_device_revoked_by_another_copy_as_revoked() {
 #[tokio::test]
 async fn status_prints_a_damaged_or_unfinished_root_last() {
     let damaged = home("damaged");
-    std::fs::write(damaged.signet(), b"not a key").expect("a torn pin");
+    std::fs::write(damaged.root_pub(), b"not a key").expect("a torn pin");
     let unfinished = home("unfinished");
     let dir = unfinished.root();
     config::create_store_dir(&dir).expect("the root's directory");

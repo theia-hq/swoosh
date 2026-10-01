@@ -15,48 +15,39 @@ use bifrost::NodeId;
 use nauthy::{Link, Revocations as _};
 use tightbeam::identity::AsVerifyKey as _;
 
-use crate::contacts::{ContactsStore, DeviceLabel};
 use crate::gate::KeyedDenylist;
 use crate::home::Home;
 use crate::roster::RosterLock;
 use crate::standing::Standing;
 
-/// What a join writes: this machine's standing from the root, and the hints the invite carried.
+/// What a join writes: this machine's standing from the root, and the machine that made the invite.
 #[derive(Debug)]
 pub struct Join<'a> {
     /// The root the standing is from: the pin.
     pub root: NodeId,
     /// This machine's standing, signed by the root.
     pub standing: &'a Link,
-    /// This machine's key.
-    pub own: NodeId,
-    /// This machine's name, as the invite gave it: a hint until the first fold.
-    pub name: DeviceLabel,
     /// The machine that made the invite: the first device a sync asks.
     pub from: NodeId,
     /// Whether the pin changes: a first join, or a switch to another root.
     pub pin_changes: bool,
 }
 
-/// Write a join, under `roster.lock`: on a pin change, the old root's update files and devices go and
-/// `roster.seed` is written; this machine's own entry is laid under `me`; then the standing; then, on a pin
-/// change, the pin. A join to the root already pinned is the same-root write, and leaves the pin as it is.
+/// Write a join, under `roster.lock`: on a pin change, the old root's lists go and `invited-by` is written;
+/// then the standing; then, on a pin change, the pin. A join to the root already pinned is the same-root
+/// write, and leaves the pin as it is.
 pub async fn join(home: &Home, join: Join<'_>) -> eyre::Result<()> {
     let _lock = RosterLock::take(&home.roster_lock()).await?;
-    let mut contacts = ContactsStore::open(home.contacts()).await?;
     if join.pin_changes {
-        for path in [home.roster(), home.roster_synced(), home.roster_fork()] {
+        for path in [home.devices(), home.synced(), home.devices_conflict()] {
             remove(path)?;
         }
-        contacts.contacts_mut().clear_me();
         crate::config::write_private_atomic(
-            &home.roster_seed(),
+            &home.invited_by(),
             format!("{}\n", join.from).as_bytes(),
         )
         .await?;
     }
-    contacts.contacts_mut().seed_me(join.name, join.own);
-    contacts.save().await?;
     same_root_write(home, join.standing).await?;
     if join.pin_changes {
         crate::config::write_signet(home, join.root).await?;
@@ -105,24 +96,21 @@ async fn same_root_write(home: &Home, standing: &Link) -> eyre::Result<()> {
     crate::config::write_badge(home, standing).await
 }
 
-/// Leave the root this machine trusts, under `roster.lock`: the standing, the update files and the
-/// devices under `me` go, then the pin, last. The revocations this machine learned stay, and so does a
+/// Leave the root this machine trusts, under `roster.lock`: the standing and the lists go, and with them
+/// the devices under `me`, then the pin, last. The revocations this machine learned stay, and so does a
 /// root kept here.
 pub async fn leave(home: &Home) -> eyre::Result<()> {
     let _lock = RosterLock::take(&home.roster_lock()).await?;
     for path in [
-        home.badge(),
-        home.roster(),
-        home.roster_synced(),
-        home.roster_seed(),
-        home.roster_fork(),
+        home.key_cert(),
+        home.devices(),
+        home.synced(),
+        home.invited_by(),
+        home.devices_conflict(),
     ] {
         remove(path)?;
     }
-    let mut contacts = ContactsStore::open(home.contacts()).await?;
-    contacts.contacts_mut().clear_me();
-    contacts.save().await?;
-    remove(home.signet())?;
+    remove(home.root_pub())?;
     Ok(())
 }
 

@@ -67,6 +67,7 @@ fn scratch_with(tag: &str, locked: bool) -> Home {
         Protection::Plain
     };
     let mut seed = TestNode::seeded(OWN).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut seed), protection)
         .unwrap();
@@ -106,7 +107,7 @@ async fn device(home: &Home, until: u64) {
     )
     .unwrap();
     fold(home, &root.sign_update(&doc)).await.unwrap();
-    std::fs::write(home.roster_seed(), format!("{}\n", node(0x41))).unwrap();
+    std::fs::write(home.invited_by(), format!("{}\n", node(0x41))).unwrap();
 }
 
 fn snapshot(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
@@ -254,16 +255,16 @@ async fn leave_removes_the_standing_and_the_pin_and_keeps_the_revocations() {
     ran.left();
     assert_eq!(read(&home).await, Standing::Unpinned);
     for path in [
-        home.badge(),
-        home.signet(),
-        home.roster(),
-        home.roster_synced(),
-        home.roster_seed(),
-        home.roster_fork(),
+        home.key_cert(),
+        home.root_pub(),
+        home.devices(),
+        home.synced(),
+        home.invited_by(),
+        home.devices_conflict(),
     ] {
         assert!(!path.exists(), "{} is gone", path.display());
     }
-    let store = ContactsStore::open(home.contacts()).await.unwrap();
+    let store = ContactsStore::open(&home).await.unwrap();
     assert!(
         store
             .contacts()
@@ -328,7 +329,7 @@ async fn leave_on_a_damaged_home_removes_the_standing_and_the_pin_and_keeps_the_
     );
     let ran = leave(&home, &[]).await;
     ran.left();
-    assert!(!home.signet().exists());
+    assert!(!home.root_pub().exists());
     assert!(home.root().join("root.key").exists(), "the root stays");
     assert!(matches!(
         read(&home).await,
@@ -348,7 +349,7 @@ async fn leave_new_key_on_an_unpinned_home_replaces_the_key() {
     let key = stored_key(&home);
     assert_ne!(key, node(OWN), "the key is replaced");
     assert_eq!(ran.out, format!("{key}\n"), "stdout is the new key alone");
-    let kept = home.dir().join("key.replaced-2026-09-25");
+    let kept = home.machine().join("key.replaced-2026-09-25");
     assert_eq!(
         KeyFile::device(&kept).load().unwrap().unwrap().node_id(),
         node(OWN),
@@ -378,16 +379,16 @@ async fn leave_new_key_on_a_device_leaves_and_keeps_the_old_key_and_links_aside(
     device(&home, now() + 90 * DAY).await;
     std::fs::write(home.links(), b"a link row\n").unwrap();
     // A day that already has a kept key takes the first free number.
-    std::fs::write(home.dir().join("key.replaced-2026-09-25"), b"earlier").unwrap();
+    std::fs::write(home.machine().join("key.replaced-2026-09-25"), b"earlier").unwrap();
     let ran = leave(&home, &["--new-key"]).await;
     ran.left();
     assert_eq!(read(&home).await, Standing::Unpinned);
     assert_eq!(
-        std::fs::read(home.dir().join("key.replaced-2026-09-25")).unwrap(),
+        std::fs::read(home.machine().join("key.replaced-2026-09-25")).unwrap(),
         b"earlier",
         "an earlier kept key is never replaced"
     );
-    assert!(home.dir().join("key.replaced-2026-09-25-1").exists());
+    assert!(home.machine().join("key.replaced-2026-09-25-1").exists());
     assert_eq!(
         std::fs::read(home.dir().join("links.replaced-2026-09-25-1")).unwrap(),
         b"a link row\n"

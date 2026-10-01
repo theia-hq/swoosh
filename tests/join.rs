@@ -64,7 +64,7 @@ fn join_refuses_an_unused_reach_flag_before_writing() {
     assert!(!output.status.success(), "refused: {stderr}");
     assert!(stderr.contains("--relay has no effect"), "{stderr}");
     assert!(!stderr.contains("joined root"), "{stderr}");
-    for file in ["badge", "signet", "roster.seed"] {
+    for file in ["key.cert", "root.pub", "invited-by"] {
         assert!(!home.join(file).exists(), "{file} is not written");
     }
     let _ = std::fs::remove_dir_all(&home);

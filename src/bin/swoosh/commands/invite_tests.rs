@@ -90,6 +90,7 @@ pub(crate) fn scratch(tag: &str) -> Home {
     config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut seed = TestNode::seeded(OWN).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
@@ -216,7 +217,7 @@ pub(crate) fn update_of(state: &State) -> RosterDoc {
 
 /// `doc`, signed by `ROOT`, as the update `home` holds.
 pub(crate) fn held(home: &Home, doc: &RosterDoc) {
-    std::fs::write(home.roster(), TestRoot::seeded(ROOT).sign_update(doc)).unwrap();
+    std::fs::write(home.devices(), TestRoot::seeded(ROOT).sign_update(doc)).unwrap();
 }
 
 /// `ROOT`'s key file sealed under [`PASS`], sealed once per process.
@@ -553,7 +554,7 @@ async fn invite_new_key_on_a_self_keyed_device_refuses() {
 async fn invite_label_that_is_a_contact_refuses() {
     let home = scratch("contact");
     holds(&home, &[live(OWN, "desk")], Vec::new()).await;
-    let mut store = ContactsStore::open(home.contacts()).await.unwrap();
+    let mut store = ContactsStore::open(&home).await.unwrap();
     store
         .contacts_mut()
         .add("alice".parse().unwrap(), None, node(ALICE));
@@ -655,7 +656,7 @@ async fn invite_refuses_to_make_a_root_while_serve_admit_runs() {
     let ran = invite(&home, &["tv", &node(0x44).to_string()]).await;
     refused_before_writing(&ran, "stop swoosh serve first.", &home, &before);
     assert!(!home.root().exists(), "no root is made");
-    assert!(!home.signet().exists(), "no root is pinned");
+    assert!(!home.root_pub().exists(), "no root is pinned");
 }
 
 #[tokio::test]
@@ -1436,8 +1437,8 @@ async fn the_invite_prints_only_after_commit() {
     let home = scratch("after-commit");
     holds(&home, &[live(OWN, "desk")], Vec::new()).await;
     // The cut cannot be kept here: the commit fails.
-    std::fs::remove_file(home.roster()).unwrap();
-    std::fs::create_dir(home.roster()).unwrap();
+    std::fs::remove_file(home.devices()).unwrap();
+    std::fs::create_dir(home.devices()).unwrap();
     let ran = invite(&home, &["tv", &node(TV).to_string()]).await;
     assert!(ran.result.is_err());
     assert!(ran.out.is_empty(), "no invite: {}", ran.out);
@@ -1508,7 +1509,7 @@ async fn a_presented_root_leaves_no_root_record_here() {
     assert!(ran.result.is_ok(), "{:?}", ran.result);
     assert!(!home.root().exists(), "no root.key here");
     assert!(!home.dir().join(state::FILE).exists(), "no state here");
-    assert!(home.roster().is_file(), "the cut is kept here");
+    assert!(home.devices().is_file(), "the cut is kept here");
 }
 
 #[tokio::test]
@@ -1550,6 +1551,7 @@ fn machine(tag: &str, seed: u8) -> Home {
     let home = scratch(tag);
     std::fs::remove_file(home.key()).unwrap();
     let mut bytes = TestNode::seeded(seed).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut bytes), Protection::Plain)
         .unwrap();
@@ -1700,4 +1702,83 @@ async fn every_making_verb_prints_only_its_artifact_on_stdout() {
         .node_id();
     assert_eq!(String::from_utf8(out).unwrap(), format!("{key}\n"));
     assert!(!err.is_empty(), "the lines about it go to stderr");
+}
+
+/// Every name a home may hold: the paths of the home's layout, with the marker that keeps `machine/` out of
+/// backups on platforms other than macOS.
+const RULED: &[&str] = &[
+    "machine/",
+    "machine/key",
+    "machine/CACHEDIR.TAG",
+    "root.key",
+    "root.pub",
+    "key.cert",
+    "devices",
+    "devices.conflict",
+    "synced",
+    "invited-by",
+    "revoked",
+    "revoked.written",
+    "links",
+    "contacts.toml",
+    "serve.toml",
+    "home.lock",
+    "serve.lock",
+    "known_hosts",
+];
+
+/// Names a home still holds that later changes to the home merge or cut: the locks that become `home.lock`
+/// and `serve.lock`, and the root's directory that becomes `root.key` beside `devices`.
+const NOT_YET: &[&str] = &["roster.lock", "admit.lock", "root/"];
+
+/// What `home` holds, by name: each entry of the home, a directory with a `/`, and each entry of `machine/`
+/// under it.
+fn names_in(home: &Home) -> Vec<String> {
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(home.dir()).unwrap() {
+        let entry = entry.unwrap();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if entry.file_type().unwrap().is_dir() {
+            names.push(format!("{name}/"));
+        } else {
+            names.push(name);
+        }
+    }
+    for entry in std::fs::read_dir(home.machine()).unwrap() {
+        names.push(format!(
+            "machine/{}",
+            entry.unwrap().file_name().to_string_lossy()
+        ));
+    }
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn a_fresh_home_has_only_the_ruled_names() {
+    let home = scratch("ruled-names-root");
+    let ran = invite(&home, &["laptop", &node(LAPTOP).to_string()]).await;
+    let printed = ran.invite();
+    let device = machine("ruled-names-device", LAPTOP);
+    join(&device, &printed.to_string()).await.unwrap();
+
+    for (after, home) in [("invite", &home), ("join", &device)] {
+        let names = names_in(home);
+        for name in &names {
+            assert!(
+                RULED.contains(&name.as_str()) || NOT_YET.contains(&name.as_str()),
+                "after {after}, the home holds {name}: {names:?}"
+            );
+        }
+        for name in ["machine/key", "root.pub", "key.cert"] {
+            assert!(
+                names.contains(&name.to_owned()),
+                "after {after}, the home holds {name}: {names:?}"
+            );
+        }
+    }
+    assert!(
+        names_in(&device).contains(&"invited-by".to_owned()),
+        "a joined device holds the machine to ask first, until its first sync"
+    );
 }

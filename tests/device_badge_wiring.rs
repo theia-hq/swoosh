@@ -96,7 +96,7 @@ fn a_keyed_invite_joins_as_its_key_and_verifies_at_the_root() {
     let _ = std::fs::remove_dir_all(&base);
     let device_dir = base.join("device");
     std::fs::create_dir_all(&device_dir).unwrap();
-    let device_key = device_dir.join("key");
+    let device_key = device_dir.join("machine").join("key");
 
     let seed = [0x77; 32];
     let token = keyed_invite(ROOT, seed, "ci-runner");
@@ -166,7 +166,7 @@ fn a_bound_invite_keeps_the_devices_key_and_verifies_at_the_root() {
     std::fs::create_dir_all(&device_dir).unwrap();
 
     let device = device_key(&device_dir);
-    let device_secret_before = std::fs::read(device_dir.join("key")).unwrap();
+    let device_secret_before = std::fs::read(device_dir.join("machine").join("key")).unwrap();
     let token = bound_invite(ROOT, device, "laptop", 90 * DAY);
     let fields = invite_fields(&token);
     assert_eq!(
@@ -200,12 +200,12 @@ fn a_bound_invite_keeps_the_devices_key_and_verifies_at_the_root() {
         "join makes nothing to print on stdout"
     );
     assert_eq!(
-        std::fs::read(device_dir.join("key")).unwrap(),
+        std::fs::read(device_dir.join("machine").join("key")).unwrap(),
         device_secret_before,
         "joining a bound invite keeps the device's key"
     );
     assert_eq!(
-        std::fs::read_to_string(device_dir.join("signet"))
+        std::fs::read_to_string(device_dir.join("root.pub"))
             .unwrap()
             .trim(),
         root.to_string(),
@@ -251,7 +251,7 @@ fn join_refuses_a_standing_bound_to_another_machine() {
         "the error names the binding check: {message}"
     );
     assert!(
-        !other_dir.join("signet").exists() && !other_dir.join("badge").exists(),
+        !other_dir.join("root.pub").exists() && !other_dir.join("key.cert").exists(),
         "nothing is written when the standing does not bind this machine"
     );
 
@@ -272,7 +272,7 @@ fn join_takes_switch_to_move_to_another_root() {
     let joined = join(&device_dir, &first_token, &[]);
     assert!(joined.status.success(), "{}", stderr(&joined));
     let pinned = || {
-        std::fs::read_to_string(device_dir.join("signet"))
+        std::fs::read_to_string(device_dir.join("root.pub"))
             .unwrap()
             .trim()
             .to_owned()
@@ -378,7 +378,7 @@ fn join_refuses_to_replace_a_key_this_machine_already_has() {
     let _ = std::fs::remove_dir_all(&base);
     let device_dir = base.join("device");
     std::fs::create_dir_all(&device_dir).unwrap();
-    let device_key_path = device_dir.join("key");
+    let device_key_path = device_dir.join("machine").join("key");
 
     let held = device_key(&device_dir);
     let held_seed = std::fs::read(&device_key_path).unwrap();
@@ -402,11 +402,11 @@ fn join_refuses_to_replace_a_key_this_machine_already_has() {
         "the refusal names the key this machine already has: {message}"
     );
     assert!(
-        !device_dir.join("signet").exists() && !device_dir.join("badge").exists(),
+        !device_dir.join("root.pub").exists() && !device_dir.join("key.cert").exists(),
         "the refusal lands before any write"
     );
 
-    std::fs::rename(&device_key_path, device_dir.join("key.bak")).unwrap();
+    std::fs::rename(&device_key_path, device_dir.join("machine").join("key.bak")).unwrap();
     let joined = join(&device_dir, &token, &[]);
     assert!(joined.status.success(), "{}", stderr(&joined));
     assert_ne!(
@@ -429,7 +429,7 @@ fn join_refuses_to_replace_a_key_this_machine_already_has() {
 fn swoosh(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .args(args)
-        // Isolate from any real `~/.config/swoosh`: every path this test uses is explicit via `--home`, but
+        // Isolate from any real default home: every path this test uses is explicit via `--home`, but
         // pin HOME to the scratch base so nothing can fall back to the operator's store.
         .env("HOME", std::env::temp_dir())
         .output()
@@ -481,7 +481,7 @@ fn standing_field(token: &str) -> String {
 
 /// The badge join stored in `home`, trimmed of the trailing newline `write_badge` appends.
 fn stored_badge(home: &Path) -> String {
-    std::fs::read_to_string(home.join("badge"))
+    std::fs::read_to_string(home.join("key.cert"))
         .expect("join stores the badge beside the key")
         .trim()
         .to_owned()

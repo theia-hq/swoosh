@@ -91,7 +91,10 @@ fn status_key_on_an_empty_home_makes_and_prints_a_key() {
     let out = swoosh(&scratch.home(), &["status", "--key"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let key: NodeId = text(&out.stdout).trim().parse().expect("a key prints");
-    assert!(scratch.home().join("key").exists(), "the key is kept");
+    assert!(
+        scratch.home().join("machine").join("key").exists(),
+        "the key is kept"
+    );
     let again = swoosh(&scratch.home(), &["status", "--key"]);
     assert_eq!(
         text(&again.stdout).trim(),
@@ -118,7 +121,7 @@ fn status_key_stdout_is_the_key_alone_on_first_run() {
         text(&out.stderr),
         format!(
             "made this machine's key (first run): {}\n",
-            scratch.home().join("key").display()
+            scratch.home().join("machine").join("key").display()
         )
     );
 }
@@ -183,6 +186,7 @@ fn status_with_a_root_copy_never_prompts() {
     let home = Home::resolve(Some(moved.home())).unwrap();
     config::create_store_dir(home.dir()).unwrap();
     let mut seed = TestNode::seeded(0x11).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     keystore::KeyFile::device(home.key())
         .write(
             &keystore::Secret::take(&mut seed),

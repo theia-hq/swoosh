@@ -17,7 +17,6 @@
 //! `petname -> { device -> node id }`. It is LOCAL STATE, not a wire or registry format, so a
 //! human-editable TOML file is the right representation.
 
-use core::num::NonZeroU64;
 use core::str::FromStr;
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
@@ -26,10 +25,10 @@ use bifrost::NodeId;
 use tightbeam::identity::AsNodeId as _;
 
 use crate::names::{Name, NameError};
-use crate::roster::{Epoch, RosterDoc};
+use crate::roster::RosterDoc;
 
 /// The reserved petname for the operator's own devices: the signet is person-zero, each device it derives
-/// lives under `me/<label>`. A signet-verified roster hydrates into exactly this partition.
+/// lives under `me/<label>`, derived from the home's list of your devices, never saved.
 pub const ME: &str = "me";
 
 mod store;
@@ -162,27 +161,11 @@ impl FromStr for ContactRef {
     }
 }
 
-/// Where a contact binding came from: a name YOU typed, or a member the signet vouched for in a signed
-/// roster. This distinction is the moat: a roster-hydrated member stays distinguishable from a hand-typed
-/// peer at read time, so flattening the two can never silently launder a stranger into a signed member.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Source {
-    /// A binding the operator added by hand (`contact add`), or loaded from the legacy bare-string
-    /// wire form. It carries no signature; it is trust the operator asserted locally.
-    HandTyped,
-    /// A binding hydrated from a signet-signed roster at the given epoch. Only [`Contacts::hydrate`] writes
-    /// this, and only from an already-verified [`RosterDoc`], so the signet-only membership fence is a
-    /// type-path property: no hand-typed op can forge a `Roster` provenance.
-    Roster { epoch: u64 },
-}
-
-/// One device binding: its node identity and where that binding came from.
+/// One device binding: its node identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Binding {
     /// The device's node identity.
     pub node: NodeId,
-    /// Whether the operator typed this binding or the signet vouched for it in a roster.
-    pub source: Source,
 }
 
 /// One person in the address book: their device bindings plus, optionally, their SIGNET root.
@@ -196,15 +179,12 @@ pub struct Binding {
 struct Person {
     /// This person's device identities, label -> binding, in label order (unchanged from the old value type).
     devices: BTreeMap<DeviceLabel, Binding>,
-    /// This person's signet root, if recorded. `None` until hand-added (v1) or federation-hydrated (later).
-    /// Reuses [`Binding`] so the signet carries the SAME [`Source`] provenance the moat depends on: a
-    /// hand-typed signet is [`Source::HandTyped`]; a future synced roster could vouch one as
-    /// [`Source::Roster`].
+    /// This person's signet root, if recorded. `None` until hand-added.
     signet: Option<Binding>,
 }
 
 impl Person {
-    /// A person with no devices AND no signet: nothing left to keep. Used by `remove`/`hydrate` tidy-up so a
+    /// A person with no devices AND no signet: nothing left to keep. Used by `remove`'s tidy-up so a
     /// signet-only person (you recorded alice's signet before any device) is NOT swept away, but a truly
     /// empty person still is.
     fn is_empty(&self) -> bool {
@@ -212,94 +192,15 @@ impl Person {
     }
 }
 
-/// The version of the operator's OWN `me/*` membership set: the CUTTER's number, bumped by this book
-/// every time that set actually changes.
-///
-/// It is NOT the anti-rollback floor. Those are two different numbers with two different owners (a
-/// cutter's "how many times my fleet has changed" and a puller's "highest epoch I have applied"), and
-/// collapsing them into one field is what made a signet holder cut epoch 0 forever: the floor only ever
-/// advanced by PULLING, and a signet holder never pulls. Separate types, separate fields, so the
-/// confusion is unrepresentable rather than merely fixed.
-///
-/// [`Unversioned`](Self::Unversioned) is the reserved zero: a book that has made no membership edit since
-/// versioning existed. It has nothing a puller may accept, so [`epoch`](Self::epoch) yields `None` and
-/// there is nothing to cut. A [`NonZeroU64`] inside [`Versioned`](Self::Versioned) is what makes
-/// "version 0" unrepresentable rather than merely avoided.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum RosterVersion {
-    /// No membership edit has been recorded under this book yet. Persists as the absent key (and loads
-    /// from the reserved on-disk `0`), so every fleet already in the field reads as unversioned and the
-    /// operator's next edit lifts it to 1, which is newer than every floor out there.
-    #[default]
-    Unversioned,
-    /// The nth change to the `me/*` member set, counting from 1.
-    Versioned(NonZeroU64),
-}
-
-impl RosterVersion {
-    /// The version after one change to the member set. Total by construction: unversioned becomes 1 (the
-    /// migration rule, so a pre-upgrade fleet unsticks itself on the owner's next edit), and a versioned
-    /// book counts on. Saturating because u64 membership edits cannot be performed in any lifetime, and a
-    /// wrap would silently hand a puller a version below its floor.
-    pub fn bumped(self) -> Self {
-        match self {
-            Self::Unversioned => Self::Versioned(NonZeroU64::MIN),
-            Self::Versioned(count) => Self::Versioned(count.saturating_add(1)),
-        }
-    }
-
-    /// The epoch a cut doc carries at this version, or `None` when there is nothing to cut. This is the
-    /// ONLY way an [`Epoch`] is derived from a local version, so a cutter cannot reach for the floor by
-    /// mistake, and an unversioned book cannot emit the reserved 0 that [`hydrate`](Contacts::hydrate)
-    /// refuses.
-    pub fn epoch(self) -> Option<Epoch> {
-        match self {
-            Self::Unversioned => None,
-            Self::Versioned(count) => Some(Epoch(count.get())),
-        }
-    }
-
-    /// Reconstruct from the persisted integer. `0` is the reserved unversioned slot, so an old file (and
-    /// an absent key) both load as [`Unversioned`](Self::Unversioned) with no migration step.
-    pub(crate) fn from_stored(value: u64) -> Self {
-        match NonZeroU64::new(value) {
-            None => Self::Unversioned,
-            Some(count) => Self::Versioned(count),
-        }
-    }
-
-    /// The integer to persist, or `None` when there is nothing to write (an unversioned book writes no
-    /// key at all, exactly as a book with no floor writes no floor).
-    pub(crate) fn stored(self) -> Option<u64> {
-        match self {
-            Self::Unversioned => None,
-            Self::Versioned(count) => Some(count.get()),
-        }
-    }
-}
-
-/// The in-memory address book: every petname mapped to its ordered group of device bindings, plus the two
-/// roster counters (this book's own membership version, and the epoch floor it has accepted from its
-/// signet).
+/// The in-memory address book: every petname mapped to its ordered group of device bindings.
 ///
 /// This is the pure domain view the store loads into and saves back from. It owns the add / list /
-/// remove / resolve / cut / hydrate behaviour; persistence is the [`ContactsStore`]'s job, layered around
-/// it.
+/// remove / resolve behaviour; persistence is the [`ContactsStore`]'s job, layered around it. Your own
+/// devices, under `me`, are never saved: the store derives them from the home's list of your devices each
+/// time it opens the book ([`derive_me`](Self::derive_me)).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Contacts {
     people: BTreeMap<Petname, Person>,
-    /// This book's OWN membership version: the number a roster cut here is stamped with. Bumped by
-    /// [`add`](Self::add) and [`remove`](Self::remove) when, and only when, the `me/*` device SET changes,
-    /// so re-recording a device at the same key (a badge renewal) leaves it alone.
-    roster_version: RosterVersion,
-    /// The highest roster epoch this book has applied: the anti-rollback FLOOR. `None` before any roster is
-    /// hydrated. A snapshot at or below it is refused as stale, so a replayed old-but-genuine roster can
-    /// never roll the fleet back. There is one signet today, so one floor; a device in two fleets is out of
-    /// scope until the floor is keyed per-signet.
-    ///
-    /// Written ONLY by [`hydrate`](Self::hydrate) (and the store, reloading it). Never read by the cut
-    /// path: it is `pub(crate)`, so nothing outside this crate can mistake the floor for the version.
-    roster_floor: Option<Epoch>,
 }
 
 impl Contacts {
@@ -307,31 +208,14 @@ impl Contacts {
     /// replaced. Idempotent: re-adding the same name and device just overwrites, so the caller can warn
     /// on a clobber rather than the store silently losing the old key. A device-less add targets the
     /// [`DEFAULT`](DeviceLabel::DEFAULT) slot.
-    ///
-    /// An add under `me` that CHANGES the member set bumps [`roster_version`](Self::roster_version); an
-    /// [`Unchanged`](Added::Unchanged) one does not. A re-add under the same
-    /// label and the same key (a renewal) leaves the member set byte-identical, so bumping there would weld
-    /// quarterly credential churn to the rare membership version and drive every device through a
-    /// full-snapshot re-pull for no delta.
     pub fn add(&mut self, petname: Petname, device: Option<DeviceLabel>, node: NodeId) -> Added {
         let device = device.unwrap_or(DeviceLabel(DeviceLabel::DEFAULT.to_owned()));
-        let mine = petname.as_str() == ME;
         let person = self.people.entry(petname).or_default();
-        let binding = Binding {
-            node,
-            source: Source::HandTyped,
-        };
-        let added = match person.devices.insert(device, binding) {
+        match person.devices.insert(device, Binding { node }) {
             Some(previous) if previous.node == node => Added::Unchanged,
             Some(previous) => Added::Replaced(previous.node),
             None => Added::Created,
-        };
-        // Anchored to this book's OWN answer about whether the set changed, never to the verb that ran:
-        // an add that enrolls and one that renews differ by the data, not by the call site.
-        if mine && added != Added::Unchanged {
-            self.roster_version = self.roster_version.bumped();
         }
-        added
     }
 
     /// Every petname, in name order, for `status`'s contacts.
@@ -351,17 +235,6 @@ impl Contacts {
                 .iter()
                 .map(|(label, binding)| (label, &binding.node))
         })
-    }
-
-    /// Every device binding under a petname WITH its provenance, in label order, for the store's codec and
-    /// for a `status` that wants to show which entries the signet vouched for. `None` for an unknown
-    /// petname. Unlike [`devices`](Self::devices) (which projects to the node for reach), this carries the
-    /// [`Source`] so a roster-hydrated member round-trips through persistence.
-    pub fn bindings(
-        &self,
-        petname: &Petname,
-    ) -> Option<impl Iterator<Item = (&DeviceLabel, &Binding)>> {
-        self.people.get(petname).map(|person| person.devices.iter())
     }
 
     /// Resolve an address to its ordered [`Candidate`]s, each carrying the `<petname>/<device>` label it
@@ -400,173 +273,32 @@ impl Contacts {
         }
     }
 
-    /// This book's OWN membership version, the number a roster cut from it is stamped with. See
-    /// [`RosterVersion`]: it is not the floor, and a caller that wants "how fresh is what I pulled"
-    /// wants the floor instead.
-    pub fn roster_version(&self) -> RosterVersion {
-        self.roster_version
-    }
-
-    /// This book's roster epoch floor: the highest roster epoch it has applied, or `None` before any roster
-    /// is hydrated. The store persists and reloads it so the anti-rollback floor survives a restart.
-    ///
-    /// `pub(crate)` deliberately. The floor is the PULLER's number; a cutter reading it was the whole
-    /// defect, so no code outside this crate can obtain it and stamp a doc with it.
-    pub(crate) fn roster_floor(&self) -> Option<Epoch> {
-        self.roster_floor
-    }
-
-    /// Fold a signet-verified roster into the `me` partition (the operator's own fleet) as a FLOORED
-    /// SNAPSHOT-REPLACE, tagging each member [`Source::Roster`]. THIS is the moat's write path, and it is
-    /// safe by construction: the only way to obtain a [`RosterDoc`] is [`crate::roster::verify`], so a
-    /// `Roster` provenance can only ever come from the signet, never from a hand-typed op.
-    ///
-    /// A roster is a whole SNAPSHOT, not an op-log, so the correct fold is a REPLACE under a persisted
-    /// floor. The returned [`Hydrated`] says which happened, and it is the caller's only honest basis for
-    /// claiming a pull:
-    ///
-    /// - [`Epoch`] `0` is REFUSED as [`Unversioned`](Hydrated::Unversioned). Zero is the reserved
-    ///   pre-versioning stamp, so such a doc is not "not newer", it is "not versioned"; those are
-    ///   different conditions and they owe different messages.
-    /// - `doc.epoch <= floor` (a stale or same-epoch replay from a lagging/hostile courier) is REFUSED
-    ///   wholesale as [`NotNewer`](Hydrated::NotNewer), a no-op, so a genuinely-signed OLD roster can never
-    ///   roll the fleet back or re-add a removed member. The first hydrate (floor `None`) applies.
-    /// - `doc.epoch > floor`: the roster-sourced `me/*` set is REPLACED by the doc's members (add new,
-    ///   refresh changed, and DROP any prior `Roster`-sourced device NOT in the new doc so a removed member
-    ///   disappears), then the floor advances to `doc.epoch`. The [`Applied`] report names what was bound,
-    ///   what a sovereign local binding held back, and exactly which devices the replace REMOVED, because
-    ///   a thinner snapshot silently deleting devices under the word "pulled" is a lie the caller cannot
-    ///   otherwise avoid telling.
-    ///
-    /// A `HandTyped` binding under `me` is NEVER touched (the operator's local choice is sovereign, and a
-    /// member is only a suggestion); only `Roster`-sourced entries are in the replace-set. Only the `me`
-    /// partition is touched: other petnames (people you know) are never rewritten by your own fleet roster.
-    ///
-    /// This advances the FLOOR and never the [`RosterVersion`]: applying someone else's snapshot is not an
-    /// edit to a membership set this book owns, and one node's fleet has exactly one cutter.
-    pub fn hydrate(&mut self, roster: &RosterDoc) -> Hydrated {
-        let epoch = roster.epoch();
-        // Zero is reserved, so refuse it before the floor comparison even runs: a fresh book has NO floor,
-        // and "the first hydrate always applies" would otherwise let a pre-versioning doc in and pin the
-        // floor at 0, which is the state every device in the field is already stuck in.
-        if epoch == Epoch::UNVERSIONED {
-            return Hydrated::Unversioned;
-        }
-        // Refuse a stale or same-epoch snapshot before touching anything: the whole-doc floor is what kills
-        // F1's removed-member re-add (the old blob never applies at all) and the same-epoch overwrite.
-        if let Some(floor) = self.roster_floor
-            && epoch <= floor
-        {
-            return Hydrated::NotNewer { floor };
-        }
-        let applied = self.rebuild_me(roster);
-        self.roster_floor = Some(epoch);
-        Hydrated::Applied(applied)
-    }
-
-    /// Replace the roster-sourced devices under `me` with the live devices of a verified update, keeping
-    /// every hand-typed binding. The caller has already decided the update is newer: a fold holds the
-    /// floor in the update it keeps, not here.
-    pub fn rebuild_me(&mut self, roster: &RosterDoc) -> Applied {
-        let epoch = roster.epoch();
-        let person = self.people.entry(Petname(ME.to_owned())).or_default();
-        // Snapshot-REPLACE the DEVICE set only; the fence: hydrate never touches `person.signet` (a roster
-        // carries no signet in v1), so a hand-typed `me` signet survives every pull. Drop the prior
-        // roster-sourced devices, keep every HandTyped binding, then lay the new doc's members down.
-        // Dropping first is what makes a removed member disappear; a hand-typed entry never enters the
-        // drop-set, so the operator's local choice survives. The dropped labels are COLLECTED, not just
-        // discarded: they are the destructive half of the fold and the caller has to be able to name them.
-        let mut dropped: Vec<DeviceLabel> = Vec::new();
-        person.devices.retain(|label, binding| {
-            let keep = binding.source == Source::HandTyped;
-            if !keep {
-                dropped.push(label.clone());
-            }
-            keep
-        });
-        let mut applied = Applied {
-            bound: 0,
-            skipped: 0,
-            removed: Vec::new(),
+    /// Lay `me` down as the devices of `devices`, the list of your devices this machine holds, verified
+    /// under its root, replacing whatever `me` held; with no list, `me` names nothing. The one writer of
+    /// `me`: no hand-typed binding lives there, and the book never saves it.
+    pub(crate) fn derive_me(&mut self, devices: Option<&RosterDoc>) {
+        let me = Petname(ME.to_owned());
+        self.people.remove(&me);
+        let Some(devices) = devices else {
+            return;
         };
-        for member in roster.members() {
-            // The label is already a `DeviceLabel` (one label type across the seam), so there is no lossy
-            // re-parse here. A HandTyped binding is sovereign and was kept by `retain`; never clobber it.
-            if let Entry::Occupied(entry) = person.devices.entry(member.label.clone())
-                && entry.get().source == Source::HandTyped
-            {
-                applied.skipped += 1;
-                continue;
-            }
-            // The update's decode refused any key that is not a usable key, and bifrost runs the same
+        let mut person = Person::default();
+        for member in devices.members() {
+            // The list's decode refused any key that is not a usable key, and bifrost runs the same
             // check, so this conversion does not fail; a key that did would not be dialable anyway.
             let Ok(node) = member.node.node_id() else {
                 continue;
             };
-            person.devices.insert(
-                member.label.clone(),
-                Binding {
-                    node,
-                    source: Source::Roster { epoch: epoch.0 },
-                },
-            );
-            applied.bound += 1;
+            person
+                .devices
+                .insert(member.label.clone(), Binding { node });
         }
-        // A dropped label the new snapshot laid back down was refreshed, not removed; only the ones the
-        // doc no longer carries are true removals.
-        applied.removed = dropped
-            .into_iter()
-            .filter(|label| !person.devices.contains_key(label))
-            .collect();
-        // An empty `me` person (a roster of only skipped members over no hand-typed device AND no signet)
-        // should not linger; mirror `remove`'s tidy-up. A `me` that kept a hand-typed signet is NOT empty,
-        // so it survives a device-only pull.
-        if self
-            .people
-            .get(&Petname(ME.to_owned()))
-            .is_some_and(Person::is_empty)
-        {
-            self.people.remove(&Petname(ME.to_owned()));
+        if !person.is_empty() {
+            self.people.insert(me, person);
         }
-        applied
     }
 
-    /// Lay this machine's own entry under `me` as `join` reads it from an invite: a hint, held until the
-    /// first fold rebuilds `me` from the root's update. It is never hand-typed, so that fold replaces it.
-    pub fn seed_me(&mut self, label: DeviceLabel, node: NodeId) {
-        self.insert_binding(
-            Petname(ME.to_owned()),
-            label,
-            Binding {
-                node,
-                source: Source::Roster { epoch: 0 },
-            },
-        );
-    }
-
-    /// Forget every device under `me`: a machine that leaves its root, or moves to another, keeps no list
-    /// of the old root's devices.
-    pub fn clear_me(&mut self) {
-        let _ = self.remove(&Petname(ME.to_owned()), None);
-    }
-
-    /// Set the persisted roster epoch floor when the store reconstructs a book from disk. For the store's
-    /// codec ONLY: the floor was established by a prior [`hydrate`], and reload just round-trips it, so a
-    /// restart does not reset the anti-rollback high-water mark to zero.
-    pub(crate) fn set_roster_floor(&mut self, floor: Option<Epoch>) {
-        self.roster_floor = floor;
-    }
-
-    /// Set this book's membership version when the store reconstructs it from disk. For the store's codec
-    /// ONLY: the version was established by a prior membership edit, and reload just round-trips it, so a
-    /// restart does not re-cut the fleet at a version pullers have already applied.
-    pub(crate) fn set_roster_version(&mut self, version: RosterVersion) {
-        self.roster_version = version;
-    }
-
-    /// Insert a fully-formed binding (node + provenance) under a petname's device. For the store's codec,
-    /// which reconstructs persisted state INCLUDING a `Roster` provenance; the trust for that provenance was
-    /// established when it was first hydrated from a verified roster, and persistence just round-trips it.
+    /// Insert a binding under a petname's device. For the store's codec, which reconstructs what was saved.
     pub(crate) fn insert_binding(
         &mut self,
         petname: Petname,
@@ -583,32 +315,24 @@ impl Contacts {
     /// Record (or overwrite) a person's SIGNET root, hand-typed. Idempotent, mirroring [`add`](Self::add):
     /// re-setting the same key is a no-op the caller can report; a different key is a [`Replaced`](Added::Replaced)
     /// the caller can warn on rather than silently clobbering a signet the operator may not mean to lose.
-    /// Always [`Source::HandTyped`] in v1 (federation-synced signets arrive via a future `hydrate`, never
-    /// this path).
     pub fn set_signet(&mut self, petname: Petname, node: NodeId) -> Added {
         let person = self.people.entry(petname).or_default();
-        let binding = Binding {
-            node,
-            source: Source::HandTyped,
-        };
-        match person.signet.replace(binding) {
+        match person.signet.replace(Binding { node }) {
             Some(prev) if prev.node == node => Added::Unchanged,
             Some(prev) => Added::Replaced(prev.node),
             None => Added::Created,
         }
     }
 
-    /// A person's recorded signet binding (node + provenance), or `None` if none is on file. The resolver
-    /// reads `.node`; `status` reads `.source` to mark a hand-typed vs vouched signet.
+    /// A person's recorded signet binding, or `None` if none is on file.
     pub fn signet(&self, petname: &Petname) -> Option<&Binding> {
         self.people
             .get(petname)
             .and_then(|person| person.signet.as_ref())
     }
 
-    /// Insert a fully-formed signet binding (node + provenance) under a petname. For the store codec ONLY,
-    /// reconstructing a persisted signet INCLUDING a future `Roster` provenance, exactly as
-    /// [`insert_binding`](Self::insert_binding) does for devices.
+    /// Insert a signet binding under a petname. For the store codec ONLY, reconstructing a saved signet,
+    /// as [`insert_binding`](Self::insert_binding) does for devices.
     pub(crate) fn set_signet_binding(&mut self, petname: Petname, binding: Binding) {
         self.people.entry(petname).or_default().signet = Some(binding);
     }
@@ -616,20 +340,13 @@ impl Contacts {
     /// Remove a whole petname (all its devices and signet) or, with a device, just that one device. Returns
     /// whether anything was removed. Removing a person's last device removes the now-empty person too, UNLESS
     /// a signet keeps them (a signet-only person is kept), so an empty person never lingers.
-    ///
-    /// A removal that takes at least one DEVICE out of `me` bumps
-    /// [`roster_version`](Self::roster_version), on the same rule [`add`](Self::add) follows: the member
-    /// set changed. Dropping a signet-only `me` changes no member, so it does not bump.
     pub fn remove(&mut self, petname: &Petname, device: Option<&DeviceLabel>) -> Removed {
-        let mine = petname.as_str() == ME;
         let Entry::Occupied(mut entry) = self.people.entry(petname.clone()) else {
             return Removed::Absent;
         };
-        let (removed, lost_a_device) = match device {
+        match device {
             None => {
-                let had_devices = !entry.get().devices.is_empty();
                 entry.remove();
-                (Removed::Removed, had_devices)
             }
             Some(device) => {
                 let person = entry.get_mut();
@@ -641,65 +358,9 @@ impl Contacts {
                 if person.is_empty() {
                     entry.remove();
                 }
-                (Removed::Removed, true)
             }
-        };
-        if mine && lost_a_device {
-            self.roster_version = self.roster_version.bumped();
         }
-        removed
-    }
-}
-
-/// The outcome of a [`hydrate`](Contacts::hydrate): the snapshot was folded in, or refused and why.
-///
-/// A typed outcome rather than a bool because the two refusals mean different things to an operator (an
-/// unversioned cutter needs an upgrade on the OTHER machine; a not-newer doc means there is simply nothing
-/// new) and because an applied fold is not news until it says what it changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[must_use]
-pub enum Hydrated {
-    /// The snapshot was applied and the floor advanced; the report names what changed.
-    Applied(Applied),
-    /// The doc was stamped the reserved [`Epoch::UNVERSIONED`], so it came from a cutter that predates
-    /// membership versioning. Nothing can fix that from this side: the fleet's owner has to upgrade and
-    /// make one membership edit.
-    Unversioned,
-    /// The doc was not newer than this book's floor, so it was refused wholesale as a replay.
-    NotNewer {
-        /// The highest epoch this book has already applied.
-        floor: Epoch,
-    },
-}
-
-/// What an applied [`hydrate`](Contacts::hydrate) actually did to the `me/*` partition.
-///
-/// The doc's member COUNT is not this, and reporting it as if it were is how a pull that bound nothing
-/// (or deleted devices) still read as a success.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Applied {
-    bound: usize,
-    skipped: usize,
-    removed: Vec<DeviceLabel>,
-}
-
-impl Applied {
-    /// How many of the doc's members are now bound under `me/*`.
-    pub fn bound(&self) -> usize {
-        self.bound
-    }
-
-    /// How many of the doc's members were passed over because a sovereign `HandTyped` binding already
-    /// held that label. They were NOT pulled in, and counting them as pulled is the lie.
-    pub fn skipped(&self) -> usize {
-        self.skipped
-    }
-
-    /// The devices this snapshot REMOVED: roster-sourced labels the new doc no longer carries. A
-    /// snapshot-replace is destructive by design (it is what makes a removed member disappear), so the
-    /// caller must be able to name what went.
-    pub fn removed(&self) -> &[DeviceLabel] {
-        &self.removed
+        Removed::Removed
     }
 }
 

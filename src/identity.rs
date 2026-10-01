@@ -1,7 +1,7 @@
 //! The node identity: the ed25519 secret every swoosh verb binds under.
 //!
 //! Identity is chosen by intent, and exactly one intent CREATES a key. A verb that must be *reachable at
-//! a stable address* (`serve`) persists its secret at `<home>/key`: it loads that key and writes
+//! a stable address* (`serve`) persists its secret at `<home>/machine/key`: it loads that key and writes
 //! one on first use, so restarting the node keeps its address. A verb that only *reaches outward* (`ping`,
 //! `speed`, `reach`, including the `reach` behind `swoosh ssh`) LOADS that key when it already exists,
 //! because the membership badge it presents must root at the key the dial binds under, and mints a
@@ -29,7 +29,8 @@
 //! The secret is a [`Secret`] newtype, never a bare `[u8; 32]`: it zeroizes its bytes on drop so the
 //! key does not linger in freed memory, and it lends them out only at the boundaries that need them raw.
 //!
-//! The persisted default lives at `~/.config/swoosh/key`, mode 0600.
+//! The key lives at `<home>/machine/key`, mode 0600, in a directory system backups leave out
+//! ([`make_machine_dir`]): a copy of the key acts as this machine.
 
 use bifrost::NodeId;
 use keystore::{KeyFile, Protection, Stored};
@@ -110,7 +111,7 @@ pub enum Identity {
     PersistedIfPresent,
 }
 
-/// Resolve the secret a verb binds under from its home: the key is always `<home>/key`, and the
+/// Resolve the secret a verb binds under from its home: the key is always `<home>/machine/key`, and the
 /// verb's [`Identity`] ALONE decides whether one is written.
 ///
 /// The home names the directory, default or explicit alike. A `--home`/`SWOOSH_HOME` run does not turn an
@@ -133,7 +134,7 @@ pub fn resolve_with(
     match intent {
         Identity::Persisted => match open(&file, prompt)? {
             Some(secret) => Ok(secret),
-            None => mint(&file),
+            None => mint(home, &file),
         },
         Identity::Ephemeral => Ok(Secret::ephemeral()),
         // Load the persisted key only if it already exists; never create it. So a provisioned operator's
@@ -143,7 +144,7 @@ pub fn resolve_with(
     }
 }
 
-/// Load the persisted secret at `<home>/key` if the file exists and holds a key, else `None`,
+/// Load the persisted secret at `<home>/machine/key` if the file exists and holds a key, else `None`,
 /// WITHOUT creating one. A bound invite carries no seed, so `join` uses this to require the key the
 /// badge was signed for; a home with no identity gets a teaching error, never a fresh key minted over
 /// the invite's binding.
@@ -160,7 +161,7 @@ pub fn inspect(home: &Home) -> eyre::Result<Inspected> {
     let file = key_file(home);
     match file.load()? {
         Some(stored) => Ok(Inspected::Found(stored)),
-        None => mint(&file).map(|secret| Inspected::Made(Stored::Plain(secret.0))),
+        None => mint(home, &file).map(|secret| Inspected::Made(Stored::Plain(secret.0))),
     }
 }
 
@@ -211,7 +212,7 @@ fn open(file: &KeyFile, prompt: &mut impl Prompt) -> eyre::Result<Option<Secret>
 
 /// Mint a fresh key into the empty key file, plain: the default a home is created with. A home that
 /// cannot be written is named with the system's reason, the one thing a person can act on.
-fn mint(file: &KeyFile) -> eyre::Result<Secret> {
+fn mint(home: &Home, file: &KeyFile) -> eyre::Result<Secret> {
     let secret = keystore::Secret::generate()?;
     let dir = file.path().parent().unwrap_or(file.path());
     let cannot = |reason: &dyn core::fmt::Display| {
@@ -220,7 +221,7 @@ fn mint(file: &KeyFile) -> eyre::Result<Secret> {
             EscapedPath(dir)
         )
     };
-    create_dir(file).map_err(|error| cannot(&error))?;
+    make_machine_dir(home).map_err(|error| cannot(&error))?;
     file.write(&secret, Protection::Plain)
         .map_err(|error| match &error {
             keystore::Error::Io { source, .. } => cannot(source),
@@ -229,15 +230,100 @@ fn mint(file: &KeyFile) -> eyre::Result<Secret> {
     Ok(Secret(secret))
 }
 
-/// Create the directory the key file lives in, owner-only, as every store file's directory is.
-fn create_dir(file: &KeyFile) -> std::io::Result<()> {
-    match file.path().parent() {
-        Some(dir) => crate::config::create_store_dir(dir),
-        None => Ok(()),
-    }
+/// Make `<home>/machine/`, owner-only like the home above it, and mark it for system backups to leave out,
+/// before any key is written into it: on macOS the Time Machine exclusion `tmutil addexclusion` sets, on
+/// other platforms a `CACHEDIR.TAG` holding the standard signature. Only this directory is marked, never the
+/// home: a copy of the key acts as this machine, while a copy of the root is a backup. The mark sits on the
+/// directory because a file's is lost when the file is replaced by a rename, and every key write is one.
+/// Safe to run again: a directory already made and marked is left as it is.
+///
+/// # Errors
+///
+/// The directory could not be made, or marked.
+pub fn make_machine_dir(home: &Home) -> std::io::Result<()> {
+    let dir = home.machine();
+    crate::config::create_store_dir(&dir)?;
+    mark_for_no_backup(&dir)
 }
 
-/// Write `seed` as the persisted identity at `<home>/key`, plain, mode 0600, creating the store
+/// The extended attribute Time Machine reads to leave an item out, as `tmutil addexclusion` sets it.
+#[cfg(target_os = "macos")]
+pub const TIME_MACHINE_EXCLUSION: &str = "com.apple.metadata:com_apple_backup_excludeItem";
+
+/// The value `tmutil addexclusion` writes under [`TIME_MACHINE_EXCLUSION`]: the binary property list of the
+/// string `com.apple.backupd`.
+#[cfg(target_os = "macos")]
+pub const TIME_MACHINE_EXCLUDED: &[u8] = b"bplist00_\x10\x11com.apple.backupd\x08\0\0\0\0\0\0\x01\x01\0\0\0\0\0\0\0\x01\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\x1c";
+
+/// Exclude `dir` from Time Machine, the way `tmutil addexclusion <dir>` does: the exclusion travels with
+/// the directory, so a key renamed into it later is left out too.
+#[cfg(target_os = "macos")]
+// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+fn mark_for_no_backup(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::ffi::CString::new(dir.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    let name = std::ffi::CString::new(TIME_MACHINE_EXCLUSION)
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+    // SAFETY: `path` and `name` are live NUL-terminated strings, and `TIME_MACHINE_EXCLUDED` is a live
+    // static of the length passed; `setxattr` only reads them for the length of the call.
+    let set = unsafe {
+        libc::setxattr(
+            path.as_ptr(),
+            name.as_ptr(),
+            TIME_MACHINE_EXCLUDED.as_ptr().cast(),
+            TIME_MACHINE_EXCLUDED.len(),
+            0,
+            0,
+        )
+    };
+    if set != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// The name of the tag backup tools read to leave a directory out.
+#[cfg(not(target_os = "macos"))]
+pub const CACHEDIR_TAG: &str = "CACHEDIR.TAG";
+
+/// The first line every `CACHEDIR.TAG` starts with, which is what makes it one.
+#[cfg(not(target_os = "macos"))]
+pub const CACHEDIR_SIGNATURE: &str = "Signature: 8a477f597d28d172789f06886806bc55";
+
+/// Leave a `CACHEDIR.TAG` in `dir` (owner-only, as every file in the home), which restic, borg, tar
+/// `--exclude-caches` and other backup tools read to skip it. One already there is kept.
+#[cfg(not(target_os = "macos"))]
+// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+fn mark_for_no_backup(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let opened = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(dir.join(CACHEDIR_TAG));
+    let mut tag = match opened {
+        Ok(tag) => tag,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    tag.write_all(
+        format!(
+            "{CACHEDIR_SIGNATURE}\n\
+             # This directory holds this machine's swoosh key; backups leave it out.\n\
+             # See https://bford.info/cachedir/\n"
+        )
+        .as_bytes(),
+    )?;
+    tag.sync_all()
+}
+
+/// Write `seed` as the persisted identity at `<home>/machine/key`, plain, mode 0600, creating the store
 /// dir, REFUSING a home that already holds a different one.
 ///
 /// This is how `join` provisions the device identity a later `serve` binds from an invite that carries a
@@ -268,7 +354,7 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
         Some(passphrase) => Protection::Passphrase(passphrase),
         None => Protection::Plain,
     };
-    create_dir(&file)?;
+    make_machine_dir(home)?;
     match file.adopt(&secret, protection) {
         Ok(()) => Ok(()),
         Err(keystore::Error::Different {
@@ -287,7 +373,7 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
 
 /// Write `seed` over `made`, the key [`inspect`] made earlier in this same run and nothing has used yet:
 /// bare `join` printed that key, and the invite pasted after it carries its own. Any other key at
-/// `<home>/key` is refused. Held under the home lock exclusive, so a node that started meanwhile, serving
+/// `<home>/machine/key` is refused. Held under the home lock exclusive, so a node that started meanwhile, serving
 /// as `made`, refuses it.
 pub fn replace_made(seed: &[u8; 32], made: NodeId, home: &Home) -> eyre::Result<()> {
     let _lock = HomeLock::new_key(home)?;
@@ -301,11 +387,11 @@ pub fn replace_made(seed: &[u8; 32], made: NodeId, home: &Home) -> eyre::Result<
     }
     let mut copy = Zeroizing::new(*seed);
     let secret = keystore::Secret::take(&mut copy);
-    let staged = KeyFile::device(home.dir().join("key.new"));
+    let staged = KeyFile::device(home.machine().join("key.new"));
     replace::remove(staged.path())?;
     staged.write(&secret, Protection::Plain)?;
     std::fs::rename(staged.path(), file.path())?;
-    std::fs::File::open(home.dir())?.sync_all()?;
+    std::fs::File::open(home.machine())?.sync_all()?;
     Ok(())
 }
 

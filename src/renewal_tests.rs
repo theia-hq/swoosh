@@ -94,6 +94,7 @@ async fn device(tag: &str, seed: u8, until: u64) -> Home {
     config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
+    crate::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
@@ -324,7 +325,7 @@ async fn a_door_renewal_never_writes_the_pin() {
     let (nas, _) = nas_renewing("pin-nas", renewed).await;
     let laptop = lapsed_laptop("pin-laptop").await;
     let pin = |home: &Home| {
-        let meta = std::fs::metadata(home.signet()).unwrap();
+        let meta = std::fs::metadata(home.root_pub()).unwrap();
         (meta.ino(), meta.mtime(), meta.mtime_nsec())
     };
     let before = pin(&laptop);
@@ -351,8 +352,8 @@ async fn a_door_renewal_never_writes_the_pin() {
 async fn pick_up_never_dials_a_machine_outside_me() {
     let laptop = lapsed_laptop("outside-me").await;
     // The invite's `from`, and a contact's device: neither is under `me`.
-    std::fs::write(laptop.roster_seed(), format!("{}\n", node(STRANGER))).unwrap();
-    let mut store = ContactsStore::open(laptop.contacts()).await.unwrap();
+    std::fs::write(laptop.invited_by(), format!("{}\n", node(STRANGER))).unwrap();
+    let mut store = ContactsStore::open(&laptop).await.unwrap();
     store.contacts_mut().add(
         "alice".parse().unwrap(),
         Some("laptop".parse().unwrap()),

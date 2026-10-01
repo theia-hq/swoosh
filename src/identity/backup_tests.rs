@@ -306,6 +306,7 @@ fn an_unreadable_home_key_is_replaced_only_when_asked() {
     .expect("export");
 
     let (home, dir) = home("restore-unreadable-home");
+    super::super::make_machine_dir(&home).expect("the key's dir");
     std::fs::write(home.key(), [7u8; 16]).expect("a truncated key");
     std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600))
         .expect("owner-only");

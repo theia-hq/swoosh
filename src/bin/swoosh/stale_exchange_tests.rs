@@ -37,6 +37,7 @@ async fn device(tag: &str, hours: u64) -> Home {
     swoosh::config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut seed = TestNode::seeded(DESK).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
@@ -62,7 +63,7 @@ async fn device(tag: &str, hours: u64) -> Home {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    std::fs::write(home.roster_synced(), format!("{}\n", now - hours * 3600)).unwrap();
+    std::fs::write(home.synced(), format!("{}\n", now - hours * 3600)).unwrap();
     home
 }
 
@@ -84,11 +85,7 @@ async fn ping(home: &Home, peer: &str, dial: &Answering) -> eyre::Result<()> {
     let Verb::Outward(outward @ Outward::Ping(_)) = command.split() else {
         panic!("ping is a reaching verb");
     };
-    let contacts = ContactsStore::open(home.contacts())
-        .await
-        .unwrap()
-        .contacts()
-        .clone();
+    let contacts = ContactsStore::open(home).await.unwrap().contacts().clone();
     let bound = swoosh::transport::Bound {
         transport: swoosh::transport::Transport::Iroh,
         local: false,

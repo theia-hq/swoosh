@@ -29,6 +29,7 @@ pub(super) fn home(tag: &str) -> (Home, PathBuf) {
 async fn a_wrong_size_key_file_refuses_and_is_never_overwritten() {
     let (home, dir) = home("wrong-size");
     let path = home.key();
+    super::make_machine_dir(&home).expect("the key's dir");
     let corrupt = [7u8; 16];
     std::fs::write(&path, corrupt).expect("seed a wrong-size key file");
     // The mode guard reads before the size check, so lock the corrupt file owner-only: this test is about
@@ -95,8 +96,8 @@ async fn a_write_lands_the_key_atomically_owner_only() {
         assert_eq!(mode & 0o777, 0o600, "the key lands owner-only");
     }
 
-    let entries: Vec<String> = std::fs::read_dir(&dir)
-        .expect("read the home dir")
+    let entries: Vec<String> = std::fs::read_dir(home.machine())
+        .expect("read the key's dir")
         .map(|entry| {
             entry
                 .expect("a dir entry")
@@ -104,6 +105,7 @@ async fn a_write_lands_the_key_atomically_owner_only() {
                 .to_string_lossy()
                 .into_owned()
         })
+        .filter(|name| name != "CACHEDIR.TAG")
         .collect();
     assert_eq!(
         entries,
@@ -200,6 +202,7 @@ async fn a_group_or_world_readable_key_is_refused_with_a_chmod_hint() {
 
     let (home, dir) = home("too-open");
     let path = home.key();
+    super::make_machine_dir(&home).expect("the key's dir");
     let seed = [5u8; 32];
     std::fs::write(&path, seed).expect("seed the key");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod 644");

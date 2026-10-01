@@ -11,8 +11,9 @@ The `Usage` line under each command is hand-copied from the parser's `-h` output
 These apply to most commands and are omitted from the per-command signatures below:
 
 - `--home <dir>` (or `SWOOSH_HOME`) use a specific node home directory. The home is the whole profile: the
-  key lives at `<home>/key`, and its contacts, the signet it trusts, and its membership all live
-  beside it, so one `--home` moves the whole identity. Without it the default `~/.config/swoosh` applies.
+  key lives at `<home>/machine/key`, and its contacts, the signet it trusts, and its membership all live
+  beside it, so one `--home` moves the whole identity. Without it the default applies:
+  `~/Library/Application Support/swoosh` on macOS, `$XDG_STATE_HOME/swoosh` or `~/.local/state/swoosh` on Linux.
 - `--transport <iroh|quirk|quirk+noise>` which backend to bind. See [transports](../transports.md).
 - `--peer <key=addr>` a direct address hint, for when discovery cannot reach a peer (mainly quirk). See
   [transports](../transports.md#quirk).

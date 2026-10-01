@@ -154,7 +154,7 @@ fn issue(home: &Path, args: &[&str]) -> Link {
 
 /// This machine's key, as `serve` created it: the seed a test signs with as the serving machine.
 fn own_seed(home: &Path) -> [u8; 32] {
-    std::fs::read(home.join("key"))
+    std::fs::read(home.join("machine").join("key"))
         .unwrap()
         .try_into()
         .expect("a plain key file is its 32 bytes")
@@ -294,7 +294,7 @@ async fn a_self_anchored_session_survives_ten_sweeps_and_a_leave() {
 
     let session = echo_session(&node, &served, link, None).await;
     let (mut write, mut read) = open(&session).await.expect("the link is admitted");
-    std::fs::remove_file(scratch.0.join("signet")).expect("leave: the pin goes");
+    std::fs::remove_file(scratch.0.join("root.pub")).expect("leave: the pin goes");
     for sweep in 0..10 {
         tokio::time::sleep(SWEEP).await;
         assert!(

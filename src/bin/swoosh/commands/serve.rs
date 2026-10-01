@@ -216,7 +216,7 @@ pub(crate) async fn admitting(home: &Home, own: NodeId, root: NodeId) -> eyre::R
     if swoosh::config::is_disabled(home, root).await? {
         eyre::bail!("root:{root} was revoked on this machine; recovery is a new root.");
     }
-    let store = ContactsStore::open(home.contacts()).await?;
+    let store = ContactsStore::open(home).await?;
     let contacts = store.contacts();
     if let Some(person) = contacts.petnames().find(|person| {
         contacts

@@ -154,7 +154,7 @@ impl LeaveCmd {
 /// This machine's name among your devices, from `me`, when it has one there.
 async fn own_name(home: &Home) -> Option<String> {
     let own = swoosh::identity::inspect(home).ok()?.stored().node_id();
-    let store = ContactsStore::open(home.contacts()).await.ok()?;
+    let store = ContactsStore::open(home).await.ok()?;
     let me = Petname::stored(ME).ok()?;
     let devices = store.contacts().devices(&me)?;
     devices

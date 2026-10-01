@@ -4,18 +4,13 @@ use swoosh::home::Home;
 
 use super::RmCmd;
 
-/// A scratch home with `me/desk` and `alice/macbook` on file.
+/// A scratch home with `alice/macbook` on file.
 async fn populated_home(tag: &str) -> Home {
     let dir = std::env::temp_dir().join(format!("swoosh-contact-rm-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let home = Home::resolve(Some(dir)).expect("resolve");
-    let mut store = ContactsStore::open(home.contacts()).await.expect("open");
-    store.contacts_mut().add(
-        "me".parse().expect("me"),
-        Some("desk".parse().expect("label")),
-        NodeId::from_ed25519_secret(&[4u8; 32]),
-    );
+    let mut store = ContactsStore::open(&home).await.expect("open");
     store.contacts_mut().add(
         "alice".parse().expect("alice"),
         Some("macbook".parse().expect("label")),
@@ -65,7 +60,7 @@ async fn removing_a_peer_is_saved() {
     remove(&home, "alice/macbook")
         .await
         .expect("a removal outside me/ is saved");
-    let store = ContactsStore::open(home.contacts()).await.expect("open");
+    let store = ContactsStore::open(&home).await.expect("open");
     assert!(
         !store
             .contacts()

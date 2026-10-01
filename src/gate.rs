@@ -121,7 +121,7 @@ pub enum RevokedKeysError {
 /// admission reads.
 pub const MAX_REVOKED_KEYS_LEN: u64 = 1 << 20;
 
-/// The pin as `serve` reads it: `<home>/signet`, afresh on every admission.
+/// The pin as `serve` reads it: `<home>/root.pub`, afresh on every admission.
 ///
 /// It re-stats the file at most once per [`STAT_DEBOUNCE`] and re-reads it when its [`FileStamp`]
 /// changed, so a pin written while `serve` runs is trusted at the next admission with no restart.
@@ -169,10 +169,10 @@ enum Reading {
 }
 
 impl FilePin {
-    /// The pin at `<home>/signet`, checked against `latch`. Reads nothing until it is first asked.
+    /// The pin at `<home>/root.pub`, checked against `latch`. Reads nothing until it is first asked.
     pub fn open(home: &Home, latch: Arc<Revoked>) -> Self {
         Self {
-            path: home.signet(),
+            path: home.root_pub(),
             latch,
             admit: None,
             state: Mutex::new(PinState {

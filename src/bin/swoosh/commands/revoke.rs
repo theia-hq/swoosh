@@ -161,7 +161,7 @@ impl RevokeCmd {
             }
             Target::PersonDevice(device) => {
                 self.no_root()?;
-                let store = ContactsStore::open(home.contacts()).await?;
+                let store = ContactsStore::open(home).await?;
                 let candidates = store
                     .contacts()
                     .resolve_candidates(&device)
@@ -468,7 +468,7 @@ impl Publish {
 
 /// `<person>`: every link given to any device of that contact, and every link bound to their root.
 async fn person_links(home: &Home, person: &Petname, err: &mut impl Write) -> eyre::Result<()> {
-    let store = ContactsStore::open(home.contacts()).await?;
+    let store = ContactsStore::open(home).await?;
     let contacts = store.contacts();
     let whole: ContactRef = person.as_str().parse()?;
     let mut holders: Vec<String> = match contacts.resolve_candidates(&whole) {
@@ -555,7 +555,7 @@ async fn also(home: &Home, key: NodeId) -> eyre::Result<Vec<String>> {
             "{short} is also your device me/{name}: `swoosh revoke me/{name}` revokes the device."
         ));
     }
-    let store = ContactsStore::open(home.contacts()).await?;
+    let store = ContactsStore::open(home).await?;
     let contacts = store.contacts();
     let mut roots = Vec::new();
     if pin == Some(verify) {

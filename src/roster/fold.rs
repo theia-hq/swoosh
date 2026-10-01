@@ -1,7 +1,7 @@
 //! The fold: how an update reaches this machine's files, whoever carried it.
 //!
 //! A root act's own cut, an update taken in an exchange, and one given to this machine in an exchange all
-//! fold here, and nowhere else writes `roster`. The fold verifies the update under the pin, compares it with
+//! fold here, and nowhere else writes `devices`. The fold verifies the update under the pin, compares it with
 //! the one held, and only ever adds: a revoked id or key it learns is written to the files the gate reads,
 //! and none is ever removed. A fork another device passes on in an exchange folds here too
 //! ([`fold_fork`]), and never becomes the update held.
@@ -20,7 +20,6 @@ use nauthy::{DenylistError, FileDenylist, VerifyKey};
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::{ArtifactError, Epoch, MAX_ROSTER_BLOB, RosterDoc, RosterVerifyError};
-use crate::contacts::ContactsStore;
 use crate::escape::EscapedPath;
 use crate::gate::RevokedKeysError;
 use crate::home::Home;
@@ -34,7 +33,7 @@ pub enum Folded {
     /// The update held here, byte for byte: nothing written.
     Same,
     /// Another update at the number of the one held here: two copies of the root both signed. Its
-    /// revocations were added, it was kept as `roster.fork`, and `roster` was left as it was.
+    /// revocations were added, it was kept as `devices.conflict`, and `devices` was left as it was.
     Fork {
         /// The number of the update held here.
         floor: Epoch,
@@ -88,9 +87,9 @@ pub enum FoldError {
 ///
 /// Folds run only on a device of a root, one that holds it or not. Below the update held here is not
 /// newer; the same bytes change nothing; another update at the same number is a fork, whose revocations
-/// are added and which is kept as evidence. A newer update adds its revocations, rebuilds `me`, gives this
-/// machine a newer standing it carries, and becomes the update held here; `roster.fork` goes only once an
-/// update carries everything the fork revoked.
+/// are added and which is kept as evidence. A newer update adds its revocations, gives this machine a
+/// newer standing it carries, and becomes the update held here, from which `me` is read; `devices.conflict`
+/// goes only once an update carries everything the fork revoked.
 pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
     let _lock = RosterLock::take(&home.roster_lock()).await?;
     let (pin, badge_until) = match Standing::read(home).await?.standing {
@@ -104,7 +103,7 @@ pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
         return Err(FoldError::TooLarge);
     }
     let doc = super::verify(bytes, pin)?;
-    let held = read_held(&home.roster(), pin);
+    let held = read_held(&home.devices(), pin);
     seam().await;
     let floor = held
         .as_ref()
@@ -122,11 +121,8 @@ pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
         },
         core::cmp::Ordering::Greater => {
             revoke(home, &doc).await?;
-            let mut contacts = ContactsStore::open(home.contacts()).await?;
-            let _ = contacts.contacts_mut().rebuild_me(&doc);
-            contacts.save().await?;
             pick_up(home, &doc, pin, badge_until).await?;
-            super::write(&home.roster(), bytes).await?;
+            super::write(&home.devices(), bytes).await?;
             clear_fork(home, &doc, pin)?;
             Ok(Folded::Newer)
         }
@@ -137,7 +133,7 @@ pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
 ///
 /// Folds run only on a device of a root, one that holds it or not. A fork that is the update held here, or
 /// whose revocations the update held here all carries, changes nothing. Any other adds its revocations,
-/// whatever its number, and is kept as `roster.fork` unless a fork is kept already, so the next exchange
+/// whatever its number, and is kept as `devices.conflict` unless a fork is kept already, so the next exchange
 /// here passes it on. It never becomes the update held here.
 pub async fn fold_fork(home: &Home, bytes: &[u8]) -> Result<(), FoldError> {
     let _lock = RosterLock::take(&home.roster_lock()).await?;
@@ -152,7 +148,7 @@ pub async fn fold_fork(home: &Home, bytes: &[u8]) -> Result<(), FoldError> {
         return Err(FoldError::TooLarge);
     }
     let fork = super::verify(bytes, pin)?;
-    if let Some((held, held_bytes)) = read_held(&home.roster(), pin)
+    if let Some((held, held_bytes)) = read_held(&home.devices(), pin)
         && (held_bytes.as_slice() == bytes || carries(&held, &fork))
     {
         return Ok(());
@@ -226,18 +222,18 @@ async fn pick_up(
     Ok(())
 }
 
-/// Keep `bytes` as `roster.fork`, unless a fork of this root is kept already.
+/// Keep `bytes` as `devices.conflict`, unless a fork of this root is kept already.
 async fn keep_fork(home: &Home, bytes: &[u8], pin: VerifyKey) -> Result<(), FoldError> {
-    if read_held(&home.roster_fork(), pin).is_none() {
-        super::write(&home.roster_fork(), bytes).await?;
+    if read_held(&home.devices_conflict(), pin).is_none() {
+        super::write(&home.devices_conflict(), bytes).await?;
     }
     Ok(())
 }
 
-/// Remove `roster.fork` once `doc` carries every revoked id that has not ended and every revoked key of
+/// Remove `devices.conflict` once `doc` carries every revoked id that has not ended and every revoked key of
 /// the fork kept.
 fn clear_fork(home: &Home, doc: &RosterDoc, pin: VerifyKey) -> Result<(), FoldError> {
-    let path = home.roster_fork();
+    let path = home.devices_conflict();
     let Some((fork, _)) = read_held(&path, pin) else {
         return Ok(());
     };

@@ -3,7 +3,7 @@
 //! The caller holds the home lock exclusive ([`HomeLock::new_key`](super::HomeLock::new_key)), so no node
 //! serves as the key being replaced. The new key is written whole beside the old one first; the old one
 //! is then linked to its kept name and the new one renamed over it, so a crash at any step leaves either
-//! the old key or the new one at `<home>/key`, never neither.
+//! the old key or the new one at `<home>/machine/key`, never neither.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ pub struct Replaced {
 /// The refusal when the new key is to be locked and nobody is at a terminal to choose its passphrase.
 pub const CHOOSE_NEEDS_TERMINAL: &str = "the new key is locked like the old one, and choosing its passphrase needs a terminal: run this at one.";
 
-/// A fresh random key written whole at `<home>/key.new`, not yet in place. Staging runs every step that
+/// A fresh random key written whole at `<home>/machine/key.new`, not yet in place. Staging runs every step that
 /// can ask or fail, so a caller stages first, makes its own writes, then [`put`](Self::put)s it. Dropped
 /// unput, the staged file is removed.
 #[derive(Debug)]
@@ -38,14 +38,15 @@ pub struct NewKey {
     key: NodeId,
     /// Whether the home had a key to keep aside.
     had_old: bool,
-    /// `<home>/key.new`.
+    /// `<home>/machine/key.new`.
     staged: PathBuf,
     /// Whether it was put, so the drop leaves it.
     put: bool,
 }
 
 impl NewKey {
-    /// Choose the new passphrase if the old key was locked, and write the new key at `<home>/key.new`.
+    /// Choose the new passphrase if the old key was locked, and write the new key at
+    /// `<home>/machine/key.new`.
     pub fn stage(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Self> {
         let path = home.key();
         let old = KeyFile::device(&path).load()?;
@@ -62,7 +63,8 @@ impl NewKey {
             .as_ref()
             .map_or(Protection::Plain, Protection::Passphrase);
         let secret = keystore::Secret::generate()?;
-        let staged = home.dir().join("key.new");
+        super::make_machine_dir(home)?;
+        let staged = home.machine().join("key.new");
         remove(&staged)?;
         let new = Self {
             key: secret.node_id(),
@@ -74,8 +76,9 @@ impl NewKey {
         Ok(new)
     }
 
-    /// Put the staged key in place, keeping the old key and `links` as `key.replaced-<day>[-n]` and
-    /// `links.replaced-<day>[-n]` with the first `n` free for both. `day` is today, as `YYYY-MM-DD`.
+    /// Put the staged key in place, keeping the old key as `machine/key.replaced-<day>[-n]` and `links` as
+    /// `links.replaced-<day>[-n]` with the first `n` free for both. `day` is today, as `YYYY-MM-DD`. The
+    /// old key stays in `machine/`, which system backups leave out, as a key's every copy here does.
     pub fn put(mut self, home: &Home, day: &str) -> eyre::Result<Replaced> {
         let path = home.key();
         let (kept, links_kept) = free_names(home, day);
@@ -93,6 +96,7 @@ impl NewKey {
         } else {
             None
         };
+        std::fs::File::open(home.machine())?.sync_all()?;
         std::fs::File::open(home.dir())?.sync_all()?;
         Ok(Replaced {
             key: self.key,
@@ -119,7 +123,7 @@ fn free_names(home: &Home, day: &str) -> (PathBuf, PathBuf) {
             format!("{day}-{n}")
         };
         (
-            home.dir().join(format!("key.replaced-{suffix}")),
+            home.machine().join(format!("key.replaced-{suffix}")),
             home.dir().join(format!("links.replaced-{suffix}")),
         )
     };

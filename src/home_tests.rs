@@ -3,8 +3,35 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use super::xdg_runtime_root;
+use super::{macos_state_home, xdg_runtime_root, xdg_state_home};
 use crate::escape::Escaped;
+
+/// Both platforms' default homes, whichever platform runs the test: macOS's under `Application Support`,
+/// and the XDG rule, which takes `XDG_STATE_HOME` only when it is absolute. The binary's own platform is
+/// driven end to end in `tests/home_layout.rs`.
+#[test]
+fn the_default_home_rule_holds_on_each_platform() {
+    let user = PathBuf::from("/home/you");
+    assert_eq!(
+        macos_state_home(&user),
+        PathBuf::from("/home/you/Library/Application Support/swoosh")
+    );
+    assert_eq!(
+        xdg_state_home(&user, None),
+        PathBuf::from("/home/you/.local/state/swoosh")
+    );
+    assert_eq!(
+        xdg_state_home(&user, Some(OsString::from("/var/state"))),
+        PathBuf::from("/var/state/swoosh")
+    );
+    for ignored in ["", "state", "./state"] {
+        assert_eq!(
+            xdg_state_home(&user, Some(OsString::from(ignored))),
+            PathBuf::from("/home/you/.local/state/swoosh"),
+            "a relative XDG_STATE_HOME {ignored:?} is ignored"
+        );
+    }
+}
 
 /// The refusal a `serve` prints where no private runtime directory resolves.
 const NO_RUNTIME_DIR: &str = "swoosh serve needs a private runtime directory. Set XDG_RUNTIME_DIR to a \
@@ -348,4 +375,35 @@ fn a_loose_known_hosts_is_on_the_trust_list() {
     };
     assert_eq!(path, home.known_hosts());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A key file is loose when another user owns it, or group or other can read or write it; reading is named
+/// first, since the key is a secret.
+#[test]
+fn a_key_file_is_loose_when_others_can_read_or_write_it() {
+    use super::Loose::{Owner, Readable, Writable};
+
+    let me = 501;
+    for (owner, mode, want) in [
+        (me, 0o100_600, None),
+        (me, 0o100_640, Some(Readable)),
+        (me, 0o100_604, Some(Readable)),
+        (me, 0o100_666, Some(Readable)),
+        (me, 0o100_620, Some(Writable)),
+        (0, 0o100_600, None),
+        (
+            502,
+            0o100_600,
+            Some(Owner {
+                owner: 502,
+                euid: me,
+            }),
+        ),
+    ] {
+        assert_eq!(
+            super::loose_key_by(owner, mode, me),
+            want,
+            "owner {owner}, mode {mode:o}"
+        );
+    }
 }

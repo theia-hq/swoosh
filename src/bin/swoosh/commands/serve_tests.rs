@@ -2136,7 +2136,7 @@ fn serve_without_a_runtime_dir_refuses_before_binding() {
             "{xdg:?}: {stderr}"
         );
         assert!(
-            !scratch.home_dir.join("key").exists(),
+            !scratch.home_dir.join("machine").join("key").exists(),
             "{xdg:?}: nothing was made or bound"
         );
     }
@@ -3277,9 +3277,7 @@ async fn serve_admit_refuses_what_it_must_not_admit() {
     );
 
     let home = scratch("contact");
-    let mut store = swoosh::contacts::ContactsStore::open(home.contacts())
-        .await
-        .unwrap();
+    let mut store = swoosh::contacts::ContactsStore::open(&home).await.unwrap();
     store
         .contacts_mut()
         .set_signet("alice".parse().unwrap(), root);
@@ -3302,6 +3300,7 @@ async fn serve_admit_refuses_what_it_must_not_admit() {
     .await
     .unwrap();
     let mut seed = TestNode::seeded(0x11).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     keystore::KeyFile::device(home.key())
         .write(
             &keystore::Secret::take(&mut seed),
@@ -3316,7 +3315,7 @@ async fn serve_admit_refuses_what_it_must_not_admit() {
     let home = scratch("admits");
     let lock = super::admitting(&home, own, root).await.expect("admits");
     assert_eq!(swoosh::joining::AdmitLock::admitted(&home), Some(root));
-    assert!(!home.signet().exists(), "no pin is written");
+    assert!(!home.root_pub().exists(), "no pin is written");
     drop(lock);
     assert_eq!(swoosh::joining::AdmitLock::admitted(&home), None);
 }

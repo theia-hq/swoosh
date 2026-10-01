@@ -425,8 +425,8 @@ mod tests {
     /// An UNPROVISIONED home for a resolver test: no stored badge and no signet, so its standing is
     /// `Unpinned` and a plain dial presents nothing.
     ///
-    /// A unique empty dir, never the default home: the default is the developer's own
-    /// `~/.config/swoosh`, so on any joined machine these cases would read that machine's real badge
+    /// A unique empty dir, never the default home: the default is the developer's own home, so on any
+    /// joined machine these cases would read that machine's real badge
     /// and the suite would pass or fail by whose laptop it ran on. That was invisible while the
     /// resolver ignored the badge's expiry; now that it refuses a dead one, it would be a suite that
     /// dies on the calendar.

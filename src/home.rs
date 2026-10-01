@@ -1,13 +1,14 @@
 //! The node home: the one directory every file this node owns derives from.
 //!
 //! A node is a DIRECTORY, not a lone key file. `--home <dir>` (env `SWOOSH_HOME`) names it; with neither,
-//! the default `~/.config/swoosh` applies. The key is always `<home>/key`, and the
-//! signet it gates on, the membership badge it presents, the contacts book, the mint-log ledger, and the
+//! the platform's per-user state place applies (`~/Library/Application Support/swoosh` on macOS,
+//! `$XDG_STATE_HOME/swoosh` or `~/.local/state/swoosh` elsewhere). The key is always `<home>/machine/key`,
+//! and the root it gates on, the certificate it presents, the contacts book, the links ledger, and the
 //! revocation denylist all hang off the SAME dir, so one home moves the whole identity+trust unit together.
 //! This is the `GNUPGHOME` / `CARGO_HOME` model: a home dir is a whole profile, not a key you point at.
 //!
 //! Every node path is a pure function of the home, so this type is the ONE place "what files make up one
-//! node's state" is answered; a caller reads a path off it (`home.signet()`, `home.revoked()`) rather than
+//! node's state" is answered; a caller reads a path off it (`home.root_pub()`, `home.revoked()`) rather than
 //! re-deriving one from a key file's parent in a scattered spot.
 
 use std::path::{Path, PathBuf};
@@ -28,7 +29,8 @@ pub struct Home {
     selection: Selection,
 }
 
-/// How the home was chosen: defaulted to `~/.config/swoosh`, or named explicitly (`--home`/`SWOOSH_HOME`).
+/// How the home was chosen: defaulted to the platform's state place, or named explicitly
+/// (`--home`/`SWOOSH_HOME`).
 ///
 /// An enum, not a bare bool, so the "did the caller pin this home" question reads as intent at every use
 /// site and a future selection source (say a config file) forces a decision here rather than silently
@@ -48,7 +50,7 @@ enum Selection {
 
 impl Home {
     /// Resolve the home from the optional `--home`/`SWOOSH_HOME` selection: the named dir when given, else
-    /// the default `~/.config/swoosh`. Fallible only in the default case (it reads `HOME`), and it rejects
+    /// the platform default (`default_dir`). Fallible only in the default case (it reads `HOME`), and it rejects
     /// an explicit home that names an existing FILE with a teaching error (the home is a directory; the key
     /// lives INSIDE it at `key`), the inverse of the old point-at-a-file mistake.
     pub fn resolve(selected: Option<PathBuf>) -> eyre::Result<Self> {
@@ -79,10 +81,16 @@ impl Home {
         self.selection == Selection::Explicit
     }
 
-    /// `<home>/key`: the ed25519 secret every verb binds under (0600). Always inside the home,
+    /// `<home>/machine/`: the directory that holds this machine's key, and nothing a backup should keep.
+    /// The one directory system backups leave out, because a copy of the key acts as this machine.
+    pub fn machine(&self) -> PathBuf {
+        self.dir.join("machine")
+    }
+
+    /// `<home>/machine/key`: the ed25519 secret every verb binds under (0600). Always inside the home,
     /// never a path the user points at directly.
     pub fn key(&self) -> PathBuf {
-        self.dir.join("key")
+        self.machine().join("key")
     }
 
     /// `<home>/key.lock`: the lock that keeps a running node and a restore apart. Separate from
@@ -97,15 +105,16 @@ impl Home {
         self.dir.join("admit.lock")
     }
 
-    /// `<home>/signet`: the public [`NodeId`](bifrost::NodeId) of the signet this node trusts, written by
-    /// `join`, read by the `serve` gate.
-    pub fn signet(&self) -> PathBuf {
-        self.dir.join("signet")
+    /// `<home>/root.pub`: the root that vouches for this machine, written by `join` and the first `invite`,
+    /// read by the `serve` gate.
+    pub fn root_pub(&self) -> PathBuf {
+        self.dir.join("root.pub")
     }
 
-    /// `<home>/badge`: the signet-signed, device-bound membership badge this device presents on connect.
-    pub fn badge(&self) -> PathBuf {
-        self.dir.join("badge")
+    /// `<home>/key.cert`: your root's certificate for this machine's key, which this machine presents on
+    /// connect: its name among your devices and its end date.
+    pub fn key_cert(&self) -> PathBuf {
+        self.dir.join("key.cert")
     }
 
     /// `<home>/relay`: the relay this node offers as its home relay, written by `serve --relay` and read
@@ -122,21 +131,21 @@ impl Home {
         self.dir.join("resolver")
     }
 
-    /// `<home>/roster`: the newest update this machine holds from its root. Only a fold writes it: a root
-    /// act's own cut, or one taken in an exchange with another device.
-    pub fn roster(&self) -> PathBuf {
-        self.dir.join("roster")
+    /// `<home>/devices`: the newest list of your devices this machine has seen, signed by your root. Only a
+    /// fold writes it: a root act's own cut, or one taken in an exchange with another device.
+    pub fn devices(&self) -> PathBuf {
+        self.dir.join("devices")
     }
 
-    /// `<home>/roster.synced`: when a sync last reached another device, in unix seconds.
-    pub fn roster_synced(&self) -> PathBuf {
-        self.dir.join("roster.synced")
+    /// `<home>/synced`: when a sync last reached another device, in unix seconds.
+    pub fn synced(&self) -> PathBuf {
+        self.dir.join("synced")
     }
 
-    /// `<home>/roster.seed`: the key of the machine that made this machine's invite, the first device a
-    /// sync asks.
-    pub fn roster_seed(&self) -> PathBuf {
-        self.dir.join("roster.seed")
+    /// `<home>/invited-by`: the key of the machine whose invite this machine joined, the first device a
+    /// sync asks. Removed once a sync lands.
+    pub fn invited_by(&self) -> PathBuf {
+        self.dir.join("invited-by")
     }
 
     /// `<home>/roster.lock`: the flock every fold holds, so two folds never read one floor and both write.
@@ -145,11 +154,11 @@ impl Home {
         self.dir.join("roster.lock")
     }
 
-    /// `<home>/roster.fork`: an update of the root other than the one in `roster`, kept as evidence that
-    /// two copies of the root signed: one seen at the number of the one in `roster`, or one another device
-    /// passed on in an exchange, at any number.
-    pub fn roster_fork(&self) -> PathBuf {
-        self.dir.join("roster.fork")
+    /// `<home>/devices.conflict`: a list of your devices your root signed other than the one in
+    /// [`devices`](Self::devices), kept as evidence that two copies of the root signed: one seen at the
+    /// number of the one in `devices`, or one another device passed on in an exchange, at any number.
+    pub fn devices_conflict(&self) -> PathBuf {
+        self.dir.join("devices.conflict")
     }
 
     /// `<home>/root/`: the root, held here only by a machine that holds it.
@@ -253,8 +262,7 @@ impl Home {
 
     /// `<home>/known_hosts`: the private host-key book `swoosh ssh` pins peers into, keyed on the
     /// immutable node id (not the petname) via ssh's `HostKeyAlias`. A node path like every other, so an
-    /// isolated `--home` isolates its pins too; the default home's book stays at the historical
-    /// `~/.config/swoosh/known_hosts`, since that IS the default home.
+    /// isolated `--home` isolates its pins too.
     pub fn known_hosts(&self) -> PathBuf {
         self.dir.join("known_hosts")
     }
@@ -264,7 +272,7 @@ impl Home {
     /// pins (a writer who plants a host key there can sit between this machine and a peer).
     fn trust_files(&self) -> [PathBuf; 11] {
         [
-            self.signet(),
+            self.root_pub(),
             self.links(),
             self.contacts(),
             self.revoked(),
@@ -296,6 +304,25 @@ impl Home {
             }
         }
         Ok(())
+    }
+
+    /// Refuse a home whose key file another user owns, or group or other can read or write, before any verb
+    /// runs, so the refusal is this line and not the key store's. A key that is absent, or that cannot be
+    /// stat'ed, passes: its reader reports what is wrong with it. Bits that let others neither read nor write
+    /// the key are left to the key store, which refuses them too.
+    ///
+    /// # Errors
+    ///
+    /// [`LooseFile`] naming the key file, and why.
+    pub fn check_key_file(&self) -> Result<(), LooseFile> {
+        let path = self.key();
+        let Ok(meta) = std::fs::metadata(&path) else {
+            return Ok(());
+        };
+        match loose_key(&meta) {
+            Some(why) => Err(LooseFile { path, why }),
+            None => Ok(()),
+        }
     }
 
     /// The 16-char hex key scoping this home's runtime state: inline 64-bit FNV-1a over the
@@ -438,19 +465,52 @@ pub(crate) fn xdg_runtime_root(value: Option<std::ffi::OsString>) -> eyre::Resul
     Ok(root.join("swoosh"))
 }
 
-/// The default home, `~/.config/swoosh`. Reads `HOME`, so it fails with a teaching error when unset (a
-/// caller can always name the home explicitly with `--home <dir>` instead).
+/// The default home, the platform's per-user state place: [`macos_state_home`] on macOS,
+/// [`xdg_state_home`] elsewhere. Reads `HOME`, so it fails with a teaching error when unset (a caller can
+/// always name the home explicitly with `--home <dir>` instead).
 fn default_dir() -> eyre::Result<PathBuf> {
-    let home =
-        std::env::var_os("HOME").ok_or_else(|| eyre!("HOME is not set; pass --home <dir>"))?;
-    Ok(PathBuf::from(home).join(".config").join("swoosh"))
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .ok_or_else(|| eyre!("HOME is not set; pass --home <dir>"))?;
+    #[cfg(target_os = "macos")]
+    let dir = macos_state_home(Path::new(&home));
+    #[cfg(not(target_os = "macos"))]
+    let dir = xdg_state_home(Path::new(&home), std::env::var_os("XDG_STATE_HOME"));
+    Ok(dir)
 }
 
-/// Where a `recv:` with no directory saves: `inbox` in this user's data directory for swoosh,
-/// `~/Library/Application Support/swoosh/inbox` on macOS, else `$XDG_DATA_HOME/swoosh/inbox` when that is set
-/// and absolute, else `~/.local/share/swoosh/inbox`. Never the directory `serve` was started in: a push names
-/// its own path under the output directory, so a `serve` started in `$HOME` would put the home's files in
-/// reach of every sender. `None` when there is no `HOME` to place it under.
+/// The macOS default home under the user's home directory `user`: `~/Library/Application Support/swoosh`.
+#[cfg_attr(
+    all(not(target_os = "macos"), not(test)),
+    allow(dead_code, reason = "only macOS places its home here")
+)]
+pub(crate) fn macos_state_home(user: &Path) -> PathBuf {
+    user.join("Library")
+        .join("Application Support")
+        .join("swoosh")
+}
+
+/// The Linux default home: `$XDG_STATE_HOME/swoosh` when the variable is set and absolute (the XDG rule
+/// ignores a relative value), else `~/.local/state/swoosh` under the user's home directory `user`. A pure
+/// function over the values, so the rule is tested the same on every platform.
+#[cfg_attr(
+    all(target_os = "macos", not(test)),
+    allow(dead_code, reason = "macOS places its home under Application Support")
+)]
+pub(crate) fn xdg_state_home(user: &Path, xdg_state: Option<std::ffi::OsString>) -> PathBuf {
+    xdg_state
+        .map(PathBuf::from)
+        .filter(|state| state.is_absolute())
+        .unwrap_or_else(|| user.join(".local").join("state"))
+        .join("swoosh")
+}
+
+/// Where a `recv:` with no directory saves: `~/Library/Application Support/swoosh-inbox` on macOS, else
+/// `$XDG_DATA_HOME/swoosh/inbox` when that is set and absolute, else `~/.local/share/swoosh/inbox`. Never
+/// inside the default home, which on macOS sits in the same base directory as `swoosh`, so the inbox there
+/// is its sibling. Never the directory `serve` was started in: a push names its own path under the output
+/// directory, so a `serve` started in `$HOME` would put the home's files in reach of every sender. `None`
+/// when there is no `HOME` to place it under.
 pub fn inbox() -> Option<PathBuf> {
     #[cfg(not(target_os = "macos"))]
     if let Some(data) = std::env::var_os("XDG_DATA_HOME")
@@ -463,10 +523,17 @@ pub fn inbox() -> Option<PathBuf> {
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)?;
     #[cfg(target_os = "macos")]
-    let data = home.join("Library").join("Application Support");
+    let inbox = home
+        .join("Library")
+        .join("Application Support")
+        .join("swoosh-inbox");
     #[cfg(not(target_os = "macos"))]
-    let data = home.join(".local").join("share");
-    Some(data.join("swoosh").join("inbox"))
+    let inbox = home
+        .join(".local")
+        .join("share")
+        .join("swoosh")
+        .join("inbox");
+    Some(inbox)
 }
 
 /// A trust file this machine will not load, because someone other than its owner could have written it.
@@ -487,6 +554,15 @@ impl core::fmt::Display for LooseFile {
             // The command names the absolute path, so it runs from any directory and a relative home that
             // starts with `-` or `=` is never read as an option or an expansion. When no word is sure to
             // read back as the path in every shell, the line names no command (O1).
+            // A key: the lead names the full path too, so the line reads the same from any directory.
+            Loose::Readable => {
+                let full = std::path::absolute(&self.path).unwrap_or_else(|_| self.path.clone());
+                write!(f, "{} can be read by others", EscapedPath(&full))?;
+                match shell_word(&full) {
+                    Some(word) => write!(f, ": chmod 600 {word}"),
+                    None => Ok(()),
+                }
+            }
             Loose::Writable => {
                 write!(f, "{path} can be written by others")?;
                 match std::path::absolute(&self.path)
@@ -584,6 +660,8 @@ impl core::error::Error for LooseFile {}
 /// What makes a trust file loose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Loose {
+    /// Group or other can read the file: a key file, which holds a secret.
+    Readable,
     /// Group or other can write the file.
     Writable,
     /// Another user, not root, owns the file.
@@ -610,6 +688,37 @@ fn loose(meta: &std::fs::Metadata) -> Option<Loose> {
     {
         let _ = meta;
         None
+    }
+}
+
+/// What makes the key file `meta` describes loose, or `None` when it is sound: another user owns it, or
+/// group or other can read or write it.
+fn loose_key(meta: &std::fs::Metadata) -> Option<Loose> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        // SAFETY: `geteuid` takes no arguments and touches no memory.
+        loose_key_by(meta.uid(), meta.mode(), unsafe { libc::geteuid() })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        None
+    }
+}
+
+/// The rule [`loose_key`] applies: [`loose_by`]'s owner rule, then [`Loose::Readable`] when group or other
+/// can read the key, then [`loose_by`]'s write rule.
+#[cfg_attr(
+    not(unix),
+    allow(dead_code, reason = "only unix has owners and modes to check")
+)]
+fn loose_key_by(owner: u32, mode: u32, euid: u32) -> Option<Loose> {
+    match loose_by(owner, mode, euid) {
+        Some(Loose::Owner { owner, euid }) => Some(Loose::Owner { owner, euid }),
+        _ if mode & 0o044 != 0 => Some(Loose::Readable),
+        other => other,
     }
 }
 
@@ -685,14 +794,14 @@ pub fn loose_in(error: &std::io::Error) -> Option<Loose> {
 
 /// Reject a `--home` that names an existing FILE, with a teaching error instead of the confusing
 /// `Not a directory` the first file IO under it would surface. A home is a DIRECTORY (the key lives inside
-/// it at `key`); pointing it at a file is the inverse of the old point-at-a-key-file mistake, so
+/// it at `machine/key`); pointing it at a file is the inverse of the old point-at-a-key-file mistake, so
 /// name the fix. A no-op for a not-yet-created home (a fresh install creates the dir); it only fires on an
 /// existing file.
 fn reject_home_file(dir: &Path) -> eyre::Result<()> {
     if dir.is_file() {
         return Err(eyre!(
             "--home wants a directory, not a file: {file}. The key lives inside the home at \
-             {file}/key; pass the directory, e.g. {parent}",
+             {file}/machine/key; pass the directory, e.g. {parent}",
             file = EscapedPath(dir),
             parent = EscapedPath(dir.parent().unwrap_or(dir)),
         ));

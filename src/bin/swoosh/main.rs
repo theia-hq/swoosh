@@ -16,7 +16,7 @@
 //! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
 //! key and keeps a stable address across runs (and across transports: `--transport iroh|quirk|quirk+noise`
 //! swaps the backend without changing the key). The outward verbs only dial out, so they mint a throwaway
-//! key each run unless you pin a home with `--home`/`SWOOSH_HOME` (the key then lives at `<home>/key`).
+//! key each run unless you pin a home with `--home`/`SWOOSH_HOME` (the key then lives at `<home>/machine/key`).
 //! The full verb arc (send, tunnel, share, fetch, run, cluster, MagicDNS names) is tracked in the README's
 //! Roadmap; it ticks as it ships.
 
@@ -40,6 +40,18 @@ use crate::commands::{
 
 mod commands;
 
+/// `--home`'s help line, naming the default home of the platform this binary was built for
+/// ([`swoosh::home::Home::resolve`]).
+#[cfg(target_os = "macos")]
+const HOME_HELP: &str =
+    "use <dir> as this machine's home (default ~/Library/Application Support/swoosh)";
+
+/// `--home`'s help line, naming the default home of the platform this binary was built for
+/// ([`swoosh::home::Home::resolve`]).
+#[cfg(not(target_os = "macos"))]
+const HOME_HELP: &str =
+    "use <dir> as this machine's home (default $XDG_STATE_HOME/swoosh, else ~/.local/state/swoosh)";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "swoosh",
@@ -53,10 +65,11 @@ mod commands;
     arg_required_else_help = true
 )]
 struct Cli {
-    /// the node home: key, contacts, trust (default `~/.config/swoosh`)
     // clap appends the `[env: SWOOSH_HOME]` annotation itself from `env` below, so the help must NOT
-    // spell the env var again (doing so double-prints it).
+    // spell the env var again (doing so double-prints it). The default is a runtime path clap cannot
+    // render, so the line names the one for the platform this binary was built for.
     #[arg(
+        help = HOME_HELP,
         long = "home",
         id = "node-home",
         value_name = "dir",
@@ -452,7 +465,7 @@ fn reject_retired_key_env(present: bool) -> eyre::Result<()> {
     if present {
         eyre::bail!(
             "`SWOOSH_KEY` is gone; use `SWOOSH_HOME` (the node is a directory; the key lives at \
-             `$SWOOSH_HOME/key`)"
+             `$SWOOSH_HOME/machine/key`)"
         );
     }
     Ok(())
@@ -516,12 +529,14 @@ async fn run() -> eyre::Result<()> {
         std::process::exit(2);
     };
 
-    // The node home, resolved ONCE from `--home`/`SWOOSH_HOME` (else the default `~/.config/swoosh`): every
+    // The node home, resolved ONCE from `--home`/`SWOOSH_HOME` (else the platform default): every
     // node path (identity key, signet, badge, contacts, denylist, ledger) derives from it, so a verb never
     // re-derives one and two verbs can never disagree on where the store is.
     let home = Home::resolve(cli.home)?;
     // Before any verb reads it: a trust file another user could have written is never loaded.
     home.check_trust_files()?;
+    // And a key file others can read is refused with its own line, never the key store's.
+    home.check_key_file()?;
 
     // Local verbs run here, before any transport is composed and (for `tree`) before the store is even
     // opened: `tree` is pure introspection over clap's own model, and `contact` only edits the address
@@ -591,7 +606,7 @@ async fn run() -> eyre::Result<()> {
                 // `issue` reads the address book (to resolve a `--for` petname to a device), so it opens
                 // the store; it binds no transport.
                 grant::GrantCmd::Issue(cmd) => {
-                    let store = ContactsStore::open(home.contacts()).await?;
+                    let store = ContactsStore::open(&home).await?;
                     cmd.run(store, &home).await
                 }
                 grant::GrantCmd::Narrow(cmd) => cmd.run(),
@@ -601,7 +616,7 @@ async fn run() -> eyre::Result<()> {
         // tightbeam as its `ProxyCommand`). swoosh binds no transport here; on unix `run` execs and does
         // not return on success.
         Verb::Ssh(cmd) => {
-            let store = ContactsStore::open(home.contacts()).await?;
+            let store = ContactsStore::open(&home).await?;
             return cmd.run(store.contacts(), &home);
         }
         Verb::Outward(outward) => {
@@ -617,7 +632,7 @@ async fn run() -> eyre::Result<()> {
 
     // The address book lives in the node home, `<home>/contacts.toml`. A reach verb reads it to resolve a
     // petname in its peer slot.
-    let store = ContactsStore::open(home.contacts()).await?;
+    let store = ContactsStore::open(&home).await?;
 
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward
     // verb binds the home's key where one exists (its badge roots there) and a throwaway where none does,
@@ -1661,14 +1676,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         swoosh::config::create_store_dir(&dir).expect("create the home");
         let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
-        std::fs::write(home.signet(), format!("{key}\n")).expect("write the pin");
+        std::fs::write(home.root_pub(), format!("{key}\n")).expect("write the pin");
         let error = swoosh::config::load_signet(&home)
             .await
             .expect_err("a torsioned pin is refused");
         assert_eq!(
             error.to_string(),
             swoosh::standing::damaged_line(&swoosh::standing::Disagreement::UnreadablePin {
-                path: home.signet()
+                path: home.root_pub()
             }),
             "the stored bad key reads as the damaged home"
         );

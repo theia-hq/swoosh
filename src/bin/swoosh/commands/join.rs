@@ -199,8 +199,6 @@ impl JoinCmd {
             Join {
                 root,
                 standing: &invite.standing,
-                own,
-                name: invite.name.clone(),
                 from: invite.from,
                 pin_changes: was != Some(root),
             },

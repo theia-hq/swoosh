@@ -11,7 +11,7 @@ On the machine that will hold your signet, create the key sealed under a passphr
 <!-- manual: the passphrase is typed at the terminal -->
 ```console
 $ swoosh identity protect passphrase
-new passphrase for ~/.config/swoosh/key:
+new passphrase for ~/Library/Application Support/swoosh/machine/key:
 repeat the new passphrase:
 ed012xdjkuwbokai5brwac6varo7xsvuxba6wmfkottpronrhjavyp4q
 protection: passphrase
@@ -32,7 +32,7 @@ node in the foreground; `swoosh serve &` stops at the prompt until you bring it 
 <!-- manual: the backup destination is a path only the operator knows -->
 ```console
 $ swoosh identity export /Volumes/backup/signet.key
-passphrase for ~/.config/swoosh/key:
+passphrase for ~/Library/Application Support/swoosh/machine/key:
 new passphrase for /Volumes/backup/signet.key:
 repeat the new passphrase:
 exported to /Volumes/backup/signet.key

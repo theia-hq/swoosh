@@ -17,7 +17,7 @@ Usage: swoosh status [OPTIONS] [peer]
 <!-- live-run: the key and its path differ per machine -->
 ```console
 $ swoosh status
-made this machine's key (first run): /home/me/.config/swoosh/key
+made this machine's key (first run): /home/me/.local/state/swoosh/machine/key
 key: ed01hskmy456mldlsiqv4vuno7t37jzj2rqt3ipnnq4wvd5h67ahnk7q
 lock: none
 root: none yet.

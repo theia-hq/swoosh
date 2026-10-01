@@ -57,6 +57,7 @@ async fn device_home(tag: &str, seed: u8) -> Home {
     swoosh::config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
@@ -244,7 +245,7 @@ fn a_damaged_home_lets_no_key_reach_the_door() {
         let laptop = Node::new(MemTransport::bind(), NoDiscovery);
         renewing(&nas, laptop.node_id()).await;
         // A pin with no standing beside it: the home reads as damaged.
-        std::fs::remove_file(nas.badge()).unwrap();
+        std::fs::remove_file(nas.key_cert()).unwrap();
         let host = Node::new(MemTransport::bind(), NoDiscovery);
         let host_id = host.node_id();
         serve(nas, host);

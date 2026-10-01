@@ -29,59 +29,105 @@ use tightbeam::tunnel::Connector;
 const DIALING: BindRole = BindRole::Dialing(Credential::Family { present: None });
 
 /// One test's directories, removed on drop: `user` stands in for `$HOME`, `home` is the swoosh home (kept
-/// out of `user`, so each refusal is reached by its own rule), and `work` is where `serve` is started.
+/// out of `user`, so each refusal is reached by its own rule, unless the test uses the default home), and
+/// `work` is where `serve` is started.
 struct Scratch {
     base: PathBuf,
     user: PathBuf,
     home: PathBuf,
     work: PathBuf,
+    /// Whether `home` is named with `--home`, or is the platform default under `user`.
+    named: bool,
 }
 
 impl Scratch {
     fn new(tag: &str) -> Self {
         let base = std::env::temp_dir().join(format!("sw-inbox-{tag}-{}", std::process::id()));
+        Self::made(base.join("home"), base, true)
+    }
+
+    /// A scratch whose swoosh home is the platform default under `user`, named by nothing.
+    fn at_default(tag: &str) -> Self {
+        let base = std::env::temp_dir().join(format!("sw-inbox-{tag}-{}", std::process::id()));
+        #[cfg(target_os = "macos")]
+        let home = base
+            .join("user")
+            .join("Library")
+            .join("Application Support")
+            .join("swoosh");
+        #[cfg(not(target_os = "macos"))]
+        let home = base
+            .join("user")
+            .join(".local")
+            .join("state")
+            .join("swoosh");
+        Self::made(home, base, false)
+    }
+
+    fn made(home: PathBuf, base: PathBuf, named: bool) -> Self {
         let _ = std::fs::remove_dir_all(&base);
         let scratch = Self {
             user: base.join("user"),
-            home: base.join("home"),
             work: base.join("work"),
+            home,
             base,
+            named,
         };
-        for dir in [&scratch.user, &scratch.home, &scratch.work] {
+        for dir in [&scratch.user, &scratch.work] {
             std::fs::create_dir_all(dir).unwrap();
+        }
+        if named {
+            std::fs::create_dir_all(&scratch.home).unwrap();
         }
         scratch
     }
 
-    /// The inbox `serve` resolves when `HOME` is `user` and `XDG_DATA_HOME` is unset.
+    /// The inbox `serve` resolves when `HOME` is `user` and `XDG_DATA_HOME` is unset: beside the default
+    /// home on macOS, never in it.
     fn inbox(&self) -> PathBuf {
         #[cfg(target_os = "macos")]
-        let data = self.user.join("Library").join("Application Support");
+        let inbox = self
+            .user
+            .join("Library")
+            .join("Application Support")
+            .join("swoosh-inbox");
         #[cfg(not(target_os = "macos"))]
-        let data = self.user.join(".local").join("share");
-        data.join("swoosh").join("inbox")
+        let inbox = self
+            .user
+            .join(".local")
+            .join("share")
+            .join("swoosh")
+            .join("inbox");
+        inbox
     }
 
-    /// `swoosh --home <home> serve --transport quirk+noise <args>`, with `HOME` set to `user` and started in
-    /// `cwd`.
+    /// `swoosh [--home <home>] <args>`, with `HOME` set to `user` and nothing else choosing a directory.
+    fn swoosh(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_swoosh"));
+        if self.named {
+            command.arg("--home").arg(&self.home);
+        }
+        command
+            .args(args)
+            .env("HOME", &self.user)
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("SWOOSH_HOME")
+            .stdin(Stdio::null());
+        command
+    }
+
+    /// `swoosh [--home <home>] serve --transport quirk+noise <args>`, with `HOME` set to `user` and started
+    /// in `cwd`.
     fn serve(&self, cwd: &Path, args: &[&str]) -> Command {
         use std::os::unix::fs::PermissionsExt as _;
 
         let run = self.base.join("run");
         std::fs::create_dir_all(&run).unwrap();
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_swoosh"));
-        command
-            .arg("--home")
-            .arg(&self.home)
-            .args(["serve", "--transport", "quirk+noise"])
-            .args(args)
-            .current_dir(cwd)
-            .env("HOME", &self.user)
-            .env("XDG_RUNTIME_DIR", &run)
-            .env_remove("XDG_DATA_HOME")
-            .env_remove("SWOOSH_HOME")
-            .stdin(Stdio::null());
+        let mut command =
+            self.swoosh(&[&["serve", "--transport", "quirk+noise"][..], args].concat());
+        command.current_dir(cwd).env("XDG_RUNTIME_DIR", &run);
         command
     }
 
@@ -120,7 +166,7 @@ impl Scratch {
             "serve {args:?} names the directory and why"
         );
         assert!(
-            !self.home.join("key").exists(),
+            !self.home.join("machine").join("key").exists(),
             "serve {args:?} made no key"
         );
         assert!(output.stdout.is_empty(), "serve {args:?} printed no banner");
@@ -180,14 +226,11 @@ fn serve(scratch: &Scratch, cwd: &Path, args: &[&str]) -> Served {
     }
 }
 
-/// The link `grant issue <service>` prints on `home`, once a running `serve` can have seen its ledger row.
-fn issue(home: &Path, service: &str) -> nauthy::Link {
-    let output = Command::new(env!("CARGO_BIN_EXE_swoosh"))
-        .arg("--home")
-        .arg(home)
-        .args(["grant", "issue", service])
-        .env_remove("SWOOSH_HOME")
-        .stdin(Stdio::null())
+/// The link `grant issue <service>` prints on the scratch's home, once a running `serve` can have seen its
+/// ledger row.
+fn issue(scratch: &Scratch, service: &str) -> nauthy::Link {
+    let output = scratch
+        .swoosh(&["grant", "issue", service])
         .output()
         .expect("the binary runs");
     assert!(
@@ -235,7 +278,7 @@ async fn a_dirless_recv_saves_into_the_inbox() {
 
     let scratch = Scratch::new("dirless");
     let served = serve(&scratch, &scratch.work, &["inbox=recv:"]);
-    let link = issue(&scratch.home, "inbox");
+    let link = issue(&scratch, "inbox");
     push(&served, "inbox", link, b"notes.txt", b"hello").await;
 
     let landed = scratch.inbox().join("notes.txt");
@@ -264,6 +307,37 @@ async fn a_dirless_recv_saves_into_the_inbox() {
         "inbox=recv:\n",
         "the saved list keeps the inbox, not the start directory"
     );
+}
+
+/// With the home in its platform default place, named by nothing, a dirless `recv:` still saves: the inbox
+/// is outside that home (on macOS both sit under `Application Support`), so the rule that refuses a
+/// directory inside the home never meets it.
+#[tokio::test]
+async fn a_dirless_recv_beside_the_default_home_saves_into_the_inbox() {
+    let scratch = Scratch::at_default("default-home");
+    let served = serve(&scratch, &scratch.work, &["inbox=recv:"]);
+    assert!(
+        scratch.home.join("machine").join("key").is_file(),
+        "serve runs in the default home"
+    );
+    assert!(
+        !scratch.inbox().starts_with(&scratch.home),
+        "the inbox is not inside the home"
+    );
+    let link = issue(&scratch, "inbox");
+    push(&served, "inbox", link, b"notes.txt", b"hello").await;
+
+    let landed = scratch.inbox().join("notes.txt");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !landed.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the push never landed at {}",
+            landed.display()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(std::fs::read(&landed).unwrap(), b"hello");
 }
 
 /// A `recv:` into `$HOME`, the swoosh home, a directory holding it, or a directory inside it is refused at
@@ -364,7 +438,10 @@ fn an_inbox_that_cannot_be_made_stops_before_the_key() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(stderr.starts_with("error: could not create "), "{stderr}");
-    assert!(!scratch.home.join("key").exists(), "serve made no key");
+    assert!(
+        !scratch.home.join("machine").join("key").exists(),
+        "serve made no key"
+    );
 }
 
 /// A saved list that names such a directory is refused at resume the same way, and nothing starts.

@@ -136,6 +136,7 @@ pub fn restore(
     let _lock = HomeLock::replacing(home)?;
     let backup = read_backup(from)?;
     let file = key_file(home);
+    super::make_machine_dir(home)?;
     let staged = Stage::write(file.path(), &backup.bytes)?;
     // The copy is read at its stage, so a refusal names the backup the user gave, not the stage.
     let locked = match KeyFile::device(staged.path())

@@ -39,6 +39,7 @@ fn home(tag: &str) -> Home {
     config::create_store_dir(&dir).expect("create the home");
     let home = Home::resolve(Some(dir)).expect("resolve the home");
     let mut seed = TestNode::seeded(OWN).seed();
+    crate::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .expect("write this machine's key");
@@ -117,10 +118,10 @@ async fn revoke(home: &Home, key: NodeId) {
 /// The update files, as a device that has synced holds them.
 fn update_files(home: &Home) -> [PathBuf; 4] {
     let files = [
-        home.roster(),
-        home.roster_synced(),
-        home.roster_seed(),
-        home.roster_fork(),
+        home.devices(),
+        home.synced(),
+        home.invited_by(),
+        home.devices_conflict(),
     ];
     for file in &files {
         std::fs::write(file, b"update").expect("write an update file");
@@ -250,7 +251,7 @@ async fn a_root_with_no_pin_is_an_interrupted_mint_whatever_the_badge_holds() {
     }
     let home = home("mint-torn");
     root_dir(&home.root(), ROOT);
-    std::fs::write(home.badge(), b"torn").expect("tear the badge");
+    std::fs::write(home.key_cert(), b"torn").expect("tear the badge");
     assert_eq!(
         read(&home).await.standing,
         Standing::InterruptedMint { root_key: root() }
@@ -295,14 +296,14 @@ async fn a_home_whose_badge_is_self_signed_with_no_pin_reads_damaged() {
 async fn a_torsioned_pin_reads_damaged() {
     let home = home("torsioned-pin");
     std::fs::write(
-        home.signet(),
+        home.root_pub(),
         format!("{}\n", crate::testkit::torsioned_text()),
     )
     .expect("write the pin");
     assert_eq!(
         damaged(&home).await,
         Disagreement::UnreadablePin {
-            path: home.signet()
+            path: home.root_pub()
         }
     );
 }
@@ -378,10 +379,12 @@ async fn a_held_root_with_no_standing_reads_damaged() {
 async fn a_torn_standing_reads_damaged() {
     let home = home("torn-badge");
     pin(&home, root()).await;
-    std::fs::write(home.badge(), b"torn").expect("tear the badge");
+    std::fs::write(home.key_cert(), b"torn").expect("tear the badge");
     assert_eq!(
         damaged(&home).await,
-        Disagreement::UnreadableStanding { path: home.badge() }
+        Disagreement::UnreadableStanding {
+            path: home.key_cert()
+        }
     );
 }
 
@@ -397,13 +400,17 @@ async fn a_standing_for_another_key_reads_damaged() {
         .expect("write the device standing");
     assert_eq!(
         damaged(&home).await,
-        Disagreement::StandingForAnotherKey { path: home.badge() }
+        Disagreement::StandingForAnotherKey {
+            path: home.key_cert()
+        }
     );
     // Held here too.
     root_dir(&home.root(), ROOT);
     assert_eq!(
         damaged(&home).await,
-        Disagreement::StandingForAnotherKey { path: home.badge() }
+        Disagreement::StandingForAnotherKey {
+            path: home.key_cert()
+        }
     );
 }
 
@@ -439,7 +446,9 @@ async fn a_standing_with_no_readable_end_date_reads_damaged() {
             .expect("write the device standing");
         assert_eq!(
             damaged(&home).await,
-            Disagreement::UnreadableStanding { path: home.badge() },
+            Disagreement::UnreadableStanding {
+                path: home.key_cert()
+            },
             "{tag}"
         );
     }
@@ -448,11 +457,11 @@ async fn a_standing_with_no_readable_end_date_reads_damaged() {
 #[tokio::test]
 async fn a_malformed_pin_reads_damaged() {
     let home = home("torn-pin");
-    std::fs::write(home.signet(), b"ed01torn\n").expect("tear the pin");
+    std::fs::write(home.root_pub(), b"ed01torn\n").expect("tear the pin");
     assert_eq!(
         damaged(&home).await,
         Disagreement::UnreadablePin {
-            path: home.signet()
+            path: home.root_pub()
         }
     );
 }
@@ -508,7 +517,7 @@ async fn an_interrupted_retirement_is_finished_by_the_read() {
     assert_eq!(read.standing, Standing::Unpinned);
     assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
     assert!(!home.root_revoking().exists());
-    for gone in files.iter().chain([&home.badge(), &home.signet()]) {
+    for gone in files.iter().chain([&home.key_cert(), &home.root_pub()]) {
         assert!(!gone.exists(), "{} is removed", gone.display());
     }
 }
@@ -571,7 +580,7 @@ async fn a_held_revoked_root_is_retired_with_its_standing() {
     assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
     for gone in files
         .iter()
-        .chain([&home.badge(), &home.signet(), &home.root()])
+        .chain([&home.key_cert(), &home.root_pub(), &home.root()])
     {
         assert!(!gone.exists(), "{} is removed", gone.display());
     }
@@ -587,7 +596,7 @@ async fn apply_on_a_device_killed_after_the_latch_is_finished_by_the_read() {
     let read = read(&home).await;
     assert_eq!(read.standing, Standing::Unpinned);
     assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
-    for gone in files.iter().chain([&home.badge(), &home.signet()]) {
+    for gone in files.iter().chain([&home.key_cert(), &home.root_pub()]) {
         assert!(!gone.exists(), "{} is removed", gone.display());
     }
 }
@@ -599,20 +608,23 @@ async fn a_retirement_removes_the_standing_first_and_the_pin_last() {
     badge(&home, ROOT).await;
     update_files(&home);
     // The last update file cannot be removed: a crash at that step, after every earlier one.
-    std::fs::remove_file(home.roster_fork()).expect("clear the fork file");
-    std::fs::create_dir(home.roster_fork()).expect("block the fork file");
-    std::fs::write(home.roster_fork().join("x"), b"x").expect("fill it");
+    std::fs::remove_file(home.devices_conflict()).expect("clear the fork file");
+    std::fs::create_dir(home.devices_conflict()).expect("block the fork file");
+    std::fs::write(home.devices_conflict().join("x"), b"x").expect("fill it");
     revoke(&home, root()).await;
 
     let failed = Standing::read(&home).await;
     assert!(matches!(failed, Err(StandingError::Finish { .. })));
-    assert!(!home.badge().exists(), "the device standing went first");
-    assert!(home.signet().exists(), "the pin is still here, going last");
+    assert!(!home.key_cert().exists(), "the device standing went first");
+    assert!(
+        home.root_pub().exists(),
+        "the pin is still here, going last"
+    );
 
-    std::fs::remove_dir_all(home.roster_fork()).expect("unblock");
+    std::fs::remove_dir_all(home.devices_conflict()).expect("unblock");
     let read = read(&home).await;
     assert_eq!(read.standing, Standing::Unpinned);
-    assert!(!home.signet().exists());
+    assert!(!home.root_pub().exists());
 }
 
 // Races: another command changes the home between two of the read's steps.
@@ -750,8 +762,8 @@ async fn a_keyless_retirement_removes_a_standing_under_a_revoked_key() {
     let read = read(&home).await;
     assert_eq!(read.standing, Standing::Unpinned);
     assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
-    assert!(!home.badge().exists());
-    assert!(!home.signet().exists());
+    assert!(!home.key_cert().exists());
+    assert!(!home.root_pub().exists());
 }
 
 // Stray files.

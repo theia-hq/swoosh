@@ -233,6 +233,7 @@ async fn device_home(tag: &str, seed: u8) -> Home {
     swoosh::config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
