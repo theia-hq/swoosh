@@ -2391,6 +2391,48 @@ async fn a_device_whose_key_the_list_revoked_meanwhile_is_never_handed_a_new_one
 }
 
 #[tokio::test]
+async fn a_device_the_list_handed_a_new_key_meanwhile_is_never_left_live_by_a_revoke() {
+    // revoke found me/laptop's key before its prompt. While it waited there, this home folded a list
+    // another copy of the root cut, which hands me/laptop a new key. Revoking only the old key would leave
+    // the device live under the new one, so the act stops and prints nothing.
+    let rekeyed = row(
+        TV,
+        "laptop",
+        vec![id(LAPTOP, STANDING_UNTIL), id(TV, STANDING_UNTIL)],
+    );
+    let elsewhere = RosterDoc::new(
+        Epoch(2),
+        vec![
+            member(&own_row()),
+            member(&rekeyed),
+            member(&row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)])),
+        ],
+    )
+    .unwrap();
+    let home = home("prompt-revoke-rekeyed");
+    let mut prompt = FoldingPrompt::new(&home, &elsewhere);
+    let (home, _, mut root) = presented_with("prompt-revoke-rekeyed", &mut prompt).await;
+    assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
+    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+
+    let mut out = Vec::new();
+    let error = root.commit_to(&mut out).await.map(|_| ()).unwrap_err();
+    assert!(matches!(error, RootError::ListChanged), "{error:?}");
+    assert!(
+        out.is_empty(),
+        "a stopped act prints nothing it did not write: {}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(
+        matches!(
+            crate::roster::read_held(&home.devices(), TestRoot::seeded(ROOT).verify_key()),
+            Some((held, _)) if held.epoch() == Epoch(2)
+        ),
+        "nothing was cut"
+    );
+}
+
+#[tokio::test]
 async fn a_key_the_list_named_meanwhile_is_never_added_under_another_name() {
     // While the act waited at its prompt, this home folded a list another copy of the root cut, which
     // names the key TV me/phone. Adding TV as me/tv would rename that device, so the act stops.

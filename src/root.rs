@@ -466,6 +466,9 @@ struct Act {
     renewed: Vec<VerifyKey>,
     /// The latest `until` among the rows this act revoked.
     revoked_until: Option<u64>,
+    /// The devices this act revoked, by name, each with the keys its name held live when it did. The commit
+    /// stops when a name holds another key by then: the revoke would leave the device live under it.
+    revoked: Vec<(DeviceLabel, Vec<VerifyKey>)>,
     /// Whether this act made the root.
     minted: bool,
 }
@@ -709,6 +712,7 @@ impl Root {
             replaced: Vec::new(),
             renewed: Vec::new(),
             revoked_until: None,
+            revoked: Vec::new(),
             minted: false,
         };
         if verb.cuts() {
@@ -944,6 +948,13 @@ impl Root {
     pub fn revoke_device(&mut self, name: &DeviceLabel, key: VerifyKey) -> Result<(), RootError> {
         let act = &mut self.act;
         let now = act.now;
+        let seen: Vec<VerifyKey> = act
+            .book
+            .live()
+            .filter(|row| &row.label == name)
+            .map(|row| row.key)
+            .chain([key])
+            .collect();
         let Some(row) = act.book.live().find(|row| row.key == key) else {
             let revoked = act
                 .book
@@ -956,6 +967,7 @@ impl Root {
             };
             let until = row.until;
             act.revoked_until = Some(act.revoked_until.map_or(until, |latest| latest.max(until)));
+            act.revoked.push((name.clone(), seen));
             return Ok(());
         };
         let (key, until) = (row.key, row.until);
@@ -988,6 +1000,7 @@ impl Root {
         }
         act.book.follow_keys(act.now);
         act.revoked_until = Some(act.revoked_until.map_or(until, |latest| latest.max(until)));
+        act.revoked.push((name.clone(), seen));
         Ok(())
     }
 
@@ -1244,7 +1257,9 @@ impl Act {
     /// - revoked a device it added or renewed, or gave a device it added's name to another key (which
     ///   revokes the act's);
     /// - lists a key it added, under any name: that key was already a device;
-    /// - revoked the old key of a device it handed a new key.
+    /// - revoked the old key of a device it handed a new key;
+    /// - handed a device it revoked a key it did not see: revoking the keys it saw would leave the device
+    ///   live under that one.
     fn again(&mut self, out: &mut impl Write) -> Result<(), RootError> {
         let pin = self.key.verify_key()?;
         let held = read_held(&self.home.devices(), pin);
@@ -1268,7 +1283,12 @@ impl Act {
             !before.contains_key(key.bytes()) && self.book.revoked_keys.contains_key(key.bytes())
         };
         let mut touched = self.added.iter().chain(&self.replaced).chain(&self.renewed);
-        if listed || touched.any(revoked) {
+        let rekeyed = self.revoked.iter().any(|(name, seen)| {
+            self.book
+                .live()
+                .any(|row| &row.label == name && !seen.contains(&row.key))
+        });
+        if listed || rekeyed || touched.any(revoked) {
             return Err(RootError::ListChanged);
         }
         let _ = out.write_all(&brought);
@@ -1513,6 +1533,7 @@ async fn make(
             replaced: Vec::new(),
             renewed: Vec::new(),
             revoked_until: None,
+            revoked: Vec::new(),
             minted: true,
         },
         secret,
@@ -1609,6 +1630,7 @@ async fn finish(
         replaced: Vec::new(),
         renewed: Vec::new(),
         revoked_until: None,
+        revoked: Vec::new(),
         minted: false,
     };
     act.bring_forward(out)?;
