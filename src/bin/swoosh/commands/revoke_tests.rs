@@ -487,10 +487,7 @@ async fn revoke_reports_which_devices_took_it() {
             .all(|member| member.node != key(LAPTOP)),
         "the root's list no longer carries it"
     );
-    assert!(
-        list.revoked_keys().contains(&key(LAPTOP)),
-        "and revokes its key"
-    );
+    assert!(list.is_revoked_key(&key(LAPTOP)), "and revokes its key");
 }
 
 #[tokio::test]
@@ -536,7 +533,7 @@ async fn a_full_row_never_blocks_a_revoke() {
     let err = ran.ok();
     assert!(err.contains("revoked me/phone: me/laptop has it."), "{err}");
     let list = kept_list(&home);
-    assert!(list.revoked_keys().contains(&key(PHONE)));
+    assert!(list.is_revoked_key(&key(PHONE)));
     for id in &phone.ids {
         assert!(list.revoked().contains(id), "every id of the full row");
     }
@@ -826,7 +823,7 @@ async fn an_old_link_never_revokes_the_device_now_named_for_it() {
         "the device now named nas is not"
     );
     let state = kept(&home).await;
-    assert!(!kept_list(&home).revoked_keys().contains(&key(PHONE)));
+    assert!(!kept_list(&home).is_revoked_key(&key(PHONE)));
     assert!(!row_of(&state, "desk").is_revoked());
     assert!(
         state
@@ -1058,7 +1055,7 @@ async fn revoked_holds_ids_device_keys_and_roots_in_one_file() {
             .map(super::super::invite::invite_tests::member)
             .collect(),
         Vec::new(),
-        vec![key(PHONE)],
+        vec![swoosh::testkit::revoked(key(PHONE))],
     )
     .unwrap();
     let home_lock = swoosh::home::HomeWrite::take(&home).await.unwrap();
@@ -1129,7 +1126,7 @@ async fn no_nauthy_lock_file_is_made_in_the_home() {
             .map(super::super::invite::invite_tests::member)
             .collect(),
         Vec::new(),
-        vec![key(PHONE)],
+        vec![swoosh::testkit::revoked(key(PHONE))],
     )
     .unwrap();
     swoosh::roster::fold(
@@ -1185,7 +1182,7 @@ async fn a_stale_copy_cuts_above_the_fleet_from_the_newest_list() {
     let cut = list_in(&stick);
     assert_eq!(cut.epoch(), Epoch(3), "above the list on the stick");
     assert!(
-        cut.revoked_keys().contains(&key(PHONE)),
+        cut.is_revoked_key(&key(PHONE)),
         "the second machine's cut carries the first's revocation"
     );
 
@@ -1199,10 +1196,7 @@ async fn a_stale_copy_cuts_above_the_fleet_from_the_newest_list() {
         Epoch(4),
         "above the newest list, not the backup's"
     );
-    assert!(
-        cut.revoked_keys().contains(&key(PHONE)),
-        "and carries it too"
-    );
+    assert!(cut.is_revoked_key(&key(PHONE)), "and carries it too");
     assert_eq!(kept_list(&second).epoch(), Epoch(4));
 }
 
@@ -1231,7 +1225,7 @@ async fn a_revoke_stopped_after_the_copy_write_is_finished_by_running_it_again()
     let _ = ran.ok();
     let list = kept_list(&home);
     assert_eq!(list.epoch(), Epoch(5), "a cut above the copy's list");
-    assert!(list.revoked_keys().contains(&key(LAPTOP)));
+    assert!(list.is_revoked_key(&key(LAPTOP)));
     assert!(
         !list
             .members()
@@ -1242,11 +1236,10 @@ async fn a_revoke_stopped_after_the_copy_write_is_finished_by_running_it_again()
     assert!(ran.tape.text().contains("<offer>"), "the cut is offered");
 }
 
-/// Where the root is kept, a device revoked here leaves the list with its key and no row, so no name is
-/// left to print: the next `status` shows it by its short key, once, in the name column, and never the
-/// same key again in the key column.
+/// Where the root is kept, a device revoked here leaves the list's live rows, and the list carries its key
+/// with the name it had: the next `status` shows it as `me/laptop`, its short key once, and `revoked`.
 #[tokio::test]
-async fn status_prints_a_device_revoked_here_by_its_short_key_once() {
+async fn status_names_a_device_revoked_here() {
     let home = scratch("revoke-then-status");
     holds(
         &home,
@@ -1269,7 +1262,7 @@ async fn status_prints_a_device_revoked_here_by_its_short_key_once() {
     };
     assert_eq!(
         laptop.split_whitespace().collect::<Vec<_>>(),
-        [short.as_str(), "revoked"],
-        "the key once, then the state: {out}"
+        ["me/laptop", short.as_str(), "revoked"],
+        "the name, the key once, then the state: {out}"
     );
 }

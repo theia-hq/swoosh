@@ -71,7 +71,13 @@ fn members() -> Vec<Member> {
 
 /// The update at `number`, revoking `ids` and `keys`, signed by the root.
 fn update(number: u64, ids: Vec<Id>, keys: Vec<VerifyKey>) -> Vec<u8> {
-    let doc = RosterDoc::with_revocations(Epoch(number), members(), ids, keys).unwrap();
+    let doc = RosterDoc::with_revocations(
+        Epoch(number),
+        members(),
+        ids,
+        keys.into_iter().map(crate::testkit::revoked).collect(),
+    )
+    .unwrap();
     root().sign_update(&doc)
 }
 

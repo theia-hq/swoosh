@@ -12,7 +12,7 @@ use swoosh::contacts::DeviceLabel;
 use swoosh::grants::{ANYONE, Delegation, GrantKind, GrantRecord};
 use swoosh::home::Home;
 use swoosh::root::Date;
-use swoosh::roster::{Epoch, Member, RosterDoc};
+use swoosh::roster::{Epoch, Member, RevokedDevice, RosterDoc};
 use swoosh::serve::control_codec::{DisabledList, ServiceMenu};
 use swoosh::testkit::{STANDING_UNTIL, TestNode, TestRoot};
 use tightbeam::tunnel::ServiceCatalog;
@@ -99,7 +99,15 @@ fn list(home: &Home, list: &RosterDoc) {
 
 /// Make `home` keep `ROOT`, sealed, beside a list of this machine and a laptop that revokes an old device.
 async fn holds(home: &Home) {
-    holds_rows(home, vec![row(LAPTOP, "laptop")], vec![key(OLD)]).await;
+    holds_rows(home, vec![row(LAPTOP, "laptop")], vec![gone(OLD, "old")]).await;
+}
+
+/// The device `seed`, revoked under the name `label`.
+fn gone(seed: u8, label: &str) -> RevokedDevice {
+    RevokedDevice {
+        node: key(seed),
+        label: label.parse().expect("a name"),
+    }
 }
 
 /// The report `home` reads as, rendered.
@@ -206,7 +214,7 @@ async fn status_prints_no_revocations_line() {
                 .expect("a member"),
         ],
         Vec::new(),
-        vec![key(OLD)],
+        vec![gone(OLD, "old")],
     )
     .expect("an update");
     swoosh::roster::fold(
@@ -227,9 +235,8 @@ async fn status_prints_no_revocations_line() {
     let out = status(&keeps).await;
     assert!(
         out.lines()
-            .any(|line| line.starts_with(&format!("  {} ", short_key(OLD)))
-                && line.contains("revoked")),
-        "a revoked device stays a row: {out}"
+            .any(|line| names(line, "me/old", OLD) && line.contains("revoked")),
+        "a revoked device stays a row, by its name: {out}"
     );
     assert!(
         out.contains("root: root:") && out.contains("kept on this machine"),
@@ -242,10 +249,16 @@ async fn status_prints_no_revocations_line() {
     );
     assert!(
         out.lines()
-            .any(|line| line.starts_with(&format!("  {} ", short_key(OLD)))
-                && line.contains("revoked")),
-        "a device keeps a revoked device as a row: {out}"
+            .any(|line| names(line, "me/old", OLD) && line.contains("revoked")),
+        "a device keeps a revoked device as a row, by its name: {out}"
     );
+}
+
+/// Whether the devices row `line` opens with `name` and then the short key of `seed`.
+fn names(line: &str, name: &str, seed: u8) -> bool {
+    line.split_whitespace()
+        .take(2)
+        .eq([name, short_key(seed).as_str()])
 }
 
 /// A row's short form of the key `seed`.
@@ -254,8 +267,8 @@ fn short_key(seed: u8) -> String {
 }
 
 /// The update `ROOT` signed revoking `revoked`, with `laptop` still a member unless it is revoked too.
-fn revoking(epoch: u64, revoked: Vec<VerifyKey>) -> Vec<u8> {
-    let members = if revoked.contains(&key(LAPTOP)) {
+fn revoking(epoch: u64, revoked: Vec<RevokedDevice>) -> Vec<u8> {
+    let members = if revoked.iter().any(|device| device.node == key(LAPTOP)) {
         Vec::new()
     } else {
         vec![
@@ -270,7 +283,7 @@ fn revoking(epoch: u64, revoked: Vec<VerifyKey>) -> Vec<u8> {
 }
 
 /// A device revoked with another copy of the root shows as revoked, where the root is kept and on a device,
-/// by its saved name or else its short key.
+/// by the name the update carries for it.
 #[tokio::test]
 async fn status_shows_a_device_revoked_by_another_copy_as_revoked() {
     let keeps = home("revoked-elsewhere-root");
@@ -278,7 +291,7 @@ async fn status_shows_a_device_revoked_by_another_copy_as_revoked() {
     swoosh::roster::fold(
         &swoosh::home::HomeWrite::take(&keeps).await.unwrap(),
         &keeps,
-        &revoking(2, vec![key(OLD), key(LAPTOP)]),
+        &revoking(2, vec![gone(OLD, "old"), gone(LAPTOP, "laptop")]),
     )
     .await
     .expect("the machine that keeps the root holds the other copy's update");
@@ -286,7 +299,7 @@ async fn status_shows_a_device_revoked_by_another_copy_as_revoked() {
     // The list kept beside the root is the one folded: it carries the laptop's key and no row for it.
     let laptop = out
         .lines()
-        .find(|line| line.starts_with(&format!("  {} ", short_key(LAPTOP))))
+        .find(|line| names(line, "me/laptop", LAPTOP))
         .unwrap_or_else(|| panic!("the laptop is a row: {out}"));
     assert!(
         laptop.contains("revoked") && !laptop.contains("live"),
@@ -298,19 +311,16 @@ async fn status_shows_a_device_revoked_by_another_copy_as_revoked() {
     swoosh::roster::fold(
         &swoosh::home::HomeWrite::take(&device).await.unwrap(),
         &device,
-        &revoking(2, vec![key(OLD), key(LAPTOP)]),
+        &revoking(2, vec![gone(OLD, "old"), gone(LAPTOP, "laptop")]),
     )
     .await
     .expect("the device holds the update");
     let out = status(&device).await;
-    for start in [
-        format!("  {} ", short_key(OLD)),
-        format!("  {} ", short_key(LAPTOP)),
-    ] {
+    for (name, seed) in [("me/old", OLD), ("me/laptop", LAPTOP)] {
         assert!(
             out.lines()
-                .any(|line| line.starts_with(&start) && line.contains("revoked")),
-            "{start:?} is a revoked row: {out}"
+                .any(|line| names(line, name, seed) && line.contains("revoked")),
+            "{name} is a revoked row: {out}"
         );
     }
 }
@@ -341,7 +351,7 @@ async fn status_prints_a_damaged_or_unfinished_root_last() {
 fn use_your_root_now_counts_devices_as_quoted() {
     let now = 1_000 * DAY;
     let due = super::DeviceRow {
-        label: Some("laptop".parse().expect("a name")),
+        label: "laptop".parse().expect("a name"),
         key: key(LAPTOP),
         until: now + 10 * DAY,
         duration: 90 * DAY,
@@ -426,7 +436,7 @@ fn the_gate_never_reads_the_ledger() {
 }
 
 /// Make `home` keep `ROOT`, sealed, beside a list of this machine and `rows` that revokes `revoked`.
-async fn holds_rows(home: &Home, rows: Vec<Member>, revoked: Vec<VerifyKey>) {
+async fn holds_rows(home: &Home, rows: Vec<Member>, revoked: Vec<RevokedDevice>) {
     device_of(home).await;
     root_key(home);
     let mut all = vec![row(OWN, "desk")];
@@ -449,7 +459,7 @@ async fn status_warns_before_a_key_carrying_invite_ends() {
         ..row(seed, label)
     };
     let home = home("invite-ends");
-    // The revoked device's invite would end in five days: its list carries only its key.
+    // The revoked device's invite would end in five days: its list carries its key and name, and no row.
     holds_rows(
         &home,
         vec![
@@ -457,7 +467,7 @@ async fn status_warns_before_a_key_carrying_invite_ends() {
             carrying(0x43, "later", now + 10 * DAY, now + 60 * DAY),
             carrying(0x44, "ended", now + 80 * DAY, now - DAY),
         ],
-        vec![key(OLD)],
+        vec![gone(OLD, "old")],
     )
     .await;
     let out = status(&home).await;

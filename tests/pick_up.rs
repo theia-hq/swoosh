@@ -14,7 +14,7 @@ use std::time::SystemTime;
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use keystore::{KeyFile, Protection};
-use nauthy::{Link, VerifyKey};
+use nauthy::Link;
 use swoosh::contacts::DeviceLabel;
 use swoosh::home::Home;
 use swoosh::renewal::{Fetch as _, NodeFetch};
@@ -92,8 +92,7 @@ async fn renewing(nas: &Home, laptop: NodeId) -> Link {
     let own = row(laptop, "laptop");
     let standing = own.standing.clone();
     let members = vec![row(TestNode::seeded(NAS).node_id(), "nas"), own];
-    let doc =
-        RosterDoc::with_revocations(Epoch(1), members, vec![], Vec::<VerifyKey>::new()).unwrap();
+    let doc = RosterDoc::with_revocations(Epoch(1), members, vec![], Vec::new()).unwrap();
     fold(
         &swoosh::home::HomeWrite::take(nas).await.unwrap(),
         nas,

@@ -5,7 +5,8 @@
 //! [`Root`](crate::root::Root), and the envelope is nauthy's [`Signed`](nauthy::Signed). Each live device
 //! carries its name, the end and length of its standing, the end of the invite that carried its key, the
 //! ids of its live standings, and its newest standing (bare), so a device can pick up its own renewal from
-//! any peer, and every copy of the root reads the same renewal rules. No last-seen is carried.
+//! any peer, and every copy of the root reads the same renewal rules. Each revoked device carries its key
+//! and the name it had, so every machine can say which device a revoked key was. No last-seen is carried.
 //!
 //! Where the root is kept, the last update it signed is also its record: the next number, and every
 //! device and revocation the next cut carries, are read forward from it.
@@ -14,7 +15,7 @@ use nauthy::{Link, SignError, Signed, VerifyKey};
 
 pub use crate::codec::{
     FormatError, Id, MAX_BADGE, MAX_IDS, MAX_MEMBERS, MAX_REVOCATION_ID, MAX_REVOKED,
-    MAX_REVOKED_KEYS,
+    MAX_REVOKED_KEYS, RevokedDevice,
 };
 use crate::codec::{Put as _, Reader, bound, canonicalize, check_device, check_ids, unique_labels};
 use crate::contacts::DeviceLabel;
@@ -55,6 +56,9 @@ pub(crate) const MAX_MEMBER_LEN: usize = VerifyKey::LEN
     + 2
     + MAX_BADGE;
 
+/// One revoked device on the wire at its bound: its key and its name.
+pub(crate) const MAX_REVOKED_DEVICE_LEN: usize = VerifyKey::LEN + 2 + DeviceLabel::MAX_LEN;
+
 /// The detached ed25519 signature in the envelope a cut writes.
 const SIGNATURE_LEN: usize = 64;
 
@@ -71,9 +75,9 @@ pub(crate) const ENVELOPE_LEN: usize = VerifyKey::LEN + SIGNATURE_LEN;
 ///   + HEADER_LEN                                 MAGIC + VERSION + epoch + member count
 ///   + MAX_MEMBERS * MAX_MEMBER_LEN               every member at every bound
 ///   + 4 + MAX_REVOKED * MAX_ID_LEN               the revoked ids
-///   + 4 + MAX_REVOKED_KEYS * 32                  the revoked keys
-///   = 96 + 26 + 4096 * 1444 + 4 + 16384 * 74 + 4 + 4096 * 32
-///   = 7_258_242 bytes
+///   + 4 + MAX_REVOKED_KEYS * MAX_REVOKED_DEVICE_LEN the revoked devices
+///   = 96 + 26 + 4096 * 1444 + 4 + 16384 * 74 + 4 + 4096 * 97
+///   = 7_524_482 bytes
 /// ```
 pub const MAX_ROSTER_BLOB: u64 = (ENVELOPE_LEN
     + HEADER_LEN
@@ -81,7 +85,7 @@ pub const MAX_ROSTER_BLOB: u64 = (ENVELOPE_LEN
     + 4
     + MAX_REVOKED * MAX_ID_LEN
     + 4
-    + MAX_REVOKED_KEYS * VerifyKey::LEN) as u64;
+    + MAX_REVOKED_KEYS * MAX_REVOKED_DEVICE_LEN) as u64;
 
 /// A monotonically-increasing version of an operator's roster, carrying the cutter's own
 /// [`RosterVersion`](crate::contacts::RosterVersion) onto the wire: it advances when the MEMBER SET
@@ -138,7 +142,7 @@ impl Member {
     }
 }
 
-/// The update: the live devices, the revoked ids and the revoked keys at one epoch. Canonical at
+/// The update: the live devices, the revoked ids and the revoked devices at one epoch. Canonical at
 /// construction (every list sorted, every bound held), so its bytes are a pure function of its content
 /// and every doc that builds also parses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,7 +151,7 @@ pub struct RosterDoc {
     // invariant: every list sorted and unique, every bound held (upheld by `with_revocations`).
     members: Vec<Member>,
     revoked: Vec<Id>,
-    revoked_keys: Vec<VerifyKey>,
+    revoked_devices: Vec<RevokedDevice>,
 }
 
 impl RosterDoc {
@@ -156,17 +160,18 @@ impl RosterDoc {
         Self::with_revocations(epoch, members, Vec::new(), Vec::new())
     }
 
-    /// An update listing `members`, the revoked ids and the revoked keys. Sorts every list, and refuses a
-    /// repeated key, name or id and anything over its bound.
+    /// An update listing `members`, the revoked ids and the revoked devices. Sorts every list, and refuses
+    /// a repeated key, a live device's repeated name, a repeated id and anything over its bound. Revoked
+    /// devices may share a name: a name passes to a new device once the old one is revoked.
     pub fn with_revocations(
         epoch: Epoch,
         mut members: Vec<Member>,
         mut revoked: Vec<Id>,
-        mut revoked_keys: Vec<VerifyKey>,
+        mut revoked_devices: Vec<RevokedDevice>,
     ) -> Result<Self, FormatError> {
         bound(members.len(), MAX_MEMBERS, "members")?;
         bound(revoked.len(), MAX_REVOKED, "revoked ids")?;
-        bound(revoked_keys.len(), MAX_REVOKED_KEYS, "revoked keys")?;
+        bound(revoked_devices.len(), MAX_REVOKED_KEYS, "revoked devices")?;
         for member in &mut members {
             check_device(&mut member.ids, &member.standing)?;
         }
@@ -176,12 +181,12 @@ impl RosterDoc {
         }
         unique_labels(members.iter().map(|member| &member.label))?;
         check_ids(&mut revoked)?;
-        canonicalize(&mut revoked_keys, |key| *key.bytes())?;
+        canonicalize(&mut revoked_devices, |device| *device.node.bytes())?;
         Ok(Self {
             epoch,
             members,
             revoked,
-            revoked_keys,
+            revoked_devices,
         })
     }
 
@@ -200,9 +205,21 @@ impl RosterDoc {
         &self.revoked
     }
 
-    /// The revoked device keys, sorted.
-    pub fn revoked_keys(&self) -> &[VerifyKey] {
-        &self.revoked_keys
+    /// The revoked devices, sorted by key.
+    pub fn revoked_devices(&self) -> &[RevokedDevice] {
+        &self.revoked_devices
+    }
+
+    /// The revoked device keys, in key order.
+    pub fn revoked_keys(&self) -> impl Iterator<Item = VerifyKey> + '_ {
+        self.revoked_devices.iter().map(|device| device.node)
+    }
+
+    /// Whether this update revokes the device `key`.
+    pub fn is_revoked_key(&self, key: &VerifyKey) -> bool {
+        self.revoked_devices
+            .binary_search_by(|device| device.node.bytes().cmp(key.bytes()))
+            .is_ok()
     }
 
     /// The exact bytes that get signed and verified, a pure function of the doc's content:
@@ -225,7 +242,10 @@ impl RosterDoc {
     ///       id           u16 length, bytes       (<= MAX_REVOCATION_ID)
     ///     standing       u16 length, bare link   (<= MAX_BADGE)
     ///   revoked_count    u32                     (<= MAX_REVOKED), then each id as above
-    ///   revoked_key_count u32                    (<= MAX_REVOKED_KEYS), then each key, 32 bytes
+    ///   revoked_device_count u32                 (<= MAX_REVOKED_KEYS)
+    ///   per revoked device, ascending by node:
+    ///     node           [u8; 32]
+    ///     label          u16 length, bytes       (<= DeviceLabel::MAX_LEN)
     /// ```
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(HEADER_LEN);
@@ -246,7 +266,7 @@ impl RosterDoc {
             out.put_bytes16(member.standing.as_str().as_bytes());
         }
         out.put_ids32(&self.revoked);
-        out.put_keys32(&self.revoked_keys);
+        out.put_revoked32(&self.revoked_devices);
         out
     }
 
@@ -279,13 +299,13 @@ impl RosterDoc {
         }
         unique_labels(members.iter().map(|member| &member.label))?;
         let revoked = reader.revoked()?;
-        let revoked_keys = reader.revoked_keys()?;
+        let revoked_devices = reader.revoked_devices()?;
         reader.finish()?;
         Ok(Self {
             epoch,
             members,
             revoked,
-            revoked_keys,
+            revoked_devices,
         })
     }
 }

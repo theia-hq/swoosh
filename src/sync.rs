@@ -570,11 +570,7 @@ async fn dialable(
     if let Ok(Some(pin)) = device_pin(home).await
         && let Some((doc, _)) = read_held(&home.devices(), pin)
     {
-        revoked.extend(
-            doc.revoked_keys()
-                .iter()
-                .filter_map(|key| key.node_id().ok()),
-        );
+        revoked.extend(doc.revoked_keys().filter_map(|key| key.node_id().ok()));
     }
     let mut out: Vec<Device> = Vec::new();
     for device in listed {

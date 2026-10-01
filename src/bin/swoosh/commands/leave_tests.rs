@@ -102,7 +102,9 @@ async fn device(home: &Home, until: u64) {
         Epoch(1),
         vec![member],
         vec![],
-        vec![TestNode::seeded(0x66).verify_key()],
+        vec![swoosh::testkit::revoked(
+            TestNode::seeded(0x66).verify_key(),
+        )],
     )
     .unwrap();
     fold(

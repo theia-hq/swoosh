@@ -25,8 +25,22 @@ use zeroize::Zeroizing;
 use crate::contacts::DeviceLabel;
 use crate::home::{Home, HomeWrite, ServeLock};
 use crate::passphrase::Prompt;
-use crate::roster::{Member, RosterDoc};
+use crate::roster::{Member, RevokedDevice, RosterDoc};
 use crate::sync::{Answer, Dial, ExchangeError};
+
+/// A revoked device for an update: `node`, under the name `gone`, which any number of revoked devices may
+/// share. For a test that needs only the key revoked; one that reads the name builds its own.
+///
+/// # Panics
+///
+/// Never: `gone` is a stored name.
+#[expect(clippy::expect_used, reason = "a fixed name that parses")]
+pub fn revoked(node: VerifyKey) -> RevokedDevice {
+    RevokedDevice {
+        node,
+        label: DeviceLabel::stored("gone").expect("a stored name"),
+    }
+}
 
 /// A held `home.lock` for a test's own setup writes: the lock of a scratch home of its own, so a fixture
 /// writing a file never waits on, or holds up, the home under test.

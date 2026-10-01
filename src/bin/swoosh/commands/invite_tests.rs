@@ -24,7 +24,7 @@ use swoosh::home::Home;
 use swoosh::invite::Invite;
 use swoosh::passphrase::Prompt;
 use swoosh::root::{Date, Root, RootPlace};
-use swoosh::roster::{Epoch, Id, Member, RosterDoc};
+use swoosh::roster::{Epoch, Id, Member, RevokedDevice, RosterDoc};
 use swoosh::sync::{Answer, Dial, ExchangeError};
 use swoosh::testkit::{Answering, Counting, TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
@@ -222,12 +222,15 @@ pub(crate) fn member(row: &Row) -> Member {
     }
 }
 
-/// The list `rows` make at `epoch`: each live row, each revoked row's key, and `revoked` ids.
+/// The list `rows` make at `epoch`: each live row, each revoked row's key and name, and `revoked` ids.
 pub(crate) fn records(epoch: u64, rows: &[Row], revoked: Vec<Id>) -> RosterDoc {
     let keys = rows
         .iter()
         .filter(|row| row.is_revoked())
-        .map(|row| row.key)
+        .map(|row| RevokedDevice {
+            node: row.key,
+            label: row.label.clone(),
+        })
         .collect();
     let members = rows
         .iter()
@@ -843,8 +846,8 @@ async fn bare_invite_lists_only_due_devices() {
     ];
     holds(&home, &rows, Vec::new()).await;
     let state = records(1, &rows, Vec::new());
-    let mut keys = state.revoked_keys().to_vec();
-    keys.push(key(PAD));
+    let mut keys = state.revoked_devices().to_vec();
+    keys.push(swoosh::testkit::revoked(key(PAD)));
     let members = rows
         .iter()
         .filter(|row| !row.is_revoked() && row.key != key(PAD))
@@ -928,7 +931,7 @@ async fn renewal_skips_a_revoked_device() {
         list.members().iter().all(|member| member.node != key(OLD)),
         "a revoked device is never renewed back onto the list"
     );
-    assert!(list.revoked_keys().contains(&key(OLD)));
+    assert!(list.is_revoked_key(&key(OLD)));
 }
 
 #[tokio::test]
@@ -938,9 +941,13 @@ async fn renewal_skips_a_row_whose_key_is_revoked() {
     let own = live(OWN, "desk");
     holds(&home, &[own.clone(), laptop.clone()], Vec::new()).await;
     // Another copy of the root revoked the laptop; the update this machine holds says so.
-    let elsewhere =
-        RosterDoc::with_revocations(Epoch(2), vec![member(&own)], Vec::new(), vec![key(LAPTOP)])
-            .unwrap();
+    let elsewhere = RosterDoc::with_revocations(
+        Epoch(2),
+        vec![member(&own)],
+        Vec::new(),
+        vec![swoosh::testkit::revoked(key(LAPTOP))],
+    )
+    .unwrap();
     held(&home, &elsewhere);
     add_tv(&home).await;
     let list = kept_list(&home);
@@ -950,7 +957,7 @@ async fn renewal_skips_a_row_whose_key_is_revoked() {
             .all(|member| member.node != key(LAPTOP)),
         "a revoked key is never renewed"
     );
-    assert!(list.revoked_keys().contains(&key(LAPTOP)));
+    assert!(list.is_revoked_key(&key(LAPTOP)));
 }
 
 #[tokio::test]
@@ -1366,10 +1373,7 @@ async fn invite_new_key_leaves_the_old_invite_valid_to_its_date() {
     );
     let list = kept_list(&home);
     assert!(!list.revoked().contains(&ci.ids[0]), "and is not revoked");
-    assert!(
-        !list.revoked_keys().contains(&key(CI)),
-        "the old key is not revoked"
-    );
+    assert!(!list.is_revoked_key(&key(CI)), "the old key is not revoked");
     assert!(
         ran.err.contains(&format!(
             "The old invite works until {}.",
@@ -1436,11 +1440,16 @@ async fn a_key_in_revoked_keys_is_not_re_admitted() {
     let own = live(OWN, "desk");
     holds(&home, core::slice::from_ref(&own), Vec::new()).await;
     // Another copy of the root added the laptop and revoked it; this copy never had a row for it, and
-    // the update this machine holds carries only its key.
+    // the update this machine holds carries its key and name, and no row.
     held(
         &home,
-        &RosterDoc::with_revocations(Epoch(2), vec![member(&own)], Vec::new(), vec![key(LAPTOP)])
-            .unwrap(),
+        &RosterDoc::with_revocations(
+            Epoch(2),
+            vec![member(&own)],
+            Vec::new(),
+            vec![swoosh::testkit::revoked(key(LAPTOP))],
+        )
+        .unwrap(),
     );
     let ran = invite(&home, &["laptop", &node(LAPTOP).to_string()]).await;
     let refusal = ran.refusal();

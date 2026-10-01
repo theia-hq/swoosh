@@ -20,6 +20,7 @@
 use core::fmt;
 use core::time::Duration;
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -30,7 +31,9 @@ use nauthy::{Link, RevocationId, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
 
-use crate::codec::{FormatError, Id, MAX_IDS, MAX_MEMBERS, MAX_REVOKED, MAX_REVOKED_KEYS};
+use crate::codec::{
+    FormatError, Id, MAX_IDS, MAX_MEMBERS, MAX_REVOKED, MAX_REVOKED_KEYS, RevokedDevice,
+};
 use crate::contacts::DeviceLabel;
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite, ServeLock};
@@ -495,8 +498,8 @@ impl Inspected {
         &self.forward.marked
     }
 
-    /// The device keys the records brought forward revoke.
-    pub fn revoked_keys(&self) -> impl Iterator<Item = &VerifyKey> {
+    /// The devices the records brought forward revoke, each by its key and the name it had.
+    pub fn revoked_devices(&self) -> impl Iterator<Item = &RevokedDevice> {
         self.forward.revoked_keys.values()
     }
 
@@ -507,7 +510,7 @@ impl Inspected {
 
     /// The device keys the list beside the key revokes, as signed.
     pub fn listed_revoked_keys(&self) -> impl Iterator<Item = &VerifyKey> {
-        self.list.revoked_keys.values()
+        self.list.revoked_keys.values().map(|device| &device.node)
     }
 
     /// The rows due to renew at `now`: what the next act that cuts renews on its own.
@@ -959,7 +962,7 @@ impl Root {
             act.revoked.push((name.clone(), seen));
             return Ok(());
         };
-        let (key, until) = (row.node, row.until);
+        let (key, until, label) = (row.node, row.until, row.label.clone());
         let adds = row
             .ids
             .iter()
@@ -985,7 +988,7 @@ impl Root {
             if count >= MAX_REVOKED_KEYS {
                 return Err(RootError::TooManyKeys { count });
             }
-            act.book.revoked_keys.insert(*key.bytes(), key);
+            act.book.revoke_key(RevokedDevice { node: key, label });
         }
         act.book.follow_keys(act.now);
         act.revoked_until = Some(act.revoked_until.map_or(until, |latest| latest.max(until)));
@@ -1770,7 +1773,9 @@ struct Book {
     /// still finds it. An update never lists them.
     marked: Vec<Member>,
     revoked: BTreeMap<Vec<u8>, Id>,
-    revoked_keys: BTreeMap<[u8; 32], VerifyKey>,
+    /// The revoked devices by key, each with the name its row had, so an update says which device a key
+    /// was.
+    revoked_keys: BTreeMap<[u8; 32], RevokedDevice>,
 }
 
 impl Book {
@@ -1789,9 +1794,9 @@ impl Book {
                 .map(|id| (id.id.as_bytes().to_vec(), id.clone()))
                 .collect(),
             revoked_keys: list
-                .revoked_keys()
+                .revoked_devices()
                 .iter()
-                .map(|key| (*key.bytes(), *key))
+                .map(|device| (*device.node.bytes(), device.clone()))
                 .collect(),
         }
     }
@@ -1857,6 +1862,18 @@ impl Book {
         }
     }
 
+    /// Revoke a device's key, keeping the name already held for it: a name is a suggestion, and the key
+    /// decides. Whether the key is newly revoked.
+    fn revoke_key(&mut self, device: RevokedDevice) -> bool {
+        match self.revoked_keys.entry(*device.node.bytes()) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(slot) => {
+                slot.insert(device);
+                true
+            }
+        }
+    }
+
     /// Bring these records forward from `update`: its number, its revocations, the devices it lists that
     /// these lack, and for a device in both, its ids and its newer standing.
     fn bring_forward(&mut self, update: &RosterDoc, now: u64, brought: &mut Brought) {
@@ -1874,8 +1891,8 @@ impl Book {
                 brought.revocations += 1;
             }
         }
-        for key in update.revoked_keys() {
-            if self.revoked_keys.insert(*key.bytes(), *key).is_none() {
+        for device in update.revoked_devices() {
+            if self.revoke_key(device.clone()) {
                 brought.revocations += 1;
             }
         }
@@ -1891,7 +1908,10 @@ impl Book {
             .position(|row| row.label == member.label && row.node != member.node)
         {
             let key = self.rows[index].node;
-            self.revoked_keys.insert(*key.bytes(), key);
+            self.revoke_key(RevokedDevice {
+                node: key,
+                label: self.rows[index].label.clone(),
+            });
             brought.clashed.push((member.label.clone(), key));
             brought.marked += self.follow_keys(now);
         }
@@ -2030,14 +2050,17 @@ impl Book {
                 self.revoke_id(Id { expires, id });
             }
         }
-        let keys: Vec<VerifyKey> = self
+        let devices: Vec<RevokedDevice> = self
             .rows
             .iter()
-            .map(|row| row.node)
-            .filter(|key| revoked.is_revoked_key(key))
+            .filter(|row| revoked.is_revoked_key(&row.node))
+            .map(|row| RevokedDevice {
+                node: row.node,
+                label: row.label.clone(),
+            })
             .collect();
-        for key in keys {
-            self.revoked_keys.insert(*key.bytes(), key);
+        for device in devices {
+            self.revoke_key(device);
         }
         Ok(())
     }
@@ -2146,10 +2169,11 @@ impl Book {
             .values()
             .filter(|id| id.expires > now)
             .any(|id| !held.revoked().iter().any(|held| held.id == id.id));
+        // Keys only: two copies that name one revoked key differently never force a cut.
         let keys = self
             .revoked_keys
             .values()
-            .any(|key| !held.revoked_keys().contains(key));
+            .any(|device| !held.is_revoked_key(&device.node));
         rows || ids || keys
     }
 
@@ -2175,7 +2199,7 @@ impl Book {
             number,
             members,
             revoked,
-            self.revoked_keys.values().copied().collect(),
+            self.revoked_keys.values().cloned().collect(),
         )
         .map_err(RootError::Format)
     }

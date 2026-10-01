@@ -414,7 +414,7 @@ impl RevokeCmd {
                         })
                         .collect();
                     source.revoked = ids(doc.revoked());
-                    source.revoked_keys = doc.revoked_keys().to_vec();
+                    source.revoked_keys = doc.revoked_keys().collect();
                 }
             }
             (None, _) => {}

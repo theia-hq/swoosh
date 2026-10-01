@@ -113,7 +113,7 @@ async fn standing_for(home: &Home, peer: VerifyKey, now: SystemTime) -> Result<L
         .iter()
         .find(|member| member.node == peer)
         .ok_or(Miss::NoRow)?;
-    if doc.revoked_keys().contains(&peer) {
+    if doc.is_revoked_key(&peer) {
         return Err(Miss::RowRevoked);
     }
     let cap = row.standing.cap();

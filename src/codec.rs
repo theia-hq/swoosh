@@ -18,7 +18,7 @@ pub const MAX_MEMBERS: usize = 4096;
 /// The most unexpired revoked ids one document carries.
 pub const MAX_REVOKED: usize = 16384;
 
-/// The most revoked device keys one document carries.
+/// The most revoked devices one document carries.
 pub const MAX_REVOKED_KEYS: usize = 4096;
 
 /// The longest revocation id, in bytes.
@@ -72,6 +72,16 @@ impl fmt::Debug for Id {
             .field("id", &self.id.to_hex())
             .finish()
     }
+}
+
+/// One revoked device: its key, which the gate refuses for good, and the name it had when it was revoked,
+/// which only a reader's display uses. A name is a suggestion, as a live device's is: the key decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedDevice {
+    /// The device's key.
+    pub node: VerifyKey,
+    /// The name the device had.
+    pub label: DeviceLabel,
 }
 
 /// Why a document could not be built or parsed.
@@ -163,7 +173,7 @@ pub(crate) trait Put {
     fn put_bytes16(&mut self, bytes: &[u8]);
     fn put_id(&mut self, id: &Id);
     fn put_ids32(&mut self, ids: &[Id]);
-    fn put_keys32(&mut self, keys: &[VerifyKey]);
+    fn put_revoked32(&mut self, devices: &[RevokedDevice]);
 }
 
 impl Put for Vec<u8> {
@@ -200,10 +210,11 @@ impl Put for Vec<u8> {
         }
     }
 
-    fn put_keys32(&mut self, keys: &[VerifyKey]) {
-        self.put_u32(keys.len());
-        for key in keys {
-            self.extend_from_slice(key.bytes());
+    fn put_revoked32(&mut self, devices: &[RevokedDevice]) {
+        self.put_u32(devices.len());
+        for device in devices {
+            self.extend_from_slice(device.node.bytes());
+            self.put_bytes16(device.label.as_str().as_bytes());
         }
     }
 }
@@ -337,20 +348,25 @@ impl<'a> Reader<'a> {
         Ok(ids)
     }
 
-    /// The `u32`-counted revoked keys, at most [`MAX_REVOKED_KEYS`], strictly ascending.
-    pub(crate) fn revoked_keys(&mut self) -> Result<Vec<VerifyKey>, FormatError> {
-        let count = self.count32(MAX_REVOKED_KEYS, "revoked keys")?;
-        let mut keys: Vec<VerifyKey> = Vec::with_capacity(count);
+    /// The `u32`-counted revoked devices, at most [`MAX_REVOKED_KEYS`], strictly ascending by key, each
+    /// name read as stored ([`label`](Self::label)). Two may share a name: a name passes to a new device
+    /// once the old one is revoked.
+    pub(crate) fn revoked_devices(&mut self) -> Result<Vec<RevokedDevice>, FormatError> {
+        let count = self.count32(MAX_REVOKED_KEYS, "revoked devices")?;
+        let mut devices: Vec<RevokedDevice> = Vec::with_capacity(count);
         for _ in 0..count {
-            let key = self.key()?;
-            if keys
+            let node = self.key()?;
+            if devices
                 .last()
-                .is_some_and(|previous| key.bytes() <= previous.bytes())
+                .is_some_and(|previous| node.bytes() <= previous.node.bytes())
             {
                 return Err(FormatError::NonCanonicalOrder);
             }
-            keys.push(key);
+            devices.push(RevokedDevice {
+                node,
+                label: self.label()?,
+            });
         }
-        Ok(keys)
+        Ok(devices)
     }
 }

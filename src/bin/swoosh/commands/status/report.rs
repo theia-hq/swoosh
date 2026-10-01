@@ -18,7 +18,7 @@ use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::root::{Date, Root, RootPlace};
-use swoosh::roster::Member;
+use swoosh::roster::{Member, RevokedDevice};
 use swoosh::serve::control_codec::{ControlError, DisabledList, ServiceMenu};
 use swoosh::standing::{Standing, StandingError};
 use swoosh::{badge, identity, roster, standing, sync};
@@ -186,7 +186,7 @@ impl Report {
                 // Another copy of the root, or this machine, may have revoked a device since the last act
                 // here: the records as the next act would bring them forward say so before the list does.
                 let device = |row: &Member, revoked| DeviceRow {
-                    label: Some(row.label.clone()),
+                    label: row.label.clone(),
                     key: row.node,
                     until: row.until,
                     duration: row.duration,
@@ -200,12 +200,11 @@ impl Report {
                     .chain(inspected.marked())
                     .map(|row| row.node)
                     .collect();
-                // A revoked device the list carries no row for has only its key: the name is the one
-                // saved under `me/`, if any.
+                // A revoked device the list carries no row for: its key and the name it had.
                 let unlisted = inspected
-                    .revoked_keys()
-                    .filter(|key| !listed.contains(key))
-                    .map(|key| revoked_key(contacts, *key));
+                    .revoked_devices()
+                    .filter(|device| !listed.contains(&device.node))
+                    .map(revoked_device);
                 let rows: Vec<DeviceRow> = inspected
                     .rows()
                     .iter()
@@ -230,19 +229,15 @@ impl Report {
                     .and_then(|root| roster::held(home, root))
                     .map(|update| {
                         let members = update.members().iter().map(|member| DeviceRow {
-                            label: Some(member.label.clone()),
+                            label: member.label.clone(),
                             key: member.node,
                             until: member.until,
                             duration: member.duration,
                             seeded: member.seeded(),
                             revoked: false,
                         });
-                        // The update carries no row for a revoked device, only its key and no date: the name
-                        // is the one saved under `me/`, if any.
-                        let revoked = update
-                            .revoked_keys()
-                            .iter()
-                            .map(|key| revoked_key(contacts, *key));
+                        // A revoked device carries its key and the name it had, and no date.
+                        let revoked = update.revoked_devices().iter().map(revoked_device);
                         members.chain(revoked).collect()
                     })
                     .unwrap_or_default();
@@ -261,7 +256,7 @@ impl Report {
         let own = self.key.verify_key().ok();
         let own_row = rows.iter().find(|row| Some(row.key) == own && !row.revoked);
         let name = own_row
-            .and_then(|row| row.label.clone())
+            .map(|row| row.label.clone())
             .or_else(|| own_name(contacts, self.key));
         let me = name
             .as_ref()
@@ -316,14 +311,14 @@ impl Report {
                     };
                     (state, format!("until {}", Date(row.until)))
                 };
-                // A row with no name stands as its short key, once, in the name column; the key column
-                // stays empty rather than print the same key a second time (O2).
-                let key = short(&row.key.to_string());
-                let (name, key) = match &row.label {
-                    Some(label) => (format!("me/{label}"), key),
-                    None => (key, String::new()),
-                };
-                [name, key, state, date]
+                // The key column tells apart a revoked device and a live one that took its name (O2: the
+                // line names the machine).
+                [
+                    format!("me/{}", row.label),
+                    short(&row.key.to_string()),
+                    state,
+                    date,
+                ]
             })
             .collect();
         self.sections.push(Section { title, rows });
@@ -443,8 +438,8 @@ fn serving(menu: &ServiceMenu) -> Result<String, String> {
 /// One of the root's devices, from its records where the root is kept, or from the update a device holds.
 #[derive(Debug)]
 struct DeviceRow {
-    /// Its name among `me`'s devices; `None` for a revoked device whose name this machine never saved.
-    label: Option<DeviceLabel>,
+    /// Its name among `me`'s devices; for a revoked device, the name it had when it was revoked.
+    label: DeviceLabel,
     key: VerifyKey,
     until: u64,
     duration: u64,
@@ -453,11 +448,11 @@ struct DeviceRow {
     revoked: bool,
 }
 
-/// A revoked device with no row, only its key: the name is the one saved under `me/`, if any.
-fn revoked_key(contacts: &Contacts, key: VerifyKey) -> DeviceRow {
+/// A revoked device with no row: its key and the name it had.
+fn revoked_device(device: &RevokedDevice) -> DeviceRow {
     DeviceRow {
-        label: me_name(contacts, key),
-        key,
+        label: device.label.clone(),
+        key: device.node,
         until: 0,
         duration: 0,
         seeded: false,
@@ -515,15 +510,6 @@ fn own_name(contacts: &Contacts, own: NodeId) -> Option<DeviceLabel> {
     contacts
         .devices(&me)?
         .find(|(_, key)| **key == own)
-        .map(|(label, _)| label.clone())
-}
-
-/// The name `key` is saved under among `me`'s devices in the address book.
-fn me_name(contacts: &Contacts, key: VerifyKey) -> Option<DeviceLabel> {
-    let me = ME.parse().ok()?;
-    contacts
-        .devices(&me)?
-        .find(|(_, saved)| saved.verify_key().ok() == Some(key))
         .map(|(label, _)| label.clone())
 }
 

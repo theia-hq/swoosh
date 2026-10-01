@@ -30,7 +30,7 @@ use crate::contacts::DeviceLabel;
 use crate::home::Home;
 use crate::passphrase::Prompt;
 use crate::reach_report::{Missed, Reach, Why};
-use crate::roster::{Epoch, Member, RosterDoc};
+use crate::roster::{Epoch, Member, RevokedDevice, RosterDoc};
 use crate::standing::Standing;
 use crate::sync::{Answer, Dial, ExchangeError};
 use crate::testkit::{Answering, Counting, Loopback, STANDING_UNTIL, TestNode, TestRoot};
@@ -103,7 +103,13 @@ fn own_row() -> Member {
 
 /// A list the root signs: update `last`, listing `rows`, revoking `revoked` and `keys`.
 fn records(last: u64, rows: Vec<Member>, revoked: Vec<Id>, keys: Vec<VerifyKey>) -> RosterDoc {
-    RosterDoc::with_revocations(Epoch(last), rows, revoked, keys).unwrap()
+    RosterDoc::with_revocations(
+        Epoch(last),
+        rows,
+        revoked,
+        keys.into_iter().map(crate::testkit::revoked).collect(),
+    )
+    .unwrap()
 }
 
 /// A fresh home with this machine's key in it, plain.
@@ -774,7 +780,7 @@ async fn a_cut_at_max_revoked_keys_refuses_before_the_prompt() {
             Epoch(1),
             vec![member(&own_row())],
             Vec::new(),
-            vec![key(LAPTOP)],
+            vec![crate::testkit::revoked(key(LAPTOP))],
         )
         .unwrap(),
     )
@@ -861,7 +867,7 @@ async fn bring_forward_of_a_fifth_id_keeps_the_device() {
             .iter()
             .any(|member| member.node == key(LAPTOP))
     );
-    assert!(!update.revoked_keys().contains(&key(LAPTOP)));
+    assert!(!update.is_revoked_key(&key(LAPTOP)));
 }
 
 #[tokio::test]
@@ -945,10 +951,7 @@ async fn bring_forward_never_takes_devices_from_the_copy_over_the_update() {
         key(PHONE),
         "the update's device keeps the name"
     );
-    assert!(
-        update.revoked_keys().contains(&key(LAPTOP)),
-        "the copy's is revoked"
-    );
+    assert!(update.is_revoked_key(&key(LAPTOP)), "the copy's is revoked");
 }
 
 #[tokio::test]
@@ -966,13 +969,59 @@ async fn a_rolled_back_copy_renews_no_revoked_device() {
             Epoch(1),
             vec![member(&own_row())],
             Vec::new(),
-            vec![key(LAPTOP)],
+            vec![crate::testkit::revoked(key(LAPTOP))],
         )
         .unwrap(),
     )
     .await;
     let (_, out) = present(&home, place, RootVerb::Invite, &mut Counting::refusing()).await;
     assert!(!out.contains("renewing"), "{out}");
+}
+
+/// A revoked device's name rides with its key: a device folds the update another copy of the root cut
+/// revoking the laptop, and a copy behind it, brought forward from what the device holds, signs that name
+/// on with the key. The other copy had renamed it, so the name signed is the update's, not the copy's row.
+#[tokio::test]
+async fn a_revoked_devices_name_survives_a_fold_and_a_bring_forward() {
+    let home = home("revoked-name-forward");
+    let laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]);
+    let gone = RevokedDevice {
+        node: key(LAPTOP),
+        label: name("work-laptop"),
+    };
+    let behind = records(1, vec![own_row(), laptop], Vec::new(), Vec::new());
+    let place = with_copy(&home, &behind, &behind).await;
+    let elsewhere = RosterDoc::with_revocations(
+        Epoch(2),
+        vec![member(&own_row())],
+        Vec::new(),
+        vec![gone.clone()],
+    )
+    .unwrap();
+    crate::roster::fold(
+        &crate::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &TestRoot::seeded(ROOT).sign_update(&elsewhere),
+    )
+    .await
+    .unwrap();
+    let folded = crate::roster::held(&home, TestRoot::seeded(ROOT).verify_key()).unwrap();
+    assert_eq!(
+        folded.revoked_devices(),
+        core::slice::from_ref(&gone),
+        "the fold keeps the name"
+    );
+
+    let (root, _) = present(&home, place, RootVerb::Invite, &mut Counting::new([PASS])).await;
+    let mut root = root.unwrap();
+    root.sign_standing(key(TV), name("tv"), Duration::from_secs(90 * DAY))
+        .unwrap();
+    let (_, update) = commit(root).await;
+    assert_eq!(
+        update.revoked_devices(),
+        [gone],
+        "the copy brought forward signs the name on"
+    );
 }
 
 #[tokio::test]
@@ -999,7 +1048,7 @@ async fn a_revoked_key_survives_its_standings_expiry_in_the_update() {
         "an ended standing's id is not carried"
     );
     assert!(
-        update.revoked_keys().contains(&key(LAPTOP)),
+        update.is_revoked_key(&key(LAPTOP)),
         "a revoked key is carried for good"
     );
 }
@@ -1049,7 +1098,11 @@ async fn a_root_act_never_publishes_a_devices_own_grant_revocations() {
         vec![id(LAPTOP, 0).id.to_hex()],
         "only the root's own device's id"
     );
-    assert_eq!(update.revoked_keys(), &[key(LAPTOP)], "only a row's key");
+    assert_eq!(
+        update.revoked_keys().collect::<Vec<_>>(),
+        [key(LAPTOP)],
+        "only a row's key"
+    );
 }
 
 // --- commit ---
@@ -1446,7 +1499,7 @@ async fn a_fork_below_the_held_update_brings_forward_only_its_revocations() {
             Epoch(2),
             vec![member(&own_row()), member(&old)],
             Vec::new(),
-            vec![key(PHONE)],
+            vec![crate::testkit::revoked(key(PHONE))],
         )
         .unwrap();
         crate::roster::fold_fork(
@@ -1473,11 +1526,11 @@ async fn a_fork_below_the_held_update_brings_forward_only_its_revocations() {
             "reused {reused}: {out}"
         );
         assert!(
-            update.revoked_keys().contains(&key(PHONE)),
+            update.is_revoked_key(&key(PHONE)),
             "reused {reused}: the fork's revocation is brought forward"
         );
         assert!(
-            !update.revoked_keys().contains(&key(NAS)),
+            !update.is_revoked_key(&key(NAS)),
             "reused {reused}: the device under the name now keeps it"
         );
         let runner: Vec<_> = update
@@ -1522,7 +1575,7 @@ async fn a_held_update_below_the_records_brings_forward_only_its_revocations() {
                 Epoch(3),
                 vec![member(&own_row()), member(&old)],
                 Vec::new(),
-                vec![key(PHONE)],
+                vec![crate::testkit::revoked(key(PHONE))],
             )
             .unwrap(),
         );
@@ -1530,7 +1583,7 @@ async fn a_held_update_below_the_records_brings_forward_only_its_revocations() {
             Epoch(3),
             vec![member(&own_row()), member(&old)],
             Vec::new(),
-            vec![key(TV)],
+            vec![crate::testkit::revoked(key(TV))],
         )
         .unwrap();
         crate::roster::fold_fork(
@@ -1562,15 +1615,15 @@ async fn a_held_update_below_the_records_brings_forward_only_its_revocations() {
             "reused {reused}: {out}"
         );
         assert!(
-            update.revoked_keys().contains(&key(PHONE)),
+            update.is_revoked_key(&key(PHONE)),
             "reused {reused}: the held update's revocation is brought forward"
         );
         assert!(
-            update.revoked_keys().contains(&key(TV)),
+            update.is_revoked_key(&key(TV)),
             "reused {reused}: the fork's revocation is brought forward"
         );
         assert!(
-            !update.revoked_keys().contains(&key(NAS)),
+            !update.is_revoked_key(&key(NAS)),
             "reused {reused}: the device under the name now keeps it"
         );
         let runner: Vec<_> = update
@@ -1602,7 +1655,7 @@ async fn a_revocation_only_cut_advances_the_number() {
         Epoch(2),
         "a revoke alone moves the number"
     );
-    assert!(update.revoked_keys().contains(&key(LAPTOP)));
+    assert!(update.is_revoked_key(&key(LAPTOP)));
 }
 
 #[tokio::test]
@@ -1624,7 +1677,7 @@ async fn revoking_a_device_by_its_key_never_takes_the_live_device_of_its_name() 
         .unwrap();
     let (_, update) = commit(root).await;
     assert!(
-        !update.revoked_keys().contains(&key(PHONE)),
+        !update.is_revoked_key(&key(PHONE)),
         "the device now named nas stays one of your devices"
     );
     assert!(
@@ -2152,7 +2205,7 @@ async fn a_list_folded_during_the_prompt_is_brought_forward_before_the_cut() {
             .any(|revoked| revoked.id == id(OTHER, STANDING_UNTIL).id),
         "the cut carries the revocation of the list folded meanwhile"
     );
-    assert!(cut.revoked_keys().contains(&key(LAPTOP)), "and its own");
+    assert!(cut.is_revoked_key(&key(LAPTOP)), "and its own");
     assert!(matches!(
         crate::roster::read_held(&home.devices(), TestRoot::seeded(ROOT).verify_key()),
         Some((held, _)) if held.epoch() == Epoch(3)
@@ -2227,7 +2280,7 @@ async fn a_device_whose_key_the_list_revoked_meanwhile_is_never_handed_a_new_one
         Epoch(2),
         [&rows[0], &rows[2]].into_iter().map(member).collect(),
         vec![id(LAPTOP, STANDING_UNTIL)],
-        vec![key(LAPTOP)],
+        vec![crate::testkit::revoked(key(LAPTOP))],
     )
     .unwrap();
     let home = home("prompt-rekey-revoked");
