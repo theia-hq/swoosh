@@ -151,7 +151,7 @@ impl Known {
             home.root_pub(),
             home.key_cert(),
             home.devices(),
-            home.disabled_roots(),
+            home.revoked(),
             home.root(),
             home.root().join("root.key"),
         ] {

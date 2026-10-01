@@ -27,10 +27,10 @@ use bifrost_mdns::{Advertising, MdnsDiscovery, MdnsError, Started};
 use clap::{Args, ValueEnum};
 use eyre::WrapErr as _;
 
-use crate::config;
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
 use crate::reaching::BindRole;
+use crate::serve_toml::ServeToml;
 
 /// The flags every reaching verb shares and no local verb has: which backend to bind, whether the
 /// bind stays off n0, any direct address hints, and the relay and resolver the bind leans on.
@@ -69,20 +69,26 @@ pub struct ReachArgs {
 }
 
 impl ReachArgs {
-    /// The relay and the resolver THIS run binds over: each flag if it was given, else the file `serve`
-    /// wrote under this home, else n0's.
+    /// The relay and the resolver THIS run binds over: each flag if it was given, else the one `serve`
+    /// kept in this home's `serve.toml`, else n0's.
     ///
     /// Read on a DEFAULT home too. A dial-only verb reads its key from the home and otherwise barely
     /// opens it, so without this a `swoosh ping` would quietly go back to n0's resolver and never find a
     /// fleet that publishes to its own.
     pub async fn reach(&self, home: &Home) -> eyre::Result<Reach> {
+        let kept = if self.relay.is_none() || self.resolver.is_none() {
+            ServeToml::read(home)?
+        } else {
+            ServeToml::default()
+        };
+        let path = home.serve_toml();
         let relay = match Option::clone(&self.relay) {
             Some(url) => Some(url),
-            None => load_reach_url(&home.relay(), "relay").await?,
+            None => kept_url(kept.relay.as_deref(), &path, "relay")?,
         };
         let resolver = match Option::clone(&self.resolver) {
             Some(url) => Some(url),
-            None => load_reach_url(&home.resolver(), "resolver").await?,
+            None => kept_url(kept.resolver.as_deref(), &path, "resolver")?,
         };
         Ok(Reach {
             relay: relay.map_or(RelayHome::N0, RelayHome::Custom),
@@ -105,20 +111,14 @@ impl ReachArgs {
             return Ok(());
         }
         let home_lock = HomeWrite::take(home).await?;
-        if let Some(relay) = &self.relay {
-            config::write_private_atomic(
-                &home_lock,
-                &home.relay(),
-                format!("{relay}\n").as_bytes(),
-            )?;
-        }
-        if let Some(resolver) = &self.resolver {
-            config::write_private_atomic(
-                &home_lock,
-                &home.resolver(),
-                format!("{resolver}\n").as_bytes(),
-            )?;
-        }
+        ServeToml::update(&home_lock, home, |file| {
+            if let Some(relay) = &self.relay {
+                file.relay = Some(relay.to_string());
+            }
+            if let Some(resolver) = &self.resolver {
+                file.resolver = Some(resolver.to_string());
+            }
+        })?;
         Ok(())
     }
 
@@ -416,41 +416,17 @@ impl FromStr for PeerHint {
     }
 }
 
-/// Read one reach file into its URL newtype: absent is n0's default, present is parsed here.
-///
-/// An empty or malformed file is a REFUSAL, not a shrug back to n0: the operator wrote it to keep this
-/// node's traffic off n0's servers, so falling back silently would put it back there without a word.
-/// `what` is the noun and the flag stem (`relay`, `resolver`), so the message names the file (nothing
-/// else on screen says which home is in play) and both fixes, a leftover file being as likely as a typo.
-// `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
-#[allow(clippy::std_instead_of_core)]
-async fn load_reach_url<T: FromStr>(path: &Path, what: &str) -> eyre::Result<Option<T>>
+/// The `what` (`relay` or `resolver`) `serve.toml` at `path` keeps, parsed, or `None` when it keeps none.
+fn kept_url<T: FromStr>(kept: Option<&str>, path: &Path, what: &str) -> eyre::Result<Option<T>>
 where
     T::Err: core::error::Error + Send + Sync + 'static,
 {
-    let text = match crate::home::read_trust_file_async(path).await {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        // A directory where the file belongs is the same mistake as a file holding nothing usable, and
-        // the raw `Is a directory (os error 21)` names neither the file nor the way out.
-        Err(error) if error.kind() == std::io::ErrorKind::IsADirectory => {
-            eyre::bail!(
-                "the {what} file {path} is a directory; remove it, or pass --{what} <url>",
-                path = EscapedPath(path)
-            );
-        }
-        Err(error) => return Err(error.into()),
+    let Some(url) = kept else {
+        return Ok(None);
     };
-    let url = text.trim();
-    if url.is_empty() {
-        eyre::bail!(
-            "the {what} file {path} is empty; delete it, or pass --{what} <url>",
-            path = EscapedPath(path)
-        );
-    }
     let url = url.parse::<T>().wrap_err_with(|| {
         format!(
-            "the {what} file {path} does not name a usable {what}; delete it, or pass --{what} <url>",
+            "the {what} in {path} is not a usable {what}; pass --{what} <url>",
             path = EscapedPath(path)
         )
     })?;

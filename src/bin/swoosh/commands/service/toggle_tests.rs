@@ -1,13 +1,13 @@
-//! Tests for the `service enable`/`disable` file toggle: the round-trip on `<home>/disabled`, the sorted
-//! atomic rewrite, and idempotency.
+//! Tests for the `service enable`/`disable` file toggle: the round-trip on the services off in
+//! `<home>/serve.toml`, the sorted rewrite, and idempotency.
 
 use std::collections::BTreeSet;
 
 use swoosh::home::Home;
 
-use super::{ServiceToggleCmd, read};
+use super::{ServiceToggleCmd, disabled};
 
-/// A fresh, empty home under a unique temp dir, so parallel tests never share a `<home>/disabled`.
+/// A fresh, empty home under a unique temp dir, so parallel tests never share a `<home>/serve.toml`.
 fn temp_home(tag: &str) -> Home {
     let dir = std::env::temp_dir().join(format!("swoosh-toggle-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -17,10 +17,10 @@ fn temp_home(tag: &str) -> Home {
 
 /// The disabled set currently on disk, read back through the same parse the oracle uses.
 fn disabled_on_disk(home: &Home) -> BTreeSet<String> {
-    read(&home.disabled()).expect("read the disabled file")
+    disabled(home).expect("read serve.toml")
 }
 
-/// A `disable` writes the name into `<home>/disabled`; an `enable` takes it back out. The core round-trip.
+/// A `disable` writes the name into `<home>/serve.toml`; an `enable` takes it back out. The core round-trip.
 #[tokio::test]
 async fn disable_then_enable_round_trips() {
     let home = temp_home("round-trip");
@@ -71,9 +71,9 @@ async fn disables_accumulate_sorted_and_idempotent() {
         "distinct names only (idempotent), name-sorted"
     );
 
-    // The raw file body is sorted with a trailing newline, so the mtime-watched oracle parses it cleanly.
-    let body = std::fs::read_to_string(home.disabled()).expect("read raw");
-    assert_eq!(body, "ping\nspeed\n", "sorted, newline-terminated");
+    // The raw file holds the names sorted.
+    let body = std::fs::read_to_string(home.serve_toml()).expect("read raw");
+    assert_eq!(body, "off = [\"ping\", \"speed\"]\n", "sorted");
 
     let _ = std::fs::remove_dir_all(home.dir());
 }
@@ -89,5 +89,71 @@ async fn enable_of_an_untouched_service_is_a_noop() {
     .await
     .expect("enable a never-disabled service succeeds");
     assert!(disabled_on_disk(&home).is_empty(), "nothing disabled");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// `serve.toml` is the one file for what `serve` runs: a `serve` that names its services, `service off`,
+/// and `serve --relay --resolver` each land their own field in it and keep every field the others wrote,
+/// and the home holds no file of its own for any of them.
+#[tokio::test]
+async fn serve_toml_holds_services_off_relay_and_resolver() {
+    use swoosh::serve::Started;
+    use swoosh::serve_toml::ServeToml;
+    use swoosh::transport::{ReachArgs, Transport};
+
+    let home = temp_home("one-file");
+    let read = || ServeToml::read(&home).expect("read serve.toml");
+
+    Started::of(&["ssh=sshd:".to_owned()], &home, std::path::Path::new("/"))
+        .expect("named")
+        .record(&swoosh::home::HomeWrite::take(&home).await.unwrap(), &home)
+        .expect("a named serve records its services");
+    assert_eq!(read().services, ["ssh=sshd:"]);
+
+    ServiceToggleCmd {
+        service: "speed".parse().expect("a service"),
+    }
+    .run_disable(&home)
+    .await
+    .expect("disable");
+    assert_eq!(read().services, ["ssh=sshd:"], "the services stay");
+    assert_eq!(read().off, BTreeSet::from(["speed".to_owned()]));
+
+    ReachArgs {
+        transport: Transport::default(),
+        local: false,
+        peer: Vec::new(),
+        relay: Some("https://relay.example".parse().expect("a relay")),
+        resolver: Some("https://dns.example/pkarr".parse().expect("a resolver")),
+    }
+    .persist_reach(&home)
+    .await
+    .expect("serve keeps its relay and resolver");
+    let all = read();
+    assert_eq!(all.services, ["ssh=sshd:"], "the services stay");
+    assert_eq!(
+        all.off,
+        BTreeSet::from(["speed".to_owned()]),
+        "so do the off"
+    );
+    assert_eq!(all.relay.as_deref(), Some("https://relay.example/"));
+    assert_eq!(all.resolver.as_deref(), Some("https://dns.example/pkarr"));
+
+    ServiceToggleCmd {
+        service: "speed".parse().expect("a service"),
+    }
+    .run_enable(&home)
+    .await
+    .expect("enable");
+    let all = read();
+    assert!(all.off.is_empty(), "speed is back on");
+    assert!(
+        all.services.len() == 1 && all.relay.is_some() && all.resolver.is_some(),
+        "and the rest stay: {all:?}"
+    );
+
+    for gone in ["serving", "disabled", "relay", "resolver"] {
+        assert!(!home.dir().join(gone).exists(), "no {gone} file");
+    }
     let _ = std::fs::remove_dir_all(home.dir());
 }

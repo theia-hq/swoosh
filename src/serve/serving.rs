@@ -1,17 +1,17 @@
 //! What a `serve` serves when it starts: the services it was given, the list this home last served, or
 //! the default.
 //!
-//! The list is `<home>/serving`, one service form per line. Only the services are kept: `--public`,
-//! `--public-unsafe`, `--admit` and `--expires` apply to the run that types them, so a restart never opens
-//! a service to anyone the person did not open it to again. Each line is read by the service-entry parser,
-//! never by the flag parser, so a line cannot become a flag.
+//! The list is the `services` of `<home>/serve.toml`, one service form per entry. Only the services are
+//! kept: `--public`, `--public-unsafe`, `--admit` and `--expires` apply to the run that types them, so a
+//! restart never opens a service to anyone the person did not open it to again. Each entry is read by the
+//! service-entry parser, never by the flag parser, so an entry cannot become a flag.
 
-use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{DEFAULT_SERVICES, service_entry};
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
+use crate::serve_toml::{ServeToml, ServeTomlError};
 
 /// The targets whose argument is a path on this machine: stored absolute, because a service manager
 /// starts `serve` in a different directory than the shell that named them.
@@ -20,21 +20,21 @@ const PATH_SCHEMES: [&str; 4] = ["recv", "unix", "file", "fifo"];
 /// Why the services a `serve` starts with could not be settled.
 #[derive(Debug, thiserror::Error)]
 pub enum ServingError {
-    /// A line of `<home>/serving` is not a service form, a flag above all: it is refused, never spliced
-    /// into the command line.
+    /// An entry of the services `<home>/serve.toml` keeps is not a service form, a flag above all: it is
+    /// refused, never spliced into the command line.
     #[error(
         "{} has a line that is not a service: {line}. Name the services: swoosh serve ssh ping …",
         EscapedPath(path)
     )]
     NotAService {
-        /// The file the line was read from.
+        /// The file the entry was read from.
         path: PathBuf,
-        /// The line, as it is in the file.
+        /// The entry, as it is in the file.
         line: String,
     },
-    /// A named service that one line of `<home>/serving` cannot hold as it is: a line break would read back
-    /// as more services, a space at either end is trimmed on the way back, and a path that is not UTF-8
-    /// would be saved as a different path. It is refused, and nothing is saved.
+    /// A named service that one entry of `<home>/serve.toml` cannot hold as it is: a control character or
+    /// a space at either end would not read back as it was typed, and a path that is not UTF-8 would be
+    /// saved as a different path. It is refused, and nothing is saved.
     #[error(
         "{} cannot be saved in {}: it has a control character, a space at either end, or a path that is \
          not UTF-8.",
@@ -47,15 +47,9 @@ pub enum ServingError {
         /// The service, paths made absolute.
         entry: String,
     },
-    /// `<home>/serving` exists and could not be read or written.
-    #[error("could not use {}", EscapedPath(path))]
-    Io {
-        /// The file.
-        path: PathBuf,
-        /// The underlying failure.
-        #[source]
-        source: io::Error,
-    },
+    /// `<home>/serve.toml` could not be read or written.
+    #[error(transparent)]
+    File(#[from] ServeTomlError),
 }
 
 /// The services a `serve` starts with, and where they came from: the banner says which, and only a named
@@ -74,7 +68,7 @@ impl Started {
     /// Settle what a `serve` under `home` starts with: `named` (already through the service-entry parser)
     /// with its paths made absolute against `cwd`, else the recorded list, else the default.
     pub fn of(named: &[String], home: &Home, cwd: &Path) -> Result<Self, ServingError> {
-        let path = home.serving();
+        let path = home.serve_toml();
         if !named.is_empty() {
             let cannot_save = |entry: String| ServingError::CannotSave {
                 path: path.clone(),
@@ -92,21 +86,16 @@ impl Started {
                 .collect::<Result<_, _>>()
                 .map(Self::Named);
         }
-        let text = match crate::home::read_trust_file(&path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::Default),
-            Err(source) => return Err(ServingError::Io { path, source }),
-        };
         let mut entries = Vec::new();
-        for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        for line in ServeToml::read(home)?.services {
             let not_a_service = || ServingError::NotAService {
                 path: path.clone(),
-                line: line.to_owned(),
+                line: line.clone(),
             };
             if line.starts_with('-') {
                 return Err(not_a_service());
             }
-            entries.push(service_entry(line).map_err(|_| not_a_service())?);
+            entries.push(service_entry(&line).map_err(|_| not_a_service())?);
         }
         if entries.is_empty() {
             return Ok(Self::Default);
@@ -136,16 +125,13 @@ impl Started {
     ///
     /// # Errors
     ///
-    /// [`ServingError::Io`] when the list could not be written.
+    /// [`ServingError::File`] when the list could not be written.
     pub fn record(&self, home_lock: &HomeWrite, home: &Home) -> Result<(), ServingError> {
         let Self::Named(entries) = self else {
             return Ok(());
         };
-        let path = home.serving();
-        let mut body = entries.join("\n");
-        body.push('\n');
-        crate::config::write_private_atomic(home_lock, &path, body.as_bytes())
-            .map_err(|source| ServingError::Io { path, source })
+        ServeToml::update(home_lock, home, |file| file.services.clone_from(entries))?;
+        Ok(())
     }
 }
 

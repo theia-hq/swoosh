@@ -37,7 +37,7 @@ use std::time::SystemTime;
 use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use nauthy::VerifyKey;
 use rand::seq::SliceRandom as _;
-use tightbeam::identity::AsNodeId as _;
+use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use tightbeam::tunnel::Connector;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
@@ -562,7 +562,11 @@ async fn dialable(
     let own = keystore::KeyFile::device(home.key())
         .load()?
         .map(|stored| stored.node_id());
-    let mut revoked: Vec<NodeId> = revoked_keys_here(home).await?;
+    // The one reader of what this machine refuses, on the gate's rules: a file that cannot be read, is
+    // loose, or lost entries fails the list rather than reading as no keys, which would dial a device this
+    // machine revoked.
+    let revoked_here = crate::revoked::open(home)?;
+    let mut revoked: Vec<NodeId> = Vec::new();
     if let Ok(Some(pin)) = device_pin(home).await
         && let Some((doc, _)) = read_held(&home.devices(), pin)
     {
@@ -576,31 +580,16 @@ async fn dialable(
     for device in listed {
         let skip = Some(device.key) == own
             || revoked.contains(&device.key)
+            || device
+                .key
+                .verify_key()
+                .is_ok_and(|key| revoked_here.is_revoked_key(&key))
             || out.iter().any(|kept| kept.key == device.key);
         if !skip {
             out.push(device);
         }
     }
     Ok(out)
-}
-
-/// The keys in `<home>/revoked_keys`, skipping any line that is not one, and none when there is no file.
-///
-/// # Errors
-///
-/// A file this machine cannot read, or one [`read_trust_file`](crate::home::read_trust_file) refuses as
-/// loose. Either fails the list rather than reading as no keys: a list made without the keys revoked here
-/// would dial a device this machine revoked.
-async fn revoked_keys_here(home: &Home) -> io::Result<Vec<NodeId>> {
-    let text = match crate::home::read_trust_file_async(&home.revoked_keys()).await {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error),
-    };
-    Ok(text
-        .lines()
-        .filter_map(|line| line.trim().parse::<NodeId>().ok())
-        .collect())
 }
 
 /// How one device's exchange in a round went.

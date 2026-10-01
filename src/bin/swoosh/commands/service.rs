@@ -7,7 +7,7 @@
 //! - `service ls [--at <peer>]` reads the served menu: bare reads your own live node over the local
 //!   control socket (needs a running `serve`), `--at` reaches a peer's `control.services`. See [`ls`].
 //! - `service enable <svc>` / `service disable <svc>` toggle one of YOUR node's services by writing
-//!   `<home>/disabled`, honored LIVE by a running `serve` with no restart. No `--at`: you never remotely
+//!   `<home>/serve.toml`, honored LIVE by a running `serve` with no restart. No `--at`: you never remotely
 //!   toggle a peer's service (a wire mutation the design forbids). See [`toggle`].
 
 use clap::Subcommand;
@@ -27,8 +27,8 @@ pub enum ServiceCmd {
     // value; inline, every `service enable`/`disable` would pay for them
     // (`clippy::large_enum_variant`). One run-once allocation on a path that parses a command line.
     Ls(Box<ls::ServiceLsCmd>),
-    /// Re-enable a disabled service (a file-write on `<home>/disabled`, honored live, no restart).
+    /// Re-enable a disabled service (a file-write on `<home>/serve.toml`, honored live, no restart).
     Enable(toggle::ServiceToggleCmd),
-    /// Disable a service (a file-write on `<home>/disabled`, persisted fail-closed, honored live).
+    /// Disable a service (a file-write on `<home>/serve.toml`, persisted fail-closed, honored live).
     Disable(toggle::ServiceToggleCmd),
 }

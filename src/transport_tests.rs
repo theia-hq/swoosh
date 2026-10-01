@@ -209,9 +209,9 @@ fn no_flags() -> ReachArgs {
     }
 }
 
-/// `serve --relay --resolver` writes both files, and a later verb under the SAME home reads them back as
-/// the two URLs it was pointed at. This is the whole contract of the home files: name the two servers once,
-/// on the node, and every verb after it reaches the same fleet with no flags repeated.
+/// `serve --relay --resolver` writes both into `serve.toml`, and a later verb under the SAME home reads
+/// them back as the two URLs it was pointed at. This is the whole contract: name the two servers once, on
+/// the node, and every verb after it reaches the same fleet with no flags repeated.
 #[tokio::test]
 async fn both_reach_files_round_trip_through_a_home() {
     let home = home("round-trip");
@@ -252,18 +252,17 @@ async fn both_reach_files_round_trip_through_a_home() {
     {
         use std::os::unix::fs::PermissionsExt as _;
 
-        for path in [home.relay(), home.resolver()] {
-            let mode = std::fs::metadata(&path)
-                .expect("stat the reach file")
-                .permissions()
-                .mode();
-            assert_eq!(
-                mode & 0o777,
-                0o600,
-                "{} is written owner-only",
-                path.display()
-            );
-        }
+        let path = home.serve_toml();
+        let mode = std::fs::metadata(&path)
+            .expect("stat serve.toml")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "{} is written owner-only",
+            path.display()
+        );
     }
 }
 
@@ -331,46 +330,46 @@ async fn a_flag_overrides_the_file_for_one_run() {
     );
 }
 
-/// An empty or malformed reach file REFUSES, naming the file and both fixes. It never shrugs back to n0:
-/// the operator wrote the file to keep this node off n0's servers, so a silent fallback would put it back
-/// there without a word.
+/// A relay or resolver in `serve.toml` that is not a usable one REFUSES, naming the file and the fix. It
+/// never shrugs back to n0: the operator set it to keep this node off n0's servers, so a silent fallback
+/// would put it back there without a word.
 #[tokio::test]
-async fn an_empty_or_malformed_reach_file_refuses_with_the_file_named() {
+async fn an_unusable_kept_relay_or_resolver_refuses_with_the_file_named() {
     let home = home("refuse");
     std::fs::create_dir_all(home.dir()).expect("create the home dir");
 
-    for (contents, tail) in [
-        ("   \n", "is empty"),
-        ("http://relay.example\n", "usable relay"),
-    ] {
-        std::fs::write(home.relay(), contents).expect("write the relay file");
+    for kept in ["", "http://relay.example"] {
+        std::fs::write(home.serve_toml(), format!("relay = \"{kept}\"\n"))
+            .expect("write serve.toml");
         let error = no_flags()
             .reach(&home)
             .await
-            .expect_err("a file that names no relay is a refusal, not a shrug back to n0");
+            .expect_err("a kept relay that is no relay is a refusal, not a shrug back to n0");
         let message = format!("{error:#}");
         assert!(
-            message.contains(&home.relay().display().to_string()),
-            "the message names the file: {message}"
-        );
-        assert!(message.contains(tail), "{message}");
-        assert!(
-            message.contains("delete it, or pass --relay <url>"),
-            "the message names both fixes: {message}"
+            message.contains(&format!(
+                "the relay in {} is not a usable relay; pass --relay <url>",
+                home.serve_toml().display()
+            )),
+            "the message names the file and the fix: {message}"
         );
     }
 
-    std::fs::write(home.relay(), "https://relay.example\n").expect("write a usable relay");
-    std::fs::write(home.resolver(), "ftp://dns.example\n").expect("write the resolver file");
+    std::fs::write(
+        home.serve_toml(),
+        "relay = \"https://relay.example\"\nresolver = \"ftp://dns.example\"\n",
+    )
+    .expect("write serve.toml");
     let error = no_flags()
         .reach(&home)
         .await
-        .expect_err("a file that names no resolver refuses too");
+        .expect_err("a kept resolver that is no resolver refuses too");
     let message = format!("{error:#}");
     assert!(
-        message.contains(&home.resolver().display().to_string())
-            && message.contains("does not name a usable resolver")
-            && message.contains("delete it, or pass --resolver <url>"),
+        message.contains(&format!(
+            "the resolver in {} is not a usable resolver; pass --resolver <url>",
+            home.serve_toml().display()
+        )),
         "{message}"
     );
     assert!(
@@ -465,21 +464,18 @@ fn a_bind_that_uses_neither_reach_flag_refuses_both_by_name() {
     );
 }
 
-/// A directory where a reach file belongs is the same mistake as a file holding nothing usable, and it
-/// gets the same teaching line: the raw `Is a directory` names neither the file nor the way out.
+/// A `serve.toml` that cannot be read refuses, naming the file, rather than reaching through n0.
 #[tokio::test]
-async fn a_reach_file_that_is_a_directory_refuses_with_the_file_named() {
+async fn a_serve_toml_that_cannot_be_read_refuses_with_the_file_named() {
     let home = home("directory");
-    std::fs::create_dir_all(home.relay()).expect("create a directory where the relay file belongs");
+    std::fs::create_dir_all(home.serve_toml())
+        .expect("create a directory where serve.toml belongs");
     let error = no_flags()
         .reach(&home)
         .await
         .expect_err("a directory is not a relay");
     assert_eq!(
-        format!("{error:#}"),
-        format!(
-            "the relay file {} is a directory; remove it, or pass --relay <url>",
-            home.relay().display()
-        )
+        error.to_string(),
+        format!("could not use {}", home.serve_toml().display())
     );
 }

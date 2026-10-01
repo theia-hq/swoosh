@@ -241,7 +241,12 @@ async fn the_door_misses_a_lapsed_row_nobody_renewed() {
 async fn the_door_misses_a_revoked_key_even_on_a_stale_update() {
     let (nas, _) = nas_renewing("revoked-key", now() + 90 * DAY).await;
     // Revoked here since the update was cut: the update still lists the laptop live.
-    crate::gate::add_revoked_keys(&crate::testkit::lock(), &nas, &[key(LAPTOP)]).unwrap();
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &nas,
+        [nauthy::Revocation::Key(key(LAPTOP))],
+    )
+    .unwrap();
 
     assert_eq!(asked(&nas, LAPTOP).await, MISSED);
 }
@@ -250,12 +255,7 @@ async fn the_door_misses_a_revoked_key_even_on_a_stale_update() {
 async fn the_door_misses_a_revoked_standing_id() {
     let (nas, renewed) = nas_renewing("revoked-id", now() + 90 * DAY).await;
     let id = renewed.cap().root_revocation_id().unwrap();
-    nauthy::FileDenylist::load(nas.revoked())
-        .await
-        .unwrap()
-        .revoke_id(id)
-        .await
-        .unwrap();
+    crate::revoked::add(&crate::testkit::lock(), &nas, [nauthy::Revocation::Id(id)]).unwrap();
 
     assert_eq!(asked(&nas, LAPTOP).await, MISSED);
 }

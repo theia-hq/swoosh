@@ -816,7 +816,12 @@ async fn bare_invite_lists_only_due_devices() {
         &home,
         &RosterDoc::with_revocations(Epoch(2), members, Vec::new(), keys).unwrap(),
     );
-    std::fs::write(home.revoked_keys(), format!("{}\n", key(WATCH))).unwrap();
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(key(WATCH))],
+    )
+    .unwrap();
     let ran = invite(&home, &[]).await;
     assert!(ran.result.is_ok(), "{:?}", ran.result);
     assert_eq!(ran.out, "swoosh invite laptop\n");
@@ -1124,7 +1129,12 @@ async fn a_named_renewal_of_a_device_revoked_here_prints_no_standing_and_cuts() 
     let home = scratch("revoked-here-id");
     let laptop = fresh(LAPTOP, "laptop");
     holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
-    std::fs::write(home.revoked(), format!("{}\n", laptop.ids[0].id.to_hex())).unwrap();
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Id(laptop.ids[0].id.clone())],
+    )
+    .unwrap();
     let ran = invite(&home, &["laptop"]).await;
     let printed = ran.invite();
     assert_ne!(
@@ -1143,7 +1153,12 @@ async fn a_named_renewal_of_a_device_revoked_here_prints_no_standing_and_cuts() 
     // Its key revoked on this machine only: it is no device to renew.
     let home = scratch("revoked-here-key");
     holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
-    std::fs::write(home.revoked_keys(), format!("{}\n", key(LAPTOP))).unwrap();
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(key(LAPTOP))],
+    )
+    .unwrap();
     let ran = invite(&home, &["laptop"]).await;
     assert!(ran.result.is_err());
     assert!(ran.out.is_empty(), "never its standing: {}", ran.out);

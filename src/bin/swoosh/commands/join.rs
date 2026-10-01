@@ -132,7 +132,7 @@ impl JoinCmd {
                 name = invite.name
             );
         }
-        if swoosh::config::is_disabled(home, root).await? {
+        if swoosh::config::is_revoked(home, root)? {
             eyre::bail!("root:{root} was revoked on this machine; recovery is a new root.");
         }
         let locked = matches!(stored, Some(Stored::Locked(_)));

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
 use eyre::WrapErr as _;
-use nauthy::{DisabledRoots, Link};
+use nauthy::Link;
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::escape::EscapedPath;
@@ -40,13 +40,13 @@ pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
     }
 }
 
-/// Whether this home has disabled `root`: the question a verb asks before it follows a key it did not
-/// sign itself, read from the same latch the `serve` gate refuses every cap rooted there on. Fails
-/// closed: a latch that cannot be read, or that lost keys it once held, is an error, never "nothing is
-/// disabled".
-pub async fn is_disabled(home: &Home, root: NodeId) -> eyre::Result<bool> {
-    let disabled = DisabledRoots::load(home.disabled_roots()).await?;
-    Ok(disabled.is_disabled(root.verify_key()?))
+/// Whether this home has revoked `root`: the question a verb asks before it follows a key it did not
+/// sign itself, read from the same `revoked` the `serve` gate refuses every cap rooted there on. Fails
+/// closed: a file that cannot be read, or that lost entries it once held, is an error, never "nothing is
+/// revoked".
+pub fn is_revoked(home: &Home, root: NodeId) -> eyre::Result<bool> {
+    let revoked = crate::revoked::open(home)?;
+    Ok(revoked.is_revoked_key(&root.verify_key()?))
 }
 
 /// Write this node's signet: the public [`NodeId`] its default gate will trust, as `join` sets it from an

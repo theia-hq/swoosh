@@ -18,7 +18,7 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use keystore::{KeyFile, Passphrase, Protection, Stored};
-use nauthy::{DisabledRoots, RevocationId, Revocations as _, VerifyKey};
+use nauthy::{Revocation, RevocationId, VerifyKey};
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
@@ -570,10 +570,12 @@ async fn present_checks_everything_before_the_prompt() {
 
     // Step 5: a root revoked here.
     let latched = home("check-5");
-    DisabledRoots::open_for_repair(latched.disabled_roots())
-        .disable(TestRoot::seeded(ROOT).verify_key())
-        .await
-        .unwrap();
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &latched,
+        [Revocation::Key(TestRoot::seeded(ROOT).verify_key())],
+    )
+    .unwrap();
     let (refused, _) = present(
         &latched,
         RootPlace::Dir(dir.clone()),
@@ -628,10 +630,12 @@ async fn present_refuses_a_latched_root() {
         ROOT,
         &records(0, vec![own_row()], Vec::new(), Vec::new()),
     );
-    DisabledRoots::open_for_repair(home.disabled_roots())
-        .disable(TestRoot::seeded(ROOT).verify_key())
-        .await
-        .unwrap();
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &home,
+        [Revocation::Key(TestRoot::seeded(ROOT).verify_key())],
+    )
+    .unwrap();
     let mut prompt = Counting::refusing();
     let (refused, _) = present(&home, RootPlace::Dir(dir), RootVerb::Backup, &mut prompt).await;
     assert!(
@@ -1042,18 +1046,15 @@ async fn a_root_act_never_publishes_a_devices_own_grant_revocations() {
     .await;
     // This machine revoked a link it signed, and the laptop's standing and key.
     let grant = RevocationId::from_bytes(vec![0x99; 64]);
-    std::fs::write(
-        home.revoked(),
-        format!("{}\n{}\n", grant.to_hex(), id(LAPTOP, 0).id.to_hex()),
-    )
-    .unwrap();
-    std::fs::write(
-        home.revoked_keys(),
-        format!(
-            "{}\n{}\n",
-            TestNode::seeded(PHONE).node_id(),
-            TestNode::seeded(LAPTOP).node_id()
-        ),
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &home,
+        [
+            Revocation::Id(grant),
+            Revocation::Id(id(LAPTOP, 0).id),
+            Revocation::Key(key(PHONE)),
+            Revocation::Key(key(LAPTOP)),
+        ],
     )
     .unwrap();
     let (root, _) = present(
@@ -1363,7 +1364,7 @@ async fn the_device_refusals_print_their_lines() {
          swoosh invite nas <its key>."
     );
     let line = root
-        .revoke_device(&name("nas"), key(NAS))
+        .revoke_device(&name("nas"), key(NAS), &[])
         .unwrap_err()
         .to_string();
     assert_eq!(line, "me/nas is not one of your devices (`swoosh status`)");
@@ -1451,7 +1452,7 @@ async fn revoking_past_max_revoked_refuses_with_its_line() {
     .await;
     let mut root = root.unwrap();
     let refused = root
-        .revoke_device(&name("laptop"), key(LAPTOP))
+        .revoke_device(&name("laptop"), key(LAPTOP), &[])
         .unwrap_err();
     assert!(
         matches!(refused, RootError::TooManyRevoked { count, .. } if count == MAX_REVOKED + 1),
@@ -1695,7 +1696,8 @@ async fn a_revocation_only_cut_advances_the_number() {
     let mut prompt = Counting::new([PASS]);
     let (root, _) = present(&home, RootPlace::Home, RootVerb::Revoke, &mut prompt).await;
     let mut root = root.unwrap();
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
     let (committed, update) = commit(root).await;
 
     assert_eq!(
@@ -1733,7 +1735,8 @@ async fn revoking_a_device_by_its_key_never_takes_the_live_device_of_its_name() 
     let mut prompt = Counting::new([PASS]);
     let (root, _) = present(&home, RootPlace::Home, RootVerb::Revoke, &mut prompt).await;
     let mut root = root.unwrap();
-    root.revoke_device(&name("nas"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("nas"), key(LAPTOP), &[key(PHONE)])
+        .unwrap();
     let (_, update) = commit(root).await;
     assert!(
         !update.revoked_keys().contains(&key(PHONE)),
@@ -1832,7 +1835,7 @@ async fn a_device_that_missed_its_renewal_update_gets_it_from_the_next() {
     )
     .await;
     let mut root = root.unwrap();
-    root.revoke_device(&name("phone"), key(PHONE)).unwrap();
+    root.revoke_device(&name("phone"), key(PHONE), &[]).unwrap();
     let (next, _) = commit(root).await;
     assert_eq!(next.number, Epoch(3));
 
@@ -1908,13 +1911,13 @@ fn silent(label: &str) -> Missed {
 async fn a_cut_from_a_non_serving_device_is_offered() {
     let (home, first, mut root) = revoking("offered", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
     let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
     let (committed, _) = commit(root).await;
     assert!(
-        !crate::gate::KeyedDenylist::load(&nas)
-            .await
+        !crate::revoked::open(&nas)
             .unwrap()
-            .is_revoked_peer(&key(LAPTOP)),
+            .is_revoked_key(&key(LAPTOP)),
         "before the offer, me/nas still admits me/laptop"
     );
 
@@ -1925,10 +1928,9 @@ async fn a_cut_from_a_non_serving_device_is_offered() {
     let reach = committed.offer(&dial).await;
 
     assert!(
-        crate::gate::KeyedDenylist::load(&nas)
-            .await
+        crate::revoked::open(&nas)
             .unwrap()
-            .is_revoked_peer(&key(LAPTOP)),
+            .is_revoked_key(&key(LAPTOP)),
         "me/nas blocks the revoked device"
     );
     assert_eq!(
@@ -1944,7 +1946,7 @@ async fn a_cut_from_a_non_serving_device_is_offered() {
 #[tokio::test]
 async fn reach_says_held_when_no_device_took_it_and_nothing_serves() {
     let (_home, _, mut root) = revoking("held", &[(LAPTOP, "laptop"), (PHONE, "phone")]).await;
-    root.revoke_device(&name("phone"), key(PHONE)).unwrap();
+    root.revoke_device(&name("phone"), key(PHONE), &[]).unwrap();
     let (committed, _) = commit(root).await;
 
     let reach = committed.offer(&Answering::nobody()).await;
@@ -1961,7 +1963,7 @@ async fn reach_says_held_when_no_device_took_it_and_nothing_serves() {
 #[tokio::test]
 async fn reach_says_published_while_this_machine_serves() {
     let (home, _, mut root) = revoking("serving", &[(LAPTOP, "laptop"), (PHONE, "phone")]).await;
-    root.revoke_device(&name("phone"), key(PHONE)).unwrap();
+    root.revoke_device(&name("phone"), key(PHONE), &[]).unwrap();
     let (committed, _) = commit(root).await;
     let _serving = crate::testkit::serving(&home, None);
 
@@ -1984,7 +1986,8 @@ async fn a_cut_below_the_fleet_floor_reports_behind() {
     // me/nas already holds a later list than the one this copy of the root cuts.
     let later = RosterDoc::new(Epoch(5), first.members().to_vec()).unwrap();
     let nas = sibling(&home, NAS, STANDING_UNTIL, &later).await;
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
     let (committed, _) = commit(root).await;
     assert_eq!(committed.number, Epoch(2));
 
@@ -2049,7 +2052,8 @@ async fn an_offer_to_a_machine_that_is_not_a_device_is_not_taken() {
     let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
     std::fs::remove_file(nas.key_cert()).unwrap();
     std::fs::remove_file(nas.root_pub()).unwrap();
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
     let (committed, _) = commit(root).await;
 
     let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
@@ -2067,7 +2071,8 @@ async fn an_offer_to_a_machine_that_is_not_a_device_is_not_taken() {
 async fn an_offer_after_a_newer_fold_reports_behind() {
     let (home, first, mut root) = revoking("newer-fold", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
     let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
     let (committed, _) = commit(root).await;
     assert_eq!(committed.number, Epoch(2));
 
@@ -2102,7 +2107,8 @@ async fn an_offer_after_a_newer_fold_reports_behind() {
 async fn a_forked_offer_reports_behind() {
     // me/nas recorded the cut as a fork of its own list at that number.
     let (_home, _, mut root) = revoking("fork-recorded", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
     let (committed, _) = commit(root).await;
     let dial = Scripted(vec![(NAS, Answer::ForkRecorded { floor: Epoch(2) })]);
     assert_eq!(committed.offer(&dial).await, Reach::Behind);
@@ -2124,7 +2130,8 @@ async fn a_forked_offer_reports_behind() {
     )
     .await
     .unwrap();
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
     let (committed, _) = commit(root).await;
     let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
     assert_eq!(committed.offer(&dial).await, Reach::Behind);
@@ -2212,7 +2219,8 @@ async fn a_write_under_the_guard_never_takes_the_lock_again() {
     // A root act's commit folds its own cut under the `home.lock` it holds. A fold that took the lock
     // itself would wait on the act's own hold for good, so the commit is bounded here.
     let (home, _, mut root) = revoking("under-guard", &[(LAPTOP, "laptop")]).await;
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
     let committed = tokio::time::timeout(Duration::from_secs(10), root.commit_to(&mut io::sink()))
         .await
         .expect("the commit's own fold finishes under the act's lock")
@@ -2266,7 +2274,8 @@ async fn a_list_folded_during_the_prompt_is_brought_forward_before_the_cut() {
     let (home, first, mut root) = presented_with("prompt-folded", &mut prompt).await;
     assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
     let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
 
     let committed = root
         .commit_to(&mut io::sink())
@@ -2295,10 +2304,9 @@ async fn a_list_folded_during_the_prompt_is_brought_forward_before_the_cut() {
     );
     let _reach = committed.offer(&dial).await;
     assert!(
-        crate::gate::KeyedDenylist::load(&nas)
-            .await
+        crate::revoked::open(&nas)
             .unwrap()
-            .is_revoked_peer(&key(LAPTOP)),
+            .is_revoked_key(&key(LAPTOP)),
         "me/nas took the cut"
     );
 }
@@ -2413,7 +2421,8 @@ async fn a_device_the_list_handed_a_new_key_meanwhile_is_never_left_live_by_a_re
     let mut prompt = FoldingPrompt::new(&home, &elsewhere);
     let (home, _, mut root) = presented_with("prompt-revoke-rekeyed", &mut prompt).await;
     assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
-    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    root.revoke_device(&name("laptop"), key(LAPTOP), &[])
+        .unwrap();
 
     let mut out = Vec::new();
     let error = root.commit_to(&mut out).await.map(|_| ()).unwrap_err();
@@ -2551,7 +2560,7 @@ async fn a_refused_offer_is_never_counted_as_taken() {
         &[(LAPTOP, "laptop"), (NAS, "nas"), (PHONE, "phone")],
     )
     .await;
-    root.revoke_device(&name("phone"), key(PHONE)).unwrap();
+    root.revoke_device(&name("phone"), key(PHONE), &[]).unwrap();
     let (committed, _) = commit(root).await;
 
     let dial = Scripted(vec![(NAS, Answer::Gave), (LAPTOP, Answer::Refused)]);

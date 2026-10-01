@@ -255,7 +255,7 @@ async fn leave_removes_the_standing_and_the_pin_and_keeps_the_revocations() {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
-    let revoked_keys = std::fs::read(home.revoked_keys()).unwrap();
+    let revoked = std::fs::read(home.revoked()).unwrap();
     let ran = leave(&home, &[]).await;
     ran.left();
     assert_eq!(read(&home).await, Standing::Unpinned);
@@ -278,8 +278,8 @@ async fn leave_removes_the_standing_and_the_pin_and_keeps_the_revocations() {
         "no list of the old root's devices stays"
     );
     assert_eq!(
-        std::fs::read(home.revoked_keys()).unwrap(),
-        revoked_keys,
+        std::fs::read(home.revoked()).unwrap(),
+        revoked,
         "every revocation it learned stays"
     );
     assert_eq!(

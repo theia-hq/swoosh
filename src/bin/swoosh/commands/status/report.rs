@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bifrost::NodeId;
 use keystore::{Method, Stored};
-use nauthy::{FileDenylist, VerifyKey};
+use nauthy::{Denylist, VerifyKey};
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME};
 use swoosh::escape::EscapedPath;
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
@@ -566,7 +566,7 @@ fn contacts_section(contacts: &Contacts) -> Section {
 /// with the service, who holds it, and when it ends. Devices are under `devices:`, never here.
 async fn links_section(home: &Home, now: u64) -> eyre::Result<Section> {
     let records = Grants::at(home.links()).load().await?;
-    let revoked = FileDenylist::load(home.revoked()).await?;
+    let revoked = swoosh::revoked::open(home)?;
     let rows = records
         .iter()
         .map(|record| link_row(record, &revoked, now))
@@ -578,7 +578,7 @@ async fn links_section(home: &Home, now: u64) -> eyre::Result<Section> {
 }
 
 /// One link's row.
-fn link_row(record: &GrantRecord, revoked: &FileDenylist, now: u64) -> [String; 4] {
+fn link_row(record: &GrantRecord, revoked: &Denylist, now: u64) -> [String; 4] {
     let id: String = record.root_id.to_hex().chars().take(8).collect();
     let holder = match record.holder.as_str() {
         ANYONE => "anyone".to_owned(),

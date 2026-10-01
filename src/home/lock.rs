@@ -94,6 +94,10 @@ pub enum ServeLockError {
     Lock(#[from] LockError),
 }
 
+/// `home.lock` excludes every writer of every file in the home, `<home>/revoked` among them, so a write to
+/// the revocations under it takes no lock of its own and makes no lock file beside it.
+impl nauthy::Exclusive for HomeWrite {}
+
 /// `<home>/serve.lock`, held exclusive: by a `serve` for its whole run, or by a command replacing this
 /// machine's key while it runs. Emptied and released when this drops.
 #[derive(Debug)]

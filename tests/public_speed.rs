@@ -19,7 +19,7 @@ use core::time::Duration;
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use measure::{Limit, Mode, Ping, ProtocolError, Refusal, Speedtest};
-use nauthy::FileDenylist;
+use nauthy::Denylist;
 use swoosh::serve::{CONTROL_STOP_SERVICE, Stop};
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
 
@@ -127,9 +127,9 @@ async fn proof() {
 
 /// An empty revocation denylist: this test exercises admission, not revocation, so the gate loads from a
 /// path that does not exist (an absent file is an empty set). `tag` keeps parallel tests' paths apart.
-async fn empty_denylist(tag: &str) -> FileDenylist {
+async fn empty_denylist(tag: &str) -> Denylist {
     let path =
         std::env::temp_dir().join(format!("swoosh-public-speed-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    FileDenylist::load(path).await.unwrap()
+    Denylist::load(path).unwrap()
 }

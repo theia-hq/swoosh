@@ -6,7 +6,7 @@ use core::time::Duration;
 use std::time::SystemTime;
 
 use keystore::{KeyFile, Passphrase, Protection};
-use nauthy::{FileDenylist, RevocationId, VerifyKey};
+use nauthy::{RevocationId, VerifyKey};
 use swoosh::config;
 use swoosh::contacts::DeviceLabel;
 use swoosh::grants::{ANYONE, Delegation, GrantKind, GrantRecord};
@@ -409,9 +409,7 @@ fn serving_is_unknown_when_what_is_off_cannot_be_read() {
 #[tokio::test]
 async fn a_link_row_prints_its_holder_by_kind() {
     let home = home("links");
-    let revoked = FileDenylist::load(home.revoked())
-        .await
-        .expect("no revocations");
+    let revoked = swoosh::revoked::open(&home).expect("no revocations");
     let holder = |kind, holder: String| {
         let record = GrantRecord {
             target: "ssh".parse().expect("a service"),

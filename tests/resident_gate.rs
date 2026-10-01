@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! BLOCKER-3, end to end over the in-process transport: a running resident's control socket is never a
-//! data channel into the gate. A service disabled by writing `<home>/disabled`, and a member revoked by
+//! data channel into the gate. A service disabled by writing `<home>/serve.toml`, and a member revoked by
 //! writing `<home>/revoked`, are both honored LIVE by the gate on the next stream with ZERO control
 //! connections (the resident's `served()` counter stays at zero). Both are file-writes, exactly as
 //! `swoosh service disable` and `swoosh revoke` perform them; the socket carries only reads and a
@@ -14,11 +14,11 @@ use std::sync::Arc;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
-use nauthy::{Cap, FileDenylist};
-use swoosh::home::Home;
+use nauthy::{Cap, Revocation};
+use swoosh::home::{Home, HomeWrite};
 use swoosh::serve::{CONTROL_SERVICES_SERVICE, Resident, ServiceList};
+use swoosh::serve_toml::{ServeToml, ServicesOff};
 use swoosh::testkit::TestRoot;
-use tightbeam::enabled::FileDisabledList;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router, ServiceCatalog};
 
 /// The byte the signet's fixed key is seeded with; its ed25519 public half is the signet the family gate
@@ -47,18 +47,13 @@ impl Drop for Scratch {
     }
 }
 
-/// The exposer a resident serves from: one gated `control.services` read, the enabled oracle on
-/// `<home>/disabled`, and the revocation denylist on `<home>/revoked`. Built through the same
-/// `resolve_gate` + handler the product path injects.
-async fn build_exposer(home: &Home) -> Exposer {
+/// The exposer a resident serves from: one gated `control.services` read, the enabled oracle `off` on
+/// `<home>/serve.toml`, and the revocations in `<home>/revoked`. Built through the same `resolve_gate` +
+/// handler the product path injects.
+fn build_exposer(home: &Home, enabled: ServicesOff) -> Exposer {
     let signet = TestRoot::seeded(SIGNET).node_id();
-    let denylist = FileDenylist::load(home.revoked())
-        .await
-        .expect("the revocation denylist loads");
+    let denylist = swoosh::revoked::open(home).expect("the revocations load");
     let gate = tunnel::resolve_gate(Some(signet), denylist).expect("the family gate resolves");
-    let enabled = FileDisabledList::load(home.disabled())
-        .await
-        .expect("the disabled list loads");
     Router::new(gate)
         .service(
             CONTROL_SERVICES_SERVICE.parse().expect("a name"),
@@ -96,7 +91,7 @@ async fn reach(host: NodeId, member: &Node<MemTransport, NoDiscovery>, badge: &s
 /// the test can assert its `served()` counter never moves: if a disable or a revoke reached the gate
 /// through the socket, this is the counter that would climb.
 fn running_resident(
-    home: &Home,
+    off: ServicesOff,
     base: &Path,
     cancel: &CancellationToken,
 ) -> (Arc<Resident>, std::os::unix::net::UnixListener) {
@@ -106,13 +101,27 @@ fn running_resident(
         NodeId::from_ed25519_secret(&[3u8; 32]),
         None,
         ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog"),
-        home.disabled(),
+        off,
         cancel.clone(),
     ));
     (resident, control)
 }
 
-/// BLOCKER-3 (disable): with the resident control listener running, writing `<home>/disabled` refuses
+/// Turn `control.services` off (`true`) or back on in `home`'s `serve.toml`, through the writer `service
+/// off|on` uses.
+async fn toggle(home: &Home, off: bool) {
+    let home_lock = HomeWrite::take(home).await.expect("take home.lock");
+    ServeToml::update(&home_lock, home, |file| {
+        if off {
+            file.off.insert(CONTROL_SERVICES_SERVICE.to_owned());
+        } else {
+            file.off.remove(CONTROL_SERVICES_SERVICE);
+        }
+    })
+    .expect("write serve.toml");
+}
+
+/// BLOCKER-3 (disable): with the resident control listener running, writing `<home>/serve.toml` refuses
 /// the very next stream, and re-enabling restores it live, both with ZERO control connections. The
 /// disable is a file-write; the socket is untouched.
 #[tokio::test]
@@ -122,7 +131,8 @@ async fn service_disable_is_file_only_with_the_daemon_running() {
         .run_until(async {
             let scratch = Scratch::new("disable");
             let cancel = CancellationToken::new();
-            let (resident, control) = running_resident(&scratch.home, &scratch.base, &cancel);
+            let off = ServicesOff::load(&scratch.home).expect("the services off load");
+            let (resident, control) = running_resident(off.clone(), &scratch.base, &cancel);
             let control_task = tokio::task::spawn_local({
                 let resident = Arc::clone(&resident);
                 async move { resident.serve(control).await }
@@ -130,7 +140,7 @@ async fn service_disable_is_file_only_with_the_daemon_running() {
 
             let host = Node::new(MemTransport::bind(), NoDiscovery);
             let host_id = host.node_id();
-            let exposer = build_exposer(&scratch.home).await;
+            let exposer = build_exposer(&scratch.home, off);
             let run = tokio::task::spawn_local({
                 let cancel = cancel.clone();
                 async move { exposer.run(&host, cancel).await }
@@ -143,8 +153,7 @@ async fn service_disable_is_file_only_with_the_daemon_running() {
                 "the enabled service admits its member"
             );
 
-            std::fs::write(scratch.home.disabled(), "control.services\n")
-                .expect("disable the service by file");
+            toggle(&scratch.home, true).await;
             // Past the oracle's mtime-watch debounce, so the running gate re-reads the file.
             tokio::time::sleep(Duration::from_millis(250)).await;
 
@@ -158,7 +167,7 @@ async fn service_disable_is_file_only_with_the_daemon_running() {
                 "the disable moved zero control connections: it was file-only"
             );
 
-            std::fs::write(scratch.home.disabled(), "\n").expect("re-enable the service by file");
+            toggle(&scratch.home, false).await;
             tokio::time::sleep(Duration::from_millis(250)).await;
             assert!(
                 reach(host_id, &member, &badge).await,
@@ -184,8 +193,8 @@ async fn service_disable_is_file_only_with_the_daemon_running() {
 
 /// BLOCKER-3 (revocation twin): with the resident control listener running, revoking the member at its
 /// root id refuses the very next stream, monotonically (no re-enable), with ZERO control connections.
-/// The revocation is written to `<home>/revoked` by a separate denylist instance, exactly the file a
-/// separate `swoosh revoke` process writes, so the running gate's mtime refresh is what honors it.
+/// The revocation is written to `<home>/revoked` through the writer `swoosh revoke` uses, so the running
+/// gate's refresh is what honors it.
 #[tokio::test]
 async fn revoke_while_resident_refuses_next_stream() {
     let local = tokio::task::LocalSet::new();
@@ -193,7 +202,8 @@ async fn revoke_while_resident_refuses_next_stream() {
         .run_until(async {
             let scratch = Scratch::new("revoke");
             let cancel = CancellationToken::new();
-            let (resident, control) = running_resident(&scratch.home, &scratch.base, &cancel);
+            let off = ServicesOff::load(&scratch.home).expect("the services off load");
+            let (resident, control) = running_resident(off.clone(), &scratch.base, &cancel);
             let control_task = tokio::task::spawn_local({
                 let resident = Arc::clone(&resident);
                 async move { resident.serve(control).await }
@@ -201,7 +211,7 @@ async fn revoke_while_resident_refuses_next_stream() {
 
             let host = Node::new(MemTransport::bind(), NoDiscovery);
             let host_id = host.node_id();
-            let exposer = build_exposer(&scratch.home).await;
+            let exposer = build_exposer(&scratch.home, off);
             let run = tokio::task::spawn_local({
                 let cancel = cancel.clone();
                 async move { exposer.run(&host, cancel).await }
@@ -215,13 +225,16 @@ async fn revoke_while_resident_refuses_next_stream() {
             );
 
             let cap = Cap::parse(&badge).expect("the badge link parses");
-            let mut denylist = FileDenylist::load(scratch.home.revoked())
+            let home_lock = HomeWrite::take(&scratch.home)
                 .await
-                .expect("load the revocation denylist");
-            denylist
-                .revoke_root(&cap)
-                .await
-                .expect("revoke the badge at its root");
+                .expect("take home.lock");
+            swoosh::revoked::add(
+                &home_lock,
+                &scratch.home,
+                cap.root_revocation_id().map(Revocation::Id),
+            )
+            .expect("revoke the badge at its root");
+            drop(home_lock);
             // Past the oracle's mtime-watch debounce, so the running gate re-reads the file.
             tokio::time::sleep(Duration::from_millis(250)).await;
 
@@ -244,6 +257,67 @@ async fn revoke_while_resident_refuses_next_stream() {
                 .await
                 .expect("the control task joins")
                 .expect("the control arm ends Ok");
+            run.await
+                .expect("the exposer task joins")
+                .expect("the exposer ends Ok");
+        })
+        .await;
+}
+
+/// A `serve.toml` deleted while `serve` runs keeps the services it turned off, in the gate and in the
+/// status alike: the stream is still refused, and the status the control socket reports still names the
+/// service off, because both read the one instance the gate asks.
+#[tokio::test]
+async fn a_deleted_serve_toml_keeps_the_disabled_set_in_gate_and_status() {
+    use swoosh::node_client::NodeClient as _;
+    use swoosh::serve::control_codec::DisabledList;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let scratch = Scratch::new("deleted");
+            let cancel = CancellationToken::new();
+            let off = ServicesOff::load(&scratch.home).expect("the services off load");
+            let (resident, _control) = running_resident(off.clone(), &scratch.base, &cancel);
+
+            let host = Node::new(MemTransport::bind(), NoDiscovery);
+            let host_id = host.node_id();
+            let exposer = build_exposer(&scratch.home, off);
+            let run = tokio::task::spawn_local({
+                let cancel = cancel.clone();
+                async move { exposer.run(&host, cancel).await }
+            });
+            let member = Node::new(MemTransport::bind(), NoDiscovery);
+            let badge = signet_badge(member.node_id());
+
+            toggle(&scratch.home, true).await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let reported = || async {
+                resident
+                    .services()
+                    .await
+                    .expect("the resident answers")
+                    .disabled
+            };
+            assert!(!reach(host_id, &member, &badge).await, "turned off");
+            assert_eq!(
+                reported().await,
+                DisabledList::Known(vec![CONTROL_SERVICES_SERVICE.to_owned()])
+            );
+
+            std::fs::remove_file(scratch.home.serve_toml()).expect("delete serve.toml");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            assert!(
+                !reach(host_id, &member, &badge).await,
+                "the gate still refuses the service"
+            );
+            assert_eq!(
+                reported().await,
+                DisabledList::Known(vec![CONTROL_SERVICES_SERVICE.to_owned()]),
+                "and the status still reports it off"
+            );
+
+            cancel.cancel();
             run.await
                 .expect("the exposer task joins")
                 .expect("the exposer ends Ok");

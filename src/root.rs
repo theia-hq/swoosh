@@ -21,7 +21,7 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use keystore::{KeyFile, Method, Protection, Stored};
-use nauthy::{DisabledRoots, Link, RevocationId, VerifyKey};
+use nauthy::{Link, RevocationId, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
 
@@ -945,16 +945,27 @@ impl Root {
     /// finds the row, never the name, since a name can pass to a new device once the old one is revoked.
     /// A row already marked revoked, by this machine's own block brought forward or by an earlier act, is
     /// revoked again as it stands, so running a revoke again with the root publishes it.
-    pub fn revoke_device(&mut self, name: &DeviceLabel, key: VerifyKey) -> Result<(), RootError> {
+    ///
+    /// `listed` is every key `name` held live when the caller resolved it, before this act brought its
+    /// records forward. When the records now list the device under a key outside `listed` and `key`, the
+    /// device got a new key the caller never saw, and revoking `key` would leave it live under that one, so
+    /// the act stops with [`RootError::ListChanged`].
+    pub fn revoke_device(
+        &mut self,
+        name: &DeviceLabel,
+        key: VerifyKey,
+        listed: &[VerifyKey],
+    ) -> Result<(), RootError> {
         let act = &mut self.act;
         let now = act.now;
-        let seen: Vec<VerifyKey> = act
+        let seen: Vec<VerifyKey> = listed.iter().copied().chain([key]).collect();
+        if act
             .book
             .live()
-            .filter(|row| &row.label == name)
-            .map(|row| row.key)
-            .chain([key])
-            .collect();
+            .any(|row| &row.label == name && !seen.contains(&row.key))
+        {
+            return Err(RootError::ListChanged);
+        }
         let Some(row) = act.book.live().find(|row| row.key == key) else {
             let revoked = act
                 .book
@@ -1410,10 +1421,8 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
     {
         return Err(RootError::Mismatch { root: header, pin });
     }
-    let revoked = DisabledRoots::load(home.disabled_roots())
-        .await
-        .map_err(StandingError::Revoked)?;
-    if revoked.is_disabled(header.verify_key()?) {
+    let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
+    if revoked.is_revoked_key(&header.verify_key()?) {
         return Err(RootError::Revoked { root: header });
     }
     Ok(Found {
@@ -1995,10 +2004,11 @@ impl Book {
         Ok((forward, held))
     }
 
-    /// Add to these records' revocations the ids in `home`'s `revoked` that are the root's own (a row's,
-    /// or in `held`) and the keys in its `revoked_keys` that are rows' keys. A machine's revocations of its
-    /// own links never go further.
+    /// Add to these records' revocations the ids `home`'s `revoked` holds that are the root's own (a row's,
+    /// or in `held`) and the keys it holds that are rows' keys. A machine's revocations of its own links
+    /// never go further.
     fn carry_forward(&mut self, home: &Home, held: Option<&RosterDoc>) -> Result<(), RootError> {
+        let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
         let mut known: BTreeMap<Vec<u8>, u64> = BTreeMap::new();
         for id in self.rows.iter().flat_map(|row| row.ids.iter()) {
             known.insert(id.id.as_bytes().to_vec(), id.expires);
@@ -2009,24 +2019,20 @@ impl Book {
                 known.insert(id.id.as_bytes().to_vec(), id.expires);
             }
         }
-        for line in read_lines(&home.revoked())? {
-            let Ok(id) = RevocationId::from_hex(&line) else {
-                continue;
-            };
-            if let Some(expires) = known.get(id.as_bytes()) {
-                self.revoke_id(Id {
-                    expires: *expires,
-                    id,
-                });
+        for (bytes, expires) in known {
+            let id = RevocationId::from_bytes(bytes);
+            if revoked.is_revoked_any([&id]) {
+                self.revoke_id(Id { expires, id });
             }
         }
-        for line in read_lines(&home.revoked_keys())? {
-            let Ok(key) = line.parse::<VerifyKey>() else {
-                continue;
-            };
-            if self.rows.iter().any(|row| row.key == key) {
-                self.revoked_keys.insert(*key.bytes(), key);
-            }
+        let keys: Vec<VerifyKey> = self
+            .rows
+            .iter()
+            .map(|row| row.key)
+            .filter(|key| revoked.is_revoked_key(key))
+            .collect();
+        for key in keys {
+            self.revoked_keys.insert(*key.bytes(), key);
         }
         Ok(())
     }
@@ -2326,23 +2332,6 @@ fn read_standing(path: &Path) -> Result<Option<Link>, RootError> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(text.trim().parse::<Link>().ok()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(RootError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
-}
-
-/// The non-empty lines of a small text file, none when it is absent.
-fn read_lines(path: &Path) -> Result<Vec<String>, RootError> {
-    match crate::home::read_trust_file(path) {
-        Ok(text) => Ok(text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_owned)
-            .collect()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(source) => Err(RootError::Io {
             path: path.to_path_buf(),
             source,

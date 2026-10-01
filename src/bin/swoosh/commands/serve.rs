@@ -2,9 +2,9 @@
 //! this machine's gate, hold the home's control socket, then stay reachable so your devices, and anyone
 //! you gave a link, reach them.
 //!
-//! Bare, it serves what this home last started with (`<home>/serving`), or `ping` and `speed` when it
-//! never named any. `swoosh serve ssh ping` publishes a shell and the round-trip probe; `ssh`, `ping` and
-//! `speed` name themselves, and every other entry is `name=target`. Only the services are remembered:
+//! Bare, it serves what this home last started with (the services in `<home>/serve.toml`), or `ping` and
+//! `speed` when it never named any. `swoosh serve ssh ping` publishes a shell and the round-trip probe;
+//! `ssh`, `ping` and `speed` name themselves, and every other entry is `name=target`. Only the services are remembered:
 //! `--public`, `--public-unsafe`, `--admit` and `--expires` apply to the run that types them. It drives
 //! tightbeam's tunnel LIBRARY (`Exposer`) directly under swoosh's OWN persisted identity: the node binds
 //! the same key `swoosh ssh` and a signed link root at, gates on the pin read live from swoosh's own
@@ -47,10 +47,10 @@ use swoosh::serve::{
     Stopped, acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop,
     extract_recv_services, refuse_recv_into_home,
 };
+use swoosh::serve_toml::ServicesOff;
 use swoosh::standing::{Standing, StandingError};
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
-use tightbeam::enabled::FileDisabledList;
 use tightbeam::tunnel::{CancellationToken, Exposer, ManifestEntry, Posture, Router};
 
 use super::service::toggle;
@@ -126,7 +126,7 @@ pub struct ServeCmd {
     /// consumes the secret (the ssh host seed derives from it). Not a flag: clap skips it, and the root
     /// fills it in via [`with_expose`](Self::with_expose) before dispatch. Lives HERE, on `ServeCmd`, so
     /// `serve` reads its OWN context and the reach context stays uniform.
-    // Boxed so the runtime context (which embeds a `FileDenylist`, itself carrying a `Mutex` and its
+    // Boxed so the runtime context (which embeds a `Denylist`, itself carrying a `Mutex` and its
     // live-reload state) does not bloat `ServeCmd` inline: `Serve(ServeCmd)` is a variant of the clap
     // command enums, and an unboxed context makes that one variant far larger than the rest
     // (`clippy::large_enum_variant`). A `Box` keeps `ServeCmd` pointer-sized here; the context is a
@@ -191,8 +191,9 @@ pub struct ExposeContext {
     /// The live cut over the same pin and revocations the gate reads, wired beside it.
     pub cut: AnchorCut,
     /// The live enable/disable oracle the exposer's per-stream gate consults: a service turned off in
-    /// `<home>/disabled` is refused live, and turned back on, both with no restart.
-    pub enabled: FileDisabledList,
+    /// `<home>/serve.toml` is refused live, and turned back on, both with no restart. The status the
+    /// control socket reports reads the same instance.
+    pub enabled: ServicesOff,
     /// The node home this serve runs under, resolved ONCE by the composition root.
     pub home: Home,
 }
@@ -216,7 +217,7 @@ pub(crate) async fn admitting(
     if root == own {
         eyre::bail!("that is this machine's key, not a root.");
     }
-    if swoosh::config::is_disabled(home, root).await? {
+    if swoosh::config::is_revoked(home, root)? {
         eyre::bail!("root:{root} was revoked on this machine; recovery is a new root.");
     }
     let store = ContactsStore::open(home).await?;
@@ -257,7 +258,7 @@ pub(crate) async fn admitting(
 }
 
 impl core::fmt::Debug for ExposeContext {
-    /// The gate, the cut and `FileDisabledList` are not `Debug`, so this impl names the fields it can and
+    /// The gate, the cut and `ServicesOff` are not `Debug`, so this impl names the fields it can and
     /// elides those, which is enough for the derived `Debug` on `ServeCmd`/`Command` to compile.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExposeContext")
@@ -329,7 +330,7 @@ impl Reaching for ServeCmd {
 
 impl ServeCmd {
     /// Before anything binds or is written: take this home's one lock and control socket, and settle the
-    /// services this run starts with (named, resumed from `<home>/serving`, or the default). A second
+    /// services this run starts with (named, resumed from `<home>/serve.toml`, or the default). A second
     /// `serve` for the home refuses here with the running one's pid and the fix, and so does a machine with
     /// no private runtime directory or one whose path a socket cannot hold.
     pub async fn claim(mut self, home: &Home) -> eyre::Result<Self> {
@@ -476,7 +477,7 @@ impl ServeCmd {
         host_seed: [u8; 32],
         gate: Gate,
         cut: AnchorCut,
-        enabled: FileDisabledList,
+        enabled: ServicesOff,
         home: Home,
     ) -> eyre::Result<()>
     where
@@ -570,7 +571,10 @@ impl ServeCmd {
             ServiceList::new(catalog.clone()),
         )?;
         // Wire the live enable/disable oracle and the live cut beside the proven public overlay.
-        let exposer = router.expose()?.with_enabled(enabled).with_live_cuts(cut);
+        let exposer = router
+            .expose()?
+            .with_enabled(enabled.clone())
+            .with_live_cuts(cut);
         // Prove the transport can carry this gate BEFORE recording or announcing anything.
         exposer
             .prove_security::<T>()
@@ -588,7 +592,7 @@ impl ServeCmd {
                 toggle::turn_on(&home_lock, &home, names.iter().map(String::as_str))?;
             }
             Started::Resumed(_) | Started::Default => {
-                let off = toggle::disabled(&home)?;
+                let off = enabled.names();
                 for name in names.iter().filter(|name| off.contains(*name)) {
                     eprintln!(
                         "{name} is off (swoosh service off {name}); swoosh service on {name} turns it \
@@ -610,7 +614,7 @@ impl ServeCmd {
             addr.node,
             status_addr,
             tightbeam::tunnel::ServiceCatalog::clone(&catalog),
-            home.disabled(),
+            enabled,
             cancel.clone(),
         ));
 

@@ -1073,10 +1073,12 @@ async fn join_refuses_an_earlier_date_on_the_same_root() {
 #[tokio::test]
 async fn join_refuses_a_root_revoked_here() {
     let home = scratch("revoked-root");
-    nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
-        .disable(TestRoot::seeded(ROOT).verify_key())
-        .await
-        .unwrap();
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(TestRoot::seeded(ROOT).verify_key())],
+    )
+    .unwrap();
     let before = snapshot(home.dir());
     let ran = join(&home, &for_me()).await;
     refused_before_writing(
