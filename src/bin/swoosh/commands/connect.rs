@@ -1,5 +1,4 @@
-//! The one swoosh connect runner over tightbeam's tunnel [`Connector`], and the [`To`] sink selector it
-//! is parameterized by.
+//! The one swoosh connect runner, and the [`To`] sink selector it is parameterized by.
 //!
 //! NOT a verb: `swoosh reach <peer> <service> [--to <port | - | unix:PATH>]` is the surface, and this is
 //! the body it drives. The two halves are split because the act ("dial a peer's served service,
@@ -11,18 +10,29 @@
 //! `swoosh ssh` reaches the same runner the same way, through the PUBLIC verb: its `ProxyCommand`
 //! re-invokes THIS binary as `<self> reach <key> <service> --to -` via `current_exe()` (not a separate
 //! `tightbeam` binary on PATH), so the bridge an operator debugs by hand is the one ssh runs.
+//!
+//! Both sinks end when the host ends the session (it exited, or it cut the session on a revoke or an
+//! expiry), whatever the local side is doing. tightbeam's own stdio bridge and port forward do not yet:
+//! the bridge waits on a stdin read before the process can exit, and the forward keeps listening on a
+//! session that is gone. So the exchange, the bridge and the forward live here, over tightbeam's wire
+//! frames, until tightbeam's own end the same way.
 
 use core::str::FromStr;
+use core::time::Duration;
 use std::io::Read as _;
 use std::path::PathBuf;
 
-use bifrost::{Discovery, Node, Session as _, Transport};
+use bifrost::{Discovery, Node, NodeId, Refusal, Session, Transport};
+use futures::StreamExt as _;
+use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::escape::escaped_report;
 use swoosh::peer::Peer;
-use tightbeam::tunnel::Connector;
+use tightbeam::protocol::{Request, Response};
+use tightbeam::tunnel::DialRefused;
 use tokio::io::{self, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
 /// Where a reached service's bytes go locally: the one `--to` selector, parsed to a closed enum so the
@@ -72,8 +82,8 @@ impl FromStr for To {
 }
 
 /// The ONE connect path, driven by `reach` directly and by `swoosh ssh` through it. Resolve the [`Peer`]
-/// to a connector via the shared [`Peer::connector`] (slot 1 the grant, slot 2 a membership badge for a
-/// signet-bound slip's AND), then drive the sink [`To`] names: forward a local port (proving admission,
+/// to the node to dial via the shared [`Peer::connector`] (slot 1 the grant, slot 2 a membership badge for
+/// a signet-bound slip's AND), then drive the sink [`To`] names: forward a local port (proving admission,
 /// then printing swoosh's own `forwarding …` line), stream stdin/stdout (no banner: ssh owns the tty), or
 /// the reserved unix listener. A refused forward surfaces the host's reason here and exits non-zero,
 /// never a fake banner.
@@ -86,27 +96,145 @@ pub async fn connect<T: Transport, D: Discovery>(
     slot2: Option<Link>,
     to: To,
 ) -> eyre::Result<()> {
-    let connector = peer.connector(contacts, service, slot1, slot2)?;
+    // The opening frame every stream sends, built from the same slots the connector holds.
+    let request = Request {
+        service: service.to_string(),
+        capability: slot1.as_ref().map(ToString::to_string),
+        membership: slot2.as_ref().map(ToString::to_string),
+    };
+    let dial = peer.connector(contacts, service, slot1, slot2)?.dial();
     match to {
-        To::Port(port) => {
-            // Prove the gate admits us BEFORE printing "forwarding …": `preflight` reaches, probes
-            // admission on one stream, and binds the port, returning the host's refusal reason on an
-            // Err. So an unauthorized forward fails loudly here (a clear one-line reason, non-zero exit),
-            // never a hopeful banner followed by a silent reset.
-            let (dial, service) = (connector.dial(), Service::clone(connector.service()));
-            let forward = connector
-                .preflight(node, port)
-                .await
-                .map_err(escaped_report)?;
-            println!("forwarding 127.0.0.1:{port} to {dial} ({service})");
-            forward.run().await
-        }
-        To::Stdout => pipe_stdio(connector, node).await.map_err(escaped_report),
+        To::Port(port) => forward_port(node, dial, &request, port)
+            .await
+            .map_err(escaped_report),
+        To::Stdout => pipe_stdio(node, dial, &request)
+            .await
+            .map_err(escaped_report),
         To::UnixListener(path) => eyre::bail!(
             "--to unix:{} is reserved, not yet built (bind a port and connect to it, or use `--to -`)",
             path.display()
         ),
     }
+}
+
+/// Open one stream on `session` and ask the host for the service: the admitted halves, or the host's
+/// refusal.
+///
+/// Every failure comes back as its own error, unwrapped, so a printed line names what failed (`early eof`,
+/// the transport that does not prove the peer) and reads the same on both sinks.
+async fn admitted<S: Session>(
+    session: &S,
+    request: &Request,
+) -> eyre::Result<Result<(S::Write, S::Read), Refusal>> {
+    let (mut writer, mut reader) = session.open_bi().await?;
+    // The checked writer: a request presenting a credential refuses here, before any byte, when the
+    // session's declared profile does not prove the peer.
+    request.write_checked::<S, _>(&mut writer).await?;
+    Ok(match Response::read(&mut reader).await? {
+        Response::Ok => Ok((writer, reader)),
+        Response::Refused(refusal) => Err(refusal),
+    })
+}
+
+/// Reach the peer, prove the gate admits this request, bind the local port, print the `forwarding` line,
+/// then forward each local connection over its own stream until the session ends.
+///
+/// Admission is proven on one probe stream before the line prints, so a refusal fails here with the host's
+/// reason rather than as a silent reset once the line is out. Every later stream presents the same request
+/// to the same gate.
+async fn forward_port<T: Transport, D: Discovery>(
+    node: &Node<T, D>,
+    dial: NodeId,
+    request: &Request,
+    port: u16,
+) -> eyre::Result<()> {
+    let session = node.connect(dial).await?;
+    // The probe stream is dropped once admitted; the host tears its half down.
+    if let Err(refusal) = admitted(&session, request).await? {
+        return Err(DialRefused { dial, refusal }.into());
+    }
+    let listener = TcpListener::bind(("127.0.0.1", port)).await?;
+    println!(
+        "forwarding 127.0.0.1:{port} to {dial} ({})",
+        request.service
+    );
+    forward(&session, request, listener).await
+}
+
+/// The most local connections one forward holds at once, carried or waiting for a stream. Above a QUIC
+/// peer's usual concurrent-stream limit (100 on iroh), and far enough below a default descriptor limit
+/// (256 on macOS) that connections waiting for a stream cannot exhaust the process. Past it, new
+/// connections wait in the kernel's listen backlog.
+const MAX_PIPES: usize = 128;
+
+/// How long the forward waits before accepting again after an accept fails. An error such as running out
+/// of descriptors repeats on every attempt until something frees, so retrying at once would spin.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+
+/// Forward each accepted local connection over its own stream, until the session ends: then the forward
+/// is over, and every connection it carried has already ended with it.
+async fn forward<S: Session>(
+    session: &S,
+    request: &Request,
+    listener: TcpListener,
+) -> eyre::Result<()> {
+    let mut pipes = FuturesUnordered::new();
+    let closed = session.wait_closed();
+    tokio::pin!(closed);
+    // Set after a failed accept: accepting resumes once `retry` fires.
+    let retry = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(retry);
+    let mut paused = false;
+    loop {
+        tokio::select! {
+            // The host closed the session (it cut it on a revoke or an expiry), or the path to it failed.
+            () = &mut closed => return Err(lost(session).await),
+            () = &mut retry, if paused => paused = false,
+            // Accept only below the cap: a connection waiting for a stream holds a descriptor.
+            accepted = listener.accept(), if !paused && pipes.len() < MAX_PIPES => match accepted {
+                // The stream is opened inside the pipe: past the peer's stream limit an open waits, and
+                // waiting here would stop the pipes in flight from being polled.
+                Ok((tcp, _)) => pipes.push(carry(session, request, tcp)),
+                // One failed accept drops no pipe in flight; pause, since it fails again at once.
+                Err(error) => {
+                    tracing::warn!(%error, "local accept failed; still listening");
+                    retry.as_mut().reset(tokio::time::Instant::now() + ACCEPT_RETRY);
+                    paused = true;
+                }
+            },
+            Some(result) = pipes.next(), if !pipes.is_empty() => {
+                // One connection's failure is not the forward's: it goes to the log, not to the person.
+                if let Err(error) = result {
+                    tracing::warn!("connection failed: {error:#}");
+                }
+            }
+        }
+    }
+}
+
+/// Carry one local connection over its own admitted stream, both ways, until both sides close.
+async fn carry<S: Session>(session: &S, request: &Request, mut tcp: TcpStream) -> eyre::Result<()> {
+    let (writer, reader) = admitted(session, request)
+        .await?
+        .map_err(bifrost::Error::Refused)?;
+    io::copy_bidirectional(&mut tcp, &mut io::join(reader, writer)).await?;
+    Ok(())
+}
+
+/// The session a forward rode on is gone.
+#[derive(Debug, thiserror::Error)]
+#[error("connection lost")]
+struct ConnectionLost(#[source] Option<Box<dyn core::error::Error + Send + Sync>>);
+
+/// Why the session ended, in the transport's own words: an open on it now fails with the cause, which
+/// prints after `connection lost`, the line the stdio bridge prints at the same cut.
+async fn lost<S: Session>(session: &S) -> eyre::Report {
+    ConnectionLost(match session.open_bi().await {
+        Err(bifrost::Error::Stream(cause)) => Some(cause),
+        Err(other) => Some(Box::new(other)),
+        Ok(_) => None,
+    })
+    .into()
 }
 
 /// Reach the service over one stream and pipe it against this process's stdin and stdout: the bridge
@@ -117,12 +245,15 @@ pub async fn connect<T: Transport, D: Discovery>(
 /// doing. stdin is read on its own thread (see [`stdin_chunks`]), so nothing waits on a read that, at a
 /// terminal or under ssh, only returns when the person types again.
 async fn pipe_stdio<T: Transport, D: Discovery>(
-    connector: Connector,
     node: &Node<T, D>,
+    dial: NodeId,
+    request: &Request,
 ) -> eyre::Result<()> {
     // Held for the whole pump: the stream rides this session, which closes when it drops.
-    let session = connector.open_service(node).await?;
-    let (mut writer, mut reader) = session.open_bi().await?;
+    let session = node.connect(dial).await?;
+    let (mut writer, mut reader) = admitted(&session, request)
+        .await?
+        .map_err(bifrost::Error::Refused)?;
     let mut input = stdin_chunks()?;
     let mut output = io::stdout();
     let upstream = async {
@@ -194,7 +325,12 @@ mod tests {
 
     /// Reach a peer whose gate refuses with [`HOSTILE`], sinking the bytes into `to`.
     async fn refused(to: To) -> eyre::Report {
-        let node = bifrost::Node::new(HostilePeer::RefusesAtTheGate(HOSTILE), bifrost::NoDiscovery);
+        failed(HostilePeer::RefusesAtTheGate(HOSTILE), to).await
+    }
+
+    /// Reach `host`, sinking the bytes into `to`, and return the error the reach fails with.
+    async fn failed(host: HostilePeer, to: To) -> eyre::Report {
+        let node = bifrost::Node::new(host, bifrost::NoDiscovery);
         let peer = HostilePeer::node_id()
             .to_string()
             .parse()
@@ -228,6 +364,16 @@ mod tests {
             format!("{error:#}"),
             format!("stream refused: unavailable: {ESCAPED}")
         );
+    }
+
+    // A host that ends the stream before it answers (it died mid-dial) prints the exchange's own cause,
+    // with no word in front of it, and the same line on both sinks.
+    #[tokio::test]
+    async fn a_host_that_hangs_up_before_answering_prints_the_bare_cause() {
+        for to in [To::Port(1), To::Stdout] {
+            let error = failed(HostilePeer::HangsUp, To::clone(&to)).await;
+            assert_eq!(format!("{error:#}"), "early eof", "reaching to {to:?}");
+        }
     }
 
     #[test]
