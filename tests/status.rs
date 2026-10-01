@@ -15,7 +15,7 @@ use std::time::SystemTime;
 use bifrost::NodeId;
 use swoosh::config;
 use swoosh::home::Home;
-use swoosh::root::{Date, Minted, Moved, Root};
+use swoosh::root::{Minted, Root};
 use swoosh::testkit::{Counting, STANDING_UNTIL, TestNode, TestRoot};
 
 static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -155,7 +155,7 @@ fn status_report_is_on_stdout_and_its_notices_on_stderr() {
     assert!(!stderr.contains("key: "), "{stderr}");
 }
 
-/// Where a sealed root is kept, and where it was moved away from, `status` reads the root and asks for no
+/// Where a sealed root is kept, and on a device of a root kept elsewhere, `status` reads the root and asks for no
 /// passphrase: the run has no terminal, so any prompt would have failed it.
 #[test]
 fn status_with_a_root_copy_never_prompts() {
@@ -181,7 +181,7 @@ fn status_with_a_root_copy_never_prompts() {
         text(&out.stdout)
     );
 
-    let moved = Scratch::new("moved-root");
+    let moved = Scratch::new("root-elsewhere");
     let home = Home::resolve(Some(moved.home())).unwrap();
     config::create_store_dir(home.dir()).unwrap();
     let mut seed = TestNode::seeded(0x11).seed();
@@ -200,18 +200,12 @@ fn status_with_a_root_copy_never_prompts() {
             .device_badge(TestNode::seeded(0x11).node_id(), until)
             .unwrap();
         config::write_badge(&swoosh::testkit::lock(), &home, &standing).unwrap();
-        Moved {
-            to: PathBuf::from("/media/usb/root"),
-            on: Date(1_790_000_000),
-        }
-        .write(&swoosh::testkit::lock(), &home)
-        .unwrap();
     });
     let out = swoosh(&moved.home(), &["status"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert!(
         text(&out.stdout).contains(&format!(
-            "root: root:{}, not on this machine (you moved it to /media/usb/root on 2026-09-21).",
+            "root: root:{}, not on this machine.",
             root.node_id()
         )),
         "{}",

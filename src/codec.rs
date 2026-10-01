@@ -1,7 +1,6 @@
-//! The field codecs the root's two signed documents share: the update ([`crate::roster`]) and `state`
-//! ([`crate::state`]).
+//! The field codecs of the root's signed document, the update ([`crate::roster`]).
 //!
-//! Both are big-endian, length-prefixed and canonical: every list is strictly ascending by its own key, so
+//! It is big-endian, length-prefixed and canonical: every list is strictly ascending by its own key, so
 //! one document has one byte-string and a parser refuses any other order rather than re-sorting it. Each
 //! reader here checks its bound before it allocates, so untrusted bytes are a clean [`FormatError`], never
 //! a panic or a large allocation.
@@ -19,7 +18,7 @@ pub const MAX_MEMBERS: usize = 4096;
 /// The most unexpired revoked ids one document carries.
 pub const MAX_REVOKED: usize = 16384;
 
-/// The most revoked device keys one document carries.
+/// The most revoked devices one document carries.
 pub const MAX_REVOKED_KEYS: usize = 4096;
 
 /// The longest revocation id, in bytes.
@@ -75,6 +74,16 @@ impl fmt::Debug for Id {
     }
 }
 
+/// One revoked device: its key, which the gate refuses for good, and the name it had when it was revoked,
+/// which only a reader's display uses. A name is a suggestion, as a live device's is: the key decides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevokedDevice {
+    /// The device's key.
+    pub node: VerifyKey,
+    /// The name the device had.
+    pub label: DeviceLabel,
+}
+
 /// Why a document could not be built or parsed.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum FormatError {
@@ -90,21 +99,15 @@ pub enum FormatError {
     /// A standing was not a bare link.
     #[error("a standing is not a link")]
     BadStanding,
-    /// A flag byte was neither 0 nor 1.
-    #[error("a flag is neither 0 nor 1")]
-    BadFlag,
     /// A device key is not a key anyone can hold.
     #[error("a device key is not a usable key: {0}")]
     BadKey(nauthy::KeyError),
     /// Two devices share one key.
     #[error("the document lists device {0} twice")]
     DuplicateNode(VerifyKey),
-    /// Two devices that are not revoked share one name.
+    /// Two devices share one name.
     #[error("the document lists the name {0} twice")]
     DuplicateLabel(DeviceLabel),
-    /// A device's row is revoked but its key is not a revoked key, or its row is live and its key is.
-    #[error("device {0} is revoked in one list and not the other")]
-    RevokedMismatch(VerifyKey),
     /// A list was not strictly ascending, or held one entry twice.
     #[error("the document's entries are not in canonical order")]
     NonCanonicalOrder,
@@ -170,7 +173,7 @@ pub(crate) trait Put {
     fn put_bytes16(&mut self, bytes: &[u8]);
     fn put_id(&mut self, id: &Id);
     fn put_ids32(&mut self, ids: &[Id]);
-    fn put_keys32(&mut self, keys: &[VerifyKey]);
+    fn put_revoked32(&mut self, devices: &[RevokedDevice]);
 }
 
 impl Put for Vec<u8> {
@@ -207,10 +210,11 @@ impl Put for Vec<u8> {
         }
     }
 
-    fn put_keys32(&mut self, keys: &[VerifyKey]) {
-        self.put_u32(keys.len());
-        for key in keys {
-            self.extend_from_slice(key.bytes());
+    fn put_revoked32(&mut self, devices: &[RevokedDevice]) {
+        self.put_u32(devices.len());
+        for device in devices {
+            self.extend_from_slice(device.node.bytes());
+            self.put_bytes16(device.label.as_str().as_bytes());
         }
     }
 }
@@ -272,15 +276,6 @@ impl<'a> Reader<'a> {
 
     pub(crate) fn u64(&mut self) -> Result<u64, FormatError> {
         Ok(u64::from_be_bytes(self.array()?))
-    }
-
-    /// A flag byte: 0 or 1, nothing else, so one document has one byte-string.
-    pub(crate) fn flag(&mut self) -> Result<bool, FormatError> {
-        match self.u8()? {
-            0 => Ok(false),
-            1 => Ok(true),
-            _ => Err(FormatError::BadFlag),
-        }
     }
 
     /// A count, refused over `max` before anything is allocated for it.
@@ -353,20 +348,25 @@ impl<'a> Reader<'a> {
         Ok(ids)
     }
 
-    /// The `u32`-counted revoked keys, at most [`MAX_REVOKED_KEYS`], strictly ascending.
-    pub(crate) fn revoked_keys(&mut self) -> Result<Vec<VerifyKey>, FormatError> {
-        let count = self.count32(MAX_REVOKED_KEYS, "revoked keys")?;
-        let mut keys: Vec<VerifyKey> = Vec::with_capacity(count);
+    /// The `u32`-counted revoked devices, at most [`MAX_REVOKED_KEYS`], strictly ascending by key, each
+    /// name read as stored ([`label`](Self::label)). Two may share a name: a name passes to a new device
+    /// once the old one is revoked.
+    pub(crate) fn revoked_devices(&mut self) -> Result<Vec<RevokedDevice>, FormatError> {
+        let count = self.count32(MAX_REVOKED_KEYS, "revoked devices")?;
+        let mut devices: Vec<RevokedDevice> = Vec::with_capacity(count);
         for _ in 0..count {
-            let key = self.key()?;
-            if keys
+            let node = self.key()?;
+            if devices
                 .last()
-                .is_some_and(|previous| key.bytes() <= previous.bytes())
+                .is_some_and(|previous| node.bytes() <= previous.node.bytes())
             {
                 return Err(FormatError::NonCanonicalOrder);
             }
-            keys.push(key);
+            devices.push(RevokedDevice {
+                node,
+                label: self.label()?,
+            });
         }
-        Ok(keys)
+        Ok(devices)
     }
 }

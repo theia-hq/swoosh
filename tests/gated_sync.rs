@@ -242,7 +242,13 @@ fn update(number: u64, keys: Vec<VerifyKey>) -> Vec<u8> {
                 .unwrap()
         })
         .collect();
-    let doc = RosterDoc::with_revocations(Epoch(number), members, vec![], keys).unwrap();
+    let doc = RosterDoc::with_revocations(
+        Epoch(number),
+        members,
+        vec![],
+        keys.into_iter().map(swoosh::testkit::revoked).collect(),
+    )
+    .unwrap();
     root.sign_update(&doc)
 }
 

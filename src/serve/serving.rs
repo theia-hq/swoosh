@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use super::{DEFAULT_SERVICES, service_entry};
 use crate::escape::EscapedPath;
-use crate::home::{Home, HomeWrite};
+use crate::home::Home;
 use crate::serve_toml::{ServeToml, ServeTomlError};
 
 /// The targets whose argument is a path on this machine: stored absolute, because a service manager
@@ -121,19 +121,20 @@ impl Started {
         matches!(self, Self::Resumed(_))
     }
 
-    /// Record a named list as what the next bare `serve` under `home` resumes. Called only after the
-    /// routes bound, so a start that fails leaves the record as it was; a resumed or default start
-    /// writes nothing. Under `home.lock`, which the caller holds.
-    ///
-    /// # Errors
-    ///
-    /// [`ServingError::File`] when the list could not be written.
-    pub fn record(&self, home_lock: &HomeWrite, home: &Home) -> Result<(), ServingError> {
+    /// Record a named list in `file` as what the next bare `serve` resumes, and turn its services back on:
+    /// a `serve` that names a service serves it, so one turned off yesterday is not refused by today's
+    /// `serve ssh`. A resumed or default start changes neither. Applied inside the one
+    /// [`ServeToml::update`] a start makes once its routes bound, so a start that fails writes nothing.
+    pub fn record(&self, file: &mut ServeToml) {
         let Self::Named(entries) = self else {
-            return Ok(());
+            return;
         };
-        ServeToml::update(home_lock, home, |file| file.services.clone_from(entries))?;
-        Ok(())
+        file.services.clone_from(entries);
+        for entry in entries {
+            if let Some((name, _)) = entry.split_once('=') {
+                file.off.remove(name);
+            }
+        }
     }
 }
 

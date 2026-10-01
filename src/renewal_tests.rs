@@ -71,6 +71,7 @@ fn row(seed: u8, label: &str, until: u64) -> Member {
         label: label.parse::<DeviceLabel>().unwrap(),
         until,
         duration: 0,
+        invite_until: 0,
         ids: Vec::new(),
         standing: standing(&root(), seed, until),
     }
@@ -78,7 +79,13 @@ fn row(seed: u8, label: &str, until: u64) -> Member {
 
 /// The update at `number` listing `members`, revoking `keys`, signed by the root.
 fn update(number: u64, members: Vec<Member>, keys: Vec<VerifyKey>) -> Vec<u8> {
-    let doc = RosterDoc::with_revocations(Epoch(number), members, Vec::new(), keys).unwrap();
+    let doc = RosterDoc::with_revocations(
+        Epoch(number),
+        members,
+        Vec::new(),
+        keys.into_iter().map(crate::testkit::revoked).collect(),
+    )
+    .unwrap();
     root().sign_update(&doc)
 }
 

@@ -47,13 +47,11 @@ use swoosh::serve::{
     Stopped, acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop,
     extract_recv_services, refuse_recv_into_home,
 };
-use swoosh::serve_toml::ServicesOff;
+use swoosh::serve_toml::{ServeToml, ServicesOff};
 use swoosh::standing::{Standing, StandingError};
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{CancellationToken, Exposer, ManifestEntry, Posture, Router};
-
-use super::service::toggle;
 
 /// Be a node: publish these services behind your gate, then stay reachable.
 #[derive(Debug, Args)]
@@ -582,26 +580,22 @@ impl ServeCmd {
                 "bare quirk cannot serve: it does not prove the peer's key; use `--transport quirk+noise`",
             )?;
 
-        // The routes bound: only now is a named list recorded for the next bare `serve`, and are the
-        // services it named turned back on. A bare `serve` changes neither, and says which of its services
-        // are off.
+        // The routes bound: only now does this run save what it was told, in one write: a named list for the
+        // next bare `serve`, with the services it names turned back on, and the relay and resolver it was
+        // pointed at. A `serve` that did not start saves nothing. A bare `serve` saves no list, and says
+        // which of its services are off.
         let home_lock = HomeWrite::take(&home).await?;
-        started.record(&home_lock, &home)?;
-        match &started {
-            Started::Named(_) => {
-                toggle::turn_on(&home_lock, &home, names.iter().map(String::as_str))?;
-            }
-            Started::Resumed(_) | Started::Default => {
-                let off = enabled.names();
-                for name in names.iter().filter(|name| off.contains(*name)) {
-                    eprintln!(
-                        "{name} is off (swoosh service off {name}); swoosh service on {name} turns it \
-                         back on."
-                    );
-                }
+        ServeToml::update(&home_lock, &home, |file| {
+            started.record(file);
+            self.reach.keep_reach(file);
+        })?;
+        drop(home_lock);
+        if !matches!(started, Started::Named(_)) {
+            let off = enabled.names();
+            for name in names.iter().filter(|name| off.contains(*name)) {
+                eprintln!("{name} is off; to turn it back on: swoosh service enable {name}");
             }
         }
-        drop(home_lock);
 
         // ONE expansion of this bind, read by both the control socket's status address and the transport
         // block, so the two can only ever name the same host.

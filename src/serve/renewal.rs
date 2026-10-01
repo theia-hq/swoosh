@@ -152,8 +152,7 @@ impl Known {
             home.key_cert(),
             home.devices(),
             home.revoked(),
-            home.root(),
-            home.root().join("root.key"),
+            home.root_key(),
         ] {
             seen.push(match tokio::fs::metadata(&path).await {
                 Ok(meta) => FileStamp::of(&meta).map_or(Seen::Unknown, Seen::At),

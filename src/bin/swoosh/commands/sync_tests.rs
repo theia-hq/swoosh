@@ -104,12 +104,11 @@ async fn sync_refuses_each_standing_that_is_not_a_device() {
 
     let interrupted = home("interrupted");
     let root = TestRoot::seeded(0x21);
-    swoosh::config::create_store_dir(&interrupted.root()).unwrap();
     let mut seed = root.seed();
     let passphrase =
         keystore::Passphrase::try_from(zeroize::Zeroizing::new("a root passphrase".to_owned()))
             .unwrap();
-    KeyFile::root(interrupted.root().join("root.key"))
+    KeyFile::root(interrupted.root_key())
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),

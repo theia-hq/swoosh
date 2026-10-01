@@ -21,6 +21,7 @@ use tightbeam::enabled::EnabledServices;
 
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
+use crate::transport::{RelayUrl, ResolverUrl};
 
 /// The most bytes `serve.toml` may hold: far above any list of services, and a bound on what one read of a
 /// running `serve` allocates.
@@ -44,9 +45,9 @@ pub struct ServeToml {
     /// The services turned off.
     pub off: BTreeSet<String>,
     /// The relay this machine offers, as `serve --relay` gave it.
-    pub relay: Option<String>,
+    pub relay: Option<RelayUrl>,
     /// The resolver this machine publishes to and looks devices up through, as `serve --resolver` gave it.
-    pub resolver: Option<String>,
+    pub resolver: Option<ResolverUrl>,
 }
 
 /// Why `<home>/serve.toml` could not be read or written.
@@ -63,11 +64,32 @@ pub enum ServeTomlError {
     },
     /// The file is not one swoosh wrote: it is not TOML, a field has the wrong type, a key is unknown, a
     /// service turned off is not a service name, or it is larger than [`MAX_SERVE_TOML`].
-    #[error("{} is damaged", EscapedPath(path))]
+    #[error("{} was changed outside swoosh: refusing to use it", EscapedPath(path))]
     Damaged {
         /// The file.
         path: PathBuf,
     },
+    /// The relay or the resolver the file keeps is not a URL swoosh can use. Swoosh's own line, never the
+    /// parser's text, and it names no command: which server to use is the person's call, and swoosh
+    /// never falls back to the default one.
+    #[error(
+        "the {what} in {path} is not a usable {what}, and swoosh will not fall back to the default one",
+        path = EscapedPath(path)
+    )]
+    Unusable {
+        /// The file.
+        path: PathBuf,
+        /// `relay` or `resolver`.
+        what: &'static str,
+    },
+}
+
+/// Why `serve.toml`'s text is not a file swoosh wrote.
+enum Undecodable {
+    /// It is damaged.
+    Damaged,
+    /// The field `what` is not a usable URL.
+    Unusable(&'static str),
 }
 
 impl ServeToml {
@@ -116,35 +138,54 @@ impl ServeToml {
             table.insert(OFF.to_owned(), list(&mut self.off.iter()));
         }
         if let Some(relay) = &self.relay {
-            table.insert(RELAY.to_owned(), toml::Value::String(relay.clone()));
+            table.insert(RELAY.to_owned(), toml::Value::String(relay.to_string()));
         }
         if let Some(resolver) = &self.resolver {
-            table.insert(RESOLVER.to_owned(), toml::Value::String(resolver.clone()));
+            table.insert(
+                RESOLVER.to_owned(),
+                toml::Value::String(resolver.to_string()),
+            );
         }
         table.to_string()
     }
 
-    /// Decode the file's `text`, or `None` when it is not a file swoosh wrote.
-    fn decode(text: &str) -> Option<Self> {
-        let table: toml::Table = text.parse().ok()?;
+    /// Decode the file's `text`, every field parsed here: a service turned off that is not a name as swoosh
+    /// stores one (folded, so it can match the service served) is damage, and so is a relay or a resolver
+    /// that is not a usable URL, named by its key.
+    fn decode(text: &str) -> Result<Self, Undecodable> {
+        let damaged = |_| Undecodable::Damaged;
+        let table: toml::Table = text.parse().map_err(damaged)?;
         let mut read = Self::default();
         for (key, value) in table {
             match key.as_str() {
-                SERVICES => read.services = strings(value)?,
+                SERVICES => read.services = strings(value).ok_or(Undecodable::Damaged)?,
                 OFF => {
-                    let off = strings(value)?;
-                    if off.iter().any(|name| name.parse::<Service>().is_err()) {
-                        return None;
+                    let off = strings(value).ok_or(Undecodable::Damaged)?;
+                    if off
+                        .iter()
+                        .any(|name| crate::names::Name::stored(name).is_err())
+                    {
+                        return Err(Undecodable::Damaged);
                     }
                     read.off = off.into_iter().collect();
                 }
-                RELAY => read.relay = Some(value.as_str()?.to_owned()),
-                RESOLVER => read.resolver = Some(value.as_str()?.to_owned()),
-                _ => return None,
+                RELAY => read.relay = Some(url(&value, RELAY)?),
+                RESOLVER => read.resolver = Some(url(&value, RESOLVER)?),
+                _ => return Err(Undecodable::Damaged),
             }
         }
-        Some(read)
+        Ok(read)
     }
+}
+
+/// The URL `value` holds for the key `what`. A value that is not a string is damage; a string that is not
+/// a usable URL is named by its key.
+fn url<T: core::str::FromStr>(value: &toml::Value, what: &'static str) -> Result<T, Undecodable> {
+    value
+        .as_str()
+        .ok_or(Undecodable::Damaged)?
+        .parse()
+        .map_err(|_| Undecodable::Unusable(what))
 }
 
 /// The strings of an array `value`, or `None` when it is not an array of strings.
@@ -193,8 +234,14 @@ fn read_stamped(path: &Path) -> Result<(ServeToml, Option<FileStamp>), ServeToml
             path: path.to_owned(),
         });
     }
-    let read = ServeToml::decode(&text).ok_or_else(|| ServeTomlError::Damaged {
-        path: path.to_owned(),
+    let read = ServeToml::decode(&text).map_err(|why| match why {
+        Undecodable::Damaged => ServeTomlError::Damaged {
+            path: path.to_owned(),
+        },
+        Undecodable::Unusable(what) => ServeTomlError::Unusable {
+            path: path.to_owned(),
+            what,
+        },
     })?;
     Ok((read, stamp))
 }

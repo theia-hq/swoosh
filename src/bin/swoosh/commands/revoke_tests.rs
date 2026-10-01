@@ -16,15 +16,14 @@ use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::root::{Date, RootPlace};
 use swoosh::roster::{Epoch, RosterDoc};
-use swoosh::state::Row;
 use swoosh::sync::{Answer, Dial, ExchangeError};
 use swoosh::testkit::{Counting, TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::super::invite::invite_tests::{
-    Asked, CI, DAY, LAPTOP, NAS, NINETY, OWN, PASS, PHONE, ROOT, Stream, Tape, carrying, copy,
-    device_of, due, held, holds, invite, kept, key, live, node, now, records, revoked, row_of,
-    scratch, signed, snapshot, update_of,
+    Asked, CI, DAY, LAPTOP, NAS, NINETY, OWN, PASS, PHONE, ROOT, Row, Stream, Tape, carrying, copy,
+    device_of, due, held, holds, invite, kept, kept_list, key, live, node, now, records, revoked,
+    row_of, scratch, signed, snapshot,
 };
 use super::{RevokeCmd, Usage};
 
@@ -173,7 +172,7 @@ async fn blocks_id(home: &Home, id: &swoosh::roster::Id) -> bool {
 async fn device(tag: &str, rows: &[Row]) -> Home {
     let home = scratch(tag);
     device_of(&home, &rows[0]).await;
-    held(&home, &update_of(&records(1, rows, Vec::new())));
+    held(&home, &records(1, rows, Vec::new()));
     home
 }
 
@@ -481,12 +480,14 @@ async fn revoke_reports_which_devices_took_it() {
         ran.tape.at("<prompt>") < ran.tape.at("<offer>"),
         "offered after the passphrase"
     );
-    let state = kept(&home).await;
+    let list = kept_list(&home);
     assert!(
-        row_of(&state, "laptop").is_revoked(),
-        "the root's row is revoked"
+        list.members()
+            .iter()
+            .all(|member| member.node != key(LAPTOP)),
+        "the root's list no longer carries it"
     );
-    assert!(state.revoked_keys().contains(&key(LAPTOP)), "and its key");
+    assert!(list.is_revoked_key(&key(LAPTOP)), "and revokes its key");
 }
 
 #[tokio::test]
@@ -519,7 +520,7 @@ async fn a_full_row_never_blocks_a_revoke() {
     assert!(err.contains("revoked me/nas: "), "{err}");
     let state = kept(&home).await;
     assert!(
-        row_of(&state, "nas").is_revoked(),
+        state.iter().all(|row| row.key != key(NAS)),
         "a full row beside it does not stop the revoke"
     );
     assert_eq!(
@@ -531,10 +532,10 @@ async fn a_full_row_never_blocks_a_revoke() {
     let ran = revoke(&home, &["me/phone"]).await;
     let err = ran.ok();
     assert!(err.contains("revoked me/phone: me/laptop has it."), "{err}");
-    let state = kept(&home).await;
-    assert!(row_of(&state, "phone").is_revoked());
+    let list = kept_list(&home);
+    assert!(list.is_revoked_key(&key(PHONE)));
     for id in &phone.ids {
-        assert!(state.revoked().contains(id), "every id of the full row");
+        assert!(list.revoked().contains(id), "every id of the full row");
     }
 }
 
@@ -546,10 +547,10 @@ async fn revoking_a_device_revokes_its_renewed_standings() {
     holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
     let ran = revoke(&home, &["me/laptop"]).await;
     let _ = ran.ok();
-    let state = kept(&home).await;
+    let list = kept_list(&home);
     for id in &laptop.ids {
         assert!(
-            state.revoked().contains(id),
+            list.revoked().contains(id),
             "the root revokes every live id"
         );
         assert!(blocks_id(&home, id).await, "and this machine blocks each");
@@ -557,7 +558,7 @@ async fn revoking_a_device_revokes_its_renewed_standings() {
 }
 
 #[tokio::test]
-async fn a_local_only_revoke_carried_by_a_later_root_act_marks_the_row() {
+async fn a_local_only_revoke_carried_by_a_later_root_act_is_published() {
     let own = live(OWN, "desk");
     let laptop = live(LAPTOP, "laptop");
     let home = device("revoke-carried", &[own.clone(), laptop.clone()]).await;
@@ -570,17 +571,18 @@ async fn a_local_only_revoke_carried_by_a_later_root_act_marks_the_row() {
     let tv = node(0x44).to_string();
     let ran = invite(&home, &["tv", &tv, "--root", root]).await;
     assert!(ran.result.is_ok(), "{:?}: {}", ran.result, ran.err);
-    let state = swoosh::root::Root::inspect(&home, RootPlace::Dir(copy_dir.clone()))
+    let inspected = swoosh::root::Root::inspect(&home, RootPlace::Dir(copy_dir.clone()))
         .await
-        .unwrap()
-        .state;
+        .unwrap();
     assert!(
-        row_of(&state, "laptop").is_revoked(),
-        "the root act marks the row this machine revoked"
+        inspected.rows().iter().all(|row| row.node != key(LAPTOP)),
+        "the root act drops the device this machine revoked"
     );
     assert!(
-        state.revoked_keys().contains(&key(LAPTOP)),
-        "and carries its key"
+        inspected
+            .listed_revoked_keys()
+            .any(|key_| *key_ == key(LAPTOP)),
+        "and its list carries its key"
     );
 }
 
@@ -598,9 +600,8 @@ async fn revoke_after_new_key_refuses_the_old_invite() {
         blocks(&home, &ci.standing).await,
         "the old invite's standing is refused here"
     );
-    let state = kept(&home).await;
     assert!(
-        state.revoked().contains(&ci.ids[0]),
+        kept_list(&home).revoked().contains(&ci.ids[0]),
         "and the root publishes its id"
     );
 }
@@ -808,7 +809,8 @@ async fn an_old_link_never_revokes_the_device_now_named_for_it() {
         "revoked the link: blocked here. Your root revoked the device it stands for already.";
 
     let home = scratch("revoke-old-link");
-    holds(&home, &rows, Vec::new()).await;
+    // The root revoked the laptop: its list revokes its key and the ids it held, and carries no row.
+    holds(&home, &rows, old.ids.clone()).await;
     let ran = revoke(&home, &[&typed(&old.standing)]).await;
     assert_eq!(ran.ok().trim_end(), line);
     assert_eq!(ran.prompts, 0, "no root act");
@@ -821,11 +823,10 @@ async fn an_old_link_never_revokes_the_device_now_named_for_it() {
         "the device now named nas is not"
     );
     let state = kept(&home).await;
-    assert!(!state.revoked_keys().contains(&key(PHONE)));
+    assert!(!kept_list(&home).is_revoked_key(&key(PHONE)));
     assert!(!row_of(&state, "desk").is_revoked());
     assert!(
         state
-            .rows()
             .iter()
             .any(|row| row.key == key(PHONE) && !row.is_revoked()),
         "and stays one of your devices"
@@ -833,7 +834,7 @@ async fn an_old_link_never_revokes_the_device_now_named_for_it() {
 
     // On a device, the update names the old link's id among the revoked.
     let home = device("revoke-old-link-device", &[live(OWN, "desk"), new.clone()]).await;
-    held(&home, &update_of(&records(1, &rows, old.ids.clone())));
+    held(&home, &records(1, &rows, old.ids.clone()));
     let ran = revoke(&home, &[&typed(&old.standing)]).await;
     assert_eq!(ran.ok().trim_end(), line);
     assert!(!blocks_key(&home, PHONE).await);
@@ -859,17 +860,21 @@ async fn a_link_revoked_alone_still_revokes_its_live_device() {
     let ran = revoke(&home, &["me/phone", "--root", root]).await;
     let _ = ran.ok();
     let inspect = || swoosh::root::Root::inspect(&home, RootPlace::Dir(copy_dir.clone()));
-    let state = inspect().await.unwrap().state;
-    assert!(state.revoked().contains(&laptop.ids[0]));
-    assert!(!row_of(&state, "laptop").is_revoked());
+    let inspected = inspect().await.unwrap();
+    assert!(inspected.listed_revoked().any(|id| *id == laptop.ids[0]));
+    assert!(inspected.rows().iter().any(|row| row.node == key(LAPTOP)));
 
     // The command the first revoke named revokes the device the link stands for.
     let ran = revoke(&home, &[&typed(&laptop.standing), "--root", root]).await;
     let _ = ran.ok();
     assert_eq!(ran.prompts, 1, "a root act");
-    let state = inspect().await.unwrap().state;
-    assert!(row_of(&state, "laptop").is_revoked());
-    assert!(state.revoked_keys().contains(&key(LAPTOP)));
+    let inspected = inspect().await.unwrap();
+    assert!(inspected.rows().iter().all(|row| row.node != key(LAPTOP)));
+    assert!(
+        inspected
+            .listed_revoked_keys()
+            .any(|key_| *key_ == key(LAPTOP))
+    );
 }
 
 #[tokio::test]
@@ -898,12 +903,16 @@ async fn a_root_signed_link_refuses_when_your_devices_cannot_be_read() {
     let laptop = live(LAPTOP, "laptop");
     let home = scratch("revoke-unreadable");
     holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
-    std::fs::write(home.root().join(swoosh::state::FILE), b"not a state").unwrap();
+    std::fs::write(home.devices(), b"not a list").unwrap();
     let ran = revoke(&home, &[&typed(&laptop.standing)]).await;
     let refusal = ran.refusal();
     assert!(
-        refusal.contains("records were changed outside swoosh"),
-        "the failed read is the refusal: {refusal}"
+        refusal.contains(&format!(
+            "this root's devices list was changed outside swoosh ({}): refusing to sign from it. Use \
+             another copy.",
+            home.devices().display()
+        )),
+        "the failed read is the refusal, naming the list's file: {refusal}"
     );
     assert!(
         !blocks(&home, &laptop.standing).await,
@@ -957,7 +966,7 @@ async fn a_revoke_never_leaves_live_a_device_its_own_sync_rekeyed() {
     let rows = [live(OWN, "desk"), live(LAPTOP, "laptop"), live(NAS, "nas")];
     holds(&home, &rows, Vec::new()).await;
     let rekeyed = [rows[0].clone(), live(STRANGER, "laptop"), rows[2].clone()];
-    let elsewhere = update_of(&records(2, &rekeyed, Vec::new()));
+    let elsewhere = records(2, &rekeyed, Vec::new());
     let tape = Tape::default();
     let dial = Handing {
         home: home.clone(),
@@ -1002,7 +1011,13 @@ async fn a_revoke_never_leaves_live_a_device_its_own_sync_rekeyed() {
 async fn revoking_this_machines_own_standing_never_blocks_its_key() {
     let own = revoked(OWN, "desk");
     let home = scratch("revoke-own-standing");
-    holds(&home, &[own.clone(), live(LAPTOP, "laptop")], Vec::new()).await;
+    // The root's list revokes this machine's key and the ids it held.
+    holds(
+        &home,
+        &[own.clone(), live(LAPTOP, "laptop")],
+        own.ids.clone(),
+    )
+    .await;
     let given = gave(&home, node(STRANGER), GrantKind::Device).await;
 
     let ran = revoke(&home, &[&typed(&own.standing)]).await;
@@ -1040,7 +1055,7 @@ async fn revoked_holds_ids_device_keys_and_roots_in_one_file() {
             .map(super::super::invite::invite_tests::member)
             .collect(),
         Vec::new(),
-        vec![key(PHONE)],
+        vec![swoosh::testkit::revoked(key(PHONE))],
     )
     .unwrap();
     let home_lock = swoosh::home::HomeWrite::take(&home).await.unwrap();
@@ -1111,7 +1126,7 @@ async fn no_nauthy_lock_file_is_made_in_the_home() {
             .map(super::super::invite::invite_tests::member)
             .collect(),
         Vec::new(),
-        vec![key(PHONE)],
+        vec![swoosh::testkit::revoked(key(PHONE))],
     )
     .unwrap();
     swoosh::roster::fold(
@@ -1125,5 +1140,129 @@ async fn no_nauthy_lock_file_is_made_in_the_home() {
     assert!(
         !home.dir().join("revoked.lock").exists(),
         "no revoked.lock in the home"
+    );
+}
+
+/// The list beside the key in the copy at `dir`.
+fn list_in(dir: &std::path::Path) -> RosterDoc {
+    swoosh::roster::verify(
+        &std::fs::read(dir.join("devices")).unwrap(),
+        TestRoot::seeded(ROOT).verify_key(),
+    )
+    .unwrap()
+}
+
+/// The stick workflow: one copy of the root on a stick, used on two machines that never sync with each
+/// other in between. The second machine brings itself forward from the list on the stick, so its cut
+/// carries the first's revocation; and a stale backup used after both cuts above every list it is shown.
+#[tokio::test]
+async fn a_stale_copy_cuts_above_the_fleet_from_the_newest_list() {
+    let rows = [
+        live(OWN, "desk"),
+        live(LAPTOP, "laptop"),
+        live(PHONE, "phone"),
+    ];
+    let first = device("stick-first", &rows).await;
+    let second = device("stick-second", &rows).await;
+    let stick = dir("stick");
+    copy(&stick, &records(1, &rows, Vec::new()));
+    let backup = dir("stick-backup");
+    copy(&backup, &records(1, &rows, Vec::new()));
+    let (stick_text, backup_text) = (stick.to_str().unwrap(), backup.to_str().unwrap());
+
+    // The stick on the first machine revokes the phone.
+    let ran = revoke(&first, &["me/phone", "--root", stick_text]).await;
+    let _ = ran.ok();
+    assert_eq!(list_in(&stick).epoch(), Epoch(2));
+
+    // The stick on the second machine, which still holds list 1, invites the tv.
+    let tv = node(0x44).to_string();
+    let ran = invite(&second, &["tv", &tv, "--root", stick_text]).await;
+    assert!(ran.result.is_ok(), "{:?}: {}", ran.result, ran.err);
+    let cut = list_in(&stick);
+    assert_eq!(cut.epoch(), Epoch(3), "above the list on the stick");
+    assert!(
+        cut.is_revoked_key(&key(PHONE)),
+        "the second machine's cut carries the first's revocation"
+    );
+
+    // A backup made before both, used on the second machine: it cuts above the list held there.
+    let watch = node(0x48).to_string();
+    let ran = invite(&second, &["watch", &watch, "--root", backup_text]).await;
+    assert!(ran.result.is_ok(), "{:?}: {}", ran.result, ran.err);
+    let cut = list_in(&backup);
+    assert_eq!(
+        cut.epoch(),
+        Epoch(4),
+        "above the newest list, not the backup's"
+    );
+    assert!(cut.is_revoked_key(&key(PHONE)), "and carries it too");
+    assert_eq!(kept_list(&second).epoch(), Epoch(4));
+}
+
+/// A revoke that stopped after writing the copy and before the home took the cut: the copy holds list 4
+/// revoking the laptop, the home still lists it live at 3. Running the revoke again finds the laptop
+/// marked revoked, cuts above 4 and offers the cut, so the revocation reaches the phone.
+#[tokio::test]
+async fn a_revoke_stopped_after_the_copy_write_is_finished_by_running_it_again() {
+    let desk = live(OWN, "desk");
+    let laptop = live(LAPTOP, "laptop");
+    let phone = live(PHONE, "phone");
+    let gone = Row {
+        revoked_on: now() - DAY,
+        ..laptop.clone()
+    };
+    let before = [desk.clone(), laptop.clone(), phone.clone()];
+    let home = device("stopped-revoke", &before).await;
+    held(&home, &records(3, &before, Vec::new()));
+    let stick = dir("stopped-revoke");
+    copy(
+        &stick,
+        &records(4, &[desk, gone, phone], laptop.ids.clone()),
+    );
+
+    let ran = revoke(&home, &["me/laptop", "--root", stick.to_str().unwrap()]).await;
+    let _ = ran.ok();
+    let list = kept_list(&home);
+    assert_eq!(list.epoch(), Epoch(5), "a cut above the copy's list");
+    assert!(list.is_revoked_key(&key(LAPTOP)));
+    assert!(
+        !list
+            .members()
+            .iter()
+            .any(|member| member.node == key(LAPTOP))
+    );
+    assert_eq!(list_in(&stick).epoch(), Epoch(5));
+    assert!(ran.tape.text().contains("<offer>"), "the cut is offered");
+}
+
+/// Where the root is kept, a device revoked here leaves the list's live rows, and the list carries its key
+/// with the name it had: the next `status` shows it as `me/laptop`, its short key once, and `revoked`.
+#[tokio::test]
+async fn status_names_a_device_revoked_here() {
+    let home = scratch("revoke-then-status");
+    holds(
+        &home,
+        &[live(OWN, "desk"), live(LAPTOP, "laptop")],
+        Vec::new(),
+    )
+    .await;
+    let _ = revoke(&home, &["me/laptop"]).await.ok().to_owned();
+
+    let stored = swoosh::identity::inspect(&home).unwrap().into_stored();
+    let out = super::super::status::report::Report::gather(&home, &stored, now())
+        .await
+        .unwrap()
+        .render();
+    // A row's short key: `ed01` and 8 more characters.
+    let short: String = key(LAPTOP).to_string().chars().take(12).collect();
+    let rows: Vec<&str> = out.lines().filter(|line| line.contains(&short)).collect();
+    let [laptop] = rows.as_slice() else {
+        panic!("one row names the laptop's key: {out}");
+    };
+    assert_eq!(
+        laptop.split_whitespace().collect::<Vec<_>>(),
+        ["me/laptop", short.as_str(), "revoked"],
+        "the name, the key once, then the state: {out}"
     );
 }

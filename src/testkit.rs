@@ -25,9 +25,22 @@ use zeroize::Zeroizing;
 use crate::contacts::DeviceLabel;
 use crate::home::{Home, HomeWrite, ServeLock};
 use crate::passphrase::Prompt;
-use crate::roster::{Member, RosterDoc};
-use crate::state::State;
+use crate::roster::{Member, RevokedDevice, RosterDoc};
 use crate::sync::{Answer, Dial, ExchangeError};
+
+/// A revoked device for an update: `node`, under the name `gone`, which any number of revoked devices may
+/// share. For a test that needs only the key revoked; one that reads the name builds its own.
+///
+/// # Panics
+///
+/// Never: `gone` is a stored name.
+#[expect(clippy::expect_used, reason = "a fixed name that parses")]
+pub fn revoked(node: VerifyKey) -> RevokedDevice {
+    RevokedDevice {
+        node,
+        label: DeviceLabel::stored("gone").expect("a stored name"),
+    }
+}
 
 /// A held `home.lock` for a test's own setup writes: the lock of a scratch home of its own, so a fixture
 /// writing a file never waits on, or holds up, the home under test.
@@ -193,12 +206,13 @@ impl Keys {
             label,
             until: STANDING_UNTIL,
             duration: 0,
+            invite_until: 0,
             ids: Vec::new(),
             standing: self.standing(node)?,
         })
     }
 
-    /// This root's sealed badge for `node`, bare: the standing an update or `state` carries for it.
+    /// This root's sealed badge for `node`, bare: the standing an update carries for it.
     pub fn standing(&self, node: VerifyKey) -> Result<Link, CapError> {
         self.member_badge(
             node,
@@ -249,11 +263,6 @@ impl Keys {
     /// `doc`, signed by this key: the bytes a root act cuts and every device serves.
     pub fn sign_update(&self, doc: &RosterDoc) -> Vec<u8> {
         self.sign(&doc.canonical_bytes()).encode()
-    }
-
-    /// `state`, signed by this key: the bytes a root's copy holds in its `state` file.
-    pub fn sign_state(&self, state: &State) -> Vec<u8> {
-        self.sign(&state.canonical_bytes()).encode()
     }
 }
 

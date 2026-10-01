@@ -2,8 +2,9 @@
 //! commit.
 //!
 //! Each home is built on disk the way the product leaves it: this machine's key, a pin, a standing the root
-//! signed, and a root directory holding a sealed `root.key` and a signed `state`. The sealed key is made
-//! once per process and copied, because sealing is the slow part of a test here.
+//! signed, and a sealed `root.key` beside the list of devices the root signed last, `devices`. A copy is a
+//! directory holding the same two files. The sealed key is made once per process and copied, because
+//! sealing is the slow part of a test here.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use core::cell::RefCell;
@@ -29,9 +30,8 @@ use crate::contacts::DeviceLabel;
 use crate::home::Home;
 use crate::passphrase::Prompt;
 use crate::reach_report::{Missed, Reach, Why};
-use crate::roster::{Epoch, Member, RosterDoc};
+use crate::roster::{Epoch, Member, RevokedDevice, RosterDoc};
 use crate::standing::Standing;
-use crate::state::{self, Row, State};
 use crate::sync::{Answer, Dial, ExchangeError};
 use crate::testkit::{Answering, Counting, Loopback, STANDING_UNTIL, TestNode, TestRoot};
 
@@ -78,40 +78,38 @@ fn id(seed: u8, expires: u64) -> Id {
     }
 }
 
-/// A live row for the device `seed`, signed by `ROOT`, with `ids`.
-fn row(seed: u8, label: &str, ids: Vec<Id>) -> Row {
-    Row {
-        key: key(seed),
+/// A live device `seed`, signed by `ROOT`, with `ids`.
+fn row(seed: u8, label: &str, ids: Vec<Id>) -> Member {
+    Member {
+        node: key(seed),
         label: name(label),
         until: STANDING_UNTIL,
         duration: 90 * DAY,
-        seeded: false,
         invite_until: 0,
-        revoked_on: 0,
         ids,
         standing: TestRoot::seeded(ROOT).standing(key(seed)).unwrap(),
     }
 }
 
-/// The update `row` stands in.
-fn member(row: &Row) -> Member {
-    Member {
-        node: row.key,
-        label: row.label.clone(),
-        until: row.until,
-        duration: row.duration,
-        ids: row.ids.clone(),
-        standing: row.standing.clone(),
-    }
+/// `row`, as an update lists it.
+fn member(row: &Member) -> Member {
+    row.clone()
 }
 
 /// This machine's own row.
-fn own_row() -> Row {
+fn own_row() -> Member {
     row(OWN, "desk", vec![id(OWN, STANDING_UNTIL)])
 }
 
-fn records(last: u64, rows: Vec<Row>, revoked: Vec<Id>, keys: Vec<VerifyKey>) -> State {
-    State::new(Epoch(last), rows, revoked, keys).unwrap()
+/// A list the root signs: update `last`, listing `rows`, revoking `revoked` and `keys`.
+fn records(last: u64, rows: Vec<Member>, revoked: Vec<Id>, keys: Vec<VerifyKey>) -> RosterDoc {
+    RosterDoc::with_revocations(
+        Epoch(last),
+        rows,
+        revoked,
+        keys.into_iter().map(crate::testkit::revoked).collect(),
+    )
+    .unwrap()
 }
 
 /// A fresh home with this machine's key in it, plain.
@@ -179,14 +177,13 @@ fn private(path: &Path, bytes: &[u8]) {
     file.write_all(bytes).unwrap();
 }
 
-/// A copy of the root seeded `seed` at `dir`, holding `records`.
-fn copy(dir: &Path, seed: u8, records: &State) {
+/// A copy of the root seeded `seed` at `dir`: its key, and `records` beside it as the list it signed last.
+fn copy(dir: &Path, seed: u8, records: &RosterDoc) {
     config::create_store_dir(dir).unwrap();
     private(&dir.join("root.key"), &sealed(seed));
-    state::write(
-        &crate::testkit::lock(),
-        dir,
-        &TestRoot::seeded(seed).sign_state(records),
+    std::fs::write(
+        dir.join("devices"),
+        TestRoot::seeded(seed).sign_update(records),
     )
     .unwrap();
 }
@@ -202,10 +199,22 @@ async fn device_of(home: &Home, seed: u8) {
     config::write_badge(&crate::testkit::lock(), home, &badge).unwrap();
 }
 
-/// Make `home` hold the root seeded `ROOT`, with `records`.
-async fn holds(home: &Home, records: &State) {
+/// Make `home` hold the root seeded `ROOT`: its key beside `records`, the home's own `devices`.
+async fn holds(home: &Home, records: &RosterDoc) {
     device_of(home, ROOT).await;
-    copy(&home.root(), ROOT, records);
+    private(&home.root_key(), &sealed(ROOT));
+    held(home, records);
+}
+
+/// Make `home` a device of the root seeded `ROOT` holding `held`, with a copy of that root at a directory
+/// beside it holding `records`: the place to present it from.
+async fn with_copy(home: &Home, records: &RosterDoc, held_here: &RosterDoc) -> RootPlace {
+    device_of(home, ROOT).await;
+    held(home, held_here);
+    let dir = beside(home, "copy");
+    let _ = std::fs::remove_dir_all(&dir);
+    copy(&dir, ROOT, records);
+    RootPlace::Dir(dir)
 }
 
 /// Write `doc`, signed by `ROOT`, as the update this home holds.
@@ -302,7 +311,7 @@ async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
         panic!("an unpinned home makes a root");
     };
     let root_key = root.key();
-    match KeyFile::root(home.root().join("root.key")).load().unwrap() {
+    match KeyFile::root(home.root_key()).load().unwrap() {
         Some(Stored::Locked(locked)) => assert_eq!(locked.node_id(), root_key),
         other => panic!("the root key is sealed, of the root kind: {other:?}"),
     }
@@ -313,9 +322,20 @@ async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
         "the standing roots at the new root"
     );
     assert!(matches!(standing(&home).await, Standing::HoldsRoot { pin, .. } if pin == root_key));
-    assert!(
-        !home.root().join("standing").exists(),
-        "the pin is written, so the staged standing is gone"
+    let first = crate::roster::verify(
+        &std::fs::read(home.devices()).unwrap(),
+        root_key.verify_key().expect("a usable key"),
+    )
+    .unwrap();
+    assert_eq!(first.epoch(), Epoch(1), "the mint's own list");
+    assert_eq!(
+        first
+            .members()
+            .iter()
+            .map(|member| member.node)
+            .collect::<Vec<_>>(),
+        vec![key(OWN)],
+        "listing only this machine"
     );
 
     root.sign_standing(key(LAPTOP), name("laptop"), Duration::from_secs(90 * DAY))
@@ -326,7 +346,7 @@ async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
         root_key.verify_key().expect("a usable key"),
     )
     .unwrap();
-    assert_eq!(update.epoch(), Epoch(1));
+    assert_eq!(update.epoch(), Epoch(2));
     assert_eq!(
         update.members().len(),
         2,
@@ -339,24 +359,39 @@ async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
 }
 
 #[tokio::test]
-async fn an_interrupted_mint_completes_without_a_prompt() {
-    let home = home("mint-renamed");
-    STOP.set(Some(Seam::Renamed));
+async fn a_mint_stopped_after_its_list_finishes_without_a_prompt() {
+    let home = home("mint-listed");
+    STOP.set(Some(Seam::Listed));
     let stopped = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink()).await;
     STOP.set(None);
     assert!(stopped.is_err());
+    assert!(home.devices().exists() && !home.key_cert().exists() && !home.root_pub().exists());
     assert!(matches!(
         standing(&home).await,
         Standing::InterruptedMint { .. }
     ));
 
+    // The finish the next `invite` runs: the list beside the key carries this machine's standing.
     let mut prompt = Counting::refusing();
     let finished = Root::mint_to(&home, &mut prompt, &mut io::sink())
         .await
         .unwrap();
     assert!(matches!(finished, Minted::Finished));
-    assert_eq!(prompt.events(), 0);
-    assert!(matches!(standing(&home).await, Standing::HoldsRoot { .. }));
+    assert_eq!(prompt.events(), 0, "no prompt once devices is written");
+    let Standing::HoldsRoot { pin, .. } = standing(&home).await else {
+        panic!("the mint finished");
+    };
+    let badge = config::load_badge(&home).await.unwrap().unwrap();
+    let list = crate::roster::verify(
+        &std::fs::read(home.devices()).unwrap(),
+        pin.verify_key().expect("a usable key"),
+    )
+    .unwrap();
+    assert_eq!(
+        list.members()[0].standing.as_str(),
+        badge.as_str(),
+        "this machine's standing is the one its list carries"
+    );
 }
 
 #[tokio::test]
@@ -382,13 +417,13 @@ async fn a_mint_killed_between_badge_and_pin_finishes_without_a_prompt() {
 }
 
 #[tokio::test]
-async fn an_interrupted_mint_with_no_standing_prompts_once() {
+async fn an_interrupted_mint_with_no_list_prompts_once() {
     let home = home("mint-bare");
-    STOP.set(Some(Seam::Renamed));
+    STOP.set(Some(Seam::Keyed));
     let stopped = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink()).await;
     STOP.set(None);
     assert!(stopped.is_err());
-    std::fs::remove_file(home.root().join("standing")).unwrap();
+    assert!(home.root_key().exists() && !home.devices().exists());
 
     let mut prompt = Counting::new([PASS]);
     let Minted::Made(mut root) = Root::mint_to(&home, &mut prompt, &mut io::sink())
@@ -413,13 +448,13 @@ async fn an_interrupted_mint_with_no_standing_prompts_once() {
 #[tokio::test]
 async fn an_interrupted_mint_takes_no_standing_that_is_not_its_own() {
     let home = home("mint-foreign");
-    STOP.set(Some(Seam::Renamed));
+    STOP.set(Some(Seam::Keyed));
     let stopped = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink()).await;
     STOP.set(None);
     assert!(stopped.is_err());
-    // A standing another root signed, left where the mint keeps this machine's.
+    // A standing another root signed, left where this machine keeps its own.
     let foreign = TestRoot::seeded(OTHER).standing(key(OWN)).unwrap();
-    std::fs::write(home.root().join("standing"), format!("{foreign}\n")).unwrap();
+    config::write_badge(&crate::testkit::lock(), &home, &foreign).unwrap();
 
     let mut prompt = Counting::new([PASS]);
     let minted = Root::mint_to(&home, &mut prompt, &mut io::sink())
@@ -491,7 +526,7 @@ async fn the_first_root_act_announces_before_the_prompt_and_after_the_mint() {
         let row = root.rows().iter().find(|row| row.label.as_str() == label);
         super::Date(row.unwrap().until).to_string()
     };
-    let own = root.rows().iter().find(|row| row.key == key(OWN)).unwrap();
+    let own = root.rows().iter().find(|row| row.node == key(OWN)).unwrap();
     let expected = format!(
         "This makes your root on this machine: a second key, not a machine, that vouches for all your devices.\n\
          It is locked with a passphrase, which you type whenever you add, renew or revoke a device.\n\
@@ -601,22 +636,10 @@ async fn present_checks_everything_before_the_prompt() {
     std::fs::set_permissions(&stick, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert!(matches!(refused, Err(RootError::ReadOnly { .. })));
 
-    // Step 7: a copy another command is using.
-    let held_lock = super::DirLock::take(&dir).unwrap();
-    let (refused, _) = present(
-        &device,
-        RootPlace::Dir(dir.clone()),
-        RootVerb::Invite,
-        &mut prompt,
-    )
-    .await;
-    drop(held_lock);
-    assert!(matches!(refused, Err(RootError::InUse)));
-
-    // Step 8: records changed outside swoosh.
-    std::fs::write(dir.join("state"), b"not the root's records").unwrap();
+    // Step 7: records changed outside swoosh.
+    std::fs::write(dir.join("devices"), b"not the root's records").unwrap();
     let (refused, _) = present(&device, RootPlace::Dir(dir), RootVerb::Invite, &mut prompt).await;
-    assert!(matches!(refused, Err(RootError::State(_))));
+    assert!(matches!(refused, Err(RootError::Damaged { .. })));
 
     assert_eq!(prompt.events(), 0, "no refusal costs a prompt");
 }
@@ -659,7 +682,7 @@ async fn present_refuses_a_copy_where_a_root_is_held() {
 }
 
 #[tokio::test]
-async fn a_tampered_state_is_refused_before_the_prompt() {
+async fn a_tampered_list_is_refused_before_the_prompt() {
     let home = home("tampered");
     device_of(&home, ROOT).await;
     let dir = beside(&home, "copy");
@@ -671,18 +694,21 @@ async fn a_tampered_state_is_refused_before_the_prompt() {
     );
     copy(&dir, ROOT, &records);
     // Repoint the laptop's row at another key, as someone who can write the copy would.
-    let mut bytes = std::fs::read(dir.join("state")).unwrap();
+    let mut bytes = std::fs::read(dir.join("devices")).unwrap();
     let laptop = *key(LAPTOP).bytes();
     let at = bytes
         .windows(laptop.len())
         .position(|window| window == laptop)
         .unwrap();
     bytes[at..at + laptop.len()].copy_from_slice(key(PHONE).bytes());
-    std::fs::write(dir.join("state"), bytes).unwrap();
+    std::fs::write(dir.join("devices"), bytes).unwrap();
 
     let mut prompt = Counting::refusing();
     let (refused, _) = present(&home, RootPlace::Dir(dir), RootVerb::Invite, &mut prompt).await;
-    assert!(matches!(refused, Err(RootError::State(_))), "{refused:?}");
+    assert!(
+        matches!(refused, Err(RootError::Damaged { .. })),
+        "{refused:?}"
+    );
     assert_eq!(prompt.events(), 0);
 }
 
@@ -699,10 +725,9 @@ async fn a_device_key_file_in_the_root_slot_is_refused_by_kind() {
             Protection::Passphrase(&passphrase()),
         )
         .unwrap();
-    state::write(
-        &crate::testkit::lock(),
-        &dir,
-        &TestRoot::seeded(ROOT).sign_state(&records(0, vec![own_row()], Vec::new(), Vec::new())),
+    std::fs::write(
+        dir.join("devices"),
+        TestRoot::seeded(ROOT).sign_update(&records(0, vec![own_row()], Vec::new(), Vec::new())),
     )
     .unwrap();
 
@@ -748,19 +773,20 @@ async fn a_cut_at_max_revoked_keys_refuses_before_the_prompt() {
             TestNode::from_seed(seed).verify_key()
         })
         .collect();
-    holds(&home, &records(0, vec![own_row()], Vec::new(), full)).await;
-    held(
+    let place = with_copy(
         &home,
+        &records(0, vec![own_row()], Vec::new(), full),
         &RosterDoc::with_revocations(
             Epoch(1),
             vec![member(&own_row())],
             Vec::new(),
-            vec![key(LAPTOP)],
+            vec![crate::testkit::revoked(key(LAPTOP))],
         )
         .unwrap(),
-    );
+    )
+    .await;
     let mut prompt = Counting::refusing();
-    let (refused, _) = present(&home, RootPlace::Home, RootVerb::Revoke, &mut prompt).await;
+    let (refused, _) = present(&home, place, RootVerb::Revoke, &mut prompt).await;
     assert!(
         matches!(refused, Err(RootError::TooManyKeys { count }) if count == MAX_REVOKED_KEYS + 1),
         "{refused:?}"
@@ -771,11 +797,11 @@ async fn a_cut_at_max_revoked_keys_refuses_before_the_prompt() {
 #[tokio::test]
 async fn update_number_overflow_refuses() {
     let home = home("overflow");
-    holds(&home, &records(0, vec![own_row()], Vec::new(), Vec::new())).await;
-    held(
+    holds(
         &home,
-        &RosterDoc::new(Epoch(u64::MAX), vec![member(&own_row())]).unwrap(),
-    );
+        &records(u64::MAX, vec![own_row()], Vec::new(), Vec::new()),
+    )
+    .await;
     let mut prompt = Counting::refusing();
     let (refused, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
     assert!(matches!(refused, Err(RootError::Exhausted)), "{refused:?}");
@@ -784,12 +810,15 @@ async fn update_number_overflow_refuses() {
 
 // --- bring forward ---
 
-/// A home whose `state` lists the laptop with four live ids, and whose update renews it a fifth time.
-async fn fifth_id(tag: &str) -> Home {
+/// A device holding an update that renews the laptop a fifth time, with a copy of the root whose list
+/// gives the laptop four live ids: the home, and the copy.
+async fn fifth_id(tag: &str) -> (Home, RootPlace) {
     let home = home(tag);
     let later = now() + 10 * DAY;
     let four = (1..=4).map(|nth| id(nth, later + u64::from(nth))).collect();
-    holds(
+    let mut renewed = row(LAPTOP, "laptop", vec![id(5, later + 5)]);
+    renewed.until = STANDING_UNTIL + 1;
+    let place = with_copy(
         &home,
         &records(
             1,
@@ -797,27 +826,16 @@ async fn fifth_id(tag: &str) -> Home {
             Vec::new(),
             Vec::new(),
         ),
+        &RosterDoc::new(Epoch(2), vec![member(&own_row()), member(&renewed)]).unwrap(),
     )
     .await;
-    let mut renewed = row(LAPTOP, "laptop", vec![id(5, later + 5)]);
-    renewed.until = STANDING_UNTIL + 1;
-    held(
-        &home,
-        &RosterDoc::new(Epoch(2), vec![member(&own_row()), member(&renewed)]).unwrap(),
-    );
-    home
+    (home, place)
 }
 
 #[tokio::test]
 async fn bring_forward_revokes_a_fifth_live_id_it_cannot_keep() {
-    let home = fifth_id("fifth-revoked").await;
-    let (root, out) = present(
-        &home,
-        RootPlace::Home,
-        RootVerb::Invite,
-        &mut Counting::new([PASS]),
-    )
-    .await;
+    let (home, place) = fifth_id("fifth-revoked").await;
+    let (root, out) = present(&home, place, RootVerb::Invite, &mut Counting::new([PASS])).await;
     assert!(
         out.contains("+1 older renewals of me/laptop revoked"),
         "{out}"
@@ -840,14 +858,8 @@ async fn bring_forward_revokes_a_fifth_live_id_it_cannot_keep() {
 
 #[tokio::test]
 async fn bring_forward_of_a_fifth_id_keeps_the_device() {
-    let home = fifth_id("fifth-kept").await;
-    let (root, _) = present(
-        &home,
-        RootPlace::Home,
-        RootVerb::Invite,
-        &mut Counting::new([PASS]),
-    )
-    .await;
+    let (home, place) = fifth_id("fifth-kept").await;
+    let (root, _) = present(&home, place, RootVerb::Invite, &mut Counting::new([PASS])).await;
     let (_, update) = commit(root.unwrap()).await;
     assert!(
         update
@@ -855,26 +867,21 @@ async fn bring_forward_of_a_fifth_id_keeps_the_device() {
             .iter()
             .any(|member| member.node == key(LAPTOP))
     );
-    assert!(!update.revoked_keys().contains(&key(LAPTOP)));
+    assert!(!update.is_revoked_key(&key(LAPTOP)));
 }
 
 #[tokio::test]
 async fn bring_forward_keeps_a_devices_duration() {
     let home = home("duration");
-    holds(&home, &records(0, vec![own_row()], Vec::new(), Vec::new())).await;
     let mut phone = row(PHONE, "phone", Vec::new());
     phone.duration = 60 * DAY;
-    held(
+    let place = with_copy(
         &home,
+        &records(0, vec![own_row()], Vec::new(), Vec::new()),
         &RosterDoc::new(Epoch(1), vec![member(&own_row()), member(&phone)]).unwrap(),
-    );
-    let (root, _) = present(
-        &home,
-        RootPlace::Home,
-        RootVerb::Invite,
-        &mut Counting::new([PASS]),
     )
     .await;
+    let (root, _) = present(&home, place, RootVerb::Invite, &mut Counting::new([PASS])).await;
     let (_, update) = commit(root.unwrap()).await;
     let phone = update
         .members()
@@ -887,14 +894,15 @@ async fn bring_forward_keeps_a_devices_duration() {
 #[tokio::test]
 async fn a_current_copy_prints_no_bring_forward() {
     let home = home("current");
-    holds(&home, &records(1, vec![own_row()], Vec::new(), Vec::new())).await;
-    held(
+    let place = with_copy(
         &home,
+        &records(1, vec![own_row()], Vec::new(), Vec::new()),
         &RosterDoc::new(Epoch(1), vec![member(&own_row())]).unwrap(),
-    );
+    )
+    .await;
     let (_, out) = present(
         &home,
-        RootPlace::Home,
+        place.clone(),
         RootVerb::Invite,
         &mut Counting::refusing(),
     )
@@ -905,13 +913,7 @@ async fn a_current_copy_prints_no_bring_forward() {
         &home,
         &RosterDoc::new(Epoch(2), vec![member(&own_row())]).unwrap(),
     );
-    let (_, out) = present(
-        &home,
-        RootPlace::Home,
-        RootVerb::Invite,
-        &mut Counting::refusing(),
-    )
-    .await;
+    let (_, out) = present(&home, place, RootVerb::Invite, &mut Counting::refusing()).await;
     assert!(
         out.contains("brought forward"),
         "a copy behind its devices says so: {out}"
@@ -921,7 +923,8 @@ async fn a_current_copy_prints_no_bring_forward() {
 #[tokio::test]
 async fn bring_forward_never_takes_devices_from_the_copy_over_the_update() {
     let home = home("update-wins");
-    holds(
+    let theirs = row(PHONE, "laptop", Vec::new());
+    let place = with_copy(
         &home,
         &records(
             0,
@@ -929,20 +932,10 @@ async fn bring_forward_never_takes_devices_from_the_copy_over_the_update() {
             Vec::new(),
             Vec::new(),
         ),
-    )
-    .await;
-    let theirs = row(PHONE, "laptop", Vec::new());
-    held(
-        &home,
         &RosterDoc::new(Epoch(1), vec![member(&own_row()), member(&theirs)]).unwrap(),
-    );
-    let (root, out) = present(
-        &home,
-        RootPlace::Home,
-        RootVerb::Invite,
-        &mut Counting::new([PASS]),
     )
     .await;
+    let (root, out) = present(&home, place, RootVerb::Invite, &mut Counting::new([PASS])).await;
     assert!(
         out.contains("was also added on another copy of your root"),
         "{out}"
@@ -958,58 +951,85 @@ async fn bring_forward_never_takes_devices_from_the_copy_over_the_update() {
         key(PHONE),
         "the update's device keeps the name"
     );
-    assert!(
-        update.revoked_keys().contains(&key(LAPTOP)),
-        "the copy's is revoked"
-    );
+    assert!(update.is_revoked_key(&key(LAPTOP)), "the copy's is revoked");
 }
 
 #[tokio::test]
-async fn a_rolled_back_state_renews_no_revoked_device() {
+async fn a_rolled_back_copy_renews_no_revoked_device() {
     let home = home("rolled-back");
     // Due: in the last half of its 60 days.
     let mut laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, now() + 10 * DAY)]);
     laptop.until = now() + 10 * DAY;
     laptop.duration = 60 * DAY;
-    holds(
+    // Its devices revoked the laptop's key since this copy was made.
+    let place = with_copy(
         &home,
         &records(0, vec![own_row(), laptop], Vec::new(), Vec::new()),
-    )
-    .await;
-    // Its devices revoked the laptop's key since this copy was made.
-    held(
-        &home,
         &RosterDoc::with_revocations(
             Epoch(1),
             vec![member(&own_row())],
             Vec::new(),
-            vec![key(LAPTOP)],
+            vec![crate::testkit::revoked(key(LAPTOP))],
         )
         .unwrap(),
-    );
-    let (_, out) = present(
-        &home,
-        RootPlace::Home,
-        RootVerb::Invite,
-        &mut Counting::refusing(),
     )
     .await;
+    let (_, out) = present(&home, place, RootVerb::Invite, &mut Counting::refusing()).await;
     assert!(!out.contains("renewing"), "{out}");
+}
+
+/// A revoked device's name rides with its key: a device folds the update another copy of the root cut
+/// revoking the laptop, and a copy behind it, brought forward from what the device holds, signs that name
+/// on with the key. The other copy had renamed it, so the name signed is the update's, not the copy's row.
+#[tokio::test]
+async fn a_revoked_devices_name_survives_a_fold_and_a_bring_forward() {
+    let home = home("revoked-name-forward");
+    let laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]);
+    let gone = RevokedDevice {
+        node: key(LAPTOP),
+        label: name("work-laptop"),
+    };
+    let behind = records(1, vec![own_row(), laptop], Vec::new(), Vec::new());
+    let place = with_copy(&home, &behind, &behind).await;
+    let elsewhere = RosterDoc::with_revocations(
+        Epoch(2),
+        vec![member(&own_row())],
+        Vec::new(),
+        vec![gone.clone()],
+    )
+    .unwrap();
+    crate::roster::fold(
+        &crate::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &TestRoot::seeded(ROOT).sign_update(&elsewhere),
+    )
+    .await
+    .unwrap();
+    let folded = crate::roster::held(&home, TestRoot::seeded(ROOT).verify_key()).unwrap();
+    assert_eq!(
+        folded.revoked_devices(),
+        core::slice::from_ref(&gone),
+        "the fold keeps the name"
+    );
+
+    let (root, _) = present(&home, place, RootVerb::Invite, &mut Counting::new([PASS])).await;
+    let mut root = root.unwrap();
+    root.sign_standing(key(TV), name("tv"), Duration::from_secs(90 * DAY))
+        .unwrap();
+    let (_, update) = commit(root).await;
+    assert_eq!(
+        update.revoked_devices(),
+        [gone],
+        "the copy brought forward signs the name on"
+    );
 }
 
 #[tokio::test]
 async fn a_revoked_key_survives_its_standings_expiry_in_the_update() {
     let home = home("key-survives");
-    let mut gone = row(LAPTOP, "laptop", vec![id(LAPTOP, 1)]);
-    gone.revoked_on = 1;
     holds(
         &home,
-        &records(
-            0,
-            vec![own_row(), gone],
-            vec![id(LAPTOP, 1)],
-            vec![key(LAPTOP)],
-        ),
+        &records(1, vec![own_row()], vec![id(LAPTOP, 1)], vec![key(LAPTOP)]),
     )
     .await;
     let (root, _) = present(
@@ -1019,13 +1039,16 @@ async fn a_revoked_key_survives_its_standings_expiry_in_the_update() {
         &mut Counting::new([PASS]),
     )
     .await;
-    let (_, update) = commit(root.unwrap()).await;
+    let mut root = root.unwrap();
+    root.sign_standing(key(TV), name("tv"), Duration::from_secs(90 * DAY))
+        .unwrap();
+    let (_, update) = commit(root).await;
     assert!(
         update.revoked().is_empty(),
         "an ended standing's id is not carried"
     );
     assert!(
-        update.revoked_keys().contains(&key(LAPTOP)),
+        update.is_revoked_key(&key(LAPTOP)),
         "a revoked key is carried for good"
     );
 }
@@ -1075,7 +1098,11 @@ async fn a_root_act_never_publishes_a_devices_own_grant_revocations() {
         vec![id(LAPTOP, 0).id.to_hex()],
         "only the root's own device's id"
     );
-    assert_eq!(update.revoked_keys(), &[key(LAPTOP)], "only a row's key");
+    assert_eq!(
+        update.revoked_keys().collect::<Vec<_>>(),
+        [key(LAPTOP)],
+        "only a row's key"
+    );
 }
 
 // --- commit ---
@@ -1083,7 +1110,7 @@ async fn a_root_act_never_publishes_a_devices_own_grant_revocations() {
 #[tokio::test]
 async fn a_commit_publishes_a_row_the_held_update_lacks() {
     let home = home("pending-row");
-    holds(
+    let place = with_copy(
         &home,
         &records(
             1,
@@ -1091,19 +1118,10 @@ async fn a_commit_publishes_a_row_the_held_update_lacks() {
             Vec::new(),
             Vec::new(),
         ),
-    )
-    .await;
-    held(
-        &home,
         &RosterDoc::new(Epoch(1), vec![member(&own_row())]).unwrap(),
-    );
-    let (root, _) = present(
-        &home,
-        RootPlace::Home,
-        RootVerb::Invite,
-        &mut Counting::new([PASS]),
     )
     .await;
+    let (root, _) = present(&home, place, RootVerb::Invite, &mut Counting::new([PASS])).await;
     let (committed, update) = commit(root.unwrap()).await;
     assert_eq!(committed.number, Epoch(2));
     assert!(
@@ -1139,12 +1157,12 @@ async fn inspect_never_unlocks() {
     let home = home("inspect");
     let records = records(3, vec![own_row()], Vec::new(), Vec::new());
     holds(&home, &records).await;
-    // Another command holds the lock; inspect takes none.
-    let _held = super::DirLock::take(&home.root()).unwrap();
+    // Another command holds the home's lock; inspect takes none.
+    let _held = crate::home::HomeWrite::take(&home).await.unwrap();
 
     let inspected = Root::inspect(&home, RootPlace::Home).await.unwrap();
     assert_eq!(inspected.root, TestRoot::seeded(ROOT).node_id());
-    assert_eq!(inspected.state, records);
+    assert_eq!(inspected.rows(), records.members());
 }
 
 #[test]
@@ -1236,49 +1254,6 @@ async fn a_root_act_with_no_terminal_refuses_before_the_prompt() {
 }
 
 #[tokio::test]
-async fn a_planted_probe_link_is_not_followed() {
-    let home = home("probe-link");
-    let dir = beside(&home, "copy");
-    copy(
-        &dir,
-        ROOT,
-        &records(0, vec![own_row()], Vec::new(), Vec::new()),
-    );
-    let target = beside(&home, "victim");
-    std::fs::write(&target, b"keep me").unwrap();
-    std::os::unix::fs::symlink(&target, dir.join("lock.probe")).unwrap();
-    let (root, _) = present(
-        &home,
-        RootPlace::Dir(dir.clone()),
-        RootVerb::Lock,
-        &mut Counting::new([PASS]),
-    )
-    .await;
-    root.unwrap();
-    assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
-    assert!(!dir.join("lock.probe").exists());
-}
-
-#[tokio::test]
-async fn a_planted_lock_link_is_not_followed() {
-    let home = home("lock-link");
-    let dir = beside(&home, "copy");
-    copy(
-        &dir,
-        ROOT,
-        &records(0, vec![own_row()], Vec::new(), Vec::new()),
-    );
-    let target = beside(&home, "planted");
-    let _ = std::fs::remove_file(&target);
-    std::os::unix::fs::symlink(&target, dir.join("lock")).unwrap();
-    let mut prompt = Counting::refusing();
-    let (refused, _) = present(&home, RootPlace::Dir(dir), RootVerb::Lock, &mut prompt).await;
-    assert!(matches!(refused, Err(RootError::Io { .. })), "{refused:?}");
-    assert!(!target.exists(), "the lock creates nothing through a link");
-    assert_eq!(prompt.events(), 0);
-}
-
-#[tokio::test]
 async fn the_first_invite_under_this_machines_name_moves_this_machine() {
     let home = home("mint-clash");
     let Minted::Made(mut root) = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink())
@@ -1290,7 +1265,7 @@ async fn the_first_invite_under_this_machines_name_moves_this_machine() {
     let suggested = root
         .rows()
         .iter()
-        .find(|row| row.key == key(OWN))
+        .find(|row| row.node == key(OWN))
         .unwrap()
         .label
         .clone();
@@ -1303,7 +1278,7 @@ async fn the_first_invite_under_this_machines_name_moves_this_machine() {
     let label = |root: &Root, seed: u8| {
         root.rows()
             .iter()
-            .find(|row| row.key == key(seed))
+            .find(|row| row.node == key(seed))
             .unwrap()
             .label
             .to_string()
@@ -1334,15 +1309,13 @@ async fn the_first_invite_under_this_machines_name_moves_this_machine() {
 #[tokio::test]
 async fn the_device_refusals_print_their_lines() {
     let home = home("refusal-lines");
-    let mut gone = row(LAPTOP, "laptop", Vec::new());
-    gone.revoked_on = 86_400 * 20_000;
     holds(
         &home,
         &records(
-            1,
-            vec![own_row(), gone, row(PHONE, "phone", Vec::new())],
+            2,
+            vec![own_row(), row(PHONE, "phone", Vec::new())],
             Vec::new(),
-            vec![key(LAPTOP), key(0x51)],
+            vec![key(LAPTOP)],
         ),
     )
     .await;
@@ -1376,18 +1349,10 @@ async fn the_device_refusals_print_their_lines() {
     assert_eq!(
         line,
         format!(
-            "{}… was revoked on 2024-10-04; a revoked key is not re-admitted. On that machine: swoosh leave \
-             --new-key, then invite the new key.",
+            "{}… was me/gone's key and is revoked; a revoked key is not re-admitted. Give that machine a \
+             new key and invite that one. On that machine: swoosh leave --new-key",
             short(LAPTOP)
         )
-    );
-    let line = root
-        .sign_standing(key(0x51), name("new"), days)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        line.starts_with(&format!("{}… was revoked; ", short(0x51))),
-        "no row, no date: {line}"
     );
 
     let line = root
@@ -1459,7 +1424,7 @@ async fn revoking_past_max_revoked_refuses_with_its_line() {
         "{refused:?}"
     );
     assert!(
-        root.rows().iter().all(|row| !row.is_revoked()),
+        root.rows().iter().any(|row| row.node == key(LAPTOP)),
         "nothing is revoked on a refusal"
     );
 }
@@ -1490,9 +1455,8 @@ async fn a_commit_over_a_bound_refuses_with_its_line() {
 #[tokio::test]
 async fn a_fork_that_adds_nothing_prints_nothing() {
     let home = home("empty-fork");
-    holds(&home, &records(1, vec![own_row()], Vec::new(), Vec::new())).await;
     let same = RosterDoc::new(Epoch(1), vec![member(&own_row())]).unwrap();
-    held(&home, &same);
+    holds(&home, &same).await;
     std::fs::write(
         home.devices_conflict(),
         TestRoot::seeded(ROOT).sign_update(&same),
@@ -1521,31 +1485,21 @@ async fn a_fork_below_the_held_update_brings_forward_only_its_revocations() {
         });
         let old = row(LAPTOP, "runner", vec![id(LAPTOP, STANDING_UNTIL)]);
         let new = row(NAS, "runner", vec![id(NAS, STANDING_UNTIL)]);
-        let mut rows = vec![own_row(), new.clone()];
-        let mut keys = Vec::new();
-        if reused {
-            rows.push(Row {
-                revoked_on: now() - DAY,
-                ..old.clone()
-            });
-            keys.push(key(LAPTOP));
-        }
-        holds(&home, &records(3, rows, Vec::new(), keys.clone())).await;
-        held(
+        let keys = if reused {
+            vec![key(LAPTOP)]
+        } else {
+            Vec::new()
+        };
+        holds(
             &home,
-            &RosterDoc::with_revocations(
-                Epoch(3),
-                vec![member(&own_row()), member(&new)],
-                Vec::new(),
-                keys,
-            )
-            .unwrap(),
-        );
+            &records(3, vec![own_row(), new.clone()], Vec::new(), keys),
+        )
+        .await;
         let fork = RosterDoc::with_revocations(
             Epoch(2),
             vec![member(&own_row()), member(&old)],
             Vec::new(),
-            vec![key(PHONE)],
+            vec![crate::testkit::revoked(key(PHONE))],
         )
         .unwrap();
         crate::roster::fold_fork(
@@ -1572,11 +1526,11 @@ async fn a_fork_below_the_held_update_brings_forward_only_its_revocations() {
             "reused {reused}: {out}"
         );
         assert!(
-            update.revoked_keys().contains(&key(PHONE)),
+            update.is_revoked_key(&key(PHONE)),
             "reused {reused}: the fork's revocation is brought forward"
         );
         assert!(
-            !update.revoked_keys().contains(&key(NAS)),
+            !update.is_revoked_key(&key(NAS)),
             "reused {reused}: the device under the name now keeps it"
         );
         let runner: Vec<_> = update
@@ -1604,24 +1558,24 @@ async fn a_held_update_below_the_records_brings_forward_only_its_revocations() {
         device_of(&home, ROOT).await;
         let old = row(LAPTOP, "runner", vec![id(LAPTOP, STANDING_UNTIL)]);
         let new = row(NAS, "runner", vec![id(NAS, STANDING_UNTIL)]);
-        let mut rows = vec![own_row(), new.clone()];
-        let mut keys = Vec::new();
-        if reused {
-            rows.push(Row {
-                revoked_on: now() - DAY,
-                ..old.clone()
-            });
-            keys.push(key(LAPTOP));
-        }
+        let keys = if reused {
+            vec![key(LAPTOP)]
+        } else {
+            Vec::new()
+        };
         let dir = beside(&home, "copy");
-        copy(&dir, ROOT, &records(5, rows, Vec::new(), keys));
+        copy(
+            &dir,
+            ROOT,
+            &records(5, vec![own_row(), new.clone()], Vec::new(), keys),
+        );
         held(
             &home,
             &RosterDoc::with_revocations(
                 Epoch(3),
                 vec![member(&own_row()), member(&old)],
                 Vec::new(),
-                vec![key(PHONE)],
+                vec![crate::testkit::revoked(key(PHONE))],
             )
             .unwrap(),
         );
@@ -1629,7 +1583,7 @@ async fn a_held_update_below_the_records_brings_forward_only_its_revocations() {
             Epoch(3),
             vec![member(&own_row()), member(&old)],
             Vec::new(),
-            vec![key(TV)],
+            vec![crate::testkit::revoked(key(TV))],
         )
         .unwrap();
         crate::roster::fold_fork(
@@ -1661,15 +1615,15 @@ async fn a_held_update_below_the_records_brings_forward_only_its_revocations() {
             "reused {reused}: {out}"
         );
         assert!(
-            update.revoked_keys().contains(&key(PHONE)),
+            update.is_revoked_key(&key(PHONE)),
             "reused {reused}: the held update's revocation is brought forward"
         );
         assert!(
-            update.revoked_keys().contains(&key(TV)),
+            update.is_revoked_key(&key(TV)),
             "reused {reused}: the fork's revocation is brought forward"
         );
         assert!(
-            !update.revoked_keys().contains(&key(NAS)),
+            !update.is_revoked_key(&key(NAS)),
             "reused {reused}: the device under the name now keeps it"
         );
         let runner: Vec<_> = update
@@ -1687,11 +1641,7 @@ async fn a_revocation_only_cut_advances_the_number() {
     let home = home("revocation-only");
     let laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]);
     let rows = vec![own_row(), laptop.clone()];
-    holds(&home, &records(1, rows.clone(), vec![], vec![])).await;
-    held(
-        &home,
-        &RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap(),
-    );
+    holds(&home, &records(1, rows, vec![], vec![])).await;
 
     let mut prompt = Counting::new([PASS]);
     let (root, _) = present(&home, RootPlace::Home, RootVerb::Revoke, &mut prompt).await;
@@ -1705,41 +1655,29 @@ async fn a_revocation_only_cut_advances_the_number() {
         Epoch(2),
         "a revoke alone moves the number"
     );
-    assert!(update.revoked_keys().contains(&key(LAPTOP)));
+    assert!(update.is_revoked_key(&key(LAPTOP)));
 }
 
 #[tokio::test]
 async fn revoking_a_device_by_its_key_never_takes_the_live_device_of_its_name() {
     let home = home("revoke-by-key");
-    let old = Row {
-        revoked_on: now() - DAY,
-        ..row(LAPTOP, "nas", vec![id(LAPTOP, STANDING_UNTIL)])
-    };
+    // The copy names the laptop me/nas; the list held here, cut since, gives the name to the phone.
+    let old = row(LAPTOP, "nas", vec![id(LAPTOP, STANDING_UNTIL)]);
     let new = row(PHONE, "nas", vec![id(PHONE, STANDING_UNTIL)]);
-    let rows = vec![own_row(), old, new];
-    holds(
+    let place = with_copy(
         &home,
-        &records(1, rows.clone(), Vec::new(), vec![key(LAPTOP)]),
+        &records(1, vec![own_row(), old], Vec::new(), Vec::new()),
+        &records(2, vec![own_row(), new], Vec::new(), vec![key(LAPTOP)]),
     )
     .await;
-    held(
-        &home,
-        &RosterDoc::with_revocations(
-            Epoch(1),
-            vec![member(&rows[0]), member(&rows[2])],
-            Vec::new(),
-            vec![key(LAPTOP)],
-        )
-        .unwrap(),
-    );
     let mut prompt = Counting::new([PASS]);
-    let (root, _) = present(&home, RootPlace::Home, RootVerb::Revoke, &mut prompt).await;
+    let (root, _) = present(&home, place, RootVerb::Revoke, &mut prompt).await;
     let mut root = root.unwrap();
     root.revoke_device(&name("nas"), key(LAPTOP), &[key(PHONE)])
         .unwrap();
     let (_, update) = commit(root).await;
     assert!(
-        !update.revoked_keys().contains(&key(PHONE)),
+        !update.is_revoked_key(&key(PHONE)),
         "the device now named nas stays one of your devices"
     );
     assert!(
@@ -1759,13 +1697,9 @@ async fn a_cutting_act_that_cannot_list_your_devices_says_it_could_not_check() {
     let laptop = row(LAPTOP, "laptop", Vec::new());
     holds(
         &home,
-        &records(1, vec![own_row(), laptop.clone()], Vec::new(), Vec::new()),
+        &records(1, vec![own_row(), laptop], Vec::new(), Vec::new()),
     )
     .await;
-    held(
-        &home,
-        &RosterDoc::new(Epoch(1), vec![member(&own_row()), member(&laptop)]).unwrap(),
-    );
     std::fs::write(home.contacts(), "not = [an address book").unwrap();
 
     let log = Log::default();
@@ -1797,16 +1731,15 @@ async fn a_device_that_missed_its_renewal_update_gets_it_from_the_next() {
     let home = home("missed-renewal");
     // me/laptop's standing ends in ten days, and was signed eighty days ago.
     let ends = now() + 10 * DAY;
-    let laptop = Row {
+    let laptop = Member {
         until: ends,
         ids: vec![id(LAPTOP, ends)],
         ..row(LAPTOP, "laptop", Vec::new())
     };
     let phone = row(PHONE, "phone", vec![id(PHONE, STANDING_UNTIL)]);
-    let rows = vec![own_row(), laptop.clone(), phone.clone()];
-    holds(&home, &records(1, rows.clone(), Vec::new(), Vec::new())).await;
-    let first = RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap();
-    held(&home, &first);
+    let rows = vec![own_row(), laptop, phone];
+    let first = records(1, rows, Vec::new(), Vec::new());
+    holds(&home, &first).await;
 
     // me/laptop, a device of the same root holding the first update and its standing.
     let device = sibling(&home, LAPTOP, ends, &first).await;
@@ -1887,9 +1820,8 @@ async fn revoking(tag: &str, others: &[(u8, &str)]) -> (Home, RosterDoc, Root) {
             .iter()
             .map(|(seed, label)| row(*seed, label, vec![id(*seed, STANDING_UNTIL)])),
     );
-    holds(&home, &records(1, rows.clone(), Vec::new(), Vec::new())).await;
-    let first = RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap();
-    held(&home, &first);
+    let first = records(1, rows, Vec::new(), Vec::new());
+    holds(&home, &first).await;
     let (root, _) = present(
         &home,
         RootPlace::Home,
@@ -1998,30 +1930,11 @@ async fn a_cut_below_the_fleet_floor_reports_behind() {
 #[tokio::test]
 async fn the_offer_skips_revoked_keys_and_new_devices() {
     let home = home("skips");
-    let phone = Row {
-        revoked_on: now() - DAY,
-        ..row(PHONE, "phone", vec![id(PHONE, STANDING_UNTIL)])
-    };
     let rows = vec![
         own_row(),
         row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
-        phone,
     ];
-    holds(
-        &home,
-        &records(1, rows.clone(), Vec::new(), vec![key(PHONE)]),
-    )
-    .await;
-    held(
-        &home,
-        &RosterDoc::with_revocations(
-            Epoch(1),
-            rows[..2].iter().map(member).collect(),
-            Vec::new(),
-            vec![key(PHONE)],
-        )
-        .unwrap(),
-    );
+    holds(&home, &records(1, rows, Vec::new(), vec![key(PHONE)])).await;
     let (root, _) = present(
         &home,
         RootPlace::Home,
@@ -2207,9 +2120,8 @@ async fn presented_with(tag: &str, prompt: &mut impl Prompt) -> (Home, RosterDoc
         row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
         row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)]),
     ];
-    holds(&home, &records(1, rows.clone(), Vec::new(), Vec::new())).await;
-    let first = RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap();
-    held(&home, &first);
+    let first = records(1, rows, Vec::new(), Vec::new());
+    holds(&home, &first).await;
     let (root, _) = present(&home, RootPlace::Home, RootVerb::Revoke, prompt).await;
     (home, first, root.unwrap())
 }
@@ -2293,7 +2205,7 @@ async fn a_list_folded_during_the_prompt_is_brought_forward_before_the_cut() {
             .any(|revoked| revoked.id == id(OTHER, STANDING_UNTIL).id),
         "the cut carries the revocation of the list folded meanwhile"
     );
-    assert!(cut.revoked_keys().contains(&key(LAPTOP)), "and its own");
+    assert!(cut.is_revoked_key(&key(LAPTOP)), "and its own");
     assert!(matches!(
         crate::roster::read_held(&home.devices(), TestRoot::seeded(ROOT).verify_key()),
         Some((held, _)) if held.epoch() == Epoch(3)
@@ -2354,11 +2266,11 @@ async fn a_device_whose_key_the_list_revoked_meanwhile_is_never_handed_a_new_one
     // me/laptop came with its key. While an invite waited at its prompt, this home folded a list another
     // copy of the root cut, which revokes laptop's key and id. A new key for me/laptop would bring it back
     // to life past that revocation, so the act stops.
-    let laptop = Row {
-        seeded: true,
+    let laptop = Member {
+        invite_until: STANDING_UNTIL,
         ..row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)])
     };
-    let rows = vec![
+    let rows = [
         own_row(),
         laptop,
         row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)]),
@@ -2368,12 +2280,11 @@ async fn a_device_whose_key_the_list_revoked_meanwhile_is_never_handed_a_new_one
         Epoch(2),
         [&rows[0], &rows[2]].into_iter().map(member).collect(),
         vec![id(LAPTOP, STANDING_UNTIL)],
-        vec![key(LAPTOP)],
+        vec![crate::testkit::revoked(key(LAPTOP))],
     )
     .unwrap();
     let home = home("prompt-rekey-revoked");
-    holds(&home, &records(1, rows, Vec::new(), Vec::new())).await;
-    held(&home, &first);
+    holds(&home, &first).await;
     let mut prompt = FoldingPrompt::new(&home, &elsewhere);
     let (root, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
     let mut root = root.unwrap();
@@ -2536,17 +2447,16 @@ async fn a_join_during_a_mints_prompt_stops_the_mint() {
         Some(TestRoot::seeded(OTHER).node_id()),
         "the root it joined is still the one it trusts"
     );
-    assert!(!home.root().exists(), "no root was made");
+    assert!(!home.root_key().exists(), "no root was made");
 }
 
 #[tokio::test]
 async fn a_join_during_a_finishs_prompt_stops_the_finish() {
     let home = home("finish-joined");
-    STOP.set(Some(Seam::Renamed));
+    STOP.set(Some(Seam::Keyed));
     let stopped = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink()).await;
     STOP.set(None);
     assert!(stopped.is_err());
-    std::fs::remove_file(home.root().join("standing")).unwrap();
 
     let mut prompt = JoiningPrompt { home: home.clone() };
     let finished = Root::mint_to(&home, &mut prompt, &mut io::sink()).await;

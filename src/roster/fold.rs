@@ -197,7 +197,7 @@ fn revoke(home_lock: &HomeWrite, home: &Home, doc: &RosterDoc) -> Result<(), Fol
         .iter()
         .filter(|id| id.expires > now)
         .map(|id| Revocation::Id(id.id.clone()));
-    let keys = doc.revoked_keys().iter().map(|key| Revocation::Key(*key));
+    let keys = doc.revoked_keys().map(Revocation::Key);
     crate::revoked::add(home_lock, home, ids.chain(keys))?;
     Ok(())
 }
@@ -232,7 +232,7 @@ fn pick_up(
     let bound = cap
         .verify_member_at_root_without_revocation(now, own, pin)
         .is_ok();
-    let revoked = doc.revoked_keys().contains(&own)
+    let revoked = doc.is_revoked_key(&own)
         || cap
             .root_revocation_id()
             .is_some_and(|id| doc.revoked().iter().any(|revoked| revoked.id == id));
@@ -286,10 +286,7 @@ fn carries(doc: &RosterDoc, fork: &RosterDoc) -> bool {
         .iter()
         .filter(|id| id.expires > now)
         .all(|id| doc.revoked().iter().any(|carried| carried.id == id.id));
-    let keys = fork
-        .revoked_keys()
-        .iter()
-        .all(|key| doc.revoked_keys().contains(key));
+    let keys = fork.revoked_keys().all(|key| doc.is_revoked_key(&key));
     ids && keys
 }
 

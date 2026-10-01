@@ -26,8 +26,8 @@ use swoosh::invite::Invite;
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::peer::KeyTextError;
 use swoosh::root::{self, Date, Minted, Records, Root, RootError, RootPlace, RootVerb};
+use swoosh::roster::Member;
 use swoosh::standing::{Standing, StandingError};
-use swoosh::state::Row;
 use swoosh::sync::{Dial, NodeDial};
 use swoosh::transport::ReachArgs;
 use tightbeam::duration::Lifetime;
@@ -280,11 +280,7 @@ impl InviteCmd {
         };
         let _ = root.renew_due()?;
         let committed = root.commit_to(err).await?;
-        let row = root
-            .rows()
-            .iter()
-            .find(|row| !row.is_revoked() && row.label == name)
-            .cloned();
+        let row = root.rows().iter().find(|row| row.label == name).cloned();
         let until = row.as_ref().map_or(0, |row| row.until);
 
         // After the commit, and before the offer: the invite alone on stdout, then what it means.
@@ -296,7 +292,7 @@ impl InviteCmd {
         out.flush()?;
         let device = format!("me/{name}");
         if let Some(until) = issued.unchanged {
-            let own_row = row.as_ref().is_some_and(|row| Some(row.key) == own);
+            let own_row = row.as_ref().is_some_and(|row| Some(row.node) == own);
             writeln!(err, "{}", needs_no_renewal(&name, until, own_row))?;
         } else {
             issued.lines(err, &device, until)?;
@@ -308,7 +304,7 @@ impl InviteCmd {
         }
         let renewed_another = plan == Plan::Renew
             && issued.unchanged.is_none()
-            && row.as_ref().is_some_and(|row| Some(row.key) != own);
+            && row.as_ref().is_some_and(|row| Some(row.node) != own);
         if renewed_another && let Some(line) = reach.renewed_line(&device, until) {
             writeln!(err, "{line}")?;
         }
@@ -412,7 +408,7 @@ fn plan(
 ) -> Result<Plan, RootError> {
     let device = records.device(name);
     let plan = match (ask, device) {
-        (Ask::Add(key), Some(row)) if row.key == key => Plan::Renew,
+        (Ask::Add(key), Some(row)) if row.node == key => Plan::Renew,
         (Ask::Add(key), _) => {
             records.check_add(key, name)?;
             Plan::Add(key)
@@ -433,7 +429,7 @@ fn plan(
             );
         }
         (Plan::Renew, Some(row)) if row.until <= records.now() => {
-            let key = row.key;
+            let key = row.node;
             let _ = writeln!(
                 err,
                 "renewing me/{name} ({key}), which ended on {}. Whatever machine holds {key} picks this up \
@@ -504,9 +500,9 @@ fn own_key(home: &Home) -> eyre::Result<NodeId> {
 }
 
 /// The named device's own renewal length, or the default when it has none.
-fn own_duration(rows: &[Row], name: &DeviceLabel) -> Duration {
+fn own_duration(rows: &[Member], name: &DeviceLabel) -> Duration {
     rows.iter()
-        .find(|row| !row.is_revoked() && &row.label == name)
+        .find(|row| &row.label == name)
         .map(|row| row.duration)
         .filter(|duration| *duration != 0)
         .map_or(root::DEFAULT_DURATION, Duration::from_secs)

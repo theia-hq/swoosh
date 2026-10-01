@@ -380,19 +380,24 @@ impl RevokeCmd {
         match (&source.place, &read.standing) {
             (Some(place), _) => {
                 let inspected = Root::inspect(home, place.clone()).await?;
+                let device = |row: &swoosh::roster::Member, revoked| Device {
+                    label: row.label.clone(),
+                    key: row.node,
+                    until: row.until,
+                    ids: row.ids.clone(),
+                    revoked,
+                };
                 source.rows = inspected
                     .rows()
                     .iter()
-                    .map(|row| Device {
-                        label: row.label.clone(),
-                        key: row.key,
-                        until: row.until,
-                        ids: row.ids.clone(),
-                        revoked: row.is_revoked(),
-                    })
+                    .map(|row| device(row, false))
+                    .chain(inspected.marked().iter().map(|row| device(row, true)))
                     .collect();
-                source.revoked = ids(inspected.state.revoked());
-                source.revoked_keys = inspected.state.revoked_keys().to_vec();
+                source.revoked = inspected
+                    .listed_revoked()
+                    .map(|id| RevocationId::clone(&id.id))
+                    .collect();
+                source.revoked_keys = inspected.listed_revoked_keys().copied().collect();
             }
             (None, Standing::Device { pin, .. }) => {
                 let pin = swoosh::standing::pin_key(home, *pin)?;
@@ -409,7 +414,7 @@ impl RevokeCmd {
                         })
                         .collect();
                     source.revoked = ids(doc.revoked());
-                    source.revoked_keys = doc.revoked_keys().to_vec();
+                    source.revoked_keys = doc.revoked_keys().collect();
                 }
             }
             (None, _) => {}

@@ -10,8 +10,8 @@ use nauthy::{Link, RevocationId, SignError, VerifyKey};
 
 use super::{
     ENVELOPE_LEN, Epoch, FormatError, HEADER_LEN, Id, MAX_BADGE, MAX_IDS, MAX_MEMBER_LEN,
-    MAX_MEMBERS, MAX_REVOCATION_ID, MAX_REVOKED, MAX_REVOKED_KEYS, MAX_ROSTER_BLOB, Member,
-    RosterDoc, RosterVerifyError,
+    MAX_MEMBERS, MAX_REVOCATION_ID, MAX_REVOKED, MAX_REVOKED_DEVICE_LEN, MAX_REVOKED_KEYS,
+    MAX_ROSTER_BLOB, Member, RevokedDevice, RosterDoc, RosterVerifyError,
 };
 use crate::contacts::DeviceLabel;
 use crate::testkit::{TestNode, TestRoot};
@@ -45,6 +45,13 @@ fn member(node: u8, label: &str) -> Member {
     identity(ROOT)
         .member(key(node), DeviceLabel::from_str(label).unwrap())
         .unwrap()
+}
+
+fn gone(node: u8, label: &str) -> RevokedDevice {
+    RevokedDevice {
+        node: key(node),
+        label: DeviceLabel::from_str(label).unwrap(),
+    }
 }
 
 fn id(byte: u8, len: usize) -> Id {
@@ -88,9 +95,21 @@ fn canonical_bytes_change_with_every_field() {
     let revoked =
         RosterDoc::with_revocations(Epoch(1), vec![member(1, "desk")], vec![id(2, 64)], vec![])
             .unwrap();
-    let revoked_key =
-        RosterDoc::with_revocations(Epoch(1), vec![member(1, "desk")], vec![], vec![key(3)])
-            .unwrap();
+    let revoked_device = |label| {
+        RosterDoc::with_revocations(
+            Epoch(1),
+            vec![member(1, "desk")],
+            vec![],
+            vec![gone(3, label)],
+        )
+        .unwrap()
+    };
+    let revoked_key = revoked_device("laptop");
+    let revoked_name = revoked_device("phone");
+    assert_ne!(
+        revoked_key.canonical_bytes(),
+        revoked_name.canonical_bytes()
+    );
 
     let bytes = base.canonical_bytes();
     for other in [
@@ -290,6 +309,45 @@ fn parse_rejects_a_capital_label() {
 }
 
 #[test]
+fn a_revoked_device_whose_name_is_not_a_stored_name_refuses() {
+    // A revoked device's name is read under the stored-name rule a live device's is: a capital, a dot or a
+    // control byte is refused rather than folded, so two byte-strings never decode to one update, and no
+    // name a reader prints can reframe its line.
+    let doc =
+        RosterDoc::with_revocations(Epoch(1), vec![], vec![], vec![gone(3, "laptop")]).unwrap();
+    let bytes = doc.canonical_bytes();
+    // The revoked devices' count, the key, then the name's length and its first byte.
+    let first = HEADER_LEN + 4 + 4 + VerifyKey::LEN + 2;
+    assert_eq!(&bytes[first..], b"laptop");
+    assert_eq!(RosterDoc::parse_canonical(&bytes), Ok(doc));
+    for bad in *b"L.\n" {
+        let mut wire = bytes.clone();
+        wire[first] = bad;
+        assert!(
+            matches!(
+                RosterDoc::parse_canonical(&wire),
+                Err(FormatError::BadLabel(_))
+            ),
+            "{:?} in a revoked device's name refuses",
+            bad as char
+        );
+    }
+}
+
+#[test]
+fn two_revoked_devices_may_share_a_name() {
+    // A name passes to a new device once the old one is revoked, so two revoked devices may have held it.
+    let doc = RosterDoc::with_revocations(
+        Epoch(1),
+        vec![member(1, "laptop")],
+        vec![],
+        vec![gone(2, "laptop"), gone(3, "laptop")],
+    )
+    .unwrap();
+    assert_eq!(RosterDoc::parse_canonical(&doc.canonical_bytes()), Ok(doc));
+}
+
+#[test]
 fn parse_rejects_every_count_over_its_bound() {
     // Each count is refused before anything is allocated for it: a hostile courier cannot make a puller
     // reserve memory for a list it never sends.
@@ -309,7 +367,7 @@ fn parse_rejects_every_count_over_its_bound() {
     );
     assert_eq!(
         over(HEADER_LEN + 4, MAX_REVOKED_KEYS + 1),
-        Err(FormatError::TooLarge("revoked keys"))
+        Err(FormatError::TooLarge("revoked devices"))
     );
 }
 
@@ -332,7 +390,8 @@ fn a_member_over_a_field_bound_neither_builds_nor_parses() {
     let mut bytes = RosterDoc::new(Epoch(1), vec![member(1, "desk")])
         .unwrap()
         .canonical_bytes();
-    let id_count = FIRST_LABEL + 2 + "desk".len() + 16;
+    // After the name: `until`, `duration` and `invite_until`.
+    let id_count = FIRST_LABEL + 2 + "desk".len() + 24;
     bytes[id_count] = MAX_IDS as u8 + 1;
     assert_eq!(
         RosterDoc::parse_canonical(&bytes),
@@ -346,7 +405,7 @@ fn a_standing_that_is_not_a_bare_link_refuses() {
     let bytes = RosterDoc::new(Epoch(1), vec![member(1, "desk")])
         .unwrap()
         .canonical_bytes();
-    let standing = FIRST_LABEL + 2 + "desk".len() + 16 + 1;
+    let standing = FIRST_LABEL + 2 + "desk".len() + 24 + 1;
     let mut damaged = bytes.clone();
     let last = damaged.len() - 9;
     damaged[last] ^= 0x01;
@@ -389,18 +448,22 @@ fn a_real_standing_fits_max_badge() {
 fn max_roster_blob_is_computed_from_the_bounds() {
     // The formula over the bounds, spelled out field by field.
     let id = 8 + 2 + MAX_REVOCATION_ID;
-    let member = 32 + (2 + DeviceLabel::MAX_LEN) + 8 + 8 + 1 + MAX_IDS * id + (2 + MAX_BADGE);
+    let member = 32 + (2 + DeviceLabel::MAX_LEN) + 8 + 8 + 8 + 1 + MAX_IDS * id + (2 + MAX_BADGE);
+    let revoked_device = 32 + (2 + DeviceLabel::MAX_LEN);
     let payload = (b"swoosh-roster".len() + 1 + 8 + 4)
         + MAX_MEMBERS * member
         + (4 + MAX_REVOKED * id)
-        + (4 + MAX_REVOKED_KEYS * 32);
+        + (4 + MAX_REVOKED_KEYS * revoked_device);
     assert_eq!(MAX_ROSTER_BLOB, (32 + 64 + payload) as u64);
     assert_eq!(MAX_MEMBER_LEN, member);
+    assert_eq!(MAX_REVOKED_DEVICE_LEN, revoked_device);
+    assert_eq!(MAX_ROSTER_BLOB, 7_524_482);
 }
 
 /// The largest update the parser accepts but for its standings, which are real ones: [`MAX_MEMBERS`]
 /// members, each name at [`DeviceLabel::MAX_LEN`] and [`MAX_IDS`] ids at [`MAX_REVOCATION_ID`], then
-/// [`MAX_REVOKED`] ids and [`MAX_REVOKED_KEYS`] keys, signed into the envelope a courier serves.
+/// [`MAX_REVOKED`] ids and [`MAX_REVOKED_KEYS`] revoked devices, each name at its bound, signed into the
+/// envelope a courier serves.
 fn maximal_blob(id: &TestRoot, standing: &Link) -> Vec<u8> {
     let index_key = |nth: usize| {
         let mut seed = [0u8; 32];
@@ -426,12 +489,19 @@ fn maximal_blob(id: &TestRoot, standing: &Link) -> Vec<u8> {
             .unwrap(),
             until: u64::MAX,
             duration: u64::MAX,
+            invite_until: u64::MAX,
             ids: (0..MAX_IDS).map(full_id).collect(),
             standing: standing.clone(),
         })
         .collect();
     let revoked = (0..MAX_REVOKED).map(full_id).collect();
-    let keys = (0..MAX_REVOKED_KEYS).map(index_key).collect();
+    // Revoked devices may share a name, so every one carries the longest.
+    let keys = (0..MAX_REVOKED_KEYS)
+        .map(|nth| RevokedDevice {
+            node: index_key(nth),
+            label: DeviceLabel::from_str(&"r".repeat(DeviceLabel::MAX_LEN)).unwrap(),
+        })
+        .collect();
     id.sign_update(&RosterDoc::with_revocations(Epoch(u64::MAX), members, revoked, keys).unwrap())
 }
 
