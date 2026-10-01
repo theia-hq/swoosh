@@ -209,6 +209,14 @@ fn no_flags() -> ReachArgs {
     }
 }
 
+/// Keep `flags` in `home`'s `serve.toml`, as a `serve` does once its routes bind.
+fn keep(home: &Home, flags: &ReachArgs) {
+    crate::serve_toml::ServeToml::update(&crate::testkit::lock(), home, |file| {
+        flags.keep_reach(file);
+    })
+    .expect("serve writes the reach fields");
+}
+
 /// `serve --relay --resolver` writes both into `serve.toml`, and a later verb under the SAME home reads
 /// them back as the two URLs it was pointed at. This is the whole contract: name the two servers once, on
 /// the node, and every verb after it reaches the same fleet with no flags repeated.
@@ -224,10 +232,7 @@ async fn both_reach_files_round_trip_through_a_home() {
         ),
         ..no_flags()
     };
-    served
-        .persist_reach(&home)
-        .await
-        .expect("serve writes both reach files");
+    keep(&home, &served);
 
     let read = no_flags()
         .reach(&home)
@@ -282,17 +287,15 @@ async fn a_home_with_no_reach_files_is_n0s() {
 #[tokio::test]
 async fn a_flag_overrides_the_file_for_one_run() {
     let home = home("override");
-    ReachArgs {
+    let served = ReachArgs {
         resolver: Some(
             "https://dns.example/pkarr"
                 .parse()
                 .expect("a valid resolver url"),
         ),
         ..no_flags()
-    }
-    .persist_reach(&home)
-    .await
-    .expect("serve writes the resolver file");
+    };
+    keep(&home, &served);
 
     let dialed = ReachArgs {
         resolver: Some(

@@ -19,7 +19,6 @@ use core::fmt;
 use core::net::SocketAddr;
 use core::str::FromStr;
 use std::net::ToSocketAddrs;
-use std::path::Path;
 
 use bifrost::{Layered, NodeId, StaticDiscovery};
 pub use bifrost_iroh::{Reach, RelayHome, RelayUrl, Resolver, ResolverUrl};
@@ -27,8 +26,7 @@ use bifrost_mdns::{Advertising, MdnsDiscovery, MdnsError, Started};
 use clap::{Args, ValueEnum};
 use eyre::WrapErr as _;
 
-use crate::escape::EscapedPath;
-use crate::home::{Home, HomeWrite};
+use crate::home::Home;
 use crate::reaching::BindRole;
 use crate::serve_toml::ServeToml;
 
@@ -81,45 +79,28 @@ impl ReachArgs {
         } else {
             ServeToml::default()
         };
-        let path = home.serve_toml();
-        let relay = match Option::clone(&self.relay) {
-            Some(url) => Some(url),
-            None => kept_url(kept.relay.as_deref(), &path, "relay")?,
-        };
-        let resolver = match Option::clone(&self.resolver) {
-            Some(url) => Some(url),
-            None => kept_url(kept.resolver.as_deref(), &path, "resolver")?,
-        };
+        let relay = Option::clone(&self.relay).or(kept.relay);
+        let resolver = Option::clone(&self.resolver).or(kept.resolver);
         Ok(Reach {
             relay: relay.map_or(RelayHome::N0, RelayHome::Custom),
             resolver: resolver.map_or(Resolver::N0, Resolver::Custom),
         })
     }
 
-    /// Persist each reach flag this run was given, so every later verb under the home reaches the same
-    /// two servers without repeating the flags. Only `serve` calls it: a node's relay and its fleet's
-    /// resolver are settings of the NODE, and the node is what `serve` is.
+    /// Keep each reach flag this run was given in `file`, so every later verb under the home reaches the
+    /// same two servers without repeating the flags. Only `serve` calls it, inside the one
+    /// [`ServeToml::update`] it makes once its routes bind: a node's relay and its fleet's resolver are
+    /// settings of the NODE, the node is what `serve` is, and a `serve` that did not start keeps nothing.
     ///
-    /// A flag that was not given leaves its file alone, so naming one of the two never silently drops
+    /// A flag that was not given leaves its field alone, so naming one of the two never silently drops
     /// the other, and `--relay` on a dial stays a one-run override rather than a rewrite of the home.
-    ///
-    /// # Errors
-    ///
-    /// `home.lock` could not be taken, or a file could not be written.
-    pub async fn persist_reach(&self, home: &Home) -> eyre::Result<()> {
-        if self.relay.is_none() && self.resolver.is_none() {
-            return Ok(());
+    pub fn keep_reach(&self, file: &mut ServeToml) {
+        if let Some(relay) = &self.relay {
+            file.relay = Some(relay.clone());
         }
-        let home_lock = HomeWrite::take(home).await?;
-        ServeToml::update(&home_lock, home, |file| {
-            if let Some(relay) = &self.relay {
-                file.relay = Some(relay.to_string());
-            }
-            if let Some(resolver) = &self.resolver {
-                file.resolver = Some(resolver.to_string());
-            }
-        })?;
-        Ok(())
+        if let Some(resolver) = &self.resolver {
+            file.resolver = Some(resolver.clone());
+        }
     }
 
     /// Refuse `--relay`/`--resolver` on a bind that would never read them, by name.
@@ -414,23 +395,6 @@ impl FromStr for PeerHint {
             text: text.to_owned(),
         })
     }
-}
-
-/// The `what` (`relay` or `resolver`) `serve.toml` at `path` keeps, parsed, or `None` when it keeps none.
-///
-/// One that does not parse refuses with swoosh's own line, never the parser's text, and names no command:
-/// which server to use is the person's call, and swoosh never falls back to the default one.
-fn kept_url<T: FromStr>(kept: Option<&str>, path: &Path, what: &str) -> eyre::Result<Option<T>> {
-    let Some(url) = kept else {
-        return Ok(None);
-    };
-    let Ok(url) = url.parse::<T>() else {
-        eyre::bail!(
-            "the {what} in {path} is not a usable {what}, and swoosh will not fall back to the default one",
-            path = EscapedPath(path)
-        );
-    };
-    Ok(Some(url))
 }
 
 #[cfg(test)]

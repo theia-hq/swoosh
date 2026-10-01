@@ -4,8 +4,9 @@
 use std::collections::BTreeSet;
 
 use swoosh::home::Home;
+use swoosh::serve_toml::ServeToml;
 
-use super::{ServiceToggleCmd, disabled};
+use super::ServiceToggleCmd;
 
 /// A fresh, empty home under a unique temp dir, so parallel tests never share a `<home>/serve.toml`.
 fn temp_home(tag: &str) -> Home {
@@ -15,9 +16,15 @@ fn temp_home(tag: &str) -> Home {
     Home::resolve(Some(dir)).expect("resolve the temp home")
 }
 
+/// Change `home`'s `serve.toml` by `change`, under `home.lock`, as `serve` does once its routes bind.
+async fn update(home: &Home, change: impl FnOnce(&mut ServeToml)) {
+    let home_lock = swoosh::home::HomeWrite::take(home).await.unwrap();
+    ServeToml::update(&home_lock, home, change).expect("serve.toml written");
+}
+
 /// The disabled set currently on disk, read back through the same parse the oracle uses.
 fn disabled_on_disk(home: &Home) -> BTreeSet<String> {
-    disabled(home).expect("read serve.toml")
+    ServeToml::read(home).expect("read serve.toml").off
 }
 
 /// A `disable` writes the name into `<home>/serve.toml`; an `enable` takes it back out. The core round-trip.
@@ -98,16 +105,13 @@ async fn enable_of_an_untouched_service_is_a_noop() {
 #[tokio::test]
 async fn serve_toml_holds_services_off_relay_and_resolver() {
     use swoosh::serve::Started;
-    use swoosh::serve_toml::ServeToml;
     use swoosh::transport::{ReachArgs, Transport};
 
     let home = temp_home("one-file");
     let read = || ServeToml::read(&home).expect("read serve.toml");
-
-    Started::of(&["ssh=sshd:".to_owned()], &home, std::path::Path::new("/"))
-        .expect("named")
-        .record(&swoosh::home::HomeWrite::take(&home).await.unwrap(), &home)
-        .expect("a named serve records its services");
+    let started =
+        Started::of(&["ssh=sshd:".to_owned()], &home, std::path::Path::new("/")).expect("named");
+    update(&home, |file| started.record(file)).await;
     assert_eq!(read().services, ["ssh=sshd:"]);
 
     ServiceToggleCmd {
@@ -119,16 +123,14 @@ async fn serve_toml_holds_services_off_relay_and_resolver() {
     assert_eq!(read().services, ["ssh=sshd:"], "the services stay");
     assert_eq!(read().off, BTreeSet::from(["speed".to_owned()]));
 
-    ReachArgs {
+    let flags = ReachArgs {
         transport: Transport::default(),
         local: false,
         peer: Vec::new(),
         relay: Some("https://relay.example".parse().expect("a relay")),
         resolver: Some("https://dns.example/pkarr".parse().expect("a resolver")),
-    }
-    .persist_reach(&home)
-    .await
-    .expect("serve keeps its relay and resolver");
+    };
+    update(&home, |file| flags.keep_reach(file)).await;
     let all = read();
     assert_eq!(all.services, ["ssh=sshd:"], "the services stay");
     assert_eq!(
@@ -136,8 +138,14 @@ async fn serve_toml_holds_services_off_relay_and_resolver() {
         BTreeSet::from(["speed".to_owned()]),
         "so do the off"
     );
-    assert_eq!(all.relay.as_deref(), Some("https://relay.example/"));
-    assert_eq!(all.resolver.as_deref(), Some("https://dns.example/pkarr"));
+    assert_eq!(
+        all.relay.map(|url| url.to_string()).as_deref(),
+        Some("https://relay.example/")
+    );
+    assert_eq!(
+        all.resolver.map(|url| url.to_string()).as_deref(),
+        Some("https://dns.example/pkarr")
+    );
 
     ServiceToggleCmd {
         service: "speed".parse().expect("a service"),

@@ -54,34 +54,6 @@ impl ServiceToggleCmd {
     }
 }
 
-/// Turn back on every one of `names` that is off in `<home>/serve.toml`: a `serve` that names a service at
-/// start serves it, so a service turned off yesterday is not refused by today's `serve ssh`. Writes nothing
-/// when none of them is off. Under `home.lock`, which the caller holds.
-pub(crate) fn turn_on<'a>(
-    home_lock: &HomeWrite,
-    home: &Home,
-    names: impl IntoIterator<Item = &'a str>,
-) -> eyre::Result<()> {
-    let off = disabled(home)?;
-    let names: Vec<&str> = names
-        .into_iter()
-        .filter(|name| off.contains(*name))
-        .collect();
-    if names.is_empty() {
-        return Ok(());
-    }
-    edit(home_lock, home, |disabled| {
-        for name in names {
-            disabled.remove(name);
-        }
-    })
-}
-
-/// The service names `<home>/serve.toml` holds as off; none when there is no file.
-pub(crate) fn disabled(home: &Home) -> eyre::Result<BTreeSet<String>> {
-    Ok(ServeToml::read(home)?.off)
-}
-
 /// Change the services off in `<home>/serve.toml` by `mutate`, under `home.lock`, which the caller holds,
 /// so two concurrent toggles serialize (neither loses the other's edit). The other fields keep what the
 /// file held.
