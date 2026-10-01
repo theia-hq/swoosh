@@ -1939,9 +1939,10 @@ impl Book {
 
     /// Bring these records forward as an act that cuts does before its prompt: from `held` and `fork` when
     /// they are behind `held` or a fork is held, then this machine's own revocations, then every row whose
-    /// key is revoked marked. A fork below the number of `held` or of these records, and `held` below these
-    /// records, bring only their revocations: their devices and names are older than the ones held. What it
-    /// brought, and whether the records were behind `held`.
+    /// key is revoked marked, and every device `held` or `fork` lists whose key is revoked. A fork below
+    /// the number of `held` or of these records, and `held` below these records, bring only their
+    /// revocations: their devices and names are older than the ones held. What it brought, and whether the
+    /// records were behind `held`.
     fn forward(
         &mut self,
         home: &Home,
@@ -1970,7 +1971,26 @@ impl Book {
         }
         self.carry_forward(home, held)?;
         brought.marked += self.follow_keys(now);
+        for update in held.into_iter().chain(fork) {
+            brought.marked += self.mark_listed(update);
+        }
         Ok((brought, behind))
+    }
+
+    /// Mark each device `update` lists whose key these records revoke and that is not yet marked, so an
+    /// update that still lists a device these records revoked (one cut before the revocation, say) shows it
+    /// revoked, and a revoke of it finds it. Returns how many it marked.
+    fn mark_listed(&mut self, update: &RosterDoc) -> usize {
+        let mut marked = 0;
+        for member in update.members() {
+            if self.revoked_keys.contains_key(member.node.bytes())
+                && !self.marked.iter().any(|row| row.node == member.node)
+            {
+                self.marked.push(member.clone());
+                marked += 1;
+            }
+        }
+        marked
     }
 
     /// A copy of these records brought [`forward`](Self::forward) from what `home` holds of the root

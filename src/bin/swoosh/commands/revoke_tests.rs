@@ -1201,3 +1201,39 @@ async fn a_stale_copy_cuts_above_the_fleet_from_the_newest_list() {
     );
     assert_eq!(kept_list(&second).epoch(), Epoch(4));
 }
+
+/// A revoke that stopped after writing the copy and before the home took the cut: the copy holds list 4
+/// revoking the laptop, the home still lists it live at 3. Running the revoke again finds the laptop
+/// marked revoked, cuts above 4 and offers the cut, so the revocation reaches the phone.
+#[tokio::test]
+async fn a_revoke_stopped_after_the_copy_write_is_finished_by_running_it_again() {
+    let desk = live(OWN, "desk");
+    let laptop = live(LAPTOP, "laptop");
+    let phone = live(PHONE, "phone");
+    let gone = Row {
+        revoked_on: now() - DAY,
+        ..laptop.clone()
+    };
+    let before = [desk.clone(), laptop.clone(), phone.clone()];
+    let home = device("stopped-revoke", &before).await;
+    held(&home, &records(3, &before, Vec::new()));
+    let stick = dir("stopped-revoke");
+    copy(
+        &stick,
+        &records(4, &[desk, gone, phone], laptop.ids.clone()),
+    );
+
+    let ran = revoke(&home, &["me/laptop", "--root", stick.to_str().unwrap()]).await;
+    let _ = ran.ok();
+    let list = kept_list(&home);
+    assert_eq!(list.epoch(), Epoch(5), "a cut above the copy's list");
+    assert!(list.revoked_keys().contains(&key(LAPTOP)));
+    assert!(
+        !list
+            .members()
+            .iter()
+            .any(|member| member.node == key(LAPTOP))
+    );
+    assert_eq!(list_in(&stick).epoch(), Epoch(5));
+    assert!(ran.tape.text().contains("<offer>"), "the cut is offered");
+}
