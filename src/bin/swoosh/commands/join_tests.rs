@@ -560,7 +560,10 @@ async fn a_same_root_join_keeps_the_floor_and_the_fork() {
     fold(&home, &update(ROOT, 3, "laptop")).await.unwrap();
     std::fs::write(home.devices_conflict(), b"a fork kept as evidence").unwrap();
     let held = std::fs::read(home.devices()).unwrap();
-    let seed = std::fs::read(home.invited_by()).unwrap();
+    assert!(
+        !home.invited_by().exists(),
+        "the held list names the devices to ask"
+    );
 
     // Later than the standing the fold may have picked up, so the join is a renewal.
     let renewal = Invite::bound(
@@ -576,10 +579,9 @@ async fn a_same_root_join_keeps_the_floor_and_the_fork() {
         "the floor stays"
     );
     assert!(home.devices_conflict().exists(), "the fork stays");
-    assert_eq!(
-        std::fs::read(home.invited_by()).unwrap(),
-        seed,
-        "the first device to ask stays"
+    assert!(
+        !home.invited_by().exists(),
+        "a same-root join does not bring back the invite's device to ask"
     );
     // A replay of the update below the floor still changes nothing.
     assert_eq!(

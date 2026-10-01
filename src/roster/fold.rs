@@ -88,8 +88,8 @@ pub enum FoldError {
 /// Folds run only on a device of a root, one that holds it or not. Below the update held here is not
 /// newer; the same bytes change nothing; another update at the same number is a fork, whose revocations
 /// are added and which is kept as evidence. A newer update adds its revocations, gives this machine a
-/// newer standing it carries, and becomes the update held here, from which `me` is read; `devices.conflict`
-/// goes only once an update carries everything the fork revoked.
+/// newer standing it carries, and becomes the update held here, from which `me` is read; `invited-by` goes
+/// with it, and `devices.conflict` goes only once an update carries everything the fork revoked.
 pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
     let _lock = RosterLock::take(&home.roster_lock()).await?;
     let (pin, badge_until) = match Standing::read(home).await?.standing {
@@ -123,9 +123,24 @@ pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
             revoke(home, &doc).await?;
             pick_up(home, &doc, pin, badge_until).await?;
             super::write(&home.devices(), bytes).await?;
+            forget_invited_by(home);
             clear_fork(home, &doc, pin)?;
             Ok(Folded::Newer)
         }
+    }
+}
+
+/// Remove `invited-by` once a list is held: the list names every device a sync asks, so the one device the
+/// invite named is no longer needed. Only a fold that writes `devices` calls this, under `roster.lock`.
+/// Best-effort: one left behind is only one more device a sync asks.
+// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+fn forget_invited_by(home: &Home) {
+    match std::fs::remove_file(home.invited_by()) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            tracing::debug!(%error, "could not remove invited-by");
+        }
+        _ => {}
     }
 }
 

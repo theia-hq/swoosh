@@ -784,6 +784,49 @@ async fn invited_by_goes_after_the_first_sync() {
     );
 }
 
+/// `invited-by` stays through an exchange that lands no list: one where neither side holds a list, and one
+/// whose offered update the device refused. Until a list is held, it is the only device the device knows to
+/// ask.
+#[tokio::test]
+async fn invited_by_stays_when_a_sync_lands_no_list() {
+    let desk = device("invited-by-stays", DESK).await;
+    let nas = device("invited-by-stays", NAS).await;
+    std::fs::write(desk.invited_by(), format!("{}\n", node(NAS))).unwrap();
+    let asks_nas = |asked: Vec<Device>| asked.iter().map(|device| device.key).collect::<Vec<_>>();
+
+    // Neither side holds a list.
+    let dial = Loopback::new(desk.clone(), [(node(NAS), nas.clone())]);
+    assert_eq!(dial.exchange(node(NAS)).await.unwrap(), Answer::Same);
+    assert!(
+        desk.invited_by().exists(),
+        "an exchange of no list keeps invited-by"
+    );
+    assert_eq!(
+        asks_nas(super::devices(&desk, []).await.unwrap()),
+        [node(NAS)],
+        "the device still knows whom to ask"
+    );
+
+    // Another device offers bytes that are not a list, and the device refuses them.
+    let offered = Loopback::new(nas.clone(), [(node(DESK), desk.clone())]);
+    assert_eq!(
+        offered
+            .offer(node(DESK), Epoch(5), b"not a list")
+            .await
+            .unwrap(),
+        Answer::Refused
+    );
+    assert!(
+        desk.invited_by().exists(),
+        "a refused update keeps invited-by"
+    );
+    assert_eq!(
+        asks_nas(super::devices(&desk, []).await.unwrap()),
+        [node(NAS)],
+        "the device still knows whom to ask"
+    );
+}
+
 /// The devices of `me` are read from the list a fold took, and never written to `contacts.toml`: not by the
 /// fold, and not by a later edit of the book that opened with them.
 #[tokio::test]

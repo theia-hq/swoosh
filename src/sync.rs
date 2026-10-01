@@ -366,24 +366,14 @@ async fn read_update(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, E
 }
 
 /// Record that an exchange reached another device, now, owner-only through
-/// [`write_private_atomic`](crate::config::write_private_atomic), and remove `invited-by`: the first sync
-/// has landed, so this machine no longer needs the one device its invite named to ask. Best-effort: a
-/// failure only makes the next dial exchange again.
-// `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
-#[allow(clippy::std_instead_of_core)]
+/// [`write_private_atomic`](crate::config::write_private_atomic). Best-effort: a failure only makes the next
+/// dial exchange again. `invited-by` stays: only a fold that lands a list removes it.
 async fn touch_synced(home: &Home) {
     let now = unix_now();
     let written =
         crate::config::write_private_atomic(&home.synced(), format!("{now}\n").as_bytes()).await;
     if let Err(error) = written {
         tracing::debug!(%error, "could not record the sync");
-        return;
-    }
-    match std::fs::remove_file(home.invited_by()) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-            tracing::debug!(%error, "could not remove invited-by");
-        }
-        _ => {}
     }
 }
 
