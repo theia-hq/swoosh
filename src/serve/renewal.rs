@@ -124,7 +124,7 @@ impl Known {
 
     /// The keys the update lists, with when each standing ends, when this home's standing lets it answer.
     async fn listed(&self) -> HashMap<VerifyKey, u64> {
-        let pin = match Standing::read(&self.home).await.map(|read| read.standing) {
+        let pin = match Standing::read(&self.home).await {
             Ok(Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. }) => pin,
             Ok(Standing::Unpinned | Standing::InterruptedMint { .. }) | Err(_) => {
                 return HashMap::new();

@@ -1,18 +1,20 @@
 //! The bare `swoosh status`: what this machine is, read from its own files.
 //!
-//! It never dials and never asks for a passphrase: the root is read through [`Root::inspect`], which
-//! looks only at the key file's header and the signed records beside it. Its one write is this machine's
-//! key, made plain on a home that has none, and said once on stderr.
+//! It never dials, never asks for a passphrase and never writes: the root is read through
+//! [`Root::inspect`], which looks only at the key file's header and the signed records beside it. A home
+//! with no key prints `key: none yet`; the first verb that needs a key makes it.
 //!
-//! The report goes to stdout whole; every notice (the key it made, a crash state the read finished, a
-//! running `serve` it could not read) goes to stderr, so a script that reads the report reads only it.
+//! The report goes to stdout whole; every notice (a running `serve` it could not read) goes to stderr, so a
+//! script that reads the report reads only it.
 
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bifrost::NodeId;
-use keystore::{Method, Stored};
+use keystore::{KeyFile, Method, Stored};
 use nauthy::{Denylist, VerifyKey};
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME};
+use swoosh::credential::short;
 use swoosh::escape::EscapedPath;
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
@@ -21,7 +23,7 @@ use swoosh::root::{Date, Root, RootPlace};
 use swoosh::roster::{Member, RevokedDevice};
 use swoosh::serve::control_codec::{ControlError, DisabledList, ServiceMenu};
 use swoosh::standing::{Standing, StandingError};
-use swoosh::{badge, identity, roster, standing, sync};
+use swoosh::{badge, roster, standing, sync};
 use tightbeam::identity::AsVerifyKey as _;
 
 /// What bare `status` prints on stdout.
@@ -36,10 +38,18 @@ pub(crate) enum Print {
 /// The line `serving:` reads when no `serve` runs here.
 pub(crate) const SERVING_NOTHING: &str = "serving: nothing (swoosh serve is not running)";
 
-/// The characters of a key a row shows: `ed01` and 8 more.
-const SHORT: usize = 12;
+/// `status --key`'s refusal on a home with no key: `status` makes none.
+pub(crate) const NO_KEY: &str =
+    "this machine has no key yet; to make one and print it: swoosh join";
 
-/// Make this machine's key if the home has none, then print what `print` asks for.
+/// The block a machine that is no device of a root prints after `home:`.
+const NOT_A_DEVICE: [&str; 3] = [
+    "this machine: not one of your devices yet",
+    "to join yours, paste its invite into: swoosh join",
+    "to make your root on this machine: swoosh invite <name> <key>",
+];
+
+/// Print what `print` asks for. Writes nothing to the home.
 pub(crate) async fn run(home: &Home, print: Print) -> eyre::Result<()> {
     run_to(home, print, &mut std::io::stdout(), &mut std::io::stderr()).await
 }
@@ -51,19 +61,15 @@ pub(crate) async fn run_to(
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> eyre::Result<()> {
-    let key = identity::inspect(home)?;
-    if let identity::Inspected::Made(_) = key {
-        writeln!(
-            err,
-            "made this machine's key (first run): {}",
-            EscapedPath(&home.key())
-        )?;
-    }
+    let key = KeyFile::device(home.key()).load()?;
     if print == Print::Key {
-        writeln!(out, "{}", key.stored().node_id())?;
+        let Some(key) = key else {
+            eyre::bail!(NO_KEY);
+        };
+        writeln!(out, "{}", key.node_id())?;
         return Ok(());
     }
-    let report = Report::gather(home, key.stored(), unix_now()).await?;
+    let report = Report::gather(home, key.as_ref(), unix_now()).await?;
     for notice in &report.notices {
         writeln!(err, "{notice}")?;
     }
@@ -74,14 +80,17 @@ pub(crate) async fn run_to(
 /// Everything bare `status` says, gathered from the home's files before anything prints.
 #[derive(Debug)]
 pub(crate) struct Report {
-    key: NodeId,
-    lock: Method,
-    /// The `root:` block: one line, or a line and what follows it.
-    root: Vec<String>,
-    /// `this machine: me/<name>, your device until <date>`, on a device.
+    /// This machine's key and how it is locked; `None` when the home has no key.
+    key: Option<(NodeId, Method)>,
+    /// The home's directory.
+    home: String,
+    /// The lines after `home:`: the root's line, or what this machine is when it is no device.
+    top: Vec<String>,
+    /// `this machine: me/<name>, your device until <date>`, when this machine is no row of the list.
     this_machine: Option<String>,
     sections: Vec<Section>,
-    serving: String,
+    /// `serving:`; `None` when nothing runs and this machine is no device, which has nothing to say.
+    serving: Option<String>,
     /// The lines that say what to do, last.
     nags: Vec<String>,
     /// What goes to stderr.
@@ -98,46 +107,62 @@ struct Section {
 impl Report {
     /// Read the home: its standing, the root's records or the update it holds, its contacts, the links it
     /// shared, and what a running `serve` serves.
-    pub(crate) async fn gather(home: &Home, key: &Stored, now: u64) -> eyre::Result<Self> {
-        let own = key.node_id();
+    pub(crate) async fn gather(home: &Home, key: Option<&Stored>, now: u64) -> eyre::Result<Self> {
         let mut report = Self {
-            key: own,
-            lock: key.method(),
-            root: Vec::new(),
+            key: key.map(|key| (key.node_id(), key.method())),
+            home: EscapedPath(home.dir()).to_string(),
+            top: Vec::new(),
             this_machine: None,
             sections: Vec::new(),
-            serving: String::new(),
+            serving: None,
             nags: Vec::new(),
             notices: Vec::new(),
         };
         let store = ContactsStore::open(home).await?;
         let contacts = store.contacts();
-        // A damaged or unfinished standing has no `root:` line of its own: its line is a nag, printed last.
-        let last = match Standing::read(home).await {
-            Err(StandingError::Damaged(what)) => Some(standing::damaged_line(&what)),
-            Err(other) => return Err(other.into()),
-            Ok(read) => {
-                report
-                    .notices
-                    .extend(read.finished.iter().map(ToString::to_string));
-                match read.standing {
-                    Standing::InterruptedMint { root_key } => {
-                        Some(standing::unfinished_line(root_key))
-                    }
-                    standing => {
-                        report.standing(home, standing, contacts, now).await?;
-                        None
-                    }
-                }
+        // An act that did not finish, or a home whose records disagree, says so on the last line.
+        let mut last = None;
+        let mut device = false;
+        match key {
+            None if restored(home) => {
+                report.nags.extend(
+                    [
+                        "this machine's key is not in this home, because system backups leave it out. To \
+                         start over: swoosh leave",
+                        "then: swoosh join",
+                    ]
+                    .map(str::to_owned),
+                );
             }
-        };
+            None => report.top = NOT_A_DEVICE.map(str::to_owned).to_vec(),
+            Some(_) => match Standing::read(home).await {
+                Err(StandingError::Damaged(what)) => last = Some(standing::damaged_line(&what)),
+                Err(other) => return Err(other.into()),
+                Ok(Standing::InterruptedMint { .. }) => {
+                    last = Some(standing::UNFINISHED_MINT.to_owned());
+                }
+                Ok(Standing::Unpinned) => report.top = NOT_A_DEVICE.map(str::to_owned).to_vec(),
+                Ok(standing) => {
+                    device = true;
+                    report.standing(home, standing, now).await?;
+                }
+            },
+        }
+        if let Some(root) = Standing::revoked_root(home).await? {
+            report.nags.push(format!(
+                "a revoked root is still on this machine; to delete it: swoosh revoke root:{root}"
+            ));
+        }
         report.sections.push(contacts_section(contacts));
         report.sections.push(links_section(home, now).await?);
         report.serving = report.serving_line(home).await;
         if let Some(root) = swoosh::home::ServeLock::recorded(home).admit
             && swoosh::home::serve_running(home).await
         {
-            report.serving = admitting(&report.serving, root);
+            report.serving = Some(admitting(report.serving.as_deref(), root));
+        }
+        if device && report.serving.is_none() {
+            report.serving = Some(SERVING_NOTHING.to_owned());
         }
         if roster_fork_held(home) {
             report.nags.push(
@@ -151,38 +176,17 @@ impl Report {
         Ok(report)
     }
 
-    /// The `root:` block, this machine's line, the devices, and the lines about renewing, by standing.
-    async fn standing(
-        &mut self,
-        home: &Home,
-        standing: Standing,
-        contacts: &Contacts,
-        now: u64,
-    ) -> eyre::Result<()> {
+    /// The root's line, this machine's line, the devices, and the lines about renewing, on a device of a
+    /// root: one that keeps it or one that does not.
+    async fn standing(&mut self, home: &Home, standing: Standing, now: u64) -> eyre::Result<()> {
         let mut carrying = Vec::new();
-        let due;
         let (rows, until) = match standing {
-            Standing::Unpinned => {
-                self.root = vec![
-                    "root: none yet.".to_owned(),
-                    "  to join yours: swoosh join".to_owned(),
-                    "  to make one here: swoosh invite <name> <key>".to_owned(),
-                ];
-                return Ok(());
-            }
-            Standing::InterruptedMint { .. } => return Ok(()),
+            Standing::Unpinned | Standing::InterruptedMint { .. } => return Ok(()),
             Standing::HoldsRoot { pin, until } => {
                 let inspected = Root::inspect(home, RootPlace::Home).await?;
-                self.notices
-                    .extend(inspected.finished.iter().map(ToString::to_string));
-                self.root = vec![
-                    format!(
-                        "root: root:{pin}, kept on this machine, locked with a passphrase."
-                    ),
-                    "      Your root is a key, not a machine: it vouches for your devices, and it never dials \
-                     or serves."
-                        .to_owned(),
-                ];
+                self.top = vec![format!(
+                    "root:{pin} on this machine, locked with a passphrase."
+                )];
                 // Another copy of the root, or this machine, may have revoked a device since the last act
                 // here: the records as the next act would bring them forward say so before the list does.
                 let device = |row: &Member, revoked| DeviceRow {
@@ -213,7 +217,13 @@ impl Report {
                     .chain(unlisted)
                     .collect();
                 self.devices("devices:".to_owned(), &rows, now);
-                due = inspected.due(now).count();
+                // Due by the same test the renewal runs, which skips a device it cannot renew.
+                let due: Vec<VerifyKey> = inspected.due(now).map(|row| row.node).collect();
+                self.nags.extend(
+                    rows.iter()
+                        .filter(|row| !row.revoked && due.contains(&row.key))
+                        .filter_map(|row| renew_line(row, "")),
+                );
                 carrying = inspected
                     .rows()
                     .iter()
@@ -222,7 +232,7 @@ impl Report {
                 (rows, until)
             }
             Standing::Device { pin, until } => {
-                self.root = vec![not_here(pin)];
+                self.top = vec![format!("root:{pin} not on this machine.")];
                 let rows: Vec<DeviceRow> = pin
                     .verify_key()
                     .ok()
@@ -243,37 +253,55 @@ impl Report {
                     .unwrap_or_default();
                 let title = format!("devices (as of the last sync, {}):", sync::ago(home));
                 self.devices(title, &rows, now);
-                due = rows
-                    .iter()
-                    .filter(|row| !row.revoked && row.until > now)
-                    .filter_map(|row| swoosh::root::renew_by(row.until, row.duration, row.seeded))
-                    .filter(|by| *by <= now)
-                    .count();
+                self.nags.extend(
+                    rows.iter()
+                        .filter(|row| due(row, now).is_some())
+                        .filter_map(|row| renew_line(row, " --root <dir>")),
+                );
                 (rows, until)
             }
         };
         let until = unix(until);
-        let own = self.key.verify_key().ok();
-        let own_row = rows.iter().find(|row| Some(row.key) == own && !row.revoked);
-        let name = own_row
-            .map(|row| row.label.clone())
-            .or_else(|| own_name(contacts, self.key));
+        let Some((key, _)) = self.key else {
+            return Ok(());
+        };
+        let own = key.verify_key().ok();
+        let own_row = rows.iter().find(|row| Some(row.key) == own);
+        // Named by the list once it lands; before that, by the name the invite gave this machine.
+        let name = match own_row {
+            Some(row) => Some(row.label.clone()),
+            None => swoosh::renewal::own_label(home).await,
+        };
         let me = name
             .as_ref()
-            .map_or_else(|| self.key.short(), |name| format!("me/{name}"));
-        self.this_machine = Some(format!(
-            "this machine: {me}, your device until {}",
-            Date(until)
-        ));
-        self.nags.extend(use_your_root(&rows, now, due));
+            .map_or_else(|| short(&key), |name| format!("me/{name}"));
+        if own_row.is_none() {
+            self.this_machine = Some(format!(
+                "this machine: {me}, your device until {}",
+                Date(until)
+            ));
+        }
+        if own_row.is_some_and(|row| row.revoked) {
+            self.nags.extend(
+                [
+                    "this machine is no longer one of your devices: your root revoked it. To join again: \
+                     swoosh leave --new-key",
+                    "then: swoosh join",
+                ]
+                .map(str::to_owned),
+            );
+            return Ok(());
+        }
         let name = name.map_or_else(|| "<name>".to_owned(), |name| name.to_string());
         if until <= now {
             self.nags.push(format!(
-                "device: {me} ended on {}; your devices refuse it. Where your root is kept: swoosh invite \
-                 {name}. This machine picks it up the next time it reaches one of your devices (or now: \
-                 swoosh sync).",
+                "{me} ended on {}; your devices refuse it. Where your root is kept: swoosh invite {name}",
                 Date(until)
             ));
+            self.nags.push(
+                "this machine picks it up the next time it reaches one of your devices, or now: swoosh sync"
+                    .to_owned(),
+            );
         } else if until - now <= badge::DEVICE_WARN_WINDOW.as_secs() {
             let renews = own_row.is_some_and(|row| {
                 swoosh::root::renew_by(row.until, row.duration, row.seeded).is_some()
@@ -282,7 +310,7 @@ impl Report {
                 "It renews the next time you use your root, when this machine next syncs."
                     .to_owned()
             } else {
-                format!("It is not renewed on its own. With your root: swoosh invite {name}.")
+                format!("It is not renewed on its own. With your root: swoosh invite {name}")
             };
             self.nags
                 .push(format!("{me} ends on {}. {how}", Date(until)));
@@ -291,55 +319,49 @@ impl Report {
         Ok(())
     }
 
-    /// The devices table: every row the root has, revoked ones too; the root itself is never a row.
+    /// The devices table: every row the root has, revoked ones too; the root itself is never a row. A live
+    /// row leaves the state column blank.
     fn devices(&mut self, title: String, rows: &[DeviceRow], now: u64) {
-        let own = self.key.verify_key().ok();
+        let own = self.key.and_then(|(key, _)| key.verify_key().ok());
         let rows = rows
             .iter()
             .map(|row| {
                 let (state, date) = if row.revoked {
                     ("revoked".to_owned(), String::new())
                 } else if row.until <= now {
-                    ("ended".to_owned(), Date(row.until).to_string())
+                    (format!("ended {}", Date(row.until)), String::new())
                 } else {
-                    let due = swoosh::root::renew_by(row.until, row.duration, row.seeded)
-                        .filter(|by| *by <= now);
-                    let state = match due {
+                    let state = match due(row, now) {
                         _ if Some(row.key) == own => "this machine".to_owned(),
                         Some(by) => format!("renew by {}", Date(by)),
-                        None => "live".to_owned(),
+                        None => String::new(),
                     };
                     (state, format!("until {}", Date(row.until)))
                 };
                 // The key column tells apart a revoked device and a live one that took its name (O2: the
                 // line names the machine).
-                [
-                    format!("me/{}", row.label),
-                    short(&row.key.to_string()),
-                    state,
-                    date,
-                ]
+                [format!("me/{}", row.label), short(&row.key), state, date]
             })
             .collect();
         self.sections.push(Section { title, rows });
     }
 
-    /// `serving:`, from the running `serve`'s local control socket when there is one. Reading it is not a
-    /// dial: no other machine is contacted. A socket nothing listens on (a `serve` that was killed) is
-    /// the same as none.
-    async fn serving_line(&mut self, home: &Home) -> String {
+    /// `serving:`, from the running `serve`'s local control socket when there is one; `None` when no
+    /// `serve` runs. Reading it is not a dial: no other machine is contacted. A socket nothing listens on
+    /// (a `serve` that was killed) is the same as none.
+    async fn serving_line(&mut self, home: &Home) -> Option<String> {
         let client = match ControlClient::resolve(home) {
             Ok(client) => client,
-            Err(ControlError::NoResident) => return SERVING_NOTHING.to_owned(),
-            Err(error) => return self.serving_unknown(&error),
+            Err(ControlError::NoResident) => return None,
+            Err(error) => return Some(self.serving_unknown(&error)),
         };
         match client.status().await {
-            Ok(status) => match serving(&status.menu) {
+            Ok(status) => Some(match serving(&status.menu) {
                 Ok(line) => line,
                 Err(why) => self.serving_unknown(&why),
-            },
-            Err(ControlError::NoResident) => SERVING_NOTHING.to_owned(),
-            Err(error) => self.serving_unknown(&error),
+            }),
+            Err(ControlError::NoResident) => None,
+            Err(error) => Some(self.serving_unknown(&error)),
         }
     }
 
@@ -350,30 +372,27 @@ impl Report {
         "serving: unknown".to_owned()
     }
 
-    /// The report, in order: the key, the lock, the root, this machine, each section with a row, what is
-    /// served, then the lines that say what to do.
+    /// The report, in blocks a blank line apart, an empty block left out: the key, its lock, the home and
+    /// the root's line (or what this machine is); each section with a row and what is served; the lines that
+    /// say what to do.
     pub(crate) fn render(&self) -> String {
-        let mut out = format!("key: {}\n", self.key);
-        out.push_str(match self.lock {
-            Method::Plain => "lock: none\n",
-            Method::Passphrase => "lock: passphrase\n",
-        });
-        for line in &self.root {
-            out.push_str(line);
-            out.push('\n');
-        }
-        if let Some(line) = &self.this_machine {
-            out.push_str(line);
-            out.push('\n');
-        }
-        out.push('\n');
+        let mut head = match self.key {
+            Some((key, method)) => {
+                vec![format!("key: {key}"), format!("key lock: {}", lock(method))]
+            }
+            None => vec!["key: none yet".to_owned()],
+        };
+        head.push(format!("home: {}", self.home));
+        head.extend(self.top.iter().cloned());
+        head.extend(self.this_machine.iter().cloned());
+
+        let mut body = Vec::new();
         for section in self
             .sections
             .iter()
             .filter(|section| !section.rows.is_empty())
         {
-            out.push_str(&section.title);
-            out.push('\n');
+            body.push(section.title.clone());
             let width = |column: usize| {
                 section
                     .rows
@@ -385,31 +404,62 @@ impl Report {
             let (name, key, state) = (width(0), width(1), width(2));
             for [a, b, c, d] in &section.rows {
                 let line = format!("  {a:<name$}  {b:<key$}  {c:<state$}  {d}");
-                out.push_str(line.trim_end());
-                out.push('\n');
+                body.push(line.trim_end().to_owned());
             }
         }
-        out.push_str(&self.serving);
-        out.push('\n');
-        if !self.nags.is_empty() {
-            out.push('\n');
-            for line in &self.nags {
-                out.push_str(line);
-                out.push('\n');
-            }
-        }
-        out
+        body.extend(self.serving.iter().cloned());
+
+        let blocks: Vec<String> = [head, body, self.nags.clone()]
+            .into_iter()
+            .filter(|block| !block.is_empty())
+            .map(|block| block.join("\n") + "\n")
+            .collect();
+        blocks.join("\n")
     }
 }
 
+/// The word `key lock:` names a method by.
+fn lock(method: Method) -> &'static str {
+    match method {
+        Method::Plain => "none",
+        Method::Passphrase => "passphrase",
+    }
+}
+
+/// Whether a home with no key still holds what a device or a root leaves: a home restored from a system
+/// backup, which leaves `machine/` out.
+fn restored(home: &Home) -> bool {
+    [home.root_pub(), home.key_cert(), home.root_key()]
+        .iter()
+        .any(|path| Path::exists(path))
+}
+
+/// The day a live row falls due to renew, once that day has come.
+fn due(row: &DeviceRow, now: u64) -> Option<u64> {
+    if row.revoked || row.until <= now {
+        return None;
+    }
+    swoosh::root::renew_by(row.until, row.duration, row.seeded).filter(|by| *by <= now)
+}
+
+/// The line for a device due to renew: `renew me/<name> by <date>: swoosh invite <name>`, with `root`
+/// after it where the root is not on this machine. Nothing for a device that never renews on its own.
+fn renew_line(row: &DeviceRow, root: &str) -> Option<String> {
+    let by = swoosh::root::renew_by(row.until, row.duration, row.seeded)?;
+    Some(format!(
+        "renew me/{name} by {}: swoosh invite {name}{root}",
+        Date(by),
+        name = row.label
+    ))
+}
+
 /// `serving:` with the root a running `serve --admit` admits, after what it serves when that is known.
-fn admitting(serving: &str, root: NodeId) -> String {
-    let head = if serving == SERVING_NOTHING {
-        "serving:".to_owned()
-    } else {
-        format!("{serving},")
+fn admitting(serving: Option<&str>, root: NodeId) -> String {
+    let head = match serving {
+        None | Some(SERVING_NOTHING) => "serving:".to_owned(),
+        Some(serving) => format!("{serving},"),
     };
-    format!("{head} admitting root root:{root}")
+    format!("{head} admitting root:{root}")
 }
 
 /// `serving:` from a running `serve`'s menu: every service it serves that is not turned off. When the list
@@ -460,32 +510,6 @@ fn revoked_device(device: &RevokedDevice) -> DeviceRow {
     }
 }
 
-/// The `root:` line where the root is not kept.
-fn not_here(root: NodeId) -> String {
-    format!("root: root:{root}, not on this machine.")
-}
-
-/// "use your root by <date>", the earliest day a device of the root falls due to renew; or, while `due`
-/// devices are due, how many. Nothing when no device renews on its own. `due` is counted by the caller:
-/// where the root is kept, by the same test the renewal runs.
-fn use_your_root(rows: &[DeviceRow], now: u64, due: usize) -> Option<String> {
-    if due > 0 {
-        return Some(format!(
-            "use your root now: swoosh invite ({due} devices due)"
-        ));
-    }
-    let earliest = rows
-        .iter()
-        .filter(|row| !row.revoked && row.until > now)
-        .filter_map(|row| swoosh::root::renew_by(row.until, row.duration, row.seeded))
-        .filter(|by| *by > now)
-        .min()?;
-    Some(format!(
-        "use your root by {}: swoosh invite (it lists what is due)",
-        Date(earliest)
-    ))
-}
-
 /// For a device whose key came in its invite, in the 14 days before that invite ends: what to do if it
 /// starts from that invite each time. Read from `invite_until`, never `until`: a bound renewal moves the
 /// row's date, not the date its invite stops working.
@@ -504,15 +528,6 @@ fn invite_ends(row: &Member, now: u64) -> Option<String> {
     })
 }
 
-/// The name this machine has among `me`'s devices in the address book, when the root's list has none.
-fn own_name(contacts: &Contacts, own: NodeId) -> Option<DeviceLabel> {
-    let me = ME.parse().ok()?;
-    contacts
-        .devices(&me)?
-        .find(|(_, key)| **key == own)
-        .map(|(label, _)| label.clone())
-}
-
 /// `contacts:`: each person with their root, and each device saved by hand. Your own devices are under
 /// `devices:`, never here.
 fn contacts_section(contacts: &Contacts) -> Section {
@@ -521,7 +536,7 @@ fn contacts_section(contacts: &Contacts) -> Section {
         if let Some(root) = contacts.signet(person) {
             rows.push([
                 person.to_string(),
-                format!("root:{}", short(&root.node.to_string())),
+                format!("root:{}", short(&root.node)),
                 "root".to_owned(),
                 String::new(),
             ]);
@@ -532,12 +547,7 @@ fn contacts_section(contacts: &Contacts) -> Section {
             } else {
                 format!("{person}/{label}")
             };
-            rows.push([
-                name,
-                short(&key.to_string()),
-                "device".to_owned(),
-                String::new(),
-            ]);
+            rows.push([name, short(&key), "device".to_owned(), String::new()]);
         }
     }
     Section {
@@ -569,9 +579,9 @@ fn link_row(record: &GrantRecord, revoked: &Denylist, now: u64) -> [String; 4] {
         holder => match holder.parse::<NodeId>() {
             // A link shared with a person's devices is bound to their root, and a root prints as one.
             Ok(key) if record.kind == GrantKind::Fleet => {
-                format!("root:{}", short(&key.to_string()))
+                format!("root:{}", short(&key))
             }
-            Ok(key) => short(&key.to_string()),
+            Ok(key) => short(&key),
             Err(_) => holder.to_owned(),
         },
     };
@@ -589,11 +599,6 @@ fn link_row(record: &GrantRecord, revoked: &Denylist, now: u64) -> [String; 4] {
 /// Whether `devices.conflict` holds an update: two copies of the root signed, and a device saw both.
 fn roster_fork_held(home: &Home) -> bool {
     std::fs::metadata(home.devices_conflict()).is_ok_and(|meta| meta.len() > 0)
-}
-
-/// A key as a row shows it: `ed01` and 8 more characters.
-fn short(key: &str) -> String {
-    key.chars().take(SHORT).collect()
 }
 
 fn unix(time: SystemTime) -> u64 {

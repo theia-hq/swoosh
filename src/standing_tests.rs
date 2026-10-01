@@ -1,4 +1,5 @@
-//! `Standing::read` over every standing, every damaged shape, and the pin to a revoked root it removes.
+//! `Standing::read` over every standing, every damaged shape, and the files a revoked root left, which it
+//! reads as absent and never removes.
 //!
 //! Each home is built on disk the way the product leaves it: a device key file, a pin, a badge a root
 //! signed, a `root.key` whose key file has a header, and the latch of roots revoked here. The root key
@@ -14,7 +15,7 @@ use keystore::{KeyFile, Protection};
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
-use super::{Disagreement, Finished, Standing, StandingError};
+use super::{Disagreement, Standing, StandingError};
 use crate::config;
 use crate::home::Home;
 use crate::testkit::{TestNode, TestRoot, hand_signed};
@@ -118,7 +119,7 @@ fn update_files(home: &Home) -> [PathBuf; 4] {
     files
 }
 
-async fn read(home: &Home) -> super::Read {
+async fn read(home: &Home) -> Standing {
     Standing::read(home).await.expect("read the standing")
 }
 
@@ -133,9 +134,7 @@ async fn damaged(home: &Home) -> Disagreement {
 
 #[tokio::test]
 async fn an_empty_home_is_unpinned() {
-    let read = read(&home("empty")).await;
-    assert_eq!(read.standing, Standing::Unpinned);
-    assert!(read.finished.is_empty());
+    assert_eq!(read(&home("empty")).await, Standing::Unpinned);
 }
 
 /// A pin with no device standing is left only by a crash while leaving, and reads as damaged, naming `leave`.
@@ -158,7 +157,7 @@ async fn a_pin_and_a_standing_from_it_is_a_device_until_the_standings_end() {
     pin(&home, root()).await;
     let before = until();
     badge(&home, ROOT).await;
-    let Standing::Device { pin, until } = read(&home).await.standing else {
+    let Standing::Device { pin, until } = read(&home).await else {
         panic!("expected a device");
     };
     assert_eq!(pin, root());
@@ -178,7 +177,7 @@ async fn a_held_pinned_root_with_its_standing_holds_the_root() {
     pin(&home, root()).await;
     badge(&home, ROOT).await;
     assert!(matches!(
-        read(&home).await.standing,
+        read(&home).await,
         Standing::HoldsRoot { pin, .. } if pin == root()
     ));
 }
@@ -192,7 +191,7 @@ async fn a_root_with_no_pin_is_an_interrupted_mint_whatever_the_badge_holds() {
             badge(&home, by).await;
         }
         assert_eq!(
-            read(&home).await.standing,
+            read(&home).await,
             Standing::InterruptedMint { root_key: root() },
             "badge {tag}"
         );
@@ -201,7 +200,7 @@ async fn a_root_with_no_pin_is_an_interrupted_mint_whatever_the_badge_holds() {
     root_key(&home, ROOT);
     std::fs::write(home.key_cert(), b"torn").expect("tear the badge");
     assert_eq!(
-        read(&home).await.standing,
+        read(&home).await,
         Standing::InterruptedMint { root_key: root() }
     );
 }
@@ -219,7 +218,7 @@ async fn a_sealed_root_key_is_read_by_its_header_without_a_prompt() {
         )
         .expect("seal the root key");
     assert_eq!(
-        read(&home).await.standing,
+        read(&home).await,
         Standing::InterruptedMint { root_key: root() }
     );
 }
@@ -369,7 +368,7 @@ async fn a_lapsed_standing_is_still_this_machines() {
         .expect("sign a lapsed standing");
     config::write_badge(&crate::testkit::lock(), &home, &badge).expect("write the device standing");
     assert!(matches!(
-        read(&home).await.standing,
+        read(&home).await,
         Standing::Device { pin, until } if pin == root() && until < SystemTime::now()
     ));
 }
@@ -422,83 +421,106 @@ async fn a_root_key_with_no_readable_header_reads_damaged() {
 
 // A root revoked here.
 
+/// Every file in `home`, by name, with its length and modification time: what a read must leave as it was.
+fn listing(home: &Home) -> Vec<(String, u64, SystemTime)> {
+    let mut files: Vec<_> = std::fs::read_dir(home.dir())
+        .expect("list the home")
+        .map(|entry| {
+            let entry = entry.expect("an entry");
+            let meta = entry.metadata().expect("its metadata");
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                meta.len(),
+                meta.modified().expect("its mtime"),
+            )
+        })
+        .collect();
+    files.sort();
+    files
+}
+
 #[tokio::test]
 async fn a_revoked_root_left_in_the_home_is_never_read_as_a_mint() {
     let home = home("revoked-root");
     root_key(&home, ROOT);
     revoke(&home, root()).await;
-    let read = read(&home).await;
-    assert_eq!(read.standing, Standing::Unpinned);
-    assert!(read.finished.is_empty());
+    assert_eq!(read(&home).await, Standing::Unpinned);
     assert!(home.root_key().exists(), "a read deletes no root key");
+    assert_eq!(
+        Standing::revoked_root(&home).await.expect("read the root"),
+        Some(root())
+    );
 }
 
 #[tokio::test]
-async fn a_held_revoked_root_reads_as_no_root_and_its_pin_is_removed() {
+async fn a_held_revoked_root_and_its_pin_read_as_absent_and_stay() {
     let home = home("revoked-holder");
     root_key(&home, ROOT);
     pin(&home, root()).await;
     badge(&home, ROOT).await;
-    let files = update_files(&home);
+    update_files(&home);
     revoke(&home, root()).await;
-    let read = read(&home).await;
-    assert_eq!(read.standing, Standing::Unpinned);
-    assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
-    for gone in files.iter().chain([&home.key_cert(), &home.root_pub()]) {
-        assert!(!gone.exists(), "{} is removed", gone.display());
-    }
+    let before = listing(&home);
+    assert_eq!(read(&home).await, Standing::Unpinned);
+    assert_eq!(
+        listing(&home),
+        before,
+        "the read renames and deletes nothing"
+    );
 }
 
 #[tokio::test]
-async fn apply_on_a_device_killed_after_the_latch_is_finished_by_the_read() {
+async fn a_revoked_pin_reads_as_no_pin_and_its_standing_as_none() {
     let home = home("revoked-pin");
     pin(&home, root()).await;
     badge(&home, ROOT).await;
-    let files = update_files(&home);
+    update_files(&home);
     revoke(&home, root()).await;
-    let read = read(&home).await;
-    assert_eq!(read.standing, Standing::Unpinned);
-    assert_eq!(read.finished, [Finished::Retired { root: Some(root()) }]);
-    for gone in files.iter().chain([&home.key_cert(), &home.root_pub()]) {
-        assert!(!gone.exists(), "{} is removed", gone.display());
-    }
+    let before = listing(&home);
+    assert_eq!(read(&home).await, Standing::Unpinned);
+    assert_eq!(
+        listing(&home),
+        before,
+        "the read renames and deletes nothing"
+    );
+    assert_eq!(
+        Standing::revoked_root(&home).await.expect("read the root"),
+        None,
+        "no root is kept here"
+    );
 }
 
 #[tokio::test]
-async fn a_retirement_removes_the_standing_first_and_the_pin_last() {
-    let home = home("retire-order");
-    pin(&home, root()).await;
-    badge(&home, ROOT).await;
-    update_files(&home);
-    // The last update file cannot be removed: a crash at that step, after every earlier one.
-    std::fs::remove_file(home.devices_conflict()).expect("clear the fork file");
-    std::fs::create_dir(home.devices_conflict()).expect("block the fork file");
-    std::fs::write(home.devices_conflict().join("x"), b"x").expect("fill it");
-    revoke(&home, root()).await;
-
-    let failed = Standing::read(&home).await;
-    assert!(matches!(failed, Err(StandingError::Finish { .. })));
-    assert!(!home.key_cert().exists(), "the device standing went first");
-    assert!(
-        home.root_pub().exists(),
-        "the pin is still here, going last"
+async fn a_live_root_kept_here_is_no_revoked_root() {
+    let home = home("live-root");
+    root_key(&home, ROOT);
+    assert_eq!(
+        Standing::revoked_root(&home).await.expect("read the root"),
+        None
     );
-
-    std::fs::remove_dir_all(home.devices_conflict()).expect("unblock");
-    let read = read(&home).await;
-    assert_eq!(read.standing, Standing::Unpinned);
-    assert!(!home.root_pub().exists());
 }
 
 // The lines.
 
 #[test]
-fn each_finished_state_prints_its_line() {
+fn a_stopped_join_or_leave_names_the_verb_that_finishes_it() {
     assert_eq!(
-        Finished::Retired { root: Some(root()) }.to_string(),
+        super::damaged_line(&Disagreement::StandingWithoutPin {
+            standing_root: root()
+        }),
+        "joining did not finish; to finish it: swoosh join"
+    );
+    assert_eq!(
+        super::damaged_line(&Disagreement::PinWithoutStanding { pin: root() }),
+        "leaving did not finish; to finish it: swoosh leave"
+    );
+    assert_eq!(
+        super::damaged_line(&Disagreement::OwnKeyPinned { key: own() }),
         format!(
-            "finished retiring root {}… on this machine.",
-            root().short()
+            "root: this machine's records disagree (this machine trusts its own key {} as a root): \
+             swoosh cannot tell which root it trusts. A root kept on this machine stays. To start over: \
+             swoosh leave",
+            crate::credential::short(&own())
         )
     );
 }

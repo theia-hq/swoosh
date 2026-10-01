@@ -219,7 +219,7 @@ impl Events for NoTerminal {
 }
 
 async fn read(home: &Home) -> Standing {
-    Standing::read(home).await.unwrap().standing
+    Standing::read(home).await.unwrap()
 }
 
 fn stored_key(home: &Home) -> NodeId {
@@ -478,6 +478,7 @@ impl Switching {
                 root: other.node_id(),
                 standing: &standing,
                 from: node(0x41),
+                name: &"b".parse().unwrap(),
                 pin_changes: true,
             },
         )
@@ -559,4 +560,22 @@ async fn leave_under_a_running_serve_says_its_sessions_end() {
         "{}",
         ran.err
     );
+}
+
+/// A leave that stopped after the standing went and before the pin did reads as "leaving did not finish",
+/// and running `leave` again finishes it.
+#[tokio::test]
+async fn a_leave_that_stopped_is_finished_by_leave() {
+    let home = scratch("stopped");
+    config::write_signet(&swoosh::testkit::lock(), &home, root(ROOT)).unwrap();
+    match Standing::read(&home).await {
+        Err(swoosh::standing::StandingError::Damaged(what)) => assert_eq!(
+            swoosh::standing::damaged_line(&what),
+            "leaving did not finish; to finish it: swoosh leave"
+        ),
+        other => panic!("a stopped leave: {other:?}"),
+    }
+    leave(&home, &[]).await.left();
+    assert!(!home.root_pub().exists(), "the pin went");
+    assert_eq!(read(&home).await, Standing::Unpinned);
 }

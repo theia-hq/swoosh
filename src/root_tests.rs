@@ -276,7 +276,7 @@ async fn sibling(home: &Home, seed: u8, until: u64, update: &RosterDoc) -> Home 
 }
 
 async fn standing(home: &Home) -> Standing {
-    Standing::read(home).await.unwrap().standing
+    Standing::read(home).await.unwrap()
 }
 
 // --- the mint ---
@@ -531,11 +531,11 @@ async fn the_first_root_act_announces_before_the_prompt_and_after_the_mint() {
         "This makes your root on this machine: a second key, not a machine, that vouches for all your devices.\n\
          It is locked with a passphrase, which you type whenever you add, renew or revoke a device.\n\
          <prompt>\n\
-         made your root root:{}…, kept on this machine, locked with a passphrase.\n\
+         made your root root:{}, kept on this machine, locked with a passphrase.\n\
          This machine is me/{} until {}. me/laptop can join until {}.\n\
          Back up your root now, off this disk: swoosh root backup <dir>\n\
          To keep it off this machine, back it up, then: swoosh root forget <dir>\n",
-        root.key().short(),
+        crate::credential::short(&root.key()),
         own.label,
         date(own.label.as_str()),
         date("laptop"),
@@ -1349,7 +1349,7 @@ async fn the_device_refusals_print_their_lines() {
     assert_eq!(
         line,
         format!(
-            "{}… was me/gone's key and is revoked; a revoked key is not re-admitted. Give that machine a \
+            "{} was me/gone's key and is revoked; a revoked key is not re-admitted. Give that machine a \
              new key and invite that one. On that machine: swoosh leave --new-key",
             short(LAPTOP)
         )
@@ -1371,7 +1371,7 @@ async fn the_device_refusals_print_their_lines() {
     assert_eq!(
         line,
         format!(
-            "me/phone is {}…. To replace it: swoosh revoke me/phone, then invite the new key.",
+            "me/phone is {}. To replace it: swoosh revoke me/phone, then invite the new key.",
             short(PHONE)
         )
     );
@@ -2407,6 +2407,7 @@ impl JoiningPrompt {
                 root: TestRoot::seeded(OTHER).node_id(),
                 standing: &standing,
                 from: TestNode::seeded(LAPTOP).node_id(),
+                name: &"own".parse().unwrap(),
                 pin_changes: true,
             },
         )

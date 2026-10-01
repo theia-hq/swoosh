@@ -27,15 +27,23 @@ impl AddCmd {
         let outcome = store.contacts_mut().add(petname, device, self.key);
 
         match outcome {
-            Added::Created => println!("added {} -> {}", self.name, self.key.short()),
+            Added::Created => println!(
+                "added {} -> {}",
+                self.name,
+                swoosh::credential::short(&self.key)
+            ),
             Added::Unchanged => {
-                println!("{} already -> {} (unchanged)", self.name, self.key.short())
+                println!(
+                    "{} already -> {} (unchanged)",
+                    self.name,
+                    swoosh::credential::short(&self.key)
+                )
             }
             Added::Replaced(previous) => println!(
                 "updated {} -> {} (was {})",
                 self.name,
-                self.key.short(),
-                previous.short()
+                swoosh::credential::short(&self.key),
+                swoosh::credential::short(&previous)
             ),
         }
 

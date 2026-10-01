@@ -266,7 +266,7 @@ fn refused_before_writing(ran: &Ran, line: &str, home: &Home, before: &BTreeMap<
 }
 
 async fn read(home: &Home) -> Standing {
-    Standing::read(home).await.unwrap().standing
+    Standing::read(home).await.unwrap()
 }
 
 /// This machine's own name under `me`, as `status` reads it.
@@ -1141,7 +1141,7 @@ async fn join_refuses_a_damaged_home() {
     config::write_signet(&swoosh::testkit::lock(), &home, root(ROOT)).unwrap();
     let before = snapshot(home.dir());
     let ran = join_with(&home, &for_me(), &["--switch"]).await;
-    refused_before_writing(&ran, "Run swoosh leave to start over", &home, &before);
+    refused_before_writing(&ran, "To start over: swoosh leave", &home, &before);
 }
 
 #[tokio::test]
@@ -1150,4 +1150,41 @@ async fn join_refuses_text_that_is_not_an_invite() {
     let before = snapshot(home.dir());
     let ran = join(&home, "swoosh:ed01notalink").await;
     refused_before_writing(&ran, "this is not a swoosh invite", &home, &before);
+}
+
+/// A join that stopped after its standing and before its pin reads as "joining did not finish", and running
+/// `join` again finishes it.
+#[tokio::test]
+async fn a_join_that_stopped_is_finished_by_join() {
+    let home = scratch("stopped");
+    config::write_badge(
+        &swoosh::testkit::lock(),
+        &home,
+        &standing(ROOT, node(OWN), now() + 90 * DAY),
+    )
+    .unwrap();
+    std::fs::write(home.invited_by(), format!("{}\nlaptop\n", node(FROM))).unwrap();
+    match Standing::read(&home).await {
+        Err(swoosh::standing::StandingError::Damaged(what)) => assert_eq!(
+            swoosh::standing::damaged_line(&what),
+            "joining did not finish; to finish it: swoosh join"
+        ),
+        other => panic!("a stopped join: {other:?}"),
+    }
+    join(&home, &for_me()).await.joined();
+    assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
+}
+
+/// Before a list of your devices lands, the name a joined device goes by is the one its invite gave it.
+#[tokio::test]
+async fn a_joined_device_is_named_by_its_invite_before_its_first_sync() {
+    let home = scratch("named");
+    join(&home, &for_me()).await.joined();
+    assert!(!home.devices().exists(), "no list has landed");
+    assert_eq!(
+        swoosh::renewal::own_label(&home)
+            .await
+            .map(|label| label.to_string()),
+        Some("laptop".to_owned())
+    );
 }

@@ -32,18 +32,22 @@ impl SignetCmd {
             .set_signet(self.petname.clone(), self.key);
         match outcome {
             Added::Created => {
-                println!("recorded {}'s signet -> {}", self.petname, self.key.short())
+                println!(
+                    "recorded {}'s signet -> {}",
+                    self.petname,
+                    swoosh::credential::short(&self.key)
+                )
             }
             Added::Unchanged => println!(
                 "{}'s signet already -> {} (unchanged)",
                 self.petname,
-                self.key.short()
+                swoosh::credential::short(&self.key)
             ),
             Added::Replaced(previous) => println!(
                 "updated {}'s signet -> {} (was {})",
                 self.petname,
-                self.key.short(),
-                previous.short()
+                swoosh::credential::short(&self.key),
+                swoosh::credential::short(&previous)
             ),
         }
         store.save(&home_lock)?;

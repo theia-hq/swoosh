@@ -37,7 +37,7 @@ fn join_refuses_an_unused_reach_flag_before_writing() {
             .unwrap();
         child.wait_with_output().unwrap()
     };
-    let status = swoosh(&["status", "--key"], "");
+    let status = swoosh(&["leave", "--new-key"], "");
     assert!(status.status.success());
     let key: NodeId = String::from_utf8(status.stdout)
         .unwrap()

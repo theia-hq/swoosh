@@ -177,7 +177,7 @@ fn join_refuses_while_an_admitting_serve_runs() {
     let scratch = Scratch::new("serve-admit-join");
     let run = scratch.run("run");
     // This machine's key, made before the serve, so an invite can be bound to it.
-    let status = swoosh(&scratch.home, &run, &["status", "--key"]);
+    let status = swoosh(&scratch.home, &run, &["leave", "--new-key"]);
     assert!(status.status.success());
     let key: NodeId = String::from_utf8(status.stdout)
         .unwrap()

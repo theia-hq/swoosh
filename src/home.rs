@@ -143,7 +143,8 @@ impl Home {
     }
 
     /// `<home>/invited-by`: the key of the machine whose invite this machine joined, the first device a
-    /// sync asks. Removed once a sync lands a list of the devices.
+    /// sync asks, and the name that invite gave this machine. Removed once a sync lands a list of the
+    /// devices.
     pub fn invited_by(&self) -> PathBuf {
         self.dir.join("invited-by")
     }

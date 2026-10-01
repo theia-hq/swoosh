@@ -96,7 +96,7 @@ fn hit(standing: &Link) -> Vec<u8> {
 /// held here is not revoked, the row's standing id is not revoked, and the standing outlives `now`. The
 /// transport proved the key before the stream reached here.
 async fn standing_for(home: &Home, peer: VerifyKey, now: SystemTime) -> Result<Link, Miss> {
-    let pin = match Standing::read(home).await.map(|read| read.standing) {
+    let pin = match Standing::read(home).await {
         Ok(Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. }) => pin,
         Ok(Standing::Unpinned | Standing::InterruptedMint { .. }) | Err(_) => {
             return Err(Miss::NotADevice);
@@ -204,7 +204,7 @@ pub async fn read_answer(mut reader: impl AsyncRead + Unpin) -> Result<Option<Li
 /// Whether this home's standing needs the route: it is a device's, and it has passed its date or its id
 /// is revoked here. On any other home, and on one whose files cannot be read, it does not.
 pub async fn is_due(home: &Home, now: SystemTime) -> bool {
-    let until = match Standing::read(home).await.map(|read| read.standing) {
+    let until = match Standing::read(home).await {
         Ok(Standing::Device { until, .. } | Standing::HoldsRoot { until, .. }) => until,
         Ok(Standing::Unpinned | Standing::InterruptedMint { .. }) | Err(_) => return false,
     };
@@ -311,11 +311,12 @@ pub async fn own_name(home: &Home) -> String {
         .flatten()
         .map_or_else(
             || "this machine".to_owned(),
-            |stored| stored.node_id().short(),
+            |stored| crate::credential::short(&stored.node_id()),
         )
 }
 
-/// The name `me` gives this machine, when it gives one.
+/// The name `me` gives this machine, when it gives one; before a list of your devices lands, the name the
+/// invite it joined gave it.
 pub async fn own_label(home: &Home) -> Option<DeviceLabel> {
     let own = keystore::KeyFile::device(home.key())
         .load()
@@ -324,12 +325,12 @@ pub async fn own_label(home: &Home) -> Option<DeviceLabel> {
         .node_id();
     let store = ContactsStore::open(home).await.ok()?;
     let me = Petname::stored(ME).ok()?;
-    store
+    let listed = store
         .contacts()
-        .devices(&me)?
-        .into_iter()
-        .find(|(_, key)| **key == own)
-        .map(|(label, _)| label.clone())
+        .devices(&me)
+        .and_then(|mut devices| devices.find(|(_, key)| **key == own))
+        .map(|(label, _)| label.clone());
+    listed.or_else(|| crate::joining::InvitedBy::read(home).and_then(|invited| invited.name))
 }
 
 #[cfg(test)]

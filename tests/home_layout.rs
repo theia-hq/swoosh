@@ -81,7 +81,7 @@ fn the_default_home_is_the_platform_state_place() {
     ] {
         let user = scratch.0.join(case);
         std::fs::create_dir_all(&user).unwrap();
-        let out = swoosh(&user, xdg, &["status", "--key"]);
+        let out = swoosh(&user, xdg, &["leave", "--new-key"]);
         assert!(out.status.success(), "{case}: {}", text(&out.stderr));
 
         #[cfg(target_os = "macos")]
@@ -156,7 +156,7 @@ fn time_machine_exclusion(path: &Path) -> Option<Vec<u8>> {
 fn machine_dir_carries_both_backup_markers() {
     let scratch = Scratch::new("markers");
     let home = scratch.0.join("home");
-    let out = swoosh_at(&home, &["status", "--key"]);
+    let out = swoosh_at(&home, &["leave", "--new-key"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     let machine = home.join("machine");
     assert!(machine.join("key").is_file(), "the key is in machine/");
@@ -201,7 +201,7 @@ fn a_key_file_others_can_read_is_refused() {
 
     let scratch = Scratch::new("readable");
     let home = scratch.0.join("home");
-    let made = swoosh_at(&home, &["status", "--key"]);
+    let made = swoosh_at(&home, &["leave", "--new-key"]);
     assert!(made.status.success(), "{}", text(&made.stderr));
     let key = std::fs::canonicalize(home.join("machine").join("key")).unwrap();
     let before = std::fs::read(&key).unwrap();

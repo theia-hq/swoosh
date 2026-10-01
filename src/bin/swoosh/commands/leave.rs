@@ -12,7 +12,6 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use clap::Args;
-use swoosh::contacts::{ContactsStore, ME, Petname};
 use swoosh::escape::EscapedPath;
 use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::passphrase::{Prompt, Terminal};
@@ -63,23 +62,18 @@ impl LeaveCmd {
         err: &mut impl Write,
     ) -> eyre::Result<()> {
         let was = match Standing::read(home).await {
-            Ok(read) => {
-                for line in &read.finished {
-                    writeln!(err, "{line}")?;
+            Ok(standing) => match standing {
+                Standing::Device { pin, until } => Was::Device {
+                    root: pin,
+                    until: unix(until),
+                },
+                Standing::Unpinned if self.new_key => Was::Unpinned,
+                Standing::Unpinned => eyre::bail!("this machine is not one of your devices."),
+                Standing::HoldsRoot { .. } => eyre::bail!("{}", swoosh::root::KEPT_HERE),
+                Standing::InterruptedMint { .. } => {
+                    eyre::bail!(swoosh::standing::UNFINISHED_MINT)
                 }
-                match read.standing {
-                    Standing::Device { pin, until } => Was::Device {
-                        root: pin,
-                        until: unix(until),
-                    },
-                    Standing::Unpinned if self.new_key => Was::Unpinned,
-                    Standing::Unpinned => eyre::bail!("this machine is not one of your devices."),
-                    Standing::HoldsRoot { .. } => eyre::bail!("{}", swoosh::root::KEPT_HERE),
-                    Standing::InterruptedMint { root_key } => {
-                        eyre::bail!("{}", swoosh::standing::unfinished_line(root_key))
-                    }
-                }
-            }
+            },
             Err(StandingError::Damaged(_)) => Was::Damaged {
                 root: swoosh::config::load_signet(home).await.ok().flatten(),
             },
@@ -103,7 +97,7 @@ impl LeaveCmd {
         };
         let serving = !self.new_key && swoosh::home::serve_running(home).await;
         let home_lock = HomeWrite::take(home).await?;
-        still(&home_lock, home, &was, err).await?;
+        still(&home_lock, home, &was).await?;
         let name = match was {
             Was::Device { .. } => own_name(home).await,
             Was::Damaged { .. } | Was::Unpinned => None,
@@ -157,23 +151,13 @@ impl LeaveCmd {
 
 /// Refuse, under `home.lock`, when this machine's standing is no longer `was`, the one read before the
 /// lock: a `join`, a mint or another `leave` ran meanwhile, during the new key's prompt or before it.
-async fn still(
-    _home_lock: &HomeWrite,
-    home: &Home,
-    was: &Was,
-    err: &mut impl Write,
-) -> eyre::Result<()> {
+async fn still(_home_lock: &HomeWrite, home: &Home, was: &Was) -> eyre::Result<()> {
     let holds = match Standing::read(home).await {
-        Ok(read) => {
-            for line in &read.finished {
-                writeln!(err, "{line}")?;
-            }
-            match (was, read.standing) {
-                (Was::Device { root, .. }, Standing::Device { pin, .. }) => *root == pin,
-                (Was::Unpinned, Standing::Unpinned) => true,
-                _ => false,
-            }
-        }
+        Ok(standing) => match (was, standing) {
+            (Was::Device { root, .. }, Standing::Device { pin, .. }) => *root == pin,
+            (Was::Unpinned, Standing::Unpinned) => true,
+            _ => false,
+        },
         Err(StandingError::Damaged(_)) => matches!(was, Was::Damaged { .. }),
         Err(other) => return Err(other.into()),
     };
@@ -183,16 +167,11 @@ async fn still(
     Ok(())
 }
 
-/// This machine's name among your devices, from `me`, when it has one there.
+/// This machine's name among your devices, when it has one.
 async fn own_name(home: &Home) -> Option<String> {
-    let own = swoosh::identity::inspect(home).ok()?.stored().node_id();
-    let store = ContactsStore::open(home).await.ok()?;
-    let me = Petname::stored(ME).ok()?;
-    let devices = store.contacts().devices(&me)?;
-    devices
-        .into_iter()
-        .find(|(_, key)| **key == own)
-        .map(|(label, _)| label.to_string())
+    swoosh::renewal::own_label(home)
+        .await
+        .map(|label| label.to_string())
 }
 
 /// `when` in unix seconds.
