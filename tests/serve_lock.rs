@@ -206,7 +206,10 @@ fn join_refuses_while_an_admitting_serve_runs() {
     let join = swoosh(&scratch.home, &run, &["join", &invite.to_string()]);
     let stderr = String::from_utf8_lossy(&join.stderr);
     assert!(!join.status.success(), "refused: {stderr}");
-    assert_eq!(stderr.trim_end(), "error: stop swoosh serve first.");
+    assert_eq!(
+        stderr.trim_end(),
+        "error: swoosh serve is running; stop it first: swoosh stop"
+    );
     for file in ["key.cert", "root.pub", "invited-by"] {
         assert!(!scratch.home.join(file).exists(), "{file} is not written");
     }

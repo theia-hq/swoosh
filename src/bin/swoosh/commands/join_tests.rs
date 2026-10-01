@@ -862,7 +862,12 @@ async fn join_refuses_while_serve_admit_runs() {
     let _serving = swoosh::testkit::serving(&home, Some(root(OTHER)));
     let before = snapshot(home.dir());
     let ran = join(&home, &for_me()).await;
-    refused_before_writing(&ran, "stop swoosh serve first.", &home, &before);
+    refused_before_writing(
+        &ran,
+        "swoosh serve is running; stop it first: swoosh stop",
+        &home,
+        &before,
+    );
 }
 
 #[tokio::test]

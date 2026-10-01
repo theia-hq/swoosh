@@ -458,6 +458,76 @@ async fn leave_new_key_locks_the_new_key_when_the_old_one_was_locked() {
     ));
 }
 
+/// A prompt that, while `leave --new-key` waits at it, joins this home to the root seeded `OTHER`, as a
+/// `join --switch` run beside it would, then answers.
+struct Switching {
+    home: Home,
+    events: usize,
+}
+
+impl Switching {
+    fn switch(&mut self) -> eyre::Result<Passphrase> {
+        self.events += 1;
+        let other = TestRoot::seeded(OTHER);
+        let standing = other.standing(TestNode::seeded(OWN).verify_key()).unwrap();
+        swoosh::joining::join(
+            &swoosh::home::HomeWrite::wait(&self.home).unwrap(),
+            &self.home,
+            swoosh::joining::Join {
+                root: other.node_id(),
+                standing: &standing,
+                from: node(0x41),
+                pin_changes: true,
+            },
+        )
+        .unwrap();
+        Ok(Passphrase::try_from(Zeroizing::new(PASS.to_owned())).unwrap())
+    }
+}
+
+impl Prompt for Switching {
+    fn terminal(&self) -> bool {
+        true
+    }
+
+    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        self.switch()
+    }
+
+    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        self.switch()
+    }
+}
+
+impl Events for Switching {
+    fn events(&self) -> usize {
+        self.events
+    }
+}
+
+#[tokio::test]
+async fn a_join_during_leaves_prompt_stops_the_leave() {
+    // The standing `leave` read was a device of ROOT. While it waited for the new key's passphrase, a join
+    // moved this machine to OTHER; leaving now would end OTHER's standing while saying it left ROOT.
+    let home = scratch_with("new-key-switched", true);
+    device(&home, now() + 90 * DAY).await;
+    let mut prompt = Switching {
+        home: home.clone(),
+        events: 0,
+    };
+    let ran = leave_asking(&home, &["--new-key"], &mut prompt).await;
+    assert_eq!(ran.prompts, 1);
+    assert_eq!(
+        ran.refusal(),
+        "this machine's standing changed while this ran: run it again."
+    );
+    assert!(
+        matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(OTHER)),
+        "the join stands"
+    );
+    assert_eq!(stored_key(&home), node(OWN), "the key is not replaced");
+}
+
 #[tokio::test]
 async fn leave_new_key_refuses_while_serve_runs() {
     let home = scratch("new-key-serving");

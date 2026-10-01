@@ -2342,6 +2342,167 @@ async fn a_device_added_whose_name_the_list_gave_away_meanwhile_stops_the_act() 
 }
 
 #[tokio::test]
+async fn a_device_whose_key_the_list_revoked_meanwhile_is_never_handed_a_new_one() {
+    // me/laptop came with its key. While an invite waited at its prompt, this home folded a list another
+    // copy of the root cut, which revokes laptop's key and id. A new key for me/laptop would bring it back
+    // to life past that revocation, so the act stops.
+    let laptop = Row {
+        seeded: true,
+        ..row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)])
+    };
+    let rows = vec![
+        own_row(),
+        laptop,
+        row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)]),
+    ];
+    let first = RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap();
+    let elsewhere = RosterDoc::with_revocations(
+        Epoch(2),
+        [&rows[0], &rows[2]].into_iter().map(member).collect(),
+        vec![id(LAPTOP, STANDING_UNTIL)],
+        vec![key(LAPTOP)],
+    )
+    .unwrap();
+    let home = home("prompt-rekey-revoked");
+    holds(&home, &records(1, rows, Vec::new(), Vec::new())).await;
+    held(&home, &first);
+    let mut prompt = FoldingPrompt::new(&home, &elsewhere);
+    let (root, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
+    let mut root = root.unwrap();
+    assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
+    root.rekey(&name("laptop"), Duration::from_secs(30 * DAY))
+        .unwrap();
+
+    let mut out = Vec::new();
+    let error = root.commit_to(&mut out).await.map(|_| ()).unwrap_err();
+    assert!(matches!(error, RootError::ListChanged), "{error:?}");
+    assert!(
+        out.is_empty(),
+        "a stopped act prints nothing it did not write: {}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(
+        matches!(
+            crate::roster::read_held(&home.devices(), TestRoot::seeded(ROOT).verify_key()),
+            Some((held, _)) if held.epoch() == Epoch(2)
+        ),
+        "nothing was cut"
+    );
+}
+
+#[tokio::test]
+async fn a_key_the_list_named_meanwhile_is_never_added_under_another_name() {
+    // While the act waited at its prompt, this home folded a list another copy of the root cut, which
+    // names the key TV me/phone. Adding TV as me/tv would rename that device, so the act stops.
+    let rows = [
+        own_row(),
+        row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
+        row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)]),
+    ];
+    let mut elsewhere: Vec<Member> = rows.iter().map(member).collect();
+    elsewhere.push(member(&row(TV, "phone", vec![id(TV, STANDING_UNTIL)])));
+    let elsewhere = RosterDoc::new(Epoch(2), elsewhere).unwrap();
+    let home = home("prompt-key-named");
+    let mut prompt = FoldingPrompt::new(&home, &elsewhere);
+    let (home, _, mut root) = presented_with("prompt-key-named", &mut prompt).await;
+    assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
+    root.sign_standing(key(TV), name("tv"), Duration::from_secs(30 * DAY))
+        .unwrap();
+
+    let error = root
+        .commit_to(&mut io::sink())
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(error, RootError::ListChanged), "{error:?}");
+    assert!(
+        matches!(
+            crate::roster::read_held(&home.devices(), TestRoot::seeded(ROOT).verify_key()),
+            Some((held, _)) if held.epoch() == Epoch(2)
+        ),
+        "nothing was cut"
+    );
+}
+
+/// A prompt that, while a mint or its finish waits at it, joins this home to the root seeded `OTHER`, as a
+/// `join` run beside it would, then answers.
+struct JoiningPrompt {
+    home: Home,
+}
+
+impl JoiningPrompt {
+    fn join(&self) -> eyre::Result<Passphrase> {
+        let standing = TestRoot::seeded(OTHER).standing(key(OWN)).unwrap();
+        crate::joining::join(
+            &crate::home::HomeWrite::wait(&self.home).unwrap(),
+            &self.home,
+            crate::joining::Join {
+                root: TestRoot::seeded(OTHER).node_id(),
+                standing: &standing,
+                from: TestNode::seeded(LAPTOP).node_id(),
+                pin_changes: true,
+            },
+        )
+        .unwrap();
+        crate::passphrase::passphrase(Zeroizing::new(PASS.to_owned()))
+    }
+}
+
+impl Prompt for JoiningPrompt {
+    fn terminal(&self) -> bool {
+        true
+    }
+
+    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        self.join()
+    }
+
+    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        self.join()
+    }
+}
+
+#[tokio::test]
+async fn a_join_during_a_mints_prompt_stops_the_mint() {
+    let home = home("mint-joined");
+    let mut prompt = JoiningPrompt { home: home.clone() };
+    let error = Root::mint_to(&home, &mut prompt, &mut io::sink())
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(error, RootError::StandingChanged), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "this machine's standing changed while this ran: run it again."
+    );
+    assert_eq!(
+        config::load_signet(&home).await.unwrap(),
+        Some(TestRoot::seeded(OTHER).node_id()),
+        "the root it joined is still the one it trusts"
+    );
+    assert!(!home.root().exists(), "no root was made");
+}
+
+#[tokio::test]
+async fn a_join_during_a_finishs_prompt_stops_the_finish() {
+    let home = home("finish-joined");
+    STOP.set(Some(Seam::Renamed));
+    let stopped = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink()).await;
+    STOP.set(None);
+    assert!(stopped.is_err());
+    std::fs::remove_file(home.root().join("standing")).unwrap();
+
+    let mut prompt = JoiningPrompt { home: home.clone() };
+    let finished = Root::mint_to(&home, &mut prompt, &mut io::sink()).await;
+    assert!(finished.is_err(), "the finish stops");
+    assert_eq!(
+        config::load_signet(&home).await.unwrap(),
+        Some(TestRoot::seeded(OTHER).node_id()),
+        "the root it joined is still the one it trusts"
+    );
+}
+
+#[tokio::test]
 async fn a_refused_offer_is_never_counted_as_taken() {
     let (_home, _, mut root) = revoking(
         "refused",

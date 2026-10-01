@@ -69,3 +69,22 @@ async fn a_root_left_by_a_stopped_serve_admits_nothing() {
     assert_eq!(ServeLock::admitting(&home_lock, &home).unwrap(), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A lock that cannot be taken says so in swoosh's words, naming the file, and its reason follows once,
+/// as the cause.
+#[tokio::test]
+async fn a_lock_that_cannot_be_taken_names_its_reason_once() {
+    let (home, dir) = scratch("refused");
+    std::fs::create_dir_all(home.home_lock()).unwrap();
+    let error = HomeWrite::take(&home).await.unwrap_err();
+    let reason = std::io::Error::from_raw_os_error(libc::EISDIR).to_string();
+    let line = format!("{:#}", eyre::Report::new(error));
+    assert_eq!(
+        line,
+        format!(
+            "could not lock {}: {reason}",
+            crate::escape::EscapedPath(&home.home_lock())
+        )
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

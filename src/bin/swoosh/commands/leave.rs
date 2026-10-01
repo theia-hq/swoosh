@@ -103,6 +103,7 @@ impl LeaveCmd {
         };
         let serving = !self.new_key && swoosh::home::serve_running(home).await;
         let home_lock = HomeWrite::take(home).await?;
+        still(&home_lock, home, &was, err).await?;
         let name = match was {
             Was::Device { .. } => own_name(home).await,
             Was::Damaged { .. } | Was::Unpinned => None,
@@ -152,6 +153,34 @@ impl LeaveCmd {
         }
         Ok(())
     }
+}
+
+/// Refuse, under `home.lock`, when this machine's standing is no longer `was`, the one read before the
+/// lock: a `join`, a mint or another `leave` ran meanwhile, during the new key's prompt or before it.
+async fn still(
+    _home_lock: &HomeWrite,
+    home: &Home,
+    was: &Was,
+    err: &mut impl Write,
+) -> eyre::Result<()> {
+    let holds = match Standing::read(home).await {
+        Ok(read) => {
+            for line in &read.finished {
+                writeln!(err, "{line}")?;
+            }
+            match (was, read.standing) {
+                (Was::Device { root, .. }, Standing::Device { pin, .. }) => *root == pin,
+                (Was::Unpinned, Standing::Unpinned) => true,
+                _ => false,
+            }
+        }
+        Err(StandingError::Damaged(_)) => matches!(was, Was::Damaged { .. }),
+        Err(other) => return Err(other.into()),
+    };
+    if !holds {
+        eyre::bail!("{}", swoosh::standing::CHANGED);
+    }
+    Ok(())
 }
 
 /// This machine's name among your devices, from `me`, when it has one there.

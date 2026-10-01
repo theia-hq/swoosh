@@ -661,7 +661,12 @@ async fn invite_refuses_to_make_a_root_while_serve_admit_runs() {
     let _serving = swoosh::testkit::serving(&home, Some(TestRoot::seeded(0x31).node_id()));
     let before = snapshot(home.dir());
     let ran = invite(&home, &["tv", &node(0x44).to_string()]).await;
-    refused_before_writing(&ran, "stop swoosh serve first.", &home, &before);
+    refused_before_writing(
+        &ran,
+        "swoosh serve is running; stop it first: swoosh stop",
+        &home,
+        &before,
+    );
     assert!(!home.root().exists(), "no root is made");
     assert!(!home.root_pub().exists(), "no root is pinned");
 }

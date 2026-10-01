@@ -34,7 +34,7 @@ const RECORD_CAP: u64 = 256;
 
 /// A lock file could not be opened or taken.
 #[derive(Debug, thiserror::Error)]
-#[error("{}: {source}", EscapedPath(.path))]
+#[error("could not lock {}", EscapedPath(.path))]
 pub struct LockError {
     /// The lock file.
     pub path: PathBuf,

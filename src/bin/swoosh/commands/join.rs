@@ -154,7 +154,8 @@ impl JoinCmd {
         for line in &read.finished {
             writeln!(io.err, "{line}")?;
         }
-        let was = match read.standing {
+        let standing = read.standing;
+        let was = match standing {
             Standing::Unpinned => None,
             Standing::Device { pin, until: held } => {
                 if pin == root && until < held {
@@ -197,6 +198,7 @@ impl JoinCmd {
         }
         let home_lock = HomeWrite::take(home).await?;
         refuse_if_admitting(&home_lock, home)?;
+        still(&home_lock, home, standing, &mut io.err).await?;
         swoosh::joining::join(
             &home_lock,
             home,
@@ -293,7 +295,25 @@ fn fields(text: &str) -> usize {
 /// no other root's devices.
 fn refuse_if_admitting(home_lock: &HomeWrite, home: &Home) -> eyre::Result<()> {
     if ServeLock::admitting(home_lock, home)?.is_some() {
-        eyre::bail!("stop swoosh serve first.");
+        eyre::bail!("swoosh serve is running; stop it first: swoosh stop");
+    }
+    Ok(())
+}
+
+/// Refuse, under `home.lock`, when this machine's standing is no longer `was`, the one checked before the
+/// key write and any prompt: another `join`, a `leave` or a mint ran meanwhile.
+async fn still(
+    _home_lock: &HomeWrite,
+    home: &Home,
+    was: Standing,
+    err: &mut impl Write,
+) -> eyre::Result<()> {
+    let read = Standing::read(home).await?;
+    for line in &read.finished {
+        writeln!(err, "{line}")?;
+    }
+    if !read.standing.same(&was) {
+        eyre::bail!("{}", swoosh::standing::CHANGED);
     }
     Ok(())
 }

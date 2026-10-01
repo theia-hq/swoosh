@@ -133,8 +133,12 @@ pub enum RootError {
     #[error("your root is on this machine, so drop --root.")]
     HeldHere,
     /// A root to be made or finished here while a `serve --admit` admits another root's devices.
-    #[error("stop swoosh serve first.")]
+    #[error("swoosh serve is running; stop it first: swoosh stop")]
     Admitting,
+    /// This machine's standing moved between the check before the prompt and the write under `home.lock`:
+    /// a `join`, `leave` or another mint ran meanwhile. Nothing was written.
+    #[error("{}", crate::standing::CHANGED)]
+    StandingChanged,
     /// No root is kept here, and this machine is no root's device.
     #[error("this machine holds no root. Your first `swoosh invite <name> <key>` makes one.")]
     NoRootHere,
@@ -334,9 +338,10 @@ pub enum RootError {
     /// The update cut could not be folded here.
     #[error(transparent)]
     Fold(#[from] FoldError),
-    /// The list moved while the act ran so that the act no longer holds: a device it added lost its name
-    /// or its key to the list folded meanwhile, or its own cut did not fold here as the newest update.
-    /// Nothing was offered.
+    /// The list moved while the act ran so that the act no longer holds: the list folded meanwhile
+    /// revoked a device the act added, renewed or handed a new key, gave a device it added's name away, or
+    /// already listed a key it added; or its own cut did not fold here as the newest update. Nothing was
+    /// offered.
     #[error("your devices' list changed while this ran: run it again.")]
     ListChanged,
     /// A file the act reads or writes failed.
@@ -455,6 +460,10 @@ struct Act {
     own: Option<VerifyKey>,
     /// Devices this act added.
     added: Vec<VerifyKey>,
+    /// The old keys of the devices this act handed a new key.
+    replaced: Vec<VerifyKey>,
+    /// The keys of the devices this act renewed.
+    renewed: Vec<VerifyKey>,
     /// The latest `until` among the rows this act revoked.
     revoked_until: Option<u64>,
     /// Whether this act made the root.
@@ -697,6 +706,8 @@ impl Root {
             now: unix_now(),
             own: own_key(home)?,
             added: Vec::new(),
+            replaced: Vec::new(),
+            renewed: Vec::new(),
             revoked_until: None,
             minted: false,
         };
@@ -908,6 +919,7 @@ impl Root {
         let (standing, id) = self.sign_member(key, until)?;
         let row = &mut self.act.book.rows[index];
         let old_invite_until = row.invite_until;
+        self.act.replaced.push(row.key);
         row.key = key;
         row.ids.retain(|id| id.expires > now);
         row.ids.push(id);
@@ -1042,8 +1054,8 @@ impl Root {
     ///
     /// The cut is made under `home.lock`, taken here after the prompt: the act reads `devices` and
     /// `devices.conflict` again, brings its records forward from them when either moved since it read
-    /// them, and checks again that every device it added is still one of them, so a list folded while the
-    /// act waited at its prompt is carried by the cut and never forked by it.
+    /// them, and checks its changes again against what they brought, so a list folded while the act waited
+    /// at its prompt is carried by the cut and never forked or undone by it.
     pub async fn commit_to(&mut self, out: &mut impl Write) -> Result<Committed, RootError> {
         let home_lock = HomeWrite::take(&self.act.home).await?;
         self.act.again(out)?;
@@ -1150,6 +1162,7 @@ impl Root {
         let key = self.act.book.rows[index].key;
         let until = now.saturating_add(duration);
         let (standing, id) = self.sign_member(key, until)?;
+        self.act.renewed.push(key);
         let row = &mut self.act.book.rows[index];
         row.ids.retain(|id| id.expires > now);
         row.ids.push(id);
@@ -1224,24 +1237,41 @@ impl Act {
     }
 
     /// Under `home.lock`, before the cut: read `devices` and `devices.conflict` again, and when either moved
-    /// since this act read them, bring the records forward from them again. Then check again what the act
-    /// checked before its prompt: a device it added that the list folded meanwhile revoked, or gave its name
-    /// to another key, is no longer one of the records' live devices, and the act stops.
+    /// since this act read them, bring the records forward from them again and check again what the act
+    /// checked before its prompt, against the records brought forward. The act stops, having written and
+    /// printed nothing, when the list folded meanwhile:
+    ///
+    /// - revoked a device it added or renewed, or gave a device it added's name to another key (which
+    ///   revokes the act's);
+    /// - lists a key it added, under any name: that key was already a device;
+    /// - revoked the old key of a device it handed a new key.
     fn again(&mut self, out: &mut impl Write) -> Result<(), RootError> {
         let pin = self.key.verify_key()?;
-        let held = read_held(&self.home.devices(), pin).map(|(_, bytes)| bytes);
-        let fork = read_held(&self.home.devices_conflict(), pin).map(|(_, bytes)| bytes);
+        let held = read_held(&self.home.devices(), pin);
+        let fork = read_held(&self.home.devices_conflict(), pin);
         let had = self.held.as_ref().map(|(_, bytes)| bytes);
-        if held.as_ref() != had || fork != self.fork {
-            self.bring_forward(out)?;
+        let held_moved = held.as_ref().map(|(_, bytes)| bytes) != had;
+        let fork_moved = fork.as_ref().map(|(_, bytes)| bytes) != self.fork.as_ref();
+        if !held_moved && !fork_moved {
+            return Ok(());
         }
-        let added_live = self
-            .added
-            .iter()
-            .all(|key| self.book.live().any(|row| row.key == *key));
-        if !added_live {
+        let listed = [(held_moved, &held), (fork_moved, &fork)]
+            .into_iter()
+            .filter_map(|(moved, doc)| doc.as_ref().filter(|_| moved))
+            .flat_map(|(doc, _)| doc.members())
+            .any(|member| self.added.contains(&member.node));
+        let before = self.book.revoked_keys.clone();
+        let mut brought = Vec::new();
+        self.bring_forward(&mut brought)?;
+        // A key revoked by the bring-forward, never by the act itself: an act may revoke a device it renewed.
+        let revoked = |key: &VerifyKey| {
+            !before.contains_key(key.bytes()) && self.book.revoked_keys.contains_key(key.bytes())
+        };
+        let mut touched = self.added.iter().chain(&self.replaced).chain(&self.renewed);
+        if listed || touched.any(revoked) {
             return Err(RootError::ListChanged);
         }
+        let _ = out.write_all(&brought);
         Ok(())
     }
 
@@ -1461,6 +1491,7 @@ async fn make(
         keystore::Secret::generate().map_err(|source| RootError::Write(Box::new(source)))?;
 
     let home_lock = HomeWrite::take(home).await?;
+    still(&home_lock, home, Standing::Unpinned, out).await?;
     not_admitting(&home_lock, home)?;
     remove_staging(&staging)?;
     crate::config::create_store_dir(&staging).map_err(io_at(&staging))?;
@@ -1479,6 +1510,8 @@ async fn make(
             now: unix_now(),
             own: Some(own),
             added: Vec::new(),
+            replaced: Vec::new(),
+            renewed: Vec::new(),
             revoked_until: None,
             minted: true,
         },
@@ -1534,6 +1567,13 @@ async fn finish(
         && ours(&standing)
     {
         let home_lock = HomeWrite::take(home).await?;
+        still(
+            &home_lock,
+            home,
+            Standing::InterruptedMint { root_key },
+            out,
+        )
+        .await?;
         not_admitting(&home_lock, home)?;
         take_standing(&home_lock, home, root_key, &standing)?;
         return Ok(None);
@@ -1542,6 +1582,13 @@ async fn finish(
         && ours(&badge)
     {
         let home_lock = HomeWrite::take(home).await?;
+        still(
+            &home_lock,
+            home,
+            Standing::InterruptedMint { root_key },
+            out,
+        )
+        .await?;
         not_admitting(&home_lock, home)?;
         take_standing(&home_lock, home, root_key, &badge)?;
         return Ok(None);
@@ -1559,6 +1606,8 @@ async fn finish(
         now,
         own: Some(own),
         added: Vec::new(),
+        replaced: Vec::new(),
+        renewed: Vec::new(),
         revoked_until: None,
         minted: false,
     };
@@ -1577,6 +1626,13 @@ async fn finish(
     };
     let standing = root.sign_own(own)?;
     let home_lock = HomeWrite::take(home).await?;
+    still(
+        &home_lock,
+        home,
+        Standing::InterruptedMint { root_key },
+        out,
+    )
+    .await?;
     not_admitting(&home_lock, home)?;
     root.write_state(&home_lock)?;
     take_standing(&home_lock, home, root_key, &standing)?;
@@ -1606,6 +1662,23 @@ impl Root {
                 self.sign_standing(own, name, DEFAULT_DURATION)
             }
         }
+    }
+}
+
+/// Refuse, under `home.lock`, when this home's standing is no longer `was`, the standing the mint or its
+/// finish checked before its prompt: a `join`, `leave` or another mint ran while it waited.
+async fn still(
+    _home_lock: &HomeWrite,
+    home: &Home,
+    was: Standing,
+    out: &mut impl Write,
+) -> Result<(), RootError> {
+    let read = Standing::read(home).await?;
+    report(out, &read.finished);
+    if read.standing.same(&was) {
+        Ok(())
+    } else {
+        Err(RootError::StandingChanged)
     }
 }
 
