@@ -221,7 +221,7 @@ fn mint(home: &Home, file: &KeyFile) -> eyre::Result<Secret> {
             EscapedPath(dir)
         )
     };
-    make_machine_dir(home).map_err(|error| cannot(&error))?;
+    make_machine_dir(home)?;
     file.write(&secret, Protection::Plain)
         .map_err(|error| match &error {
             keystore::Error::Io { source, .. } => cannot(source),
@@ -239,11 +239,18 @@ fn mint(home: &Home, file: &KeyFile) -> eyre::Result<Secret> {
 ///
 /// # Errors
 ///
-/// The directory could not be made, or marked.
-pub fn make_machine_dir(home: &Home) -> std::io::Result<()> {
+/// The directory could not be made, or marked: the same line as a first key that cannot be made, naming
+/// the directory and the system's reason.
+pub fn make_machine_dir(home: &Home) -> eyre::Result<()> {
     let dir = home.machine();
-    crate::config::create_store_dir(&dir)?;
-    mark_for_no_backup(&dir)
+    crate::config::create_store_dir(&dir)
+        .and_then(|()| mark_for_no_backup(&dir))
+        .map_err(|reason| {
+            eyre::eyre!(
+                "cannot make this machine's key in {}: {reason}",
+                EscapedPath(&dir)
+            )
+        })
 }
 
 /// The extended attribute Time Machine reads to leave an item out, as `tmutil addexclusion` sets it.
@@ -315,7 +322,6 @@ fn mark_for_no_backup(dir: &std::path::Path) -> std::io::Result<()> {
     tag.write_all(
         format!(
             "{CACHEDIR_SIGNATURE}\n\
-             # This directory holds this machine's swoosh key; backups leave it out.\n\
              # See https://bford.info/cachedir/\n"
         )
         .as_bytes(),

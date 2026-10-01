@@ -371,3 +371,28 @@ async fn rewriting_a_sealed_key_proves_it_and_keeps_it_sealed() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A `machine/` that cannot be made is named with the system's reason on every path that writes a key,
+/// never the bare reason: here a join's write, into a home this user cannot write.
+#[tokio::test]
+async fn a_machine_dir_that_cannot_be_made_is_named() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let (home, dir) = home("machine-blocked");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("chmod 500");
+
+    let written = super::write(&[7; 32], &home).await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("chmod 700");
+    let message = format!(
+        "{:#}",
+        written.expect_err("no key can be made in a read-only home")
+    );
+    assert!(
+        message.starts_with(&format!(
+            "cannot make this machine's key in {}: ",
+            home.machine().display()
+        )),
+        "the line names the directory: {message}"
+    );
+    std::fs::remove_dir_all(&dir).expect("clean up");
+}

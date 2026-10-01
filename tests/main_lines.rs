@@ -13,7 +13,6 @@ fn swoosh(args: &[&str], home: Option<&str>) -> Output {
     command
         .args(args)
         .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY")
         .stdin(Stdio::null());
     if let Some(home) = home {
         command.env("SWOOSH_HOME", home);

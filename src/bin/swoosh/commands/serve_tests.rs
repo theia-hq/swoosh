@@ -1750,7 +1750,6 @@ impl Running {
             .args(args)
             .env("XDG_RUNTIME_DIR", &scratch.xdg)
             .env_remove("SWOOSH_HOME")
-            .env_remove("SWOOSH_KEY")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -1831,8 +1830,7 @@ fn serve_once(scratch: &ProcessScratch, args: &[&str]) -> std::process::Output {
         .arg("serve")
         .args(args)
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
-        .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY");
+        .env_remove("SWOOSH_HOME");
     run_binary_with_deadline(&mut command, Duration::from_secs(60))
 }
 
@@ -1980,7 +1978,6 @@ fn status_serving(scratch: &ProcessScratch) -> String {
         .arg("status")
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY")
         .stdin(Stdio::null());
     let output = run_binary_with_deadline(&mut command, Duration::from_secs(30));
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2118,8 +2115,7 @@ fn serve_without_a_runtime_dir_refuses_before_binding() {
             .arg("--home")
             .arg(&scratch.home_dir)
             .args(["serve", "--local"])
-            .env_remove("SWOOSH_HOME")
-            .env_remove("SWOOSH_KEY");
+            .env_remove("SWOOSH_HOME");
         match xdg {
             Some(value) => command.env("XDG_RUNTIME_DIR", value),
             None => command.env_remove("XDG_RUNTIME_DIR"),
@@ -2171,7 +2167,6 @@ fn serve_never_opens_root_key() {
         .args(["serve", "--quiet", "--expires", "1s"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY")
         .stdin(Stdio::null());
     // SAFETY: `setsid` is async-signal-safe and touches only the child's own session. The child leaves
     // the test's terminal, so `/dev/tty` opens for nothing in it.
@@ -2207,8 +2202,7 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
         .arg(&scratch.home_dir)
         .args(["status", "--key"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
-        .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY");
+        .env_remove("SWOOSH_HOME");
     let output = run_binary_with_deadline(&mut identity, Duration::from_secs(30));
     assert!(
         output.status.success(),
@@ -2234,8 +2228,7 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
             // Surface the composition seam's own warning, so the test can hold the banner to the
             // discovery state the SAME run reported instead of assuming which way the box went.
             .env("RUST_LOG", "warn")
-            .env_remove("SWOOSH_HOME")
-            .env_remove("SWOOSH_KEY");
+            .env_remove("SWOOSH_HOME");
         let output = run_binary_with_deadline(&mut command, Duration::from_secs(30));
         assert!(
             output.status.success(),
@@ -2325,7 +2318,6 @@ fn no_self_daemonize() {
         .args(["serve", "--local", "--quiet"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

@@ -458,19 +458,6 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// Error FORWARD if the retired `SWOOSH_KEY` env var is set (Phase 1a errored only the flag, so a stale env
-/// was a silent no-op that could select the wrong identity). A pure function over the presence bit, so the
-/// forward message is unit-tested without touching (and racing on) the process environment.
-fn reject_retired_key_env(present: bool) -> eyre::Result<()> {
-    if present {
-        eyre::bail!(
-            "`SWOOSH_KEY` is gone; use `SWOOSH_HOME` (the node is a directory; the key lives at \
-             `$SWOOSH_HOME/machine/key`)"
-        );
-    }
-    Ok(())
-}
-
 /// Exit as clap does on a usage error of the verb `verb`: `error: <message>`, its usage line, and exit 2.
 /// For a usage error found only once the verb runs, such as stdin that held no link.
 fn usage_error(verb: &str, message: &str) -> ! {
@@ -514,12 +501,6 @@ async fn run() -> eyre::Result<()> {
         .init();
 
     let cli = Cli::parse();
-
-    // The retired `SWOOSH_KEY` env var is a clean break, and a silent no-op is the danger: a stale
-    // `SWOOSH_KEY` in a shell profile would sit ignored while `--home`/`SWOOSH_HOME` (or the default)
-    // quietly selected a DIFFERENT identity. Read directly (no clap field binds it); presence alone is the
-    // error, whatever its value.
-    reject_retired_key_env(std::env::var_os("SWOOSH_KEY").is_some())?;
 
     // No verb given (a bare `swoosh`, even with `SWOOSH_HOME` set): a mistake, so the help goes to stderr
     // with exit 2, as clap's own `arg_required_else_help` does (stdout stays empty, no `error:` line).
@@ -1569,19 +1550,6 @@ mod tests {
             Cli::try_parse_from(["swoosh", "service", "disable", "speed", "--at", &key]).is_err(),
             "`disable` never takes `--at`: you never remotely toggle a peer's service"
         );
-    }
-
-    /// The retired `SWOOSH_KEY` env var errors FORWARD (naming `SWOOSH_HOME`), never a silent no-op.
-    #[test]
-    fn a_set_swoosh_key_env_errors_forward() {
-        let error = reject_retired_key_env(true).expect_err("a set SWOOSH_KEY is an error");
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("SWOOSH_KEY") && message.contains("SWOOSH_HOME"),
-            "the error names the retired var and its replacement: {message}"
-        );
-        // An unset env is the ordinary path: no error.
-        assert!(reject_retired_key_env(false).is_ok());
     }
 
     /// A synthetic callsite backing the probe metadata below. The filter's static target directives

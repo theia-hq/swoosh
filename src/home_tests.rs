@@ -407,3 +407,22 @@ fn a_key_file_is_loose_when_others_can_read_or_write_it() {
         );
     }
 }
+
+/// A `--home` that names the key file is refused, and the line names no directory to pass instead: the
+/// key's own directory is not the home, and a home there would make a second key.
+#[test]
+fn a_home_that_is_the_key_file_names_no_directory_to_pass() {
+    let home = std::env::temp_dir().join(format!("swoosh-home-file-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(home.join("machine")).unwrap();
+    let key = home.join("machine").join("key");
+    std::fs::write(&key, b"a key").unwrap();
+
+    let error = super::Home::resolve(Some(key.clone())).expect_err("a file is not a home");
+    assert_eq!(
+        format!("{error:#}"),
+        format!("--home wants a directory, not a file: {}", key.display()),
+        "only the file is named"
+    );
+    std::fs::remove_dir_all(&home).unwrap();
+}

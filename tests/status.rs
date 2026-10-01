@@ -55,7 +55,6 @@ fn swoosh(home: &PathBuf, args: &[&str]) -> Output {
         .arg(home)
         .args(args)
         .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY")
         .stdin(Stdio::null());
     // SAFETY: `setsid` is async-signal-safe and touches only the child's own session.
     unsafe {

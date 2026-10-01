@@ -51,8 +51,8 @@ enum Selection {
 impl Home {
     /// Resolve the home from the optional `--home`/`SWOOSH_HOME` selection: the named dir when given, else
     /// the platform default (`default_dir`). Fallible only in the default case (it reads `HOME`), and it rejects
-    /// an explicit home that names an existing FILE with a teaching error (the home is a directory; the key
-    /// lives INSIDE it at `key`), the inverse of the old point-at-a-file mistake.
+    /// an explicit home that names an existing FILE (the home is a directory; the key lives inside it at
+    /// `machine/key`).
     pub fn resolve(selected: Option<PathBuf>) -> eyre::Result<Self> {
         match selected {
             Some(dir) => {
@@ -143,7 +143,7 @@ impl Home {
     }
 
     /// `<home>/invited-by`: the key of the machine whose invite this machine joined, the first device a
-    /// sync asks. Removed once a sync lands.
+    /// sync asks. Removed once a sync lands a list of the devices.
     pub fn invited_by(&self) -> PathBuf {
         self.dir.join("invited-by")
     }
@@ -792,18 +792,15 @@ pub fn loose_in(error: &std::io::Error) -> Option<Loose> {
         .map(|loose| loose.why)
 }
 
-/// Reject a `--home` that names an existing FILE, with a teaching error instead of the confusing
-/// `Not a directory` the first file IO under it would surface. A home is a DIRECTORY (the key lives inside
-/// it at `machine/key`); pointing it at a file is the inverse of the old point-at-a-key-file mistake, so
-/// name the fix. A no-op for a not-yet-created home (a fresh install creates the dir); it only fires on an
-/// existing file.
+/// Reject a `--home` that names an existing FILE, instead of the confusing `Not a directory` the first file
+/// IO under it would surface. The line names no directory to pass instead: the parent of the file named is
+/// not the home when the file is the key at `machine/key`, and a home there would make a second key.
+/// A no-op for a not-yet-created home (a fresh install creates the dir); it only fires on an existing file.
 fn reject_home_file(dir: &Path) -> eyre::Result<()> {
     if dir.is_file() {
         return Err(eyre!(
-            "--home wants a directory, not a file: {file}. The key lives inside the home at \
-             {file}/machine/key; pass the directory, e.g. {parent}",
-            file = EscapedPath(dir),
-            parent = EscapedPath(dir.parent().unwrap_or(dir)),
+            "--home wants a directory, not a file: {}",
+            EscapedPath(dir)
         ));
     }
     Ok(())
