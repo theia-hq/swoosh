@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use nauthy::{STAT_DEBOUNCE, Service};
 use tightbeam::enabled::EnabledServices as _;
 
-use super::{ServeToml, ServicesOff};
+use super::{LiveServeToml, ServeToml};
 use crate::home::Home;
 
 /// A scratch home, removed on drop.
@@ -59,7 +59,7 @@ fn past_the_debounce() {
 #[test]
 fn the_disabled_watcher_sees_a_same_length_rename() {
     let scratch = Scratch::new("same-length");
-    let off = ServicesOff::load(&scratch.home).expect("load");
+    let off = LiveServeToml::load(&scratch.home).expect("load");
     scratch.only_off("ping");
     past_the_debounce();
     assert!(!off.is_enabled(&service("ping")), "ping is off");
@@ -86,8 +86,8 @@ fn the_disabled_watcher_sees_a_same_length_rename() {
 fn a_missing_or_damaged_serve_toml_keeps_the_set_read_last() {
     let scratch = Scratch::new("kept");
     scratch.only_off("ping");
-    let off = ServicesOff::load(&scratch.home).expect("load");
-    assert_eq!(off.names(), ["ping"]);
+    let off = LiveServeToml::load(&scratch.home).expect("load");
+    assert_eq!(off.off(), ["ping"]);
 
     std::fs::remove_file(scratch.home.serve_toml()).unwrap();
     past_the_debounce();
@@ -95,7 +95,7 @@ fn a_missing_or_damaged_serve_toml_keeps_the_set_read_last() {
 
     std::fs::write(scratch.home.serve_toml(), "off = 3\n").unwrap();
     past_the_debounce();
-    assert_eq!(off.names(), ["ping"], "still off once damaged");
+    assert_eq!(off.off(), ["ping"], "still off once damaged");
 }
 
 /// A file swoosh did not write is damaged: a key it does not know, a field of the wrong type, or a service

@@ -942,6 +942,11 @@ async fn status_prints_every_state_verbatim() {
 
     let missing = "this machine's key is not in this home, because system backups leave it out.";
     let kept = format!("{missing} A root kept on this machine stays. To start over: swoosh leave");
+    // A torn `root.key` names no command: `leave` keeps the root, so it would print the same line again.
+    let torn =
+        "this machine's records disagree (root.key is not a readable root key); swoosh cannot \
+                tell which root it trusts"
+            .to_owned();
     let restored: [(&str, &[String]); 4] = [
         (
             "restored",
@@ -952,9 +957,9 @@ async fn status_prints_every_state_verbatim() {
         ),
         (
             "restored keeper",
-            &[kept.clone(), "then: swoosh invite <name> <key>".to_owned()],
+            &[kept, "then: swoosh invite <name> <key>".to_owned()],
         ),
-        ("keyless torn root", &[kept]),
+        ("keyless torn root", core::slice::from_ref(&torn)),
         (
             "left keeper",
             &[
@@ -1044,7 +1049,7 @@ async fn status_prints_every_state_verbatim() {
             &["a revoked root is still on this machine; swoosh does not use it".to_owned()],
         ),
         ("damaged", &[disagree("root.pub is not one root key")]),
-        ("torn root", &[disagree("root.key is not a readable root key")]),
+        ("torn root", &[torn]),
         (
             "another root",
             &[disagree(&format!(

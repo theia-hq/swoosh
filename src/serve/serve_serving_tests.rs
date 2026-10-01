@@ -5,6 +5,12 @@ use std::path::{Path, PathBuf};
 
 use super::{ServingError, Started};
 use crate::home::Home;
+use crate::serve_toml::ServeToml;
+
+/// What `home`'s `serve.toml` holds, as a `serve`'s watcher reads it when it claims the home.
+fn kept(home: &Home) -> ServeToml {
+    ServeToml::read(home).expect("read serve.toml")
+}
 
 /// A scratch home, removed on drop.
 struct Scratch(PathBuf);
@@ -40,7 +46,8 @@ fn named(entries: &[&str]) -> Vec<String> {
 fn first_bare_serve_serves_the_default() {
     let scratch = Scratch::new("default");
     let home = scratch.home();
-    let started = Started::of(&[], &home, Path::new("/")).expect("a fresh home starts");
+    let started =
+        Started::of(&[], &kept(&home), &home, Path::new("/")).expect("a fresh home starts");
     assert_eq!(started, Started::Default);
     assert_eq!(started.entries(), ["ping=ping:", "speed=speed:"]);
     assert!(!started.is_resumed(), "the default is not a resume");
@@ -59,13 +66,19 @@ fn first_bare_serve_serves_the_default() {
 fn a_named_list_is_what_the_next_bare_serve_resumes() {
     let scratch = Scratch::new("resume");
     let home = scratch.home();
-    let started = Started::of(&named(&["ssh", "ping"]), &home, Path::new("/")).expect("named");
+    let started = Started::of(
+        &named(&["ssh", "ping"]),
+        &kept(&home),
+        &home,
+        Path::new("/"),
+    )
+    .expect("named");
     crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
         started.record(file);
     })
     .expect("recorded");
 
-    let resumed = Started::of(&[], &home, Path::new("/")).expect("resumed");
+    let resumed = Started::of(&[], &kept(&home), &home, Path::new("/")).expect("resumed");
     assert_eq!(resumed.entries(), ["ssh=sshd:", "ping=ping:"]);
     assert!(
         resumed.is_resumed(),
@@ -85,7 +98,7 @@ fn resumed_list_is_parsed_as_services_never_flags() {
             format!("services = [\"ssh=sshd:\", \"{line}\"]\n"),
         )
         .expect("a planted list");
-        let refused = Started::of(&[], &home, Path::new("/"));
+        let refused = Started::of(&[], &kept(&home), &home, Path::new("/"));
         let Err(error @ ServingError::NotAService { .. }) = refused else {
             panic!("a `{line}` line must refuse, not serve: {refused:?}");
         };
@@ -120,6 +133,7 @@ fn resumed_paths_are_absolute() {
             "raw=stdin:",
             "web=tcp:127.0.0.1:8080",
         ]),
+        &kept(&home),
         &home,
         cwd,
     )
@@ -158,7 +172,7 @@ fn a_path_with_a_newline_is_refused_not_recorded() {
         ("inbox=recv:dl\nssh=sshd:", "/work"),
         ("logs=file:app.log ", "/work"),
     ] {
-        let refused = Started::of(&[typed.to_owned()], &home, Path::new(cwd));
+        let refused = Started::of(&[typed.to_owned()], &kept(&home), &home, Path::new(cwd));
         let Err(error @ ServingError::CannotSave { .. }) = refused else {
             panic!("{typed:?} under {cwd:?} must refuse, not be saved: {refused:?}");
         };
@@ -178,7 +192,7 @@ fn a_cwd_that_is_not_utf8_is_refused_not_recorded() {
     let scratch = Scratch::new("utf8");
     let home = scratch.home();
     let cwd = Path::new(std::ffi::OsStr::from_bytes(b"/work/\xff"));
-    let refused = Started::of(&["inbox=recv:.".to_owned()], &home, cwd);
+    let refused = Started::of(&["inbox=recv:.".to_owned()], &kept(&home), &home, cwd);
     assert!(
         matches!(refused, Err(ServingError::CannotSave { .. })),
         "{refused:?}"
@@ -192,7 +206,8 @@ fn the_record_is_owner_only() {
 
     let scratch = Scratch::new("mode");
     let home = scratch.home();
-    let started = Started::of(&named(&["ping"]), &home, Path::new("/")).expect("named");
+    let started =
+        Started::of(&named(&["ping"]), &kept(&home), &home, Path::new("/")).expect("named");
     crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
         started.record(file);
     })

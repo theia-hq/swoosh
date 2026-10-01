@@ -221,13 +221,18 @@ pub const UNFINISHED_LEAVE: &str = "leaving did not finish; to finish it: swoosh
 
 /// The line for a home whose records disagree: `status`'s, and the refusal of every verb that needs to
 /// know which root this machine trusts. The shapes a stopped `join` (a first join or a switch) or a stopped
-/// `leave` leaves name the verb that finishes them; every other names `leave`, which starts over.
+/// `leave` leaves name the verb that finishes them. A `root.key` that cannot be read names no command:
+/// `leave` keeps a root kept here, so it would leave the same line behind, and no verb can tell a torn
+/// root key from one to throw away. Every other names `leave`, which starts over.
 pub fn damaged_line(what: &Disagreement) -> String {
     match what {
         Disagreement::StandingWithoutPin { .. } | Disagreement::StandingFromAnotherRoot { .. } => {
             UNFINISHED_JOIN.to_owned()
         }
         Disagreement::PinWithoutStanding { .. } => UNFINISHED_LEAVE.to_owned(),
+        what @ Disagreement::UnreadableRoot { .. } => format!(
+            "this machine's records disagree ({what}); swoosh cannot tell which root it trusts"
+        ),
         what => format!(
             "this machine's records disagree ({what}): swoosh cannot tell which root it trusts. A root \
              kept on this machine stays. To start over: swoosh leave"

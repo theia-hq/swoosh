@@ -109,8 +109,13 @@ async fn serve_toml_holds_services_off_relay_and_resolver() {
 
     let home = temp_home("one-file");
     let read = || ServeToml::read(&home).expect("read serve.toml");
-    let started =
-        Started::of(&["ssh=sshd:".to_owned()], &home, std::path::Path::new("/")).expect("named");
+    let started = Started::of(
+        &["ssh=sshd:".to_owned()],
+        &read(),
+        &home,
+        std::path::Path::new("/"),
+    )
+    .expect("named");
     update(&home, |file| started.record(file)).await;
     assert_eq!(read().services, ["ssh=sshd:"]);
 

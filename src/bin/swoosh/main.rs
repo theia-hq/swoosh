@@ -357,6 +357,15 @@ impl Outward {
         }
     }
 
+    /// `<home>/serve.toml` as a claimed `serve` reads it, through its one watcher; `None` for every other
+    /// verb, which reads the file itself.
+    fn serve_toml(&self) -> Option<&swoosh::serve_toml::LiveServeToml> {
+        match self {
+            Self::Serve(cmd) => cmd.serve_toml(),
+            _ => None,
+        }
+    }
+
     /// Attach the resolved [`serve::ExposeContext`] to the `serve` verb (a no-op for every other verb, which
     /// carries no expose context), so `serve` reads its OWN context at run time. Called once in the root
     /// after the context is cut (while the secret is still live), before dispatch. This is why the reach
@@ -427,10 +436,6 @@ impl Outward {
                     host_seed: [0u8; 32],
                     gate,
                     cut,
-                    // The live enable/disable oracle: the running exposer consults it per stream, so a
-                    // `service disable`/`enable` written to `<home>/serve.toml` is honored with no
-                    // restart. Loaded here beside the gate because both are home files it reads.
-                    enabled: swoosh::serve_toml::ServicesOff::load(home)?,
                     // The SAME home the root resolved once, so the serve and its control clients name
                     // the same paths.
                     home: home.clone(),
@@ -645,7 +650,12 @@ async fn run() -> eyre::Result<()> {
             Some(_unused) => transport::Reach::default(),
             // A serving verb keeps the two servers it was pointed at in the home once its routes bind
             // (`serve`'s own write); a dialing verb's flag is this run only. Nothing is written here.
-            None => reach.reach_args().reach(&home).await?,
+            // A `serve` binds over what its one watcher of `serve.toml` read when it claimed the home, so
+            // the bind and the gate never hold the file as read at two moments.
+            None => match reach.serve_toml() {
+                Some(kept) => reach.reach_args().reach_over(&kept.held()),
+                None => reach.reach_args().reach(&home).await?,
+            },
         },
     };
     // Reject a redundant `--present` alongside a self-addressing `swoosh:` link peer ONCE here, before any

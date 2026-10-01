@@ -1,14 +1,17 @@
 //! `<home>/serve.toml`: what `serve` runs. One file holds the services a bare `serve` resumes, the
-//! services turned off, the relay this machine offers and the resolver it publishes to.
+//! services turned off, the relay this machine is reached through and the resolver it publishes to.
 //!
 //! Every writer changes it under `home.lock`, re-reading it first and keeping the fields it does not set:
 //! a `serve` that names its services (once its routes bind), `service on|off`, and `serve --relay` or
 //! `--resolver`. A person is not meant to open it.
 //!
-//! A running `serve` reads which services are off through one [`ServicesOff`], live: its gate refuses a
-//! service turned off and serves one turned back on, with no restart, and its status reports the same set
-//! the gate refuses. A file that goes missing or cannot be read keeps the set read last, so deleting the
-//! file never turns a service back on.
+//! A running `serve` reads the file through one [`LiveServeToml`], from its start to its end: the services
+//! it starts with, the relay and the resolver it binds over, and the services off all come from that one
+//! watcher's first read, and every later read is that watcher's too, so no two parts of a `serve` ever
+//! hold the file as read at two different moments. Its gate refuses a service turned off and serves one
+//! turned back on, with no restart, and its status reports the same set the gate refuses. A file that
+//! goes missing or cannot be read keeps everything read last, so deleting the file never turns a service
+//! back on.
 
 use std::collections::BTreeSet;
 use std::io::{self, Read as _};
@@ -44,7 +47,7 @@ pub struct ServeToml {
     pub services: Vec<String>,
     /// The services turned off.
     pub off: BTreeSet<String>,
-    /// The relay this machine offers, as `serve --relay` gave it.
+    /// The relay this machine is reached through, as `serve --relay` gave it.
     pub relay: Option<RelayUrl>,
     /// The resolver this machine publishes to and looks devices up through, as `serve --resolver` gave it.
     pub resolver: Option<ResolverUrl>,
@@ -246,49 +249,51 @@ fn read_stamped(path: &Path) -> Result<(ServeToml, Option<FileStamp>), ServeToml
     Ok((read, stamp))
 }
 
-/// The services turned off in `<home>/serve.toml`, read live: the [`EnabledServices`] a running `serve`'s
-/// gate asks on every stream, and the set its status reports. Cloning shares one instance, so the gate and
-/// the status never disagree about a file they each read at a different moment.
+/// `<home>/serve.toml`, read live: the one watcher a running `serve` reads the file through. It holds the
+/// whole file. The gate asks it on every stream which services are off (it is the [`EnabledServices`]
+/// the exposer consults), the status reports the same set, and the run's start takes its services, relay
+/// and resolver from its first read. Cloning shares one instance, so no two readers ever disagree about a
+/// file they each read at a different moment.
 ///
 /// It re-stats the file at most once per [`STAT_DEBOUNCE`] and re-reads it when its [`FileStamp`] (mtime,
 /// length, inode and ctime) changed, so a same-length rewrite renamed into place is seen. A file that goes
-/// missing, cannot be read, or is damaged keeps the set read last.
+/// missing, cannot be read, or is damaged keeps everything read last.
 #[derive(Clone)]
-pub struct ServicesOff {
+pub struct LiveServeToml {
     shared: Arc<Watched>,
 }
 
-/// The file a [`ServicesOff`] reads, and what it read last.
+/// The file a [`LiveServeToml`] reads, and what it read last.
 struct Watched {
     path: PathBuf,
-    state: Mutex<OffState>,
+    state: Mutex<Held>,
 }
 
-/// What a [`ServicesOff`] read last.
-struct OffState {
-    /// The services off, as the last good read found them.
-    off: BTreeSet<String>,
+/// What a [`LiveServeToml`] read last.
+struct Held {
+    /// The file, as the last good read found it.
+    file: ServeToml,
     /// The stamp of the file that read came from; `None` re-reads at the next stat.
     stamp: Option<FileStamp>,
     /// When the file was last statted, to debounce the next stat.
     last_stat: Option<Instant>,
 }
 
-impl ServicesOff {
-    /// Read the services off in `home`'s `serve.toml` now.
+impl LiveServeToml {
+    /// Read `home`'s `serve.toml` now.
     ///
     /// # Errors
     ///
     /// [`ServeTomlError`] when the file cannot be read, is loose, or is damaged: a `serve` does not start
-    /// on a set it cannot read.
+    /// on a file it cannot read.
     pub fn load(home: &Home) -> Result<Self, ServeTomlError> {
         let path = home.serve_toml();
-        let (read, stamp) = read_stamped(&path)?;
+        let (file, stamp) = read_stamped(&path)?;
         Ok(Self {
             shared: Arc::new(Watched {
                 path,
-                state: Mutex::new(OffState {
-                    off: read.off,
+                state: Mutex::new(Held {
+                    file,
                     stamp,
                     last_stat: Some(Instant::now()),
                 }),
@@ -296,13 +301,18 @@ impl ServicesOff {
         })
     }
 
+    /// The file as held now, re-read first when it changed.
+    pub fn held(&self) -> ServeToml {
+        self.refreshed().file.clone()
+    }
+
     /// The services off now, sorted.
-    pub fn names(&self) -> Vec<String> {
-        self.refreshed().off.iter().cloned().collect()
+    pub fn off(&self) -> Vec<String> {
+        self.refreshed().file.off.iter().cloned().collect()
     }
 
     /// The held state, re-read first when the file changed.
-    fn refreshed(&self) -> MutexGuard<'_, OffState> {
+    fn refreshed(&self) -> MutexGuard<'_, Held> {
         let mut state = self
             .shared
             .state
@@ -312,9 +322,9 @@ impl ServicesOff {
         state
     }
 
-    /// Re-read the file when its stamp changed, at most once per [`STAT_DEBOUNCE`]. Every failure keeps the
-    /// set: a missing file, a failed stat or read, and a damaged file.
-    fn refresh(&self, state: &mut OffState) {
+    /// Re-read the file when its stamp changed, at most once per [`STAT_DEBOUNCE`]. Every failure keeps
+    /// what was held: a missing file, a failed stat or read, and a damaged file.
+    fn refresh(&self, state: &mut Held) {
         if state
             .last_stat
             .is_some_and(|last| last.elapsed() < STAT_DEBOUNCE)
@@ -330,22 +340,22 @@ impl ServicesOff {
             return;
         }
         match read_stamped(path) {
-            Ok((read, stamp)) => {
-                state.off = read.off;
+            Ok((file, stamp)) => {
+                state.file = file;
                 state.stamp = stamp;
             }
             Err(error) => tracing::warn!(
                 path = %EscapedPath(path),
                 %error,
-                "keeping the services off already read"
+                "keeping what serve.toml held when it was last read"
             ),
         }
     }
 }
 
-impl EnabledServices for ServicesOff {
+impl EnabledServices for LiveServeToml {
     fn is_enabled(&self, service: &Service) -> bool {
-        !self.refreshed().off.contains(service.as_str())
+        !self.refreshed().file.off.contains(service.as_str())
     }
 }
 

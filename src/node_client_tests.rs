@@ -41,7 +41,7 @@ fn test_resident(cancel: CancellationToken, home: &Path) -> Resident {
         NodeId::from_ed25519_secret(&[9u8; 32]),
         None,
         empty_catalog(),
-        crate::serve_toml::ServicesOff::load(&home).expect("the services off load"),
+        crate::serve_toml::LiveServeToml::load(&home).expect("the services off load"),
         cancel,
     )
 }

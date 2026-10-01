@@ -17,7 +17,7 @@ use tokio::sync::Semaphore;
 
 use super::control::{ControlError, DisabledList, Request, Response, ServiceMenu, StatusReply};
 use crate::node_client::{NodeClient, euid, real_peer_uid};
-use crate::serve_toml::ServicesOff;
+use crate::serve_toml::LiveServeToml;
 
 /// Seconds a control connection may sit idle before it is reaped (the slow-loris bound).
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -35,7 +35,7 @@ pub const DISABLED_NAMES_CAP: usize = 1024;
 pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
 /// The resident state the accept loop serves from. Built once at `serve` start; every query reads
-/// the services off through the gate's own [`ServicesOff`], so the status and the gate never
+/// the services off through the gate's own [`LiveServeToml`], so the status and the gate never
 /// disagree, and the socket is never a data channel into the gate.
 pub struct Resident {
     /// The resident's pid, reported in the status reply.
@@ -49,7 +49,7 @@ pub struct Resident {
     /// The served catalog snapshot (the same snapshot `run_serve` cuts for `control.services`).
     catalog: ServiceCatalog,
     /// The services off, read live: the same instance the gate asks per stream.
-    off: ServicesOff,
+    off: LiveServeToml,
     /// A CLONE of the node's teardown token: firing it REQUESTS the stop; the exposer acts on it.
     cancel: CancellationToken,
     /// How the node stopped, once a path fires the token (ctrl-c, expires, wire stop, socket stop).
@@ -66,7 +66,7 @@ impl Resident {
         node_id: NodeId,
         addr: Option<SocketAddr>,
         catalog: ServiceCatalog,
-        off: ServicesOff,
+        off: LiveServeToml,
         cancel: CancellationToken,
     ) -> Self {
         Self {
@@ -143,7 +143,7 @@ impl Resident {
     /// always decodes. A file that went missing or cannot be read reports the set read last, as the gate
     /// refuses it.
     pub fn disabled_names(&self) -> DisabledList {
-        let mut names = self.off.names();
+        let mut names = self.off.off();
         names.truncate(DISABLED_NAMES_CAP);
         DisabledList::Known(names)
     }

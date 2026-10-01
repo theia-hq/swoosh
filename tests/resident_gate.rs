@@ -17,7 +17,7 @@ use bifrost_mem::MemTransport;
 use nauthy::{Cap, Revocation};
 use swoosh::home::{Home, HomeWrite};
 use swoosh::serve::{Resident, ServiceList};
-use swoosh::serve_toml::{ServeToml, ServicesOff};
+use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::testkit::TestRoot;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router, ServiceCatalog};
 
@@ -53,7 +53,7 @@ const GATED: &str = "files";
 /// The exposer a resident serves from: one gated read under the service name [`GATED`], the enabled
 /// oracle `off` on `<home>/serve.toml`, and the revocations in `<home>/revoked`. Built through the same `resolve_gate` +
 /// handler the product path injects.
-fn build_exposer(home: &Home, enabled: ServicesOff) -> Exposer {
+fn build_exposer(home: &Home, enabled: LiveServeToml) -> Exposer {
     let signet = TestRoot::seeded(SIGNET).node_id();
     let denylist = swoosh::revoked::open(home).expect("the revocations load");
     let gate = tunnel::resolve_gate(Some(signet), denylist).expect("the family gate resolves");
@@ -90,7 +90,7 @@ async fn reach(host: NodeId, member: &Node<MemTransport, NoDiscovery>, badge: &s
 /// the test can assert its `served()` counter never moves: if a disable or a revoke reached the gate
 /// through the socket, this is the counter that would climb.
 fn running_resident(
-    off: ServicesOff,
+    off: LiveServeToml,
     base: &Path,
     cancel: &CancellationToken,
 ) -> (Arc<Resident>, std::os::unix::net::UnixListener) {
@@ -130,7 +130,7 @@ async fn service_disable_is_file_only_with_the_daemon_running() {
         .run_until(async {
             let scratch = Scratch::new("disable");
             let cancel = CancellationToken::new();
-            let off = ServicesOff::load(&scratch.home).expect("the services off load");
+            let off = LiveServeToml::load(&scratch.home).expect("the services off load");
             let (resident, control) = running_resident(off.clone(), &scratch.base, &cancel);
             let control_task = tokio::task::spawn_local({
                 let resident = Arc::clone(&resident);
@@ -201,7 +201,7 @@ async fn revoke_while_resident_refuses_next_stream() {
         .run_until(async {
             let scratch = Scratch::new("revoke");
             let cancel = CancellationToken::new();
-            let off = ServicesOff::load(&scratch.home).expect("the services off load");
+            let off = LiveServeToml::load(&scratch.home).expect("the services off load");
             let (resident, control) = running_resident(off.clone(), &scratch.base, &cancel);
             let control_task = tokio::task::spawn_local({
                 let resident = Arc::clone(&resident);
@@ -276,7 +276,7 @@ async fn a_deleted_serve_toml_keeps_the_disabled_set_in_gate_and_status() {
         .run_until(async {
             let scratch = Scratch::new("deleted");
             let cancel = CancellationToken::new();
-            let off = ServicesOff::load(&scratch.home).expect("the services off load");
+            let off = LiveServeToml::load(&scratch.home).expect("the services off load");
             let (resident, _control) = running_resident(off.clone(), &scratch.base, &cancel);
 
             let host = Node::new(MemTransport::bind(), NoDiscovery);
@@ -315,6 +315,177 @@ async fn a_deleted_serve_toml_keeps_the_disabled_set_in_gate_and_status() {
                 DisabledList::Known(vec![GATED.to_owned()]),
                 "and the status still reports it off"
             );
+
+            cancel.cancel();
+            run.await
+                .expect("the exposer task joins")
+                .expect("the exposer ends Ok");
+        })
+        .await;
+}
+
+/// A `serve.toml` that cannot be read while `serve` runs changes nothing the run holds: damaged, loose
+/// (others can write it) or unreadable, the gate still refuses the service turned off, the status still
+/// reports it, and the run's one watcher still holds the services, the relay and the resolver it read.
+#[tokio::test]
+async fn a_read_error_keeps_the_held_settings() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use swoosh::node_client::NodeClient as _;
+    use swoosh::serve::control_codec::DisabledList;
+
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let scratch = Scratch::new("read-error");
+            let home_lock = HomeWrite::take(&scratch.home)
+                .await
+                .expect("take home.lock");
+            ServeToml::update(&home_lock, &scratch.home, |file| {
+                file.services = vec![format!("{GATED}=echo:")];
+                file.off.insert(GATED.to_owned());
+                file.relay = Some("https://relay.example".parse().expect("a relay"));
+                file.resolver = Some("https://dns.example/pkarr".parse().expect("a resolver"));
+            })
+            .expect("write serve.toml");
+            drop(home_lock);
+            let held = ServeToml::read(&scratch.home).expect("read serve.toml");
+
+            let cancel = CancellationToken::new();
+            let watch = LiveServeToml::load(&scratch.home).expect("serve.toml loads");
+            let (resident, _control) = running_resident(watch.clone(), &scratch.base, &cancel);
+            let host = Node::new(MemTransport::bind(), NoDiscovery);
+            let host_id = host.node_id();
+            let exposer = build_exposer(&scratch.home, watch.clone());
+            let run = tokio::task::spawn_local({
+                let cancel = cancel.clone();
+                async move { exposer.run(&host, cancel).await }
+            });
+            let member = Node::new(MemTransport::bind(), NoDiscovery);
+            let badge = signet_badge(member.node_id());
+            let reported = || async {
+                resident
+                    .services()
+                    .await
+                    .expect("the resident answers")
+                    .disabled
+            };
+
+            let path = scratch.home.serve_toml();
+            // Each spoils the file in a way the next read refuses; the text it holds would turn the
+            // service back on and drop the relay, the resolver and the services if it were read.
+            let mode =
+                |bits| std::fs::set_permissions(&path, std::fs::Permissions::from_mode(bits));
+            for spoiled in ["damaged", "loose", "unreadable"] {
+                match spoiled {
+                    "damaged" => std::fs::write(&path, "off = 3\n").expect("damage it"),
+                    "loose" => {
+                        std::fs::write(&path, "").expect("empty it");
+                        mode(0o666).expect("loosen it");
+                    }
+                    _ => mode(0o000).expect("make it unreadable"),
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                assert!(
+                    !reach(host_id, &member, &badge).await,
+                    "{spoiled}: the gate still refuses the service"
+                );
+                assert_eq!(
+                    reported().await,
+                    DisabledList::Known(vec![GATED.to_owned()]),
+                    "{spoiled}: the status still reports it off"
+                );
+                assert_eq!(watch.held(), held, "{spoiled}: every setting is kept");
+            }
+
+            cancel.cancel();
+            run.await
+                .expect("the exposer task joins")
+                .expect("the exposer ends Ok");
+        })
+        .await;
+}
+
+/// Guard: a `revoked` made shorter while `serve` runs never un-revokes live. Two members revoked at their
+/// roots are refused by the gate `serve` builds; the file loses a line, and both are still refused, because
+/// the running store only ever adds what it reads.
+#[tokio::test]
+async fn a_shorter_revoked_never_unrevokes_live() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let scratch = Scratch::new("shorter");
+            swoosh::config::write_signet(
+                &swoosh::testkit::lock(),
+                &scratch.home,
+                TestRoot::seeded(SIGNET).node_id(),
+            )
+            .expect("pin the root");
+            let own = NodeId::from_ed25519_secret(&[3u8; 32]);
+            let (gate, cut) = swoosh::gate::anchored(&scratch.home, own)
+                .await
+                .expect("the gate serve builds");
+            let exposer = Router::new(gate)
+                .service(
+                    GATED.parse().expect("a name"),
+                    ServiceList::new(
+                        ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog"),
+                    ),
+                )
+                .expect("the gated route binds")
+                .expose()
+                .expect("the exposer assembles")
+                .with_live_cuts(cut);
+            let cancel = CancellationToken::new();
+            let host = Node::new(MemTransport::bind(), NoDiscovery);
+            let host_id = host.node_id();
+            let run = tokio::task::spawn_local({
+                let cancel = cancel.clone();
+                async move { exposer.run(&host, cancel).await }
+            });
+
+            let members: Vec<_> = (0..2)
+                .map(|_| {
+                    let member = Node::new(MemTransport::bind(), NoDiscovery);
+                    let badge = signet_badge(member.node_id());
+                    (member, badge)
+                })
+                .collect();
+            for (member, badge) in &members {
+                assert!(reach(host_id, member, badge).await, "a member admits");
+            }
+            let home_lock = HomeWrite::take(&scratch.home)
+                .await
+                .expect("take home.lock");
+            swoosh::revoked::add(
+                &home_lock,
+                &scratch.home,
+                members.iter().flat_map(|(_, badge)| {
+                    Cap::parse(badge)
+                        .expect("the badge parses")
+                        .root_revocation_id()
+                        .map(Revocation::Id)
+                }),
+            )
+            .expect("revoke both");
+            drop(home_lock);
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            for (member, badge) in &members {
+                assert!(!reach(host_id, member, badge).await, "a revoked member");
+            }
+
+            let path = scratch.home.revoked();
+            let text = std::fs::read_to_string(&path).expect("read revoked");
+            assert_eq!(text.lines().count(), 2, "{text}");
+            let first = text.lines().next().expect("a line");
+            std::fs::write(&path, format!("{first}\n")).expect("shorten revoked");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            for (member, badge) in &members {
+                assert!(
+                    !reach(host_id, member, badge).await,
+                    "still refused once the file lost its line"
+                );
+            }
 
             cancel.cancel();
             run.await

@@ -347,6 +347,39 @@ async fn leave_on_a_damaged_home_removes_the_standing_and_the_pin_and_keeps_the_
     );
 }
 
+/// A torn `root.key` is not mended by `leave`, which keeps a root kept here: once a device leaves, `status`
+/// still reads the home as damaged, and its line names no command, so it never sends the person round to
+/// `leave` again.
+#[tokio::test]
+async fn after_leave_a_torn_root_key_names_no_command() {
+    let home = scratch("torn-root");
+    device(&home, now() + 90 * DAY).await;
+    std::fs::write(home.root_key(), b"not a key").unwrap();
+    let ran = leave(&home, &[]).await;
+    ran.left();
+    assert!(home.root_key().exists(), "the torn root stays");
+
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    crate::commands::status::report::run_to(
+        &home,
+        crate::commands::status::report::Print::Report,
+        &mut out,
+        &mut err,
+    )
+    .await
+    .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert_eq!(
+        out.lines().last(),
+        Some(
+            "this machine's records disagree (root.key is not a readable root key); swoosh cannot \
+             tell which root it trusts"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("swoosh leave"), "{out}");
+}
+
 #[tokio::test]
 async fn leave_new_key_on_an_unpinned_home_replaces_the_key() {
     let home = scratch("new-key-unpinned");

@@ -123,7 +123,7 @@ impl Home {
     }
 
     /// `<home>/serve.toml`: what `serve` runs. The services a bare `serve` resumes, the ones turned off, the
-    /// relay this machine offers and the resolver it publishes to, each written under
+    /// relay this machine is reached through and the resolver it publishes to, each written under
     /// [`home_lock`](Self::home_lock) by the command that sets it. Not meant to be opened by a person.
     pub fn serve_toml(&self) -> PathBuf {
         self.dir.join("serve.toml")

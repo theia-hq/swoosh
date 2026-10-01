@@ -142,12 +142,13 @@ impl Known {
             .unwrap_or_default()
     }
 
-    /// The stamps of every file this home's standing and its update are read from.
+    /// The stamps of every file this home's standing and its update are read from, but this machine's key:
+    /// a running `serve` holds `serve.lock`, so no verb gives this machine a new key while it runs, and
+    /// `lock` rewrites the file with the same key in it.
     async fn seen(&self) -> Vec<Seen> {
         let home = &self.home;
         let mut seen = Vec::new();
         for path in [
-            home.key(),
             home.root_pub(),
             home.key_cert(),
             home.devices(),
