@@ -16,7 +16,7 @@ use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::{Cap, Revocation};
 use swoosh::home::{Home, HomeWrite};
-use swoosh::serve::{CONTROL_SERVICES_SERVICE, Resident, ServiceList};
+use swoosh::serve::{Resident, ServiceList};
 use swoosh::serve_toml::{ServeToml, ServicesOff};
 use swoosh::testkit::TestRoot;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router, ServiceCatalog};
@@ -47,8 +47,11 @@ impl Drop for Scratch {
     }
 }
 
-/// The exposer a resident serves from: one gated `control.services` read, the enabled oracle `off` on
-/// `<home>/serve.toml`, and the revocations in `<home>/revoked`. Built through the same `resolve_gate` +
+/// The service the gate serves and a test turns off: a name as `service off` stores one.
+const GATED: &str = "files";
+
+/// The exposer a resident serves from: one gated read under the service name [`GATED`], the enabled
+/// oracle `off` on `<home>/serve.toml`, and the revocations in `<home>/revoked`. Built through the same `resolve_gate` +
 /// handler the product path injects.
 fn build_exposer(home: &Home, enabled: ServicesOff) -> Exposer {
     let signet = TestRoot::seeded(SIGNET).node_id();
@@ -56,10 +59,10 @@ fn build_exposer(home: &Home, enabled: ServicesOff) -> Exposer {
     let gate = tunnel::resolve_gate(Some(signet), denylist).expect("the family gate resolves");
     Router::new(gate)
         .service(
-            CONTROL_SERVICES_SERVICE.parse().expect("a name"),
+            GATED.parse().expect("a name"),
             ServiceList::new(ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog")),
         )
-        .expect("the control.services route binds")
+        .expect("the gated route binds")
         .expose()
         .expect("the resident exposer assembles")
         .with_enabled(enabled)
@@ -76,11 +79,7 @@ fn signet_badge(bound: NodeId) -> String {
 
 /// Whether a member reaches the gated read over mem: admitted iff the per-stream handshake succeeds.
 async fn reach(host: NodeId, member: &Node<MemTransport, NoDiscovery>, badge: &str) -> bool {
-    let connector = Connector::to_node(
-        host,
-        CONTROL_SERVICES_SERVICE.parse().unwrap(),
-        Some(badge.parse().unwrap()),
-    );
+    let connector = Connector::to_node(host, GATED.parse().unwrap(), Some(badge.parse().unwrap()));
     match connector.open_service(member).await {
         Ok(session) => session.open_bi().await.is_ok(),
         Err(_) => false,
@@ -107,15 +106,15 @@ fn running_resident(
     (resident, control)
 }
 
-/// Turn `control.services` off (`true`) or back on in `home`'s `serve.toml`, through the writer `service
+/// Turn [`GATED`] off (`true`) or back on in `home`'s `serve.toml`, through the writer `service
 /// off|on` uses.
 async fn toggle(home: &Home, off: bool) {
     let home_lock = HomeWrite::take(home).await.expect("take home.lock");
     ServeToml::update(&home_lock, home, |file| {
         if off {
-            file.off.insert(CONTROL_SERVICES_SERVICE.to_owned());
+            file.off.insert(GATED.to_owned());
         } else {
-            file.off.remove(CONTROL_SERVICES_SERVICE);
+            file.off.remove(GATED);
         }
     })
     .expect("write serve.toml");
@@ -302,7 +301,7 @@ async fn a_deleted_serve_toml_keeps_the_disabled_set_in_gate_and_status() {
             assert!(!reach(host_id, &member, &badge).await, "turned off");
             assert_eq!(
                 reported().await,
-                DisabledList::Known(vec![CONTROL_SERVICES_SERVICE.to_owned()])
+                DisabledList::Known(vec![GATED.to_owned()])
             );
 
             std::fs::remove_file(scratch.home.serve_toml()).expect("delete serve.toml");
@@ -313,7 +312,7 @@ async fn a_deleted_serve_toml_keeps_the_disabled_set_in_gate_and_status() {
             );
             assert_eq!(
                 reported().await,
-                DisabledList::Known(vec![CONTROL_SERVICES_SERVICE.to_owned()]),
+                DisabledList::Known(vec![GATED.to_owned()]),
                 "and the status still reports it off"
             );
 

@@ -99,7 +99,7 @@ fn a_missing_or_damaged_serve_toml_keeps_the_set_read_last() {
 }
 
 /// A file swoosh did not write is damaged: a key it does not know, a field of the wrong type, or a service
-/// turned off that is no service name.
+/// turned off that is not a name as swoosh stores one (capitals never match the folded name served).
 #[test]
 fn a_serve_toml_swoosh_did_not_write_is_damaged() {
     let scratch = Scratch::new("damaged");
@@ -107,6 +107,8 @@ fn a_serve_toml_swoosh_did_not_write_is_damaged() {
         "colour = \"blue\"\n",
         "off = \"ping\"\n",
         "off = [\"not a name\"]\n",
+        "off = [\"SSH\"]\n",
+        "off = [\"a.b\"]\n",
         "relay = 3\n",
         "not toml\n",
     ] {

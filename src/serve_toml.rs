@@ -149,8 +149,9 @@ impl ServeToml {
         table.to_string()
     }
 
-    /// Decode the file's `text`, every field parsed here: a service turned off that is not a service name
-    /// is damage, and so is a relay or a resolver that is not a usable URL, named by its key.
+    /// Decode the file's `text`, every field parsed here: a service turned off that is not a name as swoosh
+    /// stores one (folded, so it can match the service served) is damage, and so is a relay or a resolver
+    /// that is not a usable URL, named by its key.
     fn decode(text: &str) -> Result<Self, Undecodable> {
         let damaged = |_| Undecodable::Damaged;
         let table: toml::Table = text.parse().map_err(damaged)?;
@@ -160,7 +161,10 @@ impl ServeToml {
                 SERVICES => read.services = strings(value).ok_or(Undecodable::Damaged)?,
                 OFF => {
                     let off = strings(value).ok_or(Undecodable::Damaged)?;
-                    if off.iter().any(|name| name.parse::<Service>().is_err()) {
+                    if off
+                        .iter()
+                        .any(|name| crate::names::Name::stored(name).is_err())
+                    {
                         return Err(Undecodable::Damaged);
                     }
                     read.off = off.into_iter().collect();
