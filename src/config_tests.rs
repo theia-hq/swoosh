@@ -1,4 +1,4 @@
-//! The store's private posture on disk: a trust file (`signet`, `badge`) written beside the identity is
+//! The store's private posture on disk: a trust file (`root.pub`, `key.cert`) written beside the identity is
 //! created owner-only (`0600`) and the store dir owner-only (`0700`), so a co-tenant local user cannot read
 //! this node's trust graph. The bug this guards: bare `write`/`create_dir_all` left these `0644` in a
 //! likely-`0755` dir whenever the mint-log did not happen to create the dir first.
@@ -59,7 +59,7 @@ async fn a_written_badge_is_owner_only_in_an_owner_only_store() {
         "the store dir is created 0700 (owner-only), not left group/world-traversable"
     );
 
-    let file_mode = std::fs::metadata(home.badge())
+    let file_mode = std::fs::metadata(home.key_cert())
         .expect("stat the badge")
         .permissions()
         .mode();
@@ -81,7 +81,7 @@ async fn a_loosened_trust_file_is_retightened_on_rewrite() {
     super::write_badge(&home, &minted_badge())
         .await
         .expect("first badge write");
-    let badge = home.badge();
+    let badge = home.key_cert();
     // Simulate a file loosened after an earlier write; the next write must reassert 0600.
     std::fs::set_permissions(&badge, std::fs::Permissions::from_mode(0o644))
         .expect("loosen the badge");
@@ -117,7 +117,7 @@ async fn an_absent_or_empty_badge_file_reads_as_none() {
     );
 
     super::create_store_dir(&dir).expect("create the store dir");
-    std::fs::write(home.badge(), "   \n").expect("write a blank badge file");
+    std::fs::write(home.key_cert(), "   \n").expect("write a blank badge file");
     assert!(
         super::load_badge(&home)
             .await
@@ -160,14 +160,14 @@ async fn a_written_badge_reads_back_as_the_same_link() {
 async fn a_corrupt_badge_file_fails_closed_and_names_the_fix() {
     let (home, dir) = store("badge-corrupt");
     super::create_store_dir(&dir).expect("create the store dir");
-    std::fs::write(home.badge(), "not-a-real-link\n").expect("write a corrupt badge file");
+    std::fs::write(home.key_cert(), "not-a-real-link\n").expect("write a corrupt badge file");
 
     let error = super::load_badge(&home)
         .await
         .expect_err("a badge that does not decode must refuse, never be carried as if valid");
     let chain = format!("{error:#}");
     assert!(
-        chain.contains(&home.badge().display().to_string()),
+        chain.contains(&home.key_cert().display().to_string()),
         "the message names the file to fix: {chain}"
     );
     assert!(

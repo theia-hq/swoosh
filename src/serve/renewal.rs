@@ -132,7 +132,7 @@ impl Known {
         };
         crate::standing::pin_key(&self.home, pin)
             .ok()
-            .and_then(|pin| read_held(&self.home.roster(), pin))
+            .and_then(|pin| read_held(&self.home.devices(), pin))
             .map(|(doc, _)| {
                 doc.members()
                     .iter()
@@ -148,9 +148,9 @@ impl Known {
         let mut seen = Vec::new();
         for path in [
             home.key(),
-            home.signet(),
-            home.badge(),
-            home.roster(),
+            home.root_pub(),
+            home.key_cert(),
+            home.devices(),
             home.disabled_roots(),
             home.root(),
             home.root().join("root.key"),

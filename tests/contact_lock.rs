@@ -39,7 +39,6 @@ fn contact(home: &Path, args: &[&str]) -> KillOnDrop {
             .arg("contact")
             .args(args)
             .env_remove("SWOOSH_HOME")
-            .env_remove("SWOOSH_KEY")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

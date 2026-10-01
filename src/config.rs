@@ -26,12 +26,12 @@ use crate::standing::{Disagreement, damaged_line};
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 pub async fn load_signet(home: &Home) -> eyre::Result<Option<NodeId>> {
-    match crate::home::read_trust_file_async(&home.signet()).await {
+    match crate::home::read_trust_file_async(&home.root_pub()).await {
         Ok(text) => text.trim().parse::<NodeId>().map(Some).map_err(|_| {
             eyre::eyre!(
                 "{}",
                 damaged_line(&Disagreement::UnreadablePin {
-                    path: home.signet()
+                    path: home.root_pub()
                 })
             )
         }),
@@ -58,7 +58,7 @@ pub async fn is_disabled(home: &Home, root: NodeId) -> eyre::Result<bool> {
 /// on a body that is not exactly one key, so a truncating write would drop every member for the length
 /// of the write, and the pin is the commit point every write ordered before it relies on.
 pub async fn write_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
-    write_private_atomic(&home.signet(), format!("{signet}\n").as_bytes()).await
+    write_private_atomic(&home.root_pub(), format!("{signet}\n").as_bytes()).await
 }
 
 /// Load this device's stored membership badge: the signet-signed, device-bound link it presents
@@ -72,7 +72,7 @@ pub async fn write_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
-    let path = home.badge();
+    let path = home.key_cert();
     match tokio::fs::read_to_string(&path).await {
         Ok(text) => {
             let badge = text.trim();
@@ -105,7 +105,7 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
 /// Atomic and durable ([`write_private_atomic`]), like the pin it is ordered before: a torn badge reads as
 /// a damaged home.
 pub async fn write_badge(home: &Home, badge: &Link) -> eyre::Result<()> {
-    write_private_atomic(&home.badge(), format!("{badge}\n").as_bytes()).await
+    write_private_atomic(&home.key_cert(), format!("{badge}\n").as_bytes()).await
 }
 
 /// Create swoosh's store directory owner-only (`0700`) on Unix, recursively, if it does not already exist.

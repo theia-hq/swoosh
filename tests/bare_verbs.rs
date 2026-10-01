@@ -91,7 +91,6 @@ fn swoosh(scratch: &Scratch, args: &[&str]) -> std::process::Output {
         .args(args)
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY")
         .output()
         .expect("the swoosh binary runs")
 }
@@ -144,7 +143,6 @@ fn bare_stop_stops_the_resident() {
         .args(["serve", "--local"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -336,7 +334,6 @@ fn serve_removes_its_runtime_leaf_on_exit() {
         .args(["serve", "--local"])
         .env("XDG_RUNTIME_DIR", &scratch.xdg)
         .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

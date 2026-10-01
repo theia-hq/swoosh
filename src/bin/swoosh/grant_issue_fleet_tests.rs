@@ -32,7 +32,7 @@ fn share(service: &str, bind: Option<&str>, delegable: bool) -> share::ShareCmd 
 }
 
 async fn store_at(dir: &std::path::Path) -> ContactsStore {
-    ContactsStore::open(dir.join("contacts.toml"))
+    ContactsStore::open(&Home::resolve(Some(dir.to_path_buf())).unwrap())
         .await
         .unwrap()
 }

@@ -79,7 +79,8 @@ fn a_key_is_never_replaced_under_a_running_serve() {
 
     // Nothing else stops it: the home trusts no root, so without the lock `leave --new-key` would replace
     // the key.
-    let key_before = std::fs::read(home.join("key")).expect("serve made <home>/key");
+    let key_before =
+        std::fs::read(home.join("machine").join("key")).expect("serve made <home>/machine/key");
     let leave = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(&home)
@@ -96,7 +97,7 @@ fn a_key_is_never_replaced_under_a_running_serve() {
     );
     assert!(leave.stdout.is_empty(), "no new key is printed");
     assert_eq!(
-        std::fs::read(home.join("key")).expect("the key is still there"),
+        std::fs::read(home.join("machine").join("key")).expect("the key is still there"),
         key_before,
         "the key serve runs as is unchanged"
     );

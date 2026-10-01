@@ -50,7 +50,7 @@ use crate::standing::Standing;
 /// How long one exchange may take.
 pub const EACH: Duration = Duration::from_secs(5);
 
-/// How old `roster.synced` may be before a dialing verb exchanges on its connection.
+/// How old `synced` may be before a dialing verb exchanges on its connection.
 pub const STALE: Duration = Duration::from_secs(60 * 60);
 
 /// The dialer's one request.
@@ -144,7 +144,7 @@ async fn device_pin(home: &Home) -> Result<Option<VerifyKey>, ExchangeError> {
 
 /// The update this machine holds, its number and its bytes, or none yet.
 fn held(home: &Home, pin: VerifyKey) -> (Epoch, Vec<u8>) {
-    read_held(&home.roster(), pin).map_or((Epoch::UNVERSIONED, Vec::new()), |(doc, bytes)| {
+    read_held(&home.devices(), pin).map_or((Epoch::UNVERSIONED, Vec::new()), |(doc, bytes)| {
         (doc.epoch(), bytes)
     })
 }
@@ -324,7 +324,7 @@ pub async fn answer(
 
 /// The fork of the root `pin` this machine keeps, as its bytes, or empty for none.
 fn kept_fork(home: &Home, pin: VerifyKey) -> Vec<u8> {
-    read_held(&home.roster_fork(), pin).map_or_else(Vec::new, |(_, bytes)| bytes)
+    read_held(&home.devices_conflict(), pin).map_or_else(Vec::new, |(_, bytes)| bytes)
 }
 
 /// Read the fork the other device keeps, and fold it when there is one. A fork that does not fold is
@@ -366,13 +366,12 @@ async fn read_update(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, E
 }
 
 /// Record that an exchange reached another device, now, owner-only through
-/// [`write_private_atomic`](crate::config::write_private_atomic). Best-effort: a failure only makes the
-/// next dial exchange again.
+/// [`write_private_atomic`](crate::config::write_private_atomic). Best-effort: a failure only makes the next
+/// dial exchange again. `invited-by` stays: only a fold that lands a list removes it.
 async fn touch_synced(home: &Home) {
     let now = unix_now();
     let written =
-        crate::config::write_private_atomic(&home.roster_synced(), format!("{now}\n").as_bytes())
-            .await;
+        crate::config::write_private_atomic(&home.synced(), format!("{now}\n").as_bytes()).await;
     if let Err(error) = written {
         tracing::debug!(%error, "could not record the sync");
     }
@@ -380,7 +379,7 @@ async fn touch_synced(home: &Home) {
 
 /// When an exchange last reached another device, in unix seconds; `None` if never.
 pub fn last_synced(home: &Home) -> Option<u64> {
-    std::fs::read_to_string(home.roster_synced())
+    std::fs::read_to_string(home.synced())
         .ok()?
         .trim()
         .parse()
@@ -483,7 +482,7 @@ pub struct Device {
 }
 
 /// The devices to exchange with, in the order a round asks them: this machine's `me` devices in random
-/// order, then `also` (a presented root's live devices) in the order given, then `roster.seed`. Never
+/// order, then `also` (a presented root's live devices) in the order given, then `invited-by`. Never
 /// this machine, never a key revoked here or in the update held here, and each key once.
 pub async fn devices(
     home: &Home,
@@ -496,7 +495,7 @@ pub async fn devices(
             name,
         })
     });
-    let seed = std::fs::read_to_string(home.roster_seed())
+    let seed = std::fs::read_to_string(home.invited_by())
         .ok()
         .and_then(|text| text.trim().parse::<NodeId>().ok())
         .map(|key| Device {
@@ -516,7 +515,7 @@ pub async fn mine(home: &Home) -> eyre::Result<Vec<Device>> {
 
 /// The devices `me` names, in random order.
 async fn me_devices(home: &Home) -> eyre::Result<Vec<Device>> {
-    let store = ContactsStore::open(home.contacts()).await?;
+    let store = ContactsStore::open(home).await?;
     let mut mine: Vec<Device> = store
         .contacts()
         .devices(&Petname::stored(crate::contacts::ME)?)
@@ -542,7 +541,7 @@ async fn dialable(
         .map(|stored| stored.node_id());
     let mut revoked: Vec<NodeId> = revoked_keys_here(home).await?;
     if let Ok(Some(pin)) = device_pin(home).await
-        && let Some((doc, _)) = read_held(&home.roster(), pin)
+        && let Some((doc, _)) = read_held(&home.devices(), pin)
     {
         revoked.extend(
             doc.revoked_keys()

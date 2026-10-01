@@ -454,7 +454,7 @@ mod tests {
 
     /// A fixed private known_hosts path, so the assembled argv is deterministic in tests.
     fn known_hosts() -> PathBuf {
-        PathBuf::from("/home/me/.config/swoosh/known_hosts")
+        PathBuf::from("/home/me/.local/state/swoosh/known_hosts")
     }
 
     /// A thin clap wrapper so a test parses a real `SshCmd` from an argv the same way the binary does (its
@@ -680,7 +680,7 @@ mod tests {
                 "-o".to_owned(),
                 format!("ProxyCommand={PROXY} reach {KEY} ssh --to -"),
                 "-o".to_owned(),
-                "UserKnownHostsFile=\"/home/me/.config/swoosh/known_hosts\"".to_owned(),
+                "UserKnownHostsFile=\"/home/me/.local/state/swoosh/known_hosts\"".to_owned(),
                 "-o".to_owned(),
                 "GlobalKnownHostsFile=/dev/null".to_owned(),
                 "-o".to_owned(),

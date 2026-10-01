@@ -74,6 +74,7 @@ fn empty(tag: &str) -> Home {
 fn keyed(tag: &str, seed: u8) -> Home {
     let home = empty(tag);
     let mut bytes = TestNode::seeded(seed).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut bytes), Protection::Plain)
         .unwrap();
@@ -271,7 +272,7 @@ async fn read(home: &Home) -> Standing {
 
 /// This machine's own name under `me`, as `status` reads it.
 async fn me_name(home: &Home) -> Option<String> {
-    let store = ContactsStore::open(home.contacts()).await.unwrap();
+    let store = ContactsStore::open(home).await.unwrap();
     let me = Petname::stored(ME).unwrap();
     store
         .contacts()
@@ -445,7 +446,7 @@ async fn bare_join_at_a_terminal_on_a_fresh_home_takes_a_keyed_invite() {
         .unwrap()
         .node_id();
     assert_eq!(key, carried, "the invite's key is this machine's key");
-    assert!(!home.dir().join("key.new").exists());
+    assert!(!home.machine().join("key.new").exists());
     assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
 }
 
@@ -524,8 +525,8 @@ async fn a_tampered_from_or_name_changes_no_trust() {
     );
 
     for (file, path) in [
-        ("pin", Home::signet as fn(&Home) -> PathBuf),
-        ("badge", Home::badge),
+        ("pin", Home::root_pub as fn(&Home) -> PathBuf),
+        ("certificate", Home::key_cert),
     ] {
         assert_eq!(
             std::fs::read(path(&home)).unwrap(),
@@ -535,9 +536,9 @@ async fn a_tampered_from_or_name_changes_no_trust() {
     }
     assert_eq!(read(&home).await, read(&clean).await);
     assert_eq!(
-        me_name(&home).await.as_deref(),
-        Some("evil"),
-        "until the first fold"
+        me_name(&home).await,
+        None,
+        "the invite's name is kept nowhere: only the root's list names this machine"
     );
 
     // The first fold of the root's update lays down the root's name for this machine.
@@ -557,9 +558,12 @@ async fn a_same_root_join_keeps_the_floor_and_the_fork() {
         .await
         .joined();
     fold(&home, &update(ROOT, 3, "laptop")).await.unwrap();
-    std::fs::write(home.roster_fork(), b"a fork kept as evidence").unwrap();
-    let held = std::fs::read(home.roster()).unwrap();
-    let seed = std::fs::read(home.roster_seed()).unwrap();
+    std::fs::write(home.devices_conflict(), b"a fork kept as evidence").unwrap();
+    let held = std::fs::read(home.devices()).unwrap();
+    assert!(
+        !home.invited_by().exists(),
+        "the held list names the devices to ask"
+    );
 
     // Later than the standing the fold may have picked up, so the join is a renewal.
     let renewal = Invite::bound(
@@ -570,15 +574,14 @@ async fn a_same_root_join_keeps_the_floor_and_the_fork() {
     .to_string();
     join(&home, &renewal).await.joined();
     assert_eq!(
-        std::fs::read(home.roster()).unwrap(),
+        std::fs::read(home.devices()).unwrap(),
         held,
         "the floor stays"
     );
-    assert!(home.roster_fork().exists(), "the fork stays");
-    assert_eq!(
-        std::fs::read(home.roster_seed()).unwrap(),
-        seed,
-        "the first device to ask stays"
+    assert!(home.devices_conflict().exists(), "the fork stays");
+    assert!(
+        !home.invited_by().exists(),
+        "a same-root join does not bring back the invite's device to ask"
     );
     // A replay of the update below the floor still changes nothing.
     assert_eq!(
@@ -623,7 +626,7 @@ async fn a_switched_device_accepts_its_new_roots_first_update() {
     .await
     .joined();
     assert!(
-        !home.roster().exists(),
+        !home.devices().exists(),
         "the old root's update goes with its pin"
     );
     assert_eq!(
@@ -655,8 +658,8 @@ async fn a_joined_device_pulls_its_first_update_unprompted() {
     super::pull(&dial, from).await;
     assert_eq!(dial.dialed(), vec![node(FROM)]);
     assert_eq!(
-        std::fs::read(home.roster()).unwrap(),
-        std::fs::read(inviter.roster()).unwrap(),
+        std::fs::read(home.devices()).unwrap(),
+        std::fs::read(inviter.devices()).unwrap(),
         "the device holds the root's update from the start"
     );
 }
@@ -688,7 +691,7 @@ async fn an_offer_after_join_switch_under_serve_folds_the_new_roots_update() {
         .await
         .unwrap();
     assert_eq!(answer, swoosh::sync::Answer::Gave);
-    assert_eq!(std::fs::read(home.roster()).unwrap(), bytes);
+    assert_eq!(std::fs::read(home.devices()).unwrap(), bytes);
 }
 
 // --- what it prints ---
@@ -1040,6 +1043,7 @@ async fn join_refuses_a_locked_key_over_pipes() {
     let passphrase =
         Passphrase::try_from(Zeroizing::new("correct horse battery staple".to_owned())).unwrap();
     let mut seed = TestNode::seeded(OWN).seed();
+    swoosh::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(
             &keystore::Secret::take(&mut seed),

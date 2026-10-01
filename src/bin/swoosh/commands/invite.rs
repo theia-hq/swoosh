@@ -474,7 +474,7 @@ fn refuse_before_the_first_root(
 
 /// Refuse a name that is a contact's: a person is shared with, never made one of your devices.
 async fn refuse_a_contact(home: &Home, name: &DeviceLabel) -> eyre::Result<()> {
-    let store = ContactsStore::open(home.contacts()).await?;
+    let store = ContactsStore::open(home).await?;
     let contact = store
         .contacts()
         .petnames()

@@ -356,7 +356,7 @@ async fn classify(
 pub fn pin_key(home: &Home, pin: NodeId) -> Result<VerifyKey, StandingError> {
     pin.verify_key().map_err(|_| {
         StandingError::Damaged(Disagreement::UnreadablePin {
-            path: home.signet(),
+            path: home.root_pub(),
         })
     })
 }
@@ -491,12 +491,12 @@ async fn finish_retirement(
 /// damaged.
 pub(crate) async fn strip(home: &Home) -> Result<(), StandingError> {
     for path in [
-        home.badge(),
-        home.roster(),
-        home.roster_synced(),
-        home.roster_seed(),
-        home.roster_fork(),
-        home.signet(),
+        home.key_cert(),
+        home.devices(),
+        home.synced(),
+        home.invited_by(),
+        home.devices_conflict(),
+        home.root_pub(),
     ] {
         remove_file(path).await?;
     }
@@ -505,7 +505,7 @@ pub(crate) async fn strip(home: &Home) -> Result<(), StandingError> {
 
 /// The pin, or `None` when there is none. A file that is not exactly one key is damaged.
 async fn read_pin(home: &Home) -> Result<Option<NodeId>, StandingError> {
-    let path = home.signet();
+    let path = home.root_pub();
     let Some(text) = text_of(crate::home::read_trust_file_async(&path).await, &path)? else {
         return Ok(None);
     };
@@ -547,7 +547,9 @@ async fn read_badge(
     };
     if !ours {
         return Err(StandingError::Damaged(
-            Disagreement::StandingForAnotherKey { path: home.badge() },
+            Disagreement::StandingForAnotherKey {
+                path: home.key_cert(),
+            },
         ));
     }
     Ok(Some(until))
@@ -556,7 +558,7 @@ async fn read_badge(
 /// The device standing as a verified link, or `None` when there is none. A file that is not one is
 /// damaged: a torn write reads this way.
 async fn load_badge(home: &Home) -> Result<Option<Link>, StandingError> {
-    let Some(text) = read_text(&home.badge()).await? else {
+    let Some(text) = read_text(&home.key_cert()).await? else {
         return Ok(None);
     };
     text.and_then(|text| text.trim().parse::<Link>().ok())
@@ -565,7 +567,9 @@ async fn load_badge(home: &Home) -> Result<Option<Link>, StandingError> {
 }
 
 fn unreadable_badge(home: &Home) -> StandingError {
-    StandingError::Damaged(Disagreement::UnreadableStanding { path: home.badge() })
+    StandingError::Damaged(Disagreement::UnreadableStanding {
+        path: home.key_cert(),
+    })
 }
 
 /// A small text file: `None` when it is absent, `Some(None)` when its bytes are not text.

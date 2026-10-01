@@ -88,6 +88,7 @@ async fn device_until(tag: &str, seed: u8, until: u64) -> Home {
     config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
+    crate::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
@@ -348,8 +349,8 @@ async fn an_unpinned_server_never_asks_for_an_update() {
     let desk = device("unpinned", DESK).await;
     holding(&desk, &update(1, vec![], vec![key(STOLEN)])).await;
     let bare = device("unpinned", NAS).await;
-    std::fs::remove_file(bare.badge()).unwrap();
-    std::fs::remove_file(bare.signet()).unwrap();
+    std::fs::remove_file(bare.key_cert()).unwrap();
+    std::fs::remove_file(bare.root_pub()).unwrap();
 
     let (near, far) = tokio::io::duplex(64 * 1024);
     let (near_read, near_write) = tokio::io::split(near);
@@ -363,7 +364,7 @@ async fn an_unpinned_server_never_asks_for_an_update() {
         matches!(dialed, Err(ExchangeError::NotHeld)),
         "a machine with no pin asks for nothing, and never reads as holding the dialer's update"
     );
-    assert!(!bare.roster().exists(), "and takes nothing");
+    assert!(!bare.devices().exists(), "and takes nothing");
 }
 
 #[tokio::test]
@@ -385,7 +386,7 @@ async fn an_exchange_with_a_fork_keeps_both_revocation_lists() {
     assert_eq!(answers[0].1.answer(), Some(Answer::Forked));
     assert!(revoked(&desk, &id(1)).await && revoked(&desk, &id(2)).await);
     let pin = root().verify_key();
-    let kept: Vec<Id> = [desk.roster(), desk.roster_fork()]
+    let kept: Vec<Id> = [desk.devices(), desk.devices_conflict()]
         .iter()
         .filter_map(|path| crate::roster::read_held(path, pin))
         .flat_map(|(doc, _)| doc.revoked().to_vec())
@@ -415,7 +416,7 @@ async fn every_update_file_is_owner_only() {
     .await;
 
     for home in [&desk, &nas] {
-        for path in [home.roster(), home.roster_fork(), home.roster_synced()] {
+        for path in [home.devices(), home.devices_conflict(), home.synced()] {
             let mode = std::fs::metadata(&path)
                 .unwrap_or_else(|error| panic!("{}: {error}", path.display()))
                 .permissions()
@@ -535,7 +536,7 @@ async fn a_kept_fork_reaches_the_device_it_is_exchanged_with() {
         );
     }
     assert_eq!(
-        std::fs::read(desk.roster()).unwrap(),
+        std::fs::read(desk.devices()).unwrap(),
         desk_cut,
         "a fork passed on is never the update held"
     );
@@ -555,7 +556,10 @@ async fn a_kept_fork_below_the_held_update_still_adds_its_revocations() {
     let third = update(3, vec![], vec![]);
     holding(&nas, &third).await;
     holding(&laptop, &third).await;
-    assert!(nas.roster_fork().exists(), "3 lacks the fork's revocation");
+    assert!(
+        nas.devices_conflict().exists(),
+        "3 lacks the fork's revocation"
+    );
 
     let dial = Loopback::new(nas.clone(), [(node(LAPTOP), laptop.clone())]);
     assert_eq!(dial.exchange(node(LAPTOP)).await.unwrap(), Answer::Same);
@@ -565,7 +569,7 @@ async fn a_kept_fork_below_the_held_update_still_adds_its_revocations() {
         "a fork below the update held still revokes"
     );
     assert!(
-        laptop.roster_fork().exists(),
+        laptop.devices_conflict().exists(),
         "and is kept, to pass on at the next exchange"
     );
 }
@@ -591,7 +595,7 @@ async fn an_update_taken_is_still_the_answer_when_the_forks_do_not_pass() {
     };
     let (dialed, ()) = tokio::join!(exchange(&desk, near_read, near_write), server);
     assert_eq!(dialed.unwrap(), Answer::Took);
-    assert_eq!(std::fs::read(desk.roster()).unwrap(), newer);
+    assert_eq!(std::fs::read(desk.devices()).unwrap(), newer);
 }
 
 #[tokio::test]
@@ -642,7 +646,7 @@ async fn a_forked_updates_revocation_is_kept_and_carried_forward() {
         "the fork's revoked device is refused here"
     );
     assert_eq!(
-        std::fs::read(desk.roster_fork()).unwrap(),
+        std::fs::read(desk.devices_conflict()).unwrap(),
         fork,
         "and the fork is kept, for the root to carry its revocation forward"
     );
@@ -657,12 +661,12 @@ async fn the_fork_file_survives_a_newer_update_that_drops_its_revocation() {
         .unwrap();
     holding(&desk, &update(6, vec![], vec![])).await;
     assert!(
-        desk.roster_fork().exists(),
+        desk.devices_conflict().exists(),
         "an update that lacks the fork's revocation leaves the fork"
     );
     holding(&desk, &update(7, vec![], vec![key(STOLEN)])).await;
     assert!(
-        !desk.roster_fork().exists(),
+        !desk.devices_conflict().exists(),
         "one that carries it clears the fork"
     );
 }
@@ -695,7 +699,7 @@ async fn concurrent_folds_never_lose_a_revocation() {
         "one fold takes the update, the other records the fork"
     );
     let pin = root().verify_key();
-    let kept: Vec<Id> = [desk.roster(), desk.roster_fork()]
+    let kept: Vec<Id> = [desk.devices(), desk.devices_conflict()]
         .iter()
         .filter_map(|path| crate::roster::read_held(path, pin))
         .flat_map(|(doc, _)| doc.revoked().to_vec())
@@ -731,7 +735,7 @@ async fn two_contact_writers_never_lose_an_update() {
     drop(book);
     assert_eq!(folding.await.unwrap(), Folded::Newer);
 
-    let book = ContactsStore::open(desk.contacts()).await.unwrap();
+    let book = ContactsStore::open(&desk).await.unwrap();
     let contacts = book.contacts();
     assert!(
         contacts
@@ -745,4 +749,111 @@ async fn two_contact_writers_never_lose_an_update() {
             .is_some_and(|mut devices| devices.any(|(label, _)| label.as_str() == "laptop")),
         "the device the fold wrote is kept"
     );
+}
+
+/// A joined device holds `invited-by`, the machine its invite named, because it knows no other device to
+/// ask; once a sync with it lands, the device holds the list of its devices, and `invited-by` goes.
+#[tokio::test]
+async fn invited_by_goes_after_the_first_sync() {
+    let desk = device("invited-by", DESK).await;
+    let nas = device("invited-by", NAS).await;
+    holding(&nas, &update(1, vec![], vec![])).await;
+    std::fs::write(desk.invited_by(), format!("{}\n", node(NAS))).unwrap();
+    let asked = super::devices(&desk, []).await.unwrap();
+    assert_eq!(
+        asked.iter().map(|device| device.key).collect::<Vec<_>>(),
+        [node(NAS)],
+        "the first sync asks the machine the invite named"
+    );
+
+    let dial = Loopback::new(desk.clone(), [(node(NAS), nas.clone())]);
+    let answers = round(&dial, &asked, Until::Every, Duration::from_secs(20)).await;
+
+    assert_eq!(answers[0].1.answer(), Some(Answer::Took));
+    assert!(
+        !desk.invited_by().exists(),
+        "invited-by goes once the sync lands"
+    );
+    assert!(
+        super::devices(&desk, [])
+            .await
+            .unwrap()
+            .iter()
+            .any(|device| device.key == node(NAS)),
+        "the list it took names the device to ask next"
+    );
+}
+
+/// `invited-by` stays through an exchange that lands no list: one where neither side holds a list, and one
+/// whose offered update the device refused. Until a list is held, it is the only device the device knows to
+/// ask.
+#[tokio::test]
+async fn invited_by_stays_when_a_sync_lands_no_list() {
+    let desk = device("invited-by-stays", DESK).await;
+    let nas = device("invited-by-stays", NAS).await;
+    std::fs::write(desk.invited_by(), format!("{}\n", node(NAS))).unwrap();
+    let asks_nas = |asked: Vec<Device>| asked.iter().map(|device| device.key).collect::<Vec<_>>();
+
+    // Neither side holds a list.
+    let dial = Loopback::new(desk.clone(), [(node(NAS), nas.clone())]);
+    assert_eq!(dial.exchange(node(NAS)).await.unwrap(), Answer::Same);
+    assert!(
+        desk.invited_by().exists(),
+        "an exchange of no list keeps invited-by"
+    );
+    assert_eq!(
+        asks_nas(super::devices(&desk, []).await.unwrap()),
+        [node(NAS)],
+        "the device still knows whom to ask"
+    );
+
+    // Another device offers bytes that are not a list, and the device refuses them.
+    let offered = Loopback::new(nas.clone(), [(node(DESK), desk.clone())]);
+    assert_eq!(
+        offered
+            .offer(node(DESK), Epoch(5), b"not a list")
+            .await
+            .unwrap(),
+        Answer::Refused
+    );
+    assert!(
+        desk.invited_by().exists(),
+        "a refused update keeps invited-by"
+    );
+    assert_eq!(
+        asks_nas(super::devices(&desk, []).await.unwrap()),
+        [node(NAS)],
+        "the device still knows whom to ask"
+    );
+}
+
+/// The devices of `me` are read from the list a fold took, and never written to `contacts.toml`: not by the
+/// fold, and not by a later edit of the book that opened with them.
+#[tokio::test]
+async fn contacts_toml_has_no_me_table() {
+    let desk = device("no-me-table", DESK).await;
+    holding(&desk, &update(1, vec![], vec![])).await;
+    let mut book = ContactsStore::open_to_edit(&desk).await.unwrap();
+    assert!(
+        book.contacts().devices(&"me".parse().unwrap()).is_some(),
+        "the book opens with the devices the fold took"
+    );
+    let _ = book
+        .contacts_mut()
+        .add("alice".parse().unwrap(), None, node(LAPTOP));
+    book.save().await.unwrap();
+    drop(book);
+
+    let text = std::fs::read_to_string(desk.contacts()).unwrap();
+    let table: toml::Table = toml::from_str(&text).unwrap();
+    assert!(!table.contains_key("me"), "no [me] table: {text}");
+    assert!(table.contains_key("alice"), "the edit is saved: {text}");
+    let book = ContactsStore::open(&desk).await.unwrap();
+    let mine: Vec<String> = book
+        .contacts()
+        .devices(&"me".parse().unwrap())
+        .unwrap()
+        .map(|(label, _)| label.to_string())
+        .collect();
+    assert_eq!(mine, ["desk", "nas", "phone"], "me is the list's devices");
 }

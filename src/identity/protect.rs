@@ -4,7 +4,7 @@ use bifrost::NodeId;
 use keystore::{Method, Protection, Stored};
 
 use super::lock::HomeLock;
-use super::{create_dir, key_file};
+use super::{key_file, make_machine_dir};
 use crate::home::Home;
 use crate::passphrase::Prompt;
 
@@ -36,7 +36,7 @@ pub fn protect(home: &Home, method: Method, prompt: &mut impl Prompt) -> eyre::R
     let path = file.path();
     let Some(stored) = file.load()? else {
         let secret = keystore::Secret::generate()?;
-        create_dir(&file)?;
+        make_machine_dir(home)?;
         match method {
             Method::Plain => file.write(&secret, Protection::Plain)?,
             Method::Passphrase => {

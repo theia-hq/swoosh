@@ -106,8 +106,7 @@ impl Scratch {
             .arg(key)
             .env("PATH", &self.bin)
             .env("SWOOSH_TEST_SSH_LOG", &self.log)
-            .env_remove("SWOOSH_HOME")
-            .env_remove("SWOOSH_KEY");
+            .env_remove("SWOOSH_HOME");
         match home_env {
             Some(dir) => command.env("HOME", dir),
             None => command.env_remove("HOME"),
@@ -237,7 +236,6 @@ fn a_home_path_ssh_reads_specially_exits_1_in_one_line() {
         .env("SWOOSH_TEST_SSH_LOG", &scratch.log)
         .env("HOME", &scratch.decoy)
         .env_remove("SWOOSH_HOME")
-        .env_remove("SWOOSH_KEY")
         .output()
         .expect("the swoosh binary runs");
 

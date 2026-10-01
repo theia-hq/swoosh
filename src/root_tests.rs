@@ -125,6 +125,7 @@ fn home(tag: &str) -> Home {
     config::create_store_dir(&dir).unwrap();
     let home = Home::resolve(Some(dir)).unwrap();
     let mut seed = TestNode::seeded(OWN).seed();
+    crate::identity::make_machine_dir(&home).unwrap();
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
@@ -204,7 +205,7 @@ async fn holds(home: &Home, records: &State) {
 
 /// Write `doc`, signed by `ROOT`, as the update this home holds.
 fn held(home: &Home, doc: &RosterDoc) {
-    std::fs::write(home.roster(), TestRoot::seeded(ROOT).sign_update(doc)).unwrap();
+    std::fs::write(home.devices(), TestRoot::seeded(ROOT).sign_update(doc)).unwrap();
 }
 
 /// Present, printing to a buffer: what it returned, and what it printed.
@@ -237,6 +238,7 @@ async fn sibling(home: &Home, seed: u8, until: u64, update: &RosterDoc) -> Home 
     config::create_store_dir(&dir).unwrap();
     let device = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
+    crate::identity::make_machine_dir(&device).unwrap();
     KeyFile::device(device.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
@@ -355,7 +357,7 @@ async fn a_mint_killed_between_badge_and_pin_finishes_without_a_prompt() {
     let stopped = Root::mint_to(&home, &mut Counting::new([PASS]), &mut io::sink()).await;
     STOP.set(None);
     assert!(stopped.is_err());
-    assert!(home.badge().exists() && !home.signet().exists());
+    assert!(home.key_cert().exists() && !home.root_pub().exists());
     assert!(matches!(
         standing(&home).await,
         Standing::InterruptedMint { .. }
@@ -1109,7 +1111,7 @@ async fn a_commit_publishes_a_row_the_held_update_lacks() {
     );
     assert_eq!(
         crate::roster::verify(
-            &std::fs::read(home.roster()).unwrap(),
+            &std::fs::read(home.devices()).unwrap(),
             TestRoot::seeded(ROOT).verify_key()
         )
         .unwrap()
@@ -1513,7 +1515,7 @@ async fn a_fork_that_adds_nothing_prints_nothing() {
     let same = RosterDoc::new(Epoch(1), vec![member(&own_row())]).unwrap();
     held(&home, &same);
     std::fs::write(
-        home.roster_fork(),
+        home.devices_conflict(),
         TestRoot::seeded(ROOT).sign_update(&same),
     )
     .unwrap();
@@ -1651,7 +1653,7 @@ async fn a_held_update_below_the_records_brings_forward_only_its_revocations() {
             .await
             .unwrap();
         assert!(
-            home.roster_fork().exists(),
+            home.devices_conflict().exists(),
             "reused {reused}: a fork is kept"
         );
         let (root, out) = present(
@@ -2053,8 +2055,8 @@ async fn an_offer_to_a_machine_that_is_not_a_device_is_not_taken() {
         revoking("not-a-device", &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
     // me/nas left: it holds no pin and no standing, and takes nothing.
     let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
-    std::fs::remove_file(nas.badge()).unwrap();
-    std::fs::remove_file(nas.signet()).unwrap();
+    std::fs::remove_file(nas.key_cert()).unwrap();
+    std::fs::remove_file(nas.root_pub()).unwrap();
     root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
     let (committed, _) = commit(root).await;
 

@@ -22,7 +22,7 @@ fn leave_new_is_a_usage_error_not_new_key() {
             .expect("the binary runs")
     };
     assert!(swoosh(&["status", "--key"]).status.success());
-    let key = std::fs::read(home.join("key")).unwrap();
+    let key = std::fs::read(home.join("machine").join("key")).unwrap();
 
     let output = swoosh(&["leave", "--new"]);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -33,7 +33,7 @@ fn leave_new_is_a_usage_error_not_new_key() {
         "the tip names the full flag: {stderr}"
     );
     assert_eq!(
-        std::fs::read(home.join("key")).unwrap(),
+        std::fs::read(home.join("machine").join("key")).unwrap(),
         key,
         "the key is unchanged"
     );

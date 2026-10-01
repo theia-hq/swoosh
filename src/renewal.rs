@@ -110,7 +110,7 @@ async fn standing_for(home: &Home, peer: VerifyKey, now: SystemTime) -> Result<L
     if revocations.is_revoked_peer(&peer) {
         return Err(Miss::KeyRevoked);
     }
-    let (doc, _) = read_held(&home.roster(), pin).ok_or(Miss::NoRow)?;
+    let (doc, _) = read_held(&home.devices(), pin).ok_or(Miss::NoRow)?;
     let row = doc
         .members()
         .iter()
@@ -324,7 +324,7 @@ pub async fn own_label(home: &Home) -> Option<DeviceLabel> {
         .ok()
         .flatten()?
         .node_id();
-    let store = ContactsStore::open(home.contacts()).await.ok()?;
+    let store = ContactsStore::open(home).await.ok()?;
     let me = Petname::stored(ME).ok()?;
     store
         .contacts()

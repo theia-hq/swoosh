@@ -110,7 +110,7 @@ impl Report {
             nags: Vec::new(),
             notices: Vec::new(),
         };
-        let store = ContactsStore::open(home.contacts()).await?;
+        let store = ContactsStore::open(home).await?;
         let contacts = store.contacts();
         // A damaged or unfinished standing has no `root:` line of its own: its line is a nag, printed last.
         let last = match Standing::read(home).await {
@@ -600,9 +600,9 @@ fn link_row(record: &GrantRecord, revoked: &FileDenylist, now: u64) -> [String; 
     [id, record.target.as_str().to_owned(), holder, state]
 }
 
-/// Whether `roster.fork` holds an update: two copies of the root signed, and a device saw both.
+/// Whether `devices.conflict` holds an update: two copies of the root signed, and a device saw both.
 fn roster_fork_held(home: &Home) -> bool {
-    std::fs::metadata(home.roster_fork()).is_ok_and(|meta| meta.len() > 0)
+    std::fs::metadata(home.devices_conflict()).is_ok_and(|meta| meta.len() > 0)
 }
 
 /// A key as a row shows it: `ed01` and 8 more characters.

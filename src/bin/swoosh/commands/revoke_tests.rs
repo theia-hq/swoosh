@@ -615,7 +615,7 @@ async fn revoke_after_new_key_refuses_the_old_invite() {
 async fn revoke_a_bare_key_that_is_a_root_takes_back_only_links() {
     let home = scratch("revoke-root-key");
     holds(&home, &[live(OWN, "desk")], Vec::new()).await;
-    let mut store = ContactsStore::open(home.contacts()).await.unwrap();
+    let mut store = ContactsStore::open(&home).await.unwrap();
     store
         .contacts_mut()
         .set_signet("alice".parse().unwrap(), node(ALICE_ROOT));

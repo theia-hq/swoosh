@@ -104,7 +104,7 @@ async fn a_removed_pin_is_untrusted_at_the_next_admission() {
         "the pinned root's device is admitted"
     );
 
-    std::fs::remove_file(scratch.home.signet()).expect("remove the pin");
+    std::fs::remove_file(scratch.home.root_pub()).expect("remove the pin");
     past_the_debounce();
     assert!(
         !admits(&gate, &badge(ROOT)),
@@ -122,7 +122,7 @@ async fn a_malformed_pin_reads_as_none() {
         "the pinned root's device is admitted"
     );
 
-    std::fs::write(scratch.home.signet(), b"ed01 not a key\n").expect("garble the pin");
+    std::fs::write(scratch.home.root_pub(), b"ed01 not a key\n").expect("garble the pin");
     past_the_debounce();
     assert!(
         !admits(&gate, &badge(ROOT)),
@@ -195,7 +195,7 @@ async fn the_gate_and_the_cut_read_one_pin() {
         past_the_debounce();
         let read_at = std::time::Instant::now();
         assert!(admits(&gate, &badge(ROOT)), "admitted under the first root");
-        std::fs::write(scratch.home.signet(), &other).expect("move the pin");
+        std::fs::write(scratch.home.root_pub(), &other).expect("move the pin");
         let trusted = cut.trusts(&TestRoot::seeded(ROOT).verify_key());
         if read_at.elapsed() < STAT_DEBOUNCE {
             assert!(
@@ -389,6 +389,7 @@ async fn a_missing_revoked_keys_with_no_witness_holds_no_keys() {
 async fn a_damaged_server_serves_a_link_it_signed() {
     let scratch = Scratch::new("damaged-link");
     let mut seed = TestNode::seeded(OWN).seed();
+    crate::identity::make_machine_dir(&scratch.home).unwrap();
     keystore::KeyFile::device(scratch.home.key())
         .write(
             &keystore::Secret::take(&mut seed),
@@ -439,7 +440,7 @@ async fn an_admitted_root_is_trusted_for_the_run_and_writes_no_pin() {
     assert!(admits(&gate, &badge(ROOT)), "the admitted root's device");
     assert!(!admits(&gate, &badge(OTHER_ROOT)), "no other root's");
     assert!(cut.trusts(&TestRoot::seeded(ROOT).verify_key()));
-    assert!(!scratch.home.signet().exists(), "no pin is written");
+    assert!(!scratch.home.root_pub().exists(), "no pin is written");
 
     let revoked = Scratch::new("admitting-revoked");
     nauthy::DisabledRoots::open_for_repair(revoked.home.disabled_roots())
@@ -478,7 +479,7 @@ async fn a_pin_others_can_write_is_refused_while_serve_runs() {
         "the pinned root's device is admitted"
     );
 
-    let signet = scratch.home.signet();
+    let signet = scratch.home.root_pub();
     std::fs::write(
         &signet,
         format!("{}\n", TestRoot::seeded(OTHER_ROOT).node_id()),
@@ -525,10 +526,10 @@ async fn a_home_path_with_control_bytes_prints_escaped() {
     let escaped = r"home\r\u{1b}[8m\nfake";
     let scratch = Scratch::new(raw);
     scratch.pin(ROOT).await;
-    set_mode(&scratch.home.signet(), 0o620);
+    set_mode(&scratch.home.root_pub(), 0o620);
 
     let refusal = crate::home::LooseFile {
-        path: scratch.home.signet(),
+        path: scratch.home.root_pub(),
         why: crate::home::Loose::Writable,
     }
     .to_string();

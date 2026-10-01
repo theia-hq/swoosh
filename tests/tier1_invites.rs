@@ -123,11 +123,11 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         path_str(&device_dir),
     ]);
     assert!(joined.status.success(), "join failed: {}", stderr(&joined));
-    let device_seed: [u8; 32] = std::fs::read(device_dir.join("key"))
+    let device_seed: [u8; 32] = std::fs::read(device_dir.join("machine").join("key"))
         .unwrap()
         .try_into()
         .expect("the device key is 32 bytes");
-    let badge: nauthy::Link = std::fs::read_to_string(device_dir.join("badge"))
+    let badge: nauthy::Link = std::fs::read_to_string(device_dir.join("key.cert"))
         .unwrap()
         .trim()
         .parse()
@@ -138,7 +138,7 @@ async fn the_invite_round_trip_admits_the_device_and_refuses_a_stranger() {
         .unwrap()
         .expect("join wrote the pin the device's gate will arm from");
     assert_eq!(signet, root.node_id(), "the device pins the invite's root");
-    let owner_seed: [u8; 32] = std::fs::read(signet_dir.join("key"))
+    let owner_seed: [u8; 32] = std::fs::read(signet_dir.join("machine").join("key"))
         .unwrap()
         .try_into()
         .expect("the owner key is 32 bytes");

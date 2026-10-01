@@ -1170,7 +1170,7 @@ impl Act {
     }
 
     /// Present step 9's exchange: ask your devices for a newer update than the one held here, `me` in
-    /// random order, then the root's own live devices, then `roster.seed`, stopping at the first that
+    /// random order, then the root's own live devices, then `invited-by`, stopping at the first that
     /// gives one, within 10 s. When devices were asked and none answered, or they could not be listed, say
     /// so; a list read and found empty has nothing to ask and says nothing.
     async fn sync(&self, dial: &impl Dial, out: &mut impl Write) {
@@ -1204,8 +1204,8 @@ impl Act {
     /// machine's own revocations of the root's devices, then mark every row whose key is revoked.
     fn bring_forward(&mut self, out: &mut impl Write) -> Result<(), RootError> {
         let pin = self.key.verify_key()?;
-        self.held = read_held(&self.home.roster(), pin);
-        let fork = read_held(&self.home.roster_fork(), pin);
+        self.held = read_held(&self.home.devices(), pin);
+        let fork = read_held(&self.home.devices_conflict(), pin);
         let held = self.held.as_ref().map(|(held, _)| held);
         let fork_doc = fork.as_ref().map(|(fork, _)| fork);
         let (brought, behind) = self.book.forward(&self.home, held, fork_doc, self.now)?;
@@ -1842,8 +1842,8 @@ impl Book {
         pin: VerifyKey,
         now: u64,
     ) -> Result<(Self, Option<RosterDoc>), RootError> {
-        let held = read_held(&home.roster(), pin).map(|(held, _)| held);
-        let fork = read_held(&home.roster_fork(), pin).map(|(fork, _)| fork);
+        let held = read_held(&home.devices(), pin).map(|(held, _)| held);
+        let fork = read_held(&home.devices_conflict(), pin).map(|(fork, _)| fork);
         let mut forward = self.clone();
         forward.forward(home, held.as_ref(), fork.as_ref(), now)?;
         Ok((forward, held))

@@ -13,19 +13,18 @@ fn parse_add(name: &str) -> Result<Cli, clap::Error> {
     Cli::try_parse_from(["swoosh", "contact", "add", name, key.as_str()])
 }
 
-/// A scratch home with a contacts book holding `me/desk`, as a fold of this person's devices leaves it.
+/// A scratch home with an empty contacts book.
 async fn home_with_book(tag: &str) -> Home {
     let dir = std::env::temp_dir().join(format!("swoosh-contact-add-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let home = Home::resolve(Some(dir)).expect("resolve");
-    let mut store = ContactsStore::open(home.contacts()).await.expect("open");
-    store.contacts_mut().add(
-        "me".parse().expect("me"),
-        Some("desk".parse().expect("label")),
-        NodeId::from_ed25519_secret(&[4u8; 32]),
-    );
-    store.save().await.expect("save");
+    ContactsStore::open(&home)
+        .await
+        .expect("open")
+        .save()
+        .await
+        .expect("save");
     home
 }
 
@@ -65,7 +64,7 @@ async fn an_add_outside_me_is_saved() {
     )
     .await
     .expect("an add outside me/ is saved");
-    let store = ContactsStore::open(home.contacts()).await.expect("open");
+    let store = ContactsStore::open(&home).await.expect("open");
     assert!(
         store
             .contacts()
@@ -87,13 +86,13 @@ async fn a_capital_name_folds_to_lowercase() {
     )
     .await
     .expect("a capital name is saved");
-    let store = ContactsStore::open(home.contacts()).await.expect("open");
+    let store = ContactsStore::open(&home).await.expect("open");
     let names: Vec<_> = store
         .contacts()
         .petnames()
         .map(|petname| petname.as_str().to_owned())
         .collect();
-    assert_eq!(names, ["alice", "me"], "saved folded");
+    assert_eq!(names, ["alice"], "saved folded");
     let devices: Vec<_> = store
         .contacts()
         .devices(&"alice".parse().expect("petname"))
