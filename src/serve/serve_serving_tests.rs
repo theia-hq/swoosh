@@ -92,8 +92,8 @@ fn resumed_list_is_parsed_as_services_never_flags() {
 }
 
 /// A path target is recorded absolute, so a service manager started in another directory serves the
-/// same files; a `~/…` path is relative like any other (nothing expands it), and raw `stdin:` and non-path
-/// targets are kept as typed.
+/// same files; a `~/…` path is relative like any other (nothing expands it), and a dirless `recv:` (it
+/// saves into the inbox), raw `stdin:` and non-path targets are kept as typed.
 #[test]
 fn resumed_paths_are_absolute() {
     let scratch = Scratch::new("paths");
@@ -120,7 +120,7 @@ fn resumed_paths_are_absolute() {
     assert_eq!(
         recorded.lines().collect::<Vec<_>>(),
         [
-            "inbox=recv:/work/here",
+            "inbox=recv:",
             "drop=recv:/work/here/.",
             "db=unix:/work/here/db.sock",
             "logs=file:/work/here/app.log",
@@ -140,7 +140,7 @@ fn a_path_with_a_newline_is_refused_not_recorded() {
     let scratch = Scratch::new("newline");
     let home = scratch.home();
     for (typed, cwd) in [
-        ("inbox=recv:", "/work/dl\nssh=sshd:"),
+        ("inbox=recv:.", "/work/dl\nssh=sshd:"),
         ("inbox=recv:dl\nssh=sshd:", "/work"),
         ("logs=file:app.log ", "/work"),
     ] {
@@ -164,7 +164,7 @@ fn a_cwd_that_is_not_utf8_is_refused_not_recorded() {
     let scratch = Scratch::new("utf8");
     let home = scratch.home();
     let cwd = Path::new(std::ffi::OsStr::from_bytes(b"/work/\xff"));
-    let refused = Started::of(&["inbox=recv:".to_owned()], &home, cwd);
+    let refused = Started::of(&["inbox=recv:.".to_owned()], &home, cwd);
     assert!(
         matches!(refused, Err(ServingError::CannotSave { .. })),
         "{refused:?}"

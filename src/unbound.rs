@@ -45,9 +45,8 @@ impl Unbound {
         entry: "ssh=sshd:",
     };
     /// `swoosh send`'s default: the peer receives with a `recv:` service. The entry names a DIR on
-    /// purpose. A bare `recv:` sinks into the serve process's working directory, which is exactly why
-    /// there is no default to inherit, so teaching the dirless spelling here would hand every operator
-    /// the shape the bare set refuses.
+    /// purpose: where pushed files land is the operator's choice, so the refusal teaches choosing it
+    /// (a dirless `recv:` still saves into the inbox).
     pub const RECV: Self = Self {
         name: "recv",
         entry: "recv=recv:<dir>",

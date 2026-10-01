@@ -44,8 +44,9 @@ use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
     Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope, InstanceLock,
-    Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop, StopKind, Stopped,
-    acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop, extract_recv_services,
+    RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop, StopKind,
+    Stopped, acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop,
+    extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::standing::{Standing, StandingError};
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
@@ -159,6 +160,10 @@ pub struct ServeCmd {
 pub struct Claim {
     /// The services this run starts with, and where they came from.
     started: Started,
+    /// The receive services, each with its output directory checked, taken out of `started`'s entries.
+    recv: Vec<RecvService>,
+    /// The rest of `started`'s entries, for the router.
+    requested: Vec<String>,
     /// The flock that makes this the one `serve` for its home, held for the run.
     lock: InstanceLock,
     /// The control socket, bound under the lock.
@@ -344,8 +349,18 @@ impl ServeCmd {
         };
         let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
         let started = Started::of(&self.services, home, &cwd)?;
+        // A receive service never saves into `$HOME`, the home, or above it, whether named now or resumed:
+        // refused here, before anything binds or is written.
+        let mut requested = started.entries();
+        let recv = extract_recv_services(&mut requested, swoosh::home::inbox)?;
+        let user_home = std::env::var_os("HOME")
+            .filter(|user_home| !user_home.is_empty())
+            .map(std::path::PathBuf::from);
+        refuse_recv_into_home(&recv, home, user_home.as_deref())?;
         self.claim = Some(Box::new(Claim {
             started,
+            recv,
+            requested,
             lock,
             listener,
         }));
@@ -458,13 +473,15 @@ impl ServeCmd {
     {
         let Claim {
             started,
+            recv,
+            mut requested,
             lock,
             listener,
         } = claim;
-        let mut requested = started.entries();
         // The served names in the order the person gave them, for the banner and the per-service lines:
-        // read before the fetch and receive services are pulled out below.
-        let names: Vec<String> = requested
+        // read from every entry, before the fetch and receive services were pulled out.
+        let names: Vec<String> = started
+            .entries()
             .iter()
             .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
             .collect();
@@ -480,9 +497,6 @@ impl ServeCmd {
         // fetch handler therefore physically holds only its own origins and cannot reach a gated fetch's
         // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention.
         let fetch = FetchScope::extract(&mut requested)?;
-        // De-merge the receive services the SAME way: every `name=recv:<dir>` becomes its OWN `Recv`
-        // instance bound to ONLY its own output directory.
-        let recv = extract_recv_services(&mut requested)?;
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
         // `--expires` timer, the gated `control.stop` handler, and the local socket `Stop` each hold a
         // CLONE as the node-control capability: they may REQUEST the stop, never tear the node down
@@ -521,8 +535,10 @@ impl ServeCmd {
         // sink, so quiet silences every activity line by construction.
         let activity = self.activity(std::io::stderr())?;
         for service in &recv {
-            // One `Recv` instance per receive service, holding ONLY its own output dir.
+            // One `Recv` instance per receive service, holding ONLY its own output dir: de-merged the SAME way
+            // as fetch, at the claim, where each dir was checked.
             let name: Service = service.name().parse()?;
+            service.create_inbox()?;
             router = bind_recv(router, name, service.out().to_owned(), activity.as_ref())?;
         }
         // The node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the route's

@@ -2777,6 +2777,11 @@ fn a_gated_bare_fetch_is_allowed() {
     );
 }
 
+/// The inbox for an extraction with no dirless `recv:`: it is never asked for.
+fn no_inbox() -> eyre::Result<PathBuf> {
+    Err(eyre::eyre!("no `recv:` here is dirless"))
+}
+
 /// Two `name=recv:<dir>` services de-merge into TWO separate `RecvService`s, each with its own served name
 /// and ONLY its own output dir. `extract` removes them from the requested set (leaving the non-recv entries
 /// for the router's grammar), so `a=recv:/x b=recv:/y` writes each peer's pushes into its OWN directory
@@ -2784,7 +2789,7 @@ fn a_gated_bare_fetch_is_allowed() {
 #[test]
 fn named_recv_dirs_de_merge_into_per_service_instances() {
     let mut requested = vec!["a=recv:/tmp/x".to_owned(), "b=recv:/tmp/y".to_owned()];
-    let recv = extract_recv_services(&mut requested).expect("entries parse");
+    let recv = extract_recv_services(&mut requested, no_inbox).expect("entries parse");
 
     assert!(
         requested.is_empty(),
@@ -2814,7 +2819,7 @@ fn named_recv_dirs_de_merge_into_per_service_instances() {
 #[test]
 fn bare_recv_is_refused_with_the_name_addr_teaching_error() {
     let mut requested = vec!["recv:".to_owned()];
-    let Err(error) = extract_recv_services(&mut requested) else {
+    let Err(error) = extract_recv_services(&mut requested, no_inbox) else {
         panic!("a bare `recv:` should be refused, not served");
     };
     assert!(
@@ -2832,7 +2837,7 @@ fn non_recv_services_pass_through_and_only_recv_is_removed() {
         "in=recv:/tmp/x".to_owned(),
         "web=tcp:127.0.0.1:8080".to_owned(),
     ];
-    let recv = extract_recv_services(&mut requested).expect("entries parse");
+    let recv = extract_recv_services(&mut requested, no_inbox).expect("entries parse");
 
     assert_eq!(
         requested,
