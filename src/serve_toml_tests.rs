@@ -113,12 +113,17 @@ fn a_serve_toml_swoosh_did_not_write_is_damaged() {
         "not toml\n",
     ] {
         std::fs::write(scratch.home.serve_toml(), text).unwrap();
+        let read = ServeToml::read(&scratch.home);
         assert!(
-            matches!(
-                ServeToml::read(&scratch.home),
-                Err(super::ServeTomlError::Damaged { .. })
-            ),
+            matches!(read, Err(super::ServeTomlError::Damaged { .. })),
             "{text:?} is damaged"
+        );
+        assert_eq!(
+            read.unwrap_err().to_string(),
+            format!(
+                "{} was changed outside swoosh: refusing to use it",
+                scratch.home.serve_toml().display()
+            )
         );
     }
 }

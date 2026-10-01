@@ -593,10 +593,7 @@ impl ServeCmd {
         if !matches!(started, Started::Named(_)) {
             let off = enabled.names();
             for name in names.iter().filter(|name| off.contains(*name)) {
-                eprintln!(
-                    "{name} is off (swoosh service off {name}); swoosh service on {name} turns it \
-                     back on."
-                );
+                eprintln!("{name} is off; to turn it back on: swoosh service enable {name}");
             }
         }
 

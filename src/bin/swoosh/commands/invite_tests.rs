@@ -1421,8 +1421,8 @@ async fn a_revoked_key_is_not_re_admitted() {
     refused_before_writing(
         &ran,
         &format!(
-            "{}… was revoked; a revoked key is not re-admitted. On that machine: swoosh leave \
-             --new-key, then invite the new key.",
+            "{}… was revoked; a revoked key is not re-admitted. Make that machine a new key and invite \
+             that one. On that machine: swoosh leave --new-key",
             swoosh::credential::short(&key(OLD)),
         ),
         &home,

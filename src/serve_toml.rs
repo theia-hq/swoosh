@@ -64,7 +64,7 @@ pub enum ServeTomlError {
     },
     /// The file is not one swoosh wrote: it is not TOML, a field has the wrong type, a key is unknown, a
     /// service turned off is not a service name, or it is larger than [`MAX_SERVE_TOML`].
-    #[error("{} is damaged", EscapedPath(path))]
+    #[error("{} was changed outside swoosh: refusing to use it", EscapedPath(path))]
     Damaged {
         /// The file.
         path: PathBuf,

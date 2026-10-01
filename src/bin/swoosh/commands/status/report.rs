@@ -316,15 +316,14 @@ impl Report {
                     };
                     (state, format!("until {}", Date(row.until)))
                 };
+                // A row with no name stands as its short key, once, in the name column; the key column
+                // stays empty rather than print the same key a second time (O2).
                 let key = short(&row.key.to_string());
-                [
-                    row.label
-                        .as_ref()
-                        .map_or_else(|| key.clone(), |label| format!("me/{label}")),
-                    key,
-                    state,
-                    date,
-                ]
+                let (name, key) = match &row.label {
+                    Some(label) => (format!("me/{label}"), key),
+                    None => (key, String::new()),
+                };
+                [name, key, state, date]
             })
             .collect();
         self.sections.push(Section { title, rows });

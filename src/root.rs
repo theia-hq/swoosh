@@ -203,14 +203,15 @@ pub enum RootError {
         /// The copy's directory.
         dir: PathBuf,
     },
-    /// The list beside the root's key is not one this root signed.
+    /// The list beside the root's key is not one this root signed. Names the list's own file, never the
+    /// directory: for the root kept here that is the whole home.
     #[error(
-        "this root's records were changed outside swoosh ({}): refusing to sign with them. Use another copy.",
-        EscapedPath(.dir)
+        "this root's devices list was changed outside swoosh ({}): refusing to sign from it. Use another copy.",
+        EscapedPath(.path)
     )]
     Damaged {
-        /// The directory the root's key is in.
-        dir: PathBuf,
+        /// The list's file, `devices` beside the root's key.
+        path: PathBuf,
     },
     /// The root lists as many devices as one update can carry.
     #[error(
@@ -321,8 +322,8 @@ pub enum RootError {
     },
     /// The key is revoked, and a revoked key is never admitted again.
     #[error(
-        "{}… was revoked; a revoked key is not re-admitted. On that machine: swoosh leave --new-key, then \
-        invite the new key.",
+        "{}… was revoked; a revoked key is not re-admitted. Make that machine a new key and invite that one. \
+        On that machine: swoosh leave --new-key",
         crate::credential::short(.key)
     )]
     RevokedKey {
@@ -1483,9 +1484,9 @@ fn read_list(
 ) -> Result<Option<RosterDoc>, RootError> {
     use std::io::Read as _;
 
-    let (dir, path) = match copy {
-        Some(dir) => (dir.to_path_buf(), dir.join(LIST_FILE)),
-        None => (home.dir().to_path_buf(), home.devices()),
+    let path = match copy {
+        Some(dir) => dir.join(LIST_FILE),
+        None => home.devices(),
     };
     let file = match std::fs::File::open(&path) {
         Ok(file) => file,
@@ -1497,11 +1498,11 @@ fn read_list(
         .read_to_end(&mut bytes)
         .map_err(io_at(&path))?;
     if bytes.len() as u64 > MAX_ROSTER_BLOB {
-        return Err(RootError::Damaged { dir });
+        return Err(RootError::Damaged { path });
     }
     crate::roster::verify(&bytes, root)
         .map(Some)
-        .map_err(|_| RootError::Damaged { dir })
+        .map_err(|_| RootError::Damaged { path })
 }
 
 /// Present step 6: refuse a copy this act cannot write, before anything is signed, since it writes what it

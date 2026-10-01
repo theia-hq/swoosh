@@ -910,8 +910,12 @@ async fn a_root_signed_link_refuses_when_your_devices_cannot_be_read() {
     let ran = revoke(&home, &[&typed(&laptop.standing)]).await;
     let refusal = ran.refusal();
     assert!(
-        refusal.contains("records were changed outside swoosh"),
-        "the failed read is the refusal: {refusal}"
+        refusal.contains(&format!(
+            "this root's devices list was changed outside swoosh ({}): refusing to sign from it. Use \
+             another copy.",
+            home.devices().display()
+        )),
+        "the failed read is the refusal, naming the list's file: {refusal}"
     );
     assert!(
         !blocks(&home, &laptop.standing).await,
@@ -1236,4 +1240,36 @@ async fn a_revoke_stopped_after_the_copy_write_is_finished_by_running_it_again()
     );
     assert_eq!(list_in(&stick).epoch(), Epoch(5));
     assert!(ran.tape.text().contains("<offer>"), "the cut is offered");
+}
+
+/// Where the root is kept, a device revoked here leaves the list with its key and no row, so no name is
+/// left to print: the next `status` shows it by its short key, once, in the name column, and never the
+/// same key again in the key column.
+#[tokio::test]
+async fn status_prints_a_device_revoked_here_by_its_short_key_once() {
+    let home = scratch("revoke-then-status");
+    holds(
+        &home,
+        &[live(OWN, "desk"), live(LAPTOP, "laptop")],
+        Vec::new(),
+    )
+    .await;
+    let _ = revoke(&home, &["me/laptop"]).await.ok().to_owned();
+
+    let stored = swoosh::identity::inspect(&home).unwrap().into_stored();
+    let out = super::super::status::report::Report::gather(&home, &stored, now())
+        .await
+        .unwrap()
+        .render();
+    // A row's short key: `ed01` and 8 more characters.
+    let short: String = key(LAPTOP).to_string().chars().take(12).collect();
+    let rows: Vec<&str> = out.lines().filter(|line| line.contains(&short)).collect();
+    let [laptop] = rows.as_slice() else {
+        panic!("one row names the laptop's key: {out}");
+    };
+    assert_eq!(
+        laptop.split_whitespace().collect::<Vec<_>>(),
+        [short.as_str(), "revoked"],
+        "the key once, then the state: {out}"
+    );
 }

@@ -2090,9 +2090,8 @@ fn naming_a_service_at_start_clears_it_from_disabled() {
         String::from_utf8_lossy(&bare.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&bare.stderr).contains(
-            "ping is off (swoosh service off ping); swoosh service on ping turns it back on.\n"
-        ),
+        String::from_utf8_lossy(&bare.stderr)
+            .contains("ping is off; to turn it back on: swoosh service enable ping\n"),
         "{}",
         String::from_utf8_lossy(&bare.stderr)
     );
