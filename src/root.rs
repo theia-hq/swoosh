@@ -325,8 +325,8 @@ pub enum RootError {
     },
     /// The key is revoked, and a revoked key is never admitted again.
     #[error(
-        "{}… is the key of me/{name}, which was revoked; a revoked key is not re-admitted. Make that machine \
-        a new key and invite that one. On that machine: swoosh leave --new-key",
+        "{}… was me/{name}'s key and is revoked; a revoked key is not re-admitted. Give that machine a new \
+        key and invite that one. On that machine: swoosh leave --new-key",
         crate::credential::short(.key)
     )]
     RevokedKey {
