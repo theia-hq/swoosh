@@ -16,10 +16,9 @@ use std::time::SystemTime;
 use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use keystore::{KeyFile, Stored};
-use swoosh::home::Home;
-use swoosh::identity::HomeLock;
+use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::invite::{Invite, PREFIX};
-use swoosh::joining::{AdmitError, AdmitLock, Join};
+use swoosh::joining::Join;
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::root::Date;
 use swoosh::standing::{Standing, StandingError};
@@ -155,7 +154,8 @@ impl JoinCmd {
         for line in &read.finished {
             writeln!(io.err, "{line}")?;
         }
-        let was = match read.standing {
+        let standing = read.standing;
+        let was = match standing {
             Standing::Unpinned => None,
             Standing::Device { pin, until: held } => {
                 if pin == root && until < held {
@@ -181,20 +181,26 @@ impl JoinCmd {
                 eyre::bail!("{}", swoosh::standing::unfinished_line(root_key))
             }
         };
-        let _admit = match AdmitLock::joining(home) {
-            Ok(lock) => lock,
-            Err(AdmitError::Held) => eyre::bail!("stop swoosh serve first."),
-            Err(AdmitError::Io(error)) => return Err(error.into()),
-        };
+        // No `serve --admit` may run while this machine pins a root: asked under `home.lock` before any
+        // write, and again under it for the writes, which a `serve --admit` records its root under.
+        refuse_if_admitting(&HomeWrite::take(home).await?, home)?;
 
         // Then write.
         if let Some(seed) = &invite.seed {
             match made.filter(|made| *made != own) {
-                Some(made) => swoosh::identity::replace_made(seed, made, home)?,
+                Some(made) => {
+                    let home_lock = HomeWrite::take(home).await?;
+                    let serve_lock = ServeLock::take(&home_lock, home)?;
+                    swoosh::identity::replace_made(&serve_lock, &home_lock, seed, made, home)?;
+                }
                 None => swoosh::identity::write(seed, home).await?,
             }
         }
+        let home_lock = HomeWrite::take(home).await?;
+        refuse_if_admitting(&home_lock, home)?;
+        still(&home_lock, home, standing, &mut io.err).await?;
         swoosh::joining::join(
+            &home_lock,
             home,
             Join {
                 root,
@@ -202,8 +208,8 @@ impl JoinCmd {
                 from: invite.from,
                 pin_changes: was != Some(root),
             },
-        )
-        .await?;
+        )?;
+        drop(home_lock);
 
         writeln!(
             io.err,
@@ -215,7 +221,7 @@ impl JoinCmd {
                 io.err,
                 "this machine now trusts root root:{root} (was root:{was})."
             )?;
-            if HomeLock::is_held(home) {
+            if swoosh::home::serve_running(home).await {
                 writeln!(io.err, "{}", sessions_end(was))?;
             }
         }
@@ -283,6 +289,33 @@ fn fields(text: &str) -> usize {
         .and_then(|_| text.get(PREFIX.len()..))
         .unwrap_or(text);
     body.split('.').count()
+}
+
+/// Refuse, under `home.lock`, while a `serve --admit` runs on this home: a machine that pins a root admits
+/// no other root's devices.
+fn refuse_if_admitting(home_lock: &HomeWrite, home: &Home) -> eyre::Result<()> {
+    if ServeLock::admitting(home_lock, home)?.is_some() {
+        eyre::bail!("swoosh serve is running; stop it first: swoosh stop");
+    }
+    Ok(())
+}
+
+/// Refuse, under `home.lock`, when this machine's standing is no longer `was`, the one checked before the
+/// key write and any prompt: another `join`, a `leave` or a mint ran meanwhile.
+async fn still(
+    _home_lock: &HomeWrite,
+    home: &Home,
+    was: Standing,
+    err: &mut impl Write,
+) -> eyre::Result<()> {
+    let read = Standing::read(home).await?;
+    for line in &read.finished {
+        writeln!(err, "{line}")?;
+    }
+    if !read.standing.same(&was) {
+        eyre::bail!("{}", swoosh::standing::CHANGED);
+    }
+    Ok(())
 }
 
 /// The line a change of root prints while `serve` runs: what it cut, and what it did not.

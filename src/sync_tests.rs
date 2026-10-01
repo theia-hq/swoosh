@@ -92,14 +92,14 @@ async fn device_until(tag: &str, seed: u8, until: u64) -> Home {
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
-    config::write_signet(&home, root().node_id()).await.unwrap();
+    config::write_signet(&crate::testkit::lock(), &home, root().node_id()).unwrap();
     let badge = root()
         .device_badge(
             node(seed),
             SystemTime::UNIX_EPOCH + Duration::from_secs(until),
         )
         .unwrap();
-    config::write_badge(&home, &badge).await.unwrap();
+    config::write_badge(&crate::testkit::lock(), &home, &badge).unwrap();
     home
 }
 
@@ -109,7 +109,16 @@ async fn device(tag: &str, seed: u8) -> Home {
 
 /// Make `bytes` the update `home` holds, the way a fold leaves it.
 async fn holding(home: &Home, bytes: &[u8]) {
-    assert_eq!(fold(home, bytes).await.unwrap(), Folded::Newer);
+    assert_eq!(
+        fold(
+            &crate::home::HomeWrite::take(home).await.unwrap(),
+            home,
+            bytes
+        )
+        .await
+        .unwrap(),
+        Folded::Newer
+    );
 }
 
 /// Whether `home`'s gate refuses the device `seed` whatever it presents.
@@ -548,9 +557,13 @@ async fn a_kept_fork_below_the_held_update_still_adds_its_revocations() {
     let laptop = device("fork-below", LAPTOP).await;
     holding(&nas, &update(2, vec![], vec![])).await;
     assert_eq!(
-        fold(&nas, &update(2, vec![], vec![key(STOLEN)]))
-            .await
-            .unwrap(),
+        fold(
+            &crate::home::HomeWrite::take(&nas).await.unwrap(),
+            &nas,
+            &update(2, vec![], vec![key(STOLEN)])
+        )
+        .await
+        .unwrap(),
         Folded::Fork { floor: Epoch(2) }
     );
     let third = update(3, vec![], vec![]);
@@ -637,7 +650,13 @@ async fn a_forked_updates_revocation_is_kept_and_carried_forward() {
     let fork = update(5, vec![], vec![key(STOLEN)]);
 
     assert_eq!(
-        fold(&desk, &fork).await.unwrap(),
+        fold(
+            &crate::home::HomeWrite::take(&desk).await.unwrap(),
+            &desk,
+            &fork
+        )
+        .await
+        .unwrap(),
         Folded::Fork { floor: Epoch(5) }
     );
 
@@ -656,9 +675,13 @@ async fn a_forked_updates_revocation_is_kept_and_carried_forward() {
 async fn the_fork_file_survives_a_newer_update_that_drops_its_revocation() {
     let desk = device("fork-survives", DESK).await;
     holding(&desk, &update(5, vec![], vec![])).await;
-    let _ = fold(&desk, &update(5, vec![], vec![key(STOLEN)]))
-        .await
-        .unwrap();
+    let _ = fold(
+        &crate::home::HomeWrite::take(&desk).await.unwrap(),
+        &desk,
+        &update(5, vec![], vec![key(STOLEN)]),
+    )
+    .await
+    .unwrap();
     holding(&desk, &update(6, vec![], vec![])).await;
     assert!(
         desk.devices_conflict().exists(),
@@ -682,11 +705,27 @@ async fn concurrent_folds_never_lose_a_revocation() {
     let (one, two) = tokio::join!(
         tokio::spawn({
             let desk = desk.clone();
-            async move { fold(&desk, &first).await.unwrap() }
+            async move {
+                fold(
+                    &crate::home::HomeWrite::take(&desk).await.unwrap(),
+                    &desk,
+                    &first,
+                )
+                .await
+                .unwrap()
+            }
         }),
         tokio::spawn({
             let desk = desk.clone();
-            async move { fold(&desk, &second).await.unwrap() }
+            async move {
+                fold(
+                    &crate::home::HomeWrite::take(&desk).await.unwrap(),
+                    &desk,
+                    &second,
+                )
+                .await
+                .unwrap()
+            }
         }),
     );
     crate::roster::SLOW.store(false, Ordering::SeqCst);
@@ -710,7 +749,7 @@ async fn concurrent_folds_never_lose_a_revocation() {
     );
 }
 
-/// A `contact add` holds `roster.lock` from its read of the book to its save, so a fold that lands meanwhile
+/// A `contact add` holds `home.lock` from its read of the book to its save, so a fold that lands meanwhile
 /// waits, and the book keeps both the added contact and the devices the fold wrote.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_contact_writers_never_lose_an_update() {
@@ -721,18 +760,27 @@ async fn two_contact_writers_never_lose_an_update() {
     let newer = root()
         .sign_update(&RosterDoc::with_revocations(Epoch(2), devices, vec![], vec![]).unwrap());
 
-    let mut book = ContactsStore::open_to_edit(&desk).await.unwrap();
+    let home_lock = crate::home::HomeWrite::take(&desk).await.unwrap();
+    let mut book = ContactsStore::open(&desk).await.unwrap();
     let folding = tokio::spawn({
         let desk = desk.clone();
-        async move { fold(&desk, &newer).await.unwrap() }
+        async move {
+            fold(
+                &crate::home::HomeWrite::take(&desk).await.unwrap(),
+                &desk,
+                &newer,
+            )
+            .await
+            .unwrap()
+        }
     });
     // Long enough for a fold that takes no notice of the edit to finish and write the book first.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let _ = book
         .contacts_mut()
         .add("alice".parse().unwrap(), None, node(PHONE));
-    book.save().await.unwrap();
-    drop(book);
+    book.save(&home_lock).unwrap();
+    drop(home_lock);
     assert_eq!(folding.await.unwrap(), Folded::Newer);
 
     let book = ContactsStore::open(&desk).await.unwrap();
@@ -833,7 +881,7 @@ async fn invited_by_stays_when_a_sync_lands_no_list() {
 async fn contacts_toml_has_no_me_table() {
     let desk = device("no-me-table", DESK).await;
     holding(&desk, &update(1, vec![], vec![])).await;
-    let mut book = ContactsStore::open_to_edit(&desk).await.unwrap();
+    let mut book = ContactsStore::open(&desk).await.unwrap();
     assert!(
         book.contacts().devices(&"me".parse().unwrap()).is_some(),
         "the book opens with the devices the fold took"
@@ -841,7 +889,7 @@ async fn contacts_toml_has_no_me_table() {
     let _ = book
         .contacts_mut()
         .add("alice".parse().unwrap(), None, node(LAPTOP));
-    book.save().await.unwrap();
+    book.save(&crate::testkit::lock()).unwrap();
     drop(book);
 
     let text = std::fs::read_to_string(desk.contacts()).unwrap();

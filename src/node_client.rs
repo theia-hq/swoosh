@@ -12,7 +12,7 @@ use core::time::Duration;
 use std::io;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::os::unix::io::AsRawFd as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tokio::net::UnixStream;
 use tokio::time::timeout;
@@ -52,7 +52,7 @@ pub trait NodeClient {
 pub struct UidSocket {
     /// The verified control socket path.
     socket: PathBuf,
-    /// The resident pid read from `control.lock` at resolve, for the stop confirmation line.
+    /// The resident pid read from `serve.lock` at resolve, for the stop confirmation line.
     pid: Option<u32>,
 }
 
@@ -65,7 +65,9 @@ impl UidSocket {
         let socket = home
             .control_socket()
             .map_err(|_| ControlError::NoResident)?;
-        Self::resolve_socket(socket)
+        let mut resolved = Self::resolve_socket(socket)?;
+        resolved.pid = crate::home::ServeLock::recorded(home).pid;
+        Ok(resolved)
     }
 
     /// Verify an already-derived socket path (the path half of [`resolve`](Self::resolve)), split out
@@ -110,8 +112,7 @@ impl UidSocket {
             }
             Err(_) => return Err(ControlError::Untrusted { path: socket }),
         }
-        let pid = read_lock_pid(&socket.with_file_name("control.lock"));
-        Ok(Self { socket, pid })
+        Ok(Self { socket, pid: None })
     }
 
     /// Dial the verified socket and prove the CONNECTED peer's uid is ours. The path stat in
@@ -244,7 +245,7 @@ impl ControlClient {
         Ok(Self::Socket(UidSocket::resolve_socket(socket)?))
     }
 
-    /// The resident pid read from `control.lock` at resolve, for the stop confirmation line.
+    /// The resident pid read from `serve.lock` at resolve, for the stop confirmation line.
     pub fn pid(&self) -> Option<u32> {
         match self {
             Self::Socket(socket) => socket.pid,
@@ -282,23 +283,6 @@ pub fn control_error_report(error: ControlError) -> eyre::Report {
         ),
         other => eyre::Report::new(other),
     }
-}
-
-/// The most bytes [`read_lock_pid`] reads: a u32 pid is at most ten digits plus a newline, so sixteen
-/// covers the record with room to spare.
-const LOCK_PID_READ_CAP: u64 = 16;
-
-/// Read the pid recorded in the control lock at `path`, if any. Bounded, so a same-uid process cannot
-/// make a reader allocate on demand; absent or unparsable is `None`. The daemon start records this
-/// pid, and both the single-instance refusal and the client stop line read it through here.
-pub(crate) fn read_lock_pid(path: &Path) -> Option<u32> {
-    use std::io::Read as _;
-
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = file.take(LOCK_PID_READ_CAP);
-    let mut text = String::new();
-    reader.read_to_string(&mut text).ok()?;
-    text.split_whitespace().next()?.parse().ok()
 }
 
 /// The effective uid: the owner every control peer and runtime path must match.

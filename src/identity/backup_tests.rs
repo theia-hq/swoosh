@@ -7,7 +7,7 @@ use keystore::{KeyFile, Method, Stored};
 
 use super::{Existing, export, restore};
 use crate::identity::identity_tests::{home, sealed};
-use crate::identity::{HomeLock, Identity, inspect, resolve_with};
+use crate::identity::{Identity, inspect, resolve_with};
 use crate::passphrase::Scripted;
 
 /// The node a sealed file at `path` opens as under `passphrase`.
@@ -393,7 +393,7 @@ fn a_restore_is_refused_while_a_node_serves_the_home() {
     let (home, dir) = home("restore-served-home");
     resolve_with(Identity::Persisted, &home, &mut Scripted::new([])).expect("its own key");
     let before = std::fs::read(home.key()).expect("read the key");
-    let serving = HomeLock::serving(&home).expect("a node serves the home");
+    let serving = crate::testkit::serving(&home, None);
 
     let refused = restore(
         &home,
@@ -410,7 +410,7 @@ fn a_restore_is_refused_while_a_node_serves_the_home() {
         panic!("a restore under a serving node is refused");
     };
     assert!(
-        format!("{error:#}").contains("a node is running"),
+        format!("{error:#}") == "swoosh serve is running; stop it first: swoosh stop",
         "the refusal names why: {error:#}"
     );
     drop(serving);

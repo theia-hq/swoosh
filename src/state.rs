@@ -5,12 +5,11 @@
 //! ones included, and what only the root needs (`seeded`, `invite_until`, `revoked_on`), so it is never
 //! served. A payload under another magic (an update the same root signed) is refused.
 //!
-//! [`write`] replaces the file atomically through an owner-only `state.new`. [`load`] takes a valid
-//! `state`, else a valid `state.new`, else refuses as damaged, and renames nothing; [`recover`] does the
-//! same and promotes the `state.new` it took, so only a holder of the root's lock calls it.
+//! [`write`] replaces the file through the home's one write routine, under `home.lock`. [`load`] takes a
+//! valid `state`, else refuses as damaged.
 
-use std::fs::{self, File};
-use std::io::{self, Read as _, Write as _};
+use std::fs::File;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 
 use nauthy::{Link, SignError, Signed, VerifyKey};
@@ -21,6 +20,7 @@ use crate::codec::{
 };
 use crate::contacts::DeviceLabel;
 use crate::escape::EscapedPath;
+use crate::home::HomeWrite;
 use crate::roster::{ENVELOPE_LEN, Epoch, MAX_ID_LEN, MAX_MEMBER_LEN};
 
 /// The magic the payload opens with: `swoosh-` and the file it heads.
@@ -31,9 +31,6 @@ const VERSION: u8 = 1;
 
 /// The file name.
 pub const FILE: &str = "state";
-
-/// The staged file a write goes through.
-pub const STAGED: &str = "state.new";
 
 /// The most rows `state` holds: every live device and every revoked one, whose keys are kept for good.
 pub const MAX_ROWS: usize = MAX_MEMBERS + MAX_REVOKED_KEYS;
@@ -286,7 +283,7 @@ pub enum StateVerifyError {
 /// Why `state` could not be read.
 #[derive(Debug, thiserror::Error)]
 pub enum StateError {
-    /// Neither `state` nor `state.new` holds valid records of this root.
+    /// `state` holds no valid records of this root.
     #[error(
         "this root's records were changed outside swoosh ({}): refusing to sign with them. Use another copy.",
         EscapedPath(dir)
@@ -295,7 +292,7 @@ pub enum StateError {
         /// The root's directory.
         dir: PathBuf,
     },
-    /// A file could not be read, or the promotion of `state.new` could not be written.
+    /// The file could not be read.
     #[error("reading the root's records in {}", EscapedPath(dir))]
     Io {
         /// The root's directory.
@@ -306,20 +303,23 @@ pub enum StateError {
     },
 }
 
-/// Store `signed` (the root's signature over [`State::canonical_bytes`]) as `dir/state`: write `state.new` and fsync it, rename it over `state`,
-/// then fsync `dir`. A crash at any point leaves the old `state` or the new one, and [`load`] finds it.
-pub fn write(dir: &Path, signed: &[u8]) -> io::Result<()> {
-    write_with(&mut RealDisk, dir, signed)
+/// Store `signed` (the root's signature over [`State::canonical_bytes`]) as `dir/state`, under `home.lock`,
+/// through the home's one write routine: a crash at any point leaves the old `state` or the new one.
+///
+/// # Errors
+///
+/// The file could not be written.
+pub fn write(home_lock: &HomeWrite, dir: &Path, signed: &[u8]) -> io::Result<()> {
+    crate::config::write_private_atomic(home_lock, &dir.join(FILE), signed)
 }
 
-/// Read `dir/state` and verify it against `root`: a valid `state`, else a valid `state.new`, else the
-/// records are damaged. Renames nothing, so it needs no lock.
+/// Read `dir/state` and verify it against `root`: a valid `state`, else the records are damaged.
+///
+/// # Errors
+///
+/// [`StateError::Damaged`] when there is no valid `state`; [`StateError::Io`] when it cannot be read.
 pub fn load(dir: &Path, root: VerifyKey) -> Result<State, StateError> {
-    let io = io_error(dir);
-    if let Some(state) = load_file(&dir.join(FILE), root).map_err(&io)? {
-        return Ok(state);
-    }
-    match load_file(&dir.join(STAGED), root).map_err(&io)? {
+    match load_file(&dir.join(FILE), root).map_err(io_error(dir))? {
         Some(state) => Ok(state),
         None => Err(StateError::Damaged {
             dir: dir.to_path_buf(),
@@ -327,81 +327,13 @@ pub fn load(dir: &Path, root: VerifyKey) -> Result<State, StateError> {
     }
 }
 
-/// [`load`], and when the records came from `state.new`, rename it over `state`. Only a holder of the
-/// root's lock calls it: a writer may be rewriting `state.new` under anyone else.
-pub fn recover(dir: &Path, root: VerifyKey) -> Result<State, StateError> {
-    recover_with(&mut RealDisk, dir, root)
-}
-
-/// Name `dir` on a failed read or promotion.
+/// Name `dir` on a failed read.
 fn io_error(dir: &Path) -> impl Fn(io::Error) -> StateError + use<> {
     let dir = dir.to_path_buf();
     move |source| StateError::Io {
         dir: dir.clone(),
         source,
     }
-}
-
-/// The filesystem calls a write and a promotion make, one method per call, so a test can fail each one.
-pub(crate) trait Disk {
-    fn write(&mut self, path: &Path, bytes: &[u8]) -> io::Result<()>;
-    fn sync(&mut self, path: &Path) -> io::Result<()>;
-    fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()>;
-}
-
-/// The real filesystem.
-pub(crate) struct RealDisk;
-
-impl Disk for RealDisk {
-    /// A fresh owner-only file: whatever sat at `path` is removed first, and `create_new` never follows a
-    /// link there.
-    fn write(&mut self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        match fs::remove_file(path) {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
-            _ => {}
-        }
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        options.open(path)?.write_all(bytes)
-    }
-
-    fn sync(&mut self, path: &Path) -> io::Result<()> {
-        File::open(path)?.sync_all()
-    }
-
-    fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
-        fs::rename(from, to)
-    }
-}
-
-pub(crate) fn write_with(disk: &mut impl Disk, dir: &Path, signed: &[u8]) -> io::Result<()> {
-    let staged = dir.join(STAGED);
-    disk.write(&staged, signed)?;
-    disk.sync(&staged)?;
-    disk.rename(&staged, &dir.join(FILE))?;
-    disk.sync(dir)
-}
-
-pub(crate) fn recover_with(
-    disk: &mut impl Disk,
-    dir: &Path,
-    root: VerifyKey,
-) -> Result<State, StateError> {
-    let io = io_error(dir);
-    if let Some(state) = load_file(&dir.join(FILE), root).map_err(&io)? {
-        return Ok(state);
-    }
-    let staged = dir.join(STAGED);
-    let Some(state) = load_file(&staged, root).map_err(&io)? else {
-        return Err(StateError::Damaged {
-            dir: dir.to_path_buf(),
-        });
-    };
-    disk.rename(&staged, &dir.join(FILE)).map_err(&io)?;
-    disk.sync(dir).map_err(&io)?;
-    Ok(state)
 }
 
 /// The verified records at `path`, or `None` when the file is missing, longer than [`MAX_STATE_BLOB`], or

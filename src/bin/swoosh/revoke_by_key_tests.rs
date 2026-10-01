@@ -66,7 +66,9 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
         root_id,
         expiry: nauthy::Request::expires_in(Duration::from_secs(3600)),
     };
-    Grants::at(home.links()).append(&record).await.unwrap();
+    Grants::at(home.links())
+        .append(&swoosh::testkit::lock(), &record)
+        .unwrap();
 
     // Before revocation: the cap is a valid grant for the bound device, and nothing revokes it.
     let request =

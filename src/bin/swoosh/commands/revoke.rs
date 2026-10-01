@@ -22,7 +22,7 @@ use clap::Args;
 use nauthy::{FileDenylist, Link, RevocationId, VerifyKey};
 use swoosh::contacts::{ContactRef, ContactsStore, DeviceLabel, ME, Petname, ResolveError};
 use swoosh::grants::Grants;
-use swoosh::home::Home;
+use swoosh::home::{Home, HomeWrite};
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::reach_report::{Reach, What};
 use swoosh::root::{Root, RootError, RootPlace, RootVerb};
@@ -205,6 +205,7 @@ impl RevokeCmd {
         let issuer = link.root();
         if own_key(home)?.is_some_and(|own| own == issuer) {
             self.no_root()?;
+            let _home_lock = HomeWrite::take(home).await?;
             let mut denylist = denylist(home).await?;
             link.revoke(&mut denylist).await?;
             writeln!(
@@ -243,10 +244,11 @@ impl RevokeCmd {
             // Your root has revoked the device already: its name may be a new device's now, so this stops
             // at the link and the key it was signed for.
             self.no_root()?;
+            let home_lock = HomeWrite::take(home).await?;
             let mut denylist = denylist(home).await?;
             link.revoke(&mut denylist).await?;
             if let Some(row) = &row {
-                swoosh::gate::add_revoked_keys(home, &[row.key])?;
+                swoosh::gate::add_revoked_keys(&home_lock, home, &[row.key])?;
             }
             writeln!(err, "{what}: {ALREADY}")?;
             return Ok(None);
@@ -266,6 +268,7 @@ impl RevokeCmd {
         } else {
             Reach::LocalOnly { until: ends }
         };
+        let _home_lock = HomeWrite::take(home).await?;
         let mut denylist = denylist(home).await?;
         link.revoke(&mut denylist).await?;
         writeln!(err, "{}", reach.line(&what))?;
@@ -299,13 +302,14 @@ impl RevokeCmd {
         }
 
         let now = unix_now();
+        let home_lock = HomeWrite::take(home).await?;
         let mut denylist = denylist(home).await?;
         for id in row.ids.iter().filter(|id| id.expires > now) {
             if !denylist.is_revoked_any([&id.id]) {
                 denylist.revoke_id(RevocationId::clone(&id.id)).await?;
             }
         }
-        swoosh::gate::add_revoked_keys(home, &[row.key])?;
+        swoosh::gate::add_revoked_keys(&home_lock, home, &[row.key])?;
         let links = revoke_links(home, &mut denylist, &[row.key.to_string()]).await? > 0;
         let device = format!("me/{name}");
 
@@ -482,6 +486,7 @@ async fn person_links(home: &Home, person: &Petname, err: &mut impl Write) -> ey
     if let Some(root) = contacts.signet(person) {
         holders.push(root.node.to_string());
     }
+    let _home_lock = HomeWrite::take(home).await?;
     let mut denylist = denylist(home).await?;
     if revoke_links(home, &mut denylist, &holders).await? == 0 {
         eyre::bail!("no link from this machine was given to {person}; nothing revoked.");
@@ -513,6 +518,7 @@ async fn key_links(
     err: &mut impl Write,
 ) -> eyre::Result<()> {
     let holders: Vec<String> = keys.iter().map(ToString::to_string).collect();
+    let _home_lock = HomeWrite::take(home).await?;
     let mut denylist = denylist(home).await?;
     let revoked = revoke_links(home, &mut denylist, &holders).await?;
     let mut trailing = Vec::new();

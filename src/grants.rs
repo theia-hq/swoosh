@@ -9,17 +9,17 @@
 //! holder, and `status`, read. It is a who-can-reach-what record, so it is written `0600`, and it lives
 //! in the node home beside the identity so one home moves the whole identity and trust unit together.
 //!
-//! Every writer takes the exclusive flock on `<home>/links.lock`. An [`append`](Grants::append) is one
-//! `O_APPEND` line and a `sync_data`, so a link is on disk before it is printed; a rewrite (the prune an
-//! append runs once enough rows have expired) writes `links.new`, syncs it and renames it over `links`.
+//! Every writer holds `home.lock`. An [`append`](Grants::append) is one `O_APPEND` line and a `sync_data`,
+//! so a link is on disk before it is printed, and the directory is synced when the file is first made; a
+//! rewrite (the prune an append runs once enough rows have expired) goes through the home's one write
+//! routine.
 
 use core::num::ParseIntError;
 use core::str::FromStr;
 use core::time::Duration;
 use std::collections::HashSet;
 use std::io::Write as _;
-use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -27,14 +27,14 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use nauthy::{FileStamp, IssuedIds, RevocationId, STAT_DEBOUNCE, Service, ServiceParseError};
 
 use crate::escape::EscapedPath;
+use crate::home::HomeWrite;
 
 /// How many expired rows an [`append`](Grants::append) lets gather before it prunes them. A prune rewrites
 /// the whole file, so it waits until the rewrite removes enough to be worth it.
 pub const PRUNE_AT: usize = 64;
 
 /// The persisted ledger backing a node home. Owns the load / append / prune logic over its path; the
-/// location is the caller's to choose (see [`Home::links`](crate::home::Home::links)), and the lock and
-/// the rewrite's temp are its siblings, `<path>.lock` and `<path>.new`.
+/// location is the caller's to choose (see [`Home::links`](crate::home::Home::links)).
 pub struct Grants {
     path: PathBuf,
     /// Prune once this many rows have expired. [`PRUNE_AT`] outside tests.
@@ -64,23 +64,23 @@ impl Grants {
         &self.path
     }
 
-    /// Record one issued grant, creating the file (and its parent dir) on first use, under the ledger's
-    /// exclusive lock. Returns once the row is on disk (`sync_data`), so a caller that prints the link
-    /// after this never prints a link whose row a crash could lose.
+    /// Record one issued grant under `home.lock`, creating the file (and its parent dir) on first use.
+    /// Returns once the row is on disk (`sync_data`), so a caller that prints the link after this never
+    /// prints a link whose row a crash could lose.
     ///
-    /// When at least [`PRUNE_AT`] rows have expired, the append first rewrites the file without them. The
-    /// lock is what makes that safe: a rewrite reads, writes `links.new` and renames it over `links`, and
-    /// a concurrent append to the old file would be lost in between.
+    /// When at least [`PRUNE_AT`] rows have expired, the append first rewrites the file without them.
+    /// `home.lock` is what makes that safe: a rewrite reads the file and replaces it, and a concurrent
+    /// append to the old file would be lost in between.
     ///
     /// The private posture is reasserted every append: the config dir is `0700` and the ledger `0600`,
     /// because this index of who can reach what is as sensitive as the grants it tracks.
-    pub async fn append(&self, record: &GrantRecord) -> Result<(), LedgerError> {
-        let path = self.path.clone();
+    ///
+    /// # Errors
+    ///
+    /// The file could not be pruned, opened, written or synced.
+    pub fn append(&self, home_lock: &HomeWrite, record: &GrantRecord) -> Result<(), LedgerError> {
         let line = format!("{}\n", record.to_line());
-        let prune_at = self.prune_at;
-        tokio::task::spawn_blocking(move || append_locked(&path, &line, prune_at))
-            .await
-            .map_err(|error| LedgerError::Io(std::io::Error::other(error)))?
+        append_locked(home_lock, &self.path, &line, self.prune_at)
     }
 
     /// Every grant this node has issued, in append order. An absent file is no grants (nothing issued yet).
@@ -116,28 +116,21 @@ impl Grants {
     }
 }
 
-/// `path` with `suffix` appended to its file name: the ledger's lock and its rewrite's temp.
-fn sibling(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(suffix);
-    path.with_file_name(name)
-}
-
-/// The body of [`Grants::append`], synchronous so the flock and the file work never hold an executor
-/// thread across an await. The lock is held until this returns.
-fn append_locked(path: &Path, line: &str, prune_at: usize) -> Result<(), LedgerError> {
+/// The body of [`Grants::append`], under `home.lock`.
+fn append_locked(
+    home_lock: &HomeWrite,
+    path: &Path,
+    line: &str,
+    prune_at: usize,
+) -> Result<(), LedgerError> {
     if let Some(parent) = path.parent() {
         // swoosh's config dir holds the identity key, the denylist, and this index, so create it owner-only
         // (`0700`). Create-with-mode tightens only dirs WE make; it is a no-op on an existing dir, so we
         // never chmod (and fight ownership of) a dir another verb or the user already made.
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(parent)
-            .map_err(LedgerError::Io)?;
+        crate::config::create_store_dir(parent).map_err(LedgerError::Io)?;
     }
-    let _lock = LedgerLock::take(&sibling(path, ".lock")).map_err(LedgerError::Io)?;
-    prune_expired(path, prune_at).map_err(LedgerError::Io)?;
+    prune_expired(home_lock, path, prune_at).map_err(LedgerError::Io)?;
+    let made = !path.exists();
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
@@ -148,15 +141,22 @@ fn append_locked(path: &Path, line: &str, prune_at: usize) -> Result<(), LedgerE
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(LedgerError::Io)?;
     file.write_all(line.as_bytes()).map_err(LedgerError::Io)?;
-    file.sync_data().map_err(LedgerError::Io)
+    file.sync_data().map_err(LedgerError::Io)?;
+    // A file this append made is durable only once the directory that names it is.
+    if made && let Some(parent) = path.parent() {
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(LedgerError::Io)?;
+    }
+    Ok(())
 }
 
-/// Rewrite the ledger without its expired rows, when at least `prune_at` have expired. Called with the
-/// ledger's lock held. A line that does not parse is kept as it is: a prune removes only rows it read as
-/// expired, never one it could not read.
+/// Rewrite the ledger without its expired rows, when at least `prune_at` have expired, through the home's
+/// one write routine under `home.lock`. A line that does not parse is kept as it is: a prune removes only
+/// rows it read as expired, never one it could not read.
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
-fn prune_expired(path: &Path, prune_at: usize) -> std::io::Result<()> {
+fn prune_expired(home_lock: &HomeWrite, path: &Path, prune_at: usize) -> std::io::Result<()> {
     let text = match crate::home::read_trust_file(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -176,44 +176,7 @@ fn prune_expired(path: &Path, prune_at: usize) -> std::io::Result<()> {
         kept.push_str(line);
         kept.push('\n');
     }
-    let new = sibling(path, ".new");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&new)?;
-    file.write_all(kept.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&new, path)?;
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
-
-/// The ledger's exclusive flock, held while this value lives. On its own file, a stable inode, because a
-/// prune replaces the ledger itself by rename.
-struct LedgerLock {
-    /// Held, never read: the lock lives exactly as long as this open file does.
-    _held: std::fs::File,
-}
-
-impl LedgerLock {
-    /// Take the lock at `path`, creating the file, and wait for any other writer to finish.
-    fn take(path: &Path) -> std::io::Result<Self> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)?;
-        // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory lock to
-        // it. Without `LOCK_NB` it waits for a writer that holds the lock.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(Self { _held: file })
-    }
+    crate::config::write_private_atomic(home_lock, path, kept.as_bytes())
 }
 
 /// The ledger as the gate reads it: the root revocation ids of every link this machine signed, so an

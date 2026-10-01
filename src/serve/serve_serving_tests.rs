@@ -45,7 +45,7 @@ fn first_bare_serve_serves_the_default() {
     assert_eq!(started.entries(), ["ping=ping:", "speed=speed:"]);
     assert!(!started.is_resumed(), "the default is not a resume");
     started
-        .record(&home)
+        .record(&crate::testkit::lock(), &home)
         .expect("recording the default is a no-op");
     assert!(
         !home.serving().exists(),
@@ -59,7 +59,9 @@ fn a_named_list_is_what_the_next_bare_serve_resumes() {
     let scratch = Scratch::new("resume");
     let home = scratch.home();
     let started = Started::of(&named(&["ssh", "ping"]), &home, Path::new("/")).expect("named");
-    started.record(&home).expect("recorded");
+    started
+        .record(&crate::testkit::lock(), &home)
+        .expect("recorded");
 
     let resumed = Started::of(&[], &home, Path::new("/")).expect("resumed");
     assert_eq!(resumed.entries(), ["ssh=sshd:", "ping=ping:"]);
@@ -115,7 +117,9 @@ fn resumed_paths_are_absolute() {
         cwd,
     )
     .expect("named");
-    started.record(&home).expect("recorded");
+    started
+        .record(&crate::testkit::lock(), &home)
+        .expect("recorded");
     let recorded = std::fs::read_to_string(home.serving()).expect("the record");
     assert_eq!(
         recorded.lines().collect::<Vec<_>>(),
@@ -180,7 +184,7 @@ fn the_record_is_owner_only() {
     let home = scratch.home();
     Started::of(&named(&["ping"]), &home, Path::new("/"))
         .expect("named")
-        .record(&home)
+        .record(&crate::testkit::lock(), &home)
         .expect("recorded");
     let mode = std::fs::metadata(home.serving())
         .expect("the record")

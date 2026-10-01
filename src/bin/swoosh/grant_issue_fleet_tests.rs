@@ -98,7 +98,7 @@ async fn issuing_for_a_petname_binds_that_persons_stored_signet() {
     store
         .contacts_mut()
         .set_signet("alice".parse().unwrap(), alice_signet);
-    store.save().await.unwrap();
+    store.save(&swoosh::testkit::lock()).unwrap();
 
     // `--for fleet:alice` resolves alice's stored signet and binds the fleet grant to it.
     share("ssh", Some("fleet:alice"), false)
@@ -179,16 +179,14 @@ async fn a_device_issues_its_own_grant() {
         .await
         .unwrap();
     let root = swoosh::testkit::TestRoot::seeded(0x3b);
-    swoosh::config::write_signet(&home, root.node_id())
-        .await
-        .unwrap();
+    swoosh::config::write_signet(&swoosh::testkit::lock(), &home, root.node_id()).unwrap();
     let badge = root
         .device_badge(
             device.node_id(),
             nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
         )
         .unwrap();
-    swoosh::config::write_badge(&home, &badge).await.unwrap();
+    swoosh::config::write_badge(&swoosh::testkit::lock(), &home, &badge).unwrap();
 
     share("ssh", None, false)
         .run(store_at(&dir).await, &home)

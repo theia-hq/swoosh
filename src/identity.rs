@@ -41,13 +41,11 @@ use crate::home::Home;
 use crate::passphrase::{Prompt, Terminal};
 
 mod backup;
-mod lock;
 mod protect;
 mod replace;
 mod stage;
 
 pub use backup::{Existing, Restored, export, restore};
-pub use lock::HomeLock;
 pub use protect::{Protected, protect};
 pub use replace::{CHOOSE_NEEDS_TERMINAL, NewKey, Replaced};
 
@@ -379,10 +377,15 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
 
 /// Write `seed` over `made`, the key [`inspect`] made earlier in this same run and nothing has used yet:
 /// bare `join` printed that key, and the invite pasted after it carries its own. Any other key at
-/// `<home>/machine/key` is refused. Held under the home lock exclusive, so a node that started meanwhile, serving
-/// as `made`, refuses it.
-pub fn replace_made(seed: &[u8; 32], made: NodeId, home: &Home) -> eyre::Result<()> {
-    let _lock = HomeLock::new_key(home)?;
+/// `<home>/machine/key` is refused. The caller holds `serve.lock` (`_serve_lock`), so no `serve` runs as
+/// `made` while it is replaced, and `home.lock` (`_home_lock`) for the write.
+pub fn replace_made(
+    _serve_lock: &crate::home::ServeLock,
+    _home_lock: &crate::home::HomeWrite,
+    seed: &[u8; 32],
+    made: NodeId,
+    home: &Home,
+) -> eyre::Result<()> {
     let file = key_file(home);
     match file.load()? {
         Some(Stored::Plain(stored)) if stored.node_id() == made => {}

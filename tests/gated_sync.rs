@@ -58,11 +58,27 @@ fn a_device_gives_an_update_over_the_gated_route_a_stranger_is_refused() {
 async fn proof() {
     let nas_home = device_home("nas", NAS).await;
     let desk_home = device_home("desk", DESK).await;
-    fold(&nas_home, &update(1, vec![])).await.unwrap();
-    fold(&desk_home, &update(1, vec![])).await.unwrap();
-    fold(&desk_home, &update(2, vec![key(STOLEN)]))
-        .await
-        .unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(&nas_home).await.unwrap(),
+        &nas_home,
+        &update(1, vec![]),
+    )
+    .await
+    .unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(&desk_home).await.unwrap(),
+        &desk_home,
+        &update(1, vec![]),
+    )
+    .await
+    .unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(&desk_home).await.unwrap(),
+        &desk_home,
+        &update(2, vec![key(STOLEN)]),
+    )
+    .await
+    .unwrap();
     let own_slip = issue_own_slip(&nas_home).await;
 
     // The serving device: `control.sync` behind the anchored gate its home pins to the root, through the
@@ -155,7 +171,13 @@ fn a_lapsed_devices_pull_is_refused() {
 
 async fn lapsed_pull() {
     let nas_home = device_home("lapsed-nas", NAS).await;
-    fold(&nas_home, &update(1, vec![])).await.unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(&nas_home).await.unwrap(),
+        &nas_home,
+        &update(1, vec![]),
+    )
+    .await
+    .unwrap();
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
     let serving = nas_home.clone();
@@ -237,16 +259,19 @@ async fn device_home(tag: &str, seed: u8) -> Home {
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
-    swoosh::config::write_signet(&home, TestRoot::seeded(ROOT).node_id())
-        .await
-        .unwrap();
+    swoosh::config::write_signet(
+        &swoosh::testkit::lock(),
+        &home,
+        TestRoot::seeded(ROOT).node_id(),
+    )
+    .unwrap();
     let badge = TestRoot::seeded(ROOT)
         .device_badge(
             TestNode::seeded(seed).node_id(),
             SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL),
         )
         .unwrap();
-    swoosh::config::write_badge(&home, &badge).await.unwrap();
+    swoosh::config::write_badge(&swoosh::testkit::lock(), &home, &badge).unwrap();
     home
 }
 
@@ -261,15 +286,17 @@ async fn issue_own_slip(home: &Home) -> nauthy::Link {
         )
         .unwrap();
     Grants::at(home.links())
-        .append(&GrantRecord {
-            target: service,
-            kind: GrantKind::Bearer,
-            delegation: Delegation::Delegable,
-            holder: swoosh::grants::ANYONE.to_owned(),
-            root_id: slip.root_revocation_id().unwrap(),
-            expiry: nauthy::Request::expires_in(Duration::from_secs(300)),
-        })
-        .await
+        .append(
+            &swoosh::testkit::lock(),
+            &GrantRecord {
+                target: service,
+                kind: GrantKind::Bearer,
+                delegation: Delegation::Delegable,
+                holder: swoosh::grants::ANYONE.to_owned(),
+                root_id: slip.root_revocation_id().unwrap(),
+                expiry: nauthy::Request::expires_in(Duration::from_secs(300)),
+            },
+        )
         .unwrap();
     slip.link().unwrap()
 }

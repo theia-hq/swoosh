@@ -100,16 +100,14 @@ impl Device {
             .await
             .unwrap();
         let root = TestRoot::seeded(ROOT);
-        swoosh::config::write_signet(&home, root.node_id())
-            .await
-            .unwrap();
+        swoosh::config::write_signet(&swoosh::testkit::lock(), &home, root.node_id()).unwrap();
         let badge = root
             .device_badge(
                 device.node_id(),
                 Request::expires_in(Duration::from_secs(60 * 24 * 60 * 60)),
             )
             .unwrap();
-        swoosh::config::write_badge(&home, &badge).await.unwrap();
+        swoosh::config::write_badge(&swoosh::testkit::lock(), &home, &badge).unwrap();
         let secret = swoosh::identity::load(&home).await.unwrap().unwrap();
         Self { home, secret }
     }

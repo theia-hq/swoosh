@@ -285,9 +285,12 @@ async fn a_self_slip_revoked_mid_session_is_cut() {
 #[tokio::test]
 async fn a_self_anchored_session_survives_ten_sweeps_and_a_leave() {
     let scratch = Scratch::new("leave");
-    swoosh::config::write_signet(&scratch.home(), TestRoot::seeded(0x51).node_id())
-        .await
-        .unwrap();
+    swoosh::config::write_signet(
+        &swoosh::testkit::lock(),
+        &scratch.home(),
+        TestRoot::seeded(0x51).node_id(),
+    )
+    .unwrap();
     let served = serve(&scratch.0, &["demo=echo:"]);
     let link = issue(&scratch.0, &["demo"]);
     let node = dialer(0x44, &served).await;
@@ -343,8 +346,7 @@ async fn a_pin_written_under_serve_is_trusted_without_restart() {
         "before the pin, the root's device is refused"
     );
 
-    swoosh::config::write_signet(&scratch.home(), root.node_id())
-        .await
+    swoosh::config::write_signet(&swoosh::testkit::lock(), &scratch.home(), root.node_id())
         .unwrap();
     tokio::time::sleep(nauthy::STAT_DEBOUNCE + Duration::from_millis(200)).await;
     // A fresh connection under the same key: the refused one was torn down.

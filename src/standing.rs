@@ -271,7 +271,26 @@ pub fn damaged_line(what: &Disagreement) -> String {
     )
 }
 
+/// The line a command prints when this machine's standing moved between its check and its write: a `join`,
+/// `leave` or mint ran meanwhile, and nothing was written.
+pub const CHANGED: &str = "this machine's records changed while this ran: run it again.";
+
 impl Standing {
+    /// Whether `other` is this standing to the same root, whatever either's end: what a command checked
+    /// before a prompt still holds under the lock it writes under.
+    #[must_use]
+    pub fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Unpinned, Self::Unpinned) => true,
+            (Self::Device { pin: a, .. }, Self::Device { pin: b, .. })
+            | (Self::HoldsRoot { pin: a, .. }, Self::HoldsRoot { pin: b, .. })
+            | (Self::InterruptedMint { root_key: a }, Self::InterruptedMint { root_key: b }) => {
+                a == b
+            }
+            _ => false,
+        }
+    }
+
     /// Read this home's standing, finishing any crash state first. Never prompts.
     ///
     /// The crash states, in the order they are finished:

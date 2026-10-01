@@ -263,7 +263,10 @@ pub async fn pick_up(home: &Home, fetch: &impl Fetch) -> eyre::Result<Option<Ren
                 continue;
             }
         };
-        if let Some(until) = crate::joining::take_renewal(home, &fetched).await? {
+        let home_lock = crate::home::HomeWrite::take(home).await?;
+        let taken = crate::joining::take_renewal(&home_lock, home, &fetched).await?;
+        drop(home_lock);
+        if let Some(until) = taken {
             return Ok(Some(Renewed {
                 from: device.name,
                 name: own_name(home).await,

@@ -1,25 +1,24 @@
-//! Single-instance for `serve`: the flock truth plus the socket rendezvous, one per home.
+//! Single-instance for `serve`: `serve.lock` in the home is the truth, the socket is the rendezvous.
 //!
-//! The LOCK FILE is the truth; the SOCKET is the rendezvous. Start: create and verify the 0700
-//! runtime chain, take `LOCK_EX | LOCK_NB` on `control.lock`, then connect-probe the socket. The
-//! flock is what protects a legitimate resident: a resident holds it for life, so a second start
-//! loses at the flock and never reaches the probe, and that resident's path is never touched. Under
-//! OUR lock, the socket at the path is a crash plant or a same-uid squatter, so `ENOENT` and
-//! `ECONNREFUSED` reclaim it (unlink, rebind, record our pid) and a connect that completes (a
-//! listener that answers) refuses [`SingleError::ProbeAlive`]. The probe cannot prove death, and on
-//! macOS a live listener with a full accept queue answers `ECONNREFUSED`; that listener does not
-//! hold the lock, so it is the squatter this reclaim is for. The probe connect is nonblocking, so
-//! that same full queue cannot park startup. Hold the fd for life: a crash releases the flock by
-//! itself, and the next start recovers through the probe, no reaper. A clean exit removes what it made:
-//! the socket, then the lock file, then the leaf directory, so a stopped home leaves nothing in the
-//! runtime root.
+//! Start: take `serve.lock` exclusive without waiting, under `home.lock`, and record this process in it;
+//! then create and verify the 0700 runtime chain and connect-probe the socket. The lock is what protects a
+//! legitimate resident: a resident holds it for life, so a second start loses at the lock and never
+//! reaches the probe, and that resident's socket is never touched. It sits in the home, so two starts that
+//! resolve different runtime directories, or that name one home by two paths, still meet at it. Under OUR
+//! lock, the socket at the path is a crash plant or a same-uid squatter, so `ENOENT` and `ECONNREFUSED`
+//! reclaim it (unlink, rebind) and a connect that completes (a listener that answers) refuses
+//! [`SingleError::ProbeAlive`]. The probe cannot prove death, and on macOS a live listener with a full
+//! accept queue answers `ECONNREFUSED`; that listener does not hold the lock, so it is the squatter this
+//! reclaim is for. The probe connect is nonblocking, so that same full queue cannot park startup. A crash
+//! releases the lock by itself, and the next start recovers through the probe, no reaper. A clean exit
+//! removes what it made in the runtime root, the socket and then the leaf directory, before it lets the
+//! lock go, so a stopped home leaves nothing there and a start that follows finds the leaf its own.
 
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
-use crate::home::Home;
-use crate::node_client::read_lock_pid;
+use crate::home::{Home, HomeWrite, ServeLock, ServeLockError};
 
 /// Why a resident start was refused.
 #[derive(Debug, thiserror::Error)]
@@ -39,6 +38,9 @@ pub enum SingleError {
         /// The pid recorded in the lock file by the holder.
         pid: u32,
     },
+    /// A command replacing this machine's key holds this home's lock.
+    #[error("this machine's key is being replaced; when that has finished: swoosh serve")]
+    KeyChanging,
     /// A runtime-chain component is not this user's 0700 dir: created AND verified, never assumed.
     #[error("refusing insecure runtime dir {path}: want uid {want} mode 700")]
     RuntimeDirInsecure {
@@ -47,16 +49,10 @@ pub enum SingleError {
         /// The uid that must own it.
         want: u32,
     },
-    /// Opening, stat-ing, or flocking `control.lock` failed: an fd limit, a real lock error, a
-    /// symlinked or non-regular lock path.
-    #[error("could not take the control lock at {path}")]
-    LockFailed {
-        /// The lock path the open, stat, or flock was attempted on.
-        path: PathBuf,
-        /// The underlying OS failure.
-        #[source]
-        source: std::io::Error,
-    },
+    /// Opening, stat-ing, flocking or writing `home.lock` or `serve.lock` failed: an fd limit, a real
+    /// lock error, a symlinked or non-regular lock path.
+    #[error(transparent)]
+    LockFailed(#[from] crate::home::LockError),
     /// The socket answered a connect while we hold the lock: a squatter that is listening. A live
     /// node would hold the lock, so we would have lost at the flock and never probed; refuse loudly
     /// rather than clobber a socket that answers.
@@ -72,21 +68,13 @@ pub enum SingleError {
     BindFailed(#[source] std::io::Error),
 }
 
-/// The held single-instance lock: the flock fd plus the socket it guards and that socket PATH's
-/// identity. Dropping it unlinks the socket it bound, then the lock file, releases the flock, and
-/// removes the leaf directory, so a `serve` that refuses after the claim, or stops, leaves nothing for
-/// a later `status` to find. Only a process that dies without unwinding (a `SIGKILL`, an abort) leaves
-/// the leaf behind, the crash plant the next start of that home recovers through its probe. Owns the
-/// fd for process life.
+/// The held single-instance lock: `serve.lock` plus the socket it guards and that socket PATH's identity.
+/// Dropping it unlinks the socket it bound, removes the leaf directory, then empties and releases
+/// `serve.lock`, so a `serve` that refuses after the claim, or stops, leaves nothing for a later `status`
+/// to find. Only a process that dies without unwinding (a `SIGKILL`, an abort) leaves the leaf behind, the
+/// crash plant the next start of that home recovers through its probe. Owns the lock for process life.
 pub struct InstanceLock {
-    /// The lock fd: held open, flocked, for the life of the resident.
-    file: std::fs::File,
-    /// The lock file's path, unlinked on the way out.
-    lock: PathBuf,
-    /// The `(dev, ino)` of the locked file, so the unlink on the way out removes only the file this
-    /// instance holds, never one a later start made at the path.
-    lock_id: (u64, u64),
-    /// The runtime leaf holding the lock and the socket, removed last when it is empty.
+    /// The runtime leaf holding the socket, removed when it is empty.
     leaf: PathBuf,
     /// The socket this instance bound (for the graceful unlink).
     socket: PathBuf,
@@ -97,6 +85,8 @@ pub struct InstanceLock {
     socket_id: (u64, u64),
     /// This instance's pid, recorded in the lock file.
     pid: u32,
+    /// `serve.lock`, held for the run; dropped after the socket and the leaf are gone.
+    serve: ServeLock,
 }
 
 impl InstanceLock {
@@ -110,6 +100,11 @@ impl InstanceLock {
         &self.socket
     }
 
+    /// `serve.lock`, held for this run, to record the root it admits under `--admit`.
+    pub fn serve_lock(&self) -> &ServeLock {
+        &self.serve
+    }
+
     /// Graceful teardown, the same as dropping it: see the [`Drop`] impl.
     pub fn release(self) {
         drop(self);
@@ -117,20 +112,15 @@ impl InstanceLock {
 }
 
 impl Drop for InstanceLock {
-    /// Unlink the socket ONLY while the path still names the socket this instance bound (stat
-    /// without following links, compare `(dev, ino)` against the identity captured at bind), then the
-    /// lock file on the same rule, still under the flock so no start can take the file on its way
-    /// out. Then release the flock and remove the leaf, which `remove_dir` does only when it is
-    /// empty, so a start that got in after the unlink keeps its files. A blind by-path unlink could
-    /// remove a file a same-uid process swapped in.
+    /// Unlink the socket ONLY while the path still names the socket this instance bound (stat without
+    /// following links, compare `(dev, ino)` against the identity captured at bind), then remove the leaf,
+    /// which `remove_dir` does only when it is empty. Both happen while `serve.lock` is still held, so no
+    /// start of this home can make the leaf meanwhile; the lock goes after, as the fields drop. A blind
+    /// by-path unlink could remove a file a same-uid process swapped in.
     fn drop(&mut self) {
         if path_identity(&self.socket).is_ok_and(|id| id == self.socket_id) {
             let _ = std::fs::remove_file(&self.socket);
         }
-        if path_identity(&self.lock).is_ok_and(|id| id == self.lock_id) {
-            let _ = std::fs::remove_file(&self.lock);
-        }
-        release_flock(&self.file);
         let _ = std::fs::remove_dir(&self.leaf);
     }
 }
@@ -191,27 +181,24 @@ impl RuntimeDir {
         &self.dir
     }
 
-    /// `<leaf>/control.lock`: the flock truth, inside the verified leaf.
-    pub fn lock_path(&self) -> PathBuf {
-        self.dir.join("control.lock")
-    }
-
     /// `<leaf>/control.sock`: the rendezvous, inside the verified leaf.
     pub fn socket_path(&self) -> PathBuf {
         self.dir.join("control.sock")
     }
 }
 
-/// Acquire single-instance for `home` under the already-resolved runtime `root`: create and verify
-/// the runtime chain, take the exclusive nonblocking flock, connect-probe-then-unlink-bind the
-/// socket, record our pid, and return the held lock plus the bound listener. The probe/unlink/bind
-/// sequence runs UNDER the flock; the chain verify precedes it because the lock lives inside the
-/// leaf it verifies. A second holder gets [`SingleError::AlreadyResident`] naming the winner's pid
-/// and never touches the winner's socket: the flock, not the probe, is what keeps a legitimate
-/// resident's path safe. Under our own lock a socket that answers a connect is
-/// [`SingleError::ProbeAlive`], and any answer that is neither live nor one of the two stale
-/// answers is [`SingleError::ProbeUnclassified`].
-pub fn acquire(
+/// Acquire single-instance for `home` under the already-resolved runtime `root`: take `serve.lock`
+/// exclusive without waiting, under `home.lock`, and record our pid in it; then create and verify the
+/// runtime chain, connect-probe-then-unlink-bind the socket, and return the held lock plus the bound
+/// listener. A second holder gets [`SingleError::AlreadyResident`] naming the winner's pid and never
+/// touches the winner's socket: the lock, not the probe, is what keeps a legitimate resident's path safe.
+/// Under our own lock a socket that answers a connect is [`SingleError::ProbeAlive`], and any answer that
+/// is neither live nor one of the two stale answers is [`SingleError::ProbeUnclassified`].
+///
+/// # Errors
+///
+/// [`SingleError`], as above, and for a socket path too long to bind or an insecure runtime directory.
+pub async fn acquire(
     home: &Home,
     root: &Path,
 ) -> Result<(InstanceLock, std::os::unix::net::UnixListener), SingleError> {
@@ -220,38 +207,43 @@ pub fn acquire(
     if sockaddr_un(&socket_path).is_none() {
         return Err(SingleError::SocketPathTooLong { path: socket_path });
     }
-    // A resident on its way out unlinks its lock file and removes the leaf under its flock, so a start
-    // racing it can open the file just unlinked, or find the leaf gone. Each is a fresh try: the
-    // chain is made again and the lock taken on the file the path names now.
-    let mut tries = 0;
-    let (runtime, file, lock_id) = loop {
-        if let Some(runtime) = RuntimeDir::acquire(home, root)?
-            && let Some(taken) = take_lock(&runtime.lock_path())?
-        {
-            break (runtime, taken.file, taken.id);
-        }
-        tries += 1;
-        if tries == LOCK_TRIES {
-            return Err(lock_lost(home.runtime_leaf(root).join("control.lock")));
-        }
+    let serve = {
+        let home_lock = HomeWrite::take(home).await?;
+        let serve = match ServeLock::take(&home_lock, home) {
+            Ok(serve) => serve,
+            Err(ServeLockError::Held) => {
+                return Err(match ServeLock::recorded(home).pid {
+                    Some(pid) => SingleError::AlreadyResident { pid },
+                    None => SingleError::KeyChanging,
+                });
+            }
+            Err(ServeLockError::Lock(error)) => return Err(error.into()),
+        };
+        serve
+            .record(&home_lock, None)
+            .map_err(|source| crate::home::LockError {
+                path: home.serve_lock(),
+                source,
+            })?;
+        serve
     };
-    let lock_path = runtime.lock_path();
+    // Under `serve.lock` no other start of this home makes or removes the leaf, and a resident on its way
+    // out removed it before it let the lock go.
+    let runtime = match RuntimeDir::acquire(home, root)? {
+        Some(runtime) => runtime,
+        None => return Err(insecure(&home.runtime_leaf(root))),
+    };
     let socket_path = runtime.socket_path();
-    // Connect-probe UNDER the lock: the flock already proved no legitimate resident holds this
-    // home (a real resident would have won the flock and we would have returned AlreadyResident),
-    // so the socket here is a crash plant or a same-uid squatter. `ENOENT`/`ECONNREFUSED` reclaim
-    // it (unlink, bind, continue); a connect that completes (a socket that answers) refuses
-    // `ProbeAlive`; every other answer refuses `ProbeUnclassified`. The probe is a courtesy that
-    // avoids clobbering a responding socket, never the guarantee: the flock is what protects a
-    // legitimate resident.
-    let probe = probe_socket(&socket_path);
-    if !matches!(probe, Probe::Stale) {
-        // Release before returning so a probe refusal does not strand the flock.
-        release_flock(&file);
-        return Err(match probe {
-            Probe::Live => SingleError::ProbeAlive,
-            Probe::Stale | Probe::Unknown => SingleError::ProbeUnclassified,
-        });
+    // Connect-probe UNDER the lock: the lock already proved no legitimate resident holds this home (a
+    // real resident would have won the lock and we would have returned AlreadyResident), so the socket
+    // here is a crash plant or a same-uid squatter. `ENOENT`/`ECONNREFUSED` reclaim it (unlink, bind,
+    // continue); a connect that completes (a socket that answers) refuses `ProbeAlive`; every other answer
+    // refuses `ProbeUnclassified`. The probe is a courtesy that avoids clobbering a responding socket,
+    // never the guarantee: the lock is what protects a legitimate resident.
+    match probe_socket(&socket_path) {
+        Probe::Stale => {}
+        Probe::Live => return Err(SingleError::ProbeAlive),
+        Probe::Unknown => return Err(SingleError::ProbeUnclassified),
     }
     let _ = std::fs::remove_file(&socket_path);
     let listener =
@@ -263,105 +255,16 @@ pub fn acquire(
         use std::os::unix::fs::PermissionsExt as _;
         let _ = std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600));
     }
-    // Record our pid through the already-open lock fd (truncate + write), never a second by-path
-    // open a symlink planted inside the leaf could redirect.
-    let pid = std::process::id();
-    {
-        use std::io::{Seek as _, SeekFrom, Write as _};
-        let mut handle = &file;
-        let _ = handle.set_len(0);
-        let _ = handle.seek(SeekFrom::Start(0));
-        let _ = writeln!(handle, "{pid}");
-    }
     Ok((
         InstanceLock {
-            file,
-            lock: lock_path,
-            lock_id,
             leaf: runtime.path().to_owned(),
             socket: socket_path,
             socket_id,
-            pid,
+            pid: std::process::id(),
+            serve,
         },
         listener,
     ))
-}
-
-/// How many times a start takes the lock before it gives up on a file removed under it each time.
-const LOCK_TRIES: u32 = 3;
-
-/// The refusal for a start that lost the lock file at `path` on every one of its [`LOCK_TRIES`]. It names
-/// no fix: why another process keeps removing the file is for the person to find.
-fn lock_lost(path: PathBuf) -> SingleError {
-    SingleError::LockFailed {
-        path,
-        source: std::io::Error::other(format!(
-            "another process removed it on each of {LOCK_TRIES} tries"
-        )),
-    }
-}
-
-/// A lock file taken: the flocked handle and the `(dev, ino)` the path named when it was taken.
-struct Taken {
-    /// The flocked lock file.
-    file: std::fs::File,
-    /// Its `(dev, ino)`.
-    id: (u64, u64),
-}
-
-/// Open (creating, `0600`) the lock file at `path` with `O_NOFOLLOW`, check it is a regular file, and
-/// take the exclusive nonblocking flock. `None` when the file was removed before or while it was taken
-/// (a resident leaving): the path no longer names the locked file, so the flock guards nothing and is
-/// dropped. A live holder is [`SingleError::AlreadyResident`].
-// `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
-#[allow(clippy::std_instead_of_core)]
-fn take_lock(path: &Path) -> Result<Option<Taken>, SingleError> {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let failed = |source| SingleError::LockFailed {
-        path: path.to_owned(),
-        source,
-    };
-    // Open (creating) the lock file with O_NOFOLLOW and stat it as a regular file: a symlink or a
-    // special file planted inside the leaf never becomes the flock.
-    let opened = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path);
-    let file = match opened {
-        Ok(file) => file,
-        // The leaf went with a resident that was leaving.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(failed(error)),
-    };
-    let meta = file.metadata().map_err(failed)?;
-    if !meta.is_file() {
-        return Err(failed(std::io::Error::other(
-            "the control lock is not a regular file",
-        )));
-    }
-    // SAFETY: `file` owns a valid fd for the duration of the call; `flock` only associates an
-    // advisory lock with it. A nonzero return with `EWOULDBLOCK` means a live holder.
-    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if locked != 0 {
-        let held = std::io::Error::last_os_error();
-        if held.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Err(SingleError::AlreadyResident {
-                pid: read_lock_pid(path).unwrap_or(0),
-            });
-        }
-        return Err(failed(held));
-    }
-    let id = (meta.dev(), meta.ino());
-    if path_identity(path).ok() != Some(id) {
-        release_flock(&file);
-        return Ok(None);
-    }
-    Ok(Some(Taken { file, id }))
 }
 
 /// The deadline for a connect left `EINPROGRESS`. A local listener admits at once; a full accept
@@ -475,13 +378,6 @@ fn sockaddr_un(path: &Path) -> Option<(libc::sockaddr_un, libc::socklen_t)> {
         *slot = *byte as libc::c_char;
     }
     Some((addr, core::mem::size_of_val(&addr) as libc::socklen_t))
-}
-
-/// Release this fd's advisory flock, so a refusal never strands the lock for process life.
-fn release_flock(file: &std::fs::File) {
-    // SAFETY: `file` owns a valid fd for the duration of the call; `LOCK_UN` only drops this fd's
-    // advisory lock.
-    let _ = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
 }
 
 /// The `(dev, ino)` of the socket PATH, from `symlink_metadata` (a symlink planted at the path

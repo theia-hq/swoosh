@@ -134,7 +134,9 @@ impl Report {
         report.sections.push(contacts_section(contacts));
         report.sections.push(links_section(home, now).await?);
         report.serving = report.serving_line(home).await;
-        if let Some(root) = swoosh::joining::AdmitLock::admitted(home) {
+        if let Some(root) = swoosh::home::ServeLock::recorded(home).admit
+            && swoosh::home::serve_running(home).await
+        {
             report.serving = admitting(&report.serving, root);
         }
         if roster_fork_held(home) {

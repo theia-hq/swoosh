@@ -2,9 +2,9 @@
 //!
 //! A local verb group: unlike the reach verbs it binds no transport and dials nobody, it just edits the
 //! contacts file beside the identity. `main` dispatches this before composing any transport, since there
-//! is nothing to reach. Each leaf owns an `async fn run(self, ..)` that consumes it and persists. Each opens
-//! the book with [`ContactsStore::open_to_edit`](swoosh::contacts::ContactsStore::open_to_edit), which holds
-//! `roster.lock` from the read to the save, so a fold that lands meanwhile never loses the edit.
+//! is nothing to reach. Each leaf owns an `async fn run(self, ..)` that consumes it and persists. Each takes
+//! `home.lock` before it opens the book and holds it to the save, so a fold that lands meanwhile never
+//! loses the edit.
 //!
 //! `me/` is not edited here: it lists this person's own devices, and their root decides it. `add` and
 //! `rm` refuse it and write nothing.

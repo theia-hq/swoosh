@@ -8,7 +8,7 @@
 use bifrost::NodeId;
 use clap::Args;
 use swoosh::contacts::{Added, ContactsStore, Petname};
-use swoosh::home::Home;
+use swoosh::home::{Home, HomeWrite};
 
 /// Record a person's signet root, so `--for fleet:<petname>` binds their fleet.
 #[derive(Debug, Args)]
@@ -25,7 +25,8 @@ impl SignetCmd {
     /// Record the signet and persist. Idempotent, mirroring `add`: re-setting the same key is a no-op that
     /// says so; a different key warns on the clobber rather than silently losing the previous signet.
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
-        let mut store = ContactsStore::open_to_edit(home).await?;
+        let home_lock = HomeWrite::take(home).await?;
+        let mut store = ContactsStore::open(home).await?;
         let outcome = store
             .contacts_mut()
             .set_signet(self.petname.clone(), self.key);
@@ -45,7 +46,7 @@ impl SignetCmd {
                 previous.short()
             ),
         }
-        store.save().await?;
+        store.save(&home_lock)?;
         Ok(())
     }
 }

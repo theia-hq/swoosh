@@ -36,9 +36,8 @@ use eyre::WrapErr as _;
 use nauthy::{Gate, Service};
 use swoosh::contacts::ContactsStore;
 use swoosh::gate::AnchorCut;
-use swoosh::home::Home;
+use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::identity::Identity;
-use swoosh::joining::{AdmitError, AdmitLock};
 use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::renewal::PickUp;
@@ -196,8 +195,6 @@ pub struct ExposeContext {
     pub enabled: FileDisabledList,
     /// The node home this serve runs under, resolved ONCE by the composition root.
     pub home: Home,
-    /// Held for the whole run of a `serve --admit`, naming the root it admits.
-    pub admit: Option<AdmitLock>,
 }
 
 /// `--admit`'s root key, typed `root:ed01…`.
@@ -206,10 +203,16 @@ fn admitted_root(text: &str) -> Result<NodeId, String> {
         .map_err(|error| error.to_string())
 }
 
-/// Check that this machine may admit the devices of `root` for this run, and hold `<home>/admit.lock`
-/// naming it: never this machine's own key, a root revoked here, or a person's root, and only on a machine
-/// that trusts no root.
-pub(crate) async fn admitting(home: &Home, own: NodeId, root: NodeId) -> eyre::Result<AdmitLock> {
+/// Check that this machine may admit the devices of `root` for this run, and record it in `serve.lock`
+/// beside this run's pid: never this machine's own key, a root revoked here, or a person's root, and only on
+/// a machine that trusts no root. The pin is read and the root recorded under one `home.lock`, which `join`
+/// writes the pin under, so a `join` and a `serve --admit` never both go ahead.
+pub(crate) async fn admitting(
+    serve_lock: &ServeLock,
+    home: &Home,
+    own: NodeId,
+    root: NodeId,
+) -> eyre::Result<()> {
     if root == own {
         eyre::bail!("that is this machine's key, not a root.");
     }
@@ -228,13 +231,7 @@ pub(crate) async fn admitting(home: &Home, own: NodeId, root: NodeId) -> eyre::R
              {person} use a service: swoosh share <service> {person}"
         );
     }
-    let lock = match AdmitLock::admitting(home, root) {
-        Ok(lock) => lock,
-        Err(AdmitError::Held) => {
-            eyre::bail!("swoosh serve --admit or swoosh join is already running for this home.")
-        }
-        Err(AdmitError::Io(error)) => return Err(error.into()),
-    };
+    let home_lock = HomeWrite::take(home).await?;
     match Standing::read(home).await {
         Ok(read) => match read.standing {
             Standing::Unpinned => {}
@@ -251,10 +248,12 @@ pub(crate) async fn admitting(home: &Home, own: NodeId, root: NodeId) -> eyre::R
         }
         Err(other) => return Err(other.into()),
     }
+    serve_lock.record(&home_lock, Some(root))?;
+    drop(home_lock);
     eprintln!(
         "admitting devices of root root:{root} for this run; this machine does not get your revoked keys."
     );
-    Ok(lock)
+    Ok(())
 }
 
 impl core::fmt::Debug for ExposeContext {
@@ -322,13 +321,9 @@ impl Reaching for ServeCmd {
             cut,
             enabled,
             home,
-            admit,
         } = *expose;
-        let result = self
-            .run_serve(node, *claim, host_seed, gate, cut, enabled, home)
-            .await;
-        drop(admit);
-        result
+        self.run_serve(node, *claim, host_seed, gate, cut, enabled, home)
+            .await
     }
 }
 
@@ -339,7 +334,7 @@ impl ServeCmd {
     /// no private runtime directory or one whose path a socket cannot hold.
     pub async fn claim(mut self, home: &Home) -> eyre::Result<Self> {
         let root = swoosh::home::runtime_root()?;
-        let (lock, listener) = match acquire_single(home, &root) {
+        let (lock, listener) = match acquire_single(home, &root).await {
             Ok(held) => held,
             Err(SingleError::AlreadyResident { pid }) => {
                 let serving = running_services(home).await;
@@ -411,6 +406,19 @@ impl ServeCmd {
             || reach.relay.is_some()
             || reach.resolver.is_some()
             || reach.transport != swoosh::transport::Transport::default()
+    }
+
+    /// Check that this run may admit the devices of `root`, and record it in `serve.lock`, which its claim
+    /// holds; see [`admitting`].
+    ///
+    /// # Errors
+    ///
+    /// The run was not claimed, or [`admitting`] refused.
+    pub(crate) async fn admit(&self, home: &Home, own: NodeId, root: NodeId) -> eyre::Result<()> {
+        let Some(claim) = self.claim.as_ref() else {
+            eyre::bail!("internal: serve admits before it claimed its home (composition-root bug)");
+        };
+        admitting(claim.lock.serve_lock(), home, own, root).await
     }
 
     /// Attach the resolved [`ExposeContext`] the composition root cut while the secret was still live, so
@@ -573,9 +581,12 @@ impl ServeCmd {
         // The routes bound: only now is a named list recorded for the next bare `serve`, and are the
         // services it named turned back on. A bare `serve` changes neither, and says which of its services
         // are off.
-        started.record(&home)?;
+        let home_lock = HomeWrite::take(&home).await?;
+        started.record(&home_lock, &home)?;
         match &started {
-            Started::Named(_) => toggle::turn_on(&home, names.iter().map(String::as_str))?,
+            Started::Named(_) => {
+                toggle::turn_on(&home_lock, &home, names.iter().map(String::as_str))?;
+            }
             Started::Resumed(_) | Started::Default => {
                 let off = toggle::disabled(&home)?;
                 for name in names.iter().filter(|name| off.contains(*name)) {
@@ -586,6 +597,7 @@ impl ServeCmd {
                 }
             }
         }
+        drop(home_lock);
 
         // ONE expansion of this bind, read by both the control socket's status address and the transport
         // block, so the two can only ever name the same host.

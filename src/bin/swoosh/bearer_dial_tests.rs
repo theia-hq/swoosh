@@ -115,8 +115,7 @@ async fn share(server: &Scratch, bind: Bind) -> Link {
         expiry: nauthy::Request::expires_in(lifetime),
     };
     Grants::at(server.home.links())
-        .append(&record)
-        .await
+        .append(&swoosh::testkit::lock(), &record)
         .unwrap();
     link
 }
@@ -247,7 +246,8 @@ async fn a_bearer_link_admits_after_the_dialers_device_key_is_revoked_at_the_ser
     let server = Scratch::new("revoked-server", SERVER).await;
     let desk = Scratch::new("revoked-desk", DESK).await;
     let link = share(&server, Bind::Anyone).await;
-    swoosh::gate::add_revoked_keys(&server.home, &[home_key(DESK)]).unwrap();
+    swoosh::gate::add_revoked_keys(&swoosh::testkit::lock(), &server.home, &[home_key(DESK)])
+        .unwrap();
 
     assert!(
         dial(&server, &desk, &link).await.is_some(),

@@ -19,7 +19,6 @@ use eyre::WrapErr as _;
 use keystore::{KeyFile, Stored};
 
 use super::key_file;
-use super::lock::HomeLock;
 use super::stage::{Seen, Stage, read_backup};
 use crate::escape::EscapedPath;
 use crate::home::Home;
@@ -119,8 +118,9 @@ pub struct Restored {
 
 /// Replace the home's key with the one sealed in the backup at `from`.
 ///
-/// Nothing serves this home while it runs: the home lock is taken first and held to the end, so no node
-/// can be left serving a key the disk no longer names. The backup is copied beside the home key and
+/// Nothing serves this home while it runs: `serve.lock` is taken first and held to the end, so no node
+/// can be left serving a key the disk no longer names, and `home.lock` is held for the write, after the
+/// prompt. The backup is copied beside the home key and
 /// unlocked there FIRST, so a wrong passphrase or a damaged file is caught before the home is touched. The
 /// home's key is then replaced only when it is absent, when it is the same node, or when `existing` says
 /// so: a different key at home may be the only copy of that identity. The copy that unlocked is the file
@@ -133,7 +133,10 @@ pub fn restore(
     existing: Existing,
     prompt: &mut impl Prompt,
 ) -> eyre::Result<Restored> {
-    let _lock = HomeLock::replacing(home)?;
+    let _serve_lock = {
+        let home_lock = crate::home::HomeWrite::wait(home)?;
+        crate::home::ServeLock::take(&home_lock, home)?
+    };
     let backup = read_backup(from)?;
     let file = key_file(home);
     super::make_machine_dir(home)?;
@@ -163,6 +166,7 @@ pub fn restore(
         }
     };
 
+    let _home_lock = crate::home::HomeWrite::wait(home)?;
     let seen = Seen::of(file.path())?;
     match file.load() {
         Ok(None) => {}

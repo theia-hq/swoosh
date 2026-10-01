@@ -319,8 +319,8 @@ fn bare_stop_stops_the_resident() {
     );
 }
 
-/// A `serve` holds an owner-only lock file, and stopped cleanly leaves nothing in the runtime root: the
-/// socket, the lock file and the leaf directory holding them all go.
+/// A `serve` holds an owner-only `serve.lock` in its home, and stopped cleanly leaves nothing in the runtime
+/// root: the socket and the leaf directory holding it both go.
 #[test]
 fn serve_removes_its_runtime_leaf_on_exit() {
     let scratch = Scratch::new("leaf");
@@ -367,12 +367,12 @@ fn serve_removes_its_runtime_leaf_on_exit() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        leaf.join("control.sock").exists() && leaf.join("control.lock").exists(),
-        "the running resident holds its socket and lock in the leaf"
+        leaf.join("control.sock").exists() && home.serve_lock().exists(),
+        "the running resident holds its socket in the leaf and its lock in the home"
     );
     {
         use std::os::unix::fs::PermissionsExt as _;
-        let mode = std::fs::metadata(leaf.join("control.lock"))
+        let mode = std::fs::metadata(home.serve_lock())
             .expect("stat the lock")
             .permissions()
             .mode();

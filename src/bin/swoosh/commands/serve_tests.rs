@@ -18,7 +18,7 @@ use std::time::Instant;
 
 use bifrost_mdns::{At, Dialable, Expiring, MdnsError, Missing, Scope};
 use clap::CommandFactory as _;
-use swoosh::home::Home;
+use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
@@ -2400,8 +2400,7 @@ fn a_bare_serve_serves_the_update_route() {
                 .expect("this machine's key");
             match standing {
                 "device" => {
-                    swoosh::config::write_signet(&home, root.node_id())
-                        .await
+                    swoosh::config::write_signet(&swoosh::testkit::lock(), &home, root.node_id())
                         .expect("the pin");
                     let badge = root
                         .device_badge(
@@ -2409,14 +2408,14 @@ fn a_bare_serve_serves_the_update_route() {
                             nauthy::Request::expires_in(Duration::from_secs(3600)),
                         )
                         .expect("a badge");
-                    swoosh::config::write_badge(&home, &badge)
-                        .await
+                    swoosh::config::write_badge(&swoosh::testkit::lock(), &home, &badge)
                         .expect("the badge");
                 }
                 // A pin naming this machine's own key, as a home from before roots had their own keys.
-                "damaged" => swoosh::config::write_signet(&home, device.node_id())
-                    .await
-                    .expect("the pin"),
+                "damaged" => {
+                    swoosh::config::write_signet(&swoosh::testkit::lock(), &home, device.node_id())
+                        .expect("the pin")
+                }
                 _ => {}
             }
         });
@@ -3248,48 +3247,63 @@ async fn serve_admit_refuses_what_it_must_not_admit() {
     };
     let own = TestNode::seeded(0x11).node_id();
     let root = TestRoot::seeded(0x21).node_id();
-    let refusal = |result: eyre::Result<swoosh::joining::AdmitLock>| match result {
-        Ok(_) => panic!("refused"),
+    let refusal = |result: eyre::Result<()>| match result {
+        Ok(()) => panic!("refused"),
         Err(error) => format!("{error:#}"),
+    };
+    // `serve.lock` as a claimed `serve` holds it, recording this process.
+    let serving = |home: Home| async move {
+        let home_lock = HomeWrite::take(&home).await.unwrap();
+        let serve_lock = ServeLock::take(&home_lock, &home).unwrap();
+        serve_lock.record(&home_lock, None).unwrap();
+        serve_lock
     };
 
     let home = scratch("own");
+    let held = serving(home.clone()).await;
     assert_eq!(
-        refusal(super::admitting(&home, own, own).await),
+        refusal(super::admitting(&held, &home, own, own).await),
         "that is this machine's key, not a root."
     );
 
     let home = scratch("revoked");
+    let held = serving(home.clone()).await;
     nauthy::DisabledRoots::open_for_repair(home.disabled_roots())
         .disable(root.verify_key().unwrap())
         .await
         .unwrap();
     assert!(
-        refusal(super::admitting(&home, own, root).await).contains("was revoked on this machine")
+        refusal(super::admitting(&held, &home, own, root).await)
+            .contains("was revoked on this machine")
     );
 
     let home = scratch("contact");
+    let held = serving(home.clone()).await;
     let mut store = swoosh::contacts::ContactsStore::open(&home).await.unwrap();
     store
         .contacts_mut()
         .set_signet("alice".parse().unwrap(), root);
-    store.save().await.unwrap();
+    store.save(&swoosh::testkit::lock()).unwrap();
     assert!(
-        refusal(super::admitting(&home, own, root).await)
+        refusal(super::admitting(&held, &home, own, root).await)
             .contains("is alice's root: admitting it would admit every one of alice's devices"),
     );
 
     let home = scratch("pinned");
-    swoosh::config::write_signet(&home, TestRoot::seeded(0x31).node_id())
-        .await
-        .unwrap();
+    let held = serving(home.clone()).await;
+    swoosh::config::write_signet(
+        &swoosh::testkit::lock(),
+        &home,
+        TestRoot::seeded(0x31).node_id(),
+    )
+    .unwrap();
     swoosh::config::write_badge(
+        &swoosh::testkit::lock(),
         &home,
         &TestRoot::seeded(0x31)
             .device_badge(own, nauthy::Request::expires_in(Duration::from_secs(3600)))
             .unwrap(),
     )
-    .await
     .unwrap();
     let mut seed = TestNode::seeded(0x11).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
@@ -3300,16 +3314,19 @@ async fn serve_admit_refuses_what_it_must_not_admit() {
         )
         .unwrap();
     assert!(
-        refusal(super::admitting(&home, own, root).await)
+        refusal(super::admitting(&held, &home, own, root).await)
             .contains("--admit is for a machine that trusts no root")
     );
 
     let home = scratch("admits");
-    let lock = super::admitting(&home, own, root).await.expect("admits");
-    assert_eq!(swoosh::joining::AdmitLock::admitted(&home), Some(root));
+    let held = serving(home.clone()).await;
+    super::admitting(&held, &home, own, root)
+        .await
+        .expect("admits");
+    assert_eq!(ServeLock::recorded(&home).admit, Some(root));
     assert!(!home.root_pub().exists(), "no pin is written");
-    drop(lock);
-    assert_eq!(swoosh::joining::AdmitLock::admitted(&home), None);
+    drop(held);
+    assert_eq!(ServeLock::recorded(&home).admit, None);
 }
 
 /// `--admit` takes one key, typed `root:ed01…`, and is not repeated.
