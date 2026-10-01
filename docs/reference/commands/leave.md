@@ -16,10 +16,10 @@ your root is kept.
 
 **Things to know.** `leave` removes this machine's record from your root and its list of your devices,
 and keeps every revocation it learned. Your root still lists the machine until you revoke it there with
-`swoosh revoke me/<name>`. `--new-key` keeps the old key and its links file beside the new key, dated,
-and the links this machine made under the old key stop working. It refuses while `swoosh serve` runs. A
-server you reach only through swoosh needs its console after `leave --new-key`, unless it first issued you
-a link. On the machine that keeps your root, `leave` refuses: move the root off first.
+`swoosh revoke me/<name>`. `--new-key` keeps the old key in `machine/` and its links file in the home,
+each dated, and the links this machine made under the old key stop working. It refuses while `swoosh serve`
+runs. A server you reach only through swoosh needs its console after `leave --new-key`, unless it first
+issued you a link. On the machine that keeps your root, `leave` refuses: move the root off first.
 
 See also [`swoosh join`](join.md), [Commands index](../commands.md) and
 [Common options](../commands.md#common-options).

@@ -118,10 +118,9 @@ fn home_help_names_the_platform_default() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let help = text(&out.stdout);
     #[cfg(target_os = "macos")]
-    let line = "use <dir> as this machine's home (default ~/Library/Application Support/swoosh)";
+    let line = "home (default ~/Library/Application Support/swoosh)";
     #[cfg(not(target_os = "macos"))]
-    let line = "use <dir> as this machine's home (default $XDG_STATE_HOME/swoosh, else \
-                ~/.local/state/swoosh)";
+    let line = "home (default ~/.local/state/swoosh; honors $XDG_STATE_HOME)";
     let flat = help.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(flat.contains(line), "{help}");
 }

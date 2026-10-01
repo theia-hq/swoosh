@@ -43,14 +43,12 @@ mod commands;
 /// `--home`'s help line, naming the default home of the platform this binary was built for
 /// ([`swoosh::home::Home::resolve`]).
 #[cfg(target_os = "macos")]
-const HOME_HELP: &str =
-    "use <dir> as this machine's home (default ~/Library/Application Support/swoosh)";
+const HOME_HELP: &str = "home (default ~/Library/Application Support/swoosh)";
 
 /// `--home`'s help line, naming the default home of the platform this binary was built for
 /// ([`swoosh::home::Home::resolve`]).
 #[cfg(not(target_os = "macos"))]
-const HOME_HELP: &str =
-    "use <dir> as this machine's home (default $XDG_STATE_HOME/swoosh, else ~/.local/state/swoosh)";
+const HOME_HELP: &str = "home (default ~/.local/state/swoosh; honors $XDG_STATE_HOME)";
 
 #[derive(Debug, Parser)]
 #[command(
