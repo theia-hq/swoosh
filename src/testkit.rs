@@ -457,6 +457,9 @@ pub enum HostilePeer {
     /// The dial lands and the stream opens; the gate reads the request and answers with a refusal whose
     /// detail is the text.
     RefusesAtTheGate(&'static str),
+    /// The dial lands and the stream opens; the gate reads the request and ends the stream without an
+    /// answer, as a host that dies mid-dial does.
+    HangsUp,
 }
 
 impl HostilePeer {
@@ -492,7 +495,7 @@ impl bifrost::Transport for HostilePeer {
     async fn connect(&self, _addr: bifrost::Addr) -> Result<Self, bifrost::Error> {
         match *self {
             Self::Unreachable(text) => Err(bifrost::Error::Connect(text.into())),
-            Self::RefusesStreams(_) | Self::RefusesAtTheGate(_) => Ok(*self),
+            Self::RefusesStreams(_) | Self::RefusesAtTheGate(_) | Self::HangsUp => Ok(*self),
         }
     }
 
@@ -527,6 +530,7 @@ impl bifrost::Session for HostilePeer {
                     .map_err(|error| bifrost::Error::Stream(error.into()))?;
                 Ok((tokio::io::sink(), read))
             }
+            Self::HangsUp => Ok((tokio::io::sink(), tokio::io::duplex(1).1)),
         }
     }
 
