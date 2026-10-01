@@ -3,9 +3,8 @@
 use bifrost::NodeId;
 use keystore::{Method, Protection, Stored};
 
-use super::lock::HomeLock;
 use super::{key_file, make_machine_dir};
-use crate::home::Home;
+use crate::home::{Home, HomeWrite};
 use crate::passphrase::Prompt;
 
 /// What a [`protect`] did to the home's key file.
@@ -29,45 +28,45 @@ pub enum Protected {
 /// which is how a passphrase is changed.
 ///
 /// Safe beside a running node: the node already holds its key in memory, and the key does not change. It
-/// shares the home lock with running nodes, so it never interleaves with a restore.
+/// takes `home.lock` for the write alone, after every prompt, so it runs beside a `serve` and never
+/// interleaves with another change to the home.
 pub fn protect(home: &Home, method: Method, prompt: &mut impl Prompt) -> eyre::Result<Protected> {
-    let _lock = HomeLock::rewriting(home)?;
     let file = key_file(home);
     let path = file.path();
     let Some(stored) = file.load()? else {
         let secret = keystore::Secret::generate()?;
+        let passphrase = match method {
+            Method::Plain => None,
+            Method::Passphrase => Some(prompt.choose(path)?),
+        };
+        let protection = passphrase
+            .as_ref()
+            .map_or(Protection::Plain, Protection::Passphrase);
+        let _home_lock = HomeWrite::wait(home)?;
         make_machine_dir(home)?;
-        match method {
-            Method::Plain => file.write(&secret, Protection::Plain)?,
-            Method::Passphrase => {
-                let passphrase = prompt.choose(path)?;
-                file.write(&secret, Protection::Passphrase(&passphrase))?;
-            }
-        }
+        file.write(&secret, protection)?;
         return Ok(Protected::Created(secret.node_id()));
     };
-    match (stored, method) {
+    let (current, new) = match (stored, method) {
         (Stored::Plain(_), Method::Plain) => return Ok(Protected::Unchanged),
-        (Stored::Plain(_), Method::Passphrase) => {
-            let new = prompt.choose(path)?;
-            file.migrate(Protection::Plain, Protection::Passphrase(&new))?;
-        }
-        (Stored::Locked(_), Method::Plain) => {
-            let current = prompt.unlock(path)?;
-            file.migrate(Protection::Passphrase(&current), Protection::Plain)?;
-        }
+        (Stored::Plain(_), Method::Passphrase) => (None, Some(prompt.choose(path)?)),
+        (Stored::Locked(_), Method::Plain) => (Some(prompt.unlock(path)?), None),
         (Stored::Locked(locked), Method::Passphrase) => {
             let current = prompt.unlock(path)?;
             // Proven before the new one is asked for, so a mistyped current passphrase fails at once
             // rather than after the new one has been typed twice.
             drop(locked.unlock(&current)?);
-            let new = prompt.choose(path)?;
-            file.migrate(
-                Protection::Passphrase(&current),
-                Protection::Passphrase(&new),
-            )?;
+            (Some(current), Some(prompt.choose(path)?))
         }
-    }
+    };
+    let _home_lock = HomeWrite::wait(home)?;
+    file.migrate(
+        current
+            .as_ref()
+            .map_or(Protection::Plain, Protection::Passphrase),
+        new.as_ref()
+            .map_or(Protection::Plain, Protection::Passphrase),
+    )?;
     Ok(Protected::Rewritten)
 }
 

@@ -1,7 +1,7 @@
 // Setup helpers here panic on failed setup, which is the intent; exempt this test file from the unwrap lints.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! Each `contact` edit holds `<home>/roster.lock` from its read of the book to its save, end to end: while
+//! Each `contact` edit holds `<home>/home.lock` from its read of the book to its save, end to end: while
 //! the lock a fold writes the book under is held, the compiled binary's `contact add`, `signet` and `rm`
 //! each wait, and once it is released each lands.
 
@@ -48,7 +48,7 @@ fn contact(home: &Path, args: &[&str]) -> KillOnDrop {
 }
 
 #[test]
-fn a_contact_edit_waits_for_the_fold_lock() {
+fn a_contact_edit_waits_for_home_lock() {
     let scratch =
         Scratch(std::env::temp_dir().join(format!("sw-contact-lock-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&scratch.0);
@@ -76,12 +76,12 @@ fn a_contact_edit_waits_for_the_fold_lock() {
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(home.join("roster.lock"))
-            .expect("open <home>/roster.lock");
+            .open(home.join("home.lock"))
+            .expect("open <home>/home.lock");
         // SAFETY: `lock` owns a valid fd for the whole call; `flock` only attaches an advisory lock,
         // released when `lock` drops. `LOCK_NB` makes a held lock an error rather than a wait.
         let taken = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-        assert!(taken, "the test holds <home>/roster.lock");
+        assert!(taken, "the test holds <home>/home.lock");
 
         let mut edit = contact(&home, args);
         // An edit that takes no lock finishes well inside this; one that takes it is still waiting.
@@ -90,13 +90,13 @@ fn a_contact_edit_waits_for_the_fold_lock() {
             let exited = edit.0.try_wait().expect("poll the edit");
             assert!(
                 exited.is_none(),
-                "contact {verb} finished while roster.lock was held: {exited:?}"
+                "contact {verb} finished while home.lock was held: {exited:?}"
             );
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(
             !home.join("contacts.toml").exists(),
-            "contact {verb} writes nothing while roster.lock is held"
+            "contact {verb} writes nothing while home.lock is held"
         );
 
         drop(lock);

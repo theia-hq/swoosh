@@ -17,6 +17,10 @@ use eyre::eyre;
 
 use crate::escape::{BLANK_LETTERS, EscapedPath};
 
+mod lock;
+
+pub use lock::{HomeWrite, LockError, Recorded, ServeLock, ServeLockError, serve_running};
+
 /// The node home: the directory every file this node owns lives in.
 ///
 /// Construct it once at the composition root from the `--home`/`SWOOSH_HOME` selection ([`Home::resolve`]),
@@ -93,16 +97,17 @@ impl Home {
         self.machine().join("key")
     }
 
-    /// `<home>/key.lock`: the lock that keeps a running node and a restore apart. Separate from
-    /// `key`, because a restore replaces the key's inode, and a lock on a moving inode holds nothing.
-    pub fn key_lock(&self) -> PathBuf {
-        self.dir.join("key.lock")
+    /// `<home>/home.lock`: held for a moment by every change to the home, as a [`HomeWrite`]. Never
+    /// removed or replaced, so every holder locks one inode.
+    pub fn home_lock(&self) -> PathBuf {
+        self.dir.join("home.lock")
     }
 
-    /// `<home>/admit.lock`: held by a `serve --admit` for its whole run, and holding the root it admits, so
-    /// `join` and `status` can tell one runs. `join` holds it too while it writes, so the two never overlap.
-    pub fn admit_lock(&self) -> PathBuf {
-        self.dir.join("admit.lock")
+    /// `<home>/serve.lock`: held by `swoosh serve` for its whole run, recording its pid and the root it
+    /// admits, as a [`ServeLock`]. In the home rather than the runtime directory, so a command that resolves
+    /// another runtime directory, or none, still finds it.
+    pub fn serve_lock(&self) -> PathBuf {
+        self.dir.join("serve.lock")
     }
 
     /// `<home>/root.pub`: the root that vouches for this machine, written by `join` and the first `invite`,
@@ -148,12 +153,6 @@ impl Home {
         self.dir.join("invited-by")
     }
 
-    /// `<home>/roster.lock`: the flock every fold holds, so two folds never read one floor and both write.
-    /// Every writer of `contacts.toml` holds it too, so no write of the book is lost to another.
-    pub fn roster_lock(&self) -> PathBuf {
-        self.dir.join("roster.lock")
-    }
-
     /// `<home>/devices.conflict`: a list of your devices your root signed other than the one in
     /// [`devices`](Self::devices), kept as evidence that two copies of the root signed: one seen at the
     /// number of the one in `devices`, or one another device passed on in an exchange, at any number.
@@ -194,7 +193,7 @@ impl Home {
     /// `<home>/revoked_keys`: the device keys this machine no longer admits, one key per line, which the
     /// `serve` gate refuses whatever the device presents and whose open sessions the live cut ends. It
     /// only ever grows, like [`revoked`](Self::revoked), and is written on the same rules: under
-    /// [`revoked_keys_lock`](Self::revoked_keys_lock), with the count of keys it holds in
+    /// [`home_lock`](Self::home_lock), with the count of keys it holds in
     /// [`revoked_keys_written`](Self::revoked_keys_written).
     pub fn revoked_keys(&self) -> PathBuf {
         self.dir.join("revoked_keys")
@@ -204,11 +203,6 @@ impl Home {
     /// last write, so a file that lost keys reads as lost rather than as fewer revocations.
     pub fn revoked_keys_written(&self) -> PathBuf {
         self.dir.join("revoked_keys.written")
-    }
-
-    /// `<home>/revoked_keys.lock`: the flock every writer of [`revoked_keys`](Self::revoked_keys) takes.
-    pub fn revoked_keys_lock(&self) -> PathBuf {
-        self.dir.join("revoked_keys.lock")
     }
 
     /// `<home>/disabled_roots`: the root keys this node no longer trusts, one `ed01` key per line, which
@@ -235,24 +229,11 @@ impl Home {
         self.dir.join("serving")
     }
 
-    /// `<home>/disabled.lock`: the flock file that serializes concurrent `enable`/`disable` edits so two
-    /// racing toggles cannot lose each other's change. Separate from `disabled` itself because the toggle
-    /// rewrites `disabled` by atomic rename (a new inode each time), so the lock must sit on a STABLE inode.
-    pub fn disabled_lock(&self) -> PathBuf {
-        self.dir.join("disabled.lock")
-    }
-
     /// `<home>/links`: the ledger (0600) of every link this machine signed. The `serve` gate admits a
     /// link signed by this machine's own key only when its row is here, and revoke-by-holder and `grant
     /// ls` read it too.
     pub fn links(&self) -> PathBuf {
         self.dir.join("links")
-    }
-
-    /// `<home>/links.lock`: the flock every writer of [`links`](Self::links) takes, on a stable inode
-    /// because a prune replaces `links` by rename.
-    pub fn links_lock(&self) -> PathBuf {
-        self.dir.join("links.lock")
     }
 
     /// `<home>/contacts.toml`: the address book of petnames this node resolves.
@@ -329,9 +310,9 @@ impl Home {
     /// canonicalized home path, the full 64 bits rendered as 16 lowercase hex chars. Dependency
     /// free and stable across daemon and client because both binaries carry this same function.
     /// Two different homes hash differently (the full-width hash, so collisions need a 2^64
-    /// birthday, not 2^32), so two `--home`s never share a socket or lock. A home that does not
+    /// birthday, not 2^32), so two `--home`s never share a socket. A home that does not
     /// exist yet hashes the path it will canonicalize to once made, so a `serve` that claims a fresh
-    /// home and every later verb find the same lock.
+    /// home and every later verb find the same socket.
     pub fn home_key(&self) -> String {
         let canonical = canonical_to_be(&self.dir);
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -343,7 +324,7 @@ impl Home {
     }
 
     /// `<runtime>/swoosh-<uid>/<key>` (macOS) or `$XDG_RUNTIME_DIR/swoosh/<key>` (Linux): the
-    /// per-home dir holding this node's control socket and lock. A pure function of the home
+    /// per-home dir holding this node's control socket. A pure function of the home
     /// (via [`home_key`](Self::home_key)) over the per-user runtime root, so daemon and client
     /// resolve the same paths. Never `~/.config`, never `/tmp`, never an abstract socket.
     pub fn runtime_dir(&self) -> eyre::Result<PathBuf> {
@@ -362,12 +343,6 @@ impl Home {
     /// [`runtime_dir`](Self::runtime_dir).
     pub fn control_socket(&self) -> eyre::Result<PathBuf> {
         Ok(self.runtime_dir()?.join("control.sock"))
-    }
-
-    /// `<runtime_dir>/control.lock`: the flock file that is the single-instance truth. See
-    /// [`runtime_dir`](Self::runtime_dir).
-    pub fn control_lock(&self) -> eyre::Result<PathBuf> {
-        Ok(self.runtime_dir()?.join("control.lock"))
     }
 }
 
@@ -406,11 +381,11 @@ pub(crate) fn canonical_to_be(path: &Path) -> PathBuf {
     resolved
 }
 
-/// The per-user runtime root every `serve`'s socket and lock live under: `$XDG_RUNTIME_DIR/swoosh` on
+/// The per-user runtime root every `serve`'s socket lives under: `$XDG_RUNTIME_DIR/swoosh` on
 /// Linux, `confstr(_CS_DARWIN_USER_TEMP_DIR)` + `swoosh-<uid>` on macOS. Created and verified 0700 by the
 /// single-instance acquire, never assumed. An unset or relative `XDG_RUNTIME_DIR` on Linux is a refusal,
-/// never a fallback under the home, `/tmp` or the cwd. Two `serve`s on one home find each other's lock only
-/// when they resolve the same root, so a fallback would add one more way for them to miss it.
+/// never a fallback under the home, `/tmp` or the cwd. A client finds a `serve`'s socket only when the two
+/// resolve the same root, so a fallback would add one more way for them to miss it.
 pub fn runtime_root() -> eyre::Result<PathBuf> {
     #[cfg(target_os = "macos")]
     {

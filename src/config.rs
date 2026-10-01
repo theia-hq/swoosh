@@ -16,7 +16,7 @@ use nauthy::{DisabledRoots, Link};
 use tightbeam::identity::AsVerifyKey as _;
 
 use crate::escape::EscapedPath;
-use crate::home::Home;
+use crate::home::{Home, HomeWrite};
 use crate::standing::{Disagreement, damaged_line};
 
 /// Load this node's signet: the [`NodeId`] it was provisioned to trust, or `None` if it was never
@@ -57,8 +57,12 @@ pub async fn is_disabled(home: &Home, root: NodeId) -> eyre::Result<bool> {
 /// Atomic and durable ([`write_private_atomic`]): a running `serve` reads the pin live and fails closed
 /// on a body that is not exactly one key, so a truncating write would drop every member for the length
 /// of the write, and the pin is the commit point every write ordered before it relies on.
-pub async fn write_signet(home: &Home, signet: NodeId) -> eyre::Result<()> {
-    write_private_atomic(&home.root_pub(), format!("{signet}\n").as_bytes()).await
+pub fn write_signet(home_lock: &HomeWrite, home: &Home, signet: NodeId) -> std::io::Result<()> {
+    write_private_atomic(
+        home_lock,
+        &home.root_pub(),
+        format!("{signet}\n").as_bytes(),
+    )
 }
 
 /// Load this device's stored membership badge: the signet-signed, device-bound link it presents
@@ -104,8 +108,8 @@ pub async fn load_badge(home: &Home) -> eyre::Result<Option<Link>> {
 ///
 /// Atomic and durable ([`write_private_atomic`]), like the pin it is ordered before: a torn badge reads as
 /// a damaged home.
-pub async fn write_badge(home: &Home, badge: &Link) -> eyre::Result<()> {
-    write_private_atomic(&home.key_cert(), format!("{badge}\n").as_bytes()).await
+pub fn write_badge(home_lock: &HomeWrite, home: &Home, badge: &Link) -> std::io::Result<()> {
+    write_private_atomic(home_lock, &home.key_cert(), format!("{badge}\n").as_bytes())
 }
 
 /// Create swoosh's store directory owner-only (`0700`) on Unix, recursively, if it does not already exist.
@@ -130,48 +134,54 @@ pub fn create_store_dir(dir: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Write `contents` to `path` owner-only, through a unique temp sibling renamed over the target.
+/// Write `contents` to `path` owner-only, through a unique temp sibling renamed over the target: the one
+/// way every file in the home is written, under `home.lock` (`_home_lock`).
 ///
-/// The pin, the badge, the contacts book and the two reach files (`<home>/relay`, `<home>/resolver`) land
-/// this way; the identity key has its own store ([`keystore`]), which writes the same way. Each is read by
-/// a later run and each is unrecoverable if it is torn, so the bytes are durable (`sync_all`) before the
+/// The key file store ([`keystore`]) and nauthy's stores write their own files the same way. Each file is
+/// read by a later run and is unrecoverable if it is torn, so the bytes are durable (`sync_all`) before the
 /// rename makes them visible, and the temp is opened `create_new` at mode `0600` so the file is never
 /// world-readable for an instant and the rename carries that mode onto the target. The directory is synced
 /// after the rename, so the new name is durable too: a write ordered before the pin is on disk before the
 /// pin is. A failed write or rename removes the temp, leaving the previous contents intact and no litter
-/// behind.
-pub async fn write_private_atomic(path: &Path, contents: &[u8]) -> eyre::Result<()> {
-    use tokio::io::AsyncWriteExt as _;
+/// behind. Synchronous: a write is a few milliseconds of local disk, and it never waits on another process.
+///
+/// # Errors
+///
+/// The directory could not be made, or the temp could not be written, synced or renamed.
+pub fn write_private_atomic(
+    _home_lock: &HomeWrite,
+    path: &Path,
+    contents: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write as _;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     if let Some(parent) = path.parent() {
         create_store_dir(parent)?;
     }
     let temp = temp_path(path);
-    let written = async {
-        let mut options = tokio::fs::OpenOptions::new();
+    let written = (|| {
+        let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        // tokio's `OpenOptions` carries the `mode` setter inherently under the `fs` feature, so no
-        // `OpenOptionsExt` import is needed.
         #[cfg(unix)]
         options.mode(0o600);
-        let mut file = options.open(&temp).await?;
-        file.write_all(contents).await?;
-        file.flush().await?;
-        file.sync_all().await?;
+        let mut file = options.open(&temp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
         synced(Synced::File);
         Ok::<(), std::io::Error>(())
-    }
-    .await;
+    })();
     if let Err(error) = written {
-        let _ = tokio::fs::remove_file(&temp).await;
-        return Err(error.into());
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
     }
-    if let Err(error) = tokio::fs::rename(&temp, path).await {
-        let _ = tokio::fs::remove_file(&temp).await;
-        return Err(error.into());
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
     }
     if let Some(parent) = path.parent() {
-        tokio::fs::File::open(parent).await?.sync_all().await?;
+        std::fs::File::open(parent)?.sync_all()?;
         synced(Synced::Dir);
     }
     Ok(())

@@ -68,8 +68,12 @@ async fn append_then_load_returns_every_record_in_order() {
         "ed01deadbeef",
         1_788_405_000,
     );
-    grants.append(&bearer).await.expect("append bearer");
-    grants.append(&device).await.expect("append device");
+    grants
+        .append(&crate::testkit::lock(), &bearer)
+        .expect("append bearer");
+    grants
+        .append(&crate::testkit::lock(), &device)
+        .expect("append device");
 
     let loaded = grants.load().await.expect("load");
     // GrantRecord is Eq but not Debug (it holds a Service, which is not Debug), so compare by value rather
@@ -91,7 +95,9 @@ async fn a_corrupt_line_is_skipped_and_the_good_rows_survive() {
         "ed01deadbeef",
         1_788_400_000,
     );
-    grants.append(&good).await.expect("append the good record");
+    grants
+        .append(&crate::testkit::lock(), &good)
+        .expect("append the good record");
     // Hand-write a file with a blank line, a corrupt line, and the good record.
     let mut body = String::from("\nthis\tis\tnot\ta\tvalid\tline\textra\n");
     body.push_str(&std::fs::read_to_string(&path).expect("read the good line"));
@@ -148,14 +154,16 @@ async fn the_created_ledger_is_owner_only() {
 
     let (grants, path) = ledger("perms");
     grants
-        .append(&record(
-            "ssh",
-            GrantKind::Bearer,
-            Delegation::Sealed,
-            ANYONE,
-            1_788_400_000,
-        ))
-        .await
+        .append(
+            &crate::testkit::lock(),
+            &record(
+                "ssh",
+                GrantKind::Bearer,
+                Delegation::Sealed,
+                ANYONE,
+                1_788_400_000,
+            ),
+        )
         .expect("append creates the ledger");
     let mode = std::fs::metadata(&path)
         .expect("stat the ledger")
@@ -191,15 +199,19 @@ fn issued(writer: u8, index: u8, live: bool) -> GrantRecord {
 
 /// Two writers, each with its own handle as two processes would have, issue 100 links each while a prune
 /// runs on nearly every append (each writer adds an expired row before each live one, and the threshold
-/// is one). A prune reads the file, writes `links.new` and renames it over `links`, so without the lock
-/// an append landing in between goes to the replaced file and is lost.
+/// is one). A prune reads the file and replaces it, so without `home.lock` an append landing in between
+/// goes to the replaced file and is lost.
 #[test]
 fn concurrent_issues_never_lose_a_ledger_row() {
-    let (_, path) = ledger("concurrent");
+    let dir = std::env::temp_dir().join(format!("swoosh-grants-concurrent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let home = crate::home::Home::resolve(Some(dir.clone())).expect("a scratch home");
+    let path = home.links();
     let writers: Vec<_> = [1u8, 2]
         .into_iter()
         .map(|writer| {
             let path = path.clone();
+            let home = home.clone();
             std::thread::spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -208,13 +220,12 @@ fn concurrent_issues_never_lose_a_ledger_row() {
                 runtime.block_on(async {
                     let grants = Grants::at(path).pruning_at(1);
                     for index in 0..100u8 {
+                        let home_lock = crate::home::HomeWrite::take(&home).await.expect("lock");
                         grants
-                            .append(&issued(writer, index, false))
-                            .await
+                            .append(&home_lock, &issued(writer, index, false))
                             .expect("append an expired row");
                         grants
-                            .append(&issued(writer, index, true))
-                            .await
+                            .append(&home_lock, &issued(writer, index, true))
                             .expect("append a live row");
                     }
                 });
@@ -235,8 +246,7 @@ fn concurrent_issues_never_lose_a_ledger_row() {
         .filter(|row| row.expiry > std::time::SystemTime::now())
         .count();
     assert_eq!(live, 200, "every issued link keeps its row");
-    let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(super::sibling(&path, ".lock"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A prune waits for [`PRUNE_AT`](super::PRUNE_AT) expired rows, then drops every expired row and keeps
@@ -246,13 +256,11 @@ async fn a_prune_drops_only_expired_rows_once_enough_have_expired() {
     let (grants, path) = ledger("prune");
     for index in 0..u8::try_from(super::PRUNE_AT - 1).expect("fits") {
         grants
-            .append(&issued(3, index, false))
-            .await
+            .append(&crate::testkit::lock(), &issued(3, index, false))
             .expect("append an expired row");
     }
     grants
-        .append(&issued(3, 200, true))
-        .await
+        .append(&crate::testkit::lock(), &issued(3, 200, true))
         .expect("append a live row");
     assert_eq!(
         grants.load().await.expect("load").len(),
@@ -269,12 +277,10 @@ async fn a_prune_drops_only_expired_rows_once_enough_have_expired() {
     )
     .expect("add an unreadable line");
     grants
-        .append(&issued(3, 250, false))
-        .await
+        .append(&crate::testkit::lock(), &issued(3, 250, false))
         .expect("append the expired row that reaches the threshold");
     grants
-        .append(&issued(3, 201, true))
-        .await
+        .append(&crate::testkit::lock(), &issued(3, 201, true))
         .expect("append a live row, which prunes first");
     let rows = grants.load().await.expect("load");
     assert_eq!(rows.len(), 2, "only the live rows are left");
@@ -285,5 +291,4 @@ async fn a_prune_drops_only_expired_rows_once_enough_have_expired() {
         "a line the prune cannot read is kept"
     );
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(super::sibling(&path, ".lock"));
 }

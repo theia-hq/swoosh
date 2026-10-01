@@ -14,8 +14,7 @@ use bifrost::NodeId;
 use clap::Args;
 use swoosh::contacts::{ContactsStore, ME, Petname};
 use swoosh::escape::EscapedPath;
-use swoosh::home::Home;
-use swoosh::identity::HomeLock;
+use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::root::Date;
 use swoosh::standing::{Standing, StandingError};
@@ -87,25 +86,29 @@ impl LeaveCmd {
             Err(other) => return Err(other.into()),
         };
 
-        // Taken once the standing is read, so a refusal of the standing leaves no lock file behind. Held
-        // exclusive, the lock rules out a running `serve`. The new key is staged before anything is left,
-        // so a passphrase that is not chosen leaves the home as it was.
-        let (_lock, new_key) = if self.new_key {
-            let lock = HomeLock::new_key(home)?;
+        // Taken once the standing is read, so a refusal of the standing leaves no lock file behind. Taken
+        // without waiting and held to the end, `serve.lock` rules out a running `serve`. The new key is
+        // staged before anything is left, so a passphrase that is not chosen leaves the home as it was.
+        let (_serve_lock, new_key) = if self.new_key {
+            let serve_lock = {
+                let home_lock = HomeWrite::take(home).await?;
+                ServeLock::take(&home_lock, home)?
+            };
             (
-                Some(lock),
+                Some(serve_lock),
                 Some(swoosh::identity::NewKey::stage(home, prompt)?),
             )
         } else {
             (None, None)
         };
-        let serving = !self.new_key && HomeLock::is_held(home);
+        let serving = !self.new_key && swoosh::home::serve_running(home).await;
+        let home_lock = HomeWrite::take(home).await?;
         let name = match was {
             Was::Device { .. } => own_name(home).await,
             Was::Damaged { .. } | Was::Unpinned => None,
         };
         if !matches!(was, Was::Unpinned) {
-            swoosh::joining::leave(home).await?;
+            swoosh::joining::leave(&home_lock, home)?;
         }
         let left = match was {
             Was::Device { root, .. } | Was::Damaged { root: Some(root) } => Some(root),
@@ -130,7 +133,7 @@ impl LeaveCmd {
         }
 
         if let Some(new_key) = new_key {
-            let replaced = new_key.put(home, &Date(unix(now)).to_string())?;
+            let replaced = new_key.put(&home_lock, home, &Date(unix(now)).to_string())?;
             writeln!(out, "{}", replaced.key)?;
             out.flush()?;
             if let Some(kept) = &replaced.kept {

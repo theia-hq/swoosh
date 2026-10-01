@@ -266,7 +266,7 @@ async fn peer_gone<T: Transport, D: Discovery>(
     tokio::time::timeout(window, probing).await.unwrap_or(true)
 }
 
-/// The one line a completed self-stop prints. The pid comes from the resident's `control.lock` read
+/// The one line a completed self-stop prints. The pid comes from the resident's `serve.lock` read
 /// at resolve (the same record the single-instance refusal names), so the line proves WHICH process
 /// answered; a lock the resident had not written yet leaves the parenthetical off rather than
 /// printing a blank or a guess.

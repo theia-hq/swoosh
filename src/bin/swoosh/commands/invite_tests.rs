@@ -259,7 +259,12 @@ pub(crate) fn copy(dir: &Path, state: &State) {
         .unwrap()
         .write_all(&sealed())
         .unwrap();
-    state::write(dir, &TestRoot::seeded(ROOT).sign_state(state)).unwrap();
+    state::write(
+        &swoosh::testkit::lock(),
+        dir,
+        &TestRoot::seeded(ROOT).sign_state(state),
+    )
+    .unwrap();
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -270,10 +275,13 @@ pub(crate) fn copy(dir: &Path, state: &State) {
 
 /// Make `home` a device of `ROOT`: its pin, and `own` as its standing.
 pub(crate) async fn device_of(home: &Home, own: &Row) {
-    config::write_signet(home, TestRoot::seeded(ROOT).node_id())
-        .await
-        .unwrap();
-    config::write_badge(home, &own.standing).await.unwrap();
+    config::write_signet(
+        &swoosh::testkit::lock(),
+        home,
+        TestRoot::seeded(ROOT).node_id(),
+    )
+    .unwrap();
+    config::write_badge(&swoosh::testkit::lock(), home, &own.standing).unwrap();
 }
 
 /// Make `home` keep `ROOT` with `rows` (this machine's own row first) and `revoked` ids, holding the update
@@ -558,7 +566,7 @@ async fn invite_label_that_is_a_contact_refuses() {
     store
         .contacts_mut()
         .add("alice".parse().unwrap(), None, node(ALICE));
-    store.save().await.unwrap();
+    store.save(&swoosh::testkit::lock()).unwrap();
     let before = snapshot(home.dir());
     let ran = invite(&home, &["alice", &node(TV).to_string()]).await;
     refused_before_writing(
@@ -650,8 +658,7 @@ fn invite_refuses_a_reserved_name() {
 async fn invite_refuses_to_make_a_root_while_serve_admit_runs() {
     // A machine that trusts no root, admitting another root's devices for this run.
     let home = scratch("admitting");
-    let _serving =
-        swoosh::joining::AdmitLock::admitting(&home, TestRoot::seeded(0x31).node_id()).unwrap();
+    let _serving = swoosh::testkit::serving(&home, Some(TestRoot::seeded(0x31).node_id()));
     let before = snapshot(home.dir());
     let ran = invite(&home, &["tv", &node(0x44).to_string()]).await;
     refused_before_writing(&ran, "stop swoosh serve first.", &home, &before);
@@ -1727,9 +1734,9 @@ const RULED: &[&str] = &[
     "known_hosts",
 ];
 
-/// Names a home still holds that later changes to the home merge or cut: the locks that become `home.lock`
-/// and `serve.lock`, and the root's directory that becomes `root.key` beside `devices`.
-const NOT_YET: &[&str] = &["roster.lock", "admit.lock", "root/"];
+/// Names a home still holds that a later change to the home cuts: the root's directory that becomes
+/// `root.key` beside `devices`.
+const NOT_YET: &[&str] = &["root/"];
 
 /// What `home` holds, by name: each entry of the home, a directory with a `/`, and each entry of `machine/`
 /// under it.

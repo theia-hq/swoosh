@@ -136,19 +136,32 @@ fn a_wrong_current_passphrase_is_refused_before_asking_for_a_new_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// `protect` never interleaves with a restore: while one holds the home, it is refused and the key file
-/// is untouched.
+/// `protect` (the key's `lock`) changes no key's identity, so it runs beside a `serve` of the home: it takes
+/// `home.lock` for its write and never `serve.lock`.
 #[test]
-fn protect_is_refused_while_a_restore_holds_the_home() {
-    let (home, dir) = home("protect-locked");
-    resolve_with(Identity::Persisted, &home, &mut Scripted::new([])).expect("a plain key");
-    let before = std::fs::read(home.key()).expect("read the key");
-    let restoring = crate::identity::lock::HomeLock::replacing(&home).expect("a restore holds it");
+fn lock_runs_beside_a_serve() {
+    let (home, dir) = home("protect-serving");
+    let node = resolve_with(Identity::Persisted, &home, &mut Scripted::new([]))
+        .expect("mint a plain key")
+        .node_id();
+    let serving = crate::testkit::serving(&home, None);
 
-    let refused = protect(&home, Method::Passphrase, &mut Scripted::new(["pass"]));
-    assert_eq!(std::fs::read(home.key()).expect("read it back"), before);
-    assert!(refused.is_err());
-    drop(restoring);
+    let done = protect(
+        &home,
+        Method::Passphrase,
+        &mut Scripted::new(["correct horse"]),
+    )
+    .expect("lock runs beside a serve");
+    assert_eq!(done, Protected::Rewritten);
+    assert_eq!(
+        inspect(&home).expect("inspect").into_stored().method(),
+        Method::Passphrase
+    );
+    assert_eq!(
+        inspect(&home).expect("inspect").into_stored().node_id(),
+        node
+    );
+    drop(serving);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

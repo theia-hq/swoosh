@@ -7,15 +7,15 @@
 
 use std::path::Path;
 
+use crate::home::HomeWrite;
+
 /// Write `blob`, a signed update, to `path`, replacing what was there.
 ///
-/// Written through [`write_private_atomic`](crate::config::write_private_atomic): an owner-only temp unique
+/// Written under `home.lock` through [`write_private_atomic`](crate::config::write_private_atomic): an owner-only temp unique
 /// to this write, synced, renamed over the target, then the directory synced. A reader sees the old update
 /// or the new one, never a torn one, and the update is on disk before any offer of it is made.
-pub(crate) async fn write(path: &Path, blob: &[u8]) -> Result<(), ArtifactError> {
-    crate::config::write_private_atomic(path, blob)
-        .await
-        .map_err(ArtifactError::Write)
+pub(crate) fn write(home_lock: &HomeWrite, path: &Path, blob: &[u8]) -> Result<(), ArtifactError> {
+    crate::config::write_private_atomic(home_lock, path, blob).map_err(ArtifactError::Write)
 }
 
 /// Why an update could not be written.
@@ -23,5 +23,5 @@ pub(crate) async fn write(path: &Path, blob: &[u8]) -> Result<(), ArtifactError>
 pub enum ArtifactError {
     /// The update could not be written.
     #[error("writing the update")]
-    Write(#[source] eyre::Report),
+    Write(#[source] std::io::Error),
 }

@@ -45,8 +45,7 @@ async fn a_written_badge_is_owner_only_in_an_owner_only_store() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let (home, dir) = store("badge-perms");
-    super::write_badge(&home, &minted_badge())
-        .await
+    super::write_badge(&crate::testkit::lock(), &home, &minted_badge())
         .expect("write the badge into a fresh store");
 
     let dir_mode = std::fs::metadata(&dir)
@@ -78,15 +77,12 @@ async fn a_loosened_trust_file_is_retightened_on_rewrite() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let (home, dir) = store("badge-retighten");
-    super::write_badge(&home, &minted_badge())
-        .await
-        .expect("first badge write");
+    super::write_badge(&crate::testkit::lock(), &home, &minted_badge()).expect("first badge write");
     let badge = home.key_cert();
     // Simulate a file loosened after an earlier write; the next write must reassert 0600.
     std::fs::set_permissions(&badge, std::fs::Permissions::from_mode(0o644))
         .expect("loosen the badge");
-    super::write_badge(&home, &minted_badge())
-        .await
+    super::write_badge(&crate::testkit::lock(), &home, &minted_badge())
         .expect("second badge write");
 
     let mode = std::fs::metadata(&badge)
@@ -136,9 +132,7 @@ async fn an_absent_or_empty_badge_file_reads_as_none() {
 async fn a_written_badge_reads_back_as_the_same_link() {
     let (home, dir) = store("badge-round-trip");
     let minted = minted_badge();
-    super::write_badge(&home, &minted)
-        .await
-        .expect("write the minted badge");
+    super::write_badge(&crate::testkit::lock(), &home, &minted).expect("write the minted badge");
 
     let loaded = super::load_badge(&home)
         .await
@@ -233,9 +227,12 @@ async fn an_unreadable_latch_is_an_error_not_an_empty_set() {
 async fn the_atomic_write_fsyncs_its_directory() {
     let (home, dir) = store("dir-fsync");
     super::SYNCS.with_borrow_mut(Vec::clear);
-    super::write_signet(&home, crate::testkit::TestRoot::seeded(0xd1).node_id())
-        .await
-        .expect("write the pin");
+    super::write_signet(
+        &crate::testkit::lock(),
+        &home,
+        crate::testkit::TestRoot::seeded(0xd1).node_id(),
+    )
+    .expect("write the pin");
     let syncs = super::SYNCS.with_borrow(Clone::clone);
     assert_eq!(
         syncs,
@@ -243,4 +240,84 @@ async fn the_atomic_write_fsyncs_its_directory() {
         "the bytes, then the directory that names them"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The calls that write or replace a file outside [`write_private_atomic`](super::write_private_atomic).
+const PRIVATE_WRITERS: [&str; 3] = ["fs::rename", "File::create", "fs::write"];
+
+/// The places a private writer is allowed, each with how many calls and why. Anything else that writes a
+/// file of the home goes through the one routine.
+const ALLOWED: &[(&str, usize, &str)] = &[
+    ("config.rs", 1, "the routine itself"),
+    (
+        "identity.rs",
+        1,
+        "the machine key, sealed or plain by the key store, put in place over the key it replaces",
+    ),
+    (
+        "identity/replace.rs",
+        2,
+        "the machine key put in place, and the old key's links moved aside whole beside it",
+    ),
+    (
+        "identity/stage.rs",
+        1,
+        "a sealed key published by the key store's own rules, to a backup or to the home",
+    ),
+    (
+        "root.rs",
+        1,
+        "the root's staging directory renamed into place",
+    ),
+    ("standing.rs", 1, "a root's staging directory renamed away"),
+];
+
+/// Every `.rs` file under `dir`, recursively.
+fn sources(dir: &std::path::Path, found: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read the source dir") {
+        let path = entry.expect("a source entry").path();
+        if path.is_dir() {
+            sources(&path, found);
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            found.push(path);
+        }
+    }
+}
+
+#[test]
+fn every_home_file_is_written_by_the_one_routine() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    sources(&root, &mut files);
+    let mut found = Vec::new();
+    for path in files {
+        let name = path
+            .strip_prefix(&root)
+            .expect("under src")
+            .to_string_lossy()
+            .into_owned();
+        if name.ends_with("_tests.rs") || name == "testkit.rs" {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read a source");
+        // A file's own tests, below its `#[cfg(test)] mod tests`, write fixtures as they please.
+        let text = text
+            .find("#[cfg(test)]\nmod tests")
+            .map_or(text.as_str(), |at| &text[..at]);
+        let calls: usize = PRIVATE_WRITERS
+            .iter()
+            .map(|writer| text.matches(writer).count())
+            .sum();
+        let allowed = ALLOWED
+            .iter()
+            .find(|(file, _, _)| *file == name)
+            .map_or(0, |(_, count, _)| *count);
+        if calls > allowed {
+            found.push(format!("{name}: {calls} (allowed {allowed})"));
+        }
+    }
+    assert!(
+        found.is_empty(),
+        "a file is written outside the one write routine: {found:?}"
+    );
 }

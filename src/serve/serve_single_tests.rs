@@ -16,8 +16,17 @@ use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use super::{SingleError, acquire};
+use super::{InstanceLock, SingleError};
 use crate::home::Home;
+
+/// [`super::acquire`] driven to completion on a runtime of its own, for a test that runs no runtime.
+fn acquire_now(home: &Home, root: &Path) -> Result<(InstanceLock, UnixListener), SingleError> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("a runtime for the acquire")
+        .block_on(super::acquire(home, root))
+}
 
 /// Serializes scratch base names within this test process; the pid keeps two concurrent runs of the
 /// binary apart. Names stay short on purpose: the base sits under the per-user temp dir and the
@@ -95,7 +104,7 @@ fn single_lock_child_holds_the_home() {
     let root = PathBuf::from(std::env::var_os(CHILD_ROOT_ENV).expect("the child root env"));
     let pid_file = PathBuf::from(std::env::var_os(CHILD_PID_ENV).expect("the child pid env"));
     let home = Home::resolve(Some(PathBuf::from(home_dir))).expect("the child home resolves");
-    let held = acquire(&home, &root).expect("the child acquires the free home");
+    let held = acquire_now(&home, &root).expect("the child acquires the free home");
     std::fs::write(&pid_file, std::process::id().to_string()).expect("record the child pid");
     // Hold the lock and the bound listener for life; the parent kills this exact pid.
     let _held = held;
@@ -195,7 +204,7 @@ fn two_resident_starts_one_home_exactly_one_wins() {
     let mut keeper = LockChild::spawn(&scratch, &pid_file);
     let child_pid = keeper.await_pid(&pid_file);
 
-    let refused = acquire(&scratch.home, &scratch.root);
+    let refused = acquire_now(&scratch.home, &scratch.root);
     let loser_pid = match refused {
         Err(SingleError::AlreadyResident { pid }) => pid,
         Err(other) => panic!("the second start must lose at the flock: {other}"),
@@ -259,7 +268,7 @@ fn stale_socket_is_probed_then_unlinked_and_rebound() {
     );
 
     // The dead path is probed stale, unlinked, and rebound: the path answers a connect again.
-    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("stale socket rebinds");
+    let (lock, listener) = acquire_now(&scratch.home, &scratch.root).expect("stale socket rebinds");
     assert!(socket.exists(), "the rebound socket exists");
     assert!(
         matches!(super::probe_socket(&socket), super::Probe::Live),
@@ -290,7 +299,7 @@ fn live_socket_under_lock_refuses_start() {
     let live = UnixListener::bind(&socket).expect("plant a live listener");
     let identity = super::path_identity(&socket).expect("stat the live socket");
 
-    let refused = acquire(&scratch.home, &scratch.root);
+    let refused = acquire_now(&scratch.home, &scratch.root);
     assert!(
         matches!(refused, Err(SingleError::ProbeAlive)),
         "a live socket answers the probe, so the start refuses"
@@ -311,12 +320,13 @@ fn live_socket_under_lock_refuses_start() {
 #[test]
 fn legitimate_resident_flock_refuses_second_start_and_keeps_its_socket() {
     let scratch = Scratch::new("legit");
-    let (held, listener) = acquire(&scratch.home, &scratch.root).expect("the first resident holds");
+    let (held, listener) =
+        acquire_now(&scratch.home, &scratch.root).expect("the first resident holds");
     let socket = held.socket_path().to_path_buf();
     let identity = super::path_identity(&socket).expect("stat the held socket");
     assert!(listener.as_raw_fd() >= 0, "the resident keeps its listener");
 
-    let refused = acquire(&scratch.home, &scratch.root);
+    let refused = acquire_now(&scratch.home, &scratch.root);
     match refused {
         Err(SingleError::AlreadyResident { pid }) => {
             assert_eq!(pid, held.pid(), "the loser names the holding pid");
@@ -364,7 +374,7 @@ fn unclassified_probe_refuses_and_never_unlinks() {
     }
     let identity = super::path_identity(&socket).expect("stat the mode-000 socket");
 
-    let refused = acquire(&scratch.home, &scratch.root);
+    let refused = acquire_now(&scratch.home, &scratch.root);
     assert!(
         matches!(refused, Err(SingleError::ProbeUnclassified)),
         "an unclassified probe refuses start"
@@ -458,7 +468,7 @@ fn full_accept_queue_is_classified_per_platform() {
     let root = scratch.root.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        let _ = tx.send(acquire(&home, &root));
+        let _ = tx.send(acquire_now(&home, &root));
     });
     let result = rx
         .recv_timeout(Duration::from_secs(5))
@@ -566,7 +576,8 @@ fn crash_releases_flock_next_start_rebinds() {
 
     // The OS released the flock with the pid; the socket path is still the crash plant, so the next
     // start probes it stale, unlinks, and rebinds.
-    let (lock, _) = acquire(&scratch.home, &scratch.root).expect("a hard kill releases the flock");
+    let (lock, _) =
+        acquire_now(&scratch.home, &scratch.root).expect("a hard kill releases the flock");
     assert!(
         lock.socket_path().exists(),
         "the next start rebinds the stale path"
@@ -617,8 +628,9 @@ fn per_home_paths_never_collide() {
         "the resident socket path fits sun_path: {}",
         socket.display()
     );
-    let (a_lock, _) = acquire(&first.home, &first.root).expect("first home starts");
-    let (b_lock, _) = acquire(&second.home, &second.root).expect("second home starts alongside");
+    let (a_lock, _) = acquire_now(&first.home, &first.root).expect("first home starts");
+    let (b_lock, _) =
+        acquire_now(&second.home, &second.root).expect("second home starts alongside");
     assert_ne!(
         a_lock.socket_path(),
         b_lock.socket_path(),
@@ -640,7 +652,7 @@ fn runtime_dir_mode_owner_verified() {
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))
             .expect("loosen the dir");
     }
-    let refused = acquire(&scratch.home, &scratch.root);
+    let refused = acquire_now(&scratch.home, &scratch.root);
     assert!(
         matches!(refused, Err(SingleError::RuntimeDirInsecure { .. })),
         "a 0755 runtime dir refuses start"
@@ -667,7 +679,7 @@ fn a_leaf_removed_before_its_verify_is_tried_again() {
 #[test]
 fn release_unlinks_its_own_socket() {
     let scratch = Scratch::new("release-own");
-    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("resident start");
+    let (lock, listener) = acquire_now(&scratch.home, &scratch.root).expect("resident start");
     let socket = lock.socket_path().to_path_buf();
     assert!(socket.exists(), "the bound socket exists while held");
     lock.release();
@@ -680,12 +692,12 @@ fn release_unlinks_its_own_socket() {
 #[test]
 fn dropping_the_lock_unlinks_its_own_socket() {
     let scratch = Scratch::new("drop-own");
-    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("resident start");
+    let (lock, listener) = acquire_now(&scratch.home, &scratch.root).expect("resident start");
     let socket = lock.socket_path().to_path_buf();
     drop(listener);
     drop(lock);
     assert!(!socket.exists(), "a dropped lock unlinks its own socket");
-    acquire(&scratch.home, &scratch.root).expect("and releases the flock");
+    acquire_now(&scratch.home, &scratch.root).expect("and releases the flock");
 }
 
 /// A same-uid swap must not cost the foreign process its file: `release` compares against the path
@@ -694,7 +706,7 @@ fn dropping_the_lock_unlinks_its_own_socket() {
 #[test]
 fn release_spares_a_foreign_inode_swapped_onto_the_path() {
     let scratch = Scratch::new("release-foreign");
-    let (lock, listener) = acquire(&scratch.home, &scratch.root).expect("resident start");
+    let (lock, listener) = acquire_now(&scratch.home, &scratch.root).expect("resident start");
     let socket = lock.socket_path().to_path_buf();
     let foreign_path = scratch.root.join("foreign.sock");
     let foreign = UnixListener::bind(&foreign_path).expect("plant the foreign listener");
@@ -711,7 +723,7 @@ fn release_spares_a_foreign_inode_swapped_onto_the_path() {
 fn serve_refuses_a_socket_path_longer_than_sun_path() {
     let scratch = Scratch::new("longpath");
     let root = scratch.root.join("r".repeat(120));
-    let refused = acquire(&scratch.home, &root);
+    let refused = acquire_now(&scratch.home, &root);
     let Err(error @ SingleError::SocketPathTooLong { .. }) = refused else {
         panic!(
             "a socket path past sun_path must refuse: {:?}",
@@ -723,19 +735,4 @@ fn serve_refuses_a_socket_path_longer_than_sun_path() {
         "the runtime directory's path is too long for a socket: set XDG_RUNTIME_DIR to a shorter one."
     );
     assert!(!root.exists(), "nothing was created under the long root");
-}
-
-/// A start that lost the lock file on every try says so, with the count, and names no fix.
-#[test]
-fn a_lock_lost_on_every_try_says_how_many() {
-    let error = super::lock_lost(PathBuf::from("/run/leaf/control.lock"));
-    assert_eq!(
-        error.to_string(),
-        "could not take the control lock at /run/leaf/control.lock"
-    );
-    let cause = core::error::Error::source(&error).expect("a cause");
-    assert_eq!(
-        cause.to_string(),
-        "another process removed it on each of 3 tries"
-    );
 }

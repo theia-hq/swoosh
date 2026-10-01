@@ -98,16 +98,28 @@ async fn device(tag: &str, seed: u8, until: u64) -> Home {
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
-    config::write_signet(&home, root().node_id()).await.unwrap();
-    config::write_badge(&home, &standing(&root(), seed, until))
-        .await
-        .unwrap();
+    config::write_signet(&crate::testkit::lock(), &home, root().node_id()).unwrap();
+    config::write_badge(
+        &crate::testkit::lock(),
+        &home,
+        &standing(&root(), seed, until),
+    )
+    .unwrap();
     home
 }
 
 /// Make `bytes` the update `home` holds, the way a fold leaves it.
 async fn holding(home: &Home, bytes: &[u8]) {
-    assert_eq!(fold(home, bytes).await.unwrap(), Folded::Newer);
+    assert_eq!(
+        fold(
+            &crate::home::HomeWrite::take(home).await.unwrap(),
+            home,
+            bytes
+        )
+        .await
+        .unwrap(),
+        Folded::Newer
+    );
 }
 
 /// What `server` answers the key `seed`, as the route's bytes.
@@ -229,7 +241,7 @@ async fn the_door_misses_a_lapsed_row_nobody_renewed() {
 async fn the_door_misses_a_revoked_key_even_on_a_stale_update() {
     let (nas, _) = nas_renewing("revoked-key", now() + 90 * DAY).await;
     // Revoked here since the update was cut: the update still lists the laptop live.
-    crate::gate::add_revoked_keys(&nas, &[key(LAPTOP)]).unwrap();
+    crate::gate::add_revoked_keys(&crate::testkit::lock(), &nas, &[key(LAPTOP)]).unwrap();
 
     assert_eq!(asked(&nas, LAPTOP).await, MISSED);
 }
@@ -339,6 +351,7 @@ async fn a_door_renewal_never_writes_the_pin() {
 
     // A standing bound to this key under another root is never taken, so it cannot move the pin.
     let other = crate::joining::take_renewal(
+        &crate::home::HomeWrite::take(&laptop).await.unwrap(),
         &laptop,
         &standing(&TestRoot::seeded(OTHER_ROOT), LAPTOP, renewed + DAY),
     )
@@ -359,7 +372,7 @@ async fn pick_up_never_dials_a_machine_outside_me() {
         Some("laptop".parse().unwrap()),
         node(STRANGER),
     );
-    store.save().await.unwrap();
+    store.save(&crate::testkit::lock()).unwrap();
     let door = Door::new(LAPTOP, []);
 
     let took = pick_up(&laptop, &door).await.unwrap();

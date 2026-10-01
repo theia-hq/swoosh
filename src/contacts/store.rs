@@ -17,23 +17,19 @@ use bifrost::NodeIdParseError;
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::{Binding, Contacts, DeviceLabel, ME, Petname};
-use crate::home::Home;
+use crate::home::{Home, HomeWrite};
 use crate::names::NameError;
-use crate::roster::{FoldError, RosterLock};
 
 /// A contacts file at a known path, loaded into a mutable [`Contacts`] and saved back atomically.
 ///
 /// Own the path once, then [`save`](Self::save) after each mutation. The store creates the parent config
 /// dir on first save, mirroring how the identity key is provisioned lazily beside it. A writer holds
-/// `<home>/roster.lock` from the read to the save: [`open_to_edit`](Self::open_to_edit) takes it, and a
-/// fold or a join already holds it when it opens the book.
+/// `home.lock` from the read to the save, so the read, the change and the save are one write that no fold
+/// and no other editor interleaves with, and none of them loses an update.
 #[derive(Debug)]
 pub struct ContactsStore {
     path: PathBuf,
     contacts: Contacts,
-    /// `<home>/roster.lock`, held until this store drops, when [`open_to_edit`](Self::open_to_edit) opened
-    /// it.
-    _lock: Option<RosterLock>,
 }
 
 impl ContactsStore {
@@ -44,7 +40,7 @@ impl ContactsStore {
     /// file IS an error, surfaced rather than silently discarding what the user saved. A list of devices
     /// that is missing, or that does not verify under the pin, leaves `me` empty.
     ///
-    /// It takes no lock: a reader, or a writer that already holds `<home>/roster.lock`, opens this way.
+    /// It takes no lock: a writer takes `home.lock` before it opens the book, and holds it to the save.
     pub async fn open(home: &Home) -> Result<Self, StoreError> {
         let path = home.contacts();
         let mut contacts = match crate::home::read_trust_file_async(&path).await {
@@ -60,34 +56,7 @@ impl ContactsStore {
             Ok(None) | Err(_) => None,
         };
         contacts.derive_me(devices.as_ref());
-        Ok(Self {
-            path,
-            contacts,
-            _lock: None,
-        })
-    }
-
-    /// Open `home`'s book to change it: take `<home>/roster.lock`, then read the book under it.
-    ///
-    /// The lock is held until the store drops, so the read, the change and the [`save`](Self::save) are
-    /// one write that no fold and no other editor interleaves with, and none of them loses an update.
-    pub async fn open_to_edit(home: &Home) -> Result<Self, StoreError> {
-        crate::config::create_store_dir(home.dir())
-            .map_err(|error| StoreError::Write(error.into()))?;
-        // Only the io error goes on: a lock that cannot be taken reads like any other failed write of the
-        // book, and the lock's path inside the home stays out of the line.
-        let lock = RosterLock::take(&home.roster_lock())
-            .await
-            .map_err(|error| match error {
-                FoldError::Io { source, .. } => StoreError::Write(source.into()),
-                other => StoreError::Write(other.into()),
-            })?;
-        let Self { path, contacts, .. } = Self::open(home).await?;
-        Ok(Self {
-            path,
-            contacts,
-            _lock: Some(lock),
-        })
+        Ok(Self { path, contacts })
     }
 
     /// The loaded address book, to read.
@@ -100,16 +69,20 @@ impl ContactsStore {
         &mut self.contacts
     }
 
-    /// Write the current contacts back to disk, creating the config dir on first save.
+    /// Write the current contacts back to disk under `home.lock`, which the caller took before it opened
+    /// the book, creating the config dir on first save.
     ///
     /// Writes through [`config::write_private_atomic`](crate::config::write_private_atomic): a temp unique
     /// to this write, owner-only (`0600`) and synced, renamed over the target. A crash mid-write never
     /// leaves a half-written book, and two writes never share a temp.
-    pub async fn save(&self) -> Result<(), StoreError> {
+    ///
+    /// # Errors
+    ///
+    /// The book could not be encoded or written.
+    pub fn save(&self, home_lock: &HomeWrite) -> Result<(), StoreError> {
         let text = encode(&self.contacts)?;
-        crate::config::write_private_atomic(&self.path, text.as_bytes())
-            .await
-            .map_err(StoreError::Write)
+        crate::config::write_private_atomic(home_lock, &self.path, text.as_bytes())
+            .map_err(|error| StoreError::Write(error.into()))
     }
 }
 

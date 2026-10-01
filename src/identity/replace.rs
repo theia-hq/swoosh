@@ -1,7 +1,7 @@
 //! Replacing this machine's key with a fresh random one, keeping the old key and its links aside.
 //!
-//! The caller holds the home lock exclusive ([`HomeLock::new_key`](super::HomeLock::new_key)), so no node
-//! serves as the key being replaced. The new key is written whole beside the old one first; the old one
+//! The caller holds `serve.lock` ([`ServeLock`](crate::home::ServeLock)), so no node serves as the key
+//! being replaced, and `home.lock` when it puts the new key in place. The new key is written whole beside the old one first; the old one
 //! is then linked to its kept name and the new one renamed over it, so a crash at any step leaves either
 //! the old key or the new one at `<home>/machine/key`, never neither.
 
@@ -79,7 +79,12 @@ impl NewKey {
     /// Put the staged key in place, keeping the old key as `machine/key.replaced-<day>[-n]` and `links` as
     /// `links.replaced-<day>[-n]` with the first `n` free for both. `day` is today, as `YYYY-MM-DD`. The
     /// old key stays in `machine/`, which system backups leave out, as a key's every copy here does.
-    pub fn put(mut self, home: &Home, day: &str) -> eyre::Result<Replaced> {
+    pub fn put(
+        mut self,
+        _home_lock: &crate::home::HomeWrite,
+        home: &Home,
+        day: &str,
+    ) -> eyre::Result<Replaced> {
         let path = home.key();
         let (kept, links_kept) = free_names(home, day);
         let kept = if self.had_old {

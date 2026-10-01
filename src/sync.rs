@@ -42,7 +42,7 @@ use tightbeam::tunnel::Connector;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use crate::contacts::{ContactsStore, Petname};
-use crate::home::Home;
+use crate::home::{Home, HomeWrite};
 use crate::roster::{Epoch, FoldError, Folded, MAX_ROSTER_BLOB, fold, fold_fork, read_held};
 use crate::serve::SYNC_SERVICE;
 use crate::standing::Standing;
@@ -211,7 +211,7 @@ async fn dial_with(
             if code == BOTH {
                 write_update(&mut writer, bytes).await?;
             }
-            match fold(home, &theirs).await? {
+            match fold_here(home, &theirs).await? {
                 // `mine` means the other device holds another update than the one named; this machine
                 // holding it too (folded since it dialed) is still a take, never `same`.
                 Folded::Newer | Folded::Same => Answer::Took,
@@ -285,14 +285,14 @@ pub async fn answer(
         writer.write_all(&[BOTH]).await?;
         write_update(&mut writer, &bytes).await?;
         let update = read_update(&mut reader).await?;
-        if let Err(error) = fold(home, &update).await {
+        if let Err(error) = fold_here(home, &update).await {
             tracing::debug!(%error, "refused an update in an exchange");
         }
     } else {
         writer.write_all(&[SEND_YOURS]).await?;
         writer.flush().await?;
         let update = read_update(&mut reader).await?;
-        let reply = match fold(home, &update).await {
+        let reply = match fold_here(home, &update).await {
             Ok(Folded::Newer | Folded::Same) => vec![FOLDED],
             Ok(Folded::Fork { floor }) => {
                 let mut reply = vec![FORK_RECORDED];
@@ -335,11 +335,24 @@ async fn take_fork(
 ) -> Result<(), ExchangeError> {
     let fork = read_update(reader).await?;
     if !fork.is_empty()
-        && let Err(error) = fold_fork(home, &fork).await
+        && let Err(error) = fold_fork_here(home, &fork).await
     {
         tracing::debug!(%error, "dropped a fork passed on in an exchange");
     }
     Ok(())
+}
+
+/// Fold an update another device sent, under `home.lock`, taken for the fold alone: never across a read
+/// or a write of the exchange.
+async fn fold_here(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
+    let home_lock = HomeWrite::take(home).await?;
+    fold(&home_lock, home, bytes).await
+}
+
+/// Fold a fork another device passed on, under `home.lock`, taken for the fold alone.
+async fn fold_fork_here(home: &Home, bytes: &[u8]) -> Result<(), FoldError> {
+    let home_lock = HomeWrite::take(home).await?;
+    fold_fork(&home_lock, home, bytes).await
 }
 
 /// Write an update's bytes, after their length.
@@ -370,8 +383,18 @@ async fn read_update(reader: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, E
 /// dial exchange again. `invited-by` stays: only a fold that lands a list removes it.
 async fn touch_synced(home: &Home) {
     let now = unix_now();
-    let written =
-        crate::config::write_private_atomic(&home.synced(), format!("{now}\n").as_bytes()).await;
+    let home_lock = match HomeWrite::take(home).await {
+        Ok(home_lock) => home_lock,
+        Err(error) => {
+            tracing::debug!(%error, "could not record the sync");
+            return;
+        }
+    };
+    let written = crate::config::write_private_atomic(
+        &home_lock,
+        &home.synced(),
+        format!("{now}\n").as_bytes(),
+    );
     if let Err(error) = written {
         tracing::debug!(%error, "could not record the sync");
     }

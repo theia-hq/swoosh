@@ -140,7 +140,9 @@ impl ShareCmd {
             root_id,
             expiry,
         };
-        Grants::at(home.links()).append(&record).await?;
+        let home_lock = swoosh::home::HomeWrite::take(home).await?;
+        Grants::at(home.links()).append(&home_lock, &record)?;
+        drop(home_lock);
         // Frame the mint on STDERR (what was minted, its blast radius, and how to revoke it) so a person sees
         // the consequence; STDOUT gets ONLY the link, so `swoosh grant issue ... > link.txt` stays clean.
         eprint!("{}", frame(&record, self.service.as_str(), lifetime));

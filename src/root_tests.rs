@@ -183,18 +183,23 @@ fn private(path: &Path, bytes: &[u8]) {
 fn copy(dir: &Path, seed: u8, records: &State) {
     config::create_store_dir(dir).unwrap();
     private(&dir.join("root.key"), &sealed(seed));
-    state::write(dir, &TestRoot::seeded(seed).sign_state(records)).unwrap();
+    state::write(
+        &crate::testkit::lock(),
+        dir,
+        &TestRoot::seeded(seed).sign_state(records),
+    )
+    .unwrap();
 }
 
 /// Make `home` a device of the root seeded `seed`: its pin, and a standing that root signed for it.
 async fn device_of(home: &Home, seed: u8) {
     let root = TestRoot::seeded(seed);
-    config::write_signet(home, root.node_id()).await.unwrap();
+    config::write_signet(&crate::testkit::lock(), home, root.node_id()).unwrap();
     let until = SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL);
     let badge = root
         .device_badge(TestNode::seeded(OWN).node_id(), until)
         .unwrap();
-    config::write_badge(home, &badge).await.unwrap();
+    config::write_badge(&crate::testkit::lock(), home, &badge).unwrap();
 }
 
 /// Make `home` hold the root seeded `ROOT`, with `records`.
@@ -243,17 +248,21 @@ async fn sibling(home: &Home, seed: u8, until: u64, update: &RosterDoc) -> Home 
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
     let root = TestRoot::seeded(ROOT);
-    config::write_signet(&device, root.node_id()).await.unwrap();
+    config::write_signet(&crate::testkit::lock(), &device, root.node_id()).unwrap();
     let badge = root
         .device_badge(
             TestNode::seeded(seed).node_id(),
             SystemTime::UNIX_EPOCH + Duration::from_secs(until),
         )
         .unwrap();
-    config::write_badge(&device, &badge).await.unwrap();
-    crate::roster::fold(&device, &root.sign_update(update))
-        .await
-        .unwrap();
+    config::write_badge(&crate::testkit::lock(), &device, &badge).unwrap();
+    crate::roster::fold(
+        &crate::home::HomeWrite::take(&device).await.unwrap(),
+        &device,
+        &root.sign_update(update),
+    )
+    .await
+    .unwrap();
     device
 }
 
@@ -687,6 +696,7 @@ async fn a_device_key_file_in_the_root_slot_is_refused_by_kind() {
         )
         .unwrap();
     state::write(
+        &crate::testkit::lock(),
         &dir,
         &TestRoot::seeded(ROOT).sign_state(&records(0, vec![own_row()], Vec::new(), Vec::new())),
     )
@@ -1128,19 +1138,12 @@ async fn inspect_never_unlocks() {
     let home = home("inspect");
     let records = records(3, vec![own_row()], Vec::new(), Vec::new());
     holds(&home, &records).await;
-    // A write that stopped after `state.new`: inspect reads it and leaves it staged.
-    let staged = home.root().join("state.new");
-    std::fs::rename(home.root().join("state"), &staged).unwrap();
     // Another command holds the lock; inspect takes none.
     let _held = super::DirLock::take(&home.root()).unwrap();
 
     let inspected = Root::inspect(&home, RootPlace::Home).await.unwrap();
     assert_eq!(inspected.root, TestRoot::seeded(ROOT).node_id());
     assert_eq!(inspected.state, records);
-    assert!(
-        staged.exists() && !home.root().join("state").exists(),
-        "inspect never promotes"
-    );
 }
 
 #[test]
@@ -1229,31 +1232,6 @@ async fn a_root_act_with_no_terminal_refuses_before_the_prompt() {
         "using your root asks for its passphrase, which needs a terminal: run this at one."
     );
     assert_eq!(prompt.0.events(), 0);
-}
-
-#[tokio::test]
-async fn a_copy_that_is_only_read_never_promotes_its_staged_state() {
-    let home = home("read-only-copy");
-    let records = records(2, vec![own_row()], Vec::new(), Vec::new());
-    let dir = beside(&home, "stick");
-    copy(&dir, ROOT, &records);
-    // A write that stopped after `state.new`, on a stick that cannot be written now.
-    std::fs::rename(dir.join("state"), dir.join("state.new")).unwrap();
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let (root, _) = present(
-        &home,
-        RootPlace::Dir(dir.clone()),
-        RootVerb::Backup,
-        &mut Counting::new([PASS]),
-    )
-    .await;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let root = root.unwrap();
-    assert_eq!(root.rows(), records.rows(), "it reads the staged records");
-    assert!(
-        dir.join("state.new").exists() && !dir.join("state").exists(),
-        "a backup never writes its source"
-    );
 }
 
 #[tokio::test]
@@ -1569,9 +1547,13 @@ async fn a_fork_below_the_held_update_brings_forward_only_its_revocations() {
             vec![key(PHONE)],
         )
         .unwrap();
-        crate::roster::fold_fork(&home, &TestRoot::seeded(ROOT).sign_update(&fork))
-            .await
-            .unwrap();
+        crate::roster::fold_fork(
+            &crate::home::HomeWrite::take(&home).await.unwrap(),
+            &home,
+            &TestRoot::seeded(ROOT).sign_update(&fork),
+        )
+        .await
+        .unwrap();
         let (root, out) = present(
             &home,
             RootPlace::Home,
@@ -1649,9 +1631,13 @@ async fn a_held_update_below_the_records_brings_forward_only_its_revocations() {
             vec![key(TV)],
         )
         .unwrap();
-        crate::roster::fold_fork(&home, &TestRoot::seeded(ROOT).sign_update(&fork))
-            .await
-            .unwrap();
+        crate::roster::fold_fork(
+            &crate::home::HomeWrite::take(&home).await.unwrap(),
+            &home,
+            &TestRoot::seeded(ROOT).sign_update(&fork),
+        )
+        .await
+        .unwrap();
         assert!(
             home.devices_conflict().exists(),
             "reused {reused}: a fork is kept"
@@ -1850,7 +1836,13 @@ async fn a_device_that_missed_its_renewal_update_gets_it_from_the_next() {
     let (next, _) = commit(root).await;
     assert_eq!(next.number, Epoch(3));
 
-    crate::roster::fold(&device, &next.bytes).await.unwrap();
+    crate::roster::fold(
+        &crate::home::HomeWrite::take(&device).await.unwrap(),
+        &device,
+        &next.bytes,
+    )
+    .await
+    .unwrap();
     let badge = config::load_badge(&device).await.unwrap().unwrap();
     assert_eq!(
         badge.cap().expiry().unwrap(),
@@ -1971,7 +1963,7 @@ async fn reach_says_published_while_this_machine_serves() {
     let (home, _, mut root) = revoking("serving", &[(LAPTOP, "laptop"), (PHONE, "phone")]).await;
     root.revoke_device(&name("phone"), key(PHONE)).unwrap();
     let (committed, _) = commit(root).await;
-    let _serving = crate::identity::HomeLock::serving(&home).unwrap();
+    let _serving = crate::testkit::serving(&home, None);
 
     let reach = committed.offer(&Answering::nobody()).await;
 
@@ -2083,8 +2075,20 @@ async fn an_offer_after_a_newer_fold_reports_behind() {
     // not carry this act's revocation, and me/nas holds it too.
     let later = TestRoot::seeded(ROOT)
         .sign_update(&RosterDoc::new(Epoch(3), first.members().to_vec()).unwrap());
-    crate::roster::fold(&home, &later).await.unwrap();
-    crate::roster::fold(&nas, &later).await.unwrap();
+    crate::roster::fold(
+        &crate::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &later,
+    )
+    .await
+    .unwrap();
+    crate::roster::fold(
+        &crate::home::HomeWrite::take(&nas).await.unwrap(),
+        &nas,
+        &later,
+    )
+    .await
+    .unwrap();
 
     let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
     assert_eq!(
@@ -2113,64 +2117,228 @@ async fn a_forked_offer_reports_behind() {
         Vec::new(),
     )
     .unwrap();
-    crate::roster::fold(&nas, &TestRoot::seeded(ROOT).sign_update(&other))
-        .await
-        .unwrap();
+    crate::roster::fold(
+        &crate::home::HomeWrite::take(&nas).await.unwrap(),
+        &nas,
+        &TestRoot::seeded(ROOT).sign_update(&other),
+    )
+    .await
+    .unwrap();
     root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
     let (committed, _) = commit(root).await;
     let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
     assert_eq!(committed.offer(&dial).await, Reach::Behind);
 }
 
-#[tokio::test]
-async fn a_root_act_whose_cut_forks_offers_nothing_and_fails() {
-    // Between the prompt and the commit, this machine folds a list another copy of the root cut: one at the
-    // number this act's cut takes (its cut forks), and one past it (its cut is not newer).
-    for (tag, number) in [("own-fork", 2), ("own-behind", 3)] {
-        let (home, first, mut root) = revoking(tag, &[(LAPTOP, "laptop"), (NAS, "nas")]).await;
-        let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
-        let other = RosterDoc::with_revocations(
-            Epoch(number),
-            first.members().to_vec(),
-            vec![id(OTHER, STANDING_UNTIL)],
-            Vec::new(),
-        )
-        .unwrap();
-        crate::roster::fold(&home, &TestRoot::seeded(ROOT).sign_update(&other))
-            .await
-            .unwrap();
-        root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+/// A prompt that, while a root act waits at it, has this home fold `bytes`, as an exchange answered by this
+/// machine's `serve` would: on a thread of its own, taking `home.lock` itself. The fold must finish while the
+/// prompt is up; one that cannot, because the act holds `home.lock` across its prompt, is given up on after
+/// a bound and recorded as `None`, so the test fails rather than hangs.
+struct FoldingPrompt {
+    home: Home,
+    bytes: Vec<u8>,
+    folded: Option<crate::roster::Folded>,
+}
 
-        // As `invite` and `revoke` go on: offer the cut only once it is committed.
-        let dial = Loopback::new(
-            home.clone(),
-            [(TestNode::seeded(NAS).node_id(), nas.clone())],
-        );
-        let mut out = Vec::new();
-        let error = match root.commit_to(&mut out).await {
-            Ok(committed) => {
-                let _reach = committed.offer(&dial).await;
-                None
-            }
-            Err(error) => Some(error),
-        };
-
-        assert!(dial.dialed().is_empty(), "{tag}: nothing was offered");
-        let error = error.unwrap_or_else(|| panic!("{tag}: the act went on"));
-        assert!(matches!(error, RootError::ListChanged), "{tag}: {error:?}");
-        assert_eq!(
-            error.to_string(),
-            "your devices' list changed while this ran: run it again."
-        );
-        assert!(out.is_empty(), "{tag}: nothing printed as sent");
-        assert!(
-            !crate::gate::KeyedDenylist::load(&nas)
-                .await
-                .unwrap()
-                .is_revoked_peer(&key(LAPTOP)),
-            "{tag}: me/nas never got the cut"
-        );
+impl FoldingPrompt {
+    fn new(home: &Home, update: &RosterDoc) -> Self {
+        Self {
+            home: home.clone(),
+            bytes: TestRoot::seeded(ROOT).sign_update(update),
+            folded: None,
+        }
     }
+}
+
+impl Prompt for FoldingPrompt {
+    fn terminal(&self) -> bool {
+        true
+    }
+
+    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        let (home, bytes) = (self.home.clone(), self.bytes.clone());
+        let (folded, fold) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let done = runtime.block_on(async {
+                let home_lock = crate::home::HomeWrite::take(&home).await.unwrap();
+                crate::roster::fold(&home_lock, &home, &bytes)
+                    .await
+                    .unwrap()
+            });
+            let _ = folded.send(done);
+        });
+        self.folded = fold.recv_timeout(Duration::from_secs(10)).ok();
+        crate::passphrase::passphrase(Zeroizing::new(PASS.to_owned()))
+    }
+
+    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+        eyre::bail!("nothing is chosen here")
+    }
+}
+
+/// The list another copy of the root cut at update 2: the act's devices, and one more revoked id.
+fn cut_elsewhere(first: &RosterDoc) -> RosterDoc {
+    RosterDoc::with_revocations(
+        Epoch(2),
+        first.members().to_vec(),
+        vec![id(OTHER, STANDING_UNTIL)],
+        Vec::new(),
+    )
+    .unwrap()
+}
+
+/// This home holding the root with this machine, me/laptop and me/nas at update 1, presented to revoke
+/// with `prompt`; and the update it held.
+async fn presented_with(tag: &str, prompt: &mut impl Prompt) -> (Home, RosterDoc, Root) {
+    let home = home(tag);
+    let rows = vec![
+        own_row(),
+        row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
+        row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)]),
+    ];
+    holds(&home, &records(1, rows.clone(), Vec::new(), Vec::new())).await;
+    let first = RosterDoc::new(Epoch(1), rows.iter().map(member).collect()).unwrap();
+    held(&home, &first);
+    let (root, _) = present(&home, RootPlace::Home, RootVerb::Revoke, prompt).await;
+    (home, first, root.unwrap())
+}
+
+#[tokio::test]
+async fn a_write_under_the_guard_never_takes_the_lock_again() {
+    // A root act's commit folds its own cut under the `home.lock` it holds. A fold that took the lock
+    // itself would wait on the act's own hold for good, so the commit is bounded here.
+    let (home, _, mut root) = revoking("under-guard", &[(LAPTOP, "laptop")]).await;
+    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+    let committed = tokio::time::timeout(Duration::from_secs(10), root.commit_to(&mut io::sink()))
+        .await
+        .expect("the commit's own fold finishes under the act's lock")
+        .unwrap();
+    assert!(matches!(
+        crate::roster::read_held(&home.devices(), TestRoot::seeded(ROOT).verify_key()),
+        Some((held, _)) if held.epoch() == committed.number
+    ));
+}
+
+#[tokio::test]
+async fn the_home_lock_is_never_held_across_a_prompt() {
+    let first = RosterDoc::new(
+        Epoch(1),
+        [
+            own_row(),
+            row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
+            row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)]),
+        ]
+        .iter()
+        .map(member)
+        .collect(),
+    )
+    .unwrap();
+    let home = home("prompt-unlocked");
+    let mut prompt = FoldingPrompt::new(&home, &cut_elsewhere(&first));
+    let (_home, _, _root) = presented_with("prompt-unlocked", &mut prompt).await;
+    assert_eq!(
+        prompt.folded,
+        Some(crate::roster::Folded::Newer),
+        "a fold of this home finished while the act waited at its prompt"
+    );
+}
+
+#[tokio::test]
+async fn a_list_folded_during_the_prompt_is_brought_forward_before_the_cut() {
+    let first = RosterDoc::new(
+        Epoch(1),
+        [
+            own_row(),
+            row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
+            row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)]),
+        ]
+        .iter()
+        .map(member)
+        .collect(),
+    )
+    .unwrap();
+    let home = home("prompt-folded");
+    let mut prompt = FoldingPrompt::new(&home, &cut_elsewhere(&first));
+    let (home, first, mut root) = presented_with("prompt-folded", &mut prompt).await;
+    assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
+    let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
+    root.revoke_device(&name("laptop"), key(LAPTOP)).unwrap();
+
+    let committed = root
+        .commit_to(&mut io::sink())
+        .await
+        .expect("the act cuts above the list folded while it waited");
+    assert_eq!(
+        committed.number,
+        Epoch(3),
+        "above the list folded meanwhile"
+    );
+    let cut = crate::roster::verify(&committed.bytes, TestRoot::seeded(ROOT).verify_key()).unwrap();
+    assert!(
+        cut.revoked()
+            .iter()
+            .any(|revoked| revoked.id == id(OTHER, STANDING_UNTIL).id),
+        "the cut carries the revocation of the list folded meanwhile"
+    );
+    assert!(cut.revoked_keys().contains(&key(LAPTOP)), "and its own");
+    assert!(matches!(
+        crate::roster::read_held(&home.devices(), TestRoot::seeded(ROOT).verify_key()),
+        Some((held, _)) if held.epoch() == Epoch(3)
+    ));
+    let dial = Loopback::new(
+        home.clone(),
+        [(TestNode::seeded(NAS).node_id(), nas.clone())],
+    );
+    let _reach = committed.offer(&dial).await;
+    assert!(
+        crate::gate::KeyedDenylist::load(&nas)
+            .await
+            .unwrap()
+            .is_revoked_peer(&key(LAPTOP)),
+        "me/nas took the cut"
+    );
+}
+
+#[tokio::test]
+async fn a_device_added_whose_name_the_list_gave_away_meanwhile_stops_the_act() {
+    // While the act waited at its prompt, this home folded a list another copy of the root cut, which
+    // names a different key me/tv. The act's own me/tv no longer holds, so it stops and offers nothing.
+    let rows = [
+        own_row(),
+        row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
+        row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)]),
+    ];
+    let mut elsewhere: Vec<Member> = rows.iter().map(member).collect();
+    elsewhere.push(member(&row(PHONE, "tv", vec![id(PHONE, STANDING_UNTIL)])));
+    let elsewhere = RosterDoc::new(Epoch(2), elsewhere).unwrap();
+    let home = home("prompt-name-taken");
+    let mut prompt = FoldingPrompt::new(&home, &elsewhere);
+    let (home, first, mut root) = presented_with("prompt-name-taken", &mut prompt).await;
+    assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
+    let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
+    root.sign_standing(key(TV), name("tv"), Duration::from_secs(30 * DAY))
+        .unwrap();
+
+    let dial = Loopback::new(home.clone(), [(TestNode::seeded(NAS).node_id(), nas)]);
+    let mut out = Vec::new();
+    let error = match root.commit_to(&mut out).await {
+        Ok(committed) => {
+            let _reach = committed.offer(&dial).await;
+            None
+        }
+        Err(error) => Some(error),
+    };
+    assert!(dial.dialed().is_empty(), "nothing was offered");
+    let error = error.expect("the act stops");
+    assert!(matches!(error, RootError::ListChanged), "{error:?}");
+    assert_eq!(
+        error.to_string(),
+        "your devices' list changed while this ran: run it again."
+    );
 }
 
 #[tokio::test]

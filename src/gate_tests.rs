@@ -45,9 +45,12 @@ impl Scratch {
     }
 
     async fn pin(&self, root: u8) {
-        config::write_signet(&self.home, TestRoot::seeded(root).node_id())
-            .await
-            .expect("write the pin");
+        config::write_signet(
+            &crate::testkit::lock(),
+            &self.home,
+            TestRoot::seeded(root).node_id(),
+        )
+        .expect("write the pin");
     }
 
     async fn gate(&self) -> (Gate, AnchorCut) {
@@ -222,15 +225,17 @@ async fn issued_slip(home: &Home) -> Cap {
         .slip(&service(), in_an_hour())
         .expect("mint a slip");
     Grants::at(home.links())
-        .append(&GrantRecord {
-            target: service(),
-            kind: GrantKind::Bearer,
-            delegation: Delegation::Delegable,
-            holder: crate::grants::ANYONE.to_owned(),
-            root_id: slip.root_revocation_id().expect("a root id"),
-            expiry: in_an_hour(),
-        })
-        .await
+        .append(
+            &crate::testkit::lock(),
+            &GrantRecord {
+                target: service(),
+                kind: GrantKind::Bearer,
+                delegation: Delegation::Delegable,
+                holder: crate::grants::ANYONE.to_owned(),
+                root_id: slip.root_revocation_id().expect("a root id"),
+                expiry: in_an_hour(),
+            },
+        )
         .expect("record the slip");
     slip
 }
@@ -399,8 +404,7 @@ async fn a_damaged_server_serves_a_link_it_signed() {
     let standing = TestRoot::seeded(OTHER_ROOT)
         .device_badge(TestNode::seeded(OWN).node_id(), in_an_hour())
         .expect("a standing");
-    config::write_badge(&scratch.home, &standing)
-        .await
+    config::write_badge(&crate::testkit::lock(), &scratch.home, &standing)
         .expect("the new root's standing");
     scratch.pin(ROOT).await;
     assert!(
@@ -415,7 +419,7 @@ async fn a_damaged_server_serves_a_link_it_signed() {
     let (gate, _cut) = scratch.gate().await;
     assert!(admits(&gate, &slip), "the link it signed is admitted");
 
-    crate::joining::leave(&scratch.home).await.expect("leave");
+    crate::joining::leave(&crate::testkit::lock(), &scratch.home).expect("leave");
     assert_eq!(
         crate::standing::Standing::read(&scratch.home)
             .await

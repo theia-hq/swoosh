@@ -457,15 +457,12 @@ mod tests {
         crate::identity::write(&own.seed(), &home)
             .await
             .expect("write this machine's key");
-        config::write_signet(&home, own.node_id())
-            .await
+        config::write_signet(&crate::testkit::lock(), &home, own.node_id())
             .expect("pin this machine's own key");
         let badge = TestRoot::from_seed(own.seed())
             .device_badge(own.node_id(), SystemTime::now() + 30 * DAY)
             .expect("sign a badge");
-        config::write_badge(&home, &badge)
-            .await
-            .expect("write the badge");
+        config::write_badge(&crate::testkit::lock(), &home, &badge).expect("write the badge");
         let secret = crate::identity::load(&home)
             .await
             .expect("load the key")
@@ -698,12 +695,9 @@ mod tests {
         let badge = signet
             .device_badge(device.node_id(), expiry)
             .expect("mint a device badge");
-        config::write_signet(home, signet.node_id())
-            .await
+        config::write_signet(&crate::testkit::lock(), home, signet.node_id())
             .expect("write the signet");
-        config::write_badge(home, &badge)
-            .await
-            .expect("write the badge");
+        config::write_badge(&crate::testkit::lock(), home, &badge).expect("write the badge");
         let secret = crate::identity::load(home)
             .await
             .expect("load the key")

@@ -16,7 +16,7 @@ async fn populated_home(tag: &str) -> Home {
         Some("macbook".parse().expect("label")),
         NodeId::from_ed25519_secret(&[5u8; 32]),
     );
-    store.save().await.expect("save");
+    store.save(&swoosh::testkit::lock()).expect("save");
     home
 }
 
@@ -47,7 +47,7 @@ async fn contact_rm_me_is_refused() {
         "nothing is written"
     );
     assert!(
-        !home.roster_lock().exists(),
+        !home.home_lock().exists(),
         "the refusal comes before the book is opened"
     );
     let _ = std::fs::remove_dir_all(home.dir());

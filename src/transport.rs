@@ -29,7 +29,7 @@ use eyre::WrapErr as _;
 
 use crate::config;
 use crate::escape::EscapedPath;
-use crate::home::Home;
+use crate::home::{Home, HomeWrite};
 use crate::reaching::BindRole;
 
 /// The flags every reaching verb shares and no local verb has: which backend to bind, whether the
@@ -96,13 +96,28 @@ impl ReachArgs {
     ///
     /// A flag that was not given leaves its file alone, so naming one of the two never silently drops
     /// the other, and `--relay` on a dial stays a one-run override rather than a rewrite of the home.
+    ///
+    /// # Errors
+    ///
+    /// `home.lock` could not be taken, or a file could not be written.
     pub async fn persist_reach(&self, home: &Home) -> eyre::Result<()> {
+        if self.relay.is_none() && self.resolver.is_none() {
+            return Ok(());
+        }
+        let home_lock = HomeWrite::take(home).await?;
         if let Some(relay) = &self.relay {
-            config::write_private_atomic(&home.relay(), format!("{relay}\n").as_bytes()).await?;
+            config::write_private_atomic(
+                &home_lock,
+                &home.relay(),
+                format!("{relay}\n").as_bytes(),
+            )?;
         }
         if let Some(resolver) = &self.resolver {
-            config::write_private_atomic(&home.resolver(), format!("{resolver}\n").as_bytes())
-                .await?;
+            config::write_private_atomic(
+                &home_lock,
+                &home.resolver(),
+                format!("{resolver}\n").as_bytes(),
+            )?;
         }
         Ok(())
     }

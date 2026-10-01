@@ -194,18 +194,17 @@ fn status_with_a_root_copy_never_prompts() {
         .unwrap();
     let root = TestRoot::seeded(0x21);
     runtime.block_on(async {
-        config::write_signet(&home, root.node_id()).await.unwrap();
+        config::write_signet(&swoosh::testkit::lock(), &home, root.node_id()).unwrap();
         let until = SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL);
         let standing = root
             .device_badge(TestNode::seeded(0x11).node_id(), until)
             .unwrap();
-        config::write_badge(&home, &standing).await.unwrap();
+        config::write_badge(&swoosh::testkit::lock(), &home, &standing).unwrap();
         Moved {
             to: PathBuf::from("/media/usb/root"),
             on: Date(1_790_000_000),
         }
-        .write(&home)
-        .await
+        .write(&swoosh::testkit::lock(), &home)
         .unwrap();
     });
     let out = swoosh(&moved.home(), &["status"]);

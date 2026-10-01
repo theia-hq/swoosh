@@ -131,7 +131,7 @@ async fn sync_refuses_each_standing_that_is_not_a_device() {
             std::time::SystemTime::now() + core::time::Duration::from_secs(3600),
         )
         .unwrap();
-    swoosh::config::write_badge(&damaged, &badge).await.unwrap();
+    swoosh::config::write_badge(&swoosh::testkit::lock(), &damaged, &badge).unwrap();
     let error = refuse_unless_device(&damaged).await.unwrap_err();
     let line = error.to_string();
     assert!(

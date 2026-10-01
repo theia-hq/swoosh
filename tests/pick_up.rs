@@ -61,16 +61,19 @@ async fn device_home(tag: &str, seed: u8) -> Home {
     KeyFile::device(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
-    swoosh::config::write_signet(&home, TestRoot::seeded(ROOT).node_id())
-        .await
-        .unwrap();
+    swoosh::config::write_signet(
+        &swoosh::testkit::lock(),
+        &home,
+        TestRoot::seeded(ROOT).node_id(),
+    )
+    .unwrap();
     let badge = TestRoot::seeded(ROOT)
         .device_badge(
             TestNode::seeded(seed).node_id(),
             SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL),
         )
         .unwrap();
-    swoosh::config::write_badge(&home, &badge).await.unwrap();
+    swoosh::config::write_badge(&swoosh::testkit::lock(), &home, &badge).unwrap();
     home
 }
 
@@ -91,9 +94,13 @@ async fn renewing(nas: &Home, laptop: NodeId) -> Link {
     let members = vec![row(TestNode::seeded(NAS).node_id(), "nas"), own];
     let doc =
         RosterDoc::with_revocations(Epoch(1), members, vec![], Vec::<VerifyKey>::new()).unwrap();
-    fold(nas, &TestRoot::seeded(ROOT).sign_update(&doc))
-        .await
-        .unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(nas).await.unwrap(),
+        nas,
+        &TestRoot::seeded(ROOT).sign_update(&doc),
+    )
+    .await
+    .unwrap();
     standing
 }
 
@@ -274,7 +281,12 @@ fn a_revoked_key_reaches_no_route() {
             "before the revoke the laptop reaches the door"
         );
 
-        swoosh::gate::add_revoked_keys(&nas, &[laptop.node_id().verify_key().unwrap()]).unwrap();
+        swoosh::gate::add_revoked_keys(
+            &swoosh::testkit::lock(),
+            &nas,
+            &[laptop.node_id().verify_key().unwrap()],
+        )
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         for service in [RENEWAL_SERVICE, SYNC_SERVICE, "ping"] {
             assert!(

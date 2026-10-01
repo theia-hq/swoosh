@@ -63,9 +63,7 @@ fn until() -> SystemTime {
 }
 
 async fn pin(home: &Home, key: NodeId) {
-    config::write_signet(home, key)
-        .await
-        .expect("write the pin");
+    config::write_signet(&crate::testkit::lock(), home, key).expect("write the pin");
 }
 
 /// A device standing for this machine, signed by the root seeded `by`.
@@ -73,9 +71,7 @@ async fn badge(home: &Home, by: u8) {
     let badge = TestRoot::seeded(by)
         .device_badge(own(), until())
         .expect("sign a device standing");
-    config::write_badge(home, &badge)
-        .await
-        .expect("write the device standing");
+    config::write_badge(&crate::testkit::lock(), home, &badge).expect("write the device standing");
 }
 
 /// A device standing this machine signed for itself, as a home from before roots had their own keys holds.
@@ -83,9 +79,7 @@ async fn self_signed_badge(home: &Home) {
     let badge = TestRoot::seeded(OWN)
         .device_badge(own(), until())
         .expect("sign a device standing");
-    config::write_badge(home, &badge)
-        .await
-        .expect("write the device standing");
+    config::write_badge(&crate::testkit::lock(), home, &badge).expect("write the device standing");
 }
 
 /// A root directory at `dir` whose `root.key` holds the root seeded `seed`, plain, with a `state` and a
@@ -395,9 +389,7 @@ async fn a_standing_for_another_key_reads_damaged() {
     let badge = TestRoot::seeded(ROOT)
         .device_badge(TestNode::seeded(0x41).node_id(), until())
         .expect("sign a standing for another machine");
-    config::write_badge(&home, &badge)
-        .await
-        .expect("write the device standing");
+    config::write_badge(&crate::testkit::lock(), &home, &badge).expect("write the device standing");
     assert_eq!(
         damaged(&home).await,
         Disagreement::StandingForAnotherKey {
@@ -422,9 +414,7 @@ async fn a_lapsed_standing_is_still_this_machines() {
     let badge = TestRoot::seeded(ROOT)
         .device_badge(own(), lapsed)
         .expect("sign a lapsed standing");
-    config::write_badge(&home, &badge)
-        .await
-        .expect("write the device standing");
+    config::write_badge(&crate::testkit::lock(), &home, &badge).expect("write the device standing");
     assert!(matches!(
         read(&home).await.standing,
         Standing::Device { pin, until } if pin == root() && until < SystemTime::now()
@@ -441,8 +431,7 @@ async fn a_standing_with_no_readable_end_date_reads_damaged() {
     ] {
         let home = home(&format!("badge-end-{tag}"));
         pin(&home, root()).await;
-        config::write_badge(&home, &badge)
-            .await
+        config::write_badge(&crate::testkit::lock(), &home, &badge)
             .expect("write the device standing");
         assert_eq!(
             damaged(&home).await,

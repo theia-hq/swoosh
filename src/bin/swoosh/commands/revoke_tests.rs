@@ -205,7 +205,9 @@ async fn gave(home: &Home, holder: NodeId, kind: GrantKind) -> Link {
         root_id: link.cap().root_revocation_id().unwrap(),
         expiry: until,
     };
-    Grants::at(home.links()).append(&record).await.unwrap();
+    Grants::at(home.links())
+        .append(&swoosh::testkit::lock(), &record)
+        .unwrap();
     link
 }
 
@@ -619,7 +621,7 @@ async fn revoke_a_bare_key_that_is_a_root_takes_back_only_links() {
     store
         .contacts_mut()
         .set_signet("alice".parse().unwrap(), node(ALICE_ROOT));
-    store.save().await.unwrap();
+    store.save(&swoosh::testkit::lock()).unwrap();
     let alice = gave(&home, node(ALICE_ROOT), GrantKind::Fleet).await;
     let yours = gave(&home, node(ROOT), GrantKind::Fleet).await;
 

@@ -15,7 +15,6 @@ use keystore::{KeyFile, Passphrase, Protection, Stored};
 use swoosh::config;
 use swoosh::contacts::{ContactsStore, ME, Petname};
 use swoosh::home::Home;
-use swoosh::identity::HomeLock;
 use swoosh::passphrase::Prompt;
 use swoosh::roster::{Epoch, RosterDoc, fold};
 use swoosh::standing::Standing;
@@ -82,6 +81,7 @@ fn scratch(tag: &str) -> Home {
 async fn device(home: &Home, until: u64) {
     let root = TestRoot::seeded(ROOT);
     config::write_badge(
+        &swoosh::testkit::lock(),
         home,
         &root
             .device_badge(
@@ -90,9 +90,8 @@ async fn device(home: &Home, until: u64) {
             )
             .unwrap(),
     )
-    .await
     .unwrap();
-    config::write_signet(home, root.node_id()).await.unwrap();
+    config::write_signet(&swoosh::testkit::lock(), home, root.node_id()).unwrap();
     let member = root
         .member(
             TestNode::seeded(OWN).verify_key(),
@@ -106,7 +105,13 @@ async fn device(home: &Home, until: u64) {
         vec![TestNode::seeded(0x66).verify_key()],
     )
     .unwrap();
-    fold(home, &root.sign_update(&doc)).await.unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(home).await.unwrap(),
+        home,
+        &root.sign_update(&doc),
+    )
+    .await
+    .unwrap();
     std::fs::write(home.invited_by(), format!("{}\n", node(0x41))).unwrap();
 }
 
@@ -322,7 +327,7 @@ async fn leave_on_a_damaged_home_removes_the_standing_and_the_pin_and_keeps_the_
     let home = scratch("damaged");
     keep_root(&home);
     // A root kept here under a pin to another root.
-    config::write_signet(&home, root(OTHER)).await.unwrap();
+    config::write_signet(&swoosh::testkit::lock(), &home, root(OTHER)).unwrap();
     assert!(
         Standing::read(&home).await.is_err(),
         "the home reads as damaged"
@@ -415,8 +420,8 @@ async fn leave_new_key_whose_passphrase_is_not_chosen_writes_nothing() {
     for no_terminal in [false, true] {
         let home = scratch_with("new-key-unchosen", true);
         device(&home, now() + 90 * DAY).await;
-        // A home that has served has its lock file already.
-        drop(HomeLock::serving(&home).unwrap());
+        // A home that has served has its lock files already.
+        drop(swoosh::testkit::serving(&home, None));
         let before = snapshot(home.dir());
         let ran = if no_terminal {
             leave_asking(&home, &["--new-key"], &mut NoTerminal).await
@@ -457,10 +462,13 @@ async fn leave_new_key_locks_the_new_key_when_the_old_one_was_locked() {
 async fn leave_new_key_refuses_while_serve_runs() {
     let home = scratch("new-key-serving");
     device(&home, now() + 90 * DAY).await;
-    let _serving = HomeLock::serving(&home).unwrap();
+    let _serving = swoosh::testkit::serving(&home, None);
     let before = snapshot(home.dir());
     let ran = leave(&home, &["--new-key"]).await;
-    assert_eq!(ran.refusal(), "stop swoosh serve first.");
+    assert_eq!(
+        ran.refusal(),
+        "swoosh serve is running; stop it first: swoosh stop"
+    );
     assert!(ran.out.is_empty());
     assert!(snapshot(home.dir()) == before, "nothing is written");
 }
@@ -469,7 +477,7 @@ async fn leave_new_key_refuses_while_serve_runs() {
 async fn leave_under_a_running_serve_says_its_sessions_end() {
     let home = scratch("serving");
     device(&home, now() + 90 * DAY).await;
-    let _serving = HomeLock::serving(&home).unwrap();
+    let _serving = swoosh::testkit::serving(&home, None);
     let ran = leave(&home, &[]).await;
     ran.left();
     assert!(

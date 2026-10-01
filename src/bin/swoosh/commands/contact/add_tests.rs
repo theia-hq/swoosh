@@ -22,8 +22,7 @@ async fn home_with_book(tag: &str) -> Home {
     ContactsStore::open(&home)
         .await
         .expect("open")
-        .save()
-        .await
+        .save(&swoosh::testkit::lock())
         .expect("save");
     home
 }

@@ -23,11 +23,46 @@ use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
 use crate::contacts::DeviceLabel;
-use crate::home::Home;
+use crate::home::{Home, HomeWrite, ServeLock};
 use crate::passphrase::Prompt;
 use crate::roster::{Member, RosterDoc};
 use crate::state::State;
 use crate::sync::{Answer, Dial, ExchangeError};
+
+/// A held `home.lock` for a test's own setup writes: the lock of a scratch home of its own, so a fixture
+/// writing a file never waits on, or holds up, the home under test.
+///
+/// # Panics
+///
+/// When the scratch home or its lock cannot be made.
+#[expect(
+    clippy::expect_used,
+    reason = "a test fixture that cannot lock stops the test"
+)]
+pub fn lock() -> HomeWrite {
+    static SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("swoosh-lock-{}-{seq}", std::process::id()));
+    let home = Home::resolve(Some(dir)).expect("a scratch home for the lock");
+    HomeWrite::wait(&home).expect("take the scratch home's lock")
+}
+
+/// `serve.lock` held the way a running `serve` holds it: taken under the home's own `home.lock`, recording
+/// this process and, under `--admit`, the root it admits. A test holds it to stand for a `serve` of `home`.
+///
+/// # Panics
+///
+/// When the lock is held already, or cannot be taken or written.
+#[expect(
+    clippy::expect_used,
+    reason = "a test fixture that cannot lock stops the test"
+)]
+pub fn serving(home: &Home, admit: Option<NodeId>) -> ServeLock {
+    let home_lock = HomeWrite::wait(home).expect("take home.lock");
+    let held = ServeLock::take(&home_lock, home).expect("take serve.lock");
+    held.record(&home_lock, admit).expect("record the serve");
+    held
+}
 
 /// The key the seed `[7; 32]` binds plus a point of order 8: the torsioned twin of a real key, which
 /// the holder of that key's secret can sign for. nauthy's and bifrost's own tests use these bytes.

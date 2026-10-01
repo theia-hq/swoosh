@@ -28,7 +28,7 @@ use zeroize::Zeroizing;
 use crate::codec::{FormatError, Id, MAX_IDS, MAX_MEMBERS, MAX_REVOKED, MAX_REVOKED_KEYS};
 use crate::contacts::DeviceLabel;
 use crate::escape::EscapedPath;
-use crate::home::Home;
+use crate::home::{Home, HomeWrite, ServeLock};
 use crate::passphrase::Prompt;
 use crate::reach_report::{Missed, Reach, Why};
 use crate::roster::{ArtifactError, Epoch, FoldError, Folded, Member, RosterDoc, read_held};
@@ -334,8 +334,9 @@ pub enum RootError {
     /// The update cut could not be folded here.
     #[error(transparent)]
     Fold(#[from] FoldError),
-    /// The act's own cut did not fold here as the newest update: another copy of the root cut while the
-    /// act ran, so nothing was offered.
+    /// The list moved while the act ran so that the act no longer holds: a device it added lost its name
+    /// or its key to the list folded meanwhile, or its own cut did not fold here as the newest update.
+    /// Nothing was offered.
     #[error("your devices' list changed while this ran: run it again.")]
     ListChanged,
     /// A file the act reads or writes failed.
@@ -350,6 +351,9 @@ pub enum RootError {
     /// A write this home shares with other commands failed.
     #[error(transparent)]
     Write(Box<dyn core::error::Error + Send + Sync + 'static>),
+    /// `home.lock` could not be taken.
+    #[error(transparent)]
+    Lock(#[from] crate::home::LockError),
 }
 
 impl From<eyre::Report> for RootError {
@@ -403,9 +407,13 @@ pub struct Moved {
 
 impl Moved {
     /// Write the record into `home`.
-    pub async fn write(&self, home: &Home) -> eyre::Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// The record could not be written.
+    pub fn write(&self, home_lock: &HomeWrite, home: &Home) -> io::Result<()> {
         let text = format!("{}\n{}\n", self.to.display(), self.on.0);
-        crate::config::write_private_atomic(&home.root_moved(), text.as_bytes()).await
+        crate::config::write_private_atomic(home_lock, &home.root_moved(), text.as_bytes())
     }
 
     /// The record in `home`, or `None` when there is none or it is not two lines of a path and a day.
@@ -438,6 +446,8 @@ struct Act {
     book: Book,
     /// The update this machine holds from this root, and its bytes: the floor the next cut must pass.
     held: Option<(RosterDoc, Vec<u8>)>,
+    /// The bytes of the fork this machine kept when the act read it, if any: the commit reads it again.
+    fork: Option<Vec<u8>>,
     /// Rows due to renew at this act, found before the prompt.
     due: Vec<VerifyKey>,
     now: u64,
@@ -590,7 +600,7 @@ impl Committed {
         }
         if behind {
             Reach::Behind
-        } else if !took.is_empty() || crate::identity::HomeLock::is_held(&self.home) {
+        } else if !took.is_empty() || crate::home::serve_running(&self.home).await {
             Reach::Published {
                 took,
                 missed,
@@ -673,12 +683,7 @@ impl Root {
             probe(&found.dir)?;
         }
         let lock = take_lock(&found.dir, verb.writes_source() || place == RootPlace::Home)?;
-        // Only an act that writes the copy, and so holds its lock, may promote a staged `state.new`.
-        let state = if verb.writes_source() {
-            state::recover(&found.dir, found.header.verify_key()?)?
-        } else {
-            state::load(&found.dir, found.header.verify_key()?)?
-        };
+        let state = state::load(&found.dir, found.header.verify_key()?)?;
         let book = Book::from(state);
         let mut act = Act {
             key: found.header,
@@ -687,6 +692,7 @@ impl Root {
             _lock: lock,
             book,
             held: None,
+            fork: None,
             due: Vec::new(),
             now: unix_now(),
             own: own_key(home)?,
@@ -748,8 +754,7 @@ impl Root {
             .then(|| (row.key, row.until, row.standing.clone())))
     }
 
-    /// Read the root at `place` with no lock, no prompt and no write: its key and verified records. A
-    /// staged `state.new` is read, never promoted.
+    /// Read the root at `place` with no lock, no prompt and no write: its key and verified records.
     pub async fn inspect(home: &Home, place: RootPlace) -> Result<Inspected, RootError> {
         let found = find(home, &place, None).await?;
         let pin = found.header.verify_key()?;
@@ -787,23 +792,15 @@ impl Root {
         no_core_dumps()?;
         let read = Standing::read(home).await?;
         report(out, &read.finished);
-        // A machine that pins a root admits no other root's devices, so no `serve --admit` may run while
-        // one is made or finished here.
-        let _admit = match read.standing {
-            Standing::Unpinned | Standing::InterruptedMint { .. } => {
-                match crate::joining::AdmitLock::joining(home) {
-                    Ok(lock) => Some(lock),
-                    Err(crate::joining::AdmitError::Held) => return Err(RootError::Admitting),
-                    Err(crate::joining::AdmitError::Io(source)) => {
-                        return Err(RootError::Io {
-                            path: home.admit_lock(),
-                            source,
-                        });
-                    }
-                }
-            }
-            Standing::Device { .. } | Standing::HoldsRoot { .. } => None,
-        };
+        // A machine that pins a root admits no other root's devices, so no root is made or finished here
+        // while a `serve --admit` runs: asked here, before any prompt, and again under `home.lock` before
+        // the pin is written.
+        if matches!(
+            read.standing,
+            Standing::Unpinned | Standing::InterruptedMint { .. }
+        ) {
+            not_admitting(&HomeWrite::take(home).await?, home)?;
+        }
         match read.standing {
             Standing::Unpinned => make(home, prompt, out)
                 .await
@@ -1042,7 +1039,14 @@ impl Root {
     }
 
     /// [`commit`](Self::commit), printing to `out`.
+    ///
+    /// The cut is made under `home.lock`, taken here after the prompt: the act reads `devices` and
+    /// `devices.conflict` again, brings its records forward from them when either moved since it read
+    /// them, and checks again that every device it added is still one of them, so a list folded while the
+    /// act waited at its prompt is carried by the cut and never forked by it.
     pub async fn commit_to(&mut self, out: &mut impl Write) -> Result<Committed, RootError> {
+        let home_lock = HomeWrite::take(&self.act.home).await?;
+        self.act.again(out)?;
         let now = self.act.now;
         self.act.book.prune(now);
         self.act.book.check_bounds(now)?;
@@ -1062,12 +1066,12 @@ impl Root {
                 (self.sign(&doc.canonical_bytes())?, number, true)
             }
         };
-        self.write_state()?;
+        self.write_state(&home_lock)?;
         // The act's own cut must be the newest update here. Anything else (a fork, or a list another copy
         // cut past it) means the list moved while this ran, and the cut is not offered.
         if cut
             && !matches!(
-                crate::roster::fold(&self.act.home, &bytes).await?,
+                crate::roster::fold(&home_lock, &self.act.home, &bytes).await?,
                 Folded::Newer
             )
         {
@@ -1100,17 +1104,19 @@ impl Root {
         })
     }
 
-    /// Write `state` only, and cut nothing.
-    pub fn commit_state(mut self) -> Result<(), RootError> {
+    /// Write `state` only, and cut nothing, under `home.lock`.
+    pub async fn commit_state(mut self) -> Result<(), RootError> {
+        let home_lock = HomeWrite::take(&self.act.home).await?;
         self.act.book.prune(self.act.now);
-        self.write_state()
+        self.write_state(&home_lock)
     }
 
-    /// Sign and write the records as `state`: `state.new`, then over `state`.
-    fn write_state(&self) -> Result<(), RootError> {
+    /// Sign and write the records as `state`, under `home.lock`.
+    fn write_state(&self, home_lock: &HomeWrite) -> Result<(), RootError> {
         let state = self.act.book.state(self.act.now)?;
         let signed = self.sign(&state.canonical_bytes())?;
-        state::write(&self.act.dir, &signed).map_err(io_at(&self.act.dir.join(state::FILE)))
+        state::write(home_lock, &self.act.dir, &signed)
+            .map_err(io_at(&self.act.dir.join(state::FILE)))
     }
 
     /// `bytes`, signed as a document of this root.
@@ -1206,12 +1212,35 @@ impl Act {
         let pin = self.key.verify_key()?;
         self.held = read_held(&self.home.devices(), pin);
         let fork = read_held(&self.home.devices_conflict(), pin);
+        self.fork = fork.as_ref().map(|(_, bytes)| bytes.clone());
         let held = self.held.as_ref().map(|(held, _)| held);
         let fork_doc = fork.as_ref().map(|(fork, _)| fork);
         let (brought, behind) = self.book.forward(&self.home, held, fork_doc, self.now)?;
         // A fork that adds nothing is no news; a copy behind the held update always says so.
         if behind || (fork.is_some() && brought.any()) {
             brought.print(out);
+        }
+        Ok(())
+    }
+
+    /// Under `home.lock`, before the cut: read `devices` and `devices.conflict` again, and when either moved
+    /// since this act read them, bring the records forward from them again. Then check again what the act
+    /// checked before its prompt: a device it added that the list folded meanwhile revoked, or gave its name
+    /// to another key, is no longer one of the records' live devices, and the act stops.
+    fn again(&mut self, out: &mut impl Write) -> Result<(), RootError> {
+        let pin = self.key.verify_key()?;
+        let held = read_held(&self.home.devices(), pin).map(|(_, bytes)| bytes);
+        let fork = read_held(&self.home.devices_conflict(), pin).map(|(_, bytes)| bytes);
+        let had = self.held.as_ref().map(|(_, bytes)| bytes);
+        if held.as_ref() != had || fork != self.fork {
+            self.bring_forward(out)?;
+        }
+        let added_live = self
+            .added
+            .iter()
+            .all(|key| self.book.live().any(|row| row.key == *key));
+        if !added_live {
+            return Err(RootError::ListChanged);
         }
         Ok(())
     }
@@ -1431,6 +1460,8 @@ async fn make(
     let secret =
         keystore::Secret::generate().map_err(|source| RootError::Write(Box::new(source)))?;
 
+    let home_lock = HomeWrite::take(home).await?;
+    not_admitting(&home_lock, home)?;
     remove_staging(&staging)?;
     crate::config::create_store_dir(&staging).map_err(io_at(&staging))?;
     let lock = take_lock(&staging, true)?;
@@ -1443,6 +1474,7 @@ async fn make(
             _lock: lock,
             book: Book::default(),
             held: None,
+            fork: None,
             due: Vec::new(),
             now: unix_now(),
             own: Some(own),
@@ -1453,12 +1485,10 @@ async fn make(
         secret,
     };
     let standing = root.sign_own(own)?;
-    root.write_state()?;
-    crate::config::write_private_atomic(
-        &staging.join(STANDING_FILE),
-        format!("{standing}\n").as_bytes(),
-    )
-    .await?;
+    root.write_state(&home_lock)?;
+    let staged = staging.join(STANDING_FILE);
+    crate::config::write_private_atomic(&home_lock, &staged, format!("{standing}\n").as_bytes())
+        .map_err(io_at(&staged))?;
     sync_dir(&staging)?;
     std::fs::rename(&staging, home.root()).map_err(io_at(&staging))?;
     sync_dir(home.dir())?;
@@ -1467,7 +1497,7 @@ async fn make(
     root.act.added.clear();
     seam(Seam::Renamed)?;
 
-    take_standing(home, root.act.key, &standing).await?;
+    take_standing(&home_lock, home, root.act.key, &standing)?;
     Ok(root)
 }
 
@@ -1487,7 +1517,7 @@ async fn finish(
     let locked = read_header(&dir)?;
     let lock = take_lock(&dir, true)?;
     let pin = root_key.verify_key()?;
-    let book = Book::from(state::recover(&dir, pin)?);
+    let book = Book::from(state::load(&dir, pin)?);
     let own = crate::identity::inspect(home)?
         .stored()
         .node_id()
@@ -1503,13 +1533,17 @@ async fn finish(
     if let Some(standing) = read_standing(&dir.join(STANDING_FILE))?
         && ours(&standing)
     {
-        take_standing(home, root_key, &standing).await?;
+        let home_lock = HomeWrite::take(home).await?;
+        not_admitting(&home_lock, home)?;
+        take_standing(&home_lock, home, root_key, &standing)?;
         return Ok(None);
     }
     if let Some(badge) = crate::config::load_badge(home).await.ok().flatten()
         && ours(&badge)
     {
-        take_standing(home, root_key, &badge).await?;
+        let home_lock = HomeWrite::take(home).await?;
+        not_admitting(&home_lock, home)?;
+        take_standing(&home_lock, home, root_key, &badge)?;
         return Ok(None);
     }
 
@@ -1520,6 +1554,7 @@ async fn finish(
         _lock: lock,
         book,
         held: None,
+        fork: None,
         due: Vec::new(),
         now,
         own: Some(own),
@@ -1541,8 +1576,10 @@ async fn finish(
         act,
     };
     let standing = root.sign_own(own)?;
-    root.write_state()?;
-    take_standing(home, root_key, &standing).await?;
+    let home_lock = HomeWrite::take(home).await?;
+    not_admitting(&home_lock, home)?;
+    root.write_state(&home_lock)?;
+    take_standing(&home_lock, home, root_key, &standing)?;
     Ok(Some(root))
 }
 
@@ -1572,12 +1609,26 @@ impl Root {
     }
 }
 
-/// Take `standing` as this machine's device standing, pin `root`, and drop the staged copy. The pin is
-/// written last: it is what makes the rest this machine's standing.
-async fn take_standing(home: &Home, root: NodeId, standing: &Link) -> Result<(), RootError> {
-    crate::config::write_badge(home, standing).await?;
+/// Refuse, under `home.lock`, to make or finish a root here while a `serve --admit` admits another root's
+/// devices: a machine that pins a root admits no other root's.
+fn not_admitting(home_lock: &HomeWrite, home: &Home) -> Result<(), RootError> {
+    match ServeLock::admitting(home_lock, home)? {
+        Some(_) => Err(RootError::Admitting),
+        None => Ok(()),
+    }
+}
+
+/// Take `standing` as this machine's device standing, pin `root`, and drop the staged copy, under
+/// `home.lock`. The pin is written last: it is what makes the rest this machine's standing.
+fn take_standing(
+    home_lock: &HomeWrite,
+    home: &Home,
+    root: NodeId,
+    standing: &Link,
+) -> Result<(), RootError> {
+    crate::config::write_badge(home_lock, home, standing).map_err(io_at(&home.key_cert()))?;
     seam(Seam::Badged)?;
-    crate::config::write_signet(home, root).await?;
+    crate::config::write_signet(home_lock, home, root).map_err(io_at(&home.root_pub()))?;
     let staged = home.root().join(STANDING_FILE);
     match std::fs::remove_file(&staged) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(RootError::Io {

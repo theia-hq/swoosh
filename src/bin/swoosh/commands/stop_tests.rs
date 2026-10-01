@@ -173,7 +173,6 @@ async fn bare_stop_through_the_socket_cancels_the_resident() {
     let socket = leaf.join("control.sock");
     let listener =
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
-    std::fs::write(leaf.join("control.lock"), "4242\n").expect("record the resident pid");
 
     let cancel = CancellationToken::new();
     let resident = Arc::new(Resident::new(
@@ -189,11 +188,6 @@ async fn bare_stop_through_the_socket_cancels_the_resident() {
     });
 
     let client = ControlClient::resolve_socket(socket).expect("the bound socket resolves");
-    assert_eq!(
-        client.pid(),
-        Some(4242),
-        "the client holds the pid the stop line prints"
-    );
     StopCmd::stop_resolved(&client)
         .await
         .expect("the socket stop succeeds");

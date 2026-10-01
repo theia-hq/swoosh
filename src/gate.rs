@@ -26,7 +26,7 @@ use tightbeam::tunnel::{AdmittedChains, LiveCuts};
 
 use crate::escape::EscapedPath;
 use crate::grants::IssuedLedger;
-use crate::home::{Home, Loose, LooseFile, loose_in, open_trust_file, read_trust_file};
+use crate::home::{Home, HomeWrite, Loose, LooseFile, loose_in, open_trust_file, read_trust_file};
 
 /// The revocations `serve` honors: the disabled roots latched over this machine's [`KeyedDenylist`].
 pub type Revoked = Latch<KeyedDenylist>;
@@ -426,14 +426,14 @@ impl RevokedKeys {
 
 /// Add `keys` to `<home>/revoked_keys`, and raise its `.written` witness to the count it now holds.
 ///
-/// Under the exclusive flock on `<home>/revoked_keys.lock`, it re-reads the file, writes the union to a
-/// sibling and renames it over, so two writers each keep what the other added and no write shrinks the
-/// file. A file that cannot be read is never replaced: it may hold keys this write cannot see.
-pub fn add_revoked_keys(home: &Home, keys: &[VerifyKey]) -> Result<(), RevokedKeysError> {
-    use std::io::Write as _;
-    use std::os::fd::AsRawFd as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-
+/// Under `home.lock`, which the caller holds, it re-reads the file and writes the union through the one
+/// write routine, so two writers each keep what the other added and no write shrinks the file. A file that
+/// cannot be read is never replaced: it may hold keys this write cannot see.
+pub fn add_revoked_keys(
+    home_lock: &HomeWrite,
+    home: &Home,
+    keys: &[VerifyKey],
+) -> Result<(), RevokedKeysError> {
     if keys.is_empty() {
         return Ok(());
     }
@@ -442,18 +442,6 @@ pub fn add_revoked_keys(home: &Home, keys: &[VerifyKey]) -> Result<(), RevokedKe
         let path = path.to_path_buf();
         move |source| RevokedKeysError::Io { path, source }
     };
-    let lock_path = home.revoked_keys_lock();
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(&lock_path)
-        .map_err(io(&lock_path))?;
-    // SAFETY: `lock` owns a valid fd for the whole call, and `flock` only attaches an advisory lock to it.
-    // Without `LOCK_NB` it waits for another writer, whose section is as short and synchronous as this one.
-    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(io(&lock_path)(std::io::Error::last_os_error()));
-    }
     let mut held = match read_keys(&path) {
         Ok(Some((held, _))) => held,
         Ok(None) => HashSet::new(),
@@ -467,22 +455,14 @@ pub fn add_revoked_keys(home: &Home, keys: &[VerifyKey]) -> Result<(), RevokedKe
     let mut lines: Vec<String> = held.iter().map(ToString::to_string).collect();
     lines.sort();
     let body = lines.join("\n") + "\n";
-    let write = |target: &Path, bytes: &[u8]| -> std::io::Result<()> {
-        let mut temp = target.as_os_str().to_owned();
-        temp.push(".new");
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&temp, target)
-    };
-    write(&path, body.as_bytes()).map_err(io(&path))?;
+    crate::config::write_private_atomic(home_lock, &path, body.as_bytes()).map_err(io(&path))?;
     let witness = home.revoked_keys_written();
-    write(&witness, format!("{}\n", lines.len()).as_bytes()).map_err(io(&witness))
+    crate::config::write_private_atomic(
+        home_lock,
+        &witness,
+        format!("{}\n", lines.len()).as_bytes(),
+    )
+    .map_err(io(&witness))
 }
 
 /// Read the keys file at `path` and its stamp from one open handle, checked as a trust file, or `None` when

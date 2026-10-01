@@ -196,7 +196,7 @@ async fn store_roundtrips_across_reload() {
         .contacts_mut()
         .add(petname("alice"), Some(device("iphone")), node(2));
     store.contacts_mut().add(petname("bob"), None, node(3));
-    store.save().await.expect("save");
+    store.save(&crate::testkit::lock()).expect("save");
 
     // A fresh open sees exactly what was saved.
     let reloaded = ContactsStore::open(&home_at(&path)).await.expect("reopen");
@@ -241,7 +241,7 @@ async fn the_contacts_temp_is_unique_per_write() {
             }
             opened.wait().await;
             for _ in 0..25 {
-                store.save().await?;
+                store.save(&crate::testkit::lock())?;
             }
             Ok::<(), StoreError>(())
         })
@@ -258,37 +258,6 @@ async fn the_contacts_temp_is_unique_per_write() {
     while let Some(entry) = left.next_entry().await.expect("list the store dir") {
         assert_eq!(entry.file_name(), "contacts.toml", "no temp stays behind");
     }
-
-    tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
-}
-
-/// A lock that cannot be taken fails the edit the way any failed write of the book does: the one
-/// "writing the contacts file" line and the OS's reason once, with no path inside the home.
-#[cfg(unix)]
-#[tokio::test]
-async fn a_lock_that_cannot_be_taken_fails_like_a_write() {
-    let dir = std::env::temp_dir().join(format!("swoosh-contacts-lock-{}", std::process::id()));
-    let _ = tokio::fs::remove_dir_all(&dir).await;
-    let home = crate::home::Home::resolve(Some(dir.clone())).expect("resolve");
-    // A directory where the lock file goes, so opening it fails.
-    tokio::fs::create_dir_all(home.roster_lock())
-        .await
-        .expect("mkdir");
-    let reason = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(home.roster_lock())
-        .expect_err("a directory does not open as the lock");
-
-    let error = ContactsStore::open_to_edit(&home)
-        .await
-        .expect_err("the lock cannot be taken");
-    let line = format!("{:#}", eyre::Report::new(error));
-    assert_eq!(line, format!("writing the contacts file: {reason}"));
-    assert!(
-        !line.contains(&*dir.to_string_lossy()),
-        "no home path: {line}"
-    );
 
     tokio::fs::remove_dir_all(&dir).await.expect("cleanup");
 }
@@ -314,7 +283,9 @@ async fn a_saved_book_is_owner_only_in_an_owner_only_store() {
     store
         .contacts_mut()
         .add(petname("alice"), Some(device("macbook")), node(1));
-    store.save().await.expect("save creates the store dir");
+    store
+        .save(&crate::testkit::lock())
+        .expect("save creates the store dir");
 
     let dir_mode = std::fs::metadata(&dir)
         .expect("stat the store dir")
@@ -353,7 +324,7 @@ async fn a_device_named_signet_keeps_its_own_row_beside_the_signet() {
         .contacts_mut()
         .add(petname("alice"), Some(device("signet")), node(1));
     let _ = store.contacts_mut().set_signet(petname("alice"), node(2));
-    store.save().await.expect("save");
+    store.save(&crate::testkit::lock()).expect("save");
 
     let reloaded = ContactsStore::open(&home_at(&path)).await.expect("reopen");
     assert_eq!(
@@ -412,7 +383,7 @@ async fn store_round_trips_a_signet_and_keeps_the_device_map() {
     store
         .contacts_mut()
         .add(petname("alice"), Some(device("laptop")), node(1));
-    store.save().await.expect("save");
+    store.save(&crate::testkit::lock()).expect("save");
 
     // The signet persists under a key that is not a name, co-located in alice's own block.
     let text = tokio::fs::read_to_string(&path).await.expect("read file");
@@ -469,7 +440,7 @@ async fn a_signet_only_person_survives_tidy_up_and_reload() {
             .remove(&petname("bob"), Some(&device("ghost"))),
         Removed::Absent
     );
-    store.save().await.expect("save");
+    store.save(&crate::testkit::lock()).expect("save");
 
     let reloaded = ContactsStore::open(&home_at(&path)).await.expect("reopen");
     assert_eq!(

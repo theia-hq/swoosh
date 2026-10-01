@@ -409,10 +409,9 @@ impl Outward {
             // returns `None`. Nothing is signed here (or anywhere in `serve`): an update it gives or
             // takes was signed by the root.
             Self::Serve(cmd) => {
-                let admit = match cmd.admit {
-                    Some(root) => Some(serve::admitting(home, secret.node_id(), root).await?),
-                    None => None,
-                };
+                if let Some(root) = cmd.admit {
+                    cmd.admit(home, secret.node_id(), root).await?;
+                }
                 let admitted = cmd
                     .admit
                     .map(|root| tightbeam::identity::AsVerifyKey::verify_key(&root))
@@ -433,7 +432,6 @@ impl Outward {
                     // The SAME home the root resolved once, so the serve and its control clients name
                     // the same paths.
                     home: home.clone(),
-                    admit,
                 }))
             }
             _ => Ok(None),
@@ -534,9 +532,9 @@ async fn run() -> eyre::Result<()> {
         Verb::Status(cmd) => return cmd.run_local(&home).await,
         // `service enable`/`disable`: LOCAL file-writes on `<home>/disabled`, honored live by a running
         // `serve` via the mtime-watched oracle. Need only the home; bind no transport and touch no store.
-        Verb::ServiceEnable(cmd) => return cmd.run_enable(&home),
-        Verb::ServiceDisable(cmd) => return cmd.run_disable(&home),
-        // Each `contact` verb opens the book itself, holding `roster.lock` from its read to its save.
+        Verb::ServiceEnable(cmd) => return cmd.run_enable(&home).await,
+        Verb::ServiceDisable(cmd) => return cmd.run_disable(&home).await,
+        // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save.
         Verb::Contact(cmd) => return cmd.run(&home).await,
         // Backs up, restores, or protects this machine's key. Needs only the home, not the store or a
         // transport, so it dispatches here beside the other local verbs.
@@ -616,12 +614,8 @@ async fn run() -> eyre::Result<()> {
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward
     // verb binds the home's key where one exists (its badge roots there) and a throwaway where none does,
     // writing nothing. Resolve it before binding, since the secret is what the transport is bound under.
-    // A serving node holds the home lock for its whole life, taken before its key is read, so a restore
-    // can never replace the key it is serving as.
-    let _home_lock = match reach.identity() {
-        Identity::Persisted => Some(swoosh::identity::HomeLock::serving(&home)?),
-        Identity::Ephemeral | Identity::PersistedIfPresent => None,
-    };
+    // A serving node took `serve.lock` with its claim, before its key is read, so a key replacement can
+    // never replace the key it is serving as.
     let secret = swoosh::identity::resolve(reach.identity(), &home).await?;
     let contacts = Contacts::clone(store.contacts());
 
@@ -1176,8 +1170,7 @@ mod tests {
             .await
             .expect("disable a root");
 
-        swoosh::config::write_signet(&home, disabled.node_id())
-            .await
+        swoosh::config::write_signet(&swoosh::testkit::lock(), &home, disabled.node_id())
             .expect("pin the disabled root");
         let expose = serve_verb()
             .expose_context(&secret, &home)
@@ -1189,8 +1182,7 @@ mod tests {
             "a pin to a disabled root admits none of its devices"
         );
 
-        swoosh::config::write_signet(&home, live.node_id())
-            .await
+        swoosh::config::write_signet(&swoosh::testkit::lock(), &home, live.node_id())
             .expect("pin a live root");
         let expose = serve_verb()
             .expose_context(&secret, &home)

@@ -2,7 +2,7 @@
 
 use clap::Args;
 use swoosh::contacts::{ContactRef, ContactsStore, Removed};
-use swoosh::home::Home;
+use swoosh::home::{Home, HomeWrite};
 
 /// Remove a whole contact, or just one device grouped under it.
 #[derive(Debug, Args)]
@@ -17,7 +17,8 @@ impl RmCmd {
     /// not an error, so a repeated `rm` is safe. A name under `me/` is refused and nothing is written.
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
         super::refuse_me(&self.name)?;
-        let mut store = ContactsStore::open_to_edit(home).await?;
+        let home_lock = HomeWrite::take(home).await?;
+        let mut store = ContactsStore::open(home).await?;
         let removed = store
             .contacts_mut()
             .remove(self.name.petname(), self.name.device());
@@ -25,7 +26,7 @@ impl RmCmd {
         match removed {
             Removed::Removed => {
                 println!("removed {}", self.name);
-                store.save().await?;
+                store.save(&home_lock)?;
             }
             Removed::Absent => println!("no such contact {}; nothing to remove", self.name),
         }

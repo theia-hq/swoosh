@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use super::{DEFAULT_SERVICES, service_entry};
 use crate::escape::EscapedPath;
-use crate::home::Home;
+use crate::home::{Home, HomeWrite};
 
 /// The targets whose argument is a path on this machine: stored absolute, because a service manager
 /// starts `serve` in a different directory than the shell that named them.
@@ -132,15 +132,20 @@ impl Started {
 
     /// Record a named list as what the next bare `serve` under `home` resumes. Called only after the
     /// routes bound, so a start that fails leaves the record as it was; a resumed or default start
-    /// writes nothing.
-    pub fn record(&self, home: &Home) -> Result<(), ServingError> {
+    /// writes nothing. Under `home.lock`, which the caller holds.
+    ///
+    /// # Errors
+    ///
+    /// [`ServingError::Io`] when the list could not be written.
+    pub fn record(&self, home_lock: &HomeWrite, home: &Home) -> Result<(), ServingError> {
         let Self::Named(entries) = self else {
             return Ok(());
         };
         let path = home.serving();
         let mut body = entries.join("\n");
         body.push('\n');
-        write_atomic(&path, &body).map_err(|source| ServingError::Io { path, source })
+        crate::config::write_private_atomic(home_lock, &path, body.as_bytes())
+            .map_err(|source| ServingError::Io { path, source })
     }
 }
 
@@ -169,25 +174,6 @@ fn absolute(entry: &str, cwd: &Path) -> Result<String, ()> {
     };
     let path = path.to_str().ok_or(())?;
     Ok(format!("{name}={scheme}:{path}"))
-}
-
-/// Write `body` to `path` through a temp sibling and a rename, owner-only, so a reader sees the old list
-/// or the new one and never a torn one.
-fn write_atomic(path: &Path, body: &str) -> io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-
-    let tmp = path.with_extension("tmp");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(body.as_bytes())?;
-    drop(file);
-    std::fs::rename(&tmp, path)
 }
 
 #[cfg(test)]

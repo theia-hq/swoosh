@@ -74,16 +74,12 @@ fn row(seed: u8, label: &str) -> Row {
 /// Make `home` a device of `ROOT`: its pin, and a standing the root signed for it.
 async fn device_of(home: &Home) {
     let root = TestRoot::seeded(ROOT);
-    config::write_signet(home, root.node_id())
-        .await
-        .expect("the pin");
+    config::write_signet(&swoosh::testkit::lock(), home, root.node_id()).expect("the pin");
     let until = SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL);
     let badge = root
         .device_badge(TestNode::seeded(OWN).node_id(), until)
         .expect("a standing");
-    config::write_badge(home, &badge)
-        .await
-        .expect("the standing");
+    config::write_badge(&swoosh::testkit::lock(), home, &badge).expect("the standing");
 }
 
 /// Make `home` keep `ROOT`, sealed, with this machine, a laptop, and a revoked device in its records.
@@ -111,7 +107,12 @@ async fn holds(home: &Home) {
         vec![key(OLD)],
     )
     .expect("the records");
-    state::write(&dir, &TestRoot::seeded(ROOT).sign_state(&records)).expect("the records");
+    state::write(
+        &swoosh::testkit::lock(),
+        &dir,
+        &TestRoot::seeded(ROOT).sign_state(&records),
+    )
+    .expect("the records");
 }
 
 /// The report `home` reads as, rendered.
@@ -141,7 +142,7 @@ async fn status_with_no_node_prints_serving_nothing() {
 async fn status_names_the_root_a_running_serve_admits() {
     let home = home("admitting");
     let root = TestRoot::seeded(ROOT).node_id();
-    let running = swoosh::joining::AdmitLock::admitting(&home, root).expect("the lock");
+    let running = swoosh::testkit::serving(&home, Some(root));
     let out = status(&home).await;
     assert!(
         out.lines()
@@ -221,9 +222,13 @@ async fn status_prints_no_revocations_line() {
         vec![key(OLD)],
     )
     .expect("an update");
-    swoosh::roster::fold(&device, &TestRoot::seeded(ROOT).sign_update(&update))
-        .await
-        .expect("the device holds the update");
+    swoosh::roster::fold(
+        &swoosh::home::HomeWrite::take(&device).await.unwrap(),
+        &device,
+        &TestRoot::seeded(ROOT).sign_update(&update),
+    )
+    .await
+    .expect("the device holds the update");
 
     let keeps = home("revocations-root");
     holds(&keeps).await;
@@ -282,9 +287,13 @@ fn revoking(epoch: u64, revoked: Vec<VerifyKey>) -> Vec<u8> {
 async fn status_shows_a_device_revoked_by_another_copy_as_revoked() {
     let keeps = home("revoked-elsewhere-root");
     holds(&keeps).await;
-    swoosh::roster::fold(&keeps, &revoking(2, vec![key(OLD), key(LAPTOP)]))
-        .await
-        .expect("the machine that keeps the root holds the other copy's update");
+    swoosh::roster::fold(
+        &swoosh::home::HomeWrite::take(&keeps).await.unwrap(),
+        &keeps,
+        &revoking(2, vec![key(OLD), key(LAPTOP)]),
+    )
+    .await
+    .expect("the machine that keeps the root holds the other copy's update");
     let out = status(&keeps).await;
     let laptop = out
         .lines()
@@ -297,9 +306,13 @@ async fn status_shows_a_device_revoked_by_another_copy_as_revoked() {
 
     let device = home("revoked-elsewhere-device");
     device_of(&device).await;
-    swoosh::roster::fold(&device, &revoking(2, vec![key(OLD), key(LAPTOP)]))
-        .await
-        .expect("the device holds the update");
+    swoosh::roster::fold(
+        &swoosh::home::HomeWrite::take(&device).await.unwrap(),
+        &device,
+        &revoking(2, vec![key(OLD), key(LAPTOP)]),
+    )
+    .await
+    .expect("the device holds the update");
     let out = status(&device).await;
     for start in [
         format!("  {} ", short_key(OLD)),
@@ -447,7 +460,12 @@ async fn holds_rows(home: &Home, rows: Vec<Row>) {
         .map(|row| row.key)
         .collect();
     let records = State::new(Epoch(1), all, Vec::new(), keys).expect("the records");
-    state::write(&home.root(), &TestRoot::seeded(ROOT).sign_state(&records)).expect("the records");
+    state::write(
+        &swoosh::testkit::lock(),
+        &home.root(),
+        &TestRoot::seeded(ROOT).sign_state(&records),
+    )
+    .expect("the records");
 }
 
 /// Where the root is kept, a device whose key came in its invite is warned for in the 14 days before
@@ -545,9 +563,13 @@ async fn a_device_shows_use_your_root_by_from_the_update() {
             .expect("a member")
     };
     let update = RosterDoc::new(Epoch(2), vec![laptop]).expect("an update");
-    swoosh::roster::fold(&home, &TestRoot::seeded(ROOT).sign_update(&update))
-        .await
-        .expect("the device holds the update");
+    swoosh::roster::fold(
+        &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &TestRoot::seeded(ROOT).sign_update(&update),
+    )
+    .await
+    .expect("the device holds the update");
     let out = status(&home).await;
     let line = format!(
         "use your root by {}: swoosh invite (it lists what is due)",

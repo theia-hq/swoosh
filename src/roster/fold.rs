@@ -6,13 +6,12 @@
 //! and none is ever removed. A fork another device passes on in an exchange folds here too
 //! ([`fold_fork`]), and never becomes the update held.
 //!
-//! Every fold holds `<home>/roster.lock` from the read of the held update to its last write, so two folds
-//! never both read one floor and both write.
+//! Every fold runs under `home.lock`, taken by its caller and passed in, from the read of the held update to
+//! its last write, so two folds never both read one floor and both write. A root act's commit folds its own
+//! cut under the lock it already holds.
 
 use core::time::Duration;
 use std::io;
-use std::os::fd::AsRawFd as _;
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -22,7 +21,7 @@ use tightbeam::identity::AsVerifyKey as _;
 use super::{ArtifactError, Epoch, MAX_ROSTER_BLOB, RosterDoc, RosterVerifyError};
 use crate::escape::EscapedPath;
 use crate::gate::RevokedKeysError;
-use crate::home::Home;
+use crate::home::{Home, HomeWrite};
 use crate::standing::{Standing, StandingError};
 
 /// What a fold did with an update.
@@ -81,6 +80,9 @@ pub enum FoldError {
     /// This machine's standing could not be written.
     #[error(transparent)]
     Write(#[from] eyre::Report),
+    /// `home.lock` could not be taken.
+    #[error(transparent)]
+    Lock(#[from] crate::home::LockError),
 }
 
 /// Fold `bytes`, an update, into this home.
@@ -89,9 +91,9 @@ pub enum FoldError {
 /// newer; the same bytes change nothing; another update at the same number is a fork, whose revocations
 /// are added and which is kept as evidence. A newer update adds its revocations, gives this machine a
 /// newer standing it carries, and becomes the update held here, from which `me` is read; `invited-by` goes
-/// with it, and `devices.conflict` goes only once an update carries everything the fork revoked.
-pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
-    let _lock = RosterLock::take(&home.roster_lock()).await?;
+/// with it, and `devices.conflict` goes only once an update carries everything the fork revoked. Under
+/// `home.lock`, which the caller holds.
+pub async fn fold(home_lock: &HomeWrite, home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
     let (pin, badge_until) = match Standing::read(home).await?.standing {
         Standing::Device { pin, until } | Standing::HoldsRoot { pin, until } => (pin, until),
         Standing::Unpinned | Standing::InterruptedMint { .. } => {
@@ -114,15 +116,15 @@ pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
             None => Ok(Folded::NotNewer),
             Some((_, held)) if held.as_slice() == bytes => Ok(Folded::Same),
             Some(_) => {
-                revoke(home, &doc).await?;
-                keep_fork(home, bytes, pin).await?;
+                revoke(home_lock, home, &doc).await?;
+                keep_fork(home_lock, home, bytes, pin)?;
                 Ok(Folded::Fork { floor })
             }
         },
         core::cmp::Ordering::Greater => {
-            revoke(home, &doc).await?;
-            pick_up(home, &doc, pin, badge_until).await?;
-            super::write(&home.devices(), bytes).await?;
+            revoke(home_lock, home, &doc).await?;
+            pick_up(home_lock, home, &doc, pin, badge_until)?;
+            super::write(home_lock, &home.devices(), bytes)?;
             forget_invited_by(home);
             clear_fork(home, &doc, pin)?;
             Ok(Folded::Newer)
@@ -131,7 +133,7 @@ pub async fn fold(home: &Home, bytes: &[u8]) -> Result<Folded, FoldError> {
 }
 
 /// Remove `invited-by` once a list is held: the list names every device a sync asks, so the one device the
-/// invite named is no longer needed. Only a fold that writes `devices` calls this, under `roster.lock`.
+/// invite named is no longer needed. Only a fold that writes `devices` calls this, under `home.lock`.
 /// Best-effort: one left behind is only one more device a sync asks.
 // `core::io::ErrorKind` is still unstable, so the kind reads from `std`.
 #[allow(clippy::std_instead_of_core)]
@@ -149,9 +151,8 @@ fn forget_invited_by(home: &Home) {
 /// Folds run only on a device of a root, one that holds it or not. A fork that is the update held here, or
 /// whose revocations the update held here all carries, changes nothing. Any other adds its revocations,
 /// whatever its number, and is kept as `devices.conflict` unless a fork is kept already, so the next exchange
-/// here passes it on. It never becomes the update held here.
-pub async fn fold_fork(home: &Home, bytes: &[u8]) -> Result<(), FoldError> {
-    let _lock = RosterLock::take(&home.roster_lock()).await?;
+/// here passes it on. It never becomes the update held here. Under `home.lock`, which the caller holds.
+pub async fn fold_fork(home_lock: &HomeWrite, home: &Home, bytes: &[u8]) -> Result<(), FoldError> {
     let pin = match Standing::read(home).await?.standing {
         Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => pin,
         Standing::Unpinned | Standing::InterruptedMint { .. } => {
@@ -168,8 +169,8 @@ pub async fn fold_fork(home: &Home, bytes: &[u8]) -> Result<(), FoldError> {
     {
         return Ok(());
     }
-    revoke(home, &fork).await?;
-    keep_fork(home, bytes, pin).await
+    revoke(home_lock, home, &fork).await?;
+    keep_fork(home_lock, home, bytes, pin)
 }
 
 /// The update at `path` and its bytes, if it verifies under `root`; else `None`.
@@ -191,7 +192,7 @@ pub(crate) fn read_held(path: &Path, root: VerifyKey) -> Option<(RosterDoc, Vec<
 
 /// Add the update's revoked ids that have not ended to `<home>/revoked`, and its revoked keys to
 /// `<home>/revoked_keys`.
-async fn revoke(home: &Home, doc: &RosterDoc) -> Result<(), FoldError> {
+async fn revoke(home_lock: &HomeWrite, home: &Home, doc: &RosterDoc) -> Result<(), FoldError> {
     let now = unix_now();
     let mut denylist = FileDenylist::load(home.revoked()).await?;
     for id in doc.revoked().iter().filter(|id| id.expires > now) {
@@ -199,13 +200,14 @@ async fn revoke(home: &Home, doc: &RosterDoc) -> Result<(), FoldError> {
             denylist.revoke_id(id.id.clone()).await?;
         }
     }
-    crate::gate::add_revoked_keys(home, doc.revoked_keys())?;
+    crate::gate::add_revoked_keys(home_lock, home, doc.revoked_keys())?;
     Ok(())
 }
 
 /// Take this machine's standing from the update when it is bound to this machine's key, rooted at the
 /// pin, ends after the one held, and neither its id nor this key is revoked in the update.
-async fn pick_up(
+fn pick_up(
+    home_lock: &HomeWrite,
     home: &Home,
     doc: &RosterDoc,
     pin: VerifyKey,
@@ -232,15 +234,25 @@ async fn pick_up(
             .root_revocation_id()
             .is_some_and(|id| doc.revoked().iter().any(|revoked| revoked.id == id));
     if bound && ends > badge_until && !revoked {
-        crate::config::write_badge(home, &member.standing).await?;
+        crate::config::write_badge(home_lock, home, &member.standing).map_err(|source| {
+            FoldError::Io {
+                path: home.key_cert(),
+                source,
+            }
+        })?;
     }
     Ok(())
 }
 
 /// Keep `bytes` as `devices.conflict`, unless a fork of this root is kept already.
-async fn keep_fork(home: &Home, bytes: &[u8], pin: VerifyKey) -> Result<(), FoldError> {
+fn keep_fork(
+    home_lock: &HomeWrite,
+    home: &Home,
+    bytes: &[u8],
+    pin: VerifyKey,
+) -> Result<(), FoldError> {
     if read_held(&home.devices_conflict(), pin).is_none() {
-        super::write(&home.devices_conflict(), bytes).await?;
+        super::write(home_lock, &home.devices_conflict(), bytes)?;
     }
     Ok(())
 }
@@ -276,47 +288,6 @@ fn carries(doc: &RosterDoc, fork: &RosterDoc) -> bool {
         .iter()
         .all(|key| doc.revoked_keys().contains(key));
     ids && keys
-}
-
-/// The fold's exclusive flock on `<home>/roster.lock`, held while this value lives.
-#[derive(Debug)]
-pub(crate) struct RosterLock {
-    /// Held, never read: the lock lives exactly as long as this open file does.
-    _held: std::fs::File,
-}
-
-impl RosterLock {
-    /// How long to wait between two tries while another fold holds the lock.
-    const RETRY: Duration = Duration::from_millis(10);
-
-    /// Take the lock at `path`, creating the file, and wait for any other fold to finish. It waits
-    /// without blocking the thread, so a fold in another task of this process can finish meanwhile.
-    pub(crate) async fn take(path: &Path) -> Result<Self, FoldError> {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(path)
-            .map_err(|source| FoldError::Io {
-                path: path.to_path_buf(),
-                source,
-            })?;
-        loop {
-            // SAFETY: `file` owns a valid fd for the whole call, and `flock` only attaches an advisory
-            // lock to it. `LOCK_NB` makes a held lock an error, and the loop waits.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                return Ok(Self { _held: file });
-            }
-            let source = io::Error::last_os_error();
-            if source.raw_os_error() != Some(libc::EWOULDBLOCK) {
-                return Err(FoldError::Io {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-            tokio::time::sleep(Self::RETRY).await;
-        }
-    }
 }
 
 fn unix_now() -> u64 {

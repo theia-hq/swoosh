@@ -42,14 +42,12 @@ async fn device(tag: &str, hours: u64) -> Home {
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
     let root = TestRoot::seeded(ROOT);
-    swoosh::config::write_signet(&home, root.node_id())
-        .await
-        .unwrap();
+    swoosh::config::write_signet(&swoosh::testkit::lock(), &home, root.node_id()).unwrap();
     let until = SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL);
     let badge = root
         .device_badge(TestNode::seeded(DESK).node_id(), until)
         .unwrap();
-    swoosh::config::write_badge(&home, &badge).await.unwrap();
+    swoosh::config::write_badge(&swoosh::testkit::lock(), &home, &badge).unwrap();
     let members = [(DESK, "desk"), (NAS, "nas")]
         .into_iter()
         .map(|(seed, label)| {
@@ -58,7 +56,13 @@ async fn device(tag: &str, hours: u64) -> Home {
         })
         .collect();
     let update = root.sign_update(&RosterDoc::new(Epoch(1), members).unwrap());
-    swoosh::roster::fold(&home, &update).await.unwrap();
+    swoosh::roster::fold(
+        &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &update,
+    )
+    .await
+    .unwrap();
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()

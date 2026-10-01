@@ -18,7 +18,6 @@ use swoosh::config;
 use swoosh::contacts::{ContactsStore, ME, Petname};
 use swoosh::home::Home;
 use swoosh::invite::Invite;
-use swoosh::joining::AdmitLock;
 use swoosh::passphrase::Prompt;
 use swoosh::roster::{Epoch, Folded, RosterDoc, fold};
 use swoosh::standing::Standing;
@@ -292,10 +291,13 @@ fn update(by: u8, number: u64, name: &str) -> Vec<u8> {
 
 /// Make `home` a device of `by` until `until`, holding nothing else.
 async fn device_of(home: &Home, by: u8, until: u64) {
-    config::write_badge(home, &standing(by, node(OWN), until))
-        .await
-        .unwrap();
-    config::write_signet(home, root(by)).await.unwrap();
+    config::write_badge(
+        &swoosh::testkit::lock(),
+        home,
+        &standing(by, node(OWN), until),
+    )
+    .unwrap();
+    config::write_signet(&swoosh::testkit::lock(), home, root(by)).unwrap();
 }
 
 /// Keep `ROOT` in `home`: a plain 32-byte key file, which the standing reads by its key without a prompt.
@@ -543,7 +545,13 @@ async fn a_tampered_from_or_name_changes_no_trust() {
 
     // The first fold of the root's update lays down the root's name for this machine.
     assert_eq!(
-        fold(&home, &update(ROOT, 1, "laptop")).await.unwrap(),
+        fold(
+            &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+            &home,
+            &update(ROOT, 1, "laptop")
+        )
+        .await
+        .unwrap(),
         Folded::Newer
     );
     assert_eq!(me_name(&home).await.as_deref(), Some("laptop"));
@@ -557,7 +565,13 @@ async fn a_same_root_join_keeps_the_floor_and_the_fork() {
     join(&home, &bound(ROOT, node(OWN), "laptop", now() + 30 * DAY))
         .await
         .joined();
-    fold(&home, &update(ROOT, 3, "laptop")).await.unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &update(ROOT, 3, "laptop"),
+    )
+    .await
+    .unwrap();
     std::fs::write(home.devices_conflict(), b"a fork kept as evidence").unwrap();
     let held = std::fs::read(home.devices()).unwrap();
     assert!(
@@ -585,7 +599,13 @@ async fn a_same_root_join_keeps_the_floor_and_the_fork() {
     );
     // A replay of the update below the floor still changes nothing.
     assert_eq!(
-        fold(&home, &update(ROOT, 2, "laptop")).await.unwrap(),
+        fold(
+            &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+            &home,
+            &update(ROOT, 2, "laptop")
+        )
+        .await
+        .unwrap(),
         Folded::NotNewer
     );
 }
@@ -617,7 +637,13 @@ async fn a_switch_to_a_new_root_ignores_the_old_standings_date() {
 async fn a_switched_device_accepts_its_new_roots_first_update() {
     let home = scratch("switch-floor");
     join(&home, &for_me()).await.joined();
-    fold(&home, &update(ROOT, 5, "laptop")).await.unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &update(ROOT, 5, "laptop"),
+    )
+    .await
+    .unwrap();
     join_with(
         &home,
         &bound(OTHER, node(OWN), "laptop", now() + 90 * DAY),
@@ -630,7 +656,13 @@ async fn a_switched_device_accepts_its_new_roots_first_update() {
         "the old root's update goes with its pin"
     );
     assert_eq!(
-        fold(&home, &update(OTHER, 1, "laptop")).await.unwrap(),
+        fold(
+            &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+            &home,
+            &update(OTHER, 1, "laptop")
+        )
+        .await
+        .unwrap(),
         Folded::Newer,
         "the new root's first update is newer than nothing"
     );
@@ -642,11 +674,20 @@ async fn a_switched_device_accepts_its_new_roots_first_update() {
 async fn a_joined_device_pulls_its_first_update_unprompted() {
     // The machine that made the invite: a device of the root, holding its update.
     let inviter = keyed("pull-inviter", FROM);
-    config::write_badge(&inviter, &standing(ROOT, node(FROM), now() + 90 * DAY))
-        .await
-        .unwrap();
-    config::write_signet(&inviter, root(ROOT)).await.unwrap();
-    fold(&inviter, &update(ROOT, 4, "laptop")).await.unwrap();
+    config::write_badge(
+        &swoosh::testkit::lock(),
+        &inviter,
+        &standing(ROOT, node(FROM), now() + 90 * DAY),
+    )
+    .unwrap();
+    config::write_signet(&swoosh::testkit::lock(), &inviter, root(ROOT)).unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(&inviter).await.unwrap(),
+        &inviter,
+        &update(ROOT, 4, "laptop"),
+    )
+    .await
+    .unwrap();
 
     let home = scratch("pull");
     let from = join(&home, &for_me())
@@ -668,7 +709,13 @@ async fn a_joined_device_pulls_its_first_update_unprompted() {
 async fn an_offer_after_join_switch_under_serve_folds_the_new_roots_update() {
     let home = scratch("offer-after-switch");
     join(&home, &for_me()).await.joined();
-    fold(&home, &update(ROOT, 7, "laptop")).await.unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &update(ROOT, 7, "laptop"),
+    )
+    .await
+    .unwrap();
     join_with(
         &home,
         &bound(OTHER, node(OWN), "laptop", now() + 90 * DAY),
@@ -680,12 +727,21 @@ async fn an_offer_after_join_switch_under_serve_folds_the_new_roots_update() {
     // Another device of the new root offers its update: this machine answers as its `serve` does, reading
     // the pin as it stands now.
     let other = keyed("offer-other", FROM);
-    config::write_badge(&other, &standing(OTHER, node(FROM), now() + 90 * DAY))
-        .await
-        .unwrap();
-    config::write_signet(&other, root(OTHER)).await.unwrap();
+    config::write_badge(
+        &swoosh::testkit::lock(),
+        &other,
+        &standing(OTHER, node(FROM), now() + 90 * DAY),
+    )
+    .unwrap();
+    config::write_signet(&swoosh::testkit::lock(), &other, root(OTHER)).unwrap();
     let bytes = update(OTHER, 1, "laptop");
-    fold(&other, &bytes).await.unwrap();
+    fold(
+        &swoosh::home::HomeWrite::take(&other).await.unwrap(),
+        &other,
+        &bytes,
+    )
+    .await
+    .unwrap();
     let dial = Loopback::new(other, [(node(OWN), home.clone())]);
     let answer = swoosh::sync::Dial::offer(&dial, node(OWN), Epoch(1), &bytes)
         .await
@@ -803,18 +859,10 @@ async fn a_lapsed_key_carrying_invite_never_reaches_the_door() {
 #[tokio::test]
 async fn join_refuses_while_serve_admit_runs() {
     let home = scratch("admitting");
-    let _serving = AdmitLock::admitting(&home, root(OTHER)).unwrap();
+    let _serving = swoosh::testkit::serving(&home, Some(root(OTHER)));
     let before = snapshot(home.dir());
     let ran = join(&home, &for_me()).await;
     refused_before_writing(&ran, "stop swoosh serve first.", &home, &before);
-}
-
-#[tokio::test]
-async fn a_join_under_way_shows_no_root_an_earlier_admit_left() {
-    let home = scratch("admit-left");
-    drop(AdmitLock::admitting(&home, root(OTHER)).unwrap());
-    let _joining = AdmitLock::joining(&home).unwrap();
-    assert_eq!(AdmitLock::admitted(&home), None);
 }
 
 #[tokio::test]
@@ -1078,10 +1126,13 @@ async fn join_refuses_a_locked_key_over_pipes() {
 async fn join_refuses_a_damaged_home() {
     let home = scratch("damaged");
     // A standing from one root under a pin to another: a switch that stopped between its writes.
-    config::write_badge(&home, &standing(OTHER, node(OWN), now() + 90 * DAY))
-        .await
-        .unwrap();
-    config::write_signet(&home, root(ROOT)).await.unwrap();
+    config::write_badge(
+        &swoosh::testkit::lock(),
+        &home,
+        &standing(OTHER, node(OWN), now() + 90 * DAY),
+    )
+    .unwrap();
+    config::write_signet(&swoosh::testkit::lock(), &home, root(ROOT)).unwrap();
     let before = snapshot(home.dir());
     let ran = join_with(&home, &for_me(), &["--switch"]).await;
     refused_before_writing(&ran, "Run swoosh leave to start over", &home, &before);

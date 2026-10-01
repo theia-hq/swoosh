@@ -2,15 +2,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use core::str::FromStr as _;
-use std::io;
 use std::path::{Path, PathBuf};
 
 use nauthy::{RevocationId, VerifyKey};
 
-use super::{
-    Disk, FILE, MAX_ROWS, RealDisk, Row, STAGED, State, StateError, load, recover, recover_with,
-    verify, write, write_with,
-};
+use super::{FILE, MAX_ROWS, Row, State, StateError, load, verify, write};
 use crate::codec::{FormatError, Id};
 use crate::contacts::DeviceLabel;
 use crate::roster::{self, Epoch, RosterDoc};
@@ -205,108 +201,16 @@ fn a_magic_is_compared_by_its_own_length() {
     }
 }
 
-/// A disk that fails its `fail_at`th call, and tears a write it fails: half the bytes land.
-struct Faulty {
-    calls: usize,
-    fail_at: usize,
-}
-
-impl Disk for Faulty {
-    fn write(&mut self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        if self.fault() {
-            std::fs::write(path, &bytes[..bytes.len() / 2])?;
-            return Err(io::Error::other("fault"));
-        }
-        RealDisk.write(path, bytes)
-    }
-
-    fn sync(&mut self, path: &Path) -> io::Result<()> {
-        if self.fault() {
-            return Err(io::Error::other("fault"));
-        }
-        RealDisk.sync(path)
-    }
-
-    fn rename(&mut self, from: &Path, to: &Path) -> io::Result<()> {
-        if self.fault() {
-            return Err(io::Error::other("fault"));
-        }
-        RealDisk.rename(from, to)
-    }
-}
-
-impl Faulty {
-    fn fault(&mut self) -> bool {
-        let now = self.calls;
-        self.calls += 1;
-        now == self.fail_at
-    }
-}
-
-#[test]
-fn a_torn_write_leaves_one_consistent_state() {
-    // Replace one valid `state` with another, failing each call of the write in turn. Whatever call
-    // fails, the next read finds the old records or the new ones, and then `state` alone holds them.
-    let root = root();
-    let old = sample(1);
-    let new = sample(2);
-    let signed = root.sign_state(&new);
-    for fail_at in 0.. {
-        let dir = dir(&format!("torn-{fail_at}"));
-        write(&dir, &root.sign_state(&old)).unwrap();
-        let mut disk = Faulty { calls: 0, fail_at };
-        let done = write_with(&mut disk, &dir, &signed).is_ok();
-        let read_back = recover(&dir, root.verify_key()).expect("one valid state survives");
-        assert!(
-            read_back == old || read_back == new,
-            "a fault at call {fail_at} left neither"
-        );
-        let on_disk = std::fs::read(dir.join(FILE)).unwrap();
-        assert_eq!(verify(&on_disk, root.verify_key()), Ok(read_back));
-        std::fs::remove_dir_all(&dir).unwrap();
-        if done {
-            // write, sync, rename, sync the directory: each failed once before this clean run.
-            assert_eq!(fail_at, 4, "every call of the write was failed once");
-            break;
-        }
-    }
-}
-
-#[test]
-fn a_valid_staged_state_is_promoted_when_state_is_not() {
-    let root = root();
-    let dir = dir("promote");
-    let staged = sample(5);
-    std::fs::write(dir.join(STAGED), root.sign_state(&staged)).unwrap();
-    std::fs::write(dir.join(FILE), b"torn").unwrap();
-    assert_eq!(recover(&dir, root.verify_key()).unwrap(), staged);
-    assert!(
-        !dir.join(STAGED).exists(),
-        "state.new was renamed over state"
-    );
-    assert_eq!(recover(&dir, root.verify_key()).unwrap(), staged);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
-#[test]
-fn a_valid_state_wins_over_a_staged_one() {
-    let root = root();
-    let dir = dir("wins");
-    let current = sample(1);
-    write(&dir, &root.sign_state(&current)).unwrap();
-    std::fs::write(dir.join(STAGED), root.sign_state(&sample(2))).unwrap();
-    assert_eq!(recover(&dir, root.verify_key()).unwrap(), current);
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
 #[test]
 fn no_valid_state_refuses_as_changed_outside_swoosh() {
     let root = root();
     let dir = dir("damaged");
     std::fs::write(dir.join(FILE), b"torn").unwrap();
+    let error = load(&dir, root.verify_key()).unwrap_err();
+    assert!(matches!(error, StateError::Damaged { .. }));
     // Signed by another root: it verifies under nothing this home trusts.
-    std::fs::write(dir.join(STAGED), TestRoot::seeded(8).sign_state(&sample(1))).unwrap();
-    let error = recover_with(&mut RealDisk, &dir, root.verify_key()).unwrap_err();
+    std::fs::write(dir.join(FILE), TestRoot::seeded(8).sign_state(&sample(1))).unwrap();
+    let error = load(&dir, root.verify_key()).unwrap_err();
     assert!(matches!(error, StateError::Damaged { .. }));
     assert!(error.to_string().contains("changed outside swoosh"));
     std::fs::remove_dir_all(&dir).unwrap();
@@ -382,29 +286,10 @@ fn state_holds_at_most_max_members_live_rows() {
     );
 }
 
-#[test]
-fn loading_never_promotes_state_new() {
-    // `load` takes no lock, so it renames nothing: a writer may be rewriting `state.new` under it.
-    let root = root();
-    let dir = dir("load");
-    let staged = sample(5);
-    std::fs::write(dir.join(STAGED), root.sign_state(&staged)).unwrap();
-    std::fs::write(dir.join(FILE), b"torn").unwrap();
-    assert_eq!(load(&dir, root.verify_key()).unwrap(), staged);
-    assert!(dir.join(STAGED).exists(), "state.new is left where it was");
-    assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), b"torn");
-    std::fs::write(dir.join(STAGED), b"torn").unwrap();
-    assert!(matches!(
-        load(&dir, root.verify_key()),
-        Err(StateError::Damaged { .. })
-    ));
-    std::fs::remove_dir_all(&dir).unwrap();
-}
-
 #[cfg(unix)]
 #[test]
 fn state_is_written_owner_only() {
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::fs::PermissionsExt as _;
 
     let root = root();
     let state = sample(1);
@@ -412,22 +297,9 @@ fn state_is_written_owner_only() {
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
 
     let dir = dir("owner-only");
-    write(&dir, &signed).unwrap();
+    write(&crate::testkit::lock(), &dir, &signed).unwrap();
     assert_eq!(mode(&dir.join(FILE)), 0o600);
 
-    // A looser `state.new` left behind does not lend `state` its mode.
-    std::fs::write(dir.join(STAGED), b"left behind").unwrap();
-    std::fs::set_permissions(dir.join(STAGED), std::fs::Permissions::from_mode(0o644)).unwrap();
-    write(&dir, &signed).unwrap();
-    assert_eq!(mode(&dir.join(FILE)), 0o600);
-
-    // A link at `state.new` is replaced, never followed.
-    let target = dir.join("elsewhere");
-    std::fs::write(&target, b"untouched").unwrap();
-    symlink(&target, dir.join(STAGED)).unwrap();
-    write(&dir, &signed).unwrap();
-    assert_eq!(std::fs::read(&target).unwrap(), b"untouched");
-    assert_eq!(mode(&dir.join(FILE)), 0o600);
     assert_eq!(
         verify(&std::fs::read(dir.join(FILE)).unwrap(), root.verify_key()),
         Ok(state)
