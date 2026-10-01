@@ -229,8 +229,8 @@ pub fn damaged_line(what: &Disagreement) -> String {
         }
         Disagreement::PinWithoutStanding { .. } => UNFINISHED_LEAVE.to_owned(),
         what => format!(
-            "root: this machine's records disagree ({what}): swoosh cannot tell which root it trusts. A \
-             root kept on this machine stays. To start over: swoosh leave"
+            "this machine's records disagree ({what}): swoosh cannot tell which root it trusts. A root \
+             kept on this machine stays. To start over: swoosh leave"
         ),
     }
 }

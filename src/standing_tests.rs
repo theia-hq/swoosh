@@ -531,7 +531,7 @@ fn a_stopped_join_or_leave_names_the_verb_that_finishes_it() {
     assert_eq!(
         super::damaged_line(&Disagreement::OwnKeyPinned { key: own() }),
         format!(
-            "root: this machine's records disagree (this machine trusts its own key {} as a root): \
+            "this machine's records disagree (this machine trusts its own key {} as a root): \
              swoosh cannot tell which root it trusts. A root kept on this machine stays. To start over: \
              swoosh leave",
             crate::credential::short(&own())

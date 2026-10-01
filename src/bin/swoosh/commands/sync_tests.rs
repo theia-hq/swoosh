@@ -125,7 +125,7 @@ async fn sync_refuses_each_standing_that_is_not_a_device() {
     let error = refuse_unless_device(&damaged).await.unwrap_err();
     let line = error.to_string();
     assert!(
-        line.starts_with("root: this machine's records disagree (")
+        line.starts_with("this machine's records disagree (")
             && line.ends_with(
                 "): swoosh cannot tell which root it trusts. A root kept on this machine stays. To \
                  start over: swoosh leave"

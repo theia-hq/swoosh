@@ -86,7 +86,8 @@ pub(crate) struct Report {
     home: String,
     /// The lines after `home:`: the root's line, or what this machine is when it is no device.
     top: Vec<String>,
-    /// `this machine: me/<name>, your device until <date>`, when this machine is no row of the list.
+    /// `this machine: me/<name>, your device until <date>` (or `ended <date>`), when this machine is no row of
+    /// the list.
     this_machine: Option<String>,
     sections: Vec<Section>,
     /// `serving:`; `None` when nothing runs and this machine is no device, which has nothing to say.
@@ -124,17 +125,15 @@ impl Report {
         let mut last = None;
         let mut device = false;
         match key {
-            None if restored(home) => {
-                report.nags.extend(
-                    [
-                        "this machine's key is not in this home, because system backups leave it out. To \
-                         start over: swoosh leave",
-                        "then: swoosh join",
-                    ]
-                    .map(str::to_owned),
-                );
-            }
-            None => report.top = NOT_A_DEVICE.map(str::to_owned).to_vec(),
+            None => match Standing::read(home).await {
+                // A `leave` from a restored home where the root is kept leaves the root half made, and the
+                // next `invite` finishes it under the key it makes: the same line as a mint that stopped.
+                Ok(Standing::InterruptedMint { .. }) => {
+                    last = Some(standing::UNFINISHED_MINT.to_owned());
+                }
+                read if restored(home) => report.nags.extend(restored_lines(home, &read).await?),
+                _ => report.top = NOT_A_DEVICE.map(str::to_owned).to_vec(),
+            },
             Some(_) => match Standing::read(home).await {
                 Err(StandingError::Damaged(what)) => last = Some(standing::damaged_line(&what)),
                 Err(other) => return Err(other.into()),
@@ -148,10 +147,11 @@ impl Report {
                 }
             },
         }
-        if let Some(root) = Standing::revoked_root(home).await? {
-            report.nags.push(format!(
-                "a revoked root is still on this machine; to delete it: swoosh revoke root:{root}"
-            ));
+        // No verb deletes it yet: the line names none.
+        if Standing::revoked_root(home).await?.is_some() {
+            report
+                .nags
+                .push("a revoked root is still on this machine; swoosh does not use it".to_owned());
         }
         report.sections.push(contacts_section(contacts));
         report.sections.push(links_section(home, now).await?);
@@ -272,9 +272,11 @@ impl Report {
             Some(row) => Some(row.label.clone()),
             None => swoosh::renewal::own_label(home).await,
         };
+        // Before a list names it, the lines that say what to do call it `this machine`: the one name the
+        // reader has already seen for it on `this machine:`.
         let me = name
             .as_ref()
-            .map_or_else(|| short(&key), |name| format!("me/{name}"));
+            .map_or_else(|| "this machine".to_owned(), |name| format!("me/{name}"));
         if own_row.is_none() {
             // Before the list lands, `this machine:` names it by the name its invite gave it: a hint that
             // only this line prints.
@@ -282,10 +284,12 @@ impl Report {
                 swoosh::joining::InvitedBy::read(home).and_then(|invited| invited.name)
             });
             let shown = hinted.map_or_else(|| short(&key), |name| format!("me/{name}"));
-            self.this_machine = Some(format!(
-                "this machine: {shown}, your device until {}",
-                Date(until)
-            ));
+            // A date already passed reads as the row's does: `ended`, never `until`.
+            self.this_machine = Some(if until <= now {
+                format!("this machine: {shown}, ended {}", Date(until))
+            } else {
+                format!("this machine: {shown}, your device until {}", Date(until))
+            });
         }
         if own_row.is_some_and(|row| row.revoked) {
             self.nags.extend(
@@ -438,6 +442,37 @@ fn restored(home: &Home) -> bool {
     [home.root_pub(), home.key_cert(), home.root_key()]
         .iter()
         .any(|path| Path::exists(path))
+}
+
+/// The last lines of a home restored from a system backup, given what [`Standing::read`] made of it. `leave`
+/// starts over and keeps a root kept here; after it, `join` makes this machine a device again, and where a
+/// root is kept `invite` finishes it under a new key instead, which a torn `root.key` refuses.
+async fn restored_lines(
+    home: &Home,
+    read: &Result<Standing, StandingError>,
+) -> eyre::Result<Vec<String>> {
+    const MISSING: &str =
+        "this machine's key is not in this home, because system backups leave it out.";
+    let kept = home.root_key().exists() && Standing::revoked_root(home).await?.is_none();
+    let torn = matches!(
+        read,
+        Err(StandingError::Damaged(
+            standing::Disagreement::UnreadableRoot { .. }
+        ))
+    );
+    if !kept {
+        return Ok(vec![
+            format!("{MISSING} To start over: swoosh leave"),
+            "then: swoosh join".to_owned(),
+        ]);
+    }
+    let mut lines = vec![format!(
+        "{MISSING} A root kept on this machine stays. To start over: swoosh leave"
+    )];
+    if !torn {
+        lines.push("then: swoosh invite <name> <key>".to_owned());
+    }
+    Ok(lines)
 }
 
 /// The day a live row falls due to renew, once that day has come.

@@ -15,6 +15,7 @@ use swoosh::home::Home;
 use swoosh::root::Date;
 use swoosh::roster::{Epoch, Member, RevokedDevice, RosterDoc};
 use swoosh::serve::control_codec::{DisabledList, ServiceMenu};
+use swoosh::standing::Standing;
 use swoosh::testkit::{STANDING_UNTIL, TestNode, TestRoot};
 use tightbeam::tunnel::ServiceCatalog;
 use zeroize::Zeroizing;
@@ -321,7 +322,7 @@ async fn status_prints_a_damaged_or_unfinished_root_last() {
     let unfinished = home("unfinished");
     root_key(&unfinished);
     for (home, start) in [
-        (&damaged, "root: this machine's records disagree ("),
+        (&damaged, "this machine's records disagree ("),
         (&unfinished, "making your root did not finish"),
     ] {
         let out = status(home).await;
@@ -643,6 +644,16 @@ async fn every_state() -> Vec<(&'static str, Home)> {
     std::fs::remove_dir_all(restored.machine()).expect("a backup leaves machine/ out");
     homes.push(("restored", restored));
 
+    let keeper = home("state-restored-keeper");
+    holds(&keeper).await;
+    std::fs::remove_dir_all(keeper.machine()).expect("a backup leaves machine/ out");
+    homes.push(("restored keeper", keeper));
+
+    // A restored keeper after `leave`: the root, half made, and no key.
+    let left = keyless("state-left-keeper");
+    root_key(&left);
+    homes.push(("left keeper", left));
+
     let mint = home("state-mint");
     root_key(&mint);
     homes.push(("mint", mint));
@@ -929,29 +940,52 @@ async fn status_prints_every_state_verbatim() {
         .concat()
     );
 
-    for restored in ["restored", "keyless torn root"] {
-        let restored = home(restored);
+    let missing = "this machine's key is not in this home, because system backups leave it out.";
+    let kept = format!("{missing} A root kept on this machine stays. To start over: swoosh leave");
+    let restored: [(&str, &[String]); 4] = [
+        (
+            "restored",
+            &[
+                format!("{missing} To start over: swoosh leave"),
+                "then: swoosh join".to_owned(),
+            ],
+        ),
+        (
+            "restored keeper",
+            &[kept.clone(), "then: swoosh invite <name> <key>".to_owned()],
+        ),
+        ("keyless torn root", &[kept]),
+        (
+            "left keeper",
+            &[
+                "making your root did not finish; to finish it: swoosh invite <name> <key>"
+                    .to_owned(),
+            ],
+        ),
+    ];
+    for (state, last) in restored {
+        let restored = home(state);
+        let mut lines = vec![
+            "key: none yet".to_owned(),
+            home_line(restored),
+            String::new(),
+        ];
+        lines.extend_from_slice(last);
         assert_eq!(
             status(restored).await,
-            [
-                "key: none yet".to_owned(),
-                home_line(restored),
-                String::new(),
-                "this machine's key is not in this home, because system backups leave it out. To start \
-                 over: swoosh leave"
-                    .to_owned(),
-                "then: swoosh join".to_owned(),
-            ]
-            .map(|line| line + "\n")
-            .concat()
+            lines
+                .into_iter()
+                .map(|line| line + "\n")
+                .collect::<String>(),
+            "the {state} home"
         );
     }
 
     let ended = Date(now - DAY);
     let disagree = |what: &str| {
         format!(
-            "root: this machine's records disagree ({what}): swoosh cannot tell which root it trusts. A \
-             root kept on this machine stays. To start over: swoosh leave"
+            "this machine's records disagree ({what}): swoosh cannot tell which root it trusts. A root \
+             kept on this machine stays. To start over: swoosh leave"
         )
     };
     let root_short = |seed: u8| {
@@ -1007,9 +1041,7 @@ async fn status_prints_every_state_verbatim() {
         ),
         (
             "revoked root",
-            &[format!(
-                "a revoked root is still on this machine; to delete it: swoosh revoke root:{root}"
-            )],
+            &["a revoked root is still on this machine; swoosh does not use it".to_owned()],
         ),
         ("damaged", &[disagree("root.pub is not one root key")]),
         ("torn root", &[disagree("root.key is not a readable root key")]),
@@ -1064,16 +1096,15 @@ async fn a_device_before_its_first_sync_is_named_by_its_invite() {
     .expect("invited-by");
     let out = status(&ended).await;
     assert!(
-        out.lines().any(
-            |line| line == format!("this machine: me/b, your device until {}", Date(now - DAY))
-        ),
+        out.lines()
+            .any(|line| line == format!("this machine: me/b, ended {}", Date(now - DAY))),
         "{out}"
     );
     assert!(
         out.lines().any(|line| line
             == format!(
-                "{} ended on {}; your devices refuse it. Where your root is kept: swoosh invite <name>",
-                short_key(OWN),
+                "this machine ended on {}; your devices refuse it. Where your root is kept: swoosh invite \
+                 <name>",
                 Date(now - DAY)
             )),
         "{out}"
@@ -1090,5 +1121,89 @@ async fn a_device_before_its_first_sync_is_named_by_its_invite() {
                 Date(STANDING_UNTIL)
             )),
         "{out}"
+    );
+}
+
+/// The command a line gives, after its last `: swoosh `, with each placeholder filled the way a person
+/// fills it; `None` when the line gives none.
+fn command(line: &str) -> Option<Vec<String>> {
+    let (_, command) = line.rsplit_once(": swoosh ")?;
+    let key = TestNode::seeded(LAPTOP).node_id().to_string();
+    Some(
+        core::iter::once("swoosh".to_owned())
+            .chain(command.split_whitespace().map(|word| match word {
+                "<name>" => "laptop".to_owned(),
+                "<key>" => key.clone(),
+                "<dir>" => "/tmp".to_owned(),
+                word => word.to_owned(),
+            }))
+            .collect(),
+    )
+}
+
+/// Every command `status` prints, in every state, parses as printed: a line never names a form no verb
+/// takes, such as a `revoke` of a root.
+#[tokio::test]
+async fn every_command_status_prints_parses() {
+    use clap::Parser as _;
+
+    for (state, home) in every_state().await {
+        let out = status(&home).await;
+        for args in out.lines().filter_map(command) {
+            if let Err(error) = crate::Cli::try_parse_from(&args) {
+                assert_eq!(
+                    error.kind(),
+                    clap::error::ErrorKind::DisplayHelp,
+                    "the {state} home prints {args:?}, which does not parse: {error}"
+                );
+            }
+        }
+    }
+}
+
+/// A home restored from a system backup where the root is kept names only verbs that run there: `leave`,
+/// which keeps the root, then the `invite` that finishes the root under a new key. Never `join`, which
+/// refuses where a root is kept.
+#[tokio::test]
+async fn a_restored_root_keeper_is_told_only_verbs_that_run() {
+    let home = home("restored-keeper-verbs");
+    holds(&home).await;
+    std::fs::remove_dir_all(home.machine()).expect("a backup leaves machine/ out");
+    let named = |out: &str| -> Vec<String> {
+        out.lines()
+            .filter_map(command)
+            .map(|args| args[1].clone())
+            .collect()
+    };
+
+    let out = status(&home).await;
+    assert_eq!(named(&out), ["leave", "invite"], "{out}");
+    let (mut left, mut err) = (Vec::new(), Vec::new());
+    crate::commands::leave::LeaveCmd { new_key: false }
+        .leave(
+            &home,
+            &mut swoosh::testkit::Counting::refusing(),
+            SystemTime::now(),
+            &mut left,
+            &mut err,
+        )
+        .await
+        .expect("leave runs on a restored root keeper");
+    assert!(home.root_key().exists(), "leave keeps the root");
+
+    // `invite` finishes the root before it invites: under a new key, at one prompt.
+    let out = status(&home).await;
+    assert_eq!(named(&out), ["invite"], "{out}");
+    swoosh::root::Root::mint_to(
+        &home,
+        &mut swoosh::testkit::Counting::new(["a passphrase"]),
+        &mut Vec::new(),
+    )
+    .await
+    .expect("the invite's first step finishes the root");
+    assert!(
+        matches!(Standing::read(&home).await, Ok(Standing::HoldsRoot { .. })),
+        "{}",
+        status(&home).await
     );
 }
