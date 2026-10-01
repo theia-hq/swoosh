@@ -20,8 +20,8 @@ Usage: swoosh serve [OPTIONS] [name=target]...
 gated to your signet.
 
 **Things to know.** A service form is `name=target`: `ping=ping:` / `speed=speed:` (built-in diagnostics),
-`ssh=sshd:` (a keyless shell), `inbox=recv:<dir>` (receive pushed files into `<dir>`, `inbox=recv:` uses `.`),
-`news=fetch:<origin>` (fetch URLs for callers), or `web=tcp:<host>:<port>`
+`ssh=sshd:` (a keyless shell), `inbox=recv:<dir>` (receive pushed files into `<dir>`; with no `<dir>`, into
+[an inbox](../services.md#inbox)), `news=fetch:<origin>` (fetch URLs for callers), or `web=tcp:<host>:<port>`
 (front any local TCP service). `ssh`, `ping` and `speed` may be named alone (`swoosh serve ssh ping`); every
 other entry must be `name=target` and every target carries a scheme: a bare name or a bare `ping:` is refused
 with a message naming this form, a scheme nothing serves is refused by name,

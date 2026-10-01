@@ -347,7 +347,7 @@ impl Home {
 /// `path` as `canonicalize` will name it once it exists: its deepest existing ancestor canonicalized (a
 /// symlink in it resolved), then the rest joined on, `.` dropped and `..` taken lexically, since nothing
 /// below that ancestor exists to be a link. Relative paths are taken against the cwd first.
-fn canonical_to_be(path: &Path) -> PathBuf {
+pub(crate) fn canonical_to_be(path: &Path) -> PathBuf {
     let absolute = if path.is_absolute() {
         path.to_owned()
     } else {
@@ -444,6 +444,29 @@ fn default_dir() -> eyre::Result<PathBuf> {
     let home =
         std::env::var_os("HOME").ok_or_else(|| eyre!("HOME is not set; pass --home <dir>"))?;
     Ok(PathBuf::from(home).join(".config").join("swoosh"))
+}
+
+/// Where a `recv:` with no directory saves: `inbox` in this user's data directory for swoosh,
+/// `~/Library/Application Support/swoosh/inbox` on macOS, else `$XDG_DATA_HOME/swoosh/inbox` when that is set
+/// and absolute, else `~/.local/share/swoosh/inbox`. Never the directory `serve` was started in: a push names
+/// its own path under the output directory, so a `serve` started in `$HOME` would put the home's files in
+/// reach of every sender. `None` when there is no `HOME` to place it under.
+pub fn inbox() -> Option<PathBuf> {
+    #[cfg(not(target_os = "macos"))]
+    if let Some(data) = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|data| data.is_absolute())
+    {
+        return Some(data.join("swoosh").join("inbox"));
+    }
+    let home = std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)?;
+    #[cfg(target_os = "macos")]
+    let data = home.join("Library").join("Application Support");
+    #[cfg(not(target_os = "macos"))]
+    let data = home.join(".local").join("share");
+    Some(data.join("swoosh").join("inbox"))
 }
 
 /// A trust file this machine will not load, because someone other than its owner could have written it.

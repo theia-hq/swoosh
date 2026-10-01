@@ -12,9 +12,12 @@
 use std::path::{Path, PathBuf};
 
 use ::fetch::OriginAllowlist;
+use eyre::WrapErr as _;
 use nauthy::Service;
 use tightbeam::tunnel::{Router, Serve};
 
+use crate::escape::EscapedPath;
+use crate::home::{Home, canonical_to_be};
 use crate::names::{Name, NameError};
 
 mod activity;
@@ -312,6 +315,8 @@ pub const RECV_SCHEME: &str = "recv";
 pub struct RecvService {
     name: String,
     out: PathBuf,
+    /// Whether `out` is the inbox a `recv:` with no directory saves into, which `serve` creates.
+    inbox: bool,
 }
 
 impl RecvService {
@@ -323,6 +328,98 @@ impl RecvService {
     /// This service's own output directory (only its own; never shared with another receive service).
     pub fn out(&self) -> &Path {
         &self.out
+    }
+
+    /// Create the inbox, owner-only, when this service saves there; a named directory is used as it is.
+    pub fn create_inbox(&self) -> eyre::Result<()> {
+        use std::os::unix::fs::DirBuilderExt as _;
+
+        if !self.inbox {
+            return Ok(());
+        }
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&self.out)
+            .wrap_err_with(|| format!("could not create {}", EscapedPath(&self.out)))
+    }
+}
+
+/// Refuse a receive service whose output directory is `$HOME` (`user_home`), the swoosh home, a directory
+/// that holds the swoosh home, or a directory inside it. A push names its own path under the output
+/// directory, so any of these puts the home's files (the pin the gate reads, the root key) in reach of
+/// every sender. Each directory is compared by its canonical path and, once it exists, by its device and
+/// inode, so another name for the same directory (a macOS firmlink such as `/System/Volumes/Data/...`, a
+/// Linux bind mount) is caught too. Checked at start and on resume, before anything binds.
+pub fn refuse_recv_into_home(
+    services: &[RecvService],
+    home: &Home,
+    user_home: Option<&Path>,
+) -> eyre::Result<()> {
+    let swoosh_home = Dir::of(home.dir());
+    let user_home = user_home.map(Dir::of);
+    // A canonical path's ancestors are canonical too, so each is only looked up.
+    let holders: Vec<Dir> = swoosh_home.path.ancestors().skip(1).map(Dir::at).collect();
+    for service in services {
+        let out = Dir::of(&service.out);
+        let why = if user_home
+            .as_ref()
+            .is_some_and(|user_home| out.is(user_home))
+        {
+            "it is your home directory"
+        } else if out.is(&swoosh_home) {
+            "it is the swoosh home"
+        } else if holders.iter().any(|holder| out.is(holder)) {
+            "it holds the swoosh home"
+        } else if out
+            .path
+            .ancestors()
+            .skip(1)
+            .any(|above| Dir::at(above).is(&swoosh_home))
+        {
+            "it is inside the swoosh home"
+        } else {
+            continue;
+        };
+        // Named as typed (made absolute when it was relative), with `.` components dropped.
+        let named: PathBuf = service.out.components().collect();
+        eyre::bail!(
+            "{} cannot save into {}: {why}",
+            service.name,
+            EscapedPath(&named)
+        );
+    }
+    Ok(())
+}
+
+/// A directory as the refusal compares it: its canonical path, and its device and inode once it exists.
+struct Dir {
+    path: PathBuf,
+    id: Option<(u64, u64)>,
+}
+
+impl Dir {
+    /// `path` canonicalized, as it will be named once it exists.
+    fn of(path: &Path) -> Self {
+        Self::at(&canonical_to_be(path))
+    }
+
+    /// `path` as it is, already canonical.
+    fn at(path: &Path) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let id = std::fs::metadata(path)
+            .ok()
+            .map(|meta| (meta.dev(), meta.ino()));
+        Self {
+            path: path.to_owned(),
+            id,
+        }
+    }
+
+    /// Whether `self` and `other` are the same directory, by path or, when both exist, by identity.
+    fn is(&self, other: &Self) -> bool {
+        self.path == other.path || (self.id.is_some() && self.id == other.id)
     }
 }
 
@@ -347,9 +444,13 @@ pub fn bind_recv(
 /// De-merges the receive services out of the requested set: a `name=recv:<dir>` entry hands the router a
 /// output directory its addr grammar cannot carry, so swoosh separates each into its OWN [`RecvService`]
 /// (name + its own output dir) here, then binds one `Recv` instance per name by value. A `name=recv:` (no dir)
-/// saves into `.`. An entry without `=` is a teaching error, mirroring tightbeam's grammar. Non-recv entries
-/// are left in place, in order.
-pub fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<RecvService>> {
+/// saves into the inbox `inbox` names (`None` when `HOME` is unset), never the current directory. An entry
+/// without `=` is a teaching error, mirroring tightbeam's grammar. Non-recv entries are left in place, in
+/// order.
+pub fn extract_recv_services(
+    requested: &mut Vec<String>,
+    inbox: impl Fn() -> Option<PathBuf>,
+) -> eyre::Result<Vec<RecvService>> {
     let mut services: Vec<RecvService> = Vec::new();
     let mut remaining: Vec<String> = Vec::new();
     for entry in requested.drain(..) {
@@ -369,16 +470,23 @@ pub fn extract_recv_services(requested: &mut Vec<String>) -> eyre::Result<Vec<Re
             remaining.push(entry);
             continue;
         };
-        // A `name=recv:` (no dir) saves into `.`; `name=recv:<dir>` into <dir>. The dir is this service's
-        // OWN, on its OWN instance, so two receive services never share one output directory.
-        let out = if dir.is_empty() {
-            PathBuf::from(".")
+        // A `name=recv:` (no dir) saves into the inbox; `name=recv:<dir>` into <dir>. The dir is this
+        // service's OWN, on its OWN instance, so two receive services never share one output directory.
+        let (out, inbox) = if dir.is_empty() {
+            let Some(out) = inbox() else {
+                eyre::bail!(
+                    "HOME is not set, so recv: has no inbox to save into; name a directory: \
+                     swoosh serve {name}=recv:<dir>"
+                );
+            };
+            (out, true)
         } else {
-            PathBuf::from(dir)
+            (PathBuf::from(dir), false)
         };
         services.push(RecvService {
             name: name.to_owned(),
             out,
+            inbox,
         });
     }
     *requested = remaining;

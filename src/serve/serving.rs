@@ -144,9 +144,10 @@ impl Started {
     }
 }
 
-/// `entry` with a path argument made absolute against `cwd`: `inbox=recv:` becomes `inbox=recv:<cwd>` and
+/// `entry` with a path argument made absolute against `cwd`: `drop=recv:.` becomes `drop=recv:<cwd>/.` and
 /// `logs=file:app.log` becomes `logs=file:<cwd>/app.log`. A `~/…` path is relative like any other, since
-/// nothing expands it when the service binds. Raw `stdin:` and every non-path target are kept as typed.
+/// nothing expands it when the service binds. `inbox=recv:` is kept as typed: it saves into the inbox, never
+/// the cwd. Raw `stdin:` and every non-path target are kept as typed.
 /// `Err` when the joined path is not UTF-8, so it cannot be saved as the path it names.
 fn absolute(entry: &str, cwd: &Path) -> Result<String, ()> {
     let Some((name, target)) = entry.split_once('=') else {
@@ -155,7 +156,10 @@ fn absolute(entry: &str, cwd: &Path) -> Result<String, ()> {
     let Some((scheme, rest)) = target.split_once(':') else {
         return Ok(entry.to_owned());
     };
-    if !PATH_SCHEMES.contains(&scheme) || Path::new(rest).is_absolute() {
+    if !PATH_SCHEMES.contains(&scheme)
+        || Path::new(rest).is_absolute()
+        || (scheme == super::RECV_SCHEME && rest.is_empty())
+    {
         return Ok(entry.to_owned());
     }
     let path = if rest.is_empty() {
