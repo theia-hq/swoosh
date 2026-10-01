@@ -56,7 +56,8 @@ Receive pushed files into a directory, each verified end to end.
 - <a id="inbox"></a>With no directory, `inbox=recv:` saves into an inbox:
   `~/Library/Application Support/swoosh/inbox` on macOS; on Linux `$XDG_DATA_HOME/swoosh/inbox`, or
   `~/.local/share/swoosh/inbox` when that is not set.
-- Refused: `$HOME`, the swoosh home, a directory that holds the swoosh home, and a directory inside it.
+- Refused: your home directory, the swoosh home (`~/.config/swoosh`, or the directory `--home` names), a
+  directory that holds it, and a directory inside it.
 - Limits: [transfer](https://github.com/theia-hq/services/blob/main/crates/transfer/README.md).
 
 ### `fetch:<origin>`
