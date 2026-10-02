@@ -306,7 +306,7 @@ impl Waiting {
 
 impl core::fmt::Display for Waiting {
     /// One line naming each change that waits: "the changed relay and the added service drop in serve.toml
-    /// take effect on the next serve".
+    /// take effect the next time serve starts" (printed after `warning: `).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let mut items = Vec::new();
         if self.relay {
@@ -328,7 +328,7 @@ impl core::fmt::Display for Waiting {
         };
         write!(
             f,
-            "{} in serve.toml {verb} effect on the next serve",
+            "{} in serve.toml {verb} effect the next time serve starts",
             and_list(&items)
         )
     }

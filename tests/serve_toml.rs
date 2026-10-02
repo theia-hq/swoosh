@@ -204,7 +204,7 @@ fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
         .expect("the run names what waits");
     assert_eq!(
         line,
-        "the added service speed in serve.toml takes effect on the next serve"
+        "warning: the added service speed in serve.toml takes effect the next time serve starts"
     );
     let status = swoosh_in(&home, &run, &["status"]);
     assert!(

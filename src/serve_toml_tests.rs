@@ -329,8 +329,8 @@ fn what_a_running_serve_cannot_apply_is_named() {
     assert!(watcher.is_enabled(&service("ping")), "ping still served");
     assert_eq!(
         waiting.to_string(),
-        "the changed relay and the added services files and speed in serve.toml take effect on the \
-         next serve"
+        "the changed relay and the added services files and speed in serve.toml take effect the \
+         next time serve starts"
     );
     assert_eq!(
         super::Waiting {
@@ -338,6 +338,6 @@ fn what_a_running_serve_cannot_apply_is_named() {
             ..super::Waiting::default()
         }
         .to_string(),
-        "the changed resolver in serve.toml takes effect on the next serve"
+        "the changed resolver in serve.toml takes effect the next time serve starts"
     );
 }

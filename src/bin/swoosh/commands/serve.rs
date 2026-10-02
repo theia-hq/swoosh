@@ -676,7 +676,7 @@ impl ServeCmd {
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             // A running `serve` gives service only at its start, so a relay, a resolver or a service
             // changed in `serve.toml` waits for the next one; this says so once per change.
-            () = enabled.watch(|waiting| eprintln!("{waiting}")) => {
+            () = enabled.watch(|waiting| eprintln!("warning: {waiting}")) => {
                 unreachable!("serve.toml is checked until the node stops")
             }
         };
