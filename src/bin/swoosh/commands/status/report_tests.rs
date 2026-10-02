@@ -689,10 +689,22 @@ async fn every_state() -> Vec<(&'static str, Home)> {
 
     let torn_root = home("state-torn-root");
     std::fs::write(torn_root.root_key(), b"not a key").expect("a torn root key");
+    // Owner-only, as swoosh writes a key: a key others can read is refused as loose, not as torn.
+    std::fs::set_permissions(
+        torn_root.root_key(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
     homes.push(("torn root", torn_root));
 
     let keyless_torn_root = keyless("state-keyless-torn-root");
     std::fs::write(keyless_torn_root.root_key(), b"not a key").expect("a torn root key");
+    // Owner-only, as swoosh writes a key: a key others can read is refused as loose, not as torn.
+    std::fs::set_permissions(
+        keyless_torn_root.root_key(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
     homes.push(("keyless torn root", keyless_torn_root));
 
     let another = home("state-another-root");
@@ -942,6 +954,10 @@ async fn status_prints_every_state_verbatim() {
 
     let missing = "this machine's key is not in this home, because system backups leave it out.";
     let kept = format!("{missing} A root kept on this machine stays. To start over: swoosh leave");
+    // A torn `root.key` names no command: `leave` keeps the root, so it would print the same line again.
+    let torn = "this machine's records disagree (root.key is not a root key); swoosh cannot \
+                tell which root it trusts"
+        .to_owned();
     let restored: [(&str, &[String]); 4] = [
         (
             "restored",
@@ -952,9 +968,9 @@ async fn status_prints_every_state_verbatim() {
         ),
         (
             "restored keeper",
-            &[kept.clone(), "then: swoosh invite <name> <key>".to_owned()],
+            &[kept, "then: swoosh invite <name> <key>".to_owned()],
         ),
-        ("keyless torn root", &[kept]),
+        ("keyless torn root", core::slice::from_ref(&torn)),
         (
             "left keeper",
             &[
@@ -1044,7 +1060,7 @@ async fn status_prints_every_state_verbatim() {
             &["a revoked root is still on this machine; swoosh does not use it".to_owned()],
         ),
         ("damaged", &[disagree("root.pub is not one root key")]),
-        ("torn root", &[disagree("root.key is not a readable root key")]),
+        ("torn root", &[torn]),
         (
             "another root",
             &[disagree(&format!(

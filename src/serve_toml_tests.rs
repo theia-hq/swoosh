@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use nauthy::{STAT_DEBOUNCE, Service};
 use tightbeam::enabled::EnabledServices as _;
 
-use super::{ServeToml, ServicesOff};
+use super::{LiveServeToml, ServeToml};
 use crate::home::Home;
 
 /// A scratch home, removed on drop.
@@ -59,7 +59,7 @@ fn past_the_debounce() {
 #[test]
 fn the_disabled_watcher_sees_a_same_length_rename() {
     let scratch = Scratch::new("same-length");
-    let off = ServicesOff::load(&scratch.home).expect("load");
+    let off = LiveServeToml::load(&scratch.home).expect("load");
     scratch.only_off("ping");
     past_the_debounce();
     assert!(!off.is_enabled(&service("ping")), "ping is off");
@@ -86,8 +86,8 @@ fn the_disabled_watcher_sees_a_same_length_rename() {
 fn a_missing_or_damaged_serve_toml_keeps_the_set_read_last() {
     let scratch = Scratch::new("kept");
     scratch.only_off("ping");
-    let off = ServicesOff::load(&scratch.home).expect("load");
-    assert_eq!(off.names(), ["ping"]);
+    let off = LiveServeToml::load(&scratch.home).expect("load");
+    assert_eq!(off.off(), ["ping"]);
 
     std::fs::remove_file(scratch.home.serve_toml()).unwrap();
     past_the_debounce();
@@ -95,7 +95,7 @@ fn a_missing_or_damaged_serve_toml_keeps_the_set_read_last() {
 
     std::fs::write(scratch.home.serve_toml(), "off = 3\n").unwrap();
     past_the_debounce();
-    assert_eq!(off.names(), ["ping"], "still off once damaged");
+    assert_eq!(off.off(), ["ping"], "still off once damaged");
 }
 
 /// A file swoosh did not write is damaged: a key it does not know, a field of the wrong type, or a service
@@ -126,4 +126,218 @@ fn a_serve_toml_swoosh_did_not_write_is_damaged() {
             )
         );
     }
+}
+
+/// A file removed between the watcher's stat and its read reads as absent: what was held stays, so the
+/// race never turns a service back on.
+#[test]
+fn a_file_removed_between_stat_and_read_keeps_what_was_held() {
+    let scratch = Scratch::new("removed-mid-read");
+    scratch.only_off("ping");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    let path = scratch.home.serve_toml();
+    let statted = nauthy::FileStamp::of(&std::fs::metadata(&path).unwrap());
+    std::fs::remove_file(&path).unwrap();
+    {
+        let mut state = watcher.shared.state.lock().unwrap();
+        state.take(&path, super::read_stamped(&path), statted);
+    }
+    assert_eq!(watcher.held().off, ["ping".to_owned()].into(), "still off");
+}
+
+/// A damaged file is read once and then held as read until it changes, so a running `serve` does not
+/// re-read and re-parse it at every stat.
+#[test]
+fn a_damaged_serve_toml_is_read_once_until_it_changes() {
+    let scratch = Scratch::new("damaged-once");
+    scratch.only_off("ping");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    let path = scratch.home.serve_toml();
+    std::fs::write(&path, "off = 3\n").unwrap();
+    past_the_debounce();
+    assert_eq!(watcher.off(), ["ping"], "still off once damaged");
+    let damaged = nauthy::FileStamp::of(&std::fs::metadata(&path).unwrap());
+    assert!(damaged.is_some(), "the damaged file has a stamp");
+    assert_eq!(
+        watcher.shared.state.lock().unwrap().stamp,
+        damaged,
+        "the damaged file is marked as read"
+    );
+}
+
+/// What a run starts with and binds over is the watcher's first read, even once the file changed and the
+/// watcher re-read it: a slow start never binds over a later read than the one its services came from.
+#[test]
+fn the_first_read_stays_what_load_read() {
+    let scratch = Scratch::new("first-read");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
+        file.relay = Some("https://relay.example".parse().expect("a valid relay url"));
+    })
+    .expect("write serve.toml");
+    past_the_debounce();
+    assert!(
+        watcher.held().relay.is_some(),
+        "the watcher read the change"
+    );
+    assert_eq!(watcher.first_read().relay, None, "the first read is kept");
+}
+
+/// Write `services` as the file's list, through the writer `serve` uses, keeping every other field.
+fn list(scratch: &Scratch, services: &[&str]) {
+    ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
+        file.services = services.iter().map(|&entry| entry.to_owned()).collect();
+    })
+    .expect("write serve.toml");
+}
+
+/// What a bare `serve` of `scratch`'s home starts with now.
+fn bare(scratch: &Scratch) -> crate::serve::Started {
+    let file = ServeToml::read(&scratch.home).expect("read serve.toml");
+    crate::serve::Started::bare(&file, &scratch.home.serve_toml()).expect("the list starts")
+}
+
+/// A service dropped from `services` while `serve` runs is refused on its next stream, as one turned off
+/// is, and the status reports it with the services off; put back, it is served again. A route no entry
+/// bound (the node's own) is never refused for being absent from the list.
+#[test]
+fn a_service_removed_from_serve_toml_refuses_new_streams() {
+    let scratch = Scratch::new("removed");
+    list(&scratch, &["files=fetch:", "ping=ping:"]);
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    watcher.serving(&bare(&scratch));
+    assert!(watcher.is_enabled(&service("files")), "served at the start");
+
+    list(&scratch, &["ping=ping:"]);
+    past_the_debounce();
+    assert!(
+        !watcher.is_enabled(&service("files")),
+        "refused once removed"
+    );
+    assert!(
+        watcher.is_enabled(&service("ping")),
+        "the rest still served"
+    );
+    assert!(
+        watcher.is_enabled(&service("control.stop")),
+        "the node's own route is no entry's"
+    );
+    assert_eq!(watcher.refused(), ["files"], "the status reports it");
+    assert!(watcher.waiting().is_empty(), "a removal waits for nothing");
+
+    list(&scratch, &["files=fetch:", "ping=ping:"]);
+    past_the_debounce();
+    assert!(
+        watcher.is_enabled(&service("files")),
+        "served once put back"
+    );
+}
+
+/// Guard: an emptied `services` is the default set a bare `serve` starts with, never nothing, so a hand
+/// edit that empties the list does not refuse `ping` and `speed`.
+#[test]
+fn an_emptied_services_keeps_the_default_set() {
+    let scratch = Scratch::new("emptied");
+    list(&scratch, &["ping=ping:", "speed=speed:"]);
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    watcher.serving(&bare(&scratch));
+
+    list(&scratch, &[]);
+    past_the_debounce();
+    assert!(watcher.is_enabled(&service("ping")), "ping still served");
+    assert!(watcher.is_enabled(&service("speed")), "speed still served");
+    assert!(watcher.refused().is_empty());
+}
+
+/// A `services` that lists a service that is not one is a read that keeps what was held, as a damaged file
+/// is: it never reads as every service removed.
+#[test]
+fn a_services_entry_that_is_not_a_service_keeps_what_was_held() {
+    let scratch = Scratch::new("not-a-service");
+    list(&scratch, &["files=fetch:"]);
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    watcher.serving(&bare(&scratch));
+
+    list(&scratch, &["--public"]);
+    past_the_debounce();
+    assert!(watcher.is_enabled(&service("files")), "still served");
+    assert_eq!(
+        watcher.held().services,
+        ["files=fetch:"],
+        "the list held is kept"
+    );
+}
+
+/// The run's own write of what it was told is held at once, not at the next stat: a `serve` that names
+/// its services never refuses them for the list the file held before it wrote, however soon a stream
+/// comes.
+#[test]
+fn the_runs_own_write_is_held_at_once() {
+    let scratch = Scratch::new("own-write");
+    list(&scratch, &["ping=ping:"]);
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    past_the_debounce();
+    assert!(
+        watcher.held().services == ["ping=ping:"],
+        "the stat is fresh"
+    );
+
+    // `serve files=fetch:`: what it names, recorded once its routes bound, read straight after.
+    let started = crate::serve::Started::Named(vec!["files=fetch:".to_owned()]);
+    ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
+        started.record(file);
+    })
+    .expect("write serve.toml");
+    watcher.serving(&started);
+    assert!(watcher.is_enabled(&service("files")), "served at once");
+    assert!(watcher.waiting().is_empty(), "nothing waits");
+}
+
+/// A service added to `services`, and a relay or a resolver changed, wait for the next `serve`: the
+/// watcher names each, and the line says so. A relay given at the start is held as the one bound, so it
+/// never reads as a change.
+#[test]
+fn what_a_running_serve_cannot_apply_is_named() {
+    let scratch = Scratch::new("waiting");
+    list(&scratch, &["ping=ping:"]);
+    ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
+        file.relay = Some("https://relay.example".parse().expect("a relay"));
+    })
+    .expect("write serve.toml");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    watcher.serving(&bare(&scratch));
+    assert!(
+        watcher.waiting().is_empty(),
+        "the bound relay waits for nothing"
+    );
+
+    list(&scratch, &["ping=ping:", "speed=speed:", "files=fetch:"]);
+    ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
+        file.relay = Some("https://other.example".parse().expect("a relay"));
+    })
+    .expect("write serve.toml");
+    past_the_debounce();
+    let waiting = watcher.waiting();
+    assert_eq!(
+        waiting,
+        super::Waiting {
+            relay: true,
+            resolver: false,
+            added: vec!["files".to_owned(), "speed".to_owned()],
+        }
+    );
+    assert!(watcher.is_enabled(&service("ping")), "ping still served");
+    assert_eq!(
+        waiting.to_string(),
+        "the changed relay and the added services files and speed in serve.toml take effect the \
+         next time serve starts"
+    );
+    assert_eq!(
+        super::Waiting {
+            resolver: true,
+            ..super::Waiting::default()
+        }
+        .to_string(),
+        "the changed resolver in serve.toml takes effect the next time serve starts"
+    );
 }

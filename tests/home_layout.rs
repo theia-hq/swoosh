@@ -217,3 +217,56 @@ fn a_key_file_others_can_read_is_refused() {
     assert!(refused.stdout.is_empty(), "no key is printed");
     assert_eq!(std::fs::read(&key).unwrap(), before, "the key is untouched");
 }
+
+/// A root key others can read is refused the way this machine's key is, by `status` and every other verb,
+/// with the line that names `chmod`, never as a torn root key. A bit that lets others neither read nor
+/// write the key is refused before any verb too, in swoosh's words and never the key store's.
+#[test]
+fn a_loose_root_key_names_chmod_not_damage() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("loose-root");
+    let home = scratch.0.join("home");
+    let made = swoosh_at(&home, &["leave", "--new-key"]);
+    assert!(made.status.success(), "{}", text(&made.stderr));
+    let home = std::fs::canonicalize(&home).unwrap();
+    let root = home.join("root.key");
+    let mut seed = [7u8; 32];
+    let passphrase = keystore::Passphrase::try_from(zeroize::Zeroizing::new(
+        "a passphrase long enough".to_owned(),
+    ))
+    .unwrap();
+    keystore::KeyFile::root(&root)
+        .write(
+            &keystore::Secret::take(&mut seed),
+            keystore::Protection::Passphrase(&passphrase),
+        )
+        .unwrap();
+
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let path = root.display();
+    for verb in ["status", "sync"] {
+        let refused = swoosh_at(&home, &[verb]);
+        assert_eq!(refused.status.code(), Some(1), "{verb}");
+        assert_eq!(
+            text(&refused.stderr),
+            format!("error: {path} can be read by others: chmod 600 {path}\n"),
+            "{verb}"
+        );
+    }
+
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o601)).unwrap();
+    let access = format!("error: {path} gives others access: chmod 600 {path}\n");
+    for verb in ["status", "sync"] {
+        let refused = swoosh_at(&home, &[verb]);
+        assert_eq!(refused.status.code(), Some(1), "{verb}");
+        assert!(refused.stdout.is_empty(), "{verb}");
+        assert_eq!(text(&refused.stderr), access, "{verb}");
+    }
+
+    // A home with no key of its own, as a system backup restores it, says the same.
+    std::fs::remove_file(home.join("machine").join("key")).unwrap();
+    let refused = swoosh_at(&home, &["status"]);
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(text(&refused.stderr), access);
+}

@@ -3,7 +3,7 @@
 //!
 //! Both are LOCAL FILE WRITES on the `off` list of `<home>/serve.toml`, never a socket call and never a
 //! remote op: you toggle your OWN node, so there is no `--at`. A running `serve` honors the edit within the
-//! watch window (the [`ServicesOff`](swoosh::serve_toml::ServicesOff) its gate consults per stream), so a
+//! watch window (the [`LiveServeToml`](swoosh::serve_toml::LiveServeToml) its gate consults per stream), so a
 //! `disable` refuses the service on the next stream and an `enable` restores it, both with NO restart. A
 //! `disable` PERSISTS (fail-closed): a restart keeps a turned-off service off, so a node never silently
 //! re-exposes something the operator disabled. An `enable` only REMOVES a name from the list, so it can only

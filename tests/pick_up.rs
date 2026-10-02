@@ -263,6 +263,33 @@ fn a_damaged_home_lets_no_key_reach_the_door() {
     });
 }
 
+/// A file the pick-up route reads from that cannot be read keeps the devices it knew, rather than
+/// dropping every one until some file changes; once it can be read again it is read again.
+#[test]
+fn a_read_error_keeps_the_devices_the_door_knows() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    on_a_node(|| async {
+        let nas = device_home("read-error", NAS).await;
+        let laptop = TestNode::seeded(0x53).node_id();
+        renewing(&nas, laptop).await;
+        let key = laptop.verify_key().unwrap();
+        let known = swoosh::serve::Known::load(&nas).await;
+        assert!(known.knows(&key), "the door knows the laptop");
+
+        for path in [nas.root_pub(), nas.devices()] {
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            known.refresh().await;
+            let kept = known.knows(&key);
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(kept, "{} unreadable keeps the laptop known", path.display());
+            known.refresh().await;
+            assert!(known.knows(&key), "{} readable again", path.display());
+        }
+    });
+}
+
 /// A device revoked here while the node serves, though the update held here still lists it live, reaches
 /// no route from then on: the gate refuses its key before the pick-up route's own check and its shared
 /// slots, as it does at every other route.

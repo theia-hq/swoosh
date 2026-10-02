@@ -79,12 +79,18 @@ impl ReachArgs {
         } else {
             ServeToml::default()
         };
-        let relay = Option::clone(&self.relay).or(kept.relay);
-        let resolver = Option::clone(&self.resolver).or(kept.resolver);
-        Ok(Reach {
+        Ok(self.reach_over(&kept))
+    }
+
+    /// The relay and the resolver THIS run binds over: each flag if it was given, else the one `kept`
+    /// holds, else n0's. `serve` passes the file its one watcher read, so it never reads the file twice.
+    pub fn reach_over(&self, kept: &ServeToml) -> Reach {
+        let relay = Option::clone(&self.relay).or_else(|| kept.relay.clone());
+        let resolver = Option::clone(&self.resolver).or_else(|| kept.resolver.clone());
+        Reach {
             relay: relay.map_or(RelayHome::N0, RelayHome::Custom),
             resolver: resolver.map_or(Resolver::N0, Resolver::Custom),
-        })
+        }
     }
 
     /// Keep each reach flag this run was given in `file`, so every later verb under the home reaches the

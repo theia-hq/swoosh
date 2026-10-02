@@ -123,7 +123,7 @@ impl Home {
     }
 
     /// `<home>/serve.toml`: what `serve` runs. The services a bare `serve` resumes, the ones turned off, the
-    /// relay this machine offers and the resolver it publishes to, each written under
+    /// relay this machine is reached through and the resolver it publishes to, each written under
     /// [`home_lock`](Self::home_lock) by the command that sets it. Not meant to be opened by a person.
     pub fn serve_toml(&self) -> PathBuf {
         self.dir.join("serve.toml")
@@ -229,23 +229,24 @@ impl Home {
         Ok(())
     }
 
-    /// Refuse a home whose key file another user owns, or group or other can read or write, before any verb
-    /// runs, so the refusal is this line and not the key store's. A key that is absent, or that cannot be
-    /// stat'ed, passes: its reader reports what is wrong with it. Bits that let others neither read nor write
-    /// the key are left to the key store, which refuses them too.
+    /// Refuse a home one of whose key files (this machine's key, and a root kept here) another user owns,
+    /// or group or other holds any bit on, before any verb runs, so the refusal is this line and not the
+    /// key store's, and a root key with loose modes never reads as a damaged one. A key that is absent, or
+    /// that cannot be stat'ed, passes: its reader reports what is wrong with it.
     ///
     /// # Errors
     ///
-    /// [`LooseFile`] naming the key file, and why.
+    /// [`LooseFile`] naming the first key file that fails, and why.
     pub fn check_key_file(&self) -> Result<(), LooseFile> {
-        let path = self.key();
-        let Ok(meta) = std::fs::metadata(&path) else {
-            return Ok(());
-        };
-        match loose_key(&meta) {
-            Some(why) => Err(LooseFile { path, why }),
-            None => Ok(()),
+        for path in [self.key(), self.root_key()] {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if let Some(why) = loose_key(&meta) {
+                return Err(LooseFile { path, why });
+            }
         }
+        Ok(())
     }
 
     /// The 16-char hex key scoping this home's runtime state: inline 64-bit FNV-1a over the
@@ -480,6 +481,14 @@ impl core::fmt::Display for LooseFile {
                     None => Ok(()),
                 }
             }
+            Loose::Access => {
+                let full = std::path::absolute(&self.path).unwrap_or_else(|_| self.path.clone());
+                write!(f, "{} gives others access", EscapedPath(&full))?;
+                match shell_word(&full) {
+                    Some(word) => write!(f, ": chmod 600 {word}"),
+                    None => Ok(()),
+                }
+            }
             Loose::Writable => {
                 write!(f, "{path} can be written by others")?;
                 match std::path::absolute(&self.path)
@@ -581,6 +590,9 @@ pub enum Loose {
     Readable,
     /// Group or other can write the file.
     Writable,
+    /// Group or other holds a bit on a key file that lets them neither read nor write it, which the key
+    /// store refuses all the same.
+    Access,
     /// Another user, not root, owns the file.
     Owner {
         /// The file's owner.
@@ -609,7 +621,7 @@ fn loose(meta: &std::fs::Metadata) -> Option<Loose> {
 }
 
 /// What makes the key file `meta` describes loose, or `None` when it is sound: another user owns it, or
-/// group or other can read or write it.
+/// group or other holds any bit on it.
 fn loose_key(meta: &std::fs::Metadata) -> Option<Loose> {
     #[cfg(unix)]
     {
@@ -626,7 +638,8 @@ fn loose_key(meta: &std::fs::Metadata) -> Option<Loose> {
 }
 
 /// The rule [`loose_key`] applies: [`loose_by`]'s owner rule, then [`Loose::Readable`] when group or other
-/// can read the key, then [`loose_by`]'s write rule.
+/// can read the key, then [`loose_by`]'s write rule, then [`Loose::Access`] for any other group or other
+/// bit, the rest of what the key store refuses, so none of its refusals reaches a person in its words.
 #[cfg_attr(
     not(unix),
     allow(dead_code, reason = "only unix has owners and modes to check")
@@ -635,8 +648,21 @@ fn loose_key_by(owner: u32, mode: u32, euid: u32) -> Option<Loose> {
     match loose_by(owner, mode, euid) {
         Some(Loose::Owner { owner, euid }) => Some(Loose::Owner { owner, euid }),
         _ if mode & 0o044 != 0 => Some(Loose::Readable),
-        other => other,
+        Some(writable) => Some(writable),
+        None => (mode & 0o077 != 0).then_some(Loose::Access),
     }
+}
+
+/// The line [`Home::check_key_file`] gives the key file at `path`, for a key store that refused it on its
+/// modes or its owner: the key store's own text is never printed. The check ran before the verb, so only a
+/// key changed since reaches here; it is stat'ed again and named as it is now, and one mended in between
+/// is named for what the key store saw, a bit others held.
+pub(crate) fn loose_key_file(path: PathBuf) -> LooseFile {
+    let why = std::fs::metadata(&path)
+        .ok()
+        .and_then(|meta| loose_key(&meta))
+        .unwrap_or(Loose::Access);
+    LooseFile { path, why }
 }
 
 /// The rule [`loose`] applies, over a file's `owner` and `mode` and this process's `euid`: a file owned by

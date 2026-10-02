@@ -179,7 +179,7 @@ async fn bare_stop_through_the_socket_cancels_the_resident() {
         NodeId::from_ed25519_secret(&[9u8; 32]),
         None,
         empty_catalog(),
-        swoosh::serve_toml::ServicesOff::load(
+        swoosh::serve_toml::LiveServeToml::load(
             &swoosh::home::Home::resolve(Some(leaf.clone())).expect("a scratch home"),
         )
         .expect("the services off load"),

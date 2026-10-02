@@ -172,19 +172,36 @@ pub async fn fold_fork(home_lock: &HomeWrite, home: &Home, bytes: &[u8]) -> Resu
 
 /// The update at `path` and its bytes, if it verifies under `root`; else `None`.
 pub(crate) fn read_held(path: &Path, root: VerifyKey) -> Option<(RosterDoc, Vec<u8>)> {
+    read_held_or_error(path, root).ok().flatten()
+}
+
+/// The update at `path` and its bytes, if it verifies under `root`; `None` when there is none, or it does
+/// not verify.
+///
+/// # Errors
+///
+/// The file is there and could not be read.
+// `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
+#[allow(clippy::std_instead_of_core)]
+pub(crate) fn read_held_or_error(
+    path: &Path,
+    root: VerifyKey,
+) -> std::io::Result<Option<(RosterDoc, Vec<u8>)>> {
     use std::io::Read as _;
 
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
+    file.by_ref()
         .take(MAX_ROSTER_BLOB + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
+        .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_ROSTER_BLOB {
-        return None;
+        return Ok(None);
     }
-    let doc = super::verify(&bytes, root).ok()?;
-    Some((doc, bytes))
+    Ok(super::verify(&bytes, root).ok().map(|doc| (doc, bytes)))
 }
 
 /// Add the update's revoked ids that have not ended, and its revoked keys, to `<home>/revoked`, in one

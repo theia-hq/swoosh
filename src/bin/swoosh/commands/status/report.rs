@@ -131,7 +131,23 @@ impl Report {
                 Ok(Standing::InterruptedMint { .. }) => {
                     last = Some(standing::UNFINISHED_MINT.to_owned());
                 }
-                read if restored(home) => report.nags.extend(restored_lines(home, &read).await?),
+                // A torn `root.key` says so first: nothing a restored home's lines name can mend it.
+                Err(StandingError::Damaged(
+                    what @ standing::Disagreement::UnreadableRoot { .. },
+                )) => {
+                    last = Some(standing::damaged_line(&what));
+                }
+                // A file that could not be read, or a root key refused for its modes, its owner or not
+                // being a file, says why, as it does on a home with a key.
+                Err(
+                    error @ (StandingError::Read { .. }
+                    | StandingError::Revoked(_)
+                    | StandingError::Loose(_)
+                    | StandingError::NotAFile { .. }),
+                ) => {
+                    return Err(error.into());
+                }
+                _ if restored(home) => report.nags.extend(restored_lines(home).await?),
                 _ => report.top = NOT_A_DEVICE.map(str::to_owned).to_vec(),
             },
             Some(_) => match Standing::read(home).await {
@@ -444,35 +460,23 @@ fn restored(home: &Home) -> bool {
         .any(|path| Path::exists(path))
 }
 
-/// The last lines of a home restored from a system backup, given what [`Standing::read`] made of it. `leave`
-/// starts over and keeps a root kept here; after it, `join` makes this machine a device again, and where a
-/// root is kept `invite` finishes it under a new key instead, which a torn `root.key` refuses.
-async fn restored_lines(
-    home: &Home,
-    read: &Result<Standing, StandingError>,
-) -> eyre::Result<Vec<String>> {
+/// The last lines of a home restored from a system backup. `leave` starts over and keeps a root kept here;
+/// after it, `join` makes this machine a device again, and where a root is kept `invite` finishes it under
+/// a new key instead. A torn `root.key` never reaches here: its damaged line comes first.
+async fn restored_lines(home: &Home) -> eyre::Result<Vec<String>> {
     const MISSING: &str =
         "this machine's key is not in this home, because system backups leave it out.";
     let kept = home.root_key().exists() && Standing::revoked_root(home).await?.is_none();
-    let torn = matches!(
-        read,
-        Err(StandingError::Damaged(
-            standing::Disagreement::UnreadableRoot { .. }
-        ))
-    );
     if !kept {
         return Ok(vec![
             format!("{MISSING} To start over: swoosh leave"),
             "then: swoosh join".to_owned(),
         ]);
     }
-    let mut lines = vec![format!(
-        "{MISSING} A root kept on this machine stays. To start over: swoosh leave"
-    )];
-    if !torn {
-        lines.push("then: swoosh invite <name> <key>".to_owned());
-    }
-    Ok(lines)
+    Ok(vec![
+        format!("{MISSING} A root kept on this machine stays. To start over: swoosh leave"),
+        "then: swoosh invite <name> <key>".to_owned(),
+    ])
 }
 
 /// The day a live row falls due to renew, once that day has come.

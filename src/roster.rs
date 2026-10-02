@@ -27,8 +27,8 @@ pub use artifact::ArtifactError;
 pub(crate) use artifact::write;
 #[cfg(test)]
 pub(crate) use fold::SLOW;
-pub(crate) use fold::read_held;
 pub use fold::{FoldError, Folded, fold, fold_fork};
+pub(crate) use fold::{read_held, read_held_or_error};
 
 /// The magic the update's payload opens with: `swoosh-` and the file it heads. A payload this key signs
 /// under another magic is never read as an update.

@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use super::{DEFAULT_SERVICES, service_entry};
 use crate::escape::EscapedPath;
 use crate::home::Home;
-use crate::serve_toml::{ServeToml, ServeTomlError};
+use crate::serve_toml::ServeToml;
 
 /// The targets whose argument is a path on this machine: stored absolute, because a service manager
 /// starts `serve` in a different directory than the shell that named them.
@@ -49,9 +49,6 @@ pub enum ServingError {
         /// The service, paths made absolute.
         entry: String,
     },
-    /// `<home>/serve.toml` could not be read or written.
-    #[error(transparent)]
-    File(#[from] ServeTomlError),
 }
 
 /// The services a `serve` starts with, and where they came from: the banner says which, and only a named
@@ -68,8 +65,14 @@ pub enum Started {
 
 impl Started {
     /// Settle what a `serve` under `home` starts with: `named` (already through the service-entry parser)
-    /// with its paths made absolute against `cwd`, else the recorded list, else the default.
-    pub fn of(named: &[String], home: &Home, cwd: &Path) -> Result<Self, ServingError> {
+    /// with its paths made absolute against `cwd`, else the list `kept` (the home's `serve.toml`, as the
+    /// run's one watcher read it) records, else the default.
+    pub fn of(
+        named: &[String],
+        kept: &ServeToml,
+        home: &Home,
+        cwd: &Path,
+    ) -> Result<Self, ServingError> {
         let path = home.serve_toml();
         if !named.is_empty() {
             let cannot_save = |entry: String| ServingError::CannotSave {
@@ -79,25 +82,31 @@ impl Started {
             return named
                 .iter()
                 .map(|entry| {
-                    let kept = absolute(entry, cwd).map_err(|()| cannot_save(entry.clone()))?;
-                    if kept.chars().any(char::is_control) || kept.trim() != kept {
-                        return Err(cannot_save(kept));
+                    let saved = absolute(entry, cwd).map_err(|()| cannot_save(entry.clone()))?;
+                    if saved.chars().any(char::is_control) || saved.trim() != saved {
+                        return Err(cannot_save(saved));
                     }
-                    Ok(kept)
+                    Ok(saved)
                 })
                 .collect::<Result<_, _>>()
                 .map(Self::Named);
         }
+        Self::bare(kept, &path)
+    }
+
+    /// What a bare `serve` starts with from `kept`, the `serve.toml` at `path`: the list it records, else
+    /// the default. A running `serve` asks this of each later read too, for the services that file runs.
+    pub(crate) fn bare(kept: &ServeToml, path: &Path) -> Result<Self, ServingError> {
         let mut entries = Vec::new();
-        for line in ServeToml::read(home)?.services {
+        for line in &kept.services {
             let not_a_service = || ServingError::NotAService {
-                path: path.clone(),
+                path: path.to_owned(),
                 line: line.clone(),
             };
             if line.starts_with('-') {
                 return Err(not_a_service());
             }
-            entries.push(service_entry(&line).map_err(|_| not_a_service())?);
+            entries.push(service_entry(line).map_err(|_| not_a_service())?);
         }
         if entries.is_empty() {
             return Ok(Self::Default);
@@ -114,6 +123,14 @@ impl Started {
                 .map(|&entry| entry.to_owned())
                 .collect(),
         }
+    }
+
+    /// The names this run's services are bound under, in their order; an entry with no name binds none.
+    pub fn names(&self) -> Vec<String> {
+        self.entries()
+            .iter()
+            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
+            .collect()
     }
 
     /// Whether this run serves what the home last served, for the banner's "(as last time)".

@@ -9,8 +9,8 @@ use tightbeam::open_policy::ProvenOnly;
 use tightbeam::tunnel::{BoxRead, BoxWrite, Handler, ServeError, Served};
 
 use crate::home::Home;
-use crate::roster::read_held;
-use crate::standing::Standing;
+use crate::roster::read_held_or_error;
+use crate::standing::{Standing, StandingError};
 
 /// How often [`Known::watch`] looks at the pin and the update for a change.
 const REFRESH: Duration = Duration::from_secs(1);
@@ -105,7 +105,9 @@ impl Known {
     }
 
     /// Read the standing and the update again when a file either is read from changed. A home that is not
-    /// a device of a root and holds none, or whose update does not verify under the pin, lists nothing.
+    /// a device of a root and holds none, whose records disagree, or whose update does not verify under the
+    /// pin, lists nothing. A file that could not be read keeps what was listed, and is read again at the
+    /// next refresh.
     pub async fn refresh(&self) {
         let seen = self.seen().await;
         {
@@ -115,39 +117,54 @@ impl Known {
                 return;
             }
         }
-        let live = self.listed().await;
+        let Some(live) = self.listed().await else {
+            return;
+        };
         *self.rows.write().unwrap_or_else(PoisonError::into_inner) = Rows {
             seen: Some(seen),
             live,
         };
     }
 
-    /// The keys the update lists, with when each standing ends, when this home's standing lets it answer.
-    async fn listed(&self) -> HashMap<VerifyKey, u64> {
+    /// The keys the update lists, with when each standing ends, when this home's standing lets it answer;
+    /// `None` when a file could not be read.
+    async fn listed(&self) -> Option<HashMap<VerifyKey, u64>> {
         let pin = match Standing::read(&self.home).await {
             Ok(Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. }) => pin,
-            Ok(Standing::Unpinned | Standing::InterruptedMint { .. }) | Err(_) => {
-                return HashMap::new();
+            Ok(Standing::Unpinned | Standing::InterruptedMint { .. })
+            | Err(StandingError::Damaged(_)) => return Some(HashMap::new()),
+            Err(error) => {
+                tracing::debug!(%error, "keeping the devices the pick-up route knows");
+                return None;
             }
         };
-        crate::standing::pin_key(&self.home, pin)
-            .ok()
-            .and_then(|pin| read_held(&self.home.devices(), pin))
-            .map(|(doc, _)| {
-                doc.members()
-                    .iter()
-                    .map(|member| (member.node, member.until))
-                    .collect()
-            })
-            .unwrap_or_default()
+        let Ok(pin) = crate::standing::pin_key(&self.home, pin) else {
+            return Some(HashMap::new());
+        };
+        match read_held_or_error(&self.home.devices(), pin) {
+            Ok(held) => Some(
+                held.map(|(doc, _)| {
+                    doc.members()
+                        .iter()
+                        .map(|member| (member.node, member.until))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            ),
+            Err(error) => {
+                tracing::debug!(%error, "keeping the devices the pick-up route knows");
+                None
+            }
+        }
     }
 
-    /// The stamps of every file this home's standing and its update are read from.
+    /// The stamps of every file this home's standing and its update are read from, but this machine's key:
+    /// a running `serve` holds `serve.lock`, so no verb gives this machine a new key while it runs, and
+    /// `lock` rewrites the file with the same key in it.
     async fn seen(&self) -> Vec<Seen> {
         let home = &self.home;
         let mut seen = Vec::new();
         for path in [
-            home.key(),
             home.root_pub(),
             home.key_cert(),
             home.devices(),

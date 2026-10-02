@@ -47,7 +47,7 @@ use swoosh::serve::{
     Stopped, acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop,
     extract_recv_services, refuse_recv_into_home,
 };
-use swoosh::serve_toml::{ServeToml, ServicesOff};
+use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
 use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
@@ -155,6 +155,9 @@ pub struct ServeCmd {
 /// What a `serve` holds for its whole run, taken before anything binds: the home's single-instance lock
 /// and its bound control socket, and the services this run starts with.
 pub struct Claim {
+    /// `<home>/serve.toml`, read live: the run's one reader of it. The services this run starts with and
+    /// the relay and resolver it binds over come from its first read; the gate and the status ask it after.
+    serve_toml: LiveServeToml,
     /// The services this run starts with, and where they came from.
     started: Started,
     /// The receive services, each with its output directory checked, taken out of `started`'s entries.
@@ -188,10 +191,6 @@ pub struct ExposeContext {
     pub gate: Gate,
     /// The live cut over the same pin and revocations the gate reads, wired beside it.
     pub cut: AnchorCut,
-    /// The live enable/disable oracle the exposer's per-stream gate consults: a service turned off in
-    /// `<home>/serve.toml` is refused live, and turned back on, both with no restart. The status the
-    /// control socket reports reads the same instance.
-    pub enabled: ServicesOff,
     /// The node home this serve runs under, resolved ONCE by the composition root.
     pub home: Home,
 }
@@ -256,7 +255,7 @@ pub(crate) async fn admitting(
 }
 
 impl core::fmt::Debug for ExposeContext {
-    /// The gate, the cut and `ServicesOff` are not `Debug`, so this impl names the fields it can and
+    /// The gate and the cut are not `Debug`, so this impl names the fields it can and
     /// elides those, which is enough for the derived `Debug` on `ServeCmd`/`Command` to compile.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ExposeContext")
@@ -318,10 +317,9 @@ impl Reaching for ServeCmd {
             host_seed,
             gate,
             cut,
-            enabled,
             home,
         } = *expose;
-        self.run_serve(node, *claim, host_seed, gate, cut, enabled, home)
+        self.run_serve(node, *claim, host_seed, gate, cut, home)
             .await
     }
 }
@@ -341,8 +339,9 @@ impl ServeCmd {
             }
             Err(other) => return Err(eyre::Report::new(other)),
         };
+        let serve_toml = LiveServeToml::load(home)?;
         let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
-        let started = Started::of(&self.services, home, &cwd)?;
+        let started = Started::of(&self.services, serve_toml.first_read(), home, &cwd)?;
         // A receive service never saves into `$HOME`, the home, or above it, whether named now or resumed:
         // refused here, before anything binds or is written.
         let mut requested = started.entries();
@@ -356,6 +355,7 @@ impl ServeCmd {
             service.create_inbox()?;
         }
         self.claim = Some(Box::new(Claim {
+            serve_toml,
             started,
             recv,
             requested,
@@ -405,6 +405,15 @@ impl ServeCmd {
             || reach.relay.is_some()
             || reach.resolver.is_some()
             || reach.transport != swoosh::transport::Transport::default()
+    }
+
+    /// `<home>/serve.toml` as this run's one watcher first read it, when the run claimed its home: the
+    /// root binds over the relay and resolver it holds, the read the services this run starts with came
+    /// from, so the bind and the start never hold the file as read at two different moments.
+    pub fn first_read(&self) -> Option<&ServeToml> {
+        self.claim
+            .as_ref()
+            .map(|claim| claim.serve_toml.first_read())
     }
 
     /// Check that this run may admit the devices of `root`, and record it in `serve.lock`, which its claim
@@ -463,11 +472,6 @@ impl ServeCmd {
     /// the update route, and `sshd` under the `ssh` feature) behind the gate the composition root built,
     /// record what it serves, print swoosh's banner, and run the exposer and the control socket with the
     /// live cut wired. A service stays gated unless `--public` opens it.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the run is handed the claim and the expose context's parts, each a separate fact the \
-                  composition root resolved; bundling them again would only move the list"
-    )]
     async fn run_serve<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -475,14 +479,17 @@ impl ServeCmd {
         host_seed: [u8; 32],
         gate: Gate,
         cut: AnchorCut,
-        enabled: ServicesOff,
         home: Home,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
+        // The run's one watcher of `<home>/serve.toml`, the one its claim read: the live enable/disable
+        // oracle the exposer's per-stream gate consults, so a service turned off is refused live, and
+        // turned back on, both with no restart. The status the control socket reports reads the same one.
         let Claim {
+            serve_toml: enabled,
             started,
             recv,
             mut requested,
@@ -491,11 +498,7 @@ impl ServeCmd {
         } = claim;
         // The served names in the order the person gave them, for the banner and the per-service lines:
         // read from every entry, before the fetch and receive services were pulled out.
-        let names: Vec<String> = started
-            .entries()
-            .iter()
-            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
-            .collect();
+        let names = started.names();
         // Every node answers its own `control.stop` and member-only `control.services`, always, whatever
         // else it serves: the node-lifecycle control surface is part of being a node, not a service the
         // operator opts into. Both are MEMBER-only (`.member_service` below): the gate admits a family
@@ -590,8 +593,11 @@ impl ServeCmd {
             self.reach.keep_reach(file);
         })?;
         drop(home_lock);
+        // From here the watcher holds what this run serves: a service later dropped from `services` is
+        // refused, and a change the run cannot apply is named.
+        enabled.serving(&started);
         if !matches!(started, Started::Named(_)) {
-            let off = enabled.names();
+            let off = enabled.off();
             for name in names.iter().filter(|name| off.contains(*name)) {
                 eprintln!("{name} is off; to turn it back on: swoosh service enable {name}");
             }
@@ -608,7 +614,7 @@ impl ServeCmd {
             addr.node,
             status_addr,
             tightbeam::tunnel::ServiceCatalog::clone(&catalog),
-            enabled,
+            enabled.clone(),
             cancel.clone(),
         ));
 
@@ -668,6 +674,11 @@ impl ServeCmd {
             stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock) => stopped?,
             () = sync_rounds(node, &home) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
+            // A running `serve` gives service only at its start, so a relay, a resolver or a service
+            // changed in `serve.toml` waits for the next one; this says so once per change.
+            () = enabled.watch(|waiting| eprintln!("warning: {waiting}")) => {
+                unreachable!("serve.toml is checked until the node stops")
+            }
         };
         // The teardown line is best-effort: a piped consumer may have already closed stdout by the time
         // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic.

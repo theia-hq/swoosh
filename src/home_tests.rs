@@ -377,11 +377,11 @@ fn a_loose_known_hosts_is_on_the_trust_list() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A key file is loose when another user owns it, or group or other can read or write it; reading is named
-/// first, since the key is a secret.
+/// A key file is loose when another user owns it, or group or other holds any bit on it; reading is named
+/// first, since the key is a secret, and a bit that lets others neither read nor write is named as access.
 #[test]
 fn a_key_file_is_loose_when_others_can_read_or_write_it() {
-    use super::Loose::{Owner, Readable, Writable};
+    use super::Loose::{Access, Owner, Readable, Writable};
 
     let me = 501;
     for (owner, mode, want) in [
@@ -390,6 +390,8 @@ fn a_key_file_is_loose_when_others_can_read_or_write_it() {
         (me, 0o100_604, Some(Readable)),
         (me, 0o100_666, Some(Readable)),
         (me, 0o100_620, Some(Writable)),
+        (me, 0o100_601, Some(Access)),
+        (me, 0o100_610, Some(Access)),
         (0, 0o100_600, None),
         (
             502,

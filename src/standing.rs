@@ -68,6 +68,15 @@ pub enum StandingError {
     /// The roots revoked here could not be read. Fails closed: a revoked root is never read as live.
     #[error("could not read the revocations on this machine")]
     Revoked(#[source] crate::revoked::RevokedError),
+    /// A key file the standing is read from has loose modes or another owner.
+    #[error(transparent)]
+    Loose(crate::home::LooseFile),
+    /// A key file the standing is read from is not a regular file.
+    #[error("{} is not a regular file", EscapedPath(path))]
+    NotAFile {
+        /// The path.
+        path: PathBuf,
+    },
     /// A file the standing is read from could not be read.
     #[error("could not read {}", EscapedPath(path))]
     Read {
@@ -134,7 +143,8 @@ pub enum Disagreement {
         /// The standing file.
         path: PathBuf,
     },
-    /// The root's key file has no header that can be read.
+    /// The root's key file has no header that can be read: its bytes are not a root key. A file the key
+    /// store will not open, or could not read, is a [`StandingError::Read`] instead.
     UnreadableRoot {
         /// The key file.
         path: PathBuf,
@@ -190,7 +200,7 @@ impl fmt::Display for Disagreement {
                 file_name(path)
             ),
             Self::UnreadableRoot { path } => {
-                write!(formatter, "{} is not a readable root key", file_name(path))
+                write!(formatter, "{} is not a root key", file_name(path))
             }
         }
     }
@@ -221,13 +231,18 @@ pub const UNFINISHED_LEAVE: &str = "leaving did not finish; to finish it: swoosh
 
 /// The line for a home whose records disagree: `status`'s, and the refusal of every verb that needs to
 /// know which root this machine trusts. The shapes a stopped `join` (a first join or a switch) or a stopped
-/// `leave` leaves name the verb that finishes them; every other names `leave`, which starts over.
+/// `leave` leaves name the verb that finishes them. A `root.key` whose bytes are not a root key names no
+/// command: `leave` keeps a root kept here, so it would leave the same line behind, and no verb can tell a
+/// torn root key from one to throw away. Every other names `leave`, which starts over.
 pub fn damaged_line(what: &Disagreement) -> String {
     match what {
         Disagreement::StandingWithoutPin { .. } | Disagreement::StandingFromAnotherRoot { .. } => {
             UNFINISHED_JOIN.to_owned()
         }
         Disagreement::PinWithoutStanding { .. } => UNFINISHED_LEAVE.to_owned(),
+        what @ Disagreement::UnreadableRoot { .. } => format!(
+            "this machine's records disagree ({what}); swoosh cannot tell which root it trusts"
+        ),
         what => format!(
             "this machine's records disagree ({what}): swoosh cannot tell which root it trusts. A root \
              kept on this machine stays. To start over: swoosh leave"
@@ -364,15 +379,26 @@ async fn held_root(home: &Home, revoked: &Denylist) -> Result<Option<NodeId>, St
     if !exists(&path).await? {
         return Ok(None);
     }
-    let root = root_key(path).map_err(StandingError::Damaged)?;
+    let root = root_key(path)?;
     Ok((!is_revoked(revoked, root)).then_some(root))
 }
 
-/// The key `root.key`'s header names, read without unlocking it.
-fn root_key(path: PathBuf) -> Result<NodeId, Disagreement> {
+/// The key `root.key`'s header names, read without unlocking it. Only a file whose bytes are not a root
+/// key is damaged. One the key store will not open is refused in swoosh's words, never the key store's:
+/// loose modes or another owner as [`Home::check_key_file`](crate::home::Home::check_key_file) names them,
+/// and a path that is not a regular file as that. One that could not be read is a read error. So a sound
+/// key with loose modes never reads as a torn one.
+fn root_key(path: PathBuf) -> Result<NodeId, StandingError> {
     match KeyFile::root(&path).load() {
         Ok(Some(stored)) => Ok(stored.node_id()),
-        Ok(None) | Err(_) => Err(Disagreement::UnreadableRoot { path }),
+        Err(keystore::Error::Io { source, .. }) => Err(StandingError::Read { path, source }),
+        Err(keystore::Error::Permissive { .. } | keystore::Error::Owner { .. }) => {
+            Err(StandingError::Loose(crate::home::loose_key_file(path)))
+        }
+        Err(keystore::Error::NotAFile { .. }) => Err(StandingError::NotAFile { path }),
+        Ok(None) | Err(_) => Err(StandingError::Damaged(Disagreement::UnreadableRoot {
+            path,
+        })),
     }
 }
 
