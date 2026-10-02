@@ -355,6 +355,12 @@ async fn after_leave_a_torn_root_key_names_no_command() {
     let home = scratch("torn-root");
     device(&home, now() + 90 * DAY).await;
     std::fs::write(home.root_key(), b"not a key").unwrap();
+    // Owner-only, as swoosh writes a key: a key others can read is refused as loose, not as torn.
+    std::fs::set_permissions(
+        home.root_key(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
     let ran = leave(&home, &[]).await;
     ran.left();
     assert!(home.root_key().exists(), "the torn root stays");

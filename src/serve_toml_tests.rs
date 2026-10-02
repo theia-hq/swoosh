@@ -127,3 +127,58 @@ fn a_serve_toml_swoosh_did_not_write_is_damaged() {
         );
     }
 }
+
+/// A file removed between the watcher's stat and its read reads as absent: what was held stays, so the
+/// race never turns a service back on.
+#[test]
+fn a_file_removed_between_stat_and_read_keeps_what_was_held() {
+    let scratch = Scratch::new("removed-mid-read");
+    scratch.only_off("ping");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    let path = scratch.home.serve_toml();
+    let statted = nauthy::FileStamp::of(&std::fs::metadata(&path).unwrap());
+    std::fs::remove_file(&path).unwrap();
+    {
+        let mut state = watcher.shared.state.lock().unwrap();
+        state.take(&path, super::read_stamped(&path), statted);
+    }
+    assert_eq!(watcher.held().off, ["ping".to_owned()].into(), "still off");
+}
+
+/// A damaged file is read once and then held as read until it changes, so a running `serve` does not
+/// re-read and re-parse it at every stat.
+#[test]
+fn a_damaged_serve_toml_is_read_once_until_it_changes() {
+    let scratch = Scratch::new("damaged-once");
+    scratch.only_off("ping");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    let path = scratch.home.serve_toml();
+    std::fs::write(&path, "off = 3\n").unwrap();
+    past_the_debounce();
+    assert_eq!(watcher.off(), ["ping"], "still off once damaged");
+    let damaged = nauthy::FileStamp::of(&std::fs::metadata(&path).unwrap());
+    assert!(damaged.is_some(), "the damaged file has a stamp");
+    assert_eq!(
+        watcher.shared.state.lock().unwrap().stamp,
+        damaged,
+        "the damaged file is marked as read"
+    );
+}
+
+/// What a run starts with and binds over is the watcher's first read, even once the file changed and the
+/// watcher re-read it: a slow start never binds over a later read than the one its services came from.
+#[test]
+fn the_first_read_stays_what_load_read() {
+    let scratch = Scratch::new("first-read");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
+        file.relay = Some("https://relay.example".parse().expect("a valid relay url"));
+    })
+    .expect("write serve.toml");
+    past_the_debounce();
+    assert!(
+        watcher.held().relay.is_some(),
+        "the watcher read the change"
+    );
+    assert_eq!(watcher.first_read().relay, None, "the first read is kept");
+}

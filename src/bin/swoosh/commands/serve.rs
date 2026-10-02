@@ -341,7 +341,7 @@ impl ServeCmd {
         };
         let serve_toml = LiveServeToml::load(home)?;
         let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
-        let started = Started::of(&self.services, &serve_toml.held(), home, &cwd)?;
+        let started = Started::of(&self.services, serve_toml.first_read(), home, &cwd)?;
         // A receive service never saves into `$HOME`, the home, or above it, whether named now or resumed:
         // refused here, before anything binds or is written.
         let mut requested = started.entries();
@@ -407,11 +407,13 @@ impl ServeCmd {
             || reach.transport != swoosh::transport::Transport::default()
     }
 
-    /// `<home>/serve.toml` as this run's one watcher reads it, once the run has claimed its home: the root
-    /// binds over the relay and resolver it holds and hands the gate the same watcher, so no two parts of
-    /// the run read the file at two different moments.
-    pub fn serve_toml(&self) -> Option<&LiveServeToml> {
-        self.claim.as_ref().map(|claim| &claim.serve_toml)
+    /// `<home>/serve.toml` as this run's one watcher first read it, when the run claimed its home: the
+    /// root binds over the relay and resolver it holds, the read the services this run starts with came
+    /// from, so the bind and the start never hold the file as read at two different moments.
+    pub fn first_read(&self) -> Option<&ServeToml> {
+        self.claim
+            .as_ref()
+            .map(|claim| claim.serve_toml.first_read())
     }
 
     /// Check that this run may admit the devices of `root`, and record it in `serve.lock`, which its claim

@@ -229,23 +229,25 @@ impl Home {
         Ok(())
     }
 
-    /// Refuse a home whose key file another user owns, or group or other can read or write, before any verb
-    /// runs, so the refusal is this line and not the key store's. A key that is absent, or that cannot be
-    /// stat'ed, passes: its reader reports what is wrong with it. Bits that let others neither read nor write
-    /// the key are left to the key store, which refuses them too.
+    /// Refuse a home one of whose key files (this machine's key, and a root kept here) another user owns,
+    /// or group or other can read or write, before any verb runs, so the refusal is this line and not the
+    /// key store's, and a root key with loose modes never reads as a damaged one. A key that is absent, or
+    /// that cannot be stat'ed, passes: its reader reports what is wrong with it. Bits that let others
+    /// neither read nor write the key are left to the key store, which refuses them too.
     ///
     /// # Errors
     ///
-    /// [`LooseFile`] naming the key file, and why.
+    /// [`LooseFile`] naming the first key file that fails, and why.
     pub fn check_key_file(&self) -> Result<(), LooseFile> {
-        let path = self.key();
-        let Ok(meta) = std::fs::metadata(&path) else {
-            return Ok(());
-        };
-        match loose_key(&meta) {
-            Some(why) => Err(LooseFile { path, why }),
-            None => Ok(()),
+        for path in [self.key(), self.root_key()] {
+            let Ok(meta) = std::fs::metadata(&path) else {
+                continue;
+            };
+            if let Some(why) = loose_key(&meta) {
+                return Err(LooseFile { path, why });
+            }
         }
+        Ok(())
     }
 
     /// The 16-char hex key scoping this home's runtime state: inline 64-bit FNV-1a over the

@@ -357,11 +357,11 @@ impl Outward {
         }
     }
 
-    /// `<home>/serve.toml` as a claimed `serve` reads it, through its one watcher; `None` for every other
-    /// verb, which reads the file itself.
-    fn serve_toml(&self) -> Option<&swoosh::serve_toml::LiveServeToml> {
+    /// `<home>/serve.toml` as a claimed `serve`'s one watcher first read it; `None` for every other verb,
+    /// which reads the file itself.
+    fn serve_toml(&self) -> Option<&swoosh::serve_toml::ServeToml> {
         match self {
-            Self::Serve(cmd) => cmd.serve_toml(),
+            Self::Serve(cmd) => cmd.first_read(),
             _ => None,
         }
     }
@@ -519,7 +519,8 @@ async fn run() -> eyre::Result<()> {
     let home = Home::resolve(cli.home)?;
     // Before any verb reads it: a trust file another user could have written is never loaded.
     home.check_trust_files()?;
-    // And a key file others can read is refused with its own line, never the key store's.
+    // And a key file others can read, this machine's or a root kept here, is refused with its own line,
+    // never the key store's.
     home.check_key_file()?;
 
     // Local verbs run here, before any transport is composed and (for `tree`) before the store is even
@@ -650,10 +651,10 @@ async fn run() -> eyre::Result<()> {
             Some(_unused) => transport::Reach::default(),
             // A serving verb keeps the two servers it was pointed at in the home once its routes bind
             // (`serve`'s own write); a dialing verb's flag is this run only. Nothing is written here.
-            // A `serve` binds over what its one watcher of `serve.toml` read when it claimed the home, so
-            // the bind and the gate never hold the file as read at two moments.
+            // A `serve` binds over what its one watcher of `serve.toml` first read, when it claimed the
+            // home: the same read its services came from.
             None => match reach.serve_toml() {
-                Some(kept) => reach.reach_args().reach_over(&kept.held()),
+                Some(kept) => reach.reach_args().reach_over(kept),
                 None => reach.reach_args().reach(&home).await?,
             },
         },

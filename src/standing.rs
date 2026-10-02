@@ -134,7 +134,8 @@ pub enum Disagreement {
         /// The standing file.
         path: PathBuf,
     },
-    /// The root's key file has no header that can be read.
+    /// The root's key file has no header that can be read: its bytes are not a root key. A file the key
+    /// store will not open, or could not read, is a [`StandingError::Read`] instead.
     UnreadableRoot {
         /// The key file.
         path: PathBuf,
@@ -221,9 +222,9 @@ pub const UNFINISHED_LEAVE: &str = "leaving did not finish; to finish it: swoosh
 
 /// The line for a home whose records disagree: `status`'s, and the refusal of every verb that needs to
 /// know which root this machine trusts. The shapes a stopped `join` (a first join or a switch) or a stopped
-/// `leave` leaves name the verb that finishes them. A `root.key` that cannot be read names no command:
-/// `leave` keeps a root kept here, so it would leave the same line behind, and no verb can tell a torn
-/// root key from one to throw away. Every other names `leave`, which starts over.
+/// `leave` leaves name the verb that finishes them. A `root.key` whose bytes are not a root key names no
+/// command: `leave` keeps a root kept here, so it would leave the same line behind, and no verb can tell a
+/// torn root key from one to throw away. Every other names `leave`, which starts over.
 pub fn damaged_line(what: &Disagreement) -> String {
     match what {
         Disagreement::StandingWithoutPin { .. } | Disagreement::StandingFromAnotherRoot { .. } => {
@@ -369,15 +370,29 @@ async fn held_root(home: &Home, revoked: &Denylist) -> Result<Option<NodeId>, St
     if !exists(&path).await? {
         return Ok(None);
     }
-    let root = root_key(path).map_err(StandingError::Damaged)?;
+    let root = root_key(path)?;
     Ok((!is_revoked(revoked, root)).then_some(root))
 }
 
-/// The key `root.key`'s header names, read without unlocking it.
-fn root_key(path: PathBuf) -> Result<NodeId, Disagreement> {
+/// The key `root.key`'s header names, read without unlocking it. Only a file whose bytes are not a root
+/// key is damaged. One the key store will not open (its modes or owner, or not a regular file), or that
+/// could not be read, is a read error carrying the key store's reason, so a sound key with loose modes
+/// never reads as a torn one.
+fn root_key(path: PathBuf) -> Result<NodeId, StandingError> {
     match KeyFile::root(&path).load() {
         Ok(Some(stored)) => Ok(stored.node_id()),
-        Ok(None) | Err(_) => Err(Disagreement::UnreadableRoot { path }),
+        Err(keystore::Error::Io { source, .. }) => Err(StandingError::Read { path, source }),
+        Err(
+            error @ (keystore::Error::Permissive { .. }
+            | keystore::Error::Owner { .. }
+            | keystore::Error::NotAFile { .. }),
+        ) => Err(StandingError::Read {
+            path,
+            source: io::Error::other(error),
+        }),
+        Ok(None) | Err(_) => Err(StandingError::Damaged(Disagreement::UnreadableRoot {
+            path,
+        })),
     }
 }
 

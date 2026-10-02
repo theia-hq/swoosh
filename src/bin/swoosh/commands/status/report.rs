@@ -137,6 +137,10 @@ impl Report {
                 )) => {
                     last = Some(standing::damaged_line(&what));
                 }
+                // A file that could not be read says why, as it does on a home with a key.
+                Err(error @ (StandingError::Read { .. } | StandingError::Revoked(_))) => {
+                    return Err(error.into());
+                }
                 _ if restored(home) => report.nags.extend(restored_lines(home).await?),
                 _ => report.top = NOT_A_DEVICE.map(str::to_owned).to_vec(),
             },

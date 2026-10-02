@@ -425,6 +425,12 @@ async fn a_malformed_pin_reads_damaged() {
 async fn a_root_key_with_no_readable_header_reads_damaged() {
     let home = home("root-no-key");
     std::fs::write(home.root_key(), b"not a key").expect("write root.key");
+    // Owner-only, as swoosh writes a key: a key others can read is refused as loose, not as torn.
+    std::fs::set_permissions(
+        home.root_key(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
     assert_eq!(
         damaged(&home).await,
         Disagreement::UnreadableRoot {

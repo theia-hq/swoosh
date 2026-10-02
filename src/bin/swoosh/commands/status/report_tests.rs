@@ -689,10 +689,22 @@ async fn every_state() -> Vec<(&'static str, Home)> {
 
     let torn_root = home("state-torn-root");
     std::fs::write(torn_root.root_key(), b"not a key").expect("a torn root key");
+    // Owner-only, as swoosh writes a key: a key others can read is refused as loose, not as torn.
+    std::fs::set_permissions(
+        torn_root.root_key(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
     homes.push(("torn root", torn_root));
 
     let keyless_torn_root = keyless("state-keyless-torn-root");
     std::fs::write(keyless_torn_root.root_key(), b"not a key").expect("a torn root key");
+    // Owner-only, as swoosh writes a key: a key others can read is refused as loose, not as torn.
+    std::fs::set_permissions(
+        keyless_torn_root.root_key(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
     homes.push(("keyless torn root", keyless_torn_root));
 
     let another = home("state-another-root");

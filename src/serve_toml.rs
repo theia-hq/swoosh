@@ -263,9 +263,10 @@ pub struct LiveServeToml {
     shared: Arc<Watched>,
 }
 
-/// The file a [`LiveServeToml`] reads, and what it read last.
+/// The file a [`LiveServeToml`] reads, what it read first, and what it read last.
 struct Watched {
     path: PathBuf,
+    first: ServeToml,
     state: Mutex<Held>,
 }
 
@@ -292,6 +293,7 @@ impl LiveServeToml {
         Ok(Self {
             shared: Arc::new(Watched {
                 path,
+                first: file.clone(),
                 state: Mutex::new(Held {
                     file,
                     stamp,
@@ -299,6 +301,12 @@ impl LiveServeToml {
                 }),
             }),
         })
+    }
+
+    /// The file as [`load`](Self::load) read it: what a run starts with and binds over, so the services
+    /// it starts and the relay and resolver it binds come from one read, however long its start takes.
+    pub fn first_read(&self) -> &ServeToml {
+        &self.shared.first
     }
 
     /// The file as held now, re-read first when it changed.
@@ -336,19 +344,45 @@ impl LiveServeToml {
         let Ok(meta) = std::fs::metadata(path) else {
             return;
         };
-        if FileStamp::unchanged(state.stamp, FileStamp::of(&meta)) {
+        let statted = FileStamp::of(&meta);
+        if FileStamp::unchanged(state.stamp, statted) {
             return;
         }
-        match read_stamped(path) {
-            Ok((file, stamp)) => {
-                state.file = file;
-                state.stamp = stamp;
+        state.take(path, read_stamped(path), statted);
+    }
+}
+
+impl Held {
+    /// Take one read of the file at `path`, whose stat just gave `statted`. Only a read of a file that is
+    /// there replaces what is held: a file removed between the stat and the read reads as absent, and
+    /// keeps it, so deleting the file never turns a service back on. A failed read keeps it too. A file
+    /// whose contents are refused is marked as read, so it is not read again until it changes; any other
+    /// failure is tried again at the next stat.
+    fn take(
+        &mut self,
+        path: &Path,
+        read: Result<(ServeToml, Option<FileStamp>), ServeTomlError>,
+        statted: Option<FileStamp>,
+    ) {
+        match read {
+            Ok((file, Some(stamp))) => {
+                self.file = file;
+                self.stamp = Some(stamp);
             }
-            Err(error) => tracing::warn!(
-                path = %EscapedPath(path),
-                %error,
-                "keeping what serve.toml held when it was last read"
-            ),
+            Ok((_, None)) => {}
+            Err(error) => {
+                if matches!(
+                    error,
+                    ServeTomlError::Damaged { .. } | ServeTomlError::Unusable { .. }
+                ) {
+                    self.stamp = statted;
+                }
+                tracing::warn!(
+                    path = %EscapedPath(path),
+                    %error,
+                    "keeping what serve.toml held when it was last read"
+                );
+            }
         }
     }
 }
