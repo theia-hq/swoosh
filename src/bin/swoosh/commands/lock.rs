@@ -27,7 +27,7 @@ pub struct LockCmd {
 /// so `--help` never offers one that does nothing, and no value means no lock: that is `--remove`.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LockMethod {
-    /// a passphrase you type
+    // No doc comment: a documented value makes clap print `lock --help` in its long form, a block per value.
     Passphrase,
 }
 

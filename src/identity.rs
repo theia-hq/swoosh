@@ -259,7 +259,7 @@ pub async fn lock(
         (Some(Stored::Locked(locked)), _) => locked,
     };
     if !prompt.terminal() {
-        eyre::bail!(crate::passphrase::NO_TERMINAL_FOR_KEY);
+        eyre::bail!(crate::passphrase::CHANGE_FOR_KEY_NEEDS_TERMINAL);
     }
     // The current passphrase is proven before the new one is asked, so a mistyped one fails at once.
     let ((), current) = crate::passphrase::unlock(prompt, Asked::MachineKey, |passphrase| {
@@ -289,7 +289,7 @@ fn choose_new(prompt: &mut impl Prompt) -> eyre::Result<keystore::Passphrase> {
 
 /// The refusal when a passphrase for this machine's key is to be chosen and nobody is at a terminal.
 pub const CHOOSE_FOR_KEY_NEEDS_TERMINAL: &str =
-    "setting a passphrase on this machine's key needs a terminal: run this at one.";
+    "setting a passphrase on this machine's key needs a terminal: over swoosh ssh, add -t after --";
 
 /// The home's key file.
 fn key_file(home: &Home) -> KeyFile {

@@ -256,7 +256,7 @@ reaching_verbs! {
     Revoke(revoke::RevokeRoot),
     /// `swoosh root restore <dir>`'s exchange, once the root is written: it presents the standing the
     /// restore just wrote, under this machine's key, to bring the restored root up to date.
-    RootRestore(root::restore::RestoreSync),
+    RootRestore(Box<root::restore::RestoreSync>),
 }
 
 impl Command {
@@ -269,7 +269,7 @@ impl Command {
             Self::Lock(cmd) => Verb::Lock(cmd),
             Self::Root(cmd) => match cmd.split() {
                 root::Split::Local(local) => Verb::Root(local),
-                root::Split::Restore(restore) => Verb::RootRestore(restore),
+                root::Split::Restore(restore) => Verb::RootRestore(Box::new(restore)),
             },
             // A bare `invite` lists what is due from the root's records and dials nothing; a named one is a
             // root act that syncs and offers, so it binds a transport.
@@ -327,7 +327,7 @@ enum Verb {
     /// `root backup`, `forget` or `lock`: needs only the home.
     Root(root::Local),
     /// `root restore`: checks, asks and writes locally, then exchanges as a reaching verb.
-    RootRestore(root::restore::RestoreCmd),
+    RootRestore(Box<root::restore::RestoreCmd>),
     /// A bare `swoosh invite`: what is due, from the root's records; it binds no transport. With a name it is
     /// a reaching verb instead.
     Invite(invite::InviteCmd),
@@ -569,7 +569,10 @@ async fn run() -> eyre::Result<()> {
         Verb::Root(cmd) => return cmd.run(&home).await,
         // `root restore`: every check, the passphrase and the writes are local and come first; only the
         // exchange that brings the restored root up to date binds a transport, under the key it wrote for.
-        Verb::RootRestore(cmd) => Outward::RootRestore(cmd.run_local(&home).await?),
+        Verb::RootRestore(cmd) => {
+            cmd.reach.reject_unused_reach()?;
+            Outward::RootRestore(Box::new(cmd.run_local(&home).await?))
+        }
         // A bare `swoosh invite`: what is due, read from the root's records with no lock and no prompt.
         Verb::Invite(cmd) => return cmd.run_due(&home).await,
         // Joins a root from an invite: every check and write is local; only the first exchange with the

@@ -194,3 +194,18 @@ async fn a_non_cutting_act_never_syncs() {
         .unwrap();
     assert!(!home.synced().exists(), "no exchange ran");
 }
+
+/// `root lock <dir>` where `<dir>` is the home itself changes the root kept here, as `root lock` does: under
+/// `home.lock`, and said as "on this machine". Red when the home is treated as a copy.
+#[tokio::test]
+async fn root_lock_in_the_home_itself_is_root_lock() {
+    let home = scratch("root-lock-home-dir");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let (result, err) = root_lock(&home, Some(home.dir()), &mut Counting::new([PASS, FRESH])).await;
+    result.unwrap();
+    assert_eq!(
+        err,
+        "changed your root's passphrase on this machine. Other copies keep the old one.\n"
+    );
+    assert!(opens(&home.root_key(), FRESH));
+}

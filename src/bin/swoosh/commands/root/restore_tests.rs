@@ -73,15 +73,29 @@ fn machine(tag: &str, seed: u8) -> Home {
     home
 }
 
+/// `swoosh root restore <dir>`, parsed as the command line gives it.
+fn restore_cmd(dir: &Path) -> RestoreCmd {
+    let cli = Cli::try_parse_from(["swoosh", "root", "restore", dir.to_str().unwrap()]).unwrap();
+    match cli.command {
+        Some(crate::Command::Root(crate::commands::root::RootCmd::Restore(cmd))) => cmd,
+        other => panic!("not root restore: {other:?}"),
+    }
+}
+
 /// Restore `dir` on `home`, exchanging through `dial`: the result, and stderr.
 async fn restore(home: &Home, dir: &Path, dial: &impl Dial) -> (eyre::Result<()>, String) {
+    restore_asking(home, dir, dial, &mut Counting::new([PASS])).await
+}
+
+/// [`restore`], answering the prompt from `prompt`.
+async fn restore_asking(
+    home: &Home,
+    dir: &Path,
+    dial: &impl Dial,
+    prompt: &mut Counting,
+) -> (eyre::Result<()>, String) {
     let mut err = Vec::new();
-    let result = match (RestoreCmd {
-        dir: dir.to_path_buf(),
-    })
-    .restore(home, &mut Counting::new([PASS]))
-    .await
-    {
+    let result = match restore_cmd(dir).restore(home, prompt).await {
         Ok(sync) => sync.finish(home, dial, &mut err).await,
         Err(refused) => Err(refused),
     };
@@ -195,7 +209,7 @@ async fn restore_refuses_a_revoked_own_key() {
         ),
     );
     let mut prompt = Counting::refusing();
-    let refused = RestoreCmd { dir }
+    let refused = restore_cmd(&dir)
         .restore(&home, &mut prompt)
         .await
         .expect_err("refused");
@@ -403,6 +417,11 @@ async fn restore_with_no_answer_publishes_nothing() {
     let (result, err) = restore(&home, &dir, &dial).await;
     result.unwrap();
     assert_eq!(
+        dial.calls(),
+        1,
+        "the one exchange with me/laptop, and nothing offered"
+    );
+    assert_eq!(
         std::fs::read(home.devices()).unwrap(),
         std::fs::read(dir.join("devices")).unwrap(),
         "nothing cut"
@@ -485,4 +504,176 @@ async fn restore_on_a_device_of_another_root_names_leave() {
         refusal.ends_with("to start over: swoosh leave"),
         "{refusal}"
     );
+}
+
+/// The name this machine is given when a list has no row for it: the suggested name, the first time.
+fn suggested() -> String {
+    swoosh::names::suggest().as_str().to_owned()
+}
+
+/// Whether `key` is revoked anywhere `home` keeps revocations: its `revoked`, or the list it holds.
+fn revoked_at(home: &Home, key: VerifyKey) -> bool {
+    swoosh::revoked::open(home).unwrap().is_revoked_key(&key)
+        || swoosh::roster::held(home, TestRoot::seeded(ROOT).verify_key())
+            .is_some_and(|list| list.is_revoked_key(&key))
+}
+
+/// A device that answers above the restore's own cut replaced the list the restore wrote; the restore cuts
+/// again on the newer list, with this machine's row, above the fleet, and offers it, under the one prompt.
+/// Red when the fold's replacement is taken as final.
+#[tokio::test]
+async fn a_restore_answered_from_above_its_cut_carries_its_row_above_the_fleet() {
+    let home = machine("restore-above", SPARE);
+    let dir = stick(&home, &records(1, &[live(LAPTOP, "laptop")], Vec::new()));
+    let laptop = sibling(
+        &home,
+        LAPTOP,
+        &records(3, &[live(LAPTOP, "laptop")], Vec::new()),
+    )
+    .await;
+    let dial = Loopback::new(home.clone(), [(node(LAPTOP), laptop.clone())]);
+    let mut prompt = Counting::new([PASS]);
+    let (result, _) = restore_asking(&home, &dir, &dial, &mut prompt).await;
+    result.unwrap();
+    assert_eq!(prompt.events(), 1, "no second prompt");
+    let here = held(&home);
+    assert_eq!(here.epoch(), swoosh::roster::Epoch(4));
+    let row = row_for(&home, key(SPARE)).expect("this machine's row");
+    assert!(row.until > crate::commands::invite::invite_tests::now());
+    let theirs = swoosh::roster::held(&laptop, TestRoot::seeded(ROOT).verify_key()).unwrap();
+    assert_eq!(
+        theirs.epoch(),
+        swoosh::roster::Epoch(4),
+        "me/laptop took the cut"
+    );
+    assert!(
+        theirs
+            .members()
+            .iter()
+            .any(|member| member.node == key(SPARE))
+    );
+}
+
+/// A no-answer restore's row, dropped when a newer list is folded here later (as `serve` would), is carried
+/// by the next act that cuts. Red when the next act cuts from the folded list alone.
+#[tokio::test]
+async fn a_restore_row_dropped_by_a_later_fold_is_carried_by_the_next_cutting_act() {
+    let home = machine("restore-dropped", SPARE);
+    let dir = stick(&home, &records(1, &[live(LAPTOP, "laptop")], Vec::new()));
+    restore(&home, &dir, &Answering::nobody()).await.0.unwrap();
+    assert!(row_for(&home, key(SPARE)).is_some());
+
+    let fleet = records(3, &[live(LAPTOP, "laptop")], Vec::new());
+    swoosh::roster::fold(
+        &swoosh::home::HomeWrite::take(&home).await.unwrap(),
+        &home,
+        &TestRoot::seeded(ROOT).sign_update(&fleet),
+    )
+    .await
+    .unwrap();
+    assert!(
+        row_for(&home, key(SPARE)).is_none(),
+        "the fold dropped the row"
+    );
+
+    let laptop = sibling(&home, LAPTOP, &fleet).await;
+    let dial = Loopback::new(home.clone(), [(node(LAPTOP), laptop.clone())]);
+    let mut root = swoosh::root::Root::present_to(
+        &home,
+        swoosh::root::RootPlace::Home,
+        swoosh::root::RootVerb::Invite,
+        &mut Counting::new([PASS]),
+        &dial,
+        &mut Vec::new(),
+    )
+    .await
+    .unwrap();
+    root.sign_standing(
+        TestNode::seeded(0x44).verify_key(),
+        "tv".parse().unwrap(),
+        core::time::Duration::from_secs(30 * 24 * 60 * 60),
+    )
+    .unwrap();
+    let committed = root.commit_to(&mut Vec::new()).await.unwrap();
+    assert_eq!(committed.number, swoosh::roster::Epoch(4));
+    let _ = committed.offer(&dial).await;
+    assert!(row_for(&home, key(SPARE)).is_some(), "carried by the cut");
+    let theirs = swoosh::roster::held(&laptop, TestRoot::seeded(ROOT).verify_key()).unwrap();
+    assert!(
+        theirs
+            .members()
+            .iter()
+            .any(|member| member.node == key(SPARE))
+    );
+}
+
+/// A newer list that gave this machine's suggested name to another key: after the restore, this machine's
+/// row has a name fresh against that list, and its key is revoked nowhere. Red when the restore's cut is
+/// united with the newer list and the clash revokes this machine.
+#[tokio::test]
+async fn a_restored_row_whose_name_a_newer_list_took_gets_a_fresh_name() {
+    let name = suggested();
+    let home = machine("restore-name-taken", SPARE);
+    let dir = stick(&home, &records(1, &[live(LAPTOP, "laptop")], Vec::new()));
+    let fleet = records(3, &[live(LAPTOP, "laptop"), live(0x44, &name)], Vec::new());
+    let laptop = sibling(&home, LAPTOP, &fleet).await;
+    let dial = Loopback::new(home.clone(), [(node(LAPTOP), laptop.clone())]);
+    restore(&home, &dir, &dial).await.0.unwrap();
+    let row = row_for(&home, key(SPARE)).expect("this machine's row");
+    assert_ne!(row.label.as_str(), name, "a fresh name");
+    assert_eq!(
+        row_for(&home, key(0x44)).unwrap().label.as_str(),
+        name,
+        "the other device keeps its name"
+    );
+    assert!(!revoked_at(&home, key(SPARE)));
+    assert!(!revoked_at(&laptop, key(SPARE)));
+}
+
+/// A name clash in a list brought forward never revokes this machine's own key: the act's own sync folds a
+/// list holding another key under this machine's name, and this machine's row takes a fresh one. Red when
+/// the clash revokes the row's key, as it does any other device's.
+#[tokio::test]
+async fn a_name_clash_never_revokes_this_machines_own_key() {
+    let name = suggested();
+    let home = machine("restore-clash", SPARE);
+    let dir = stick(&home, &records(1, &[live(LAPTOP, "laptop")], Vec::new()));
+    // Nobody answers: the restore's own cut names this machine against the copy's list.
+    restore(&home, &dir, &Answering::nobody()).await.0.unwrap();
+    assert_eq!(row_for(&home, key(SPARE)).unwrap().label.as_str(), name);
+
+    // The next act's sync brings a list that gave that name to another key.
+    let fleet = records(3, &[live(LAPTOP, "laptop"), live(0x44, &name)], Vec::new());
+    let laptop = sibling(&home, LAPTOP, &fleet).await;
+    let dial = Loopback::new(home.clone(), [(node(LAPTOP), laptop.clone())]);
+    let mut root = swoosh::root::Root::present_to(
+        &home,
+        swoosh::root::RootPlace::Home,
+        swoosh::root::RootVerb::Revoke,
+        &mut Counting::new([PASS]),
+        &dial,
+        &mut Vec::new(),
+    )
+    .await
+    .unwrap();
+    root.revoke_device(&"laptop".parse().unwrap(), key(LAPTOP), &[])
+        .unwrap();
+    let committed = root.commit_to(&mut Vec::new()).await.unwrap();
+    let _ = committed.offer(&dial).await;
+    let row = row_for(&home, key(SPARE)).expect("this machine keeps its row");
+    assert_ne!(row.label.as_str(), name);
+    assert!(!revoked_at(&home, key(SPARE)));
+    assert!(!revoked_at(&laptop, key(SPARE)));
+}
+
+/// `root restore` takes the reach flags every dialing verb takes. Red when they are dropped.
+#[test]
+fn restore_takes_the_reach_flags() {
+    let cli = Cli::try_parse_from(["swoosh", "root", "restore", "/tmp/copy", "--local"]).unwrap();
+    match cli.command {
+        Some(crate::Command::Root(crate::commands::root::RootCmd::Restore(cmd))) => {
+            assert!(cmd.reach.local);
+        }
+        other => panic!("not root restore: {other:?}"),
+    }
 }

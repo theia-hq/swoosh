@@ -52,7 +52,7 @@ mod restore;
 
 pub use backup::{BackupError, backup};
 pub use forget::{Disk, ForgetError, Forgot, Place, RealDisk, forget};
-pub use lock::{RootLockError, lock};
+pub use lock::{Relocked, RootLockError, lock};
 pub use restore::{RestoreError, Restored, Synced, restore};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
@@ -731,6 +731,9 @@ impl Root {
             root.act.sync(dial, out).await;
             root.act.bring_forward(out)?;
             root.act.book.check_bounds(root.act.now)?;
+            if root.act.copy.is_none() {
+                root.carry_own()?;
+            }
             root.act.list_renewals(out);
         }
         let checked = check(&root.act.records(), out)?;
@@ -752,7 +755,8 @@ impl Root {
     ) -> Result<Option<(VerifyKey, u64, Link)>, RootError> {
         let found = find(home, &place, None).await?;
         let pin = found.header.verify_key()?;
-        let book = Book::of(read_list(home, found.copy.as_deref(), pin)?.as_ref());
+        let own = own_key(home)?;
+        let book = Book::of(read_list(home, found.copy.as_deref(), pin)?.as_ref(), own);
         let now = unix_now();
         let (forward, held) = book.read_forward(home, pin, now)?;
         let Some(held) = held else {
@@ -760,6 +764,10 @@ impl Root {
         };
         if forward != book || book.lacks(&held, now) || forward.rows.iter().any(|row| due(row, now))
         {
+            return Ok(None);
+        }
+        // An act on the root kept here signs this machine a live row when it has none, so it signs.
+        if found.copy.is_none() && forward.lacks_own(now) {
             return Ok(None);
         }
         let Some(row) = book.rows.iter().find(|row| &row.label == name) else {
@@ -775,7 +783,10 @@ impl Root {
     pub async fn inspect(home: &Home, place: RootPlace) -> Result<Inspected, RootError> {
         let found = find(home, &place, None).await?;
         let pin = found.header.verify_key()?;
-        let list = Book::of(read_list(home, found.copy.as_deref(), pin)?.as_ref());
+        let list = Book::of(
+            read_list(home, found.copy.as_deref(), pin)?.as_ref(),
+            own_key(home)?,
+        );
         let (forward, _) = list.read_forward(home, pin, unix_now())?;
         Ok(Inspected {
             root: found.header,
@@ -788,9 +799,10 @@ impl Root {
     /// list it left beside its key, if it got that far.
     pub fn half_made(home: &Home, root_key: NodeId) -> Result<HalfMade, RootError> {
         let list = read_list(home, None, root_key.verify_key()?)?;
+        let own = own_key(home)?;
         Ok(HalfMade {
-            book: Book::of(list.as_ref()),
-            own: own_key(home)?,
+            book: Book::of(list.as_ref(), own),
+            own,
             now: unix_now(),
         })
     }
@@ -1188,7 +1200,7 @@ impl Act {
             copy,
             beside: list.map_or(Epoch::UNVERSIONED, RosterDoc::epoch),
             home: home.clone(),
-            book: Book::of(list),
+            book: Book::of(list, own),
             held: None,
             fork: None,
             due: Vec::new(),
@@ -1659,6 +1671,17 @@ impl Root {
         take_standing(home_lock, &act.home, act.key, &standing)
     }
 
+    /// Carry a live row for this machine, on the root kept here: when the records hold none (a list cut past
+    /// this machine's last cut was folded here since, or its row lapsed), sign one as a restore does, renewing
+    /// a lapsed row or adding one under a name fresh against the records for 90 days. The commit's own fold
+    /// takes its standing as this machine's. A revoked key is never signed.
+    fn carry_own(&mut self) -> Result<(), RootError> {
+        match self.act.own {
+            Some(own) if self.act.book.lacks_own(self.act.now) => self.sign_own(own).map(drop),
+            _ => Ok(()),
+        }
+    }
+
     /// Sign this machine's standing: from its live row for its duration, or on a new row under the
     /// suggested name for 90 days when it has none.
     fn sign_own(&mut self, own: VerifyKey) -> Result<Link, RootError> {
@@ -1761,15 +1784,21 @@ struct Book {
     /// The revoked devices by key, each with the name its row had, so an update says which device a key
     /// was.
     revoked_keys: BTreeMap<[u8; 32], RevokedDevice>,
+    /// This machine's key, when it has one: a name clash never revokes it ([`Book::take_member`]).
+    own: Option<VerifyKey>,
 }
 
 impl Book {
-    /// The records `list` holds, or none when there is no list.
-    fn of(list: Option<&RosterDoc>) -> Self {
+    /// The records `list` holds, or none when there is no list, read on the machine whose key is `own`.
+    fn of(list: Option<&RosterDoc>, own: Option<VerifyKey>) -> Self {
         let Some(list) = list else {
-            return Self::default();
+            return Self {
+                own,
+                ..Self::default()
+            };
         };
         Self {
+            own,
             last_update: list.epoch(),
             rows: list.members().to_vec(),
             marked: Vec::new(),
@@ -1886,8 +1915,21 @@ impl Book {
     /// Bring one device from an update into these records.
     fn take_member(&mut self, member: &Member, now: u64, brought: &mut Brought) {
         // The update's device wins its name: a different live row under it is revoked here, and leaves the
-        // rows at once, so the name is held once.
+        // rows at once, so the name is held once. This machine's own row is never revoked by a clash: the
+        // machine that keeps the root would revoke itself, and a cut would publish it. It yields the name and
+        // takes one fresh against these records and the update's device.
         if let Some(index) = self
+            .rows
+            .iter()
+            .position(|row| row.label == member.label && row.node != member.node)
+            && Some(self.rows[index].node) == self.own
+        {
+            let rows = &self.rows;
+            let fresh = fresh_name(member.label.as_str(), |name| {
+                name == &member.label || rows.iter().any(|row| &row.label == name)
+            });
+            self.rows[index].label = fresh;
+        } else if let Some(index) = self
             .rows
             .iter()
             .position(|row| row.label == member.label && row.node != member.node)
@@ -2092,6 +2134,18 @@ impl Book {
                 && now < row.until
                 && (newest_signed.saturating_add(DAY) > now
                     || now.saturating_add(duration) <= row.until))
+    }
+
+    /// Whether these records hold no live row for this machine's key, and that key is not revoked: the case
+    /// in which an act on the root kept here signs one ([`Root::carry_own`]).
+    fn lacks_own(&self, now: u64) -> bool {
+        self.own.is_some_and(|own| {
+            !self.revoked_keys.contains_key(own.bytes())
+                && !self
+                    .rows
+                    .iter()
+                    .any(|row| row.node == own && row.until > now)
+        })
     }
 
     /// Drop every id whose standing has ended: a revocation of an ended standing blocks nothing.

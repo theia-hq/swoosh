@@ -1071,12 +1071,17 @@ async fn renewal_prints_its_list_after_the_prompt() {
 // --- renewing by name ---
 
 #[tokio::test]
-async fn renewing_a_lapsed_row_prints_its_key_and_the_revoke_line_after_the_prompt() {
+async fn renewing_a_lapsed_row_warns_before_the_prompt_and_says_renewed_after() {
     let laptop = lapsed(LAPTOP, "laptop");
-    let line = format!(
-        "renewing me/laptop ({key}), which ended on {}. Whatever machine holds {key} picks this up the \
-         next time it reaches one of your devices. If that is not a machine you still have, stop here and \
-         run: swoosh revoke me/laptop",
+    let warning = format!(
+        "warning: me/laptop ({}) ended on {}; renewing it lets whatever machine holds that key back in. If \
+         that is not a machine you still have, do not type the passphrase: swoosh revoke me/laptop",
+        swoosh::credential::short(&key(LAPTOP)),
+        Date(laptop.until),
+    );
+    let renewed = format!(
+        "renewed me/laptop, which had ended on {}. Whatever machine holds {key} picks this up the next time \
+         it reaches one of your devices.",
         Date(laptop.until),
         key = key(LAPTOP)
     );
@@ -1085,15 +1090,21 @@ async fn renewing_a_lapsed_row_prints_its_key_and_the_revoke_line_after_the_prom
     holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
     let ran = invite(&home, &["laptop"]).await;
     assert!(ran.result.is_ok(), "{:?}", ran.result);
-    assert!(ran.tape.at("<prompt>") < ran.tape.at(&line));
+    assert!(
+        ran.tape.at(&warning) < ran.tape.at("<prompt>"),
+        "the prompt is the stop"
+    );
+    assert!(ran.tape.at("<prompt>") < ran.tape.at(&renewed));
+    assert!(!ran.err.contains("stop here"), "{}", ran.err);
 
-    // At no terminal, the act refuses before its prompt: no line states an act that did not happen.
+    // At no terminal, the act refuses before its prompt, and warns of nothing it will not do.
     let home = scratch("lapsed-line-no-terminal");
     holds(&home, &[live(OWN, "desk"), laptop], Vec::new()).await;
     let before = snapshot(home.dir());
     let ran = invite_at(&home, &["laptop"], false).await;
     assert!(ran.result.is_err());
-    assert!(!ran.err.contains(&line), "{}", ran.err);
+    assert!(!ran.err.contains("warning:"), "{}", ran.err);
+    assert!(!ran.err.contains("renewed"), "{}", ran.err);
     assert!(snapshot(home.dir()) == before, "nothing signed");
 }
 

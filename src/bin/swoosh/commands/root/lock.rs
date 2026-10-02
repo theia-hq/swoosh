@@ -31,13 +31,13 @@ impl RootLockCmd {
         prompt: &mut impl Prompt,
         err: &mut impl Write,
     ) -> eyre::Result<()> {
-        swoosh::root::lock(home, self.dir.as_deref(), prompt).await?;
-        match &self.dir {
-            None => writeln!(
+        let relocked = swoosh::root::lock(home, self.dir.as_deref(), prompt).await?;
+        match (relocked, &self.dir) {
+            (swoosh::root::Relocked::Here, _) | (_, None) => writeln!(
                 err,
                 "changed your root's passphrase on this machine. Other copies keep the old one."
             )?,
-            Some(dir) => writeln!(
+            (swoosh::root::Relocked::Copy, Some(dir)) => writeln!(
                 err,
                 "changed your root's passphrase in {}. Other copies keep the old one.",
                 EscapedPath(dir)

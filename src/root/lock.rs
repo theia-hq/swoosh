@@ -54,7 +54,10 @@ pub async fn lock(
     home: &Home,
     dir: Option<&Path>,
     prompt: &mut impl Prompt,
-) -> Result<(), RootLockError> {
+) -> Result<Relocked, RootLockError> {
+    // A `<dir>` that is the home itself names the root kept here, and is changed as that one is: under
+    // `home.lock`.
+    let dir = dir.filter(|dir| !is_home(dir, home));
     let standing = Standing::read(home).await.map_err(RootError::from)?;
     let (path, asked) = match (dir, standing) {
         (None, Standing::HoldsRoot { .. }) => (home.root_key(), Asked::Root),
@@ -112,5 +115,28 @@ pub async fn lock(
             NewLock::Passphrase(&new),
         )
         .map_err(RootError::from)?;
-    Ok(())
+    Ok(match dir {
+        None => Relocked::Here,
+        Some(_) => Relocked::Copy,
+    })
+}
+
+/// Where [`lock`] changed the root's passphrase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Relocked {
+    /// The root kept on this machine (a `<dir>` that is the home included).
+    Here,
+    /// The copy in the `<dir>` named.
+    Copy,
+}
+
+/// Whether `dir`, resolved, is the home's own directory.
+fn is_home(dir: &Path, home: &Home) -> bool {
+    match (
+        std::fs::canonicalize(dir),
+        std::fs::canonicalize(home.dir()),
+    ) {
+        (Ok(dir), Ok(home)) => dir == home,
+        _ => false,
+    }
 }

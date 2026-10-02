@@ -21,6 +21,8 @@ pub struct RestoreCmd {
     /// the copy's own directory, which root backup made
     #[arg(value_name = "dir")]
     pub(crate) dir: PathBuf,
+    #[command(flatten)]
+    pub(crate) reach: ReachArgs,
 }
 
 impl RestoreCmd {
@@ -37,15 +39,7 @@ impl RestoreCmd {
         let restored = swoosh::root::restore(home, &self.dir, prompt).await?;
         Ok(RestoreSync {
             restored,
-            // `root restore` takes no reach flags: its exchange binds as a plain run does, over the relay and
-            // the resolver `serve.toml` names.
-            reach: ReachArgs {
-                transport: swoosh::transport::Transport::default(),
-                local: false,
-                peer: Vec::new(),
-                relay: None,
-                resolver: None,
-            },
+            reach: self.reach,
         })
     }
 }

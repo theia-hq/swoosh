@@ -412,11 +412,12 @@ async fn root_forget_into_a_synced_copy_writes_the_list_and_stops() {
     assert_eq!(
         refusal(result),
         format!(
-            "{shown} is in a synced folder, and this update must reach the cloud first. Once it has, choose \
-             Remove Download on {shown}, then run it again: swoosh root forget {shown}"
+            "brought the copy in {shown} up to date; your root is still on this machine. {shown} is in a \
+             synced folder: once the update reaches the cloud, choose Remove Download on {shown}, then run it \
+             again: swoosh root forget {shown}"
         )
     );
-    assert!(err.contains("brought the copy in"), "{err}");
+    assert!(err.is_empty(), "one line, the refusal: {err}");
     assert!(home.root_key().exists(), "nothing deleted");
     assert_eq!(
         std::fs::read(dir.join("devices")).unwrap(),

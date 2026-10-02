@@ -195,10 +195,13 @@ pub enum ForgetError {
         /// The directory named.
         dir: PathBuf,
     },
-    /// Check 6 wrote this machine's list into a synced copy, and the run stops until it is evicted again.
+    /// Check 6 wrote this machine's list into a synced copy, and the run stops until it is evicted again:
+    /// one line, saying what landed and what did not.
     #[error(
-        "{} is in a synced folder, and this update must reach the cloud first. Once it has, choose Remove \
-         Download on {}, then run it again: swoosh root forget {}",
+        "brought the copy in {} up to date; your root is still on this machine. {} is in a synced folder: \
+         once the update reaches the cloud, choose Remove Download on {}, then run it again: swoosh root \
+         forget {}",
+        EscapedPath(.dir),
         EscapedPath(.dir),
         EscapedPath(.dir),
         EscapedPath(.dir)
@@ -348,16 +351,18 @@ pub async fn forget(
         let bytes = std::fs::read(home.devices()).map_err(super::io_at(&home.devices()))?;
         crate::config::write_private_atomic(&home_lock, &list, &bytes)
             .map_err(super::io_at(&list))?;
-        let _ = writeln!(
-            out,
-            "brought the copy in {} up to date with this machine's list of your devices.",
-            EscapedPath(dir)
-        );
+        // A synced copy stops here, in one line that says what landed; any other run goes on to the delete,
+        // and says what it wrote first.
         if synced {
             return Err(ForgetError::Synced {
                 dir: dir.to_path_buf(),
             });
         }
+        let _ = writeln!(
+            out,
+            "brought the copy in {} up to date with this machine's list of your devices.",
+            EscapedPath(dir)
+        );
     }
     super::remove_file(&home.root_key())?;
     std::fs::File::open(home.dir())

@@ -67,6 +67,9 @@ fn lock_help_lists_exactly_the_lockmethod_values() {
         .to_string();
     assert!(help.contains("passphrase"), "{help}");
     assert!(!help.contains("plain"), "{help}");
+    // The short form: one line per argument, the values inline, never a block per value.
+    assert!(!help.contains("Possible values:"), "{help}");
+    assert!(help.contains("[possible values: passphrase]"), "{help}");
 }
 
 /// A plain key gets a passphrase: the header is sealed, and the first time says `serve` asks at each start.
@@ -213,4 +216,61 @@ async fn no_prompt_or_passphrase_refusal_names_a_key_file() {
     let refusal = format!("{:#}", resolved.err().expect("three wrong ones refuse"));
     assert!(!refusal.contains(&home_dir), "{refusal}");
     assert_eq!(refusal, "that passphrase does not open this machine's key.");
+}
+
+/// A prompt with nobody at a terminal.
+struct NoTerminal;
+
+impl swoosh::passphrase::Prompt for NoTerminal {
+    fn terminal(&self) -> bool {
+        false
+    }
+
+    fn unlock(
+        &mut self,
+        _asked: swoosh::passphrase::Asked<'_>,
+    ) -> eyre::Result<keystore::Passphrase> {
+        eyre::bail!("no terminal")
+    }
+
+    fn choose(
+        &mut self,
+        _asked: swoosh::passphrase::Asked<'_>,
+    ) -> eyre::Result<swoosh::passphrase::Choice> {
+        eyre::bail!("no terminal")
+    }
+
+    fn say(&mut self, _line: &str) {}
+}
+
+/// At no terminal, `lock` says it needs one and how to get one over ssh; changing or removing never names
+/// `lock --remove`, the command just run. Red when the line for using the key prints here.
+#[tokio::test]
+async fn lock_at_no_terminal_says_it_needs_one() {
+    let home = scratch("lock-no-tty");
+    let mut err = Vec::new();
+    let set = parse(&[])
+        .unwrap()
+        .lock(&home, &mut NoTerminal, &mut err)
+        .await;
+    assert_eq!(
+        format!("{:#}", set.unwrap_err()),
+        "setting a passphrase on this machine's key needs a terminal: over swoosh ssh, add -t after --"
+    );
+    lock(&home, &[], &mut Counting::new([LONG]))
+        .await
+        .0
+        .unwrap();
+    for args in [&[][..], &["--remove"][..]] {
+        let refused = parse(args)
+            .unwrap()
+            .lock(&home, &mut NoTerminal, &mut Vec::new())
+            .await;
+        let refusal = format!("{:#}", refused.unwrap_err());
+        assert_eq!(
+            refusal,
+            "changing this machine's key's passphrase needs a terminal: over swoosh ssh, add -t after --"
+        );
+        assert!(!refusal.contains("lock --remove"));
+    }
 }

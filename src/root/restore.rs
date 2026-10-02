@@ -33,6 +33,7 @@ use super::{
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
 use crate::passphrase::{Asked, Prompt};
+use crate::roster::Epoch;
 use crate::standing::Standing;
 use crate::sync::{Dial, Until};
 
@@ -95,6 +96,11 @@ pub struct Restored {
     own: VerifyKey,
     /// The live devices the copy lists, but this machine, in random order.
     peers: Vec<(VerifyKey, String)>,
+    /// The number of the list the restore left as `devices`: its own cut, or the copy's list.
+    written: Epoch,
+    /// The root, unlocked at the prompt and held through the exchange, so an answer above `written` is
+    /// carried with no second prompt.
+    unlocked: Root,
 }
 
 /// What the exchange after a restore found.
@@ -210,12 +216,18 @@ pub async fn restore(
         // Lapsed or absent: signed as a mint signs its own, into a list kept here.
         _ => root_here.take_own(&home_lock, own)?,
     }
+    // Read under the lock: a fold that lands once it is let go is an answer above this number, and is
+    // carried after the sync.
+    let written = crate::roster::read_held(&home.devices(), pin)
+        .map_or(Epoch::UNVERSIONED, |(list, _)| list.epoch());
     drop(home_lock);
     Ok(Restored {
         root,
         was_device,
         own,
         peers,
+        written,
+        unlocked: root_here,
     })
 }
 
@@ -254,13 +266,29 @@ impl Restored {
             .map_err(RootError::from)?;
         let held = crate::roster::read_held(&home.devices(), pin);
         if revoked.is_revoked_key(&self.own)
-            || held.is_some_and(|(held, _)| held.is_revoked_key(&self.own))
+            || held
+                .as_ref()
+                .is_some_and(|(held, _)| held.is_revoked_key(&self.own))
         {
             let _home_lock = HomeWrite::take(home).await.map_err(RootError::from)?;
             for path in [home.root_key(), home.key_cert(), home.root_pub()] {
                 remove_file(&path)?;
             }
             return Err(RestoreError::RevokedOwnKey);
+        }
+        // An answer above the restore's own number replaced `devices` with a list that may not carry this
+        // machine's row. The row step runs again on that list's records, never a union with the replaced cut
+        // (a union would take a name the newer list gave another key, and revoke this machine), and the cut
+        // goes to your devices. At or below, the list here is the restore's own, and nothing is cut.
+        if let Some((newer, _)) = held.filter(|(held, _)| held.epoch() > self.written) {
+            let mut root = self.unlocked;
+            root.act = Act::new(home, self.root, None, Some(&newer), Some(self.own));
+            root.act.bring_forward(&mut io::sink())?;
+            root.carry_own()?;
+            let committed = root.commit_to(&mut io::sink()).await?;
+            if committed.number > newer.epoch() {
+                let _reach = committed.offer(dial).await;
+            }
         }
         Ok(Synced { from })
     }

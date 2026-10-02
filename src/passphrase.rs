@@ -48,10 +48,15 @@ const CHOOSE_HINT: &str =
 /// The refusal of a chosen passphrase under [`MINIMUM`].
 pub const TOO_SHORT: &str = "a passphrase needs at least 15 characters; nothing was changed. Press Enter at the prompt and swoosh makes one.";
 
-/// The refusal when this machine's key is locked and nobody is at a terminal to type its passphrase.
-pub const NO_TERMINAL_FOR_KEY: &str = "no terminal to ask for the passphrase on; a sealed identity is unlocked by typing \
-     its passphrase at a terminal, so a node that starts with nobody at the keyboard needs a plain key: swoosh lock \
-     --remove";
+/// The refusal when this machine's key, which has a passphrase, is to be used and nobody is at a terminal to
+/// type it: the two ways out, the command last, which runs only at a terminal.
+pub const NO_TERMINAL_FOR_KEY: &str = "this machine's key has a passphrase and there is no terminal to type it at. \
+     Start this from a terminal, or remove the passphrase there: swoosh lock --remove";
+
+/// The refusal when the passphrase on this machine's key is to be changed or removed and nobody is at a
+/// terminal: never `lock --remove`, the command just run.
+pub const CHANGE_FOR_KEY_NEEDS_TERMINAL: &str =
+    "changing this machine's key's passphrase needs a terminal: over swoosh ssh, add -t after --";
 
 /// The refusal of two entries that differ.
 pub const MISMATCH: &str = "the two did not match.";
