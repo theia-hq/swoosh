@@ -219,8 +219,8 @@ fn a_key_file_others_can_read_is_refused() {
 }
 
 /// A root key others can read is refused the way this machine's key is, by `status` and every other verb,
-/// with the line that names `chmod`, never as a torn root key. A bit the key store refuses that lets others
-/// neither read nor write the key is refused with the key store's reason, never as damage either.
+/// with the line that names `chmod`, never as a torn root key. A bit that lets others neither read nor
+/// write the key is refused before any verb too, in swoosh's words and never the key store's.
 #[test]
 fn a_loose_root_key_names_chmod_not_damage() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -256,21 +256,17 @@ fn a_loose_root_key_names_chmod_not_damage() {
     }
 
     std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o601)).unwrap();
+    let access = format!("error: {path} gives others access: chmod 600 {path}\n");
     for verb in ["status", "sync"] {
         let refused = swoosh_at(&home, &[verb]);
-        let said = format!("{}{}", text(&refused.stdout), text(&refused.stderr));
-        assert_eq!(refused.status.code(), Some(1), "{verb}: {said}");
-        assert!(!said.contains("records disagree"), "{verb}: {said}");
-        assert!(
-            said.contains(&format!("chmod 600 {path}")),
-            "{verb}: {said}"
-        );
+        assert_eq!(refused.status.code(), Some(1), "{verb}");
+        assert!(refused.stdout.is_empty(), "{verb}");
+        assert_eq!(text(&refused.stderr), access, "{verb}");
     }
 
     // A home with no key of its own, as a system backup restores it, says the same.
     std::fs::remove_file(home.join("machine").join("key")).unwrap();
     let refused = swoosh_at(&home, &["status"]);
-    let said = format!("{}{}", text(&refused.stdout), text(&refused.stderr));
-    assert_eq!(refused.status.code(), Some(1), "{said}");
-    assert!(said.contains(&format!("chmod 600 {path}")), "{said}");
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(text(&refused.stderr), access);
 }

@@ -139,11 +139,11 @@ impl Resident {
         }
     }
 
-    /// The services off, as the gate reads them now, at most [`DISABLED_NAMES_CAP`] of them so the reply
+    /// The services the gate refuses now (off, or no longer in `services`), at most [`DISABLED_NAMES_CAP`] of them so the reply
     /// always decodes. A file that went missing or cannot be read reports the set read last, as the gate
     /// refuses it.
     pub fn disabled_names(&self) -> DisabledList {
-        let mut names = self.off.off();
+        let mut names = self.off.refused();
         names.truncate(DISABLED_NAMES_CAP);
         DisabledList::Known(names)
     }

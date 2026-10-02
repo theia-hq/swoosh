@@ -498,11 +498,7 @@ impl ServeCmd {
         } = claim;
         // The served names in the order the person gave them, for the banner and the per-service lines:
         // read from every entry, before the fetch and receive services were pulled out.
-        let names: Vec<String> = started
-            .entries()
-            .iter()
-            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
-            .collect();
+        let names = started.names();
         // Every node answers its own `control.stop` and member-only `control.services`, always, whatever
         // else it serves: the node-lifecycle control surface is part of being a node, not a service the
         // operator opts into. Both are MEMBER-only (`.member_service` below): the gate admits a family
@@ -597,6 +593,9 @@ impl ServeCmd {
             self.reach.keep_reach(file);
         })?;
         drop(home_lock);
+        // From here the watcher holds what this run serves: a service later dropped from `services` is
+        // refused, and a change the run cannot apply is named.
+        enabled.serving(&started);
         if !matches!(started, Started::Named(_)) {
             let off = enabled.off();
             for name in names.iter().filter(|name| off.contains(*name)) {
@@ -615,7 +614,7 @@ impl ServeCmd {
             addr.node,
             status_addr,
             tightbeam::tunnel::ServiceCatalog::clone(&catalog),
-            enabled,
+            enabled.clone(),
             cancel.clone(),
         ));
 
@@ -675,6 +674,11 @@ impl ServeCmd {
             stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock) => stopped?,
             () = sync_rounds(node, &home) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
+            // A running `serve` gives service only at its start, so a relay, a resolver or a service
+            // changed in `serve.toml` waits for the next one; this says so once per change.
+            () = enabled.watch(|waiting| eprintln!("{waiting}")) => {
+                unreachable!("serve.toml is checked until the node stops")
+            }
         };
         // The teardown line is best-effort: a piped consumer may have already closed stdout by the time
         // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic.

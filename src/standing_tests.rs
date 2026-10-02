@@ -421,6 +421,39 @@ async fn a_malformed_pin_reads_damaged() {
     );
 }
 
+/// A root key the key store refuses on its modes, or a path there that is not a file, is refused in
+/// swoosh's words, never the key store's, and never as a torn root key: the modes as the check before every
+/// verb names them, the rest as not a regular file.
+#[tokio::test]
+async fn a_root_key_the_key_store_refuses_is_named_in_swoosh_words() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = home("root-refused");
+    std::fs::write(home.root_key(), b"not a key").expect("write root.key");
+    std::fs::set_permissions(home.root_key(), std::fs::Permissions::from_mode(0o601)).unwrap();
+    let full = std::path::absolute(home.root_key()).unwrap();
+    let full = full.display();
+    match Standing::read(&home).await {
+        // The scratch path holds parentheses, so the command quotes it; the line is the check's own.
+        Err(error @ StandingError::Loose(_)) => assert_eq!(
+            error.to_string(),
+            format!("{full} gives others access: chmod 600 '{full}'")
+        ),
+        other => panic!("expected a loose root key, read {other:?}"),
+    }
+
+    std::fs::remove_file(home.root_key()).unwrap();
+    std::fs::create_dir(home.root_key()).unwrap();
+    std::fs::set_permissions(home.root_key(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    match Standing::read(&home).await {
+        Err(error @ StandingError::NotAFile { .. }) => assert_eq!(
+            error.to_string(),
+            format!("{} is not a regular file", home.root_key().display())
+        ),
+        other => panic!("expected a root key that is not a file, read {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn a_root_key_with_no_readable_header_reads_damaged() {
     let home = home("root-no-key");

@@ -68,6 +68,15 @@ pub enum StandingError {
     /// The roots revoked here could not be read. Fails closed: a revoked root is never read as live.
     #[error("could not read the revocations on this machine")]
     Revoked(#[source] crate::revoked::RevokedError),
+    /// A key file the standing is read from has loose modes or another owner.
+    #[error(transparent)]
+    Loose(crate::home::LooseFile),
+    /// A key file the standing is read from is not a regular file.
+    #[error("{} is not a regular file", EscapedPath(path))]
+    NotAFile {
+        /// The path.
+        path: PathBuf,
+    },
     /// A file the standing is read from could not be read.
     #[error("could not read {}", EscapedPath(path))]
     Read {
@@ -191,7 +200,7 @@ impl fmt::Display for Disagreement {
                 file_name(path)
             ),
             Self::UnreadableRoot { path } => {
-                write!(formatter, "{} is not a readable root key", file_name(path))
+                write!(formatter, "{} is not a root key", file_name(path))
             }
         }
     }
@@ -375,21 +384,18 @@ async fn held_root(home: &Home, revoked: &Denylist) -> Result<Option<NodeId>, St
 }
 
 /// The key `root.key`'s header names, read without unlocking it. Only a file whose bytes are not a root
-/// key is damaged. One the key store will not open (its modes or owner, or not a regular file), or that
-/// could not be read, is a read error carrying the key store's reason, so a sound key with loose modes
-/// never reads as a torn one.
+/// key is damaged. One the key store will not open is refused in swoosh's words, never the key store's:
+/// loose modes or another owner as [`Home::check_key_file`](crate::home::Home::check_key_file) names them,
+/// and a path that is not a regular file as that. One that could not be read is a read error. So a sound
+/// key with loose modes never reads as a torn one.
 fn root_key(path: PathBuf) -> Result<NodeId, StandingError> {
     match KeyFile::root(&path).load() {
         Ok(Some(stored)) => Ok(stored.node_id()),
         Err(keystore::Error::Io { source, .. }) => Err(StandingError::Read { path, source }),
-        Err(
-            error @ (keystore::Error::Permissive { .. }
-            | keystore::Error::Owner { .. }
-            | keystore::Error::NotAFile { .. }),
-        ) => Err(StandingError::Read {
-            path,
-            source: io::Error::other(error),
-        }),
+        Err(keystore::Error::Permissive { .. } | keystore::Error::Owner { .. }) => {
+            Err(StandingError::Loose(crate::home::loose_key_file(path)))
+        }
+        Err(keystore::Error::NotAFile { .. }) => Err(StandingError::NotAFile { path }),
         Ok(None) | Err(_) => Err(StandingError::Damaged(Disagreement::UnreadableRoot {
             path,
         })),

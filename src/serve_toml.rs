@@ -12,7 +12,13 @@
 //! turned back on, with no restart, and its status reports the same set the gate refuses. A file that
 //! goes missing or cannot be read keeps everything read last, so deleting the file never turns a service
 //! back on.
+//!
+//! A running `serve` takes service away live and gives it only when it starts, where its routes are
+//! proven and its banner says what it serves. So a service dropped from `services` is refused on its next
+//! stream, as one turned off is, while a service added there, and a changed relay or resolver, wait for
+//! the next `serve`; the watcher names what waits ([`Waiting`]) so the run can say so once.
 
+use core::time::Duration;
 use std::collections::BTreeSet;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
@@ -24,11 +30,15 @@ use tightbeam::enabled::EnabledServices;
 
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
+use crate::serve::Started;
 use crate::transport::{RelayUrl, ResolverUrl};
 
 /// The most bytes `serve.toml` may hold: far above any list of services, and a bound on what one read of a
 /// running `serve` allocates.
 pub const MAX_SERVE_TOML: u64 = 64 * 1024;
+
+/// How often a running `serve` checks the file for what waits for its next start, with no stream asking.
+pub const CHECK_EVERY: Duration = Duration::from_secs(1);
 
 /// The services key: the list a bare `serve` resumes.
 const SERVICES: &str = "services";
@@ -263,6 +273,84 @@ pub struct LiveServeToml {
     shared: Arc<Watched>,
 }
 
+/// What a running `serve` serves, fixed when its routes bound: what a later read is held against.
+struct Serving {
+    /// The names its services are bound under. Only these are refused for leaving `services`: the node's
+    /// own routes are bound by no entry.
+    names: BTreeSet<String>,
+    /// The relay the file held once the run saved what it was told, which is the one it bound.
+    relay: Option<RelayUrl>,
+    /// The resolver, likewise.
+    resolver: Option<ResolverUrl>,
+}
+
+/// What `serve.toml` holds that a running `serve` applies only when it next starts: a relay or a resolver
+/// other than the one it bound, and the services it lists that the run does not serve. Empty when the file
+/// holds nothing the run is not doing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Waiting {
+    /// The relay changed.
+    pub relay: bool,
+    /// The resolver changed.
+    pub resolver: bool,
+    /// The services added, sorted.
+    pub added: Vec<String>,
+}
+
+impl Waiting {
+    /// Whether nothing waits.
+    pub fn is_empty(&self) -> bool {
+        !self.relay && !self.resolver && self.added.is_empty()
+    }
+}
+
+impl core::fmt::Display for Waiting {
+    /// One line naming each change that waits: "the changed relay and the added service drop in serve.toml
+    /// take effect on the next serve".
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut items = Vec::new();
+        if self.relay {
+            items.push("the changed relay".to_owned());
+        }
+        if self.resolver {
+            items.push("the changed resolver".to_owned());
+        }
+        // Each name passed the service-name parser, so it holds nothing a terminal would act on.
+        match self.added.as_slice() {
+            [] => {}
+            [one] => items.push(format!("the added service {one}")),
+            many => items.push(format!("the added services {}", and_list(many))),
+        }
+        let verb = if items.len() == 1 && self.added.len() < 2 {
+            "takes"
+        } else {
+            "take"
+        };
+        write!(
+            f,
+            "{} in serve.toml {verb} effect on the next serve",
+            and_list(&items)
+        )
+    }
+}
+
+/// `items` as a list a sentence reads: "a", "a and b", "a, b and c".
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [head @ .., last] => format!("{} and {last}", head.join(", ")),
+    }
+}
+
+/// The names `file`'s services run, as a bare `serve` started over the file at `path` would bind them;
+/// `None` when it lists a service that is not one.
+fn running(file: &ServeToml, path: &Path) -> Option<BTreeSet<String>> {
+    Started::bare(file, path)
+        .ok()
+        .map(|started| started.names().into_iter().collect())
+}
+
 /// The file a [`LiveServeToml`] reads, what it read first, and what it read last.
 struct Watched {
     path: PathBuf,
@@ -274,6 +362,13 @@ struct Watched {
 struct Held {
     /// The file, as the last good read found it.
     file: ServeToml,
+    /// The names `file`'s services run, as a bare `serve` would start them (the default when it lists
+    /// none). `None` only while the first read lists a service that is not one: a `serve` that named its
+    /// services started over such a file, and its own write replaces it.
+    running: Option<BTreeSet<String>>,
+    /// What the run serves, once its routes bound; `None` before, when nothing is refused for leaving
+    /// `services` and nothing waits.
+    serving: Option<Serving>,
     /// The stamp of the file that read came from; `None` re-reads at the next stat.
     stamp: Option<FileStamp>,
     /// When the file was last statted, to debounce the next stat.
@@ -290,15 +385,18 @@ impl LiveServeToml {
     pub fn load(home: &Home) -> Result<Self, ServeTomlError> {
         let path = home.serve_toml();
         let (file, stamp) = read_stamped(&path)?;
+        let running = running(&file, &path);
         Ok(Self {
             shared: Arc::new(Watched {
-                path,
                 first: file.clone(),
                 state: Mutex::new(Held {
                     file,
+                    running,
+                    serving: None,
                     stamp,
                     last_stat: Some(Instant::now()),
                 }),
+                path,
             }),
         })
     }
@@ -319,15 +417,79 @@ impl LiveServeToml {
         self.refreshed().file.off.iter().cloned().collect()
     }
 
+    /// The services the gate refuses now, sorted: those off, and those the run serves that `services` no
+    /// longer runs. What the status reports as off, so it and the gate never disagree.
+    pub fn refused(&self) -> Vec<String> {
+        let held = self.refreshed();
+        let mut refused = held.file.off.clone();
+        refused.extend(held.removed());
+        refused.into_iter().collect()
+    }
+
+    /// Hold the file this run just wrote, at once rather than at the next stat, and fix what the run
+    /// serves: the names `started` bound and the relay and resolver the file now holds. Called once its
+    /// routes bound and it saved what it was told, before the first stream, so its own write never reads
+    /// as a service removed.
+    pub fn serving(&self, started: &Started) {
+        let mut held = self.lock();
+        held.stamp = None;
+        held.last_stat = None;
+        self.refresh(&mut held);
+        held.serving = Some(Serving {
+            names: started.names().into_iter().collect(),
+            relay: held.file.relay.clone(),
+            resolver: held.file.resolver.clone(),
+        });
+    }
+
+    /// What the file holds now that the run applies only when it next starts.
+    pub fn waiting(&self) -> Waiting {
+        let held = self.refreshed();
+        let Some(serving) = &held.serving else {
+            return Waiting::default();
+        };
+        Waiting {
+            relay: held.file.relay != serving.relay,
+            resolver: held.file.resolver != serving.resolver,
+            added: held
+                .running
+                .iter()
+                .flatten()
+                .filter(|name| !serving.names.contains(*name))
+                .cloned()
+                .collect(),
+        }
+    }
+
+    /// Check the file every [`CHECK_EVERY`], for as long as the run lasts, and hand `say` what waits each
+    /// time that changes, so a change the run cannot apply is named once, when it is made.
+    pub async fn watch(&self, mut say: impl FnMut(&Waiting)) {
+        let mut said = Waiting::default();
+        loop {
+            tokio::time::sleep(CHECK_EVERY).await;
+            let waiting = self.waiting();
+            if waiting != said {
+                if !waiting.is_empty() {
+                    say(&waiting);
+                }
+                said = waiting;
+            }
+        }
+    }
+
     /// The held state, re-read first when the file changed.
     fn refreshed(&self) -> MutexGuard<'_, Held> {
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut state = self.lock();
         self.refresh(&mut state);
         state
+    }
+
+    /// The held state, as it is.
+    fn lock(&self) -> MutexGuard<'_, Held> {
+        self.shared
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Re-read the file when its stamp changed, at most once per [`STAT_DEBOUNCE`]. Every failure keeps
@@ -355,21 +517,29 @@ impl LiveServeToml {
 impl Held {
     /// Take one read of the file at `path`, whose stat just gave `statted`. Only a read of a file that is
     /// there replaces what is held: a file removed between the stat and the read reads as absent, and
-    /// keeps it, so deleting the file never turns a service back on. A failed read keeps it too. A file
-    /// whose contents are refused is marked as read, so it is not read again until it changes; any other
-    /// failure is tried again at the next stat.
+    /// keeps it, so deleting the file never turns a service back on. A failed read keeps it too, and so
+    /// does one whose `services` lists a service that is not one, which a running `serve` treats as damage
+    /// rather than as every service removed. A file whose contents are refused is marked as read, so it is
+    /// not read again until it changes; any other failure is tried again at the next stat.
     fn take(
         &mut self,
         path: &Path,
         read: Result<(ServeToml, Option<FileStamp>), ServeTomlError>,
         statted: Option<FileStamp>,
     ) {
+        let read = read.and_then(|(file, stamp)| match running(&file, path) {
+            Some(running) => Ok((file, running, stamp)),
+            None => Err(ServeTomlError::Damaged {
+                path: path.to_owned(),
+            }),
+        });
         match read {
-            Ok((file, Some(stamp))) => {
+            Ok((file, running, Some(stamp))) => {
                 self.file = file;
+                self.running = Some(running);
                 self.stamp = Some(stamp);
             }
-            Ok((_, None)) => {}
+            Ok((_, _, None)) => {}
             Err(error) => {
                 if matches!(
                     error,
@@ -387,9 +557,27 @@ impl Held {
     }
 }
 
+impl Held {
+    /// The names the run serves that the held `services` no longer runs. A name bound by no entry (the
+    /// node's own routes) is never among them, and an emptied list runs the default, never nothing.
+    fn removed(&self) -> impl Iterator<Item = String> + '_ {
+        self.serving
+            .iter()
+            .zip(&self.running)
+            .flat_map(|(serving, running)| serving.names.difference(running).cloned())
+    }
+
+    /// Whether the gate refuses `name`: it is off, or it left `services`.
+    fn refuses(&self, name: &str) -> bool {
+        self.file.off.contains(name) || self.removed().any(|removed| removed == name)
+    }
+}
+
 impl EnabledServices for LiveServeToml {
+    /// Refuse a service turned off, and one the run serves that `services` no longer runs. Never opens
+    /// one: a service added to the file has no route until the next `serve`.
     fn is_enabled(&self, service: &Service) -> bool {
-        !self.refreshed().file.off.contains(service.as_str())
+        !self.refreshed().refuses(service.as_str())
     }
 }
 

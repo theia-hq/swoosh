@@ -137,8 +137,14 @@ impl Report {
                 )) => {
                     last = Some(standing::damaged_line(&what));
                 }
-                // A file that could not be read says why, as it does on a home with a key.
-                Err(error @ (StandingError::Read { .. } | StandingError::Revoked(_))) => {
+                // A file that could not be read, or a root key refused for its modes, its owner or not
+                // being a file, says why, as it does on a home with a key.
+                Err(
+                    error @ (StandingError::Read { .. }
+                    | StandingError::Revoked(_)
+                    | StandingError::Loose(_)
+                    | StandingError::NotAFile { .. }),
+                ) => {
                     return Err(error.into());
                 }
                 _ if restored(home) => report.nags.extend(restored_lines(home).await?),

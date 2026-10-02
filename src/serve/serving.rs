@@ -91,10 +91,16 @@ impl Started {
                 .collect::<Result<_, _>>()
                 .map(Self::Named);
         }
+        Self::bare(kept, &path)
+    }
+
+    /// What a bare `serve` starts with from `kept`, the `serve.toml` at `path`: the list it records, else
+    /// the default. A running `serve` asks this of each later read too, for the services that file runs.
+    pub(crate) fn bare(kept: &ServeToml, path: &Path) -> Result<Self, ServingError> {
         let mut entries = Vec::new();
         for line in &kept.services {
             let not_a_service = || ServingError::NotAService {
-                path: path.clone(),
+                path: path.to_owned(),
                 line: line.clone(),
             };
             if line.starts_with('-') {
@@ -117,6 +123,14 @@ impl Started {
                 .map(|&entry| entry.to_owned())
                 .collect(),
         }
+    }
+
+    /// The names this run's services are bound under, in their order; an entry with no name binds none.
+    pub fn names(&self) -> Vec<String> {
+        self.entries()
+            .iter()
+            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
+            .collect()
     }
 
     /// Whether this run serves what the home last served, for the banner's "(as last time)".

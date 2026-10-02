@@ -955,10 +955,9 @@ async fn status_prints_every_state_verbatim() {
     let missing = "this machine's key is not in this home, because system backups leave it out.";
     let kept = format!("{missing} A root kept on this machine stays. To start over: swoosh leave");
     // A torn `root.key` names no command: `leave` keeps the root, so it would print the same line again.
-    let torn =
-        "this machine's records disagree (root.key is not a readable root key); swoosh cannot \
+    let torn = "this machine's records disagree (root.key is not a root key); swoosh cannot \
                 tell which root it trusts"
-            .to_owned();
+        .to_owned();
     let restored: [(&str, &[String]); 4] = [
         (
             "restored",

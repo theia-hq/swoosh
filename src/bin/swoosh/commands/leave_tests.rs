@@ -378,7 +378,7 @@ async fn after_leave_a_torn_root_key_names_no_command() {
     assert_eq!(
         out.lines().last(),
         Some(
-            "this machine's records disagree (root.key is not a readable root key); swoosh cannot \
+            "this machine's records disagree (root.key is not a root key); swoosh cannot \
              tell which root it trusts"
         ),
         "{out}"

@@ -2,8 +2,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! `<home>/serve.toml` end to end, through the compiled binary: a `serve` saves its relay only once its
-//! routes bind, and a relay the file keeps is read when the file is, by every verb that reads it.
+//! routes bind, a relay the file keeps is read when the file is, by every verb that reads it, and a service
+//! added while `serve` runs is named and starts on the next one. Only the exact spawned pid is ever
+//! signalled.
 
+use core::time::Duration;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -95,4 +98,129 @@ fn a_bad_relay_in_serve_toml_is_refused_where_the_file_is_read() {
         )
     );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "unchanged");
+}
+
+/// A spawned child killed and reaped on drop, so a failing test never orphans it.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// `swoosh --home <home> <args>` with its runtime directory at `run`, run to its end.
+fn swoosh_in(home: &Path, run: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_swoosh"))
+        .arg("--home")
+        .arg(home)
+        .args(args)
+        .env("XDG_RUNTIME_DIR", run)
+        .env_remove("SWOOSH_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .expect("swoosh runs")
+}
+
+/// Start `swoosh serve <args>` on `home` over sealed quirk, which reaches no server, and wait for its
+/// banner. Returns the child, the banner, and its stderr lines as they come.
+fn serve(
+    home: &Path,
+    run: &Path,
+    args: &[&str],
+) -> (KillOnDrop, String, std::sync::mpsc::Receiver<String>) {
+    use std::io::{BufRead as _, Read as _};
+
+    let mut serve = KillOnDrop(
+        Command::new(env!("CARGO_BIN_EXE_swoosh"))
+            .arg("--home")
+            .arg(home)
+            .args(["serve", "--transport", "quirk+noise"])
+            .args(args)
+            .env("XDG_RUNTIME_DIR", run)
+            .env_remove("SWOOSH_HOME")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("serve spawns"),
+    );
+    let stderr = serve.0.stderr.take().expect("piped stderr");
+    let (lines, said) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if lines.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut stdout = serve.0.stdout.take().expect("piped stdout");
+    let mut seen = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut byte = [0u8; 1];
+    while !String::from_utf8_lossy(&seen).contains("ctrl-c to stop") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "serve never became ready"
+        );
+        if stdout.read(&mut byte).expect("read serve's banner") == 0 {
+            panic!("serve exited before it was ready");
+        }
+        seen.push(byte[0]);
+    }
+    (serve, String::from_utf8_lossy(&seen).into_owned(), said)
+}
+
+/// A service added to `serve.toml` while `serve` runs is not served live: the run says, once, that it
+/// starts on the next `serve`, and `status` still lists only what the run started. The next `serve` serves
+/// it.
+#[test]
+fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("added");
+    let home = scratch.0.join("home");
+    let run = scratch.0.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let (first, banner, said) = serve(&home, &run, &["ping"]);
+    assert!(
+        banner.contains("serving: ping (your devices)\n"),
+        "{banner}"
+    );
+    let path = home.join("serve.toml");
+    let kept = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        kept, "services = [\"ping=ping:\"]\n",
+        "the run saved its list"
+    );
+    std::fs::write(&path, "services = [\"ping=ping:\", \"speed=speed:\"]\n").unwrap();
+
+    let line = said
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the run names what waits");
+    assert_eq!(
+        line,
+        "the added service speed in serve.toml takes effect on the next serve"
+    );
+    let status = swoosh_in(&home, &run, &["status"]);
+    assert!(
+        String::from_utf8_lossy(&status.stdout).contains("serving: ping\n"),
+        "the route stays absent: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    assert!(
+        said.recv_timeout(Duration::from_secs(3)).is_err(),
+        "the line is said once"
+    );
+    drop(first);
+
+    let (_next, banner, _) = serve(&home, &run, &[]);
+    assert!(
+        banner.contains("serving: ping (your devices), speed (your devices) (as last time)\n"),
+        "{banner}"
+    );
 }
