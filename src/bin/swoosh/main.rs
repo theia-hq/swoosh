@@ -34,7 +34,7 @@ use swoosh::{credential, reaching, transport};
 // The verb modules this binary dispatches to, each its own tree beside the composition root. The
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
-    contact, fetch, grant, identity, invite, join, leave, ping, reach, revoke, send, serve,
+    contact, fetch, grant, invite, join, leave, lock, ping, reach, revoke, root, send, serve,
     service, speed, ssh, status, stop, sync, tree,
 };
 
@@ -110,8 +110,16 @@ enum Command {
     /// Manage local petnames: add a device, record a person's fleet signet, or remove one.
     #[command(subcommand)]
     Contact(contact::ContactCmd),
-    /// Back up, restore, or protect this machine's key.
-    Identity(identity::IdentityCmd),
+    /// set, change or remove the passphrase on this machine's key
+    Lock(lock::LockCmd),
+    /// copy, restore or forget your root, or change its passphrase
+    #[command(
+        subcommand,
+        subcommand_required = true,
+        arg_required_else_help = true,
+        after_help = "To end a root for good: swoosh revoke --help"
+    )]
+    Root(root::RootCmd),
     /// Add one of your devices, or renew it. Bare `invite` lists what is due.
     Invite(invite::InviteCmd),
     /// Make this machine one of your devices, from an invite.
@@ -246,6 +254,9 @@ reaching_verbs! {
     /// `swoosh revoke me/<name>` with your root, once this machine's block is written: a root act that
     /// syncs with your devices before it signs and offers them its cut after, like `invite`.
     Revoke(revoke::RevokeRoot),
+    /// `swoosh root restore <dir>`'s exchange, once the root is written: it presents the standing the
+    /// restore just wrote, under this machine's key, to bring the restored root up to date.
+    RootRestore(root::restore::RestoreSync),
 }
 
 impl Command {
@@ -255,7 +266,11 @@ impl Command {
     fn split(self) -> Verb {
         match self {
             Self::Contact(cmd) => Verb::Contact(cmd),
-            Self::Identity(cmd) => Verb::Identity(cmd),
+            Self::Lock(cmd) => Verb::Lock(cmd),
+            Self::Root(cmd) => match cmd.split() {
+                root::Split::Local(local) => Verb::Root(local),
+                root::Split::Restore(restore) => Verb::RootRestore(restore),
+            },
             // A bare `invite` lists what is due from the root's records and dials nothing; a named one is a
             // root act that syncs and offers, so it binds a transport.
             Self::Invite(cmd) => match cmd.name {
@@ -307,8 +322,12 @@ impl Command {
 enum Verb {
     /// Edits the address book; needs no transport.
     Contact(contact::ContactCmd),
-    /// Backs up, restores, or protects this machine's key; needs no transport and no store, only the home.
-    Identity(identity::IdentityCmd),
+    /// Sets, changes or removes the passphrase on this machine's key; needs only the home.
+    Lock(lock::LockCmd),
+    /// `root backup`, `forget` or `lock`: needs only the home.
+    Root(root::Local),
+    /// `root restore`: checks, asks and writes locally, then exchanges as a reaching verb.
+    RootRestore(root::restore::RestoreCmd),
     /// A bare `swoosh invite`: what is due, from the root's records; it binds no transport. With a name it is
     /// a reaching verb instead.
     Invite(invite::InviteCmd),
@@ -544,9 +563,13 @@ async fn run() -> eyre::Result<()> {
         Verb::ServiceDisable(cmd) => return cmd.run_disable(&home).await,
         // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save.
         Verb::Contact(cmd) => return cmd.run(&home).await,
-        // Backs up, restores, or protects this machine's key. Needs only the home, not the store or a
-        // transport, so it dispatches here beside the other local verbs.
-        Verb::Identity(cmd) => return cmd.run(&home),
+        // The passphrase on this machine's key, and the `root` leaves that need only the home: no store and
+        // no transport, so they dispatch here beside the other local verbs.
+        Verb::Lock(cmd) => return cmd.run(&home).await,
+        Verb::Root(cmd) => return cmd.run(&home).await,
+        // `root restore`: every check, the passphrase and the writes are local and come first; only the
+        // exchange that brings the restored root up to date binds a transport, under the key it wrote for.
+        Verb::RootRestore(cmd) => Outward::RootRestore(cmd.run_local(&home).await?),
         // A bare `swoosh invite`: what is due, read from the root's records with no lock and no prompt.
         Verb::Invite(cmd) => return cmd.run_due(&home).await,
         // Joins a root from an invite: every check and write is local; only the first exchange with the

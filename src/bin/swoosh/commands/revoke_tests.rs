@@ -1246,8 +1246,8 @@ async fn status_names_a_device_revoked_here() {
     .await;
     let _ = revoke(&home, &["me/laptop"]).await.ok().to_owned();
 
-    let stored = swoosh::identity::inspect(&home).unwrap().into_stored();
-    let out = super::super::status::report::Report::gather(&home, Some(&stored), now())
+    let stored = keystore::KeyFile::device(home.key()).load().unwrap();
+    let out = super::super::status::report::Report::gather(&home, stored.as_ref(), now())
         .await
         .unwrap()
         .render();

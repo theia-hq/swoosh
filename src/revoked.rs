@@ -157,13 +157,17 @@ pub fn add(
 /// This machine's key, from its key file's header; `None` when it has none, or the header is not a usable
 /// key.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, RevokedError> {
-    let stored = keystore::KeyFile::device(home.key())
-        .load()
-        .map_err(|error| RevokedError::Io {
-            path: home.key(),
-            source: io::Error::other(error),
-        })?;
-    Ok(stored.and_then(|stored| stored.node_id().verify_key().ok()))
+    let file = keystore::KeyFile::device(home.key());
+    let stored = file.load().map_err(|error| RevokedError::Io {
+        path: home.key(),
+        source: io::Error::other(error),
+    })?;
+    Ok(stored.and_then(|stored| {
+        crate::identity::key_of(&file, &stored)
+            .ok()?
+            .verify_key()
+            .ok()
+    }))
 }
 
 /// The [`LooseFile`] an error from [`open_trust_file`](crate::home::open_trust_file) carries, or the error.

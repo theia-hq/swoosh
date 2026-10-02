@@ -59,7 +59,7 @@ pub struct InviteCmd {
     /// How long: `2h`, `90d`.
     #[arg(long, value_name = "d", requires = "name", value_parser = device_expiry)]
     pub expires: Option<Duration>,
-    /// Act on your root, or on the root kept in `<dir>`.
+    /// use the copy of your root in <dir>
     #[arg(long = "root", value_name = "dir")]
     pub root: Option<PathBuf>,
     #[command(flatten)]
@@ -488,7 +488,7 @@ fn parse_key(text: &str) -> eyre::Result<VerifyKey> {
 
 /// This machine's key, made if the home has none.
 fn own_key(home: &Home) -> eyre::Result<NodeId> {
-    Ok(swoosh::identity::inspect(home)?.stored().node_id())
+    Ok(swoosh::identity::inspect(home)?.key())
 }
 
 /// The named device's own renewal length, or the default when it has none.

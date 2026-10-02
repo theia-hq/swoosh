@@ -28,7 +28,7 @@ use crate::codec::{Id, MAX_REVOKED, MAX_REVOKED_KEYS};
 use crate::config;
 use crate::contacts::DeviceLabel;
 use crate::home::Home;
-use crate::passphrase::Prompt;
+use crate::passphrase::{Asked, Choice, Prompt};
 use crate::reach_report::{Missed, Reach, Why};
 use crate::roster::{Epoch, Member, RevokedDevice, RosterDoc};
 use crate::standing::Standing;
@@ -312,7 +312,10 @@ async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
     };
     let root_key = root.key();
     match KeyFile::root(home.root_key()).load().unwrap() {
-        Some(Stored::Locked(locked)) => assert_eq!(locked.node_id(), root_key),
+        Some(Stored::Locked(_)) => assert_eq!(
+            crate::testkit::stored_key(&KeyFile::root(home.root_key())),
+            root_key
+        ),
         other => panic!("the root key is sealed, of the root kind: {other:?}"),
     }
     let badge = config::load_badge(&home).await.unwrap().unwrap();
@@ -496,14 +499,18 @@ impl Prompt for Marking {
         true
     }
 
-    fn unlock(&mut self, path: &Path) -> eyre::Result<Passphrase> {
+    fn unlock(&mut self, asked: Asked<'_>) -> eyre::Result<Passphrase> {
         let _ = writeln!(self.0, "<prompt>");
-        self.1.unlock(path)
+        self.1.unlock(asked)
     }
 
-    fn choose(&mut self, path: &Path) -> eyre::Result<Passphrase> {
+    fn choose(&mut self, asked: Asked<'_>) -> eyre::Result<Choice> {
         let _ = writeln!(self.0, "<prompt>");
-        self.1.choose(path)
+        self.1.choose(asked)
+    }
+
+    fn say(&mut self, line: &str) {
+        self.1.say(line);
     }
 }
 
@@ -764,7 +771,7 @@ async fn an_unpinned_machine_refuses_a_cutting_root_act() {
 // --- the bounds ---
 
 #[tokio::test]
-async fn a_cut_at_max_revoked_keys_refuses_before_the_prompt() {
+async fn a_cut_at_max_revoked_keys_refuses_before_it_signs() {
     let home = home("max-keys");
     let full: Vec<VerifyKey> = (0..MAX_REVOKED_KEYS)
         .map(|nth| {
@@ -785,13 +792,14 @@ async fn a_cut_at_max_revoked_keys_refuses_before_the_prompt() {
         .unwrap(),
     )
     .await;
-    let mut prompt = Counting::refusing();
+    // The prompt comes before the records are brought forward, so the bound refuses after it.
+    let mut prompt = Counting::new([PASS]);
     let (refused, _) = present(&home, place, RootVerb::Revoke, &mut prompt).await;
     assert!(
         matches!(refused, Err(RootError::TooManyKeys { count }) if count == MAX_REVOKED_KEYS + 1),
         "{refused:?}"
     );
-    assert_eq!(prompt.events(), 0);
+    assert_eq!(prompt.events(), 1);
 }
 
 #[tokio::test]
@@ -802,10 +810,10 @@ async fn update_number_overflow_refuses() {
         &records(u64::MAX, vec![own_row()], Vec::new(), Vec::new()),
     )
     .await;
-    let mut prompt = Counting::refusing();
+    let mut prompt = Counting::new([PASS]);
     let (refused, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
     assert!(matches!(refused, Err(RootError::Exhausted)), "{refused:?}");
-    assert_eq!(prompt.events(), 0);
+    assert_eq!(prompt.events(), 1);
 }
 
 // --- bring forward ---
@@ -904,7 +912,7 @@ async fn a_current_copy_prints_no_bring_forward() {
         &home,
         place.clone(),
         RootVerb::Invite,
-        &mut Counting::refusing(),
+        &mut Counting::new([PASS]),
     )
     .await;
     assert!(!out.contains("brought forward"), "{out}");
@@ -913,7 +921,7 @@ async fn a_current_copy_prints_no_bring_forward() {
         &home,
         &RosterDoc::new(Epoch(2), vec![member(&own_row())]).unwrap(),
     );
-    let (_, out) = present(&home, place, RootVerb::Invite, &mut Counting::refusing()).await;
+    let (_, out) = present(&home, place, RootVerb::Invite, &mut Counting::new([PASS])).await;
     assert!(
         out.contains("brought forward"),
         "a copy behind its devices says so: {out}"
@@ -1224,12 +1232,16 @@ impl Prompt for NoTerminal {
         false
     }
 
-    fn unlock(&mut self, path: &Path) -> eyre::Result<Passphrase> {
-        self.0.unlock(path)
+    fn unlock(&mut self, asked: Asked<'_>) -> eyre::Result<Passphrase> {
+        self.0.unlock(asked)
     }
 
-    fn choose(&mut self, path: &Path) -> eyre::Result<Passphrase> {
-        self.0.choose(path)
+    fn choose(&mut self, asked: Asked<'_>) -> eyre::Result<Choice> {
+        self.0.choose(asked)
+    }
+
+    fn say(&mut self, line: &str) {
+        self.0.say(line);
     }
 }
 
@@ -1719,10 +1731,10 @@ async fn a_cutting_act_that_cannot_list_your_devices_says_it_could_not_check() {
     assert_eq!(dial.calls(), 0, "no device could be listed to ask");
     assert_eq!(
         String::from_utf8(log.0.borrow().clone()).unwrap(),
-        "could not check this root against your devices (last synced never). If another copy of it has \
-         been used since, a device will report two copies.\n\
-         <prompt>\n",
-        "the line prints before the prompt"
+        "<prompt>\n\
+         could not check this root against your devices (last synced never). If another copy of it has \
+         been used since, a device will report two copies.\n",
+        "the line prints after the prompt, which comes before the sync"
     );
 }
 
@@ -2075,7 +2087,7 @@ impl Prompt for FoldingPrompt {
         true
     }
 
-    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+    fn unlock(&mut self, _asked: Asked<'_>) -> eyre::Result<Passphrase> {
         let (home, bytes) = (self.home.clone(), self.bytes.clone());
         let (folded, fold) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -2095,9 +2107,11 @@ impl Prompt for FoldingPrompt {
         crate::passphrase::passphrase(Zeroizing::new(PASS.to_owned()))
     }
 
-    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+    fn choose(&mut self, _asked: Asked<'_>) -> eyre::Result<Choice> {
         eyre::bail!("nothing is chosen here")
     }
+
+    fn say(&mut self, _line: &str) {}
 }
 
 /// The list another copy of the root cut at update 2: the act's devices, and one more revoked id.
@@ -2223,10 +2237,18 @@ async fn a_list_folded_during_the_prompt_is_brought_forward_before_the_cut() {
     );
 }
 
+/// Fold `update`, signed by the root, into `home`, as a fold beside the act would: the list moves after the
+/// act read its records, once its prompt was answered, and before it commits.
+async fn fold_meanwhile(home: &Home, update: &RosterDoc) -> crate::roster::Folded {
+    let bytes = TestRoot::seeded(ROOT).sign_update(update);
+    let home_lock = crate::home::HomeWrite::take(home).await.unwrap();
+    crate::roster::fold(&home_lock, home, &bytes).await.unwrap()
+}
+
 #[tokio::test]
 async fn a_device_added_whose_name_the_list_gave_away_meanwhile_stops_the_act() {
-    // While the act waited at its prompt, this home folded a list another copy of the root cut, which
-    // names a different key me/tv. The act's own me/tv no longer holds, so it stops and offers nothing.
+    // After the act read its records, this home folded a list another copy of the root cut, which names a
+    // different key me/tv. The act's own me/tv no longer holds, so it stops and offers nothing.
     let rows = [
         own_row(),
         row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
@@ -2235,10 +2257,12 @@ async fn a_device_added_whose_name_the_list_gave_away_meanwhile_stops_the_act() 
     let mut elsewhere: Vec<Member> = rows.iter().map(member).collect();
     elsewhere.push(member(&row(PHONE, "tv", vec![id(PHONE, STANDING_UNTIL)])));
     let elsewhere = RosterDoc::new(Epoch(2), elsewhere).unwrap();
-    let home = home("prompt-name-taken");
-    let mut prompt = FoldingPrompt::new(&home, &elsewhere);
-    let (home, first, mut root) = presented_with("prompt-name-taken", &mut prompt).await;
-    assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
+    let (home, first, mut root) =
+        presented_with("prompt-name-taken", &mut Counting::new([PASS])).await;
+    assert_eq!(
+        fold_meanwhile(&home, &elsewhere).await,
+        crate::roster::Folded::Newer
+    );
     let nas = sibling(&home, NAS, STANDING_UNTIL, &first).await;
     root.sign_standing(key(TV), name("tv"), Duration::from_secs(30 * DAY))
         .unwrap();
@@ -2263,8 +2287,8 @@ async fn a_device_added_whose_name_the_list_gave_away_meanwhile_stops_the_act() 
 
 #[tokio::test]
 async fn a_device_whose_key_the_list_revoked_meanwhile_is_never_handed_a_new_one() {
-    // me/laptop came with its key. While an invite waited at its prompt, this home folded a list another
-    // copy of the root cut, which revokes laptop's key and id. A new key for me/laptop would bring it back
+    // me/laptop came with its key. After an invite read its records, this home folded a list another copy
+    // of the root cut, which revokes laptop's key and id. A new key for me/laptop would bring it back
     // to life past that revocation, so the act stops.
     let laptop = Member {
         invite_until: STANDING_UNTIL,
@@ -2285,10 +2309,18 @@ async fn a_device_whose_key_the_list_revoked_meanwhile_is_never_handed_a_new_one
     .unwrap();
     let home = home("prompt-rekey-revoked");
     holds(&home, &first).await;
-    let mut prompt = FoldingPrompt::new(&home, &elsewhere);
-    let (root, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Invite,
+        &mut Counting::new([PASS]),
+    )
+    .await;
     let mut root = root.unwrap();
-    assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
+    assert_eq!(
+        fold_meanwhile(&home, &elsewhere).await,
+        crate::roster::Folded::Newer
+    );
     root.rekey(&name("laptop"), Duration::from_secs(30 * DAY))
         .unwrap();
 
@@ -2311,8 +2343,8 @@ async fn a_device_whose_key_the_list_revoked_meanwhile_is_never_handed_a_new_one
 
 #[tokio::test]
 async fn a_device_the_list_handed_a_new_key_meanwhile_is_never_left_live_by_a_revoke() {
-    // revoke found me/laptop's key before its prompt. While it waited there, this home folded a list
-    // another copy of the root cut, which hands me/laptop a new key. Revoking only the old key would leave
+    // revoke found me/laptop's key when it read its records. After that, this home folded a list another
+    // copy of the root cut, which hands me/laptop a new key. Revoking only the old key would leave
     // the device live under the new one, so the act stops and prints nothing.
     let rekeyed = row(
         TV,
@@ -2328,10 +2360,12 @@ async fn a_device_the_list_handed_a_new_key_meanwhile_is_never_left_live_by_a_re
         ],
     )
     .unwrap();
-    let home = home("prompt-revoke-rekeyed");
-    let mut prompt = FoldingPrompt::new(&home, &elsewhere);
-    let (home, _, mut root) = presented_with("prompt-revoke-rekeyed", &mut prompt).await;
-    assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
+    let (home, _, mut root) =
+        presented_with("prompt-revoke-rekeyed", &mut Counting::new([PASS])).await;
+    assert_eq!(
+        fold_meanwhile(&home, &elsewhere).await,
+        crate::roster::Folded::Newer
+    );
     root.revoke_device(&name("laptop"), key(LAPTOP), &[])
         .unwrap();
 
@@ -2359,8 +2393,8 @@ async fn a_device_the_list_handed_a_new_key_meanwhile_is_never_left_live_by_a_re
 
 #[tokio::test]
 async fn a_key_the_list_named_meanwhile_is_never_added_under_another_name() {
-    // While the act waited at its prompt, this home folded a list another copy of the root cut, which
-    // names the key TV me/phone. Adding TV as me/tv would rename that device, so the act stops.
+    // After the act read its records, this home folded a list another copy of the root cut, which names
+    // the key TV me/phone. Adding TV as me/tv would rename that device, so the act stops.
     let rows = [
         own_row(),
         row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
@@ -2369,10 +2403,11 @@ async fn a_key_the_list_named_meanwhile_is_never_added_under_another_name() {
     let mut elsewhere: Vec<Member> = rows.iter().map(member).collect();
     elsewhere.push(member(&row(TV, "phone", vec![id(TV, STANDING_UNTIL)])));
     let elsewhere = RosterDoc::new(Epoch(2), elsewhere).unwrap();
-    let home = home("prompt-key-named");
-    let mut prompt = FoldingPrompt::new(&home, &elsewhere);
-    let (home, _, mut root) = presented_with("prompt-key-named", &mut prompt).await;
-    assert_eq!(prompt.folded, Some(crate::roster::Folded::Newer));
+    let (home, _, mut root) = presented_with("prompt-key-named", &mut Counting::new([PASS])).await;
+    assert_eq!(
+        fold_meanwhile(&home, &elsewhere).await,
+        crate::roster::Folded::Newer
+    );
     root.sign_standing(key(TV), name("tv"), Duration::from_secs(30 * DAY))
         .unwrap();
 
@@ -2421,13 +2456,15 @@ impl Prompt for JoiningPrompt {
         true
     }
 
-    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+    fn unlock(&mut self, _asked: Asked<'_>) -> eyre::Result<Passphrase> {
         self.join()
     }
 
-    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
-        self.join()
+    fn choose(&mut self, _asked: Asked<'_>) -> eyre::Result<Choice> {
+        self.join().map(Choice::Chosen)
     }
+
+    fn say(&mut self, _line: &str) {}
 }
 
 #[tokio::test]

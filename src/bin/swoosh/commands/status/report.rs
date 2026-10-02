@@ -66,7 +66,11 @@ pub(crate) async fn run_to(
         let Some(key) = key else {
             eyre::bail!(NO_KEY);
         };
-        writeln!(out, "{}", key.node_id())?;
+        writeln!(
+            out,
+            "{}",
+            swoosh::identity::key_of(&KeyFile::device(home.key()), &key)?
+        )?;
         return Ok(());
     }
     let report = Report::gather(home, key.as_ref(), unix_now()).await?;
@@ -81,7 +85,7 @@ pub(crate) async fn run_to(
 #[derive(Debug)]
 pub(crate) struct Report {
     /// This machine's key and how it is locked; `None` when the home has no key.
-    key: Option<(NodeId, Method)>,
+    key: Option<(NodeId, Vec<Method>)>,
     /// The home's directory.
     home: String,
     /// The lines after `home:`: the root's line, or what this machine is when it is no device.
@@ -110,7 +114,16 @@ impl Report {
     /// shared, and what a running `serve` serves.
     pub(crate) async fn gather(home: &Home, key: Option<&Stored>, now: u64) -> eyre::Result<Self> {
         let mut report = Self {
-            key: key.map(|key| (key.node_id(), key.method())),
+            key: key
+                .map(|key| {
+                    let methods = match key {
+                        Stored::Plain(_) => Vec::new(),
+                        Stored::Locked(locked) => locked.methods().collect(),
+                    };
+                    swoosh::identity::key_of(&KeyFile::device(home.key()), key)
+                        .map(|node| (node, methods))
+                })
+                .transpose()?,
             home: EscapedPath(home.dir()).to_string(),
             top: Vec::new(),
             this_machine: None,
@@ -278,7 +291,7 @@ impl Report {
             }
         };
         let until = unix(until);
-        let Some((key, _)) = self.key else {
+        let Some((key, _)) = self.key.as_ref() else {
             return Ok(());
         };
         let own = key.verify_key().ok();
@@ -348,7 +361,7 @@ impl Report {
     /// The devices table: every row the root has, revoked ones too; the root itself is never a row. A live
     /// row leaves the state column blank.
     fn devices(&mut self, title: String, rows: &[DeviceRow], now: u64) {
-        let own = self.key.and_then(|(key, _)| key.verify_key().ok());
+        let own = self.key.as_ref().and_then(|(key, _)| key.verify_key().ok());
         let rows = rows
             .iter()
             .map(|row| {
@@ -402,9 +415,12 @@ impl Report {
     /// the root's line (or what this machine is); each section with a row and what is served; the lines that
     /// say what to do.
     pub(crate) fn render(&self) -> String {
-        let mut head = match self.key {
-            Some((key, method)) => {
-                vec![format!("key: {key}"), format!("key lock: {}", lock(method))]
+        let mut head = match &self.key {
+            Some((key, methods)) => {
+                vec![
+                    format!("key: {key}"),
+                    format!("key lock: {}", lock(methods)),
+                ]
             }
             None => vec!["key: none yet".to_owned()],
         };
@@ -444,12 +460,19 @@ impl Report {
     }
 }
 
-/// The word `key lock:` names a method by.
-fn lock(method: Method) -> &'static str {
-    match method {
-        Method::Plain => "none",
-        Method::Passphrase => "passphrase",
+/// The words `key lock:` names the key's locks by: `none` for a plain key, else each lock's method, in the
+/// key file's order.
+fn lock(methods: &[Method]) -> String {
+    if methods.is_empty() {
+        return "none".to_owned();
     }
+    methods
+        .iter()
+        .map(|method| match method {
+            Method::Passphrase => "passphrase",
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Whether a home with no key still holds what a device or a root leaves: a home restored from a system

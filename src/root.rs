@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Method, Protection, Stored};
+use keystore::{KeyFile, Protection, Stored, Unlock};
 use nauthy::{Link, RevocationId, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
@@ -37,13 +37,23 @@ use crate::codec::{
 use crate::contacts::DeviceLabel;
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite, ServeLock};
-use crate::passphrase::Prompt;
+use crate::passphrase::{Asked, Prompt};
 use crate::reach_report::{Missed, Reach, Why};
 use crate::roster::{
     ArtifactError, Epoch, FoldError, Folded, MAX_ROSTER_BLOB, Member, RosterDoc, read_held,
 };
 use crate::standing::{Standing, StandingError};
 use crate::sync::{Answer, Device, Dial, EACH, Until};
+
+mod backup;
+mod forget;
+mod lock;
+mod restore;
+
+pub use backup::{BackupError, backup};
+pub use forget::{Disk, ForgetError, Forgot, Place, RealDisk, forget};
+pub use lock::{RootLockError, lock};
+pub use restore::{RestoreError, Restored, Synced, restore};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
 pub const KEY_FILE: &str = "root.key";
@@ -100,8 +110,6 @@ pub enum RootVerb {
     Restore,
     /// Copies the root; signs nothing and never writes its source.
     Backup,
-    /// Moves the root kept here elsewhere; only where the root is kept.
-    MoveRoot,
     /// Changes the root's passphrase; rewrites `root.key` only.
     Lock,
     /// Retires the root; only where the root is kept, and never folds or cuts.
@@ -113,11 +121,6 @@ impl RootVerb {
     /// update cut elsewhere reaches none of its devices; and it brings the root forward first.
     fn cuts(self) -> bool {
         matches!(self, Self::Invite | Self::Revoke)
-    }
-
-    /// Whether the act works only on the root kept on this machine.
-    fn holder_only(self) -> bool {
-        matches!(self, Self::MoveRoot | Self::RevokeRoot)
     }
 
     /// Whether the act writes beside the root's key, so a copy that cannot be written is refused.
@@ -160,14 +163,12 @@ pub enum RootError {
         /// The root being made.
         root: NodeId,
     },
-    /// An act on the root kept here, given a copy.
-    #[error(
-        "this works only on the machine that keeps your root, not on a copy. Run it on that machine, without --root."
-    )]
-    HolderOnly,
     /// The root's key file could not be read or unlocked.
     #[error(transparent)]
     KeyFile(#[from] keystore::Error),
+    /// A key file's header names a key nobody can hold.
+    #[error(transparent)]
+    UnusableKey(#[from] crate::identity::UnusableKey),
     /// A key stored on this machine is not a usable key.
     #[error("a key stored on this machine is not a usable key ({0}): refusing to use it")]
     Key(#[from] nauthy::KeyError),
@@ -708,28 +709,31 @@ impl Root {
             writable(dir)?;
         }
         let list = read_list(home, found.copy.as_deref(), found.header.verify_key()?)?;
-        let mut act = Act::new(
+        let act = Act::new(
             home,
             found.header,
             found.copy,
             list.as_ref(),
             own_key(home)?,
         );
-        if verb.cuts() {
-            act.sync(dial, out).await;
-            act.bring_forward(out)?;
-            act.book.check_bounds(act.now)?;
-            act.list_renewals(out);
-        }
-        let checked = check(&act.records(), out)?;
+        // The prompt comes before the sync and before any line that states an effect, so a wrong passphrase
+        // asked again never runs the sync again, and nothing is said of an act that a passphrase then stops.
         if !prompt.terminal() {
             return Err(RootError::NoTerminalToUnlock);
         }
-        let passphrase = prompt.unlock(&act.key_file()).map_err(prompt_error)?;
-        let root = Self {
-            secret: found.locked.unlock(&passphrase)?,
-            act,
-        };
+        let asked = act.asked();
+        let (secret, _) = crate::passphrase::unlock(prompt, asked, |passphrase| {
+            found.locked.unlock(Unlock::Passphrase(passphrase))
+        })
+        .map_err(prompt_error)?;
+        let mut root = Self { secret, act };
+        if verb.cuts() {
+            root.act.sync(dial, out).await;
+            root.act.bring_forward(out)?;
+            root.act.book.check_bounds(root.act.now)?;
+            root.act.list_renewals(out);
+        }
+        let checked = check(&root.act.records(), out)?;
         Ok((root, checked))
     }
 
@@ -1199,6 +1203,11 @@ impl Act {
         }
     }
 
+    /// What the prompt asks for: your root, or the copy in its directory.
+    fn asked(&self) -> Asked<'_> {
+        self.copy.as_deref().map_or(Asked::Root, Asked::Copy)
+    }
+
     /// The root's key file.
     fn key_file(&self) -> PathBuf {
         self.copy
@@ -1415,9 +1424,6 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
         (RootPlace::Dir(_), Standing::HoldsRoot { .. } | Standing::InterruptedMint { .. }) => {
             return Err(RootError::HeldHere);
         }
-        (RootPlace::Dir(_), _) if verb.is_some_and(RootVerb::holder_only) => {
-            return Err(RootError::HolderOnly);
-        }
         (RootPlace::Dir(dir), Standing::Device { pin, .. }) => (Some(dir.clone()), Some(pin), true),
         (RootPlace::Dir(dir), Standing::Unpinned) => (Some(dir.clone()), None, false),
     };
@@ -1428,7 +1434,7 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
         .as_ref()
         .map_or_else(|| home.root_key(), |dir| dir.join(KEY_FILE));
     let locked = read_header(&key_file)?;
-    let header = locked.node_id();
+    let header = header_key(&key_file, &locked)?;
     if let Some(pin) = pin
         && pin != header
     {
@@ -1449,10 +1455,9 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
 fn read_header(path: &Path) -> Result<keystore::Locked, RootError> {
     let file = KeyFile::root(path);
     match file.load() {
-        Ok(Some(Stored::Locked(locked))) => match locked.method() {
-            Method::Passphrase => Ok(locked),
-            Method::Plain => Err(RootError::Plain),
-        },
+        // A sealed root key always keeps its passphrase lock (the key store refuses one without), so any
+        // sealed file of the root kind opens at a prompt here.
+        Ok(Some(Stored::Locked(locked))) => Ok(locked),
         Ok(Some(Stored::Plain(_))) => Err(RootError::Plain),
         Ok(None) => Err(RootError::KeyFile(keystore::Error::Absent {
             path: file.path().to_path_buf(),
@@ -1463,6 +1468,16 @@ fn read_header(path: &Path) -> Result<keystore::Locked, RootError> {
         }) => Err(RootError::Method { found }),
         Err(error) => Err(error.into()),
     }
+}
+
+/// The key a root key file's header claims, checked as a key at tightbeam's bridge.
+fn header_key(path: &Path, locked: &keystore::Locked) -> Result<NodeId, RootError> {
+    locked.public_key().node_id().map_err(|_| {
+        RootError::UnusableKey(crate::identity::UnusableKey {
+            path: path.to_path_buf(),
+            kind: keystore::Kind::Root,
+        })
+    })
 }
 
 /// The list beside the root's key, `devices`, verified under `root`: in the copy at `copy`, or in this home
@@ -1524,10 +1539,7 @@ async fn make(
     if !prompt.terminal() {
         return Err(RootError::NoTerminal);
     }
-    let own = crate::identity::inspect(home)?
-        .stored()
-        .node_id()
-        .verify_key()?;
+    let own = crate::identity::inspect(home)?.key().verify_key()?;
     let _ = writeln!(
         out,
         "This makes your root on this machine: a second key, not a machine, that vouches for all your \
@@ -1538,7 +1550,7 @@ async fn make(
         "It is locked with a passphrase, which you type whenever you add, renew or revoke a device."
     );
     let key_file = home.root_key();
-    let passphrase = prompt.choose(&key_file).map_err(prompt_error)?;
+    let passphrase = crate::passphrase::choose(prompt, Asked::Root).map_err(prompt_error)?;
     let secret =
         keystore::Secret::generate().map_err(|source| RootError::Write(Box::new(source)))?;
 
@@ -1550,7 +1562,13 @@ async fn make(
     KeyFile::root(&key_file).write(&secret, Protection::Passphrase(&passphrase))?;
     seam(Seam::Keyed)?;
     let mut root = Root {
-        act: Act::new(home, secret.node_id(), None, None, Some(own)),
+        act: Act::new(
+            home,
+            secret.with_bytes(NodeId::from_ed25519_secret),
+            None,
+            None,
+            Some(own),
+        ),
         secret,
     };
     root.act.minted = true;
@@ -1573,10 +1591,7 @@ async fn finish(
     let locked = read_header(&home.root_key())?;
     let pin = root_key.verify_key()?;
     let list = read_list(home, None, pin)?;
-    let own = crate::identity::inspect(home)?
-        .stored()
-        .node_id()
-        .verify_key()?;
+    let own = crate::identity::inspect(home)?.key().verify_key()?;
     let listed = list.as_ref().and_then(|list| {
         list.members()
             .iter()
@@ -1596,18 +1611,19 @@ async fn finish(
         return Ok(None);
     }
 
-    let mut act = Act::new(home, root_key, None, list.as_ref(), Some(own));
-    act.bring_forward(out)?;
-    act.book.check_bounds(act.now)?;
-    act.list_renewals(out);
+    let act = Act::new(home, root_key, None, list.as_ref(), Some(own));
     if !prompt.terminal() {
         return Err(RootError::NoTerminalToUnlock);
     }
-    let passphrase = prompt.unlock(&act.key_file()).map_err(prompt_error)?;
-    let mut root = Root {
-        secret: locked.unlock(&passphrase)?,
-        act,
-    };
+    // Asked before any line that states an effect, as `present` asks.
+    let (secret, _) = crate::passphrase::unlock(prompt, Asked::Root, |passphrase| {
+        locked.unlock(Unlock::Passphrase(passphrase))
+    })
+    .map_err(prompt_error)?;
+    let mut root = Root { secret, act };
+    root.act.bring_forward(out)?;
+    root.act.book.check_bounds(root.act.now)?;
+    root.act.list_renewals(out);
     let home_lock = HomeWrite::take(home).await?;
     still(&home_lock, home, Standing::InterruptedMint { root_key }).await?;
     not_admitting(&home_lock, home)?;
@@ -2276,7 +2292,12 @@ fn fresh_key() -> Result<(Zeroizing<[u8; 32]>, VerifyKey), RootError> {
     let secret =
         keystore::Secret::generate().map_err(|source| RootError::Write(Box::new(source)))?;
     let seed = secret.with_bytes(|bytes| Zeroizing::new(*bytes));
-    Ok((seed, secret.node_id().verify_key()?))
+    Ok((
+        seed,
+        secret
+            .with_bytes(NodeId::from_ed25519_secret)
+            .verify_key()?,
+    ))
 }
 
 /// Whether `row` is due to renew at this act: it renews on its own, and it holds fewer than the most
@@ -2292,11 +2313,11 @@ fn live_ids(row: &Member, now: u64) -> usize {
 
 /// This machine's key, from its key file's header, when it has one.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, RootError> {
-    KeyFile::device(home.key())
-        .load()?
-        .map(|stored| stored.node_id().verify_key())
-        .transpose()
-        .map_err(RootError::from)
+    let file = KeyFile::device(home.key());
+    match file.load()? {
+        Some(stored) => Ok(Some(crate::identity::key_of(&file, &stored)?.verify_key()?)),
+        None => Ok(None),
+    }
 }
 
 /// Set the core-dump limit to zero, soft and hard, so a crash with the root unlocked writes no copy of it.
