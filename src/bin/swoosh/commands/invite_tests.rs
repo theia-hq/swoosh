@@ -22,7 +22,7 @@ use swoosh::config;
 use swoosh::contacts::{ContactsStore, DeviceLabel};
 use swoosh::home::Home;
 use swoosh::invite::Invite;
-use swoosh::passphrase::Prompt;
+use swoosh::passphrase::{Asked as Question, Choice, Prompt};
 use swoosh::root::{Date, Root, RootPlace};
 use swoosh::roster::{Epoch, Id, Member, RevokedDevice, RosterDoc};
 use swoosh::sync::{Answer, Dial, ExchangeError};
@@ -415,18 +415,22 @@ impl Prompt for Asked {
         self.terminal
     }
 
-    fn unlock(&mut self, path: &Path) -> eyre::Result<Passphrase> {
+    fn unlock(&mut self, asked: Question<'_>) -> eyre::Result<Passphrase> {
         self.tape.push("<prompt>\n");
-        self.inner.unlock(path)
+        self.inner.unlock(asked)
     }
 
-    fn choose(&mut self, path: &Path) -> eyre::Result<Passphrase> {
+    fn choose(&mut self, asked: Question<'_>) -> eyre::Result<Choice> {
         self.tape.push("<prompt>\n");
-        self.inner.choose(path)
+        self.inner.choose(asked)
+    }
+
+    fn say(&mut self, line: &str) {
+        self.inner.say(line);
     }
 }
 
-/// Devices that answer `answer` in memory, marking the tape at each offer.
+/// Devices that answer `answer` in memory, marking the tape at each exchange and each offer.
 struct Devices {
     inner: Answering,
     tape: Tape,
@@ -434,6 +438,7 @@ struct Devices {
 
 impl Dial for Devices {
     async fn exchange(&self, peer: NodeId) -> Result<Answer, ExchangeError> {
+        self.tape.push("<exchange>\n");
         self.inner.exchange(peer).await
     }
 
@@ -493,6 +498,16 @@ pub(crate) async fn invite(home: &Home, args: &[&str]) -> Ran {
 
 /// Run `swoosh invite <args>` on `home`, at a terminal or not.
 async fn invite_at(home: &Home, args: &[&str], terminal: bool) -> Ran {
+    invite_answering(home, args, terminal, &[PASS]).await
+}
+
+/// Run `swoosh invite <args>` on `home`, the prompt answering `answers` in order.
+async fn invite_answering(
+    home: &Home,
+    args: &[&str],
+    terminal: bool,
+    answers: &[&'static str],
+) -> Ran {
     let tape = Tape::default();
     let mut out = Stream {
         bytes: Vec::new(),
@@ -503,7 +518,7 @@ async fn invite_at(home: &Home, args: &[&str], terminal: bool) -> Ran {
         tape: tape.clone(),
     };
     let mut prompt = Asked {
-        inner: Counting::new([PASS]),
+        inner: Counting::new(answers.iter().copied()),
         terminal,
         tape: tape.clone(),
     };
@@ -527,11 +542,13 @@ async fn invite_at(home: &Home, args: &[&str], terminal: bool) -> Ran {
     }
 }
 
-/// Assert `ran` refused with `line`, before any prompt, leaving `home` as `before`.
+/// Assert `ran` refused with `line`, after one prompt at most, leaving `home` as `before`. A refusal the
+/// records make comes after the passphrase, which comes before the sync that brings them forward; one the
+/// command line or the standing makes comes before it.
 fn refused_before_writing(ran: &Ran, line: &str, home: &Home, before: &BTreeMap<PathBuf, Vec<u8>>) {
     let refusal = ran.refusal();
     assert!(refusal.contains(line), "{refusal}");
-    assert_eq!(ran.prompts, 0, "refused before the passphrase");
+    assert!(ran.prompts <= 1, "one prompt at most: {}", ran.prompts);
     assert!(ran.out.is_empty(), "nothing on stdout: {}", ran.out);
     assert!(
         snapshot(home.dir()) == *before,
@@ -1035,7 +1052,7 @@ async fn a_replayed_update_never_shortens_a_standing() {
 }
 
 #[tokio::test]
-async fn renewal_prints_its_list_before_the_prompt() {
+async fn renewal_prints_its_list_after_the_prompt() {
     let home = scratch("list-first");
     holds(
         &home,
@@ -1048,18 +1065,23 @@ async fn renewal_prints_its_list_before_the_prompt() {
         "renewing 1 device: me/laptop ({})",
         swoosh::credential::short(&key(LAPTOP))
     );
-    assert!(ran.tape.at(&listed) < ran.tape.at("<prompt>"));
+    assert!(ran.tape.at("<prompt>") < ran.tape.at(&listed));
 }
 
 // --- renewing by name ---
 
 #[tokio::test]
-async fn renewing_a_lapsed_row_prints_its_key_and_the_revoke_line_before_the_prompt() {
+async fn renewing_a_lapsed_row_warns_before_the_prompt_and_says_renewed_after() {
     let laptop = lapsed(LAPTOP, "laptop");
-    let line = format!(
-        "renewing me/laptop ({key}), which ended on {}. Whatever machine holds {key} picks this up the \
-         next time it reaches one of your devices. If that is not a machine you still have, stop here and \
-         run: swoosh revoke me/laptop",
+    let warning = format!(
+        "warning: me/laptop ({}) ended on {}; renewing it lets whatever machine holds that key back in. If \
+         that is not a machine you still have, do not type the passphrase: swoosh revoke me/laptop",
+        swoosh::credential::short(&key(LAPTOP)),
+        Date(laptop.until),
+    );
+    let renewed = format!(
+        "renewed me/laptop, which had ended on {}. Whatever machine holds {key} picks this up the next time \
+         it reaches one of your devices.",
         Date(laptop.until),
         key = key(LAPTOP)
     );
@@ -1068,16 +1090,79 @@ async fn renewing_a_lapsed_row_prints_its_key_and_the_revoke_line_before_the_pro
     holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
     let ran = invite(&home, &["laptop"]).await;
     assert!(ran.result.is_ok(), "{:?}", ran.result);
-    assert!(ran.tape.at(&line) < ran.tape.at("<prompt>"));
+    assert!(
+        ran.tape.at(&warning) < ran.tape.at("<prompt>"),
+        "the prompt is the stop"
+    );
+    assert!(ran.tape.at("<prompt>") < ran.tape.at(&renewed));
+    assert!(!ran.err.contains("stop here"), "{}", ran.err);
 
-    // At no terminal, the line still prints, before anything is signed.
+    // At no terminal, the act refuses before its prompt, and warns of nothing it will not do.
     let home = scratch("lapsed-line-no-terminal");
     holds(&home, &[live(OWN, "desk"), laptop], Vec::new()).await;
     let before = snapshot(home.dir());
     let ran = invite_at(&home, &["laptop"], false).await;
     assert!(ran.result.is_err());
-    assert!(ran.err.contains(&line), "{}", ran.err);
+    assert!(!ran.err.contains("warning:"), "{}", ran.err);
+    assert!(!ran.err.contains("renewed"), "{}", ran.err);
     assert!(snapshot(home.dir()) == before, "nothing signed");
+}
+
+/// The passphrase is asked before any device is dialed, and a wrong one asked again never dials again: the
+/// sync runs once, after the passphrase that opened the root. Red when the sync runs before the prompt.
+#[tokio::test]
+async fn the_passphrase_prompt_comes_before_any_sync() {
+    let home = scratch("prompt-before-sync");
+    holds(
+        &home,
+        &[live(OWN, "desk"), live(LAPTOP, "laptop")],
+        Vec::new(),
+    )
+    .await;
+    let ran = invite_answering(
+        &home,
+        &["tv", &node(TV).to_string()],
+        true,
+        &["not the passphrase", PASS],
+    )
+    .await;
+    assert!(ran.result.is_ok(), "{:?}: {}", ran.result, ran.err);
+    assert_eq!(ran.prompts, 2, "one wrong, then the right one");
+    let tape = ran.tape.text();
+    let first_exchange = tape.find("<exchange>").expect("the act syncs");
+    assert!(
+        tape.rfind("<prompt>").expect("asked") < first_exchange,
+        "every prompt comes before the sync: {tape}"
+    );
+    assert_eq!(tape.matches("<exchange>").count(), 1, "the sync ran once");
+}
+
+/// A wrong passphrase, three times, ends the act having said nothing of it: `invite` names the device it
+/// adds only after the root is unlocked. Red when the line prints before the prompt.
+#[tokio::test]
+async fn invite_states_its_effect_after_the_unlock() {
+    let home = scratch("effect-after-unlock");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let before = snapshot(home.dir());
+    let ran = invite_answering(
+        &home,
+        &["tv", &node(TV).to_string()],
+        true,
+        &["wrong one", "wrong two", "wrong three"],
+    )
+    .await;
+    let refusal = ran.refusal();
+    assert!(
+        refusal.contains("that passphrase does not open your root."),
+        "{refusal}"
+    );
+    assert_eq!(ran.prompts, 3);
+    assert!(
+        !ran.err.contains("will be one of your own devices"),
+        "{}",
+        ran.err
+    );
+    assert!(snapshot(home.dir()) == before, "nothing written");
 }
 
 #[tokio::test]
@@ -1400,8 +1485,8 @@ async fn a_bound_renewal_of_a_key_carrying_row_keeps_the_warning() {
     let row = row_of(&state, "ci");
     assert!(row.until > ci.until, "renewed");
     assert_eq!(row.invite_until, ci.invite_until, "its invite's end stays");
-    let stored = swoosh::identity::inspect(&home).unwrap().into_stored();
-    let report = crate::commands::status::report::Report::gather(&home, Some(&stored), now)
+    let stored = KeyFile::device(home.key()).load().unwrap();
+    let report = crate::commands::status::report::Report::gather(&home, stored.as_ref(), now)
         .await
         .unwrap()
         .render();
@@ -1464,7 +1549,7 @@ async fn a_key_in_revoked_keys_is_not_re_admitted() {
         )),
         "{refusal}"
     );
-    assert_eq!(ran.prompts, 0);
+    assert_eq!(ran.prompts, 1, "the records refuse after the passphrase");
 }
 
 #[tokio::test]
@@ -1786,11 +1871,7 @@ async fn every_making_verb_prints_only_its_artifact_on_stdout() {
     )
     .await
     .unwrap();
-    let key = KeyFile::device(home.key())
-        .load()
-        .unwrap()
-        .unwrap()
-        .node_id();
+    let key = swoosh::testkit::stored_key(&KeyFile::device(home.key()));
     assert_eq!(String::from_utf8(out).unwrap(), format!("{key}\n"));
     assert!(!err.is_empty(), "the lines about it go to stderr");
 }
@@ -1907,10 +1988,7 @@ async fn a_root_on_this_machine_is_root_key_beside_devices() {
             .all(|name| !name.ends_with('/') || name == "machine/"),
         "no directory but machine/: {names:?}"
     );
-    let root = match KeyFile::root(home.root_key()).load().unwrap() {
-        Some(stored) => stored.node_id(),
-        None => panic!("root.key holds the root"),
-    };
+    let root = swoosh::testkit::stored_key(&KeyFile::root(home.root_key()));
     let list = swoosh::roster::held(&home, root.verify_key().unwrap()).unwrap();
     assert_eq!(
         list.epoch(),

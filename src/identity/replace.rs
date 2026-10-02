@@ -55,7 +55,10 @@ impl NewKey {
             eyre::bail!("{CHOOSE_NEEDS_TERMINAL}");
         }
         let passphrase = if locked {
-            Some(prompt.choose(&path)?)
+            Some(crate::passphrase::choose(
+                prompt,
+                crate::passphrase::Asked::MachineKey,
+            )?)
         } else {
             None
         };
@@ -67,7 +70,7 @@ impl NewKey {
         let staged = home.machine().join("key.new");
         remove(&staged)?;
         let new = Self {
-            key: secret.node_id(),
+            key: secret.with_bytes(NodeId::from_ed25519_secret),
             had_old: old.is_some(),
             staged,
             put: false,

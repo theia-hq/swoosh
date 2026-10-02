@@ -88,6 +88,8 @@ fn landed(path: &str, bytes: u64) -> Received {
     Received {
         path: PathBuf::from(path),
         bytes,
+        // WF1 (services 8d6f5bc) names the sender; this test renders only the path and the length.
+        from: crate::testkit::TestNode::seeded(7).verify_key(),
     }
 }
 

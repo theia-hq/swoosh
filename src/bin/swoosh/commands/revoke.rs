@@ -43,7 +43,7 @@ pub struct RevokeCmd {
         value_parser = target
     )]
     pub target: Target,
-    /// Act on your root, or on the root kept in `<dir>`.
+    /// use the copy of your root in <dir>
     #[arg(long = "root", value_name = "dir")]
     pub root: Option<PathBuf>,
     #[command(flatten)]
@@ -632,11 +632,10 @@ fn read_stdin(stdin: impl Read) -> eyre::Result<Link> {
 
 /// This machine's key, when it has one. Read only: a revoke never makes one.
 fn own_key(home: &Home) -> eyre::Result<Option<VerifyKey>> {
-    let stored = keystore::KeyFile::device(home.key())
-        .load()
-        .map_err(|error| eyre::eyre!(error))?;
+    let file = keystore::KeyFile::device(home.key());
+    let stored = file.load().map_err(|error| eyre::eyre!(error))?;
     Ok(match stored {
-        Some(stored) => Some(stored.node_id().verify_key()?),
+        Some(stored) => Some(swoosh::identity::key_of(&file, &stored)?.verify_key()?),
         None => None,
     })
 }

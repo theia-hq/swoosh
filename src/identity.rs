@@ -33,20 +33,16 @@
 //! ([`make_machine_dir`]): a copy of the key acts as this machine.
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Protection, Stored};
+use keystore::{KeyFile, Protection, Stored, Unlock};
+use tightbeam::identity::AsNodeId as _;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::escape::EscapedPath;
 use crate::home::Home;
-use crate::passphrase::{Prompt, Terminal};
+use crate::passphrase::{Asked, Prompt, Terminal};
 
-mod backup;
-mod protect;
 mod replace;
-mod stage;
 
-pub use backup::{Existing, Restored, export, restore};
-pub use protect::{Protected, protect};
 pub use replace::{CHOOSE_NEEDS_TERMINAL, NewKey, Replaced};
 
 /// The ed25519 secret key a verb binds under: a [`keystore::Secret`], which wipes itself on drop and never
@@ -73,7 +69,7 @@ impl Secret {
     /// The node id this secret binds under: the identity a peer reaches when it dials this key. Derived
     /// offline (no transport stood up), so `swoosh status` can print it without serving.
     pub fn node_id(&self) -> NodeId {
-        self.0.node_id()
+        self.0.with_bytes(NodeId::from_ed25519_secret)
     }
 
     /// A stable seed for this node's ssh host key, so a swoosh node exposing `ssh=sshd:` under its persisted
@@ -150,43 +146,150 @@ pub async fn load(home: &Home) -> eyre::Result<Option<Secret>> {
     open(&key_file(home), &mut Terminal)
 }
 
-/// What the home's key file is, WITHOUT unlocking it, minting a plain key first when the home has none.
+/// Which key the home's key file is, WITHOUT unlocking it, minting a plain key first when the home has none.
 ///
-/// `join` and `invite` read the key this way before they use it: which node it is and how it is protected.
-/// For a sealed file the node is what its header claims (see [`keystore::Locked::node_id`]); nothing here
-/// asks for a passphrase, so reading a key never blocks on a prompt.
+/// `join` and `invite` read the key this way before they use it. For a sealed file the key is what its header
+/// claims, checked as a key at tightbeam's bridge ([`key_of`]); nothing here asks for a passphrase, so reading
+/// a key never blocks on a prompt.
 pub fn inspect(home: &Home) -> eyre::Result<Inspected> {
     let file = key_file(home);
     match file.load()? {
-        Some(stored) => Ok(Inspected::Found(stored)),
-        None => mint(home, &file).map(|secret| Inspected::Made(Stored::Plain(secret.0))),
+        Some(stored) => Ok(Inspected::Found(key_of(&file, &stored)?)),
+        None => mint(home, &file).map(|secret| Inspected::Made(secret.node_id())),
     }
 }
 
-/// The home's key file as [`inspect`] read it: already there, or made by this read.
-#[derive(Debug)]
+/// The home's key as [`inspect`] read it: already there, or made by this read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Inspected {
     /// The key was already in the home.
-    Found(Stored),
+    Found(NodeId),
     /// The home had no key, and this read made one, plain.
-    Made(Stored),
+    Made(NodeId),
 }
 
 impl Inspected {
-    /// The key file, whichever way it came.
-    pub fn stored(&self) -> &Stored {
+    /// The key, whichever way it came.
+    pub fn key(self) -> NodeId {
         match self {
-            Self::Found(stored) | Self::Made(stored) => stored,
-        }
-    }
-
-    /// The key file, whichever way it came, owned.
-    pub fn into_stored(self) -> Stored {
-        match self {
-            Self::Found(stored) | Self::Made(stored) => stored,
+            Self::Found(key) | Self::Made(key) => key,
         }
     }
 }
+
+/// The key `stored`, read from `file`, is for. A plain file's key is computed from the seed it holds, a fact.
+/// A sealed file's is its header's claim, which anyone who can write the file can set to any bytes, so it is
+/// checked as a key at tightbeam's bridge, and a header no key could be refuses naming the file.
+///
+/// # Errors
+///
+/// A sealed file's header names bytes that are not a key anyone can hold.
+pub fn key_of(file: &KeyFile, stored: &Stored) -> Result<NodeId, UnusableKey> {
+    match stored {
+        Stored::Plain(secret) => Ok(secret.with_bytes(NodeId::from_ed25519_secret)),
+        Stored::Locked(locked) => locked.public_key().node_id().map_err(|_| UnusableKey {
+            path: file.path().to_path_buf(),
+            kind: file.kind(),
+        }),
+    }
+}
+
+/// A sealed key file whose header names a key nobody can hold: the file was changed outside swoosh.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "the {} key file at {} names a key nobody can hold; restore it from your backup.",
+    match .kind { keystore::Kind::Device => "device", keystore::Kind::Root => "root" },
+    EscapedPath(.path)
+)]
+pub struct UnusableKey {
+    /// The key file.
+    pub path: std::path::PathBuf,
+    /// Which key the file is named for.
+    pub kind: keystore::Kind,
+}
+
+/// What [`lock`] did to this machine's key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Locked {
+    /// The key now has a passphrase. `first` when it had none before, made here or plain until now.
+    Set {
+        /// Whether this is the first passphrase the key has had.
+        first: bool,
+    },
+    /// The key's passphrase was taken off: it is plain now.
+    Removed,
+    /// `--remove` on a key with no passphrase: nothing to do.
+    AlreadyPlain,
+}
+
+/// Set, change or remove the passphrase on this machine's key: the lock of `method`. The key never changes,
+/// so it runs beside a `serve`, which holds its key in memory. Every prompt comes first, the current
+/// passphrase before the new one, and `home.lock` is taken for the write alone.
+///
+/// A home with no key gets its first one sealed under the passphrase chosen, so a key meant to be sealed
+/// never touches the disk in the clear. `remove` on a key with no passphrase, or no key, changes nothing.
+///
+/// # Errors
+///
+/// The passphrase was not given or did not open the key, or the rewrite failed.
+pub async fn lock(
+    home: &Home,
+    method: keystore::Method,
+    remove: bool,
+    prompt: &mut impl Prompt,
+) -> eyre::Result<Locked> {
+    let file = key_file(home);
+    let stored = file.load()?;
+    let locked = match (stored, remove) {
+        (None | Some(Stored::Plain(_)), true) => return Ok(Locked::AlreadyPlain),
+        (None, false) => {
+            let new = choose_new(prompt)?;
+            let secret = keystore::Secret::generate()?;
+            let _home_lock = crate::home::HomeWrite::take(home).await?;
+            make_machine_dir(home)?;
+            file.write(&secret, Protection::Passphrase(&new))?;
+            return Ok(Locked::Set { first: true });
+        }
+        (Some(Stored::Plain(_)), false) => {
+            let new = choose_new(prompt)?;
+            let _home_lock = crate::home::HomeWrite::take(home).await?;
+            file.add_lock(None, keystore::NewLock::Passphrase(&new))?;
+            return Ok(Locked::Set { first: true });
+        }
+        (Some(Stored::Locked(locked)), _) => locked,
+    };
+    if !prompt.terminal() {
+        eyre::bail!(crate::passphrase::CHANGE_FOR_KEY_NEEDS_TERMINAL);
+    }
+    // The current passphrase is proven before the new one is asked, so a mistyped one fails at once.
+    let ((), current) = crate::passphrase::unlock(prompt, Asked::MachineKey, |passphrase| {
+        locked.unlock(Unlock::Passphrase(passphrase)).map(drop)
+    })?;
+    if remove {
+        let _home_lock = crate::home::HomeWrite::take(home).await?;
+        file.remove_lock(Unlock::Passphrase(&current), method)?;
+        return Ok(Locked::Removed);
+    }
+    let new = crate::passphrase::choose(prompt, Asked::MachineKey)?;
+    let _home_lock = crate::home::HomeWrite::take(home).await?;
+    file.add_lock(
+        Some(Unlock::Passphrase(&current)),
+        keystore::NewLock::Passphrase(&new),
+    )?;
+    Ok(Locked::Set { first: false })
+}
+
+/// A first passphrase for this machine's key, chosen at the terminal.
+fn choose_new(prompt: &mut impl Prompt) -> eyre::Result<keystore::Passphrase> {
+    if !prompt.terminal() {
+        eyre::bail!(CHOOSE_FOR_KEY_NEEDS_TERMINAL);
+    }
+    crate::passphrase::choose(prompt, Asked::MachineKey)
+}
+
+/// The refusal when a passphrase for this machine's key is to be chosen and nobody is at a terminal.
+pub const CHOOSE_FOR_KEY_NEEDS_TERMINAL: &str =
+    "setting a passphrase on this machine's key needs a terminal: over swoosh ssh, add -t after --";
 
 /// The home's key file.
 fn key_file(home: &Home) -> KeyFile {
@@ -202,8 +305,10 @@ fn open(file: &KeyFile, prompt: &mut impl Prompt) -> eyre::Result<Option<Secret>
         None => None,
         Some(Stored::Plain(secret)) => Some(Secret(secret)),
         Some(Stored::Locked(locked)) => {
-            let passphrase = prompt.unlock(file.path())?;
-            Some(Secret(locked.unlock(&passphrase)?))
+            let (secret, _) = crate::passphrase::unlock(prompt, Asked::MachineKey, |passphrase| {
+                locked.unlock(Unlock::Passphrase(passphrase))
+            })?;
+            Some(Secret(secret))
         }
     })
 }
@@ -346,11 +451,15 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
     let file = key_file(home);
     let mut copy = Zeroizing::new(*seed);
     let secret = keystore::Secret::take(&mut copy);
-    let incoming = secret.node_id();
+    let incoming = secret.with_bytes(NodeId::from_ed25519_secret);
     // A sealed file's header only CLAIMS its node; the unlock is what proves it holds this key.
     let passphrase = match file.load()? {
-        Some(Stored::Locked(locked)) if locked.node_id() == incoming => {
-            Some(prompt.unlock(file.path())?)
+        Some(Stored::Locked(locked)) if locked.public_key() == secret.public_key() => {
+            let (_, passphrase) =
+                crate::passphrase::unlock(prompt, Asked::MachineKey, |passphrase| {
+                    locked.unlock(Unlock::Passphrase(passphrase))
+                })?;
+            Some(passphrase)
         }
         _ => None,
     };
@@ -361,16 +470,20 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
     make_machine_dir(home)?;
     match file.adopt(&secret, protection) {
         Ok(()) => Ok(()),
-        Err(keystore::Error::Different {
-            path,
-            existing,
-            incoming,
-        }) => eyre::bail!(
-            "this machine is already {existing}; joining this would replace it with {incoming}. {} \
+        Err(keystore::Error::Different { path, existing, .. }) => {
+            // The key store names no key, so the existing one is spelled here, through the bridge: a sealed
+            // file's header is only a claim, and one no key could be is refused naming the file.
+            let existing = existing.node_id().map_err(|_| UnusableKey {
+                path: path.clone(),
+                kind: file.kind(),
+            })?;
+            eyre::bail!(
+                "this machine is already {existing}; joining this would replace it with {incoming}. {} \
              holds the only copy of that key: nobody can issue another. To replace it: swoosh leave \
              --new-key",
-            EscapedPath(&path),
-        ),
+                EscapedPath(&path),
+            )
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -388,7 +501,7 @@ pub fn replace_made(
 ) -> eyre::Result<()> {
     let file = key_file(home);
     match file.load()? {
-        Some(Stored::Plain(stored)) if stored.node_id() == made => {}
+        Some(Stored::Plain(stored)) if stored.with_bytes(NodeId::from_ed25519_secret) == made => {}
         _ => eyre::bail!(
             "{} changed while this waited for the invite; nothing was written",
             EscapedPath(file.path())

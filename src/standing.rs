@@ -65,6 +65,9 @@ pub enum StandingError {
     /// a root.
     #[error("could not read this machine's key")]
     OwnKey(#[source] keystore::Error),
+    /// This machine's key file names, in its header, a key nobody can hold.
+    #[error(transparent)]
+    UnusableKey(#[from] crate::identity::UnusableKey),
     /// The roots revoked here could not be read. Fails closed: a revoked root is never read as live.
     #[error("could not read the revocations on this machine")]
     Revoked(#[source] crate::revoked::RevokedError),
@@ -366,10 +369,11 @@ fn is_revoked(revoked: &Denylist, key: NodeId) -> bool {
 
 /// This machine's own key, from its key file's header. `None` when the home has no key yet.
 fn own_key(home: &Home) -> Result<Option<NodeId>, StandingError> {
-    KeyFile::device(home.key())
-        .load()
-        .map(|stored| stored.map(|stored| stored.node_id()))
-        .map_err(StandingError::OwnKey)
+    let file = KeyFile::device(home.key());
+    let stored = file.load().map_err(StandingError::OwnKey)?;
+    Ok(stored
+        .map(|stored| crate::identity::key_of(&file, &stored))
+        .transpose()?)
 }
 
 /// The key the root kept here names, or `None` when no root is kept here or the one kept here is
@@ -389,8 +393,12 @@ async fn held_root(home: &Home, revoked: &Denylist) -> Result<Option<NodeId>, St
 /// and a path that is not a regular file as that. One that could not be read is a read error. So a sound
 /// key with loose modes never reads as a torn one.
 fn root_key(path: PathBuf) -> Result<NodeId, StandingError> {
-    match KeyFile::root(&path).load() {
-        Ok(Some(stored)) => Ok(stored.node_id()),
+    let file = KeyFile::root(&path);
+    match file.load() {
+        // A header no key could be is a file whose bytes are not a root key.
+        Ok(Some(stored)) => crate::identity::key_of(&file, &stored).map_err(|_| {
+            StandingError::Damaged(Disagreement::UnreadableRoot { path: path.clone() })
+        }),
         Err(keystore::Error::Io { source, .. }) => Err(StandingError::Read { path, source }),
         Err(keystore::Error::Permissive { .. } | keystore::Error::Owner { .. }) => {
             Err(StandingError::Loose(crate::home::loose_key_file(path)))

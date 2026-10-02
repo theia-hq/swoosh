@@ -556,9 +556,11 @@ async fn dialable(
     home: &Home,
     listed: impl IntoIterator<Item = Device>,
 ) -> eyre::Result<Vec<Device>> {
-    let own = keystore::KeyFile::device(home.key())
+    let file = keystore::KeyFile::device(home.key());
+    let own = file
         .load()?
-        .map(|stored| stored.node_id());
+        .map(|stored| crate::identity::key_of(&file, &stored))
+        .transpose()?;
     // The one reader of what this machine refuses, on the gate's rules: a file that cannot be read, is
     // loose, or lost entries fails the list rather than reading as no keys, which would dial a device this
     // machine revoked.

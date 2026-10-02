@@ -18,7 +18,7 @@ use swoosh::config;
 use swoosh::contacts::{ContactsStore, ME, Petname};
 use swoosh::home::Home;
 use swoosh::invite::Invite;
-use swoosh::passphrase::Prompt;
+use swoosh::passphrase::{Asked, Choice, Prompt};
 use swoosh::roster::{Epoch, Folded, RosterDoc, fold};
 use swoosh::standing::Standing;
 use swoosh::testkit::{Loopback, TestNode, TestRoot};
@@ -146,13 +146,15 @@ impl Prompt for Asks {
         self.terminal
     }
 
-    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+    fn unlock(&mut self, _asked: Asked<'_>) -> eyre::Result<Passphrase> {
         eyre::bail!("join asks for no passphrase")
     }
 
-    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+    fn choose(&mut self, _asked: Asked<'_>) -> eyre::Result<Choice> {
         eyre::bail!("join asks for no passphrase")
     }
+
+    fn say(&mut self, _line: &str) {}
 }
 
 #[derive(Debug, Parser)]
@@ -441,11 +443,7 @@ async fn bare_join_at_a_terminal_on_a_fresh_home_takes_a_keyed_invite() {
         "{}",
         ran.err
     );
-    let key = KeyFile::device(home.key())
-        .load()
-        .unwrap()
-        .unwrap()
-        .node_id();
+    let key = swoosh::testkit::stored_key(&KeyFile::device(home.key()));
     assert_eq!(key, carried, "the invite's key is this machine's key");
     assert!(!home.machine().join("key.new").exists());
     assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
@@ -465,11 +463,7 @@ async fn the_key_bare_join_prints_outlives_a_paste_that_never_comes() {
     )
     .await;
     let _ = first.refusal();
-    let key = KeyFile::device(home.key())
-        .load()
-        .unwrap()
-        .unwrap()
-        .node_id();
+    let key = swoosh::testkit::stored_key(&KeyFile::device(home.key()));
     assert!(
         first
             .err
@@ -793,11 +787,7 @@ async fn a_key_carrying_invite_becomes_this_machines_key() {
     let home = empty("carrying");
     let seed = [0x78; 32];
     join(&home, &carrying(seed, "runner")).await.joined();
-    let key = KeyFile::device(home.key())
-        .load()
-        .unwrap()
-        .unwrap()
-        .node_id();
+    let key = swoosh::testkit::stored_key(&KeyFile::device(home.key()));
     assert_eq!(key, NodeId::from_ed25519_secret(&seed));
     assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
 }
