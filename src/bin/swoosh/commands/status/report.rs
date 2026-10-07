@@ -223,11 +223,12 @@ impl Report {
                     .to_owned(),
             );
         }
-        // No verb deletes it yet: the line names none.
-        if Standing::revoked_root(home).await?.is_some() {
-            report
-                .nags
-                .push("a revoked root is still on this machine; swoosh does not use it".to_owned());
+        // A revoke of that root that stopped after its latch; running it again deletes it. The whole key,
+        // since the line gives a command.
+        if let Some(root) = Standing::revoked_root(home).await? {
+            report.nags.push(format!(
+                "a revoked root is still on this machine; to delete it: swoosh revoke root:{root}"
+            ));
         }
         report.sections.push(contacts_section(contacts));
         report.sections.push(links_section(home, now).await?);

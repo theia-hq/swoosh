@@ -49,11 +49,13 @@ mod backup;
 mod forget;
 mod lock;
 mod restore;
+mod retire;
 
 pub use backup::{BackupError, Copied, backup};
 pub use forget::{Disk, ForgetError, Forgot, Place, RealDisk, forget};
 pub use lock::{Relocked, RootLockError, TouchIdChange, lock, lock_touch_id};
 pub use restore::{RestoreError, Restored, Synced, restore};
+pub use retire::{finish as finish_retire, retire};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
 pub const KEY_FILE: &str = "root.key";

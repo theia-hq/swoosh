@@ -1057,7 +1057,10 @@ async fn status_prints_every_state_verbatim() {
         ),
         (
             "revoked root",
-            &["a revoked root is still on this machine; swoosh does not use it".to_owned()],
+            &[format!(
+                "a revoked root is still on this machine; to delete it: swoosh revoke root:{}",
+                TestRoot::seeded(ROOT).node_id()
+            )],
         ),
         ("damaged", &[disagree("root.pub is not one root key")]),
         ("torn root", &[torn]),

@@ -18,6 +18,9 @@
 //! ([`Prompt::touch_here`]), what the enclave says of a `touch-id` lock without asking anyone
 //! ([`Prompt::health`]), and the touch itself ([`Prompt::touch`]). What to do with each answer is
 //! [`crate::touch`]'s.
+//!
+//! A typed confirmation of an act that cannot be undone rides the seam as well ([`Prompt::confirm`]), on the
+//! same terminal but shown as it is typed, since it is no secret.
 
 use std::path::Path;
 
@@ -125,6 +128,12 @@ pub trait Prompt {
 
     /// Tell the person, where they type, why the last round did not take.
     fn say(&mut self, line: &str);
+
+    /// Ask `question` and read one line, shown as it is typed: a confirmation, never a secret. The default
+    /// has nobody to ask and refuses, so only a prompt that says otherwise ever confirms an act.
+    fn confirm(&mut self, _question: &str) -> eyre::Result<String> {
+        eyre::bail!("nobody is at a terminal to answer")
+    }
 
     /// Warn the person: a notice before a write, or why a lock was passed over. Warnings ride stderr, as
     /// every other warning the binary prints does, so a capture of the command keeps them; a line that
@@ -267,6 +276,19 @@ impl Prompt for Terminal {
         if let Ok(tty) = Tty::open(Asked::MachineKey) {
             let _ = tty.tell(line);
         }
+    }
+
+    /// On `/dev/tty` too, with echo on: the answer is typed text a person checks as they type it.
+    fn confirm(&mut self, question: &str) -> eyre::Result<String> {
+        use std::io::Write as _;
+
+        // Asked only once `terminal` said yes; a terminal gone since refuses as having none.
+        let tty = Tty::open(Asked::MachineKey)
+            .map_err(|_| eyre::eyre!("nobody is at a terminal to answer"))?;
+        (&tty.0).write_all(question.as_bytes())?;
+        (&tty.0).write_all(b" ")?;
+        let line = tty.read_line()?;
+        Ok(String::from_utf8_lossy(&line).into_owned())
     }
 
     fn warn(&mut self, line: &str) {
