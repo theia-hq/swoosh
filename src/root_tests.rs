@@ -2585,7 +2585,7 @@ async fn a_restore_on_a_device_killed_after_its_key_holds_the_copys_list() {
 
 /// A list that lands while a restore's re-cut waits for the lock, and already lists this machine, is carried
 /// by the re-cut: it cuts above that list and offers the cut. Red when this machine's own row counts as a
-/// device the act added, which stops the re-cut and leaves the row waiting.
+/// device the act added, which stops the re-cut.
 #[tokio::test]
 async fn a_restore_whose_re_cut_meets_a_moved_list_carries_it_and_offers_the_cut() {
     let home = home("restore-recut-moved");
@@ -2613,8 +2613,7 @@ async fn a_restore_whose_re_cut_meets_a_moved_list_carries_it_and_offers_the_cut
     MEANWHILE.set(Some(TestRoot::seeded(ROOT).sign_update(&moved)));
     let synced = restored.sync(&home, &dial).await;
     MEANWHILE.set(None);
-    let synced = synced.expect("a moved list is carried");
-    assert!(!synced.waiting, "the moved list never stops the re-cut");
+    synced.expect("a moved list never stops the re-cut");
     let pin = TestRoot::seeded(ROOT).verify_key();
     let here = crate::roster::read_held(&home.devices(), pin).unwrap().0;
     assert_eq!(here.epoch(), Epoch(5), "cut above the moved list");
@@ -2662,39 +2661,4 @@ async fn a_list_revoking_this_machine_after_its_row_was_renewed_never_stops_the_
         !left.members().iter().any(|member| member.node == key(OWN)),
         "no live row for a revoked key"
     );
-}
-
-/// This machine's key in the home's `revoked`, with the list held here still listing it, is a revoked own
-/// key: an act that cuts warns before its prompt. `revoked::add` leaves this machine's key out, so the file
-/// is one swoosh did not write that way. Red when only the list is read.
-#[tokio::test]
-async fn a_revoked_file_naming_this_machines_key_warns_before_the_prompt() {
-    let home = home("own-key-in-revoked");
-    holds(
-        &home,
-        &records(
-            1,
-            vec![
-                own_row(),
-                row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
-            ],
-            Vec::new(),
-            Vec::new(),
-        ),
-    )
-    .await;
-    let home_lock = crate::home::HomeWrite::take(&home).await.unwrap();
-    nauthy::Denylist::for_repair(home.revoked())
-        .revoke(&home_lock, [Revocation::Key(key(OWN))])
-        .unwrap();
-    drop(home_lock);
-    let (root, out) = present(
-        &home,
-        RootPlace::Home,
-        RootVerb::Invite,
-        &mut Counting::new([PASS]),
-    )
-    .await;
-    root.unwrap();
-    assert!(out.contains(super::OWN_KEY_REVOKED), "{out}");
 }

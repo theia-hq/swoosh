@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use clap::Args;
 use swoosh::escape::EscapedPath;
 use swoosh::home::Home;
+use swoosh::root::Copied;
 
 /// copy your root to a new directory
 #[derive(Debug, Args)]
@@ -20,19 +21,28 @@ pub struct BackupCmd {
 }
 
 impl BackupCmd {
-    /// Copy, then say where the root is now.
+    /// Copy, then say where the root is now, and when a key the copy held was replaced.
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
         self.backup(home, &mut io::stderr()).await
     }
 
     pub(crate) async fn backup(self, home: &Home, err: &mut impl Write) -> eyre::Result<()> {
-        swoosh::root::backup(home, &self.dir).await?;
+        let copied = swoosh::root::backup(home, &self.dir).await?;
         let dir = EscapedPath(&self.dir);
         writeln!(
             err,
             "copied your root to {dir}. Your root is still on this machine; to take it off: swoosh root forget \
              {dir}"
         )?;
+        // A key the copy held is replaced by this machine's, whatever locked it: said, never silent.
+        match copied {
+            Copied::Replaced => writeln!(
+                err,
+                "warning: the copy in {dir} was locked differently; it now opens with your root's passphrase \
+                 on this machine. To give the copy its own: swoosh root lock {dir}"
+            )?,
+            Copied::New | Copied::Kept => {}
+        }
         Ok(())
     }
 }

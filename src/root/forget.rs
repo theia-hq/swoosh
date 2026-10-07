@@ -116,16 +116,19 @@ fn dataless(_metadata: &std::fs::Metadata) -> bool {
 /// same-disk check already refuses.
 #[cfg(target_os = "linux")]
 fn in_memory(path: &Path) -> std::io::Result<bool> {
+    use std::io;
     use std::os::unix::ffi::OsStrExt as _;
 
+    // Through `std::io`: `core::io::ErrorKind`, which a qualified `std::` path is linted toward, is not
+    // stable.
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
-        .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
     // SAFETY: `statfs` is a plain C struct for which all-zero bytes are a valid value, and the call fully
     // overwrites it before it is read.
     let mut fs: libc::statfs = unsafe { core::mem::zeroed() };
     // SAFETY: `c_path` is a live NUL-terminated string, and `fs` is a live, writable `statfs`.
     if unsafe { libc::statfs(c_path.as_ptr(), &mut fs) } != 0 {
-        return Err(std::io::Error::last_os_error());
+        return Err(io::Error::last_os_error());
     }
     #[allow(clippy::useless_conversion)]
     let kind = i64::from(fs.f_type);
@@ -327,7 +330,7 @@ pub async fn forget(
     // 5. The copy opens under a passphrase typed now, as this root. Its header names another root before
     // anything is asked; the unlock proves the key.
     // The bytes this check opens are kept: the copy confirmed under the lock is these, byte for byte.
-    let opened_bytes = read_key_bytes(&key)?;
+    let (_, opened_bytes) = open_key(&key, dir)?;
     let locked = read_header(&key)?;
     let claimed = header_key(&key, &locked)?;
     if claimed != root {
@@ -358,7 +361,7 @@ pub async fn forget(
         });
     }
     drop(secret);
-    if read_key_bytes(&key)? != opened_bytes {
+    if open_key(&key, dir)?.1 != opened_bytes {
         return Err(ForgetError::Changed {
             dir: dir.to_path_buf(),
         });
@@ -381,7 +384,9 @@ pub async fn forget(
     if !same(key_place, place(disk, &key)?) || !same(list_place, place(disk, &list)?) {
         return Err(changed());
     }
-    if read_key_bytes(&key)? != opened_bytes {
+    // The handle read here is the one made durable below: the path is not opened again under the lock.
+    let (key_file, now_bytes) = open_key(&key, dir)?;
+    if now_bytes != opened_bytes {
         return Err(changed());
     }
     // 6. The copy's list is at least as new as this machine's.
@@ -405,11 +410,10 @@ pub async fn forget(
         }
     }
     // The copy is made durable before the one step that cannot be taken back.
-    for path in [&key, &list] {
-        std::fs::File::open(path)
-            .and_then(|file| file.sync_all())
-            .map_err(super::io_at(path))?;
-    }
+    key_file.sync_all().map_err(super::io_at(&key))?;
+    std::fs::File::open(&list)
+        .and_then(|file| file.sync_all())
+        .map_err(super::io_at(&list))?;
     sync_dir(dir)?;
     super::remove_file(&home.root_key())?;
     sync_dir(home.dir())?;
@@ -440,17 +444,31 @@ async fn held(home: &Home) -> Result<bifrost::NodeId, ForgetError> {
     }
 }
 
-/// The bytes of the copy's `root.key`, read with a cap.
-fn read_key_bytes(path: &Path) -> Result<Vec<u8>, RootError> {
+/// The copy's `root.key` at `path`, opened once: the handle, and its bytes read from it with a cap. Opened
+/// without blocking, so a pipe swapped in returns at once instead of holding `home.lock`; anything but a
+/// regular file, which check 3 found there, is the copy changed.
+fn open_key(path: &Path, dir: &Path) -> Result<(std::fs::File, Vec<u8>), ForgetError> {
     use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     /// A sealed root key is a few hundred bytes; the key store reads no more than this.
     const CAP: u64 = 4096;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| file.take(CAP + 1).read_to_end(&mut bytes))
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
         .map_err(super::io_at(path))?;
-    Ok(bytes)
+    if !file.metadata().map_err(super::io_at(path))?.is_file() {
+        return Err(ForgetError::Changed {
+            dir: dir.to_path_buf(),
+        });
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(super::io_at(path))?;
+    Ok((file, bytes))
 }
 
 /// Sync a directory, so the names in it are durable.

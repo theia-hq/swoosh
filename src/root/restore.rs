@@ -146,9 +146,6 @@ pub struct Restored {
 pub struct Synced {
     /// `me/<name>` of the first device that answered, if one did.
     pub from: Option<String>,
-    /// Whether this machine's row waits for the next act that cuts: a list moved under the re-cut, which
-    /// then offered nothing.
-    pub waiting: bool,
     /// This machine's row, renamed in the list that stands: the restore's own cut, or the re-cut's when
     /// an answer replaced it.
     pub renamed: Option<Renamed>,
@@ -221,14 +218,8 @@ pub async fn restore(
             dir: dir.to_path_buf(),
         });
     };
-    let held = crate::roster::read_held(&home.devices(), pin);
-    let revokes_own = |list: Option<&crate::roster::RosterDoc>| {
-        list.is_some_and(|list| list.is_revoked_key(&own))
-    };
-    if revoked.is_revoked_key(&own)
-        || revokes_own(Some(&copied))
-        || revokes_own(held.as_ref().map(|(held, _)| held))
-    {
+    // Revoked by the copy's list or by one held here, a fork kept as the conflict among them.
+    if copied.is_revoked_key(&own) || super::own_key_revoked(home, pin)? {
         return Err(RestoreError::RevokedOwnKey);
     }
     if !prompt.terminal() {
@@ -261,8 +252,8 @@ pub async fn restore(
         }
     }
     drop(copied_bytes);
-    // A list that revokes this machine can land while the prompt waits, so the refusal before the prompt is
-    // made again here, before the commit point. What step 1 folded stays: revocations only grow.
+    // A list or a fork that revokes this machine can land while the prompt waits, so the refusal before the
+    // prompt is made again here, before the commit point. What step 1 folded stays: revocations only grow.
     if super::own_key_revoked(home, pin)? {
         return Err(RestoreError::RevokedOwnKey);
     }
@@ -347,21 +338,14 @@ impl Restored {
             .find(|(_, reply)| reply.answer().is_some())
             .map(|(device, _)| device.name);
         let pin = self.root.verify_key().map_err(RootError::from)?;
-        let revoked = crate::revoked::open(home)
-            .map_err(crate::standing::StandingError::Revoked)
-            .map_err(RootError::from)?;
-        let held = crate::roster::read_held(&home.devices(), pin);
-        if revoked.is_revoked_key(&self.own)
-            || held
-                .as_ref()
-                .is_some_and(|(held, _)| held.is_revoked_key(&self.own))
-        {
+        if super::own_key_revoked(home, pin)? {
             let _home_lock = HomeWrite::take(home).await.map_err(RootError::from)?;
             for path in [home.root_key(), home.key_cert(), home.root_pub()] {
                 remove_file(&path)?;
             }
             return Err(RestoreError::RevokedOwnKey);
         }
+        let held = crate::roster::read_held(&home.devices(), pin);
         // An answer above the restore's own number replaced `devices` with a list that may not carry this
         // machine's row. The row step runs again on that list's records, never a union with the replaced cut
         // (a union would take a name the newer list gave another key, and revoke this machine), and the cut
@@ -370,7 +354,6 @@ impl Restored {
         let Some((newer, _)) = held.filter(|(held, _)| held.epoch() > self.written) else {
             return Ok(Synced {
                 from,
-                waiting: false,
                 renamed: self.renamed,
             });
         };
@@ -378,28 +361,10 @@ impl Restored {
         root.act = Act::new(home, self.root, None, Some(&newer), Some(self.own));
         let renamed = root.act.bring_forward(&mut io::sink())?;
         root.carry_own()?;
-        // A list that moved under the re-cut is not an error here: the root, the pin and this machine's
-        // standing are in place, and the next act that cuts carries the row. Once `carry_own` leaves this
-        // machine's row out of what the act added and renewed, nothing a fold can land stops the re-cut, so
-        // this arm is defence.
-        let committed = match root.commit_to(&mut io::sink()).await {
-            Ok(committed) => committed,
-            Err(RootError::ListChanged) => {
-                return Ok(Synced {
-                    from,
-                    waiting: true,
-                    renamed: None,
-                });
-            }
-            Err(error) => return Err(error.into()),
-        };
+        let committed = root.commit_to(&mut io::sink()).await?;
         if committed.number > newer.epoch() {
             let _reach = committed.offer(dial).await;
         }
-        Ok(Synced {
-            from,
-            waiting: false,
-            renamed,
-        })
+        Ok(Synced { from, renamed })
     }
 }

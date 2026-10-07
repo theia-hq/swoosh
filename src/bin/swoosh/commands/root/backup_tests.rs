@@ -8,7 +8,7 @@ use swoosh::home::Home;
 
 use super::BackupCmd;
 use crate::commands::invite::invite_tests::{
-    LAPTOP, OWN, held, holds, live, records, scratch, snapshot,
+    LAPTOP, OWN, PASS, held, holds, live, records, scratch, snapshot,
 };
 
 /// Run `swoosh root backup <dir>` on `home`: the result, and stderr.
@@ -194,6 +194,48 @@ async fn root_backup_replaces_a_copy_key_that_differs() {
     );
 }
 
+/// A copy given its own passphrase with `root lock <dir>` gets this machine's key back at the next backup,
+/// and the backup says so on a line of its own. A first backup, and a refresh of a copy that holds this
+/// machine's key, say nothing more. Red when the replacement is silent, or said when nothing was replaced.
+#[tokio::test]
+async fn root_backup_says_when_it_replaced_a_relocked_key() {
+    let home = scratch("backup-relocked");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let dir = stick(&home);
+    let shown = dir.display();
+    let copied = format!(
+        "copied your root to {shown}. Your root is still on this machine; to take it off: swoosh root forget \
+         {shown}\n"
+    );
+    let (result, first) = backup(&home, &dir).await;
+    result.unwrap();
+    assert_eq!(first, copied, "a first backup replaces nothing");
+    let (result, refresh) = backup(&home, &dir).await;
+    result.unwrap();
+    assert_eq!(refresh, copied, "the same key is kept");
+
+    swoosh::root::lock(
+        &home,
+        Some(&dir),
+        &mut swoosh::testkit::Counting::new([PASS, "another passphrase for the copy"]),
+    )
+    .await
+    .unwrap();
+    let (result, relocked) = backup(&home, &dir).await;
+    result.unwrap();
+    assert_eq!(
+        relocked,
+        format!(
+            "{copied}warning: the copy in {shown} was locked differently; it now opens with your root's \
+             passphrase on this machine. To give the copy its own: swoosh root lock {shown}\n"
+        )
+    );
+    assert_eq!(
+        std::fs::read(dir.join("root.key")).unwrap(),
+        std::fs::read(home.root_key()).unwrap()
+    );
+}
+
 /// An empty directory the backup adopts is made owner-only, as one it makes is. Red when its mode is kept.
 #[tokio::test]
 async fn root_backup_into_an_empty_directory_makes_it_owner_only() {
@@ -206,8 +248,8 @@ async fn root_backup_into_an_empty_directory_makes_it_owner_only() {
     assert_eq!(mode(&dir), 0o700);
 }
 
-/// A planted pipe named `devices` is refused without blocking: the read checks the file's type first, and
-/// nothing holds `home.lock` while it is judged. Red when the read blocks on the pipe.
+/// A planted pipe named `devices` is refused without blocking: the read checks the file's type first. Red
+/// when the read blocks on the pipe.
 #[tokio::test]
 async fn root_backup_refuses_a_planted_pipe_without_blocking() {
     let home = scratch("backup-fifo");

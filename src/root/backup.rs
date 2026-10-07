@@ -66,6 +66,19 @@ pub enum BackupError {
     Root(#[from] RootError),
 }
 
+/// What a backup did with the copy's key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "a key replaced in the copy is said"]
+pub enum Copied {
+    /// The copy held no key: this machine's was written.
+    New,
+    /// The copy held this machine's key, byte for byte, and kept it.
+    Kept,
+    /// The copy held another key file of this root, locked differently or damaged: this machine's replaced
+    /// it, so the copy now opens with the passphrase this machine's key opens with.
+    Replaced,
+}
+
 /// Copy the root kept on this machine into `dir`: a new directory, made owner-only, an empty one, made
 /// owner-only, or one holding a copy of this same root, which is brought up to date. Asks for nothing and
 /// unlocks nothing.
@@ -73,7 +86,7 @@ pub enum BackupError {
 /// # Errors
 ///
 /// No root is kept here; `dir` holds anything else; or a read or a write failed.
-pub async fn backup(home: &Home, dir: &Path) -> Result<(), BackupError> {
+pub async fn backup(home: &Home, dir: &Path) -> Result<Copied, BackupError> {
     let root = match Standing::read(home).await.map_err(RootError::from)? {
         Standing::HoldsRoot { pin, .. } => pin,
         Standing::InterruptedMint { root_key } => {
@@ -108,8 +121,14 @@ pub async fn backup(home: &Home, dir: &Path) -> Result<(), BackupError> {
     // The key is kept only when it is this machine's, byte for byte: a damaged or a different key in the copy
     // is replaced, never reported as copied.
     let key_bytes = read_key(&home.root_key())?;
-    if held.key.as_deref() != Some(key_bytes.as_slice()) {
-        write(&home_lock, &dir.join(KEY_FILE), &key_bytes)?;
+    let copied = match held.key.as_deref() {
+        None => Copied::New,
+        Some(kept) if kept == key_bytes.as_slice() => Copied::Kept,
+        Some(_) => Copied::Replaced,
+    };
+    match copied {
+        Copied::Kept => {}
+        Copied::New | Copied::Replaced => write(&home_lock, &dir.join(KEY_FILE), &key_bytes)?,
     }
     for temp in &held.temps {
         let _ = std::fs::remove_file(temp);
@@ -123,7 +142,7 @@ pub async fn backup(home: &Home, dir: &Path) -> Result<(), BackupError> {
             dir: dir.to_path_buf(),
         });
     }
-    Ok(())
+    Ok(copied)
 }
 
 /// What a directory named for a copy already holds of this root.

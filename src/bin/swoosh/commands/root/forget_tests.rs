@@ -599,6 +599,71 @@ impl Disk for RewriteUnderLock {
     }
 }
 
+/// A pipe swapped in for the copy's key after its device and inode are confirmed under the lock is opened
+/// without blocking, refused as a change, and the root stays: forget never waits on it holding `home.lock`.
+/// Red when the read under the lock opens the key blocking, which waits for a writer that never comes.
+#[test]
+fn root_forget_never_blocks_on_a_pipe_swapped_in_under_the_lock() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (home, dir) = runtime.block_on(kept("forget-pipe-under-lock"));
+    // On a thread of its own, so a blocking open stalls that thread and never the one that waits here: the
+    // wait then runs out and the test fails, rather than hanging.
+    let (sent, got) = std::sync::mpsc::channel();
+    let (at_home, at_dir) = (home.clone(), dir.clone());
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let disk = PipeUnderLock {
+            disk: FakeDisk::new(&at_home),
+            key: at_dir.join("root.key"),
+            seen: core::cell::Cell::new(0),
+        };
+        let (result, _) =
+            runtime.block_on(forget(&at_home, &at_dir, &mut Counting::new([PASS]), &disk));
+        let _ = sent.send(result.map_err(|refused| format!("{refused:#}")));
+    });
+    let result = got
+        .recv_timeout(Duration::from_secs(60))
+        .expect("forget does not block on the pipe");
+    assert!(
+        result.unwrap_err().starts_with(&format!(
+            "the copy in {} changed during the checks",
+            dir.display()
+        )),
+        "the pipe is refused as a change"
+    );
+    assert!(home.root_key().exists());
+}
+
+/// A [`FakeDisk`] that, the second time the command reads the place of the copy's key (under the lock),
+/// answers with the key's place and then puts a pipe at its path, the key moved aside.
+struct PipeUnderLock {
+    disk: FakeDisk,
+    key: PathBuf,
+    seen: core::cell::Cell<usize>,
+}
+
+impl Disk for PipeUnderLock {
+    fn place(&self, path: &Path) -> std::io::Result<Place> {
+        let place = self.disk.place(path)?;
+        if path == self.key {
+            self.seen.set(self.seen.get() + 1);
+            if self.seen.get() == 2 {
+                std::fs::rename(path, path.with_extension("aside"))?;
+                let fifo = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+                // SAFETY: `fifo` is a live NUL-terminated path for the length of the call.
+                assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+            }
+        }
+        Ok(place)
+    }
+}
+
 /// A stage a killed key write left beside `root.key` is the one copy of the root left in the home once it
 /// goes, so forget removes it. Red when the stages are left.
 #[tokio::test]

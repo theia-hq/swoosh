@@ -50,7 +50,7 @@ mod forget;
 mod lock;
 mod restore;
 
-pub use backup::{BackupError, backup};
+pub use backup::{BackupError, Copied, backup};
 pub use forget::{Disk, ForgetError, Forgot, Place, RealDisk, forget};
 pub use lock::{Relocked, RootLockError, lock};
 pub use restore::{RestoreError, Restored, Synced, restore};
@@ -94,18 +94,20 @@ pub const KEPT_HERE: &str = "your root is on this machine, and this runs only wh
 /// it signs no row for this machine.
 pub const OWN_KEY_REVOKED: &str = "warning: this machine's key was revoked, so your devices no longer admit it. Your root still works here.";
 
-/// Whether this machine's key is revoked, by this home's `revoked` or by the list of the root `root` held here.
+/// Whether this machine's key is revoked by a list of the root `root` held here: `devices`, or a fork kept
+/// as `devices.conflict`. These are the two lists the records are built from, so this is the records'
+/// answer. The home's `revoked` is not read: it never names this machine's own key.
 ///
 /// # Errors
 ///
-/// This machine's key or the revocations could not be read.
+/// This machine's key could not be read.
 pub fn own_key_revoked(home: &Home, root: VerifyKey) -> Result<bool, RootError> {
     let Some(own) = own_key(home)? else {
         return Ok(false);
     };
-    let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
-    Ok(revoked.is_revoked_key(&own)
-        || read_held(&home.devices(), root).is_some_and(|(held, _)| held.is_revoked_key(&own)))
+    Ok([home.devices(), home.devices_conflict()]
+        .iter()
+        .any(|list| read_held(list, root).is_some_and(|(held, _)| held.is_revoked_key(&own))))
 }
 
 /// Where the root for one command is: kept in this home, or a copy in a directory given with `--root`.
@@ -1730,7 +1732,8 @@ impl Root {
         }
         self.sign_own(own)?;
         // This machine's row is not a device the act adds or renews: a list folded meanwhile that already
-        // carries it is brought forward, never a reason to stop, as `take_own` leaves its row.
+        // carries it is brought forward, never a reason to stop, as `take_own` leaves its row. So a restore's
+        // re-cut, which adds, renews and revokes nothing else, always lands.
         self.act.added.retain(|key| *key != own);
         self.act.renewed.retain(|key| *key != own);
         Ok(())

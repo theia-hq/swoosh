@@ -858,6 +858,74 @@ async fn restore_refuses_when_a_list_revoking_this_machine_lands_during_the_prom
     assert!(!home.root_key().exists(), "the root was never written");
 }
 
+/// A fork kept here (`devices.conflict`) that revokes this machine, at the number of the list held, which
+/// still lists it, refuses the restore before the prompt: the fork is one of the lists the records are built
+/// from. Red when only `devices` is read, which writes `root.key` and then fails signing this machine's row.
+#[tokio::test]
+async fn restore_refuses_when_a_fork_held_here_revokes_this_machine() {
+    let home = scratch("restore-fork-revokes");
+    let rows = [live(OWN, "desk"), live(LAPTOP, "laptop")];
+    device_of(&home, &rows[0]).await;
+    crate::commands::invite::invite_tests::held(&home, &records(2, &rows, Vec::new()));
+    fold_from_beside(&home, &fork_revoking_this_machine());
+    assert!(home.devices_conflict().exists(), "the fork is kept");
+    let dir = stick(&home, &records(2, &rows, Vec::new()));
+    let mut prompt = Counting::new([PASS]);
+    let refused = restore_cmd(&dir)
+        .restore(&home, &mut prompt)
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        format!("{refused:#}"),
+        "this machine's key was revoked; to restore here, first give this machine a new key: swoosh leave \
+         --new-key"
+    );
+    assert_eq!(prompt.events(), 0, "refused before the prompt");
+    assert!(!home.root_key().exists(), "the root was never written");
+}
+
+/// The same fork, folded here while the restore waits at its prompt, refuses it under the lock before
+/// `root.key` is written. Red when the re-check under the lock reads only `devices`.
+#[tokio::test]
+async fn restore_refuses_when_a_fork_revoking_this_machine_lands_during_the_prompt() {
+    let home = scratch("restore-fork-meanwhile");
+    let rows = [live(OWN, "desk"), live(LAPTOP, "laptop")];
+    device_of(&home, &rows[0]).await;
+    crate::commands::invite::invite_tests::held(&home, &records(2, &rows, Vec::new()));
+    let dir = stick(&home, &records(2, &rows, Vec::new()));
+    let fork = fork_revoking_this_machine();
+    let mut asked = 0;
+    let mut prompt = Meanwhile(|| {
+        asked += 1;
+        fold_from_beside(&home, &fork);
+    });
+    let refused = restore_cmd(&dir)
+        .restore(&home, &mut prompt)
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        format!("{refused:#}"),
+        "this machine's key was revoked; to restore here, first give this machine a new key: swoosh leave \
+         --new-key"
+    );
+    assert_eq!(asked, 1);
+    assert!(home.devices_conflict().exists(), "the fork is kept");
+    assert!(!home.root_key().exists(), "the root was never written");
+}
+
+/// A list at update 2 that revokes this machine: a fork of the update 2 a test holds, which lists it.
+fn fork_revoking_this_machine() -> RosterDoc {
+    records(
+        2,
+        &[
+            live(LAPTOP, "laptop"),
+            revoked(OWN, "desk"),
+            live(0x43, "nas"),
+        ],
+        Vec::new(),
+    )
+}
+
 /// A restore whose cut renames this machine, because a fork kept here gave its name to another device, says
 /// the new name on its success line. Red when the rename is dropped.
 #[tokio::test]
