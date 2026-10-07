@@ -303,6 +303,38 @@ async fn mint_asks_choose_then_repeat() {
     );
 }
 
+/// A root made beside a key under `touch-id` alone says what a restore says there: the key should take a
+/// passphrase beside the touch, since no verb gives this machine a new key once a root is kept. A plain key
+/// gets no such line. Red when the line is dropped.
+#[tokio::test]
+async fn a_root_made_beside_a_touch_id_only_key_says_to_add_a_passphrase() {
+    let home = home("mint-beside-touch-id");
+    crate::identity::make_machine_dir(&home).unwrap();
+    std::fs::write(home.key(), crate::testkit::touch_id::DEVICE_TOUCH_ID_ALONE).unwrap();
+    std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut out = Vec::new();
+    Root::mint_to(&home, &mut Counting::new([PASS]), &mut out)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.lines()
+            .any(|line| line == crate::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
+        "{out}"
+    );
+
+    let home = self::home("mint-beside-plain");
+    let mut out = Vec::new();
+    Root::mint_to(&home, &mut Counting::new([PASS]), &mut out)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        !out.contains(crate::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
+        "{out}"
+    );
+}
+
 #[tokio::test]
 async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
     let home = home("mint-sealed");

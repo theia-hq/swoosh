@@ -135,7 +135,7 @@ fn same_root_write(home_lock: &HomeWrite, home: &Home, standing: &Link) -> io::R
 /// A file could not be removed, or whether a root is kept here could not be told.
 pub fn leave(_home_lock: &HomeWrite, home: &Home) -> io::Result<()> {
     let mut gone = vec![home.key_cert(), home.synced(), home.invited_by()];
-    if !home.root_key().try_exists()? {
+    if !home.keeps_root()? {
         gone.extend([home.devices(), home.devices_conflict()]);
     }
     for path in gone {

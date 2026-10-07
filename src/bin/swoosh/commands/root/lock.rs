@@ -57,6 +57,11 @@ fn first(word: &str) -> Result<First, String> {
     if let Some(method) = method(word) {
         return Ok(First::Method(method));
     }
+    // A method on another build is named as one, never sent to a directory that holds a `/`.
+    #[cfg(not(target_os = "macos"))]
+    if word == "touch-id" {
+        return Err("touch-id is a lock on macOS only".to_owned());
+    }
     if word.contains('/') || word == "." || word == ".." {
         return Ok(First::Dir(PathBuf::from(word)));
     }

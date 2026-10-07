@@ -111,21 +111,26 @@ pub async fn lock_touch_id(
     if !prompt.terminal() {
         return Err(RootError::NoTerminalToUnlock.into());
     }
+    let file = KeyFile::root(&target.path);
+    let lines = touch::Lines::of(target.asked, &file, true);
     if !remove {
-        prompt.say(touch::ROOT_BESIDE_PASSPHRASE);
+        prompt.warn(touch::ROOT_BESIDE_PASSPHRASE);
         if target.dir.is_none() && machine_key_opens_by_touch(home) {
-            prompt.say(touch::SHARED_FINGER);
+            prompt.warn(touch::SHARED_FINGER);
+        }
+        // Setting a lock that does not open here again says first to check for a fingerprint nobody added:
+        // the new lock opens under every finger enrolled now.
+        if holds && prompt.health(&target.locked) == Some(keystore::Health::Dead) {
+            prompt.warn(&lines.warning());
         }
     }
     let current = target.prove(prompt)?;
-    let file = KeyFile::root(&target.path);
     let _home_lock = target.home_lock(home).await?;
     if remove {
         file.remove_lock(Unlock::Passphrase(&current), Method::TouchId)
             .map_err(RootError::from)?;
         return Ok((target.relocked(), TouchIdChange::Removed));
     }
-    let lines = touch::Lines::of(target.asked, &file, true);
     prompt.say(&lines.checking());
     let touch = Touch {
         file,

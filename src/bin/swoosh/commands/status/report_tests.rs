@@ -1325,3 +1325,66 @@ async fn the_root_line_names_touch_id_with_how_it_reads() {
         );
     }
 }
+
+/// On a build with no enclave, a `touch-id` lock is named with a note that it opens only on a Mac, on the
+/// key's line and the root's, so nobody there reads it as a way in. Red when it reads as a live lock.
+#[tokio::test]
+async fn touch_id_unasked_says_it_opens_only_on_a_mac() {
+    let home = home("touch-id-unasked");
+    holds(&home).await;
+    overwrite(
+        &home.key(),
+        &swoosh::testkit::touch_id::DEVICE_PASSPHRASE_AND_TOUCH_ID,
+    );
+    overwrite(
+        &home.root_key(),
+        &swoosh::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
+    );
+    let key = KeyFile::device(home.key()).load().unwrap();
+    let out = super::Report::gather_with(
+        &home,
+        key.as_ref(),
+        unix_now(),
+        &swoosh::testkit::Counting::refusing(),
+    )
+    .await
+    .unwrap()
+    .render();
+    assert!(
+        out.lines()
+            .any(|line| line == "key lock: passphrase, touch-id (opens only on a Mac)"),
+        "{out}"
+    );
+    let root = TestRoot::seeded(ROOT).node_id();
+    let line = format!(
+        "root:{root} on this machine, locked with a passphrase and touch-id, which opens only on a Mac."
+    );
+    assert!(out.lines().any(|seen| seen == line), "{line}\n{out}");
+}
+
+/// A key under `touch-id` alone beside a root kept here is nagged about, as a root made or restored beside
+/// it says, until the passphrase goes beside the touch. Red when the nag is dropped.
+#[tokio::test]
+async fn a_touch_id_only_key_beside_a_root_is_nagged() {
+    let home = home("touch-id-alone-beside-root");
+    holds(&home).await;
+    overwrite(
+        &home.key(),
+        &swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE,
+    );
+    let out = status_reading(&home, keystore::Health::Live).await;
+    assert!(
+        out.lines()
+            .any(|line| line == swoosh::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
+        "{out}"
+    );
+    overwrite(
+        &home.key(),
+        &swoosh::testkit::touch_id::DEVICE_PASSPHRASE_AND_TOUCH_ID,
+    );
+    let out = status_reading(&home, keystore::Health::Live).await;
+    assert!(
+        !out.contains(swoosh::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
+        "{out}"
+    );
+}

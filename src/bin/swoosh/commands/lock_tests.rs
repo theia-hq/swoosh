@@ -292,3 +292,26 @@ async fn lock_at_no_terminal_says_it_needs_one() {
         assert!(!refusal.contains("lock --remove"));
     }
 }
+
+/// `lock touch-id` on a key under `touch-id` alone where no root is kept says it already opens with it, and
+/// asks nothing. On a Mac only, where `touch-id` is a value; the decision itself is the library's, tested
+/// on every build.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn lock_touch_id_on_a_touch_id_only_key_says_nothing_changed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = scratch("lock-touch-id-has");
+    swoosh::identity::make_machine_dir(&home).unwrap();
+    std::fs::write(home.key(), swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE).unwrap();
+    std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut prompt = Counting::refusing();
+    let (result, err) = lock(&home, &["touch-id"], &mut prompt).await;
+    result.unwrap();
+    assert_eq!(
+        err,
+        "this machine's key already opens with touch-id; nothing was changed.\n"
+    );
+    assert_eq!(prompt.events(), 0);
+    assert!(prompt.touches().is_empty());
+}

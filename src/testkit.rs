@@ -336,6 +336,7 @@ pub struct Counting {
     events: usize,
     reads: usize,
     said: Vec<String>,
+    warned: Vec<String>,
     here: TouchHere,
     health: Option<Health>,
     touched: VecDeque<Touched>,
@@ -350,6 +351,7 @@ impl Counting {
             events: 0,
             reads: 0,
             said: Vec::new(),
+            warned: Vec::new(),
             here: TouchHere::NoEnclave,
             health: None,
             touched: VecDeque::new(),
@@ -402,9 +404,14 @@ impl Counting {
         self.reads
     }
 
-    /// What the prompt was told between tries, in order.
+    /// What the prompt was told between tries, in order, warnings included.
     pub fn said(&self) -> &[String] {
         &self.said
+    }
+
+    /// What the prompt was warned of, in order: the lines bound for stderr.
+    pub fn warned(&self) -> &[String] {
+        &self.warned
     }
 
     fn answer(&mut self, reads: usize) -> eyre::Result<Zeroizing<String>> {
@@ -447,6 +454,13 @@ impl Prompt for Counting {
 
     fn say(&mut self, line: &str) {
         self.said.push(line.to_owned());
+    }
+
+    /// Kept beside what was said, in the same order, and apart in [`warned`](Self::warned), so a test reads
+    /// the conversation whole and each channel on its own.
+    fn warn(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+        self.warned.push(line.to_owned());
     }
 
     fn touch_here(&self) -> TouchHere {

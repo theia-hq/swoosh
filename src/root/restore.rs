@@ -28,7 +28,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
-use keystore::{Health, KeyFile, Method, Passphrase, Stored, Unlock};
+use keystore::{Health, KeyFile, Passphrase, Stored, Unlock};
 use nauthy::VerifyKey;
 use rand::seq::SliceRandom as _;
 use tightbeam::identity::AsVerifyKey as _;
@@ -347,12 +347,7 @@ pub async fn restore(
     drop(home_lock);
     // Read with no dialog, after the restore is done, so it says what is there and asks nothing.
     let touch_id_dead = prompt.health(&locked) == Some(Health::Dead);
-    let machine_key_touch_id_alone = matches!(
-        KeyFile::device(home.key()).load(),
-        Ok(Some(Stored::Locked(key)))
-            if !crate::touch::holds_passphrase(&key)
-                && key.methods().any(|method| method == Method::TouchId)
-    );
+    let machine_key_touch_id_alone = crate::identity::touch_id_alone_beside_root(home);
     Ok(Restored {
         root,
         was_device,

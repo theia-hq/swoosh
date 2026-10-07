@@ -480,19 +480,26 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// Exit as clap does on a usage error of the verb `verb`: `error: <message>`, its usage line, and exit 2.
-/// For a usage error found only once the verb runs, such as stdin that held no link.
-fn usage_error(verb: &str, message: &str) -> ! {
-    let mut cli = Cli::command();
-    cli.build();
-    match cli.find_subcommand_mut(verb) {
-        Some(sub) => sub
-            .error(clap::error::ErrorKind::InvalidValue, message)
-            .exit(),
-        None => cli
-            .error(clap::error::ErrorKind::InvalidValue, message)
-            .exit(),
+/// Exit as clap does on a usage error of the command at `path` (`["root", "lock"]`): `error: <message>`, its
+/// usage line, and exit 2. For a usage error found only once the verb runs, such as stdin that held no link.
+fn usage_error(path: &[&str], message: &str) -> ! {
+    usage(path, message).exit()
+}
+
+/// The usage error [`usage_error`] exits with: the command `path` names, walked one word at a time, so a
+/// leaf prints its own usage and never its parent's. A word that names no subcommand stops the walk there.
+fn usage(path: &[&str], message: &str) -> clap::Error {
+    let mut command = Cli::command();
+    // Built first, so each subcommand carries its full name (`swoosh root lock`) into its usage line.
+    command.build();
+    for word in path {
+        match command.find_subcommand(word) {
+            // A clone, on the way to an exit: a borrow taken in one arm would outlive the walk.
+            Some(sub) => command = sub.clone(),
+            None => break,
+        }
     }
+    command.error(clap::error::ErrorKind::InvalidValue, message)
 }
 
 /// The default `RUST_LOG` directive: ERROR everywhere. Activity lines do not ride the log at all (a
@@ -569,7 +576,7 @@ async fn run() -> eyre::Result<()> {
         Verb::Root(cmd) => {
             return match cmd.run(&home).await {
                 Err(report) => match report.downcast_ref::<root::lock::Usage>() {
-                    Some(usage) => usage_error("root", &usage.0),
+                    Some(usage) => usage_error(&["root", "lock"], &usage.0),
                     None => Err(report),
                 },
                 done => done,
@@ -612,7 +619,7 @@ async fn run() -> eyre::Result<()> {
                 }),
                 Ok(None) => return Ok(()),
                 Err(report) => match report.downcast_ref::<revoke::Usage>() {
-                    Some(usage) => usage_error("revoke", &usage.0),
+                    Some(usage) => usage_error(&["revoke"], &usage.0),
                     None => return Err(report),
                 },
             }

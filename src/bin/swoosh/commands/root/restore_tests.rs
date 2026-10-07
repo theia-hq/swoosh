@@ -1028,9 +1028,10 @@ fn overwrite(path: &Path, bytes: &[u8]) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-/// The line a restore prints when the copy's `touch-id` lock does not open on this Mac.
-const DEAD_COPY: &str =
-    "the copy's touch-id does not open on this Mac; to use it here: swoosh root lock touch-id";
+/// The line a restore prints when the copy's `touch-id` lock does not open on this Mac: the line every use
+/// of it says, with the check on a fingerprint nobody added before setting it again.
+const DEAD_COPY: &str = "touch-id does not open your root on this Mac now; if you did not add a fingerprint, \
+     check Touch ID & Password before setting it again: swoosh root lock touch-id";
 
 /// A copy whose `touch-id` lock does not open here is restored byte for byte, and one line says how to use
 /// it here; a lock that cannot be checked now gets no line, since it may be live. Red when an unchecked lock

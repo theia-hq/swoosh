@@ -9,10 +9,12 @@ use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
+use keystore::KeyFile;
 use swoosh::home::Home;
-use swoosh::passphrase::{Prompt, Terminal};
+use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::Restored;
 use swoosh::sync::{Dial, NodeDial};
+use swoosh::touch::Lines;
 use swoosh::transport::ReachArgs;
 
 /// put your root on this machine from a copy
@@ -88,18 +90,14 @@ impl RestoreSync {
             )?;
         }
         // The copy's bytes are kept whole, a lock that does not open here included; these say what to do.
+        // A dead lock gets the line every use of it says, check on an added fingerprint and all: the command
+        // it names sets a lock that opens under every finger enrolled now.
         if touch_id_dead {
-            writeln!(
-                err,
-                "the copy's touch-id does not open on this Mac; to use it here: swoosh root lock touch-id"
-            )?;
+            let file = KeyFile::root(home.root_key());
+            writeln!(err, "{}", Lines::of(Asked::Root, &file, true).dead())?;
         }
         if machine_key_touch_id_alone {
-            writeln!(
-                err,
-                "this machine's key opens with touch-id alone, and now keeps your root; give it a passphrase \
-                 beside the touch: swoosh lock touch-id"
-            )?;
+            writeln!(err, "{}", swoosh::identity::TOUCH_ID_ALONE_BESIDE_ROOT)?;
         }
         Ok(())
     }

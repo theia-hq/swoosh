@@ -1670,6 +1670,11 @@ async fn make(
     };
     root.act.minted = true;
     root.take_own(&home_lock, own)?;
+    // A root made beside a key under `touch-id` alone leaves the one state the two-lock rule refuses
+    // elsewhere; read from the header, so nothing is asked.
+    if crate::identity::touch_id_alone_beside_root(home) {
+        let _ = writeln!(out, "{}", crate::identity::TOUCH_ID_ALONE_BESIDE_ROOT);
+    }
     Ok(root)
 }
 

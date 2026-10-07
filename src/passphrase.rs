@@ -126,6 +126,14 @@ pub trait Prompt {
     /// Tell the person, where they type, why the last round did not take.
     fn say(&mut self, line: &str);
 
+    /// Warn the person: a notice before a write, or why a lock was passed over. Warnings ride stderr, as
+    /// every other warning the binary prints does, so a capture of the command keeps them; a line that
+    /// attends an ask stays with [`say`](Self::say). The default says it where they type, so a prompt with
+    /// no stderr of its own loses nothing.
+    fn warn(&mut self, line: &str) {
+        self.say(line);
+    }
+
     /// Whether a touch may be asked for here, read before any dialog. The default asks for none, so a
     /// prompt that does not say otherwise never shows one and every key opens with its passphrase.
     fn touch_here(&self) -> TouchHere {
@@ -259,6 +267,10 @@ impl Prompt for Terminal {
         if let Ok(tty) = Tty::open(Asked::MachineKey) {
             let _ = tty.tell(line);
         }
+    }
+
+    fn warn(&mut self, line: &str) {
+        eprintln!("{line}");
     }
 
     /// A Mac's own session at a terminal, with no ssh session in the environment.

@@ -206,6 +206,13 @@ impl Report {
                 .nags
                 .push(touch::Lines::of(Asked::MachineKey, &file, passphrase).dead());
         }
+        // A key under `touch-id` alone beside a root kept here: the state a root made or restored beside it
+        // leaves, said until the passphrase goes beside the touch.
+        if swoosh::identity::touch_id_alone_beside_root(home) {
+            report
+                .nags
+                .push(swoosh::identity::TOUCH_ID_ALONE_BESIDE_ROOT.to_owned());
+        }
         // A root kept here whose machine's key is revoked still works; the devices refuse this machine.
         if let Ok(Standing::HoldsRoot { pin, .. }) = Standing::read(home).await
             && swoosh::root::own_key_revoked(home, pin.verify_key()?)?
@@ -512,7 +519,8 @@ impl Report {
 }
 
 /// The words `key lock:` names the key's locks by: `none` for a plain key, else each lock's method, in the
-/// key file's order, a `touch-id` lock with how it reads where that is not live.
+/// key file's order, a `touch-id` lock with how it reads where that is not live: on a build with no enclave,
+/// that it opens only on a Mac, so nobody there reads it as a way in.
 fn lock(methods: &[Method], touch: Option<TouchId>) -> String {
     if methods.is_empty() {
         return "none".to_owned();
@@ -523,7 +531,8 @@ fn lock(methods: &[Method], touch: Option<TouchId>) -> String {
             (Method::Passphrase, _) => "passphrase",
             (Method::TouchId, Some(TouchId::Dead)) => "touch-id (does not open on this Mac now)",
             (Method::TouchId, Some(TouchId::Unchecked)) => "touch-id (cannot check now)",
-            (Method::TouchId, _) => "touch-id",
+            (Method::TouchId, Some(TouchId::Unasked)) => "touch-id (opens only on a Mac)",
+            (Method::TouchId, Some(TouchId::Live) | None) => "touch-id",
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -533,7 +542,8 @@ fn lock(methods: &[Method], touch: Option<TouchId>) -> String {
 fn root_locks(touch: Option<TouchId>) -> &'static str {
     match touch {
         None => "a passphrase",
-        Some(TouchId::Live | TouchId::Unasked) => "a passphrase and touch-id",
+        Some(TouchId::Live) => "a passphrase and touch-id",
+        Some(TouchId::Unasked) => "a passphrase and touch-id, which opens only on a Mac",
         Some(TouchId::Dead) => "a passphrase and touch-id, which does not open on this Mac now",
         Some(TouchId::Unchecked) => "a passphrase and touch-id, which cannot be checked now",
     }

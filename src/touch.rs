@@ -11,10 +11,10 @@
 //! passphrase: the dialog may still be up, and nobody touched it for a minute.
 //!
 //! The touch runs on a thread of its own, which owns everything it uses, and the caller waits for it
-//! [`TOUCH_WAIT`] per dialog. On a timeout the command ends and the thread is left behind: the process
-//! exiting is what ends it, and a touch on a dialog left up hands its secret to nobody. That is why the thread
-//! is a plain one and never the runtime's: dropping a runtime waits for its blocking tasks, which would hold
-//! the process open until the dialog closed.
+//! [`TOUCH_WAIT`]: every act shows one dialog. On a timeout the command ends and the thread is left behind:
+//! the process exiting is what ends it, and a touch on a dialog left up hands its secret to nobody. That is
+//! why the thread is a plain one and never the runtime's: dropping a runtime waits for its blocking tasks,
+//! which would hold the process open until the dialog closed.
 
 use core::time::Duration;
 use std::ffi::OsString;
@@ -25,8 +25,8 @@ use crate::escape::EscapedPath;
 use crate::identity::Whose;
 use crate::passphrase::{Asked, Prompt};
 
-/// How long a touch is waited for, per dialog it shows: long enough to read the dialog and reach a keyboard's
-/// sensor, short enough that a parked command lets go of what it holds.
+/// How long a touch is waited for: long enough to read the dialog and reach a keyboard's sensor, short
+/// enough that a parked command lets go of what it holds.
 pub const TOUCH_WAIT: Duration = Duration::from_secs(60);
 
 /// The reason a dialog shows to open this machine's key: `<program> is trying to <reason>`.
@@ -67,6 +67,10 @@ pub const SHARED_FINGER: &str = "your root and this machine's key both open with
 pub const TOUCH_ID_GONE: &str =
     "the key file changed while this ran, and has no touch-id lock now; run it again";
 
+/// The refusal when a touch opens a key other than the one the file's header named when it was checked: the
+/// file was replaced between the read and the touch's own load, so the key in hand is not the one vetted.
+pub const KEY_CHANGED: &str = "the key file changed while this ran; run it again";
+
 /// The refusal of setting `touch-id` anywhere but at this Mac's own screen, naming `command` to run there.
 pub fn set_elsewhere(here: TouchHere, command: &str) -> String {
     match here {
@@ -80,7 +84,8 @@ pub fn set_elsewhere(here: TouchHere, command: &str) -> String {
 }
 
 /// A change a touch was asked for, as its end: done, or the refusal. A cancel or a lock that does not open
-/// changed nothing, since every act fails at its first touch before it writes.
+/// changed nothing, since every act fails at its first touch before it writes. A write that fails after the
+/// new lock went on says the file holds both, never that the touch did not open.
 ///
 /// # Errors
 ///
@@ -92,6 +97,11 @@ pub(crate) fn changed(touched: Touched, lines: &Lines<'_>) -> eyre::Result<()> {
             eyre::bail!("touch-id did not open {}; nothing changed", lines.key())
         }
         Touched::Failed(why) => Err(why.wrap_err(format!("touch-id did not open {}", lines.key()))),
+        Touched::HalfDone(why) => eyre::bail!(
+            "{} has its new lock, but the old one did not come off: {why:#}; swoosh status says what is \
+             there",
+            lines.key()
+        ),
         Touched::TimedOut => eyre::bail!("{TIMED_OUT}"),
     }
 }
@@ -137,7 +147,7 @@ pub struct Touch {
 }
 
 /// What a touch is asked for. Each is one call into the key store, or two where a lock is replaced, and
-/// each shows one dialog but [`TouchAct::Again`], which shows two.
+/// each shows one dialog.
 #[derive(Debug)]
 pub enum TouchAct {
     /// Open the file through its `touch-id` lock.
@@ -154,9 +164,6 @@ pub enum TouchAct {
         /// What becomes of the passphrase lock.
         then: Then,
     },
-    /// Set the file's `touch-id` lock again, opened with the one it has: a dialog to open, and one to prove
-    /// the new lock.
-    Again,
     /// Put a passphrase lock on the file, opened with its `touch-id` lock; then keep the `touch-id` lock, or
     /// take it off.
     AddPassphrase {
@@ -190,89 +197,104 @@ pub enum Touched {
     /// Anything else: the enclave failed, the unwrap refused (a lock someone else made with this Mac's
     /// enclave reads live and fails here), or the act's own write.
     Failed(eyre::Report),
+    /// The touch opened and the new lock is on, then taking the old lock off failed: the file holds both.
+    HalfDone(eyre::Report),
     /// Nobody touched in time. The dialog may still be up.
     TimedOut,
 }
 
+/// Where an act stopped: at the call that asks the touch, or at the write after it.
+#[derive(Debug)]
+pub enum Stopped {
+    /// The call that asks the touch refused, and nothing was written.
+    Touch(keystore::Error),
+    /// The new lock is on; taking the old one off refused.
+    After(keystore::Error),
+}
+
+impl From<keystore::Error> for Stopped {
+    fn from(error: keystore::Error) -> Self {
+        Self::Touch(error)
+    }
+}
+
 impl Touch {
-    /// How many dialogs the act shows, which is what bounds the wait.
-    pub const fn dialogs(&self) -> u32 {
-        match self.act {
-            TouchAct::Again => 2,
-            _ => 1,
-        }
-    }
-
-    /// How long the act is waited for: [`TOUCH_WAIT`] for each dialog it shows.
-    pub fn wait(&self) -> Duration {
-        TOUCH_WAIT * self.dialogs()
-    }
-
     /// Run the act against the key store. Blocks for as long as the dialog is up.
     ///
     /// # Errors
     ///
-    /// The key store's refusal, the touch's own included.
-    pub fn run(self) -> Result<Option<keystore::Secret>, keystore::Error> {
+    /// The key store's refusal, the touch's own included, and where the act stopped.
+    pub fn run(self) -> Result<Option<keystore::Secret>, Stopped> {
         let Self { file, reason, act } = self;
         let touch = Unlock::TouchId { reason };
         let new = NewLock::TouchId { reason };
         match act {
             // The file is read again here, on this thread: its unlock proves its own header, so the key it
-            // returns is the one this file holds whatever the caller read.
+            // returns is the one this file holds now, which `open` checks against the header the caller read.
             TouchAct::Open => match file.load()? {
-                Some(Stored::Locked(locked)) => locked.unlock(touch).map(Some),
-                Some(Stored::Plain(_)) | None => Err(keystore::Error::NoLock {
+                Some(Stored::Locked(locked)) => {
+                    locked.unlock(touch).map(Some).map_err(Stopped::Touch)
+                }
+                Some(Stored::Plain(_)) | None => Err(Stopped::Touch(keystore::Error::NoLock {
                     path: file.path().to_path_buf(),
                     method: Method::TouchId,
-                }),
+                })),
             },
             TouchAct::Write(secret) => file
                 .write(&secret, Protection::TouchId { reason })
-                .map(|()| None),
-            TouchAct::SealPlain => file.add_lock(None, new).map(|()| None),
+                .map(|()| None)
+                .map_err(Stopped::Touch),
+            TouchAct::SealPlain => file
+                .add_lock(None, new)
+                .map(|()| None)
+                .map_err(Stopped::Touch),
             TouchAct::BesidePassphrase { current, then } => {
                 let with = Unlock::Passphrase(&current);
                 file.add_lock(Some(with), new)?;
                 if then == Then::Drop {
-                    file.remove_lock(with, Method::Passphrase)?;
+                    file.remove_lock(with, Method::Passphrase)
+                        .map_err(Stopped::After)?;
                 }
                 Ok(None)
             }
-            TouchAct::Again => file.add_lock(Some(touch), new).map(|()| None),
             TouchAct::AddPassphrase { new, then } => {
                 file.add_lock(Some(touch), NewLock::Passphrase(&new))?;
                 if then == Then::Drop {
-                    file.remove_lock(Unlock::Passphrase(&new), Method::TouchId)?;
+                    file.remove_lock(Unlock::Passphrase(&new), Method::TouchId)
+                        .map_err(Stopped::After)?;
                 }
                 Ok(None)
             }
-            TouchAct::RemoveTouchId => file.remove_lock(touch, Method::TouchId).map(|()| None),
+            TouchAct::RemoveTouchId => file
+                .remove_lock(touch, Method::TouchId)
+                .map(|()| None)
+                .map_err(Stopped::Touch),
         }
     }
 }
 
 /// The key store's answer, as a touch's end. Only the refusals a person can tell apart are named; the rest is
-/// a failure, carried whole.
-impl From<Result<Option<keystore::Secret>, keystore::Error>> for Touched {
-    fn from(answer: Result<Option<keystore::Secret>, keystore::Error>) -> Self {
+/// a failure, carried whole, and a write that failed after the new lock went on says so.
+impl From<Result<Option<keystore::Secret>, Stopped>> for Touched {
+    fn from(answer: Result<Option<keystore::Secret>, Stopped>) -> Self {
         match answer {
             Ok(opened) => Self::Opened(opened),
-            Err(keystore::Error::TouchId { source, .. }) => match source {
+            Err(Stopped::After(error)) => Self::HalfDone(eyre::Report::new(error)),
+            Err(Stopped::Touch(keystore::Error::TouchId { source, .. })) => match source {
                 keystore::TouchIdError::Declined(_) => Self::Declined,
                 keystore::TouchIdError::NotHere(_) | keystore::TouchIdError::Unavailable => {
                     Self::NotHere
                 }
                 other => Self::Failed(eyre::Report::new(other)),
             },
-            Err(other) => Self::Failed(eyre::Report::new(other)),
+            Err(Stopped::Touch(other)) => Self::Failed(eyre::Report::new(other)),
         }
     }
 }
 
-/// Ask for `touch` on a thread of its own and wait [`TOUCH_WAIT`] per dialog: the product's touch.
+/// Ask for `touch` on a thread of its own and wait [`TOUCH_WAIT`] for it: the product's touch.
 pub(crate) fn ask(touch: Touch) -> Touched {
-    match bounded(touch.wait(), move || touch.run()) {
+    match bounded(TOUCH_WAIT, move || touch.run()) {
         Ok(answer) => Touched::from(answer),
         Err(Unfinished::TimedOut) => Touched::TimedOut,
         Err(Unfinished::Thread(why)) => Touched::Failed(why),
@@ -318,9 +340,36 @@ pub(crate) enum Route {
     /// Ask for a touch.
     Touch,
     /// Ask for the passphrase, after this line where there is one.
-    Passphrase(Option<String>),
+    Passphrase(Option<Aside>),
     /// Refuse, with this line: the file has no passphrase lock to fall to.
     Refuse(String),
+}
+
+/// A line said on the way to the passphrase: one that goes with the ask, or a warning, which rides stderr
+/// ([`Prompt::warn`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Aside {
+    /// Why the passphrase is asked rather than a touch.
+    Say(String),
+    /// A lock that does not open on this Mac now.
+    Warn(String),
+}
+
+impl Aside {
+    /// Tell it to the person, on its own channel.
+    pub(crate) fn tell(&self, prompt: &mut impl Prompt) {
+        match self {
+            Self::Say(line) => prompt.say(line),
+            Self::Warn(line) => prompt.warn(line),
+        }
+    }
+
+    /// The line, for a refusal that ends the command instead.
+    pub(crate) fn into_line(self) -> String {
+        match self {
+            Self::Say(line) | Self::Warn(line) => line,
+        }
+    }
 }
 
 /// How `locked`, read from `file`, opens for `asked`: [`Route::Touch`] only for a `touch-id` lock a touch may
@@ -337,7 +386,7 @@ pub(crate) fn route(
     let passphrase = holds_passphrase(locked);
     let lines = Lines::of(asked, file, passphrase);
     // The line said on the way to the passphrase, or the refusal where there is none to go to.
-    let skip = |line: Option<String>, refusal: String| {
+    let skip = |line: Option<Aside>, refusal: String| {
         if passphrase {
             Route::Passphrase(line)
         } else {
@@ -349,13 +398,16 @@ pub(crate) fn route(
         // refuses on its own when there is no terminal, and a build with no enclave names no `touch-id`.
         TouchHere::NoEnclave => skip(None, lines.no_enclave()),
         TouchHere::NoTerminal => skip(None, lines.no_terminal()),
-        TouchHere::OverSsh(variable) => {
-            skip(Some(lines.over_ssh(variable)), lines.over_ssh(variable))
-        }
+        TouchHere::OverSsh(variable) => skip(
+            Some(Aside::Say(lines.over_ssh(variable))),
+            lines.over_ssh(variable),
+        ),
         TouchHere::Here => match prompt.health(locked) {
             Some(Health::Live) => Route::Touch,
-            Some(Health::Dead) => skip(Some(lines.warning()), lines.dead()),
-            Some(Health::Unchecked) | None => skip(Some(lines.unchecked()), lines.unchecked()),
+            Some(Health::Dead) => skip(Some(Aside::Warn(lines.warning())), lines.dead()),
+            Some(Health::Unchecked) | None => {
+                skip(Some(Aside::Say(lines.unchecked())), lines.unchecked())
+            }
         },
     }
 }
@@ -364,10 +416,14 @@ pub(crate) fn route(
 /// up to [`TRIES`](crate::passphrase::TRIES) times. A touch that is declined, does not open, or fails falls
 /// to the passphrase once, never to a second touch; a touch that times out ends the command.
 ///
+/// The touch loads the file again on its own thread, so the key it opens is checked against the one
+/// `locked`'s header names, which is the one the caller checked: a file replaced between the two reads is
+/// refused, never signed with.
+///
 /// # Errors
 ///
-/// The refusal [`route`] gave, the touch's end on a file with no passphrase lock, a timeout, or the
-/// passphrase's.
+/// The refusal [`route`] gave, a key other than the one checked, the touch's end on a file with no
+/// passphrase lock, a timeout, or the passphrase's.
 pub fn open(
     prompt: &mut impl Prompt,
     file: &KeyFile,
@@ -378,9 +434,9 @@ pub fn open(
     let lines = Lines::of(asked, file, holds_passphrase(locked));
     match route(prompt, file, locked, asked) {
         Route::Refuse(line) => eyre::bail!("{line}"),
-        Route::Passphrase(line) => {
-            if let Some(line) = line {
-                prompt.say(&line);
+        Route::Passphrase(aside) => {
+            if let Some(aside) = aside {
+                aside.tell(prompt);
             }
         }
         Route::Touch => {
@@ -391,21 +447,29 @@ pub fn open(
                 act: TouchAct::Open,
             };
             let fallen = match prompt.touch(touch) {
-                Touched::Opened(Some(secret)) => return Ok(secret),
-                Touched::Opened(None) => {
-                    Some(lines.failed(&eyre::eyre!("the touch opened no key")))
+                Touched::Opened(Some(secret)) if secret.public_key() == locked.public_key() => {
+                    return Ok(secret);
                 }
+                Touched::Opened(Some(_)) => eyre::bail!("{KEY_CHANGED}"),
+                Touched::Opened(None) => Some(Aside::Say(
+                    lines.failed(&eyre::eyre!("the touch opened no key")),
+                )),
                 Touched::TimedOut => eyre::bail!("{TIMED_OUT}"),
                 // A cancel is its own answer: the prompt that follows says the rest.
                 Touched::Declined => None,
-                Touched::NotHere => Some(lines.warning()),
-                Touched::Failed(why) => Some(lines.failed(&why)),
+                Touched::NotHere => Some(Aside::Warn(lines.warning())),
+                Touched::Failed(why) | Touched::HalfDone(why) => {
+                    Some(Aside::Say(lines.failed(&why)))
+                }
             };
             if !lines.passphrase {
-                eyre::bail!("{}", fallen.unwrap_or_else(|| lines.declined()));
+                eyre::bail!(
+                    "{}",
+                    fallen.map_or_else(|| lines.declined(), Aside::into_line)
+                );
             }
-            if let Some(line) = fallen {
-                prompt.say(&line);
+            if let Some(aside) = fallen {
+                aside.tell(prompt);
             }
         }
     }
@@ -420,8 +484,9 @@ pub fn holds_passphrase(locked: &Locked) -> bool {
     locked.methods().any(|method| method == Method::Passphrase)
 }
 
-/// The refusal when a touch is not answered in time. It never says nothing changed: a lock change the touch
-/// was for may have finished in the last instant, and `status` says what is there.
+/// The refusal when a touch is not answered in time: every act shows one dialog, waited [`TOUCH_WAIT`]. It
+/// never says nothing changed: a lock change the touch was for may have finished in the last instant, and
+/// `status` says what is there.
 pub const TIMED_OUT: &str = "touch-id waited 60 seconds and no touch came";
 
 /// The lines a touch on one key file says, in the words of whose key it is.
@@ -495,8 +560,9 @@ impl<'a> Lines<'a> {
         }
     }
 
-    /// [`dead`](Self::dead), said at use on the way to the passphrase.
-    fn warning(&self) -> String {
+    /// [`dead`](Self::dead), warned of at use on the way to the passphrase, and before a lock that does not
+    /// open is set again.
+    pub fn warning(&self) -> String {
         format!("warning: {}", self.dead())
     }
 

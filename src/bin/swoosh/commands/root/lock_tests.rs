@@ -223,16 +223,27 @@ fn parse(args: &[&str]) -> Result<RootLockCmd, clap::Error> {
     }
 }
 
-/// Run `swoosh root lock <args>` on `home` with `prompt`: the result, and stderr.
-#[cfg(target_os = "macos")]
-async fn run(home: &Home, args: &[&str], prompt: &mut Counting) -> (eyre::Result<()>, String) {
+/// Run `swoosh root lock touch-id [<dir>] [--remove]` on `home` with `prompt`: the result, and stderr. Built
+/// as the parser would build it rather than parsed, so it runs on every build: `touch-id` is a value on a
+/// macOS build only, and what it runs ([`swoosh::root::lock_touch_id`]) is the same everywhere.
+async fn run(
+    home: &Home,
+    dir: Option<&Path>,
+    remove: bool,
+    prompt: &mut Counting,
+) -> (eyre::Result<()>, String) {
     let mut err = Vec::new();
-    let result = parse(args).unwrap().lock(home, prompt, &mut err).await;
+    let result = RootLockCmd {
+        first: Some(super::First::Method(keystore::Method::TouchId)),
+        dir: dir.map(Path::to_path_buf),
+        remove,
+    }
+    .lock(home, prompt, &mut err)
+    .await;
     (result, String::from_utf8(err).unwrap())
 }
 
 /// The root at `path` under its passphrase and a `touch-id` lock.
-#[cfg(target_os = "macos")]
 fn with_touch_id(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
 
@@ -245,7 +256,6 @@ fn with_touch_id(path: &Path) {
 }
 
 /// The methods of the root key's locks at `path`.
-#[cfg(target_os = "macos")]
 fn locks(path: &Path) -> Vec<keystore::Method> {
     let Some(Stored::Locked(locked)) = KeyFile::root(path).load().unwrap() else {
         panic!("a sealed root key");
@@ -254,7 +264,6 @@ fn locks(path: &Path) -> Vec<keystore::Method> {
 }
 
 /// A prompt at this Mac that answers the passphrase, and whose touch proves the new lock.
-#[cfg(target_os = "macos")]
 fn at_this_mac(touched: swoosh::touch::Touched) -> Counting {
     Counting::new([PASS])
         .at_this_mac(keystore::Health::Live)
@@ -311,22 +320,30 @@ fn touch_id_is_a_method_on_a_mac() {
     assert_eq!(cmd.target().unwrap(), (keystore::Method::TouchId, None));
 }
 
-/// Elsewhere `touch-id` is not a method, and is not taken for a directory either.
+/// Elsewhere `touch-id` is not a method, and is not taken for a directory either: it says it is macOS only.
+/// Red when it suggests `./touch-id`.
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn touch_id_is_no_method_off_a_mac() {
-    assert_eq!(parse(&["touch-id"]).unwrap_err().exit_code(), 2);
+    let refused = parse(&["touch-id"]).unwrap_err();
+    assert_eq!(refused.exit_code(), 2);
+    assert!(
+        refused
+            .to_string()
+            .contains("touch-id is a lock on macOS only"),
+        "{refused}"
+    );
+    assert!(!refused.to_string().contains("./touch-id"), "{refused}");
 }
 
 /// `root lock touch-id` says what a new fingerprint does, opens with the passphrase, and proves the new lock
 /// with one touch beside it. Red when the passphrase lock is dropped.
-#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn root_lock_touch_id_adds_it_beside_the_passphrase() {
     let home = scratch("root-lock-touch-id");
     holds(&home, &[live(OWN, "desk")], Vec::new()).await;
     let mut prompt = at_this_mac(swoosh::touch::Touched::Opened(None));
-    let (result, err) = run(&home, &["touch-id"], &mut prompt).await;
+    let (result, err) = run(&home, None, false, &mut prompt).await;
     result.unwrap();
     assert_eq!(
         err,
@@ -352,18 +369,21 @@ async fn root_lock_touch_id_adds_it_beside_the_passphrase() {
             "waiting for touch-id to check it opens your root…"
         ]
     );
+    assert_eq!(
+        prompt.warned(),
+        [swoosh::touch::ROOT_BESIDE_PASSPHRASE],
+        "the notice is a warning, and the wait for the touch is not"
+    );
 }
 
 /// On a copy, the line names the copy.
-#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn root_lock_touch_id_on_a_copy_names_the_copy() {
     let home = scratch("root-lock-touch-id-copy");
     device_of(&home, &live(OWN, "desk")).await;
     let dir = stick(&home);
-    let dir_text = dir.to_str().unwrap().to_owned();
     let mut prompt = at_this_mac(swoosh::touch::Touched::Opened(None));
-    let (result, err) = run(&home, &["touch-id", &dir_text], &mut prompt).await;
+    let (result, err) = run(&home, Some(&dir), false, &mut prompt).await;
     result.unwrap();
     assert_eq!(
         err,
@@ -376,7 +396,6 @@ async fn root_lock_touch_id_on_a_copy_names_the_copy() {
 }
 
 /// Over ssh it is refused before any prompt, and names the variable.
-#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn root_lock_touch_id_over_ssh_is_refused_before_any_prompt() {
     let home = scratch("root-lock-touch-id-ssh");
@@ -384,7 +403,7 @@ async fn root_lock_touch_id_over_ssh_is_refused_before_any_prompt() {
     let before = std::fs::read(home.root_key()).unwrap();
     let mut prompt =
         Counting::new([PASS]).here(swoosh::touch::TouchHere::OverSsh("SSH_CONNECTION"));
-    let (result, _) = run(&home, &["touch-id"], &mut prompt).await;
+    let (result, _) = run(&home, None, false, &mut prompt).await;
     assert_eq!(
         format!("{:#}", result.unwrap_err()),
         "touch-id is set at this Mac's own screen, not over ssh (SSH_CONNECTION is set); run it there: \
@@ -395,13 +414,12 @@ async fn root_lock_touch_id_over_ssh_is_refused_before_any_prompt() {
 }
 
 /// A touch that does not prove the new lock changes nothing, and says so.
-#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn root_lock_touch_id_declined_changes_nothing() {
     let home = scratch("root-lock-touch-id-declined");
     holds(&home, &[live(OWN, "desk")], Vec::new()).await;
     let mut prompt = at_this_mac(swoosh::touch::Touched::Declined);
-    let (result, err) = run(&home, &["touch-id"], &mut prompt).await;
+    let (result, err) = run(&home, None, false, &mut prompt).await;
     assert_eq!(
         format!("{:#}", result.unwrap_err()),
         "touch-id did not open your root; nothing changed"
@@ -410,13 +428,12 @@ async fn root_lock_touch_id_declined_changes_nothing() {
 }
 
 /// A timeout says only that it waited: the write may have finished in the last instant.
-#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn root_lock_touch_id_timed_out_never_says_nothing_changed() {
     let home = scratch("root-lock-touch-id-timed-out");
     holds(&home, &[live(OWN, "desk")], Vec::new()).await;
     let mut prompt = at_this_mac(swoosh::touch::Touched::TimedOut);
-    let (result, _) = run(&home, &["touch-id"], &mut prompt).await;
+    let (result, _) = run(&home, None, false, &mut prompt).await;
     assert_eq!(
         format!("{:#}", result.unwrap_err()),
         swoosh::touch::TIMED_OUT
@@ -424,14 +441,13 @@ async fn root_lock_touch_id_timed_out_never_says_nothing_changed() {
 }
 
 /// `--remove` opens with the passphrase, never a touch, and leaves the passphrase the one lock.
-#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn root_lock_touch_id_remove_leaves_the_passphrase() {
     let home = scratch("root-lock-touch-id-remove");
     holds(&home, &[live(OWN, "desk")], Vec::new()).await;
     with_touch_id(&home.root_key());
     let mut prompt = Counting::new([PASS]).at_this_mac(keystore::Health::Live);
-    let (result, err) = run(&home, &["touch-id", "--remove"], &mut prompt).await;
+    let (result, err) = run(&home, None, true, &mut prompt).await;
     result.unwrap();
     assert_eq!(
         err,
@@ -442,14 +458,45 @@ async fn root_lock_touch_id_remove_leaves_the_passphrase() {
 }
 
 /// `--remove` on a root with no `touch-id` asks nothing and changes nothing.
-#[cfg(target_os = "macos")]
 #[tokio::test]
 async fn root_lock_touch_id_remove_with_none_asks_nothing() {
     let home = scratch("root-lock-touch-id-remove-none");
     holds(&home, &[live(OWN, "desk")], Vec::new()).await;
     let mut prompt = Counting::refusing();
-    let (result, err) = run(&home, &["touch-id", "--remove"], &mut prompt).await;
+    let (result, err) = run(&home, None, true, &mut prompt).await;
     result.unwrap();
     assert_eq!(err, "your root has no touch-id; nothing was changed.\n");
     assert_eq!(prompt.events(), 0);
+}
+
+/// Setting a root's `touch-id` lock that does not open here again says first to check for a fingerprint
+/// nobody added, as a warning, before the passphrase is asked. Red when the old lock's health is not read.
+#[tokio::test]
+async fn root_lock_touch_id_over_a_dead_lock_says_to_check_touch_id_first() {
+    let home = scratch("root-lock-touch-id-dead");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    with_touch_id(&home.root_key());
+    let mut prompt = Counting::new([swoosh::testkit::touch_id::PASSPHRASE])
+        .at_this_mac(keystore::Health::Dead)
+        .touching([swoosh::touch::Touched::Opened(None)]);
+    let (result, _) = run(&home, None, false, &mut prompt).await;
+    result.unwrap();
+    assert_eq!(
+        prompt.warned(),
+        [
+            swoosh::touch::ROOT_BESIDE_PASSPHRASE,
+            "warning: touch-id does not open your root on this Mac now; if you did not add a fingerprint, \
+             check Touch ID & Password before setting it again: swoosh root lock touch-id"
+        ]
+    );
+}
+
+/// A usage error found once `root lock`'s arguments are read together prints `root lock`'s own usage,
+/// never its parent's. Red when the walk stops at `root`.
+#[test]
+fn a_root_lock_usage_error_prints_root_locks_usage() {
+    let rendered = crate::usage(&["root", "lock"], "x").render().to_string();
+    assert!(rendered.contains("swoosh root lock"), "{rendered}");
+    let rendered = crate::usage(&["revoke"], "x").render().to_string();
+    assert!(rendered.contains("swoosh revoke"), "{rendered}");
 }

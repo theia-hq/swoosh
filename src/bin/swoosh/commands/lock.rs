@@ -102,6 +102,10 @@ impl LockCmd {
                 err,
                 "this machine's key has no touch-id; nothing was changed."
             )?,
+            Locked::HasTouchId => writeln!(
+                err,
+                "this machine's key already opens with touch-id; nothing was changed."
+            )?,
         }
         Ok(())
     }

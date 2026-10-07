@@ -9,9 +9,12 @@ use std::path::PathBuf;
 
 use keystore::{Health, KeyFile, Method, Stored};
 
+// The touch itself is built only by the hardware tests, which run on a Mac.
+#[cfg(target_os = "macos")]
+use super::Touch;
 use super::{
-    Route, SSH_VARIABLES, TIMED_OUT, TOUCH_WAIT, Touch, TouchAct, TouchHere, Touched, USE_ROOT,
-    Unfinished, bounded, open, over_ssh, route,
+    KEY_CHANGED, Lines, Route, SSH_VARIABLES, Stopped, TIMED_OUT, TOUCH_WAIT, TouchAct, TouchHere,
+    Touched, USE_ROOT, Unfinished, bounded, changed, open, over_ssh, route,
 };
 use crate::passphrase::Asked;
 use crate::testkit::Counting;
@@ -149,17 +152,15 @@ fn a_job_that_panics_is_no_timeout() {
     assert!(matches!(waited, Err(Unfinished::Thread(_))));
 }
 
-/// Each dialog gets the whole bound: setting `touch-id` again shows two. Red when the bound does not scale.
+/// Every act shows one dialog, waited a minute, and the timeout's line says the wait it did. Red when the
+/// line and the bound part.
 #[test]
-fn the_wait_is_a_minute_per_dialog() {
-    let touch = |act| Touch {
-        file: KeyFile::device("key"),
-        reason: USE_ROOT,
-        act,
-    };
-    assert_eq!(touch(TouchAct::Open).wait(), TOUCH_WAIT);
-    assert_eq!(touch(TouchAct::Again).wait(), TOUCH_WAIT * 2);
+fn the_wait_is_a_minute_and_the_timeout_says_so() {
     assert_eq!(TOUCH_WAIT, Duration::from_secs(60));
+    assert!(
+        TIMED_OUT.contains(&format!("waited {} seconds", TOUCH_WAIT.as_secs())),
+        "{TIMED_OUT}"
+    );
 }
 
 /// A build with no enclave reads as a lock that does not open, and any other refusal of the key store as
@@ -170,13 +171,40 @@ fn the_key_stores_refusals_read_as_a_touch_ends() {
         path: PathBuf::from("key"),
         source: keystore::TouchIdError::Unavailable,
     };
-    assert!(matches!(Touched::from(Err(unavailable)), Touched::NotHere));
+    assert!(matches!(
+        Touched::from(Err(Stopped::Touch(unavailable))),
+        Touched::NotHere
+    ));
     let unlock = keystore::Error::Unlock {
         path: PathBuf::from("key"),
         method: Method::TouchId,
     };
-    assert!(matches!(Touched::from(Err(unlock)), Touched::Failed(_)));
+    assert!(matches!(
+        Touched::from(Err(Stopped::Touch(unlock))),
+        Touched::Failed(_)
+    ));
     assert!(matches!(Touched::from(Ok(None)), Touched::Opened(None)));
+}
+
+/// A refusal after the new lock went on reads as half done, never as a touch that did not open. Red when
+/// the second write's failure is mapped as the touch's.
+#[test]
+fn a_refusal_after_the_new_lock_reads_as_half_done() {
+    let unlock = keystore::Error::Unlock {
+        path: PathBuf::from("key"),
+        method: Method::Passphrase,
+    };
+    let touched = Touched::from(Err(Stopped::After(unlock)));
+    assert!(matches!(touched, Touched::HalfDone(_)), "{touched:?}");
+    let (file, _) = machine("half-done", &DEVICE_PASSPHRASE_AND_TOUCH_ID, false);
+    let lines = Lines::of(Asked::MachineKey, &file, true);
+    let refused = format!("{:#}", changed(touched, &lines).unwrap_err());
+    assert!(
+        refused
+            .starts_with("this machine's key has its new lock, but the old one did not come off"),
+        "{refused}"
+    );
+    assert!(!refused.contains("did not open"), "{refused}");
 }
 
 /// A live lock at this Mac is touched, and the key it opens is the answer: no passphrase is asked.
@@ -193,6 +221,21 @@ fn a_live_lock_opens_by_one_touch_and_asks_no_passphrase() {
     assert!(matches!(prompt.touches()[0].act, TouchAct::Open));
     assert_eq!(prompt.touches()[0].reason, USE_ROOT);
     assert_eq!(prompt.said(), ["waiting for touch-id to use your root…"]);
+    assert!(prompt.warned().is_empty(), "the wait attends the touch");
+}
+
+/// A touch that opens a key other than the one the header named, which the caller checked, is refused:
+/// the file was replaced between the two reads. No passphrase is asked, and the key is not handed back.
+/// Red when the touched key is not compared, which returns the wrong key.
+#[test]
+fn a_touch_that_opens_another_key_is_refused() {
+    let (file, locked) = root("another-key");
+    let mut prompt = Counting::new([PASSPHRASE])
+        .at_this_mac(Health::Live)
+        .touching([Touched::Opened(Some(secret(0x11)))]);
+    let refused = opened(&mut prompt, &file, &locked, Asked::Root).unwrap_err();
+    assert_eq!(format!("{refused:#}"), KEY_CHANGED);
+    assert_eq!(prompt.events(), 0, "no passphrase after another key");
 }
 
 /// A cancel falls to the passphrase with no line of its own, and never to a second touch. Red when a
@@ -266,7 +309,7 @@ fn a_dead_root_lock_shows_no_dialog_and_leads_with_setting_it_again() {
     opened(&mut prompt, &file, &locked, Asked::Root).unwrap();
     assert!(prompt.touches().is_empty(), "no dialog for a dead lock");
     assert_eq!(
-        prompt.said(),
+        prompt.warned(),
         [
             "warning: touch-id does not open your root on this Mac now; if you did not add a fingerprint, \
              check Touch ID & Password before setting it again: swoosh root lock touch-id"
@@ -531,4 +574,115 @@ fn the_terminal_touch_times_out_after_a_minute() {
     };
     assert!(matches!(Terminal.touch(open), Touched::TimedOut));
     assert!(started.elapsed() >= TOUCH_WAIT);
+}
+
+/// Each lock-changing act against the real enclave, through the product's own wait: the lock list after
+/// is the one the act is for. Run on an unlocked Mac with Touch ID, touching every dialog:
+/// `cargo test --lib -- --ignored the_terminal_act`.
+#[cfg(target_os = "macos")]
+mod hardware_acts {
+    use keystore::{KeyFile, Method, Protection, Stored};
+
+    use super::{PASSPHRASE, Touch, TouchAct, Touched, scratch, secret};
+    use crate::passphrase::{Prompt as _, Terminal};
+    use crate::touch::Then;
+
+    fn passphrase(text: &str) -> keystore::Passphrase {
+        keystore::Passphrase::try_from(zeroize::Zeroizing::new(text.to_owned())).unwrap()
+    }
+
+    /// A machine key in a fresh home, written under `protection`.
+    fn written(tag: &str, protection: Protection<'_>) -> KeyFile {
+        let file = KeyFile::device(scratch(tag).join("machine").join("key"));
+        file.write(&secret(0x61), protection).unwrap();
+        file
+    }
+
+    /// A machine key in a fresh home, sealed by a first touch under `touch-id` alone.
+    fn touched(tag: &str) -> KeyFile {
+        let file = KeyFile::device(scratch(tag).join("machine").join("key"));
+        let made = Touch {
+            file: file.clone(),
+            reason: "make a test key (touch to allow)",
+            act: TouchAct::Write(secret(0x61)),
+        };
+        assert!(matches!(Terminal.touch(made), Touched::Opened(None)));
+        file
+    }
+
+    /// Run `act` on `file` by one real touch, and read the lock list after.
+    fn after(file: &KeyFile, act: TouchAct) -> Vec<Method> {
+        let touch = Touch {
+            file: file.clone(),
+            reason: "change the test key's locks (touch to allow)",
+            act,
+        };
+        let touched = Terminal.touch(touch);
+        assert!(matches!(touched, Touched::Opened(None)), "{touched:?}");
+        match file.load().unwrap() {
+            Some(Stored::Locked(locked)) => locked.methods().collect(),
+            Some(Stored::Plain(_)) => Vec::new(),
+            None => panic!("the key is gone"),
+        }
+    }
+
+    #[test]
+    #[ignore = "needs a finger on this Mac's Touch ID sensor"]
+    fn the_terminal_act_seals_a_plain_key() {
+        let file = written("hardware-seal-plain", Protection::Plain);
+        assert_eq!(after(&file, TouchAct::SealPlain), [Method::TouchId]);
+    }
+
+    #[test]
+    #[ignore = "needs a finger on this Mac's Touch ID sensor"]
+    fn the_terminal_act_puts_touch_id_beside_the_passphrase() {
+        let under = passphrase(PASSPHRASE);
+        let file = written("hardware-beside-keep", Protection::Passphrase(&under));
+        let act = TouchAct::BesidePassphrase {
+            current: passphrase(PASSPHRASE),
+            then: Then::Keep,
+        };
+        assert_eq!(after(&file, act), [Method::Passphrase, Method::TouchId]);
+    }
+
+    #[test]
+    #[ignore = "needs a finger on this Mac's Touch ID sensor"]
+    fn the_terminal_act_replaces_the_passphrase_with_touch_id() {
+        let under = passphrase(PASSPHRASE);
+        let file = written("hardware-beside-drop", Protection::Passphrase(&under));
+        let act = TouchAct::BesidePassphrase {
+            current: passphrase(PASSPHRASE),
+            then: Then::Drop,
+        };
+        assert_eq!(after(&file, act), [Method::TouchId]);
+    }
+
+    #[test]
+    #[ignore = "needs a finger on this Mac's Touch ID sensor"]
+    fn the_terminal_act_adds_a_passphrase_beside_touch_id() {
+        let file = touched("hardware-add-keep");
+        let act = TouchAct::AddPassphrase {
+            new: passphrase(PASSPHRASE),
+            then: Then::Keep,
+        };
+        assert_eq!(after(&file, act), [Method::TouchId, Method::Passphrase]);
+    }
+
+    #[test]
+    #[ignore = "needs a finger on this Mac's Touch ID sensor"]
+    fn the_terminal_act_replaces_touch_id_with_a_passphrase() {
+        let file = touched("hardware-add-drop");
+        let act = TouchAct::AddPassphrase {
+            new: passphrase(PASSPHRASE),
+            then: Then::Drop,
+        };
+        assert_eq!(after(&file, act), [Method::Passphrase]);
+    }
+
+    #[test]
+    #[ignore = "needs a finger on this Mac's Touch ID sensor"]
+    fn the_terminal_act_removes_touch_id() {
+        let file = touched("hardware-remove");
+        assert_eq!(after(&file, TouchAct::RemoveTouchId), Vec::<Method>::new());
+    }
 }
