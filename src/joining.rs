@@ -94,9 +94,11 @@ pub async fn take_renewal(
         Standing::Device { pin, until } | Standing::HoldsRoot { pin, until } => (pin, until),
         Standing::Unpinned | Standing::InterruptedMint { .. } => return Ok(None),
     };
-    let Some(own) = keystore::KeyFile::device(home.key())
+    let file = keystore::KeyFile::device(home.key());
+    let Some(own) = file
         .load()?
-        .map(|stored| stored.node_id())
+        .map(|stored| crate::identity::key_of(&file, &stored))
+        .transpose()?
     else {
         return Ok(None);
     };

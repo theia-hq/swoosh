@@ -160,7 +160,7 @@ pub fn create_store_dir(dir: &Path) -> std::io::Result<()> {
 ///
 /// The directory could not be made, or the temp could not be written, synced or renamed.
 pub fn write_private_atomic(
-    _home_lock: &HomeWrite,
+    home_lock: &HomeWrite,
     path: &Path,
     contents: &[u8],
 ) -> std::io::Result<()> {
@@ -187,10 +187,22 @@ pub fn write_private_atomic(
         let _ = std::fs::remove_file(&temp);
         return Err(error);
     }
-    if let Err(error) = std::fs::rename(&temp, path) {
+    if let Err(error) = rename_private(home_lock, &temp, path) {
         let _ = std::fs::remove_file(&temp);
         return Err(error);
     }
+    Ok(())
+}
+
+/// Rename `from` over `path`, a file of the home, then sync the directory so the new name is durable: the
+/// last half of [`write_private_atomic`], for a file it already wrote and synced under another name and that
+/// was checked there before it takes its own.
+///
+/// # Errors
+///
+/// The rename failed, or the directory could not be synced after it.
+pub fn rename_private(_home_lock: &HomeWrite, from: &Path, path: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, path)?;
     if let Some(parent) = path.parent() {
         std::fs::File::open(parent)?.sync_all()?;
         synced(Synced::Dir);

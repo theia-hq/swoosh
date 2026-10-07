@@ -15,7 +15,7 @@ use keystore::{KeyFile, Passphrase, Protection, Stored};
 use swoosh::config;
 use swoosh::contacts::{ContactsStore, ME, Petname};
 use swoosh::home::Home;
-use swoosh::passphrase::Prompt;
+use swoosh::passphrase::{Asked, Choice, Prompt};
 use swoosh::roster::{Epoch, RosterDoc, fold};
 use swoosh::standing::Standing;
 use swoosh::testkit::{Counting, TestNode, TestRoot};
@@ -203,13 +203,15 @@ impl Prompt for NoTerminal {
         false
     }
 
-    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+    fn unlock(&mut self, _asked: Asked<'_>) -> eyre::Result<Passphrase> {
         eyre::bail!("no terminal")
     }
 
-    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+    fn choose(&mut self, _asked: Asked<'_>) -> eyre::Result<Choice> {
         eyre::bail!("no terminal")
     }
+
+    fn say(&mut self, _line: &str) {}
 }
 
 impl Events for NoTerminal {
@@ -223,11 +225,7 @@ async fn read(home: &Home) -> Standing {
 }
 
 fn stored_key(home: &Home) -> NodeId {
-    KeyFile::device(home.key())
-        .load()
-        .unwrap()
-        .unwrap()
-        .node_id()
+    swoosh::testkit::stored_key(&KeyFile::device(home.key()))
 }
 
 /// Keep `ROOT` in `home`: a plain 32-byte key file, which the standing reads by its key without a prompt.
@@ -396,7 +394,7 @@ async fn leave_new_key_on_an_unpinned_home_replaces_the_key() {
     assert_eq!(ran.out, format!("{key}\n"), "stdout is the new key alone");
     let kept = home.machine().join("key.replaced-2026-09-25");
     assert_eq!(
-        KeyFile::device(&kept).load().unwrap().unwrap().node_id(),
+        swoosh::testkit::stored_key(&KeyFile::device(&kept)),
         node(OWN),
         "the old key is kept aside"
     );
@@ -531,13 +529,15 @@ impl Prompt for Switching {
         true
     }
 
-    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
+    fn unlock(&mut self, _asked: Asked<'_>) -> eyre::Result<Passphrase> {
         self.switch()
     }
 
-    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
-        self.switch()
+    fn choose(&mut self, _asked: Asked<'_>) -> eyre::Result<Choice> {
+        self.switch().map(Choice::Chosen)
     }
+
+    fn say(&mut self, _line: &str) {}
 }
 
 impl Events for Switching {
@@ -679,4 +679,45 @@ async fn leave_keeps_the_list_of_a_root_kept_here() {
         b"the other list"
     );
     assert!(home.root_key().exists(), "the root stays");
+}
+
+/// Damage the header of this machine's sealed key: the key it names is a point no key can be.
+fn damage_key(home: &Home) {
+    let mut bytes = std::fs::read(home.key()).unwrap();
+    bytes[10..42].fill(0);
+    std::fs::write(home.key(), &bytes).unwrap();
+}
+
+/// `leave --new-key` sets a damaged machine key aside and makes a new one, as it does any key: it never
+/// needs the old key's identity. Plain `leave` still refuses, and a root kept here is still never left.
+/// Red when `--new-key` refuses a damaged key.
+#[tokio::test]
+async fn leave_new_key_replaces_a_damaged_key() {
+    let home = scratch_with("new-key-damaged", true);
+    device(&home, swoosh::testkit::STANDING_UNTIL).await;
+    damage_key(&home);
+
+    let refused = leave(&home, &[]).await;
+    assert!(
+        refused
+            .refusal()
+            .contains("is damaged and holds no usable key"),
+        "plain leave keeps refusing"
+    );
+
+    let ran = leave(&home, &["--new-key"]).await;
+    ran.left();
+    let new = stored_key(&home);
+    assert_ne!(new, node(OWN), "a new key");
+    assert!(matches!(read(&home).await, Standing::Unpinned));
+
+    // With a root kept here, `--new-key` still refuses, and leaves the damaged key as it is.
+    let home = scratch_with("new-key-damaged-root", true);
+    device(&home, swoosh::testkit::STANDING_UNTIL).await;
+    keep_root(&home);
+    damage_key(&home);
+    let before = std::fs::read(home.key()).unwrap();
+    let ran = leave(&home, &["--new-key"]).await;
+    assert_eq!(ran.refusal(), swoosh::root::KEPT_HERE);
+    assert_eq!(std::fs::read(home.key()).unwrap(), before);
 }

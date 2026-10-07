@@ -269,14 +269,18 @@ async fn an_outward_dial_never_creates_the_key_under_an_explicit_home() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Seal a fresh key into `home` under `passphrase`, the way `protect passphrase` creates one.
-pub(super) fn sealed(home: &Home, passphrase: &'static str) -> bifrost::NodeId {
-    match super::protect(home, Method::Passphrase, &mut Scripted::new([passphrase]))
-        .expect("seal a fresh key")
-    {
-        super::Protected::Created(node) => node,
-        other => panic!("an empty home is created, got {other:?}"),
-    }
+/// Seal a fresh key into `home` under `passphrase`, the way `lock` makes a home's first key.
+pub(super) async fn sealed(home: &Home, passphrase: &'static str) -> bifrost::NodeId {
+    let locked = super::lock(
+        home,
+        Method::Passphrase,
+        false,
+        &mut Scripted::new([passphrase]),
+    )
+    .await
+    .expect("seal a fresh key");
+    assert_eq!(locked, super::Locked::Set { first: true });
+    crate::testkit::stored_key(&keystore::KeyFile::device(home.key()))
 }
 
 /// A sealed key opens under its passphrase, for a serving verb and an outward dial alike, as the node it
@@ -284,14 +288,15 @@ pub(super) fn sealed(home: &Home, passphrase: &'static str) -> bifrost::NodeId {
 #[tokio::test]
 async fn a_sealed_key_opens_under_its_passphrase() {
     let (home, dir) = home("sealed-opens");
-    let node = sealed(&home, "correct horse");
+    let node = sealed(&home, "correct horse battery").await;
 
     for intent in [
         super::Identity::Persisted,
         super::Identity::PersistedIfPresent,
     ] {
-        let secret = super::resolve_with(intent, &home, &mut Scripted::new(["correct horse"]))
-            .expect("the passphrase opens it");
+        let secret =
+            super::resolve_with(intent, &home, &mut Scripted::new(["correct horse battery"]))
+                .expect("the passphrase opens it");
         assert_eq!(secret.node_id(), node, "{intent:?} binds the sealed key");
     }
 
@@ -303,20 +308,21 @@ async fn a_sealed_key_opens_under_its_passphrase() {
 #[tokio::test]
 async fn a_wrong_passphrase_is_never_a_new_identity() {
     let (home, dir) = home("sealed-wrong");
-    sealed(&home, "correct horse");
+    sealed(&home, "correct horse battery").await;
     let before = std::fs::read(home.key()).expect("read the sealed key");
 
     for intent in [
         super::Identity::Persisted,
         super::Identity::PersistedIfPresent,
     ] {
-        let refused = super::resolve_with(intent, &home, &mut Scripted::new(["battery staple"]));
+        let mut wrong = Scripted::new(["battery staple", "battery staple", "battery staple"]);
+        let refused = super::resolve_with(intent, &home, &mut wrong);
         let Err(error) = refused else {
             panic!("a wrong passphrase refuses");
         };
         let message = format!("{error:#}");
         assert!(
-            message.contains("wrong passphrase"),
+            message.contains("that passphrase does not open this machine's key"),
             "{intent:?} names the refusal: {message}"
         );
     }
@@ -334,14 +340,15 @@ async fn a_wrong_passphrase_is_never_a_new_identity() {
 #[tokio::test]
 async fn inspecting_a_sealed_key_asks_for_nothing() {
     let (home, dir) = home("sealed-inspect");
-    let node = sealed(&home, "correct horse");
+    let node = sealed(&home, "correct horse battery").await;
 
-    let stored = super::inspect(&home)
-        .expect("inspect a sealed home")
-        .into_stored();
-    assert!(matches!(stored, Stored::Locked(_)), "the key stays locked");
-    assert_eq!(stored.method(), Method::Passphrase);
-    assert_eq!(stored.node_id(), node);
+    let inspected = super::inspect(&home).expect("inspect a sealed home");
+    assert_eq!(inspected, super::Inspected::Found(node));
+    let stored = keystore::KeyFile::device(home.key()).load().unwrap();
+    let Some(Stored::Locked(locked)) = stored else {
+        panic!("the key stays locked");
+    };
+    assert_eq!(locked.methods().collect::<Vec<_>>(), [Method::Passphrase]);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -351,17 +358,17 @@ async fn inspecting_a_sealed_key_asks_for_nothing() {
 #[tokio::test]
 async fn rewriting_a_sealed_key_proves_it_and_keeps_it_sealed() {
     let (home, dir) = home("sealed-rewrite");
-    sealed(&home, "correct horse");
+    sealed(&home, "correct horse battery").await;
     let seed = super::resolve_with(
         super::Identity::Persisted,
         &home,
-        &mut Scripted::new(["correct horse"]),
+        &mut Scripted::new(["correct horse battery"]),
     )
     .expect("open the sealed key")
     .with_bytes(|seed| *seed);
     let before = std::fs::read(home.key()).expect("read the sealed key");
 
-    super::write_with(&seed, &home, &mut Scripted::new(["correct horse"]))
+    super::write_with(&seed, &home, &mut Scripted::new(["correct horse battery"]))
         .expect("the same key, proven, is a no-op");
     assert_eq!(
         std::fs::read(home.key()).expect("read it back"),
@@ -395,4 +402,51 @@ async fn a_machine_dir_that_cannot_be_made_is_named() {
         "the line names the directory: {message}"
     );
     std::fs::remove_dir_all(&dir).expect("clean up");
+}
+
+/// A sealed key file whose header names bytes no key could be is refused at tightbeam's bridge, naming the
+/// file, before anything asks for its passphrase. Red when the header's claim becomes a key unchecked.
+#[tokio::test]
+async fn a_locked_file_with_a_malformed_header_names_the_file() {
+    let (home, dir) = home("malformed-header");
+    sealed(&home, "correct horse battery").await;
+    let mut bytes = std::fs::read(home.key()).expect("read the sealed key");
+    // Bytes 10 to 42 are the public key the header claims; all zeros is a small-order point.
+    bytes[10..42].fill(0);
+    std::fs::write(home.key(), &bytes).expect("write it back");
+    let refused = super::inspect(&home).expect_err("a header no key could be");
+    assert_eq!(
+        format!("{refused:#}"),
+        format!(
+            "this machine's key file at {} is damaged and holds no usable key; start this machine over \
+             with a new key: swoosh leave --new-key",
+            crate::escape::EscapedPath(&home.key())
+        )
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Beside a root kept in the home, the damaged key's line names no command: `leave --new-key` refuses a home
+/// that keeps a root, and its refusal sends the person to `root backup`, which would print this line again.
+/// Red when the line names `leave` there.
+#[tokio::test]
+async fn a_damaged_machine_key_beside_a_kept_root_names_no_command() {
+    let (home, dir) = home("malformed-header-root-kept");
+    sealed(&home, "correct horse battery").await;
+    let mut bytes = std::fs::read(home.key()).expect("read the sealed key");
+    // Bytes 10 to 42 are the public key the header claims; all zeros is a small-order point.
+    bytes[10..42].fill(0);
+    std::fs::write(home.key(), &bytes).expect("write it back");
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    let refused = super::inspect(&home).expect_err("a header no key could be");
+    assert_eq!(
+        format!("{refused:#}"),
+        format!(
+            "this machine's key file at {} is damaged and holds no usable key.",
+            crate::escape::EscapedPath(&home.key())
+        )
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

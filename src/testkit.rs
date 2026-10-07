@@ -13,7 +13,6 @@
 
 use core::ops::Deref;
 use std::collections::VecDeque;
-use std::path::Path;
 use std::time::SystemTime;
 
 use bifrost::NodeId;
@@ -24,7 +23,7 @@ use zeroize::Zeroizing;
 
 use crate::contacts::DeviceLabel;
 use crate::home::{Home, HomeWrite, ServeLock};
-use crate::passphrase::Prompt;
+use crate::passphrase::{Asked, Choice, Prompt};
 use crate::roster::{Member, RevokedDevice, RosterDoc};
 use crate::sync::{Answer, Dial, ExchangeError};
 
@@ -302,16 +301,33 @@ pub mod hand_signed {
     const UNREADABLE_END_DATE: &str = "ed01rbfyqv7u5kqwcpdbkbg3gtkl5lzumul2byy54pg52tm3iia5tufq.ck7aecwraefauzlyobuxezltl5qxicqboqfayytpovxgix3emv3gsy3fbiawicrymvsdamjsmjtgyzlnor2wm3zsnn3w64lunzrtm5lnmzygknbtnfrwk43wpbsgsylxpbwdiztfmnzhizttnr4hcnbtoemamiqibidaqeasaiyaciqsbiiaraaicifsb77777777777777qcmrnbivquaqidmjaocafcibqraiidioaubikameiccakbufawih77777777777776aikaqnaecacgitaujakaiebweqibcbaqeqdbcbqqgqubicquayiqmeaubikammiicakaqnaecavcisaqaaseczpw4arhdawc5evu7eewkf4zwzfvzatltsllzvuoapwcbgs3j3pggsa2scnkknecq6w5ehdo5li62ghci3yhglq6mstgyvxlxnjxu54xsjy2daj26gwzop45b6v6ue7w74yz3mk7eu6sbc25adobrcapenu2driaereeesavqcob3tukcm4xzxcrte7ty6bpjy2wcqniqczybsk2hqsnggwiev44vjnypzfxem7cxxdh2lnoqhvfk7pjofr3h5lkgcosm3sibri4di";
 }
 
-/// A [`Prompt`] that counts prompt events and the passphrases they read, and answers from a script.
+/// The key the key file `file` holds, by its header for a sealed one: what a test compares a home's key to.
 ///
-/// One event is one call to `unlock` or `choose`, whatever the terminal behind it would read: `choose`
-/// asks for the passphrase twice, and is still one event of two reads. A call with no answer left is
+/// # Panics
+///
+/// When there is no key file, or it cannot be read.
+#[allow(clippy::expect_used)]
+pub fn stored_key(file: &keystore::KeyFile) -> NodeId {
+    let stored = file
+        .load()
+        .expect("the key file reads")
+        .expect("a key file is there");
+    crate::identity::key_of(file, &stored).expect("the key file names a key")
+}
+
+/// A [`Prompt`] that counts prompt events and the passphrases they read, answers from a script, and keeps
+/// what it was told between tries.
+///
+/// One event is one call to `unlock` or `choose`, whatever the terminal behind it would read: one round of
+/// `choose` asks for the passphrase twice, and is still one event of two reads. A call with no answer left is
 /// still an event: it refuses the way a missing terminal does, after being asked. So a test that scripts
-/// nothing and reads a count of zero proves nothing was asked.
+/// nothing and reads a count of zero proves nothing was asked. A `choose` answer is held to the minimum as a
+/// typed one is, and an empty one stands for a mismatched round.
 pub struct Counting {
     answers: VecDeque<&'static str>,
     events: usize,
     reads: usize,
+    said: Vec<String>,
 }
 
 impl Counting {
@@ -321,6 +337,7 @@ impl Counting {
             answers: answers.into_iter().collect(),
             events: 0,
             reads: 0,
+            said: Vec::new(),
         }
     }
 
@@ -339,14 +356,19 @@ impl Counting {
         self.reads
     }
 
-    fn answer(&mut self, reads: usize) -> eyre::Result<Passphrase> {
+    /// What the prompt was told between tries, in order.
+    pub fn said(&self) -> &[String] {
+        &self.said
+    }
+
+    fn answer(&mut self, reads: usize) -> eyre::Result<Zeroizing<String>> {
         self.events += 1;
         self.reads += reads;
         let answer = self
             .answers
             .pop_front()
             .ok_or_else(|| eyre::eyre!("no scripted answer left"))?;
-        crate::passphrase::passphrase(Zeroizing::new(answer.to_owned()))
+        Ok(Zeroizing::new(answer.to_owned()))
     }
 }
 
@@ -355,12 +377,30 @@ impl Prompt for Counting {
         true
     }
 
-    fn unlock(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
-        self.answer(1)
+    fn unlock(&mut self, _asked: Asked<'_>) -> eyre::Result<Passphrase> {
+        crate::passphrase::passphrase(self.answer(1)?)
     }
 
-    fn choose(&mut self, _path: &Path) -> eyre::Result<Passphrase> {
-        self.answer(2)
+    /// Not the terminal's choosing round, which is tested through its own seam: an empty answer here is a
+    /// mismatch, where at a terminal Enter makes a passphrase.
+    fn choose(&mut self, _asked: Asked<'_>) -> eyre::Result<Choice> {
+        // The terminal's round reads one entry for a short passphrase, which ends it before `again:`, and two
+        // otherwise.
+        let text = self.answer(0)?;
+        if text.is_empty() {
+            self.reads += 2;
+            return Ok(Choice::Mismatch);
+        }
+        let choice = crate::passphrase::chosen(text)?;
+        self.reads += match choice {
+            Choice::Short => 1,
+            Choice::Chosen(_) | Choice::Mismatch => 2,
+        };
+        Ok(choice)
+    }
+
+    fn say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
     }
 }
 

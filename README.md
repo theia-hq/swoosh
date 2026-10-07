@@ -66,4 +66,4 @@ This page describes the default branch; the released docs are at the newest tag.
 
 ## License
 
-MIT OR Apache-2.0.
+MIT OR Apache-2.0. The wordlist swoosh makes passphrases from is the EFF's, under CC BY 3.0 US: see [NOTICE](NOTICE).

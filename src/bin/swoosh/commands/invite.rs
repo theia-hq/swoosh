@@ -59,7 +59,7 @@ pub struct InviteCmd {
     /// How long: `2h`, `90d`.
     #[arg(long, value_name = "d", requires = "name", value_parser = device_expiry)]
     pub expires: Option<Duration>,
-    /// Act on your root, or on the root kept in `<dir>`.
+    /// use the copy of your root in <dir>
     #[arg(long = "root", value_name = "dir")]
     pub root: Option<PathBuf>,
     #[command(flatten)]
@@ -209,7 +209,20 @@ impl InviteCmd {
                 Minted::Finished => present(home, place, prompt, dial, err, &name, ask).await?,
             }
         } else {
+            // Before the prompt, which is the stop: a lapsed device a renewal lets back in, read with no lock.
+            if prompt.terminal() {
+                warn_lapsed(home, place.clone(), &name, ask, err).await?;
+            }
             present(home, place, prompt, dial, err, &name, ask).await?
+        };
+        // A renewal of a device whose date passed, as the records the act signs from have it.
+        let ended = match plan {
+            Plan::Renew => root
+                .records()
+                .device(&name)
+                .filter(|row| row.until <= root.records().now())
+                .map(|row| row.until),
+            Plan::Add(_) | Plan::Keyed | Plan::Rekey => None,
         };
 
         let from = own_key(home)?;
@@ -287,7 +300,7 @@ impl InviteCmd {
             let own_row = row.as_ref().is_some_and(|row| Some(row.node) == own);
             writeln!(err, "{}", needs_no_renewal(&name, until, own_row))?;
         } else {
-            issued.lines(err, &device, until)?;
+            issued.lines(err, &device, until, ended)?;
         }
 
         let reach = committed.offer(dial).await;
@@ -332,16 +345,30 @@ impl Issued {
 
     /// The lines after a new invite: how long it runs, and, for one that carries a key, who it makes the
     /// device and that it is not renewed on its own.
-    fn lines(&self, err: &mut impl Write, device: &str, until: u64) -> io::Result<()> {
+    /// `ended` is the date a renewed device's standing had ended on, when it had.
+    fn lines(
+        &self,
+        err: &mut impl Write,
+        device: &str,
+        until: u64,
+        ended: Option<u64>,
+    ) -> io::Result<()> {
         let date = Date(until);
         let span = swoosh::grants::humanize(self.duration);
+        let had_ended = ended.map_or_else(String::new, |ended| {
+            format!("; it had ended on {}", Date(ended))
+        });
         if self.default {
             writeln!(
                 err,
-                "{device} runs {span} from now, until {date} (the default; --expires sets 1h to 365d)."
+                "{device} runs {span} from now, until {date} (the default; --expires sets 1h to \
+                 365d){had_ended}."
             )?;
         } else {
-            writeln!(err, "{device} runs {span} from now, until {date}.")?;
+            writeln!(
+                err,
+                "{device} runs {span} from now, until {date}{had_ended}."
+            )?;
         }
         match self.old_invite_until {
             Some(old) => writeln!(
@@ -413,26 +440,48 @@ fn plan(
         (Ask::Renew, Some(_)) => Plan::Renew,
         (Ask::Renew, None) => return Err(RootError::NoDeviceToRenew { name: name.clone() }),
     };
-    match (plan, device) {
-        (Plan::Add(_) | Plan::Keyed, _) => {
-            let _ = writeln!(
-                err,
-                "me/{name} will be one of your own devices: it reaches everything your devices serve."
-            );
-        }
-        (Plan::Renew, Some(row)) if row.until <= records.now() => {
-            let key = row.node;
-            let _ = writeln!(
-                err,
-                "renewing me/{name} ({key}), which ended on {}. Whatever machine holds {key} picks this up \
-                 the next time it reaches one of your devices. If that is not a machine you still have, stop \
-                 here and run: swoosh revoke me/{name}",
-                Date(row.until)
-            );
-        }
-        _ => {}
+    if let Plan::Add(_) | Plan::Keyed = plan {
+        let _ = writeln!(
+            err,
+            "me/{name} will be one of your own devices: it reaches everything your devices serve."
+        );
     }
     Ok(plan)
+}
+
+/// The warning before the prompt when `ask` renews a device whose date passed: renewing it lets whatever machine
+/// holds its key back in, and the prompt is where to stop. Read from the records with no lock and no prompt; a
+/// root that cannot be read says nothing here, and the act refuses after.
+async fn warn_lapsed(
+    home: &Home,
+    place: RootPlace,
+    name: &DeviceLabel,
+    ask: Ask,
+    err: &mut impl Write,
+) -> io::Result<()> {
+    let Ok(inspected) = Root::inspect(home, place).await else {
+        return Ok(());
+    };
+    let now = unix_now();
+    let lapsed = inspected.rows().iter().find(|row| {
+        &row.label == name
+            && row.until <= now
+            && match ask {
+                Ask::Add(key) => row.node == key,
+                Ask::Renew => true,
+                Ask::NewKey => false,
+            }
+    });
+    if let Some(row) = lapsed {
+        writeln!(
+            err,
+            "warning: me/{name} ({}) ended on {}; renewing it lets whatever machine holds that key back in. If \
+             that is not a machine you still have, do not type the passphrase: swoosh revoke me/{name}",
+            swoosh::credential::short(&row.node),
+            Date(row.until)
+        )?;
+    }
+    Ok(())
 }
 
 /// Before a root is made or finished here, refuse what its records would once it is, so the refusal
@@ -488,7 +537,7 @@ fn parse_key(text: &str) -> eyre::Result<VerifyKey> {
 
 /// This machine's key, made if the home has none.
 fn own_key(home: &Home) -> eyre::Result<NodeId> {
-    Ok(swoosh::identity::inspect(home)?.stored().node_id())
+    Ok(swoosh::identity::inspect(home)?.key())
 }
 
 /// The named device's own renewal length, or the default when it has none.

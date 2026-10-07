@@ -74,8 +74,12 @@ impl JoinCmd {
 
         // The invite, alone.
         let root = invite.standing.root().node_id()?;
-        let stored = KeyFile::device(home.key()).load()?;
-        let stored_key = stored.as_ref().map(Stored::node_id);
+        let file = KeyFile::device(home.key());
+        let stored = file.load()?;
+        let stored_key = stored
+            .as_ref()
+            .map(|stored| swoosh::identity::key_of(&file, stored))
+            .transpose()?;
         let own = match (&invite.seed, stored_key) {
             (Some(seed), stored) => {
                 let carried = NodeId::from_ed25519_secret(seed);
@@ -249,10 +253,10 @@ impl JoinCmd {
             // Made on disk, so the key printed here outlives a paste that never comes: the invite typed for
             // it on the root's machine still joins it next time.
             let key = match swoosh::identity::inspect(home)? {
-                swoosh::identity::Inspected::Found(stored) => stored.node_id(),
-                swoosh::identity::Inspected::Made(stored) => {
-                    made = Some(stored.node_id());
-                    stored.node_id()
+                swoosh::identity::Inspected::Found(key) => key,
+                swoosh::identity::Inspected::Made(key) => {
+                    made = Some(key);
+                    key
                 }
             };
             let name = swoosh::names::suggested_from(io.hostname)

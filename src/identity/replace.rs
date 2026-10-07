@@ -26,7 +26,8 @@ pub struct Replaced {
 }
 
 /// The refusal when the new key is to be locked and nobody is at a terminal to choose its passphrase.
-pub const CHOOSE_NEEDS_TERMINAL: &str = "the new key is locked like the old one, and choosing its passphrase needs a terminal: run this at one.";
+pub const CHOOSE_NEEDS_TERMINAL: &str = "the new key is locked like the old one, and choosing its passphrase \
+     needs a terminal: over swoosh ssh, add -t after --";
 
 /// A fresh random key written whole at `<home>/machine/key.new`, not yet in place. Staging runs every step that
 /// can ask or fail, so a caller stages first, makes its own writes, then [`put`](Self::put)s it. Dropped
@@ -55,7 +56,10 @@ impl NewKey {
             eyre::bail!("{CHOOSE_NEEDS_TERMINAL}");
         }
         let passphrase = if locked {
-            Some(prompt.choose(&path)?)
+            Some(crate::passphrase::choose(
+                prompt,
+                crate::passphrase::Asked::MachineKey,
+            )?)
         } else {
             None
         };
@@ -67,7 +71,7 @@ impl NewKey {
         let staged = home.machine().join("key.new");
         remove(&staged)?;
         let new = Self {
-            key: secret.node_id(),
+            key: secret.with_bytes(NodeId::from_ed25519_secret),
             had_old: old.is_some(),
             staged,
             put: false,

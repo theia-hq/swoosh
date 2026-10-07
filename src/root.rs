@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Method, Protection, Stored};
+use keystore::{KeyFile, Protection, Stored, Unlock};
 use nauthy::{Link, RevocationId, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
@@ -37,13 +37,23 @@ use crate::codec::{
 use crate::contacts::DeviceLabel;
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite, ServeLock};
-use crate::passphrase::Prompt;
+use crate::passphrase::{Asked, Prompt};
 use crate::reach_report::{Missed, Reach, Why};
 use crate::roster::{
     ArtifactError, Epoch, FoldError, Folded, MAX_ROSTER_BLOB, Member, RosterDoc, read_held,
 };
 use crate::standing::{Standing, StandingError};
 use crate::sync::{Answer, Device, Dial, EACH, Until};
+
+mod backup;
+mod forget;
+mod lock;
+mod restore;
+
+pub use backup::{BackupError, Copied, backup};
+pub use forget::{Disk, ForgetError, Forgot, Place, RealDisk, forget};
+pub use lock::{Relocked, RootLockError, lock};
+pub use restore::{RestoreError, Restored, Synced, restore};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
 pub const KEY_FILE: &str = "root.key";
@@ -79,6 +89,27 @@ pub(crate) const UNLOCK_NEEDS_TERMINAL: &str =
 /// the two commands that take it off this machine, one per line.
 pub const KEPT_HERE: &str = "your root is on this machine, and this runs only where no root is kept. Back it up: swoosh root backup <dir>\nthen remove it from this machine: swoosh root forget <dir>";
 
+/// The warning before the prompt of an act that cuts on the root kept here, when this machine's key is revoked:
+/// the act goes on, since the root's authority does not depend on this machine being one of your devices, and
+/// it signs no row for this machine.
+pub const OWN_KEY_REVOKED: &str = "warning: this machine's key was revoked, so your devices no longer admit it. Your root still works here.";
+
+/// Whether this machine's key is revoked by a list of the root `root` held here: `devices`, or a fork kept
+/// as `devices.conflict`. These are the two lists the records are built from, so this is the records'
+/// answer. The home's `revoked` is not read: it never names this machine's own key.
+///
+/// # Errors
+///
+/// This machine's key could not be read.
+pub fn own_key_revoked(home: &Home, root: VerifyKey) -> Result<bool, RootError> {
+    let Some(own) = own_key(home)? else {
+        return Ok(false);
+    };
+    Ok([home.devices(), home.devices_conflict()]
+        .iter()
+        .any(|list| read_held(list, root).is_some_and(|(held, _)| held.is_revoked_key(&own))))
+}
+
 /// Where the root for one command is: kept in this home, or a copy in a directory given with `--root`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootPlace {
@@ -100,8 +131,6 @@ pub enum RootVerb {
     Restore,
     /// Copies the root; signs nothing and never writes its source.
     Backup,
-    /// Moves the root kept here elsewhere; only where the root is kept.
-    MoveRoot,
     /// Changes the root's passphrase; rewrites `root.key` only.
     Lock,
     /// Retires the root; only where the root is kept, and never folds or cuts.
@@ -113,11 +142,6 @@ impl RootVerb {
     /// update cut elsewhere reaches none of its devices; and it brings the root forward first.
     fn cuts(self) -> bool {
         matches!(self, Self::Invite | Self::Revoke)
-    }
-
-    /// Whether the act works only on the root kept on this machine.
-    fn holder_only(self) -> bool {
-        matches!(self, Self::MoveRoot | Self::RevokeRoot)
     }
 
     /// Whether the act writes beside the root's key, so a copy that cannot be written is refused.
@@ -160,14 +184,12 @@ pub enum RootError {
         /// The root being made.
         root: NodeId,
     },
-    /// An act on the root kept here, given a copy.
-    #[error(
-        "this works only on the machine that keeps your root, not on a copy. Run it on that machine, without --root."
-    )]
-    HolderOnly,
     /// The root's key file could not be read or unlocked.
     #[error(transparent)]
     KeyFile(#[from] keystore::Error),
+    /// A key file's header names a key nobody can hold.
+    #[error(transparent)]
+    UnusableKey(#[from] crate::identity::UnusableKey),
     /// A key stored on this machine is not a usable key.
     #[error("a key stored on this machine is not a usable key ({0}): refusing to use it")]
     Key(#[from] nauthy::KeyError),
@@ -708,28 +730,38 @@ impl Root {
             writable(dir)?;
         }
         let list = read_list(home, found.copy.as_deref(), found.header.verify_key()?)?;
-        let mut act = Act::new(
+        let act = Act::new(
             home,
             found.header,
             found.copy,
             list.as_ref(),
             own_key(home)?,
         );
-        if verb.cuts() {
-            act.sync(dial, out).await;
-            act.bring_forward(out)?;
-            act.book.check_bounds(act.now)?;
-            act.list_renewals(out);
-        }
-        let checked = check(&act.records(), out)?;
+        // The prompt comes before the sync and before any line that states an effect, so a wrong passphrase
+        // asked again never runs the sync again, and nothing is said of an act that a passphrase then stops.
         if !prompt.terminal() {
             return Err(RootError::NoTerminalToUnlock);
         }
-        let passphrase = prompt.unlock(&act.key_file()).map_err(prompt_error)?;
-        let root = Self {
-            secret: found.locked.unlock(&passphrase)?,
-            act,
-        };
+        // An act that cuts on the root kept here, with this machine's key revoked, goes on and says so first.
+        if verb.cuts() && act.copy.is_none() && own_key_revoked(home, act.key.verify_key()?)? {
+            let _ = writeln!(out, "{OWN_KEY_REVOKED}");
+        }
+        let asked = act.asked();
+        let (secret, _) = crate::passphrase::unlock(prompt, asked, |passphrase| {
+            found.locked.unlock(Unlock::Passphrase(passphrase))
+        })
+        .map_err(prompt_error)?;
+        let mut root = Self { secret, act };
+        if verb.cuts() {
+            root.act.sync(dial, out).await;
+            root.act.bring_forward(out)?;
+            root.act.book.check_bounds(root.act.now)?;
+            if root.act.copy.is_none() {
+                root.carry_own()?;
+            }
+            root.act.list_renewals(out);
+        }
+        let checked = check(&root.act.records(), out)?;
         Ok((root, checked))
     }
 
@@ -748,7 +780,8 @@ impl Root {
     ) -> Result<Option<(VerifyKey, u64, Link)>, RootError> {
         let found = find(home, &place, None).await?;
         let pin = found.header.verify_key()?;
-        let book = Book::of(read_list(home, found.copy.as_deref(), pin)?.as_ref());
+        let own = own_key(home)?;
+        let book = Book::of(read_list(home, found.copy.as_deref(), pin)?.as_ref(), own);
         let now = unix_now();
         let (forward, held) = book.read_forward(home, pin, now)?;
         let Some(held) = held else {
@@ -756,6 +789,10 @@ impl Root {
         };
         if forward != book || book.lacks(&held, now) || forward.rows.iter().any(|row| due(row, now))
         {
+            return Ok(None);
+        }
+        // An act on the root kept here signs this machine a live row when it has none, so it signs.
+        if found.copy.is_none() && forward.lacks_own(now) && !own_key_revoked(home, pin)? {
             return Ok(None);
         }
         let Some(row) = book.rows.iter().find(|row| &row.label == name) else {
@@ -771,7 +808,10 @@ impl Root {
     pub async fn inspect(home: &Home, place: RootPlace) -> Result<Inspected, RootError> {
         let found = find(home, &place, None).await?;
         let pin = found.header.verify_key()?;
-        let list = Book::of(read_list(home, found.copy.as_deref(), pin)?.as_ref());
+        let list = Book::of(
+            read_list(home, found.copy.as_deref(), pin)?.as_ref(),
+            own_key(home)?,
+        );
         let (forward, _) = list.read_forward(home, pin, unix_now())?;
         Ok(Inspected {
             root: found.header,
@@ -784,9 +824,10 @@ impl Root {
     /// list it left beside its key, if it got that far.
     pub fn half_made(home: &Home, root_key: NodeId) -> Result<HalfMade, RootError> {
         let list = read_list(home, None, root_key.verify_key()?)?;
+        let own = own_key(home)?;
         Ok(HalfMade {
-            book: Book::of(list.as_ref()),
-            own: own_key(home)?,
+            book: Book::of(list.as_ref(), own),
+            own,
             now: unix_now(),
         })
     }
@@ -1059,6 +1100,7 @@ impl Root {
     /// than it, when there was nothing new to cut.
     pub async fn commit_to(&mut self, out: &mut impl Write) -> Result<Committed, RootError> {
         let home_lock = HomeWrite::take(&self.act.home).await?;
+        meanwhile(&home_lock, &self.act.home).await?;
         self.act.again(out)?;
         let now = self.act.now;
         self.act.book.prune(now);
@@ -1184,7 +1226,7 @@ impl Act {
             copy,
             beside: list.map_or(Epoch::UNVERSIONED, RosterDoc::epoch),
             home: home.clone(),
-            book: Book::of(list),
+            book: Book::of(list, own),
             held: None,
             fork: None,
             due: Vec::new(),
@@ -1197,6 +1239,11 @@ impl Act {
             revoked: Vec::new(),
             minted: false,
         }
+    }
+
+    /// What the prompt asks for: your root, or the copy in its directory.
+    fn asked(&self) -> Asked<'_> {
+        self.copy.as_deref().map_or(Asked::Root, Asked::Copy)
     }
 
     /// The root's key file.
@@ -1248,8 +1295,9 @@ impl Act {
     }
 
     /// Bring the records forward from the update this machine holds and any fork of it, carry this
-    /// machine's own revocations of the root's devices, then mark every row whose key is revoked.
-    fn bring_forward(&mut self, out: &mut impl Write) -> Result<(), RootError> {
+    /// machine's own revocations of the root's devices, then mark every row whose key is revoked. This
+    /// machine's row renamed on the way, if it was.
+    fn bring_forward(&mut self, out: &mut impl Write) -> Result<Option<Renamed>, RootError> {
         let pin = self.key.verify_key()?;
         self.held = read_held(&self.home.devices(), pin);
         let fork = read_held(&self.home.devices_conflict(), pin);
@@ -1261,7 +1309,7 @@ impl Act {
         if behind || (fork.is_some() && brought.any()) {
             brought.print(out);
         }
-        Ok(())
+        Ok(brought.renamed)
     }
 
     /// Under `home.lock`, before the cut: read `devices` and `devices.conflict` again, and when either moved
@@ -1415,9 +1463,6 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
         (RootPlace::Dir(_), Standing::HoldsRoot { .. } | Standing::InterruptedMint { .. }) => {
             return Err(RootError::HeldHere);
         }
-        (RootPlace::Dir(_), _) if verb.is_some_and(RootVerb::holder_only) => {
-            return Err(RootError::HolderOnly);
-        }
         (RootPlace::Dir(dir), Standing::Device { pin, .. }) => (Some(dir.clone()), Some(pin), true),
         (RootPlace::Dir(dir), Standing::Unpinned) => (Some(dir.clone()), None, false),
     };
@@ -1428,7 +1473,7 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
         .as_ref()
         .map_or_else(|| home.root_key(), |dir| dir.join(KEY_FILE));
     let locked = read_header(&key_file)?;
-    let header = locked.node_id();
+    let header = header_key(&key_file, &locked)?;
     if let Some(pin) = pin
         && pin != header
     {
@@ -1449,10 +1494,9 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
 fn read_header(path: &Path) -> Result<keystore::Locked, RootError> {
     let file = KeyFile::root(path);
     match file.load() {
-        Ok(Some(Stored::Locked(locked))) => match locked.method() {
-            Method::Passphrase => Ok(locked),
-            Method::Plain => Err(RootError::Plain),
-        },
+        // A sealed root key always keeps its passphrase lock (the key store refuses one without), so any
+        // sealed file of the root kind opens at a prompt here.
+        Ok(Some(Stored::Locked(locked))) => Ok(locked),
         Ok(Some(Stored::Plain(_))) => Err(RootError::Plain),
         Ok(None) => Err(RootError::KeyFile(keystore::Error::Absent {
             path: file.path().to_path_buf(),
@@ -1465,6 +1509,50 @@ fn read_header(path: &Path) -> Result<keystore::Locked, RootError> {
     }
 }
 
+/// The key a root key file's header claims, checked as a key at tightbeam's bridge.
+fn header_key(path: &Path, locked: &keystore::Locked) -> Result<NodeId, RootError> {
+    locked.public_key().node_id().map_err(|_| {
+        RootError::UnusableKey(crate::identity::UnusableKey {
+            path: path.to_path_buf(),
+            whose: crate::identity::Whose::Root,
+        })
+    })
+}
+
+/// The most bytes of a root key file read as bytes, as the key store caps its own read: a sealed root key is a
+/// few hundred bytes.
+const KEY_CAP: u64 = 4096;
+
+/// The root key file's bytes at `path`, as stored: locked with its passphrase. Opened without blocking and
+/// read from a regular file only, with a cap, so a planted pipe or device can neither block the read nor grow
+/// it.
+fn read_key(path: &Path) -> Result<Vec<u8>, RootError> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let invalid = || RootError::Io {
+        path: path.to_path_buf(),
+        source: io::ErrorKind::InvalidData.into(),
+    };
+    // Non-blocking, so opening a pipe returns at once; the type is then checked on the handle.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(io_at(path))?;
+    if !file.metadata().map_err(io_at(path))?.is_file() {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::new();
+    file.take(KEY_CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_at(path))?;
+    if bytes.len() as u64 > KEY_CAP {
+        return Err(invalid());
+    }
+    Ok(bytes)
+}
+
 /// The list beside the root's key, `devices`, verified under `root`: in the copy at `copy`, or in this home
 /// for the root kept here. `None` when there is none yet; one that is not a list this root signed is
 /// refused, so an act never signs from records changed outside swoosh.
@@ -1473,17 +1561,35 @@ fn read_list(
     copy: Option<&Path>,
     root: VerifyKey,
 ) -> Result<Option<RosterDoc>, RootError> {
-    use std::io::Read as _;
-
     let path = match copy {
         Some(dir) => dir.join(LIST_FILE),
         None => home.devices(),
     };
-    let file = match std::fs::File::open(&path) {
+    Ok(read_list_at(&path, root)?.map(|(list, _)| list))
+}
+
+/// The list at `path`, verified under `root`, and the bytes that verified: `None` when nothing is there. Read
+/// once, capped at the largest list there can be, and only from a regular file, so a planted pipe or device
+/// can neither block the read nor grow it. A caller that writes the list writes these bytes, never the file
+/// read again.
+fn read_list_at(path: &Path, root: VerifyKey) -> Result<Option<(RosterDoc, Vec<u8>)>, RootError> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let path = path.to_path_buf();
+    // Non-blocking, so opening a pipe returns at once; the type is then checked on the handle.
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&path)
+    {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(RootError::Io { path, source }),
     };
+    if !file.metadata().map_err(io_at(&path))?.is_file() {
+        return Err(RootError::Damaged { path });
+    }
     let mut bytes = Vec::new();
     file.take(MAX_ROSTER_BLOB + 1)
         .read_to_end(&mut bytes)
@@ -1491,9 +1597,10 @@ fn read_list(
     if bytes.len() as u64 > MAX_ROSTER_BLOB {
         return Err(RootError::Damaged { path });
     }
-    crate::roster::verify(&bytes, root)
-        .map(Some)
-        .map_err(|_| RootError::Damaged { path })
+    match crate::roster::verify(&bytes, root) {
+        Ok(list) => Ok(Some((list, bytes))),
+        Err(_) => Err(RootError::Damaged { path }),
+    }
 }
 
 /// Present step 6: refuse a copy this act cannot write, before anything is signed, since it writes what it
@@ -1524,10 +1631,7 @@ async fn make(
     if !prompt.terminal() {
         return Err(RootError::NoTerminal);
     }
-    let own = crate::identity::inspect(home)?
-        .stored()
-        .node_id()
-        .verify_key()?;
+    let own = crate::identity::inspect(home)?.key().verify_key()?;
     let _ = writeln!(
         out,
         "This makes your root on this machine: a second key, not a machine, that vouches for all your \
@@ -1538,7 +1642,7 @@ async fn make(
         "It is locked with a passphrase, which you type whenever you add, renew or revoke a device."
     );
     let key_file = home.root_key();
-    let passphrase = prompt.choose(&key_file).map_err(prompt_error)?;
+    let passphrase = crate::passphrase::choose(prompt, Asked::Root).map_err(prompt_error)?;
     let secret =
         keystore::Secret::generate().map_err(|source| RootError::Write(Box::new(source)))?;
 
@@ -1550,7 +1654,13 @@ async fn make(
     KeyFile::root(&key_file).write(&secret, Protection::Passphrase(&passphrase))?;
     seam(Seam::Keyed)?;
     let mut root = Root {
-        act: Act::new(home, secret.node_id(), None, None, Some(own)),
+        act: Act::new(
+            home,
+            secret.with_bytes(NodeId::from_ed25519_secret),
+            None,
+            None,
+            Some(own),
+        ),
         secret,
     };
     root.act.minted = true;
@@ -1573,10 +1683,7 @@ async fn finish(
     let locked = read_header(&home.root_key())?;
     let pin = root_key.verify_key()?;
     let list = read_list(home, None, pin)?;
-    let own = crate::identity::inspect(home)?
-        .stored()
-        .node_id()
-        .verify_key()?;
+    let own = crate::identity::inspect(home)?.key().verify_key()?;
     let listed = list.as_ref().and_then(|list| {
         list.members()
             .iter()
@@ -1596,18 +1703,19 @@ async fn finish(
         return Ok(None);
     }
 
-    let mut act = Act::new(home, root_key, None, list.as_ref(), Some(own));
-    act.bring_forward(out)?;
-    act.book.check_bounds(act.now)?;
-    act.list_renewals(out);
+    let act = Act::new(home, root_key, None, list.as_ref(), Some(own));
     if !prompt.terminal() {
         return Err(RootError::NoTerminalToUnlock);
     }
-    let passphrase = prompt.unlock(&act.key_file()).map_err(prompt_error)?;
-    let mut root = Root {
-        secret: locked.unlock(&passphrase)?,
-        act,
-    };
+    // Asked before any line that states an effect, as `present` asks.
+    let (secret, _) = crate::passphrase::unlock(prompt, Asked::Root, |passphrase| {
+        locked.unlock(Unlock::Passphrase(passphrase))
+    })
+    .map_err(prompt_error)?;
+    let mut root = Root { secret, act };
+    root.act.bring_forward(out)?;
+    root.act.book.check_bounds(root.act.now)?;
+    root.act.list_renewals(out);
     let home_lock = HomeWrite::take(home).await?;
     still(&home_lock, home, Standing::InterruptedMint { root_key }).await?;
     not_admitting(&home_lock, home)?;
@@ -1641,6 +1749,28 @@ impl Root {
         act.due.retain(|due| *due != own);
         seam(Seam::Listed)?;
         take_standing(home_lock, &act.home, act.key, &standing)
+    }
+
+    /// Carry a live row for this machine, on the root kept here: when the records hold none (a list cut past
+    /// this machine's last cut was folded here since, or its row lapsed), sign one as a restore does, renewing
+    /// a lapsed row or adding one under a name fresh against the records for 90 days. The commit's own fold
+    /// takes its standing as this machine's. A revoked key is never signed.
+    fn carry_own(&mut self) -> Result<(), RootError> {
+        let Some(own) = self.act.own else {
+            return Ok(());
+        };
+        if !self.act.book.lacks_own(self.act.now)
+            || own_key_revoked(&self.act.home, self.act.key.verify_key()?)?
+        {
+            return Ok(());
+        }
+        self.sign_own(own)?;
+        // This machine's row is not a device the act adds or renews: a list folded meanwhile that already
+        // carries it is brought forward, never a reason to stop, as `take_own` leaves its row. So a restore's
+        // re-cut, which adds, renews and revokes nothing else, always lands.
+        self.act.added.retain(|key| *key != own);
+        self.act.renewed.retain(|key| *key != own);
+        Ok(())
     }
 
     /// Sign this machine's standing: from its live row for its duration, or on a new row under the
@@ -1745,15 +1875,21 @@ struct Book {
     /// The revoked devices by key, each with the name its row had, so an update says which device a key
     /// was.
     revoked_keys: BTreeMap<[u8; 32], RevokedDevice>,
+    /// This machine's key, when it has one: a name clash never revokes it ([`Book::take_member`]).
+    own: Option<VerifyKey>,
 }
 
 impl Book {
-    /// The records `list` holds, or none when there is no list.
-    fn of(list: Option<&RosterDoc>) -> Self {
+    /// The records `list` holds, or none when there is no list, read on the machine whose key is `own`.
+    fn of(list: Option<&RosterDoc>, own: Option<VerifyKey>) -> Self {
         let Some(list) = list else {
-            return Self::default();
+            return Self {
+                own,
+                ..Self::default()
+            };
         };
         Self {
+            own,
             last_update: list.epoch(),
             rows: list.members().to_vec(),
             marked: Vec::new(),
@@ -1782,12 +1918,34 @@ struct Brought {
     capped: Vec<(DeviceLabel, usize, u64)>,
     /// Each row revoked because the update gave its name to another key.
     clashed: Vec<(DeviceLabel, VerifyKey)>,
+    /// This machine's row, renamed because the update gave its name to another device.
+    renamed: Option<Renamed>,
+}
+
+/// This machine's row, renamed by a bring-forward because a list gave its name to another device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renamed {
+    /// The name it had.
+    pub was: DeviceLabel,
+    /// The name it has now.
+    pub now: DeviceLabel,
+}
+
+impl fmt::Display for Renamed {
+    /// The clause every line that reports the rename carries.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Another device took the name me/{}; this machine is me/{} now.",
+            self.was, self.now
+        )
+    }
 }
 
 impl Brought {
     /// Whether the bring-forward added anything.
     fn any(&self) -> bool {
-        self.devices + self.revocations + self.marked > 0
+        self.devices + self.revocations + self.marked > 0 || self.renamed.is_some()
     }
 
     /// The one bring-forward line, with the capped and clashed rows appended.
@@ -1811,6 +1969,9 @@ impl Brought {
                 that machine: on it, swoosh leave --new-key, then invite the new key under another name.",
                 crate::credential::short(key)
             ));
+        }
+        if let Some(renamed) = &self.renamed {
+            line.push_str(&format!(" {renamed}"));
         }
         let _ = writeln!(out, "{line}");
     }
@@ -1870,8 +2031,24 @@ impl Book {
     /// Bring one device from an update into these records.
     fn take_member(&mut self, member: &Member, now: u64, brought: &mut Brought) {
         // The update's device wins its name: a different live row under it is revoked here, and leaves the
-        // rows at once, so the name is held once.
+        // rows at once, so the name is held once. This machine's own row is never revoked by a clash: the
+        // machine that keeps the root would revoke itself, and a cut would publish it. It yields the name and
+        // takes one fresh against these records and the update's device.
         if let Some(index) = self
+            .rows
+            .iter()
+            .position(|row| row.label == member.label && row.node != member.node)
+            && Some(self.rows[index].node) == self.own
+        {
+            let rows = &self.rows;
+            let fresh = fresh_name(member.label.as_str(), |name| {
+                name == &member.label || rows.iter().any(|row| &row.label == name)
+            });
+            let was = core::mem::replace(&mut self.rows[index].label, fresh.clone());
+            // A second clash in one update renames it again; the line names where it started.
+            let was = brought.renamed.take().map_or(was, |first| first.was);
+            brought.renamed = Some(Renamed { was, now: fresh });
+        } else if let Some(index) = self
             .rows
             .iter()
             .position(|row| row.label == member.label && row.node != member.node)
@@ -2078,6 +2255,18 @@ impl Book {
                     || now.saturating_add(duration) <= row.until))
     }
 
+    /// Whether these records hold no live row for this machine's key, and that key is not revoked: the case
+    /// in which an act on the root kept here signs one ([`Root::carry_own`]).
+    fn lacks_own(&self, now: u64) -> bool {
+        self.own.is_some_and(|own| {
+            !self.revoked_keys.contains_key(own.bytes())
+                && !self
+                    .rows
+                    .iter()
+                    .any(|row| row.node == own && row.until > now)
+        })
+    }
+
     /// Drop every id whose standing has ended: a revocation of an ended standing blocks nothing.
     fn prune(&mut self, now: u64) {
         self.revoked.retain(|_, id| id.expires > now);
@@ -2276,7 +2465,12 @@ fn fresh_key() -> Result<(Zeroizing<[u8; 32]>, VerifyKey), RootError> {
     let secret =
         keystore::Secret::generate().map_err(|source| RootError::Write(Box::new(source)))?;
     let seed = secret.with_bytes(|bytes| Zeroizing::new(*bytes));
-    Ok((seed, secret.node_id().verify_key()?))
+    Ok((
+        seed,
+        secret
+            .with_bytes(NodeId::from_ed25519_secret)
+            .verify_key()?,
+    ))
 }
 
 /// Whether `row` is due to renew at this act: it renews on its own, and it holds fewer than the most
@@ -2292,11 +2486,11 @@ fn live_ids(row: &Member, now: u64) -> usize {
 
 /// This machine's key, from its key file's header, when it has one.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, RootError> {
-    KeyFile::device(home.key())
-        .load()?
-        .map(|stored| stored.node_id().verify_key())
-        .transpose()
-        .map_err(RootError::from)
+    let file = KeyFile::device(home.key());
+    match file.load()? {
+        Some(stored) => Ok(Some(crate::identity::key_of(&file, &stored)?.verify_key()?)),
+        None => Ok(None),
+    }
 }
 
 /// Set the core-dump limit to zero, soft and hard, so a crash with the root unlocked writes no copy of it.
@@ -2375,6 +2569,40 @@ fn seam(at: Seam) -> Result<(), RootError> {
     #[cfg(not(test))]
     let _ = at;
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A list a test folds inside [`Root::commit_to`] on the thread the act runs on, once the lock is taken
+    /// and before `again`: the list a fold landed while the act waited for the lock.
+    static MEANWHILE: core::cell::RefCell<Option<Vec<u8>>> = const { core::cell::RefCell::new(None) };
+}
+
+/// Fold the list a test left in [`MEANWHILE`], under the act's own lock. Nothing outside tests.
+async fn meanwhile(home_lock: &HomeWrite, home: &Home) -> Result<(), RootError> {
+    #[cfg(test)]
+    if let Some(bytes) = MEANWHILE.take() {
+        crate::roster::fold(home_lock, home, &bytes).await?;
+    }
+    #[cfg(not(test))]
+    let _ = (home_lock, home);
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test does to a copy's `root.key` once restore has read it as bytes and before the key store
+    /// reads it, on the thread the restore runs on: to serve other bytes to each open, as some storage can.
+    static BETWEEN_READS: core::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Run what a test left in [`BETWEEN_READS`]. Nothing outside tests.
+fn between_reads() {
+    #[cfg(test)]
+    if let Some(then) = BETWEEN_READS.take() {
+        then();
+    }
 }
 
 #[cfg(test)]

@@ -3158,6 +3158,8 @@ fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
     activity.recv(svc("recv")).received(Received {
         path: "notes.txt".into(),
         bytes: 5,
+        // WF1 (services 8d6f5bc) names the sender; this test renders only the path and the length.
+        from: swoosh::testkit::TestNode::seeded(7).verify_key(),
     });
     drop(activity);
     let deadline = Instant::now() + Duration::from_secs(5);

@@ -41,10 +41,11 @@ async fn serve_lock_has_one_holder_and_records_it() {
     let home_lock = HomeWrite::take(&home).await.unwrap();
     let held = ServeLock::take(&home_lock, &home).unwrap();
     held.record(&home_lock, Some(root)).unwrap();
-    assert!(matches!(
-        ServeLock::take(&home_lock, &home),
-        Err(ServeLockError::Held)
-    ));
+    let second = ServeLock::take(&home_lock, &home);
+    assert!(
+        matches!(second, Err(ServeLockError::Held)),
+        "a second taker is refused as held: {second:?}"
+    );
     assert_eq!(ServeLock::admitting(&home_lock, &home).unwrap(), Some(root));
     let recorded = ServeLock::recorded(&home);
     assert_eq!(recorded.pid, Some(std::process::id()));
@@ -54,7 +55,7 @@ async fn serve_lock_has_one_holder_and_records_it() {
     assert_eq!(ServeLock::admitting(&home_lock, &home).unwrap(), None);
     assert_eq!(ServeLock::recorded(&home), super::Recorded::default());
     let again = ServeLock::take(&home_lock, &home);
-    assert!(again.is_ok(), "a later serve takes it");
+    assert!(again.is_ok(), "a later serve takes it: {again:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

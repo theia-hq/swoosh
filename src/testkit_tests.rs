@@ -2,14 +2,13 @@
 //! dialer it names at the key it names, and a prompt event is one question, whatever it reads.
 
 use core::time::Duration;
-use std::path::Path;
 use std::time::SystemTime;
 
 use nauthy::{Request, Service};
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::{Counting, TestNode, TestRoot, hand_signed};
-use crate::passphrase::Prompt as _;
+use crate::passphrase::{Asked, Prompt as _};
 
 fn hour() -> SystemTime {
     SystemTime::now() + Duration::from_secs(3600)
@@ -22,14 +21,10 @@ fn ssh() -> Service {
 /// One `choose` is one event, though a person types the passphrase twice for it.
 #[test]
 fn a_choose_is_one_prompt_event() {
-    let mut prompt = Counting::new(["first", "second"]);
-    prompt
-        .choose(Path::new("root.key"))
-        .expect("the script answers");
+    let mut prompt = Counting::new(["a first passphrase", "second"]);
+    prompt.choose(Asked::Root).expect("the script answers");
     assert_eq!(prompt.events(), 1);
-    prompt
-        .unlock(Path::new("root.key"))
-        .expect("the script answers");
+    prompt.unlock(Asked::Root).expect("the script answers");
     assert_eq!(prompt.events(), 2);
 }
 
@@ -38,8 +33,8 @@ fn a_choose_is_one_prompt_event() {
 fn a_refused_prompt_is_still_an_event() {
     let mut prompt = Counting::refusing();
     assert_eq!(prompt.events(), 0, "nothing asked yet");
-    assert!(prompt.unlock(Path::new("root.key")).is_err());
-    assert!(prompt.choose(Path::new("root.key")).is_err());
+    assert!(prompt.unlock(Asked::Root).is_err());
+    assert!(prompt.choose(Asked::Root).is_err());
     assert_eq!(prompt.events(), 2);
 }
 
