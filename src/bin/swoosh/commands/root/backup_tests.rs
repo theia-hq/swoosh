@@ -217,11 +217,42 @@ async fn root_backup_refuses_a_planted_pipe_without_blocking() {
     let fifo = std::ffi::CString::new(dir.join("devices").to_str().unwrap()).unwrap();
     // SAFETY: `fifo` is a live NUL-terminated path for the length of the call.
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
-    let refused = tokio::time::timeout(core::time::Duration::from_secs(5), backup(&home, &dir))
-        .await
+    // On a thread of its own, so a blocking open stalls that thread and never the one that waits here: the
+    // wait then runs out and the test fails, rather than hanging with the timer it would wait on.
+    let (sent, got) = std::sync::mpsc::channel();
+    let (blocked, at) = (home.clone(), dir.clone());
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _ = sent.send(runtime.block_on(backup(&blocked, &at)).0);
+    });
+    let refused = got
+        .recv_timeout(core::time::Duration::from_secs(5))
         .expect("the backup does not block");
     assert!(
-        format!("{:#}", refused.0.unwrap_err()).contains("is not empty"),
+        format!("{:#}", refused.unwrap_err()).contains("is not empty"),
         "a pipe is no list"
+    );
+}
+
+/// A directory that cannot be read says why once. Red when the reason prints twice.
+#[tokio::test]
+async fn root_backup_into_an_unreadable_directory_says_why_once() {
+    let home = scratch("backup-unreadable");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let dir = stick(&home);
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let (result, _) = backup(&home, &dir).await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        format!("{:#}", result.unwrap_err()),
+        format!(
+            "could not read {}: {}",
+            dir.display(),
+            std::io::Error::from_raw_os_error(libc::EACCES)
+        )
     );
 }

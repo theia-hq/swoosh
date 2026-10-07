@@ -1098,6 +1098,7 @@ impl Root {
     /// than it, when there was nothing new to cut.
     pub async fn commit_to(&mut self, out: &mut impl Write) -> Result<Committed, RootError> {
         let home_lock = HomeWrite::take(&self.act.home).await?;
+        meanwhile(&home_lock, &self.act.home).await?;
         self.act.again(out)?;
         let now = self.act.now;
         self.act.book.prune(now);
@@ -1292,8 +1293,9 @@ impl Act {
     }
 
     /// Bring the records forward from the update this machine holds and any fork of it, carry this
-    /// machine's own revocations of the root's devices, then mark every row whose key is revoked.
-    fn bring_forward(&mut self, out: &mut impl Write) -> Result<(), RootError> {
+    /// machine's own revocations of the root's devices, then mark every row whose key is revoked. This
+    /// machine's row renamed on the way, if it was.
+    fn bring_forward(&mut self, out: &mut impl Write) -> Result<Option<Renamed>, RootError> {
         let pin = self.key.verify_key()?;
         self.held = read_held(&self.home.devices(), pin);
         let fork = read_held(&self.home.devices_conflict(), pin);
@@ -1305,7 +1307,7 @@ impl Act {
         if behind || (fork.is_some() && brought.any()) {
             brought.print(out);
         }
-        Ok(())
+        Ok(brought.renamed)
     }
 
     /// Under `home.lock`, before the cut: read `devices` and `devices.conflict` again, and when either moved
@@ -1510,7 +1512,7 @@ fn header_key(path: &Path, locked: &keystore::Locked) -> Result<NodeId, RootErro
     locked.public_key().node_id().map_err(|_| {
         RootError::UnusableKey(crate::identity::UnusableKey {
             path: path.to_path_buf(),
-            kind: keystore::Kind::Root,
+            whose: crate::identity::Whose::Root,
         })
     })
 }
@@ -1879,8 +1881,28 @@ struct Brought {
     capped: Vec<(DeviceLabel, usize, u64)>,
     /// Each row revoked because the update gave its name to another key.
     clashed: Vec<(DeviceLabel, VerifyKey)>,
-    /// This machine's row, renamed because the update gave its name to another device: the old name, the new.
-    renamed: Option<(DeviceLabel, DeviceLabel)>,
+    /// This machine's row, renamed because the update gave its name to another device.
+    renamed: Option<Renamed>,
+}
+
+/// This machine's row, renamed by a bring-forward because a list gave its name to another device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Renamed {
+    /// The name it had.
+    pub was: DeviceLabel,
+    /// The name it has now.
+    pub now: DeviceLabel,
+}
+
+impl fmt::Display for Renamed {
+    /// The clause every line that reports the rename carries.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Another device took the name me/{}; this machine is me/{} now.",
+            self.was, self.now
+        )
+    }
 }
 
 impl Brought {
@@ -1911,10 +1933,8 @@ impl Brought {
                 crate::credential::short(key)
             ));
         }
-        if let Some((was, now)) = &self.renamed {
-            line.push_str(&format!(
-                " Another device took the name me/{was}; this machine is me/{now} now."
-            ));
+        if let Some(renamed) = &self.renamed {
+            line.push_str(&format!(" {renamed}"));
         }
         let _ = writeln!(out, "{line}");
     }
@@ -1989,8 +2009,8 @@ impl Book {
             });
             let was = core::mem::replace(&mut self.rows[index].label, fresh.clone());
             // A second clash in one update renames it again; the line names where it started.
-            let was = brought.renamed.take().map_or(was, |(first, _)| first);
-            brought.renamed = Some((was, fresh));
+            let was = brought.renamed.take().map_or(was, |first| first.was);
+            brought.renamed = Some(Renamed { was, now: fresh });
         } else if let Some(index) = self
             .rows
             .iter()
@@ -2492,9 +2512,6 @@ enum Seam {
     Listed,
     /// This machine's standing is written, and the pin is not.
     Badged,
-    /// A restore's re-cut, after the sync and before its commit: a test makes the commit meet a list that
-    /// moved under it.
-    ReCut,
 }
 
 #[cfg(test)]
@@ -2506,10 +2523,6 @@ thread_local! {
 /// Stop here when a test asked to. Nothing outside tests.
 fn seam(at: Seam) -> Result<(), RootError> {
     #[cfg(test)]
-    if STOP.get() == Some(at) && at == Seam::ReCut {
-        return Err(RootError::ListChanged);
-    }
-    #[cfg(test)]
     if STOP.get() == Some(at) {
         return Err(RootError::Io {
             path: PathBuf::from("stopped by the test"),
@@ -2518,6 +2531,24 @@ fn seam(at: Seam) -> Result<(), RootError> {
     }
     #[cfg(not(test))]
     let _ = at;
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A list a test folds inside [`Root::commit_to`] on the thread the act runs on, once the lock is taken
+    /// and before `again`: the list a fold landed while the act waited for the lock.
+    static MEANWHILE: core::cell::RefCell<Option<Vec<u8>>> = const { core::cell::RefCell::new(None) };
+}
+
+/// Fold the list a test left in [`MEANWHILE`], under the act's own lock. Nothing outside tests.
+async fn meanwhile(home_lock: &HomeWrite, home: &Home) -> Result<(), RootError> {
+    #[cfg(test)]
+    if let Some(bytes) = MEANWHILE.take() {
+        crate::roster::fold(home_lock, home, &bytes).await?;
+    }
+    #[cfg(not(test))]
+    let _ = (home_lock, home);
     Ok(())
 }
 

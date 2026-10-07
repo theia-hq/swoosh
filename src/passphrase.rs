@@ -316,7 +316,10 @@ impl Tty {
     fn tell(&self, line: &str) -> eyre::Result<()> {
         use std::io::Write as _;
 
-        (&self.0).write_all(format!("{line}\n").as_bytes())?;
+        // Two writes, never one `format!`: a line can carry a made passphrase, and a copy of it in a plain
+        // `String` would be freed unwiped.
+        (&self.0).write_all(line.as_bytes())?;
+        (&self.0).write_all(b"\n")?;
         Ok(())
     }
 

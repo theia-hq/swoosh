@@ -53,7 +53,7 @@ pub struct Place {
     pub dataless: bool,
     /// Whether its filesystem is kept in memory.
     pub in_memory: bool,
-    /// Whether it is under a directory this machine empties on its own (`/tmp`, `/var/tmp`), whatever
+    /// Whether it is under `/tmp` or `/var/tmp`, emptied at boot or aged out on most systems, whatever
     /// filesystem holds it.
     pub emptied: bool,
 }
@@ -175,9 +175,10 @@ pub enum ForgetError {
         /// The directory named.
         dir: PathBuf,
     },
-    /// Check 4: the copy is in a directory this machine empties on its own.
+    /// Check 4: the copy is under `/tmp` or `/var/tmp`, emptied at boot or aged out on most systems.
     #[error(
-        "{} is in a folder this machine empties on its own; copy your root to another disk first.",
+        "{} is under /tmp or /var/tmp, which are for temporary files; copy your root to a directory outside \
+         them first.",
         EscapedPath(.dir)
     )]
     Emptied {
@@ -316,8 +317,8 @@ pub async fn forget(
             });
         }
     }
-    // After the disk: for the layouts the disk check misses (a subvolume, a separate `/home`), a directory
-    // this machine empties on its own is refused whatever filesystem holds it.
+    // After the disk: for the layouts the disk check misses (a subvolume, a separate `/home`), `/tmp` and
+    // `/var/tmp`, emptied at boot or aged out on most systems, are refused whatever filesystem holds them.
     if key_place.emptied || list_place.emptied {
         return Err(ForgetError::Emptied {
             dir: dir.to_path_buf(),

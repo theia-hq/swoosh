@@ -62,21 +62,26 @@ impl RestoreSync {
         let (root, was_device) = (self.restored.root, self.restored.was_device);
         let synced = self.restored.sync(home, dial).await?;
         let short = swoosh::credential::short(&root);
-        match synced.from.filter(|_| !synced.waiting) {
-            _ if synced.waiting => writeln!(
+        match &synced.from {
+            _ if synced.waiting => write!(
                 err,
                 "restored root:{short}, your root, on this machine. Your other devices learn of this machine \
                  the next time you use your root."
             )?,
-            Some(from) => writeln!(
+            Some(from) => write!(
                 err,
                 "restored root:{short}, your root, on this machine; brought up to date from {from}."
             )?,
-            None => writeln!(
+            None => write!(
                 err,
                 "restored root:{short}, your root, on this machine. No device answered: your other devices \
                  learn of this machine the next time you use your root."
             )?,
+        }
+        // A rename rides whichever line printed.
+        match &synced.renamed {
+            Some(renamed) => writeln!(err, " {renamed}")?,
+            None => writeln!(err)?,
         }
         if !was_device {
             writeln!(

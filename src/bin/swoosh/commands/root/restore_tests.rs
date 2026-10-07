@@ -824,3 +824,72 @@ async fn restore_on_a_device_keeps_a_copy_at_the_same_number_as_a_fork() {
     assert_eq!(std::fs::read(home.devices()).unwrap(), before);
     assert_eq!(std::fs::read(home.devices_conflict()).unwrap(), copied);
 }
+
+/// A list revoking this machine, folded here while the restore waits at its prompt, refuses the restore under
+/// the lock before `root.key` is written: the check before the prompt is made again where it counts. Red
+/// when only the check before the prompt is made.
+#[tokio::test]
+async fn restore_refuses_when_a_list_revoking_this_machine_lands_during_the_prompt() {
+    let home = scratch("restore-revoked-meanwhile");
+    let rows = [live(OWN, "desk"), live(LAPTOP, "laptop")];
+    device_of(&home, &rows[0]).await;
+    crate::commands::invite::invite_tests::held(&home, &records(1, &rows, Vec::new()));
+    let dir = stick(&home, &records(2, &rows, Vec::new()));
+    let revoking = records(
+        3,
+        &[live(LAPTOP, "laptop"), revoked(OWN, "desk")],
+        Vec::new(),
+    );
+    let mut asked = 0;
+    let mut prompt = Meanwhile(|| {
+        asked += 1;
+        fold_from_beside(&home, &revoking);
+    });
+    let refused = restore_cmd(&dir)
+        .restore(&home, &mut prompt)
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        format!("{refused:#}"),
+        "this machine's key was revoked; to restore here, first give this machine a new key: swoosh leave \
+         --new-key"
+    );
+    assert_eq!(asked, 1);
+    assert!(!home.root_key().exists(), "the root was never written");
+}
+
+/// A restore whose cut renames this machine, because a fork kept here gave its name to another device, says
+/// the new name on its success line. Red when the rename is dropped.
+#[tokio::test]
+async fn a_restore_with_a_fork_naming_this_machines_name_says_the_new_name() {
+    let home = scratch("restore-renamed");
+    let own = lapsed(OWN, "desk");
+    device_of(&home, &live(OWN, "desk")).await;
+    let laptop = live(LAPTOP, "laptop");
+    crate::commands::invite::invite_tests::held(
+        &home,
+        &records(2, &[own.clone(), laptop.clone()], Vec::new()),
+    );
+    // The copy signed update 2 too, giving the name me/desk to another device: kept here as the fork.
+    let dir = stick(
+        &home,
+        &records(2, &[laptop, live(0x43, "desk")], Vec::new()),
+    );
+    let (result, err) = restore(&home, &dir, &Answering::nobody()).await;
+    result.unwrap();
+    assert!(
+        home.devices_conflict().exists(),
+        "the copy was kept as the fork"
+    );
+    let renamed = row_for(&home, key(OWN)).expect("this machine's row").label;
+    assert_ne!(renamed.as_str(), "desk");
+    assert_eq!(
+        err.lines().next().unwrap(),
+        format!(
+            "restored root:{}, your root, on this machine. No device answered: your other devices learn of \
+             this machine the next time you use your root. Another device took the name me/desk; this \
+             machine is me/{renamed} now.",
+            swoosh::credential::short(&root())
+        )
+    );
+}

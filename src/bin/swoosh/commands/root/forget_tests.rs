@@ -552,8 +552,74 @@ async fn root_forget_refuses_a_copy_rewritten_in_place_under_the_same_inode() {
     assert!(home.root_key().exists());
 }
 
-/// A copy under `/tmp` or `/var/tmp` is refused whatever disk holds it: those are emptied on their own.
-/// Red when the place is judged by its disk alone.
+/// The compare under the lock is the one the delete depends on: a key rewritten in place after the unlock
+/// (same inode, same header) is refused there, and the root stays. Red when only the compare before the lock
+/// is made.
+#[tokio::test]
+async fn root_forget_refuses_a_copy_rewritten_in_place_once_the_lock_is_taken() {
+    let (home, dir) = kept("forget-in-place-locked").await;
+    let disk = RewriteUnderLock {
+        disk: FakeDisk::new(&home),
+        key: dir.join("root.key"),
+        seen: core::cell::Cell::new(0),
+    };
+    let (result, _) = forget(&home, &dir, &mut Counting::new([PASS]), &disk).await;
+    assert!(
+        refusal(result).starts_with(&format!(
+            "the copy in {} changed during the checks",
+            dir.display()
+        )),
+        "the rewrite under the lock is caught"
+    );
+    assert!(home.root_key().exists());
+}
+
+/// A [`FakeDisk`] that rewrites the copy's key in place, keeping its inode, when the command reads its place
+/// the second time: under the lock, after the unlock and the compare before the lock.
+struct RewriteUnderLock {
+    disk: FakeDisk,
+    key: PathBuf,
+    seen: core::cell::Cell<usize>,
+}
+
+impl Disk for RewriteUnderLock {
+    fn place(&self, path: &Path) -> std::io::Result<Place> {
+        if path == self.key {
+            self.seen.set(self.seen.get() + 1);
+            if self.seen.get() == 2 {
+                use std::io::Write as _;
+
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)?
+                    .write_all(b"\n")?;
+            }
+        }
+        self.disk.place(path)
+    }
+}
+
+/// A stage a killed key write left beside `root.key` is the one copy of the root left in the home once it
+/// goes, so forget removes it. Red when the stages are left.
+#[tokio::test]
+async fn root_forget_removes_a_stage_of_the_key_left_in_the_home() {
+    let (home, dir) = kept("forget-stages").await;
+    let stage = home.dir().join("root.key.tmp.4242.0");
+    std::fs::copy(home.root_key(), &stage).unwrap();
+    let (result, _) = forget(
+        &home,
+        &dir,
+        &mut Counting::new([PASS]),
+        &FakeDisk::new(&home),
+    )
+    .await;
+    result.unwrap();
+    assert!(!home.root_key().exists());
+    assert!(!stage.exists(), "the stage went with the root");
+}
+
+/// A copy under `/tmp` or `/var/tmp` is refused whatever disk holds it: those are emptied at boot or aged
+/// out on most systems. Red when the place is judged by its disk alone.
 #[tokio::test]
 async fn root_forget_refuses_a_copy_under_tmp() {
     let (home, dir) = kept("forget-tmp").await;
@@ -566,7 +632,8 @@ async fn root_forget_refuses_a_copy_under_tmp() {
     assert_eq!(
         refusal(result),
         format!(
-            "{} is in a folder this machine empties on its own; copy your root to another disk first.",
+            "{} is under /tmp or /var/tmp, which are for temporary files; copy your root to a directory \
+             outside them first.",
             dir.display()
         )
     );

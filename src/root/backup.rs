@@ -44,7 +44,7 @@ pub enum BackupError {
         dir: PathBuf,
     },
     /// `<dir>` could not be read.
-    #[error("could not read {}: {source}", EscapedPath(.dir))]
+    #[error("could not read {}", EscapedPath(.dir))]
     Unreadable {
         /// The directory named.
         dir: PathBuf,

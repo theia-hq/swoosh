@@ -381,6 +381,8 @@ impl Prompt for Counting {
         crate::passphrase::passphrase(self.answer(1)?)
     }
 
+    /// Not the terminal's choosing round, which is tested through its own seam: an empty answer here is a
+    /// mismatch, where at a terminal Enter makes a passphrase.
     fn choose(&mut self, _asked: Asked<'_>) -> eyre::Result<Choice> {
         // The terminal's round reads one entry for a short passphrase, which ends it before `again:`, and two
         // otherwise.

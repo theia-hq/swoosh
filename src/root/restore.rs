@@ -32,7 +32,7 @@ use rand::seq::SliceRandom as _;
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::{
-    Act, KEY_FILE, LIST_FILE, Root, RootError, header_key, not_admitting, read_header,
+    Act, KEY_FILE, LIST_FILE, Renamed, Root, RootError, header_key, not_admitting, read_header,
     read_list_at, remove_file, still, take_standing, unix_now,
 };
 use crate::escape::EscapedPath;
@@ -136,6 +136,9 @@ pub struct Restored {
     /// The root, unlocked at the prompt and held through the exchange, so an answer above `written` is
     /// carried with no second prompt.
     unlocked: Root,
+    /// This machine's row, renamed in the list the restore cut, when a fork kept here gave its name to
+    /// another device.
+    renamed: Option<Renamed>,
 }
 
 /// What the exchange after a restore found.
@@ -146,6 +149,9 @@ pub struct Synced {
     /// Whether this machine's row waits for the next act that cuts: a list moved under the re-cut, which
     /// then offered nothing.
     pub waiting: bool,
+    /// This machine's row, renamed in the list that stands: the restore's own cut, or the re-cut's when
+    /// an answer replaced it.
+    pub renamed: Option<Renamed>,
 }
 
 /// Restore the root in the copy at `dir` on this machine: every check, the passphrase, then the root's files.
@@ -245,6 +251,7 @@ pub async fn restore(
                 .await
                 .map_err(RootError::from)?;
         }
+        // `HoldsRoot` returned before the prompt, and `still` refuses a standing that moved since.
         Standing::Unpinned | Standing::InterruptedMint { .. } | Standing::HoldsRoot { .. } => {
             let held_here = crate::roster::read_held(&home.devices(), pin);
             if held_here.is_none_or(|(held, _)| held.epoch() < copied.epoch()) {
@@ -254,6 +261,11 @@ pub async fn restore(
         }
     }
     drop(copied_bytes);
+    // A list that revokes this machine can land while the prompt waits, so the refusal before the prompt is
+    // made again here, before the commit point. What step 1 folded stays: revocations only grow.
+    if super::own_key_revoked(home, pin)? {
+        return Err(RestoreError::RevokedOwnKey);
+    }
     // 2. `root.key`, unless a restore that stopped left it: an unpinned home keeps no root but a revoked one,
     // which is no root, so it goes first. On a device this is the commit point.
     if !matches!(standing, Standing::InterruptedMint { .. }) {
@@ -267,23 +279,28 @@ pub async fn restore(
     // 3. This machine's row, `key.cert` and the pin.
     let newest = crate::roster::read_held(&home.devices(), pin).map(|(list, _)| list);
     let mut act = Act::new(home, root, None, newest.as_ref(), Some(own));
-    act.bring_forward(&mut io::sink())?;
+    let renamed = act.bring_forward(&mut io::sink())?;
     let now = unix_now();
     let row = act.book.rows.iter().find(|row| row.node == own).cloned();
     let peers = peers(&act, own);
     let mut root_here = Root { secret, act };
-    match row {
-        // Live: nothing to sign. A device's own standing is kept when it already runs as long.
+    let renamed = match row {
+        // Live: nothing to sign, so nothing is cut, and records renamed on the way are dropped. A device's
+        // own standing is kept when it already runs as long.
         Some(row) if row.until > now => {
             let kept = matches!(standing, Standing::Device { until, .. }
                 if until >= super::at(row.until));
             if !kept {
                 take_standing(&home_lock, home, root, &row.standing)?;
             }
+            None
         }
-        // Lapsed or absent: signed as a mint signs its own, into a list kept here.
-        _ => root_here.take_own(&home_lock, own)?,
-    }
+        // Lapsed or absent: signed as a mint signs its own, into a list kept here, which carries the rename.
+        _ => {
+            root_here.take_own(&home_lock, own)?;
+            renamed
+        }
+    };
     // Read under the lock: a fold that lands once it is let go is an answer above this number, and is
     // carried after the sync.
     let written = crate::roster::read_held(&home.devices(), pin)
@@ -296,6 +313,7 @@ pub async fn restore(
         peers,
         written,
         unlocked: root_here,
+        renamed,
     })
 }
 
@@ -348,34 +366,40 @@ impl Restored {
         // machine's row. The row step runs again on that list's records, never a union with the replaced cut
         // (a union would take a name the newer list gave another key, and revoke this machine), and the cut
         // goes to your devices. At or below, the list here is the restore's own, and nothing is cut.
-        if let Some((newer, _)) = held.filter(|(held, _)| held.epoch() > self.written) {
-            let mut root = self.unlocked;
-            root.act = Act::new(home, self.root, None, Some(&newer), Some(self.own));
-            root.act.bring_forward(&mut io::sink())?;
-            root.carry_own()?;
-            // A list that moved under the re-cut is not an error here: the root, the pin and this machine's
-            // standing are in place, and the next act that cuts carries the row.
-            let committed = match super::seam(super::Seam::ReCut) {
-                Ok(()) => root.commit_to(&mut io::sink()).await,
-                Err(moved) => Err(moved),
-            };
-            let committed = match committed {
-                Ok(committed) => committed,
-                Err(RootError::ListChanged) => {
-                    return Ok(Synced {
-                        from,
-                        waiting: true,
-                    });
-                }
-                Err(error) => return Err(error.into()),
-            };
-            if committed.number > newer.epoch() {
-                let _reach = committed.offer(dial).await;
+        // The restore's own cut, and a rename in it, stand only while no answer replaced it.
+        let Some((newer, _)) = held.filter(|(held, _)| held.epoch() > self.written) else {
+            return Ok(Synced {
+                from,
+                waiting: false,
+                renamed: self.renamed,
+            });
+        };
+        let mut root = self.unlocked;
+        root.act = Act::new(home, self.root, None, Some(&newer), Some(self.own));
+        let renamed = root.act.bring_forward(&mut io::sink())?;
+        root.carry_own()?;
+        // A list that moved under the re-cut is not an error here: the root, the pin and this machine's
+        // standing are in place, and the next act that cuts carries the row. Once `carry_own` leaves this
+        // machine's row out of what the act added and renewed, nothing a fold can land stops the re-cut, so
+        // this arm is defence.
+        let committed = match root.commit_to(&mut io::sink()).await {
+            Ok(committed) => committed,
+            Err(RootError::ListChanged) => {
+                return Ok(Synced {
+                    from,
+                    waiting: true,
+                    renamed: None,
+                });
             }
+            Err(error) => return Err(error.into()),
+        };
+        if committed.number > newer.epoch() {
+            let _reach = committed.offer(dial).await;
         }
         Ok(Synced {
             from,
             waiting: false,
+            renamed,
         })
     }
 }

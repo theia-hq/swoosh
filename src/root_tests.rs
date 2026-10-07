@@ -23,7 +23,7 @@ use nauthy::{Revocation, RevocationId, VerifyKey};
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
-use super::{Committed, Minted, Root, RootError, RootPlace, RootVerb, STOP, Seam};
+use super::{Committed, MEANWHILE, Minted, Root, RootError, RootPlace, RootVerb, STOP, Seam};
 use crate::codec::{Id, MAX_REVOKED, MAX_REVOKED_KEYS};
 use crate::config;
 use crate::contacts::DeviceLabel;
@@ -2583,11 +2583,11 @@ async fn a_restore_on_a_device_killed_after_its_key_holds_the_copys_list() {
     );
 }
 
-/// A restore whose re-cut meets a list that moved under it succeeds: the root, the pin and this machine's
-/// standing are in place, nothing is offered, and the row waits for the next act that cuts. Red when the
-/// moved list fails the restore and tells the person to run it again.
+/// A list that lands while a restore's re-cut waits for the lock, and already lists this machine, is carried
+/// by the re-cut: it cuts above that list and offers the cut. Red when this machine's own row counts as a
+/// device the act added, which stops the re-cut and leaves the row waiting.
 #[tokio::test]
-async fn a_restore_whose_re_cut_meets_a_moved_list_succeeds_and_says_the_row_waits() {
+async fn a_restore_whose_re_cut_meets_a_moved_list_carries_it_and_offers_the_cut() {
     let home = home("restore-recut-moved");
     let dir = beside(&home, "copy");
     let _ = std::fs::remove_dir_all(&dir);
@@ -2597,7 +2597,7 @@ async fn a_restore_whose_re_cut_meets_a_moved_list_succeeds_and_says_the_row_wai
         ROOT,
         &records(1, vec![laptop.clone()], Vec::new(), Vec::new()),
     );
-    let fleet = records(3, vec![laptop], Vec::new(), Vec::new());
+    let fleet = records(3, vec![laptop.clone()], Vec::new(), Vec::new());
     let device = sibling(&home, LAPTOP, STANDING_UNTIL, &fleet).await;
     let dial = Loopback::new(
         home.clone(),
@@ -2607,14 +2607,94 @@ async fn a_restore_whose_re_cut_meets_a_moved_list_succeeds_and_says_the_row_wai
     let restored = super::restore(&home, &dir, &mut Counting::new([PASS]))
         .await
         .unwrap();
-    STOP.set(Some(Seam::ReCut));
+    // Another copy of the root cut past the fleet's list, listing this machine and me/nas.
+    let nas = row(NAS, "nas", vec![id(NAS, STANDING_UNTIL)]);
+    let moved = records(4, vec![laptop, own_row(), nas], Vec::new(), Vec::new());
+    MEANWHILE.set(Some(TestRoot::seeded(ROOT).sign_update(&moved)));
     let synced = restored.sync(&home, &dial).await;
-    STOP.set(None);
-    let synced = synced.expect("a moved list is not an error here");
-    assert!(synced.waiting, "the row waits for the next act");
-    assert!(matches!(standing(&home).await, Standing::HoldsRoot { .. }));
-    let theirs = crate::roster::read_held(&device.devices(), TestRoot::seeded(ROOT).verify_key())
-        .unwrap()
-        .0;
-    assert_eq!(theirs.epoch(), Epoch(3), "nothing was offered");
+    MEANWHILE.set(None);
+    let synced = synced.expect("a moved list is carried");
+    assert!(!synced.waiting, "the moved list never stops the re-cut");
+    let pin = TestRoot::seeded(ROOT).verify_key();
+    let here = crate::roster::read_held(&home.devices(), pin).unwrap().0;
+    assert_eq!(here.epoch(), Epoch(5), "cut above the moved list");
+    for listed in [key(OWN), key(NAS)] {
+        assert!(here.members().iter().any(|member| member.node == listed));
+    }
+    let theirs = crate::roster::read_held(&device.devices(), pin).unwrap().0;
+    assert_eq!(theirs.epoch(), Epoch(5), "the cut was offered");
+}
+
+/// A list that lands while an act waits for the lock, revoking this machine's key after the act renewed
+/// this machine's lapsed row, never stops the act: that renewal is no device the act renewed. The act goes
+/// on, as any act that cuts with this machine's key revoked does, and the list it leaves revokes the key.
+/// Red when the renewal counts as one the act made.
+#[tokio::test]
+async fn a_list_revoking_this_machine_after_its_row_was_renewed_never_stops_the_act() {
+    let home = home("own-renewed-revoked");
+    let lapsed = Member {
+        until: now() - DAY,
+        ..row(OWN, "desk", vec![id(OWN, now() - DAY)])
+    };
+    let laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]);
+    holds(
+        &home,
+        &records(1, vec![lapsed, laptop.clone()], Vec::new(), Vec::new()),
+    )
+    .await;
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Invite,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    let mut root = root.unwrap();
+    let moved = records(2, vec![laptop], Vec::new(), vec![key(OWN)]);
+    MEANWHILE.set(Some(TestRoot::seeded(ROOT).sign_update(&moved)));
+    let committed = root.commit_to(&mut io::sink()).await;
+    MEANWHILE.set(None);
+    let committed = committed.expect("the act goes on");
+    let left =
+        crate::roster::verify(&committed.bytes, TestRoot::seeded(ROOT).verify_key()).unwrap();
+    assert!(left.is_revoked_key(&key(OWN)));
+    assert!(
+        !left.members().iter().any(|member| member.node == key(OWN)),
+        "no live row for a revoked key"
+    );
+}
+
+/// This machine's key in the home's `revoked`, with the list held here still listing it, is a revoked own
+/// key: an act that cuts warns before its prompt. `revoked::add` leaves this machine's key out, so the file
+/// is one swoosh did not write that way. Red when only the list is read.
+#[tokio::test]
+async fn a_revoked_file_naming_this_machines_key_warns_before_the_prompt() {
+    let home = home("own-key-in-revoked");
+    holds(
+        &home,
+        &records(
+            1,
+            vec![
+                own_row(),
+                row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]),
+            ],
+            Vec::new(),
+            Vec::new(),
+        ),
+    )
+    .await;
+    let home_lock = crate::home::HomeWrite::take(&home).await.unwrap();
+    nauthy::Denylist::for_repair(home.revoked())
+        .revoke(&home_lock, [Revocation::Key(key(OWN))])
+        .unwrap();
+    drop(home_lock);
+    let (root, out) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Invite,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    root.unwrap();
+    assert!(out.contains(super::OWN_KEY_REVOKED), "{out}");
 }

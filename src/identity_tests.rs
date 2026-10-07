@@ -426,3 +426,27 @@ async fn a_locked_file_with_a_malformed_header_names_the_file() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Beside a root kept in the home, the damaged key's line names no command: `leave --new-key` refuses a home
+/// that keeps a root, and its refusal sends the person to `root backup`, which would print this line again.
+/// Red when the line names `leave` there.
+#[tokio::test]
+async fn a_damaged_machine_key_beside_a_kept_root_names_no_command() {
+    let (home, dir) = home("malformed-header-root-kept");
+    sealed(&home, "correct horse battery").await;
+    let mut bytes = std::fs::read(home.key()).expect("read the sealed key");
+    // Bytes 10 to 42 are the public key the header claims; all zeros is a small-order point.
+    bytes[10..42].fill(0);
+    std::fs::write(home.key(), &bytes).expect("write it back");
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    let refused = super::inspect(&home).expect_err("a header no key could be");
+    assert_eq!(
+        format!("{refused:#}"),
+        format!(
+            "this machine's key file at {} is damaged and holds no usable key.",
+            crate::escape::EscapedPath(&home.key())
+        )
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -189,21 +189,26 @@ pub fn key_of(file: &KeyFile, stored: &Stored) -> Result<NodeId, UnusableKey> {
         Stored::Plain(secret) => Ok(secret.with_bytes(NodeId::from_ed25519_secret)),
         Stored::Locked(locked) => locked.public_key().node_id().map_err(|_| UnusableKey {
             path: file.path().to_path_buf(),
-            kind: file.kind(),
+            whose: Whose::of(file),
         }),
     }
 }
 
 /// The line for an [`UnusableKey`]. This machine's key is set aside by `leave --new-key`, which never needs
-/// its identity; which copy of a root to trust is the person's call, so the root's line names no command.
+/// its identity, but which never runs where a root is kept, so beside one the line names no command; which
+/// copy of a root to trust is the person's call, so the root's line names none either.
 fn unusable_line(unusable: &UnusableKey) -> String {
-    match unusable.kind {
-        keystore::Kind::Device => format!(
+    match unusable.whose {
+        Whose::Machine => format!(
             "this machine's key file at {} is damaged and holds no usable key; start this machine over with a \
              new key: swoosh leave --new-key",
             EscapedPath(&unusable.path)
         ),
-        keystore::Kind::Root => format!(
+        Whose::MachineKeepingRoot => format!(
+            "this machine's key file at {} is damaged and holds no usable key.",
+            EscapedPath(&unusable.path)
+        ),
+        Whose::Root => format!(
             "the root key file at {} is damaged and holds no usable key.",
             EscapedPath(&unusable.path)
         ),
@@ -216,8 +221,44 @@ fn unusable_line(unusable: &UnusableKey) -> String {
 pub struct UnusableKey {
     /// The key file.
     pub path: std::path::PathBuf,
-    /// Which key the file is named for.
-    pub kind: keystore::Kind,
+    /// Whose key the file is for.
+    pub whose: Whose,
+}
+
+/// Whose key a damaged key file was for, as its line needs to know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whose {
+    /// This machine's, in a home that keeps no root: `leave --new-key` sets it aside.
+    Machine,
+    /// This machine's, beside a root kept in its home, which `leave` never leaves.
+    MachineKeepingRoot,
+    /// A root's.
+    Root,
+}
+
+impl Whose {
+    /// Whose key `file` is for. This machine's key is `<home>/machine/key` and a root kept in that home is
+    /// `<home>/root.key`, looked for where `leave` looks, so the line never names the command that refusal
+    /// turns away. A root that cannot be ruled out counts as kept: the line then names no command.
+    pub fn of(file: &KeyFile) -> Self {
+        match file.kind() {
+            keystore::Kind::Root => Self::Root,
+            keystore::Kind::Device => {
+                let absent = file
+                    .path()
+                    .parent()
+                    .and_then(std::path::Path::parent)
+                    .is_some_and(|home| {
+                        matches!(home.join(crate::root::KEY_FILE).try_exists(), Ok(false))
+                    });
+                if absent {
+                    Self::Machine
+                } else {
+                    Self::MachineKeepingRoot
+                }
+            }
+        }
+    }
 }
 
 /// What [`lock`] did to this machine's key.
@@ -487,7 +528,7 @@ fn write_with(seed: &[u8; 32], home: &Home, prompt: &mut impl Prompt) -> eyre::R
             // file's header is only a claim, and one no key could be is refused naming the file.
             let existing = existing.node_id().map_err(|_| UnusableKey {
                 path: path.clone(),
-                kind: file.kind(),
+                whose: Whose::of(&file),
             })?;
             eyre::bail!(
                 "this machine is already {existing}; joining this would replace it with {incoming}. {} \
