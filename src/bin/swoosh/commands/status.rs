@@ -651,8 +651,9 @@ mod tests {
     }
 
     /// `status <machine>` prints the one path carrying bytes on its line: `direct`, or `relayed through`
-    /// the relay's host alone, through the escaper. A direct path with a standby relay is `Direct` in
-    /// bifrost's report, so it never reads as relayed.
+    /// the relay's host alone, through the escaper and without iroh's root dot, so the line never reads
+    /// `link., rtt`. A direct path with a standby relay is `Direct` in bifrost's report, so it never reads
+    /// as relayed.
     #[test]
     fn status_machine_prints_the_path_carrying_bytes() {
         let rtt = Some(core::time::Duration::from_millis(12));
@@ -675,7 +676,7 @@ mod tests {
         );
         assert_eq!(
             line(relay("https://euw1-1.relay.iroh.network./")),
-            "alice/nas via iroh, path: relayed through euw1-1.relay.iroh.network., rtt 12.000 ms"
+            "alice/nas via iroh, path: relayed through euw1-1.relay.iroh.network, rtt 12.000 ms"
         );
         // A peer can name the relay, so its host prints through the escaper, and nothing else of its URL
         // (no path, no query) reaches the line.

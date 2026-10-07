@@ -46,7 +46,7 @@ pub struct PingCmd {
                      device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
-    /// Print a line per probe as it lands, showing the path at that moment (watch iroh punch to direct).
+    /// print a line per probe, and one when the path changes
     #[arg(short = 'v', long)]
     pub verbose: bool,
     #[command(flatten)]
@@ -309,6 +309,10 @@ mod tests {
 
     const RTT: Option<Duration> = Some(Duration::from_millis(24));
 
+    /// How long a test lets `watching` run before calling it hung: a run that waits on a stream that never
+    /// ends fails here instead of hanging the suite.
+    const HUNG: Duration = Duration::from_secs(5);
+
     /// A relayed path through `host`, as iroh names one: by the relay's URL.
     fn relayed(host: &str) -> Path {
         Path::Relayed(Relay::from(
@@ -372,12 +376,14 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         };
-        watching(PathChanges::new(change), probes, |path| {
+        let run = watching(PathChanges::new(change), probes, |path| {
             lines
                 .borrow_mut()
                 .push(path_line("alice/macbook", "iroh", path));
-        })
-        .await;
+        });
+        tokio::time::timeout(HUNG, run)
+            .await
+            .expect("the run ends with its last probe, not with the stream");
         assert_eq!(
             lines.into_inner(),
             [
@@ -390,9 +396,42 @@ mod tests {
         );
     }
 
+    /// A transport whose path never moves (quirk, mem, noise) hands `-v` a stream that says its one path
+    /// and ends. That prints the one path line, then every probe still prints and the run completes: the
+    /// ended stream neither stops the probes nor stalls them.
+    #[tokio::test]
+    async fn ping_v_runs_every_probe_after_the_path_stream_ends() {
+        let lines = core::cell::RefCell::new(Vec::new());
+        let probes = async {
+            for seq in 0..3 {
+                let line = probe_line("alice/macbook", "quirk", Probe { seq, rtt: RTT });
+                lines.borrow_mut().push(line);
+                tokio::task::yield_now().await;
+            }
+        };
+        let run = watching(PathChanges::fixed(Path::Direct), probes, |path| {
+            lines
+                .borrow_mut()
+                .push(path_line("alice/macbook", "quirk", path));
+        });
+        tokio::time::timeout(HUNG, run)
+            .await
+            .expect("the run ends with its last probe after the stream ended");
+        assert_eq!(
+            lines.into_inner(),
+            [
+                "alice/macbook via quirk, path: direct",
+                "alice/macbook via quirk, seq 0 rtt 24.000 ms",
+                "alice/macbook via quirk, seq 1 rtt 24.000 ms",
+                "alice/macbook via quirk, seq 2 rtt 24.000 ms",
+            ]
+        );
+    }
+
     /// A path is named by the one carrying bytes: `direct`, `relayed through <host>` with the relay's
     /// host and nothing else of its URL, or `unknown`. A direct path with a standby relay is `Direct`
-    /// (bifrost's), so it reads `direct`.
+    /// (bifrost's), so it reads `direct`. iroh's default relays are named with a root dot, which is dropped
+    /// so the line does not end in what reads as a period.
     #[test]
     fn a_path_is_direct_or_relayed_through_its_relay() {
         for (path, said) in [
@@ -400,6 +439,10 @@ mod tests {
             (
                 relayed("euw1-1.relay.iroh.network"),
                 "path: relayed through euw1-1.relay.iroh.network",
+            ),
+            (
+                relayed("euc1-1.relay.n0.iroh.link."),
+                "path: relayed through euc1-1.relay.n0.iroh.link",
             ),
             (Path::Unknown, "path: unknown"),
         ] {

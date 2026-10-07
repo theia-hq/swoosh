@@ -304,8 +304,10 @@ pub fn conn_path(info: &ConnInfo) -> PathLine<'_> {
 /// A [`Path`] in the words a line prints it in: `direct`, `relayed through <host>`, or `unknown`.
 ///
 /// The relay's host is the transport's report, and a relay can be named by the peer, so it prints through
-/// the shared escaper, never raw. A relay URL with no host (not one a relay serves from) prints as
-/// `relayed`, naming nothing rather than the whole URL.
+/// the shared escaper, never raw. One trailing dot is dropped: iroh names its default relays fully
+/// qualified (`euc1-1.relay.n0.iroh.link.`), and that root dot is the same name but reads as a sentence's
+/// period at a line's end and as `link., rtt` mid-line. A relay URL with no host (not one a relay serves
+/// from) prints as `relayed`, naming nothing rather than the whole URL.
 #[derive(Debug, Clone, Copy)]
 pub struct PathLine<'a>(pub &'a Path);
 
@@ -314,7 +316,11 @@ impl core::fmt::Display for PathLine<'_> {
         match self.0 {
             Path::Direct => f.write_str("direct"),
             Path::Relayed(relay) => match relay.url().host_str() {
-                Some(host) => write!(f, "relayed through {}", Escaped(host)),
+                Some(host) => write!(
+                    f,
+                    "relayed through {}",
+                    Escaped(host.strip_suffix('.').unwrap_or(host))
+                ),
                 None => f.write_str("relayed"),
             },
             Path::Unknown => f.write_str("unknown"),
