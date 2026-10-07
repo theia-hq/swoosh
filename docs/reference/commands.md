@@ -40,7 +40,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="status"></a>[`swoosh status`](commands/status.md): show this machine: its key, lock, root, devices, contacts, links and services
 - <a id="fetch"></a>[`swoosh fetch`](commands/fetch.md): mint a local URL that fetches an origin through a named node
 - <a id="reach"></a>[`swoosh reach`](commands/reach.md): reach any service a peer serves, on stdout or a local port
-- <a id="send"></a>[`swoosh send`](commands/send.md): push a file or directory to a peer, verified end to end
+- <a id="send"></a>[`swoosh send`](commands/send.md): push a file or directory to a peer
 - <a id="sync"></a>[`swoosh sync`](commands/sync.md): bring your device list up to date with your other devices, both ways
 - <a id="contact"></a>[`swoosh contact`](commands/contact.md): manage local petnames for peers (yours alone, plain TOML)
 - <a id="identity"></a>[`swoosh identity`](commands/identity.md): back up, restore, or protect this machine's key

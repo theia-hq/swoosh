@@ -102,7 +102,7 @@ enum Command {
     Fetch(fetch::FetchCmd),
     /// Reach a peer's served service: stdout by default, or `--to <port>`.
     Reach(reach::ReachCmd),
-    /// Push a file or directory to a peer, verified end to end.
+    /// Push a file or directory to a peer.
     #[command(name = "send")]
     Send(send::SendCmd),
     /// Bring your device list up to date with your other devices, both ways.

@@ -1,4 +1,4 @@
-//! `swoosh send <path>... <peer>`: PUSH a file or directory to a peer, verified end to end.
+//! `swoosh send <path>... <peer>`: PUSH a file or directory to a peer.
 //!
 //! The sender-initiates half of file transfer: you dial a waiting receiver (a node serving `recv:`), open
 //! one stream per file, and drive [`transfer::wire`]'s [`Transfer`](transfer::wire::Transfer) directly,
@@ -40,7 +40,7 @@ pub const RECV_SERVICE: &str = Unbound::RECV.name();
 /// pipeline depth; a receiver's exposer accepts these streams concurrently too, so both sides fan out.
 const MAX_INFLIGHT: usize = 16;
 
-/// Push a file or directory to a peer, addressed by their public key, verified end to end.
+/// Push a file or directory to a peer, addressed by their public key.
 #[derive(Debug, Args)]
 pub struct SendCmd {
     /// The files or directories to push.
@@ -191,8 +191,8 @@ impl SendCmd {
     }
 }
 
-/// Push one file over its own admitted stream: hash it, open a gated stream, and drive the verified
-/// transfer, naming the file by its relative name so the receiver saves it under that name.
+/// Push one file over its own admitted stream: hash it, open a gated stream, and drive the transfer,
+/// naming the file by its relative name so the receiver saves it under that name.
 async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre::Result<()> {
     let blob = {
         let mut file = tokio::fs::File::open(&path)
