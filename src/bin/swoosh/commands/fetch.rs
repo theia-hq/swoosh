@@ -555,6 +555,11 @@ mod tests {
 
         /// A double that carries nothing has nothing to end.
         fn close(&self) {}
+
+        /// No transport under it, so no path, once.
+        fn path_changes(&self) -> bifrost::PathChanges {
+            bifrost::PathChanges::fixed(bifrost::Path::Unknown)
+        }
     }
 
     /// The line the DOWNLOADER reads. A `fetch` request that fails serves an HTTP error body, and

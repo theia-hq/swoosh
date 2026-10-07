@@ -2,6 +2,16 @@
 
 All notable changes to swoosh, newest first.
 
+## Unreleased
+
+### Changed
+- **`path:` names the path that carries bytes.** A direct path with a relay kept on standby reads
+  `direct`, where it read `through a relay`, and a relayed one names its relay:
+  `path: relayed through euc1-1.relay.n0.iroh.link`. `ping`, `speed` and `status <machine>` print the
+  same words.
+- **`ping -v` prints the path on its own line.** It prints first, then again each time the path
+  changes, instead of on every probe line.
+
 ## v0.14.1
 
 ### Fixed

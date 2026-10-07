@@ -322,7 +322,7 @@ impl Line {
 }
 
 impl core::fmt::Display for Line {
-    /// `<peer> via <transport>, path: <direct | through a relay>[, rtt <n>]`, Tailscale-status shaped, or `<peer> via <transport>:
+    /// `<peer> via <transport>, path: <direct | relayed through <relay>>[, rtt <n>]`, Tailscale-status shaped, or `<peer> via <transport>:
     /// unreachable` for a device that did not answer, or `reached, but refused (<refusal>)` /
     /// `reached, but the probe failed (<cause>)` for a node that answered the dial and then said no or
     /// broke. Both failure lines say it was REACHED (not unreachable) and render their typed cause, so a
@@ -374,7 +374,7 @@ impl core::fmt::Display for Line {
 mod tests {
     use core::sync::atomic::{AtomicU32, Ordering};
 
-    use bifrost::{ConnInfo, NodeId, Path, Session};
+    use bifrost::{ConnInfo, NodeId, Path, PathChanges, Session};
     use clap::Parser as _;
     use swoosh::home::Home;
     use swoosh::{reach, transport};
@@ -507,6 +507,11 @@ mod tests {
         /// A double that carries nothing has nothing to end.
         fn close(&self) {}
 
+        /// The path `conn_info` reports, once.
+        fn path_changes(&self) -> PathChanges {
+            PathChanges::fixed(self.conn_info().path)
+        }
+
         fn conn_info(&self) -> ConnInfo {
             ConnInfo {
                 path: Path::Direct,
@@ -552,6 +557,11 @@ mod tests {
 
         /// A double that carries nothing has nothing to end.
         fn close(&self) {}
+
+        /// The path `conn_info` reports, once.
+        fn path_changes(&self) -> PathChanges {
+            PathChanges::fixed(self.conn_info().path)
+        }
 
         fn conn_info(&self) -> ConnInfo {
             ConnInfo {
@@ -638,6 +648,42 @@ mod tests {
             local: false,
             reach: transport::Reach::default(),
         }
+    }
+
+    /// `status <machine>` prints the one path carrying bytes on its line: `direct`, or `relayed through`
+    /// the relay's host alone, through the escaper and without iroh's root dot, so the line never reads
+    /// `link., rtt`. A direct path with a standby relay is `Direct` in bifrost's report, so it never reads
+    /// as relayed.
+    #[test]
+    fn status_machine_prints_the_path_carrying_bytes() {
+        let rtt = Some(core::time::Duration::from_millis(12));
+        let line = |path| {
+            let info = ConnInfo {
+                path,
+                rtt: None,
+                remote: None,
+            };
+            Line::reached("alice/nas".to_owned(), "iroh", info, rtt).to_string()
+        };
+        let relay = |url: &str| {
+            Path::Relayed(bifrost::Relay::from(
+                url::Url::parse(url).expect("a relay url"),
+            ))
+        };
+        assert_eq!(
+            line(Path::Direct),
+            "alice/nas via iroh, path: direct, rtt 12.000 ms"
+        );
+        assert_eq!(
+            line(relay("https://euw1-1.relay.iroh.network./")),
+            "alice/nas via iroh, path: relayed through euw1-1.relay.iroh.network, rtt 12.000 ms"
+        );
+        // A peer can name the relay, so its host prints through the escaper, and nothing else of its URL
+        // (no path, no query) reaches the line.
+        assert_eq!(
+            line(relay("https://relay.example/\u{1b}[2K?ok=1")),
+            "alice/nas via iroh, path: relayed through relay.example, rtt 12.000 ms"
+        );
     }
 
     /// B3: a reached-but-refused line says it was REACHED (distinct from `unreachable`) and renders the

@@ -181,7 +181,7 @@ impl SpeedCmd {
 
         // Read the settled path now: the transfer gave hole-punching time to land, and we must read
         // before the transport closes.
-        let path = reach::conn_path(&session.conn_info());
+        let path = reach::conn_path(&session.conn_info()).to_string();
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;

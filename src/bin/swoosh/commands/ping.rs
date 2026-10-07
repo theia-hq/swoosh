@@ -3,17 +3,20 @@
 //!
 //! ping is a diagnostic, so a person (`alice`) fans out to ALL her devices and reports each: how do I
 //! reach alice, across every device she has? `alice/macbook` pings the one. Each device's block names
-//! the device, then its `path:` (`direct` or `through a relay`, the same source `status` reads) so a slow
-//! RTT reads as "it relayed", not a mystery, then the `ping(8)` counts/loss and RTT distribution.
+//! the device, then its `path:` (`direct` or `relayed through <relay>`, the same words `status` prints) so
+//! a slow RTT reads as "it relayed", not a mystery, then the `ping(8)` counts/loss and RTT distribution.
 //!
-//! With `-v`, it prints a line per probe as each one lands (like `tailscale ping`), sampling the path
-//! beside every pong so you WATCH a relayed iroh link hole-punch to direct on the probe where it flips.
-//! The `ping(8)` summary still follows the live lines.
+//! With `-v`, it prints a line per probe as each one lands (like `tailscale ping`), and a `path:` line for
+//! the path in force when the probes start and again each time the transport selects another, from the
+//! session's own stream of path changes rather than a sample beside each pong, so you WATCH a relayed iroh
+//! link hole-punch to direct at the moment it does. The `ping(8)` summary still follows the live lines.
 
+use core::future::Future;
 use core::time::Duration;
 
-use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
+use bifrost::{Discovery, Node, Path, PathChanges, Session, Transport};
 use clap::Args;
+use futures::StreamExt as _;
 use measure::{Ping, PingReport, Probe, ProtocolError, Refusal};
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
@@ -28,10 +31,10 @@ pub struct PingCmd {
     /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
-    /// How many probes to send.
+    /// how many probes to send
     #[arg(short = 'c', long, value_name = "count", default_value_t = 4)]
     pub count: u32,
-    /// Seconds between probes.
+    /// seconds between probes
     #[arg(short = 'i', long, value_name = "seconds", default_value_t = 1.0)]
     pub interval: f64,
     /// present a `swoosh:` capability link to reach a gated peer
@@ -43,7 +46,7 @@ pub struct PingCmd {
                      device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
     )]
     pub present: Option<Link>,
-    /// Print a line per probe as it lands, showing the path at that moment (watch iroh punch to direct).
+    /// print a line per probe, and one when the path changes
     #[arg(short = 'v', long)]
     pub verbose: bool,
     #[command(flatten)]
@@ -143,14 +146,18 @@ impl PingCmd {
             .await
             {
                 Ok(session) => {
-                    // With `-v`, print a line per probe as it lands, sampling the path beside each pong so
-                    // the exact probe where a relayed link flips to direct is visible live. The observer
-                    // borrows the session read-only, alongside the run's own read-only borrow.
+                    // With `-v`, print a line per probe as it lands, and a path line for the path in force
+                    // and each change the session reports, so the moment a relayed link flips to direct
+                    // is visible live. The observer borrows the session read-only, alongside the run's own
+                    // read-only borrow.
                     let report = if self.verbose {
                         let label = &candidate.label;
                         let name = bound.transport.name();
-                        plan.observing(&session, |probe| {
-                            println!("{}", probe_line(label, name, &session.conn_info(), probe));
+                        let probes = plan.observing(&session, |probe| {
+                            println!("{}", probe_line(label, name, probe));
+                        });
+                        watching(session.path_changes(), probes, |path| {
+                            println!("{}", path_line(label, name, path));
                         })
                         .await
                     } else {
@@ -159,8 +166,8 @@ impl PingCmd {
                     match report {
                         Ok(report) => {
                             outcome = outcome.max(reach::Outcome::Healthy);
-                            let path = reach::conn_path(&session.conn_info());
-                            print_device(&candidate.label, bound.transport.name(), path, &report);
+                            let path = reach::conn_path(&session.conn_info()).to_string();
+                            print_device(&candidate.label, bound.transport.name(), &path, &report);
                         }
                         // The node was REACHED but refused this probe: a distinct line that says so (not a
                         // healthy device with 100% loss, and NOT "unreachable"), rendering the typed refusal
@@ -229,21 +236,43 @@ fn print_device(label: &str, transport: &str, path: &str, report: &PingReport) {
     }
 }
 
-/// One live probe line: `<label> via <transport>, path: <path>, seq <n> rtt <x> ms` (or `... lost` for a
-/// dropped reply), `tailscale ping` shaped. `info` is the path at this probe, so the line where a relayed
-/// link first flips to `direct` is the probe it happened on.
-fn probe_line(label: &str, transport: &str, info: &ConnInfo, probe: Probe) -> String {
-    let path = reach::conn_path(info);
+/// Drive `probes` to its end while every path `changes` reports goes to `said`: the path in force first,
+/// before the first probe is sent, then each change as the transport selects it. Polled on this task, so a
+/// change prints between the probe lines it fell between, and nothing outlives the run: a change after the
+/// last probe is not printed, and a stream that ended (a transport whose path never moves) simply stops.
+async fn watching<R>(
+    changes: PathChanges,
+    probes: impl Future<Output = R>,
+    mut said: impl FnMut(&Path),
+) -> R {
+    let mut changes = changes.fuse();
+    let mut probes = core::pin::pin!(probes);
+    loop {
+        tokio::select! {
+            // Biased, so the path in force, ready at once, prints before the first probe line.
+            biased;
+            Some(path) = changes.next() => said(&path),
+            report = &mut probes => return report,
+        }
+    }
+}
+
+/// One path line: `<label> via <transport>, path: <path>`, printed under `-v` for the path in force and
+/// for each change.
+fn path_line(label: &str, transport: &str, path: &Path) -> String {
+    format!("{label} via {transport}, path: {}", reach::PathLine(path))
+}
+
+/// One live probe line: `<label> via <transport>, seq <n> rtt <x> ms` (or `... lost` for a dropped reply),
+/// `tailscale ping` shaped. The path is not sampled here: it has its own line when it changes.
+fn probe_line(label: &str, transport: &str, probe: Probe) -> String {
     match probe.rtt {
         Some(rtt) => format!(
-            "{label} via {transport}, path: {path}, seq {} rtt {:.3} ms",
+            "{label} via {transport}, seq {} rtt {:.3} ms",
             probe.seq,
             millis(rtt)
         ),
-        None => format!(
-            "{label} via {transport}, path: {path}, seq {} lost",
-            probe.seq
-        ),
+        None => format!("{label} via {transport}, seq {} lost", probe.seq),
     }
 }
 
@@ -274,45 +303,22 @@ fn failed_line(label: &str, transport: &str, error: &ProtocolError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use core::net::SocketAddr;
-
-    use bifrost::Path;
+    use bifrost::Relay;
 
     use super::*;
 
-    /// A `ConnInfo` with a given path, and a remote address for the direct cases (so the phrase can name
-    /// it, matching a real iroh session). Relayed/unknown carry no remote, as the transport reports.
-    fn info(path: Path) -> ConnInfo {
-        let remote = matches!(path, Path::Direct | Path::Mixed).then(|| {
-            "203.0.113.7:41641"
-                .parse::<SocketAddr>()
-                .expect("valid addr")
-        });
-        ConnInfo {
-            path,
-            rtt: None,
-            remote,
-        }
-    }
-
-    /// Render the live lines for a synthetic per-probe path sequence, exactly as the `-v` observer does:
-    /// one `(path, rtt)` per probe. Lets a test drive a relayed-then-direct flip without a network and
-    /// assert on the phrasing.
-    fn lines(probes: &[(Path, Option<Duration>)]) -> Vec<String> {
-        probes
-            .iter()
-            .enumerate()
-            .map(|(seq, &(path, rtt))| {
-                let probe = Probe {
-                    seq: seq as u32,
-                    rtt,
-                };
-                probe_line("alice/macbook", "iroh", &info(path), probe)
-            })
-            .collect()
-    }
-
     const RTT: Option<Duration> = Some(Duration::from_millis(24));
+
+    /// How long a test lets `watching` run before calling it hung: a run that waits on a stream that never
+    /// ends fails here instead of hanging the suite.
+    const HUNG: Duration = Duration::from_secs(5);
+
+    /// A relayed path through `host`, as iroh names one: by the relay's URL.
+    fn relayed(host: &str) -> Path {
+        Path::Relayed(Relay::from(
+            url::Url::parse(&format!("https://{host}/")).expect("a relay url"),
+        ))
+    }
 
     /// A device that answered the dial and then broke gets a LINE, not the end of the run. It used to
     /// abort the whole fan-out with its error, so every device after it went untried and the operator
@@ -346,54 +352,109 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_relayed_to_direct_sequence_says_direct_from_the_flip_probe() {
-        // Connected relayed, then hole-punched to direct on the third probe: the first two lines read
-        // through a relay, and every line from the flip on reads direct, so the moment is visible.
-        let lines = lines(&[
-            (Path::Relayed, RTT),
-            (Path::Relayed, RTT),
-            (Path::Direct, RTT),
-            (Path::Direct, RTT),
-        ]);
+    /// `-v` prints the path the session reports: the one in force before the first probe, then a line for
+    /// each change, between the probe lines it fell between. The stream here is the session's, not a sample
+    /// per probe: a relayed session that punches to direct mid-run says so once, at the change.
+    #[tokio::test]
+    async fn ping_v_prints_a_line_when_the_path_changes() {
+        let lines = core::cell::RefCell::new(Vec::new());
+        let (changed, change) = futures::channel::mpsc::unbounded();
+        changed
+            .unbounded_send(relayed("relay.example"))
+            .expect("the stream is open");
+        let probes = async {
+            for seq in 0..3 {
+                // The punch lands after the second probe.
+                if seq == 2 {
+                    changed
+                        .unbounded_send(Path::Direct)
+                        .expect("the stream is open");
+                    tokio::task::yield_now().await;
+                }
+                let line = probe_line("alice/macbook", "iroh", Probe { seq, rtt: RTT });
+                lines.borrow_mut().push(line);
+                tokio::task::yield_now().await;
+            }
+        };
+        let run = watching(PathChanges::new(change), probes, |path| {
+            lines
+                .borrow_mut()
+                .push(path_line("alice/macbook", "iroh", path));
+        });
+        tokio::time::timeout(HUNG, run)
+            .await
+            .expect("the run ends with its last probe, not with the stream");
         assert_eq!(
-            lines[0],
-            "alice/macbook via iroh, path: through a relay, seq 0 rtt 24.000 ms"
-        );
-        assert_eq!(
-            lines[1],
-            "alice/macbook via iroh, path: through a relay, seq 1 rtt 24.000 ms"
-        );
-        assert_eq!(
-            lines[2],
-            "alice/macbook via iroh, path: direct, seq 2 rtt 24.000 ms"
-        );
-        assert_eq!(
-            lines[3],
-            "alice/macbook via iroh, path: direct, seq 3 rtt 24.000 ms"
+            lines.into_inner(),
+            [
+                "alice/macbook via iroh, path: relayed through relay.example",
+                "alice/macbook via iroh, seq 0 rtt 24.000 ms",
+                "alice/macbook via iroh, seq 1 rtt 24.000 ms",
+                "alice/macbook via iroh, path: direct",
+                "alice/macbook via iroh, seq 2 rtt 24.000 ms",
+            ]
         );
     }
 
+    /// A transport whose path never moves (quirk, mem, noise) hands `-v` a stream that says its one path
+    /// and ends. That prints the one path line, then every probe still prints and the run completes: the
+    /// ended stream neither stops the probes nor stalls them.
+    #[tokio::test]
+    async fn ping_v_runs_every_probe_after_the_path_stream_ends() {
+        let lines = core::cell::RefCell::new(Vec::new());
+        let probes = async {
+            for seq in 0..3 {
+                let line = probe_line("alice/macbook", "quirk", Probe { seq, rtt: RTT });
+                lines.borrow_mut().push(line);
+                tokio::task::yield_now().await;
+            }
+        };
+        let run = watching(PathChanges::fixed(Path::Direct), probes, |path| {
+            lines
+                .borrow_mut()
+                .push(path_line("alice/macbook", "quirk", path));
+        });
+        tokio::time::timeout(HUNG, run)
+            .await
+            .expect("the run ends with its last probe after the stream ended");
+        assert_eq!(
+            lines.into_inner(),
+            [
+                "alice/macbook via quirk, path: direct",
+                "alice/macbook via quirk, seq 0 rtt 24.000 ms",
+                "alice/macbook via quirk, seq 1 rtt 24.000 ms",
+                "alice/macbook via quirk, seq 2 rtt 24.000 ms",
+            ]
+        );
+    }
+
+    /// A path is named by the one carrying bytes: `direct`, `relayed through <host>` with the relay's
+    /// host and nothing else of its URL, or `unknown`. A direct path with a standby relay is `Direct`
+    /// (bifrost's), so it reads `direct`. iroh's default relays are named with a root dot, which is dropped
+    /// so the line does not end in what reads as a period.
     #[test]
-    fn a_path_is_direct_or_through_a_relay() {
+    fn a_path_is_direct_or_relayed_through_its_relay() {
         for (path, said) in [
             (Path::Direct, "path: direct"),
-            (Path::Relayed, "path: through a relay"),
-            (Path::Mixed, "path: through a relay"),
+            (
+                relayed("euw1-1.relay.iroh.network"),
+                "path: relayed through euw1-1.relay.iroh.network",
+            ),
+            (
+                relayed("euc1-1.relay.n0.iroh.link."),
+                "path: relayed through euc1-1.relay.n0.iroh.link",
+            ),
+            (Path::Unknown, "path: unknown"),
         ] {
-            let lines = lines(&[(path, RTT)]);
-            assert!(
-                lines[0].contains(said),
-                "{path:?} reads {said}: {}",
-                lines[0]
-            );
+            let line = path_line("alice/macbook", "iroh", &path);
+            assert!(line.ends_with(said), "{path:?} reads {said}: {line}");
         }
     }
 
     #[test]
     fn a_lost_probe_reports_lost_not_a_zero_rtt() {
-        let lines = lines(&[(Path::Direct, None)]);
-        assert_eq!(lines[0], "alice/macbook via iroh, path: direct, seq 0 lost");
+        let line = probe_line("alice/macbook", "iroh", Probe { seq: 0, rtt: None });
+        assert_eq!(line, "alice/macbook via iroh, seq 0 lost");
     }
 
     /// A peer's refusal detail holding a carriage return, an ESC CSI sequence and a bidi override prints

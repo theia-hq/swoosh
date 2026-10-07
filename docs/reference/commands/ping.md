@@ -10,12 +10,13 @@ Usage: swoosh ping [OPTIONS] <peer>
   <peer>            a petname, a raw node id, or a swoosh: link
   -c, --count <N>   how many probes to send [default: 4]
   -i, --interval <seconds>   seconds between probes [default: 1]
-  -v, --verbose     print a line per probe as it lands, showing the path
+  -v, --verbose     print a line per probe, and one when the path changes
 ```
 
-**Example.** `swoosh ping desk -v -c 4` prints a line per probe. Over iroh a session often starts
-relayed and hole-punches to direct mid-run, so the probe that lands direct reads `(upgraded from
-relayed)`.
+**Example.** `swoosh ping desk -v -c 4` prints `<device> via iroh, path: <path>` first, then a
+line per probe, and the path line again if the path changes mid-run: over iroh a session that starts
+`relayed through <relay>` prints `direct` when a hole punch lands.
+[Why a path changes](../../transports.md#iroh).
 
 **Things to know.** If the peer refuses the service or never admitted you, `ping` says so and exits
 non-zero, rather than reporting a healthy line or 100% loss.
