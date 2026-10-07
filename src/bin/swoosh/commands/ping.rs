@@ -31,10 +31,10 @@ pub struct PingCmd {
     /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
-    /// How many probes to send.
+    /// how many probes to send
     #[arg(short = 'c', long, value_name = "count", default_value_t = 4)]
     pub count: u32,
-    /// Seconds between probes.
+    /// seconds between probes
     #[arg(short = 'i', long, value_name = "seconds", default_value_t = 1.0)]
     pub interval: f64,
     /// present a `swoosh:` capability link to reach a gated peer
