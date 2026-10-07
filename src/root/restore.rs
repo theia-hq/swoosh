@@ -8,15 +8,16 @@
 //!
 //! 1. [`restore`]: every check, the copy's passphrase, then under `home.lock` the root's files. A copy is its
 //!    key and the last list it signed, so a copy without its list, or with one its root did not sign, is
-//!    refused before the prompt, and the bytes that verified then are the ones written. The order is
-//!    `devices`, then `root.key`, then this machine's row, `key.cert` and the pin. On a device of this root
-//!    `root.key` is the commit point (the home keeps the root from then on), so everything the copy brings
-//!    lands before it: on a device the list goes through the fold, the one path that writes `devices`, and
-//!    elsewhere it is written only over an older list or none, decided under the lock. This machine's row
-//!    needs nothing signed when it is live; a lapsed row is renewed and an absent one added under the
-//!    suggested name for 90 days, as a mint signs its own, and that cut is kept here, offered to nobody. On a
-//!    machine that kept no root, a crash before the pin leaves a root with no pin, which running this again
-//!    (or the next `invite`) finishes; on a device, the next act that cuts carries the row.
+//!    refused before the prompt, and the bytes that verified then are the ones written; so are the key's, the
+//!    bytes the passphrase opened, never sealed again. The order is `devices`, then `root.key`, then this
+//!    machine's row, `key.cert` and the pin. On a device of this root `root.key` is the commit point (the
+//!    home keeps the root from then on), so everything the copy brings lands before it: on a device the list
+//!    goes through the fold, the one path that writes `devices`, and elsewhere it is written only over an
+//!    older list or none, decided under the lock. This machine's row needs nothing signed when it is live; a
+//!    lapsed row is renewed and an absent one added under the suggested name for 90 days, as a mint signs its
+//!    own, and that cut is kept here, offered to nobody. On a machine that kept no root, a crash before the
+//!    pin leaves a root with no pin, which running this again (or the next `invite`) finishes; on a device,
+//!    the next act that cuts carries the row.
 //! 2. [`Restored::sync`]: an exchange with the devices the copy lists, then `invited-by`, for 10 s, which
 //!    brings the list here up to date and gives a device that is behind this one. If that shows this
 //!    machine's key revoked, the root's files go again, the pin last, and the restore refuses.
@@ -26,14 +27,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Protection, Unlock};
+use keystore::Unlock;
 use nauthy::VerifyKey;
 use rand::seq::SliceRandom as _;
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::{
     Act, KEY_FILE, LIST_FILE, Renamed, Root, RootError, header_key, not_admitting, read_header,
-    read_list_at, remove_file, still, take_standing, unix_now,
+    read_key, read_list_at, remove_file, still, take_standing, unix_now,
 };
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
@@ -105,6 +106,16 @@ pub enum RestoreError {
         /// The copy's root.
         root: NodeId,
     },
+    /// The copy's key changed between the reads around its unlock.
+    #[error(
+        "the copy in {} changed while it was read; nothing was restored. Run it again: swoosh root restore {}",
+        EscapedPath(.dir),
+        EscapedPath(.dir)
+    )]
+    Changed {
+        /// The directory named.
+        dir: PathBuf,
+    },
     /// This machine's key is revoked by this root.
     #[error(
         "this machine's key was revoked; to restore here, first give this machine a new key: swoosh leave \
@@ -167,6 +178,9 @@ pub async fn restore(
             dir: dir.to_path_buf(),
         });
     }
+    // The copy's key as bytes, read before the key store reads it and again after the unlock: two reads that
+    // agree hold the key store's read between them, so the bytes written are the ones the passphrase opened.
+    let key_bytes = read_key(&key_file)?;
     let locked = read_header(&key_file)?;
     let root = header_key(&key_file, &locked)?;
     let pin = root.verify_key().map_err(RootError::from)?;
@@ -225,10 +239,16 @@ pub async fn restore(
     if !prompt.terminal() {
         return Err(RootError::NoTerminalToUnlock.into());
     }
-    let (secret, passphrase) = crate::passphrase::unlock(prompt, Asked::Copy(dir), |passphrase| {
+    // An unlock proves the header, so the key opened is this root's.
+    let (secret, _) = crate::passphrase::unlock(prompt, Asked::Copy(dir), |passphrase| {
         locked.unlock(Unlock::Passphrase(passphrase))
     })
     .map_err(|report| RestoreError::Prompt(format!("{report:#}")))?;
+    if read_key(&key_file)? != key_bytes {
+        return Err(RestoreError::Changed {
+            dir: dir.to_path_buf(),
+        });
+    }
 
     let home_lock = HomeWrite::take(home).await.map_err(RootError::from)?;
     still(&home_lock, home, standing).await?;
@@ -257,15 +277,17 @@ pub async fn restore(
     if super::own_key_revoked(home, pin)? {
         return Err(RestoreError::RevokedOwnKey);
     }
-    // 2. `root.key`, unless a restore that stopped left it: an unpinned home keeps no root but a revoked one,
-    // which is no root, so it goes first. On a device this is the commit point.
+    // 2. `root.key`, unless a restore that stopped left it: the copy's own bytes, the ones the passphrase
+    // opened, written over the revoked root an unpinned home may keep (which is no root). Never sealed again:
+    // it is the same key, the same lock, the same passphrase and the same file format, and a new sealing would
+    // differ only in its random salt and nonces, so nothing about how keys are stored changes, and a restored
+    // root is byte for byte its copy (a backup into that copy then keeps it). On a device this is the commit
+    // point.
     if !matches!(standing, Standing::InterruptedMint { .. }) {
-        remove_file(&home.root_key())?;
-        KeyFile::root(home.root_key())
-            .write(&secret, Protection::Passphrase(&passphrase))
-            .map_err(RootError::from)?;
+        crate::config::write_private_atomic(&home_lock, &home.root_key(), &key_bytes)
+            .map_err(super::io_at(&home.root_key()))?;
     }
-    drop(passphrase);
+    drop(key_bytes);
     super::seam(super::Seam::Keyed)?;
     // 3. This machine's row, `key.cert` and the pin.
     let newest = crate::roster::read_held(&home.devices(), pin).map(|(list, _)| list);

@@ -1519,6 +1519,40 @@ fn header_key(path: &Path, locked: &keystore::Locked) -> Result<NodeId, RootErro
     })
 }
 
+/// The most bytes of a root key file read as bytes, as the key store caps its own read: a sealed root key is a
+/// few hundred bytes.
+const KEY_CAP: u64 = 4096;
+
+/// The root key file's bytes at `path`, as stored: locked with its passphrase. Opened without blocking and
+/// read from a regular file only, with a cap, so a planted pipe or device can neither block the read nor grow
+/// it.
+fn read_key(path: &Path) -> Result<Vec<u8>, RootError> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let invalid = || RootError::Io {
+        path: path.to_path_buf(),
+        source: io::ErrorKind::InvalidData.into(),
+    };
+    // Non-blocking, so opening a pipe returns at once; the type is then checked on the handle.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(io_at(path))?;
+    if !file.metadata().map_err(io_at(path))?.is_file() {
+        return Err(invalid());
+    }
+    let mut bytes = Vec::new();
+    file.take(KEY_CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_at(path))?;
+    if bytes.len() as u64 > KEY_CAP {
+        return Err(invalid());
+    }
+    Ok(bytes)
+}
+
 /// The list beside the root's key, `devices`, verified under `root`: in the copy at `copy`, or in this home
 /// for the root kept here. `None` when there is none yet; one that is not a list this root signed is
 /// refused, so an act never signs from records changed outside swoosh.

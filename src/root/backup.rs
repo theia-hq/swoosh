@@ -6,20 +6,16 @@
 //! last, each through the one write routine, so a run killed between them leaves a directory with no key,
 //! which running it again finishes.
 
-use std::io::{self, Read as _};
+use std::io;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use tightbeam::identity::AsVerifyKey as _;
 
-use super::{KEY_FILE, LIST_FILE, RootError, header_key, read_header, read_list};
+use super::{KEY_FILE, LIST_FILE, RootError, header_key, read_header, read_key, read_list};
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
 use crate::standing::Standing;
-
-/// The most bytes of a key file a copy reads, as the key store caps its own read: a sealed root key is a few
-/// hundred bytes.
-const KEY_CAP: u64 = 4096;
 
 /// Why a root could not be copied.
 #[derive(Debug, thiserror::Error)]
@@ -223,28 +219,6 @@ fn copy_of_this_root(dir: &Path, root: bifrost::NodeId) -> Result<Held, BackupEr
             .map(|(list, _)| list);
     }
     Ok(held)
-}
-
-/// The root key file's bytes, as stored: locked with its passphrase. A regular file only, read with a cap.
-fn read_key(path: &Path) -> Result<Vec<u8>, RootError> {
-    let file = std::fs::File::open(path).map_err(super::io_at(path))?;
-    if !file.metadata().map_err(super::io_at(path))?.is_file() {
-        return Err(RootError::Io {
-            path: path.to_path_buf(),
-            source: io::ErrorKind::InvalidData.into(),
-        });
-    }
-    let mut bytes = Vec::new();
-    file.take(KEY_CAP + 1)
-        .read_to_end(&mut bytes)
-        .map_err(super::io_at(path))?;
-    if bytes.len() as u64 > KEY_CAP {
-        return Err(RootError::Io {
-            path: path.to_path_buf(),
-            source: io::ErrorKind::InvalidData.into(),
-        });
-    }
-    Ok(bytes)
 }
 
 /// Write one file of the copy through the one write routine.

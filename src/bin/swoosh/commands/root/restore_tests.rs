@@ -961,3 +961,63 @@ async fn a_restore_with_a_fork_naming_this_machines_name_says_the_new_name() {
         )
     );
 }
+
+/// A restore writes the copy's own key bytes, never a new sealing of them, so backing up into the copy it came
+/// from keeps that copy's key and says nothing more than the success line. Red when restore seals the key
+/// again: every sealing draws a new salt and nonces, and the backup then replaces the copy and warns.
+#[tokio::test]
+async fn root_backup_after_a_restore_keeps_the_copy() {
+    let home = scratch("restore-then-backup");
+    let dir = stick(&home, &records(1, &[live(OWN, "desk")], Vec::new()));
+    let copied = std::fs::read(dir.join("root.key")).unwrap();
+    restore(&home, &dir, &Answering::nobody()).await.0.unwrap();
+    assert_eq!(
+        std::fs::read(home.root_key()).unwrap(),
+        copied,
+        "the restored key is the copy's, byte for byte"
+    );
+    let mut err = Vec::new();
+    crate::commands::root::backup::BackupCmd { dir: dir.clone() }
+        .backup(&home, &mut err)
+        .await
+        .unwrap();
+    let shown = dir.display();
+    assert_eq!(
+        String::from_utf8(err).unwrap(),
+        format!(
+            "copied your root to {shown}. Your root is still on this machine; to take it off: swoosh root \
+             forget {shown}\n"
+        ),
+        "the copy is kept, and no warning prints"
+    );
+    assert_eq!(std::fs::read(dir.join("root.key")).unwrap(), copied);
+}
+
+/// A copy's key that changes while the restore waits at its prompt refuses the restore, and nothing is
+/// written: the bytes written are only ever the ones the passphrase opened. Red when the key is not read
+/// again after the unlock.
+#[tokio::test]
+async fn restore_refuses_a_copy_whose_key_changes_during_the_prompt() {
+    let home = scratch("restore-key-changed");
+    let dir = stick(&home, &records(1, &[live(OWN, "desk")], Vec::new()));
+    let key_file = dir.join("root.key");
+    let mut prompt = Meanwhile(|| {
+        let mut bytes = std::fs::read(&key_file).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        std::fs::write(&key_file, &bytes).unwrap();
+    });
+    let refused = restore_cmd(&dir)
+        .restore(&home, &mut prompt)
+        .await
+        .expect_err("refused");
+    let shown = dir.display();
+    assert_eq!(
+        format!("{refused:#}"),
+        format!(
+            "the copy in {shown} changed while it was read; nothing was restored. Run it again: swoosh root \
+             restore {shown}"
+        )
+    );
+    assert!(!home.root_key().exists(), "the root was never written");
+}

@@ -223,11 +223,45 @@ async fn root_backup_says_when_it_replaced_a_relocked_key() {
     .unwrap();
     let (result, relocked) = backup(&home, &dir).await;
     result.unwrap();
+    assert_eq!(relocked, format!("{copied}{}", replaced(&dir)));
     assert_eq!(
-        relocked,
+        std::fs::read(dir.join("root.key")).unwrap(),
+        std::fs::read(home.root_key()).unwrap()
+    );
+}
+
+/// The line a backup prints after the success line when it replaced the key the copy in `dir` held.
+fn replaced(dir: &Path) -> String {
+    let shown = dir.display();
+    format!(
+        "warning: the copy in {shown} was locked differently or damaged, so it was replaced; it now opens with \
+         your root's passphrase on this machine. If you gave the copy its own passphrase, set it again: swoosh \
+         root lock {shown}\n"
+    )
+}
+
+/// A copy whose key file is damaged past its header gets this machine's key back, and the backup says so on
+/// the same line as for a re-locked copy. Red when a damaged key is replaced in silence.
+#[tokio::test]
+async fn root_backup_says_when_it_replaced_a_damaged_key() {
+    let home = scratch("backup-damaged");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let dir = stick(&home);
+    backup(&home, &dir).await.0.unwrap();
+    // The last byte is in the sealed body: the header still names this root, so the copy is this root's.
+    let mut bytes = std::fs::read(dir.join("root.key")).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    std::fs::write(dir.join("root.key"), &bytes).unwrap();
+    let (result, err) = backup(&home, &dir).await;
+    result.unwrap();
+    let shown = dir.display();
+    assert_eq!(
+        err,
         format!(
-            "{copied}warning: the copy in {shown} was locked differently; it now opens with your root's \
-             passphrase on this machine. To give the copy its own: swoosh root lock {shown}\n"
+            "copied your root to {shown}. Your root is still on this machine; to take it off: swoosh root \
+             forget {shown}\n{}",
+            replaced(&dir)
         )
     );
     assert_eq!(

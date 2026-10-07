@@ -38,8 +38,9 @@ impl BackupCmd {
         match copied {
             Copied::Replaced => writeln!(
                 err,
-                "warning: the copy in {dir} was locked differently; it now opens with your root's passphrase \
-                 on this machine. To give the copy its own: swoosh root lock {dir}"
+                "warning: the copy in {dir} was locked differently or damaged, so it was replaced; it now opens \
+                 with your root's passphrase on this machine. If you gave the copy its own passphrase, set it \
+                 again: swoosh root lock {dir}"
             )?,
             Copied::New | Copied::Kept => {}
         }

@@ -409,11 +409,13 @@ pub async fn forget(
             });
         }
     }
-    // The copy is made durable before the one step that cannot be taken back.
+    // The copy is made durable before the one step that cannot be taken back. A list written just now was
+    // synced by its write; one that was not is opened again, without blocking, so a pipe renamed over it since
+    // step 6's read returns at once instead of holding `home.lock`, and is refused as the copy changed.
     key_file.sync_all().map_err(super::io_at(&key))?;
-    std::fs::File::open(&list)
-        .and_then(|file| file.sync_all())
-        .map_err(super::io_at(&list))?;
+    if !behind {
+        sync_list(&list, dir)?;
+    }
     sync_dir(dir)?;
     super::remove_file(&home.root_key())?;
     sync_dir(home.dir())?;
@@ -444,15 +446,27 @@ async fn held(home: &Home) -> Result<bifrost::NodeId, ForgetError> {
     }
 }
 
-/// The copy's `root.key` at `path`, opened once: the handle, and its bytes read from it with a cap. Opened
-/// without blocking, so a pipe swapped in returns at once instead of holding `home.lock`; anything but a
-/// regular file, which check 3 found there, is the copy changed.
+/// The copy's `root.key` at `path`, opened once ([`open_regular`]): the handle, and its bytes read from it with
+/// a cap.
 fn open_key(path: &Path, dir: &Path) -> Result<(std::fs::File, Vec<u8>), ForgetError> {
     use std::io::Read as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
 
     /// A sealed root key is a few hundred bytes; the key store reads no more than this.
     const CAP: u64 = 4096;
+    let file = open_regular(path, dir)?;
+    let mut bytes = Vec::new();
+    (&file)
+        .take(CAP + 1)
+        .read_to_end(&mut bytes)
+        .map_err(super::io_at(path))?;
+    Ok((file, bytes))
+}
+
+/// The file of the copy at `path`, opened without blocking, so a pipe swapped in returns at once instead of
+/// holding `home.lock`; anything but a regular file, which check 3 found there, is the copy changed.
+fn open_regular(path: &Path, dir: &Path) -> Result<std::fs::File, ForgetError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
@@ -463,17 +477,26 @@ fn open_key(path: &Path, dir: &Path) -> Result<(std::fs::File, Vec<u8>), ForgetE
             dir: dir.to_path_buf(),
         });
     }
-    let mut bytes = Vec::new();
-    (&file)
-        .take(CAP + 1)
-        .read_to_end(&mut bytes)
-        .map_err(super::io_at(path))?;
-    Ok((file, bytes))
+    Ok(file)
 }
 
-/// Sync a directory, so the names in it are durable.
+/// Sync the copy's list at `list`, opened again ([`open_regular`]) under `home.lock`.
+fn sync_list(list: &Path, dir: &Path) -> Result<(), ForgetError> {
+    open_regular(list, dir)?
+        .sync_all()
+        .map_err(super::io_at(list))?;
+    Ok(())
+}
+
+/// Sync a directory, so the names in it are durable. Opened as a directory only, so anything else at the path
+/// (a pipe among them) fails at once rather than blocking the open.
 fn sync_dir(dir: &Path) -> Result<(), RootError> {
-    std::fs::File::open(dir)
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(dir)
         .and_then(|dir| dir.sync_all())
         .map_err(super::io_at(dir))
 }
@@ -505,3 +528,7 @@ fn sweep_stages(home: &Home) {
 fn place(disk: &impl Disk, path: &Path) -> Result<Place, RootError> {
     disk.place(path).map_err(super::io_at(path))
 }
+
+#[cfg(test)]
+#[path = "forget_tests.rs"]
+mod forget_tests;
