@@ -13,13 +13,13 @@ use swoosh::home::Home;
 use swoosh::identity::Locked;
 use swoosh::passphrase::{Prompt, Terminal};
 
-/// set, change or remove the passphrase on this machine's key
+/// set, change or remove the lock on this machine's key
 #[derive(Debug, Args)]
 pub struct LockCmd {
     /// how the key is locked
     #[arg(value_name = "method", default_value = "passphrase")]
     method: LockMethod,
-    /// remove the passphrase
+    /// remove this lock instead
     #[arg(long)]
     remove: bool,
 }
@@ -60,20 +60,21 @@ impl LockCmd {
         match swoosh::identity::lock(home, Method::from(self.method), self.remove, prompt).await? {
             Locked::Set { first: true } => writeln!(
                 err,
-                "set a passphrase on this machine's key. Every command that acts as this machine now asks \
-                 for it, so swoosh serve cannot start with nobody at a terminal."
+                "set a passphrase on this machine's key.\n\
+                 every command that acts as this machine now asks for it, so swoosh serve cannot start with \
+                 nobody at a terminal."
             )?,
             Locked::Set { first: false } => {
                 writeln!(err, "changed the passphrase on this machine's key.")?;
             }
             Locked::Removed { plain: true } => writeln!(
                 err,
-                "removed the passphrase from this machine's key: anyone with a copy of its key file can now \
-                 act as this machine."
+                "removed the passphrase from this machine's key, which now has no lock.\n\
+                 anyone with a copy of its key file can act as this machine."
             )?,
             Locked::Removed { plain: false } => writeln!(
                 err,
-                "removed the passphrase from this machine's key; touch-id still opens it."
+                "removed the passphrase from this machine's key, which now opens with touch-id only."
             )?,
             Locked::NoPassphrase => writeln!(
                 err,
@@ -81,22 +82,22 @@ impl LockCmd {
             )?,
             Locked::TouchId { passphrase: true } => writeln!(
                 err,
-                "added touch-id to this machine's key on this Mac; its passphrase still opens it."
+                "added touch-id to this machine's key, beside its passphrase."
             )?,
             Locked::TouchId { passphrase: false } => writeln!(
                 err,
-                "this machine's key now opens with touch-id on this Mac, and with nothing else. Every \
-                 command that acts as this machine asks for a touch, so swoosh serve cannot start with \
-                 nobody at this Mac."
+                "this machine's key now opens with touch-id only.\n\
+                 every command that acts as this machine now needs a touch at this Mac, so swoosh serve \
+                 cannot start with nobody there."
             )?,
             Locked::TouchIdRemoved { plain: true } => writeln!(
                 err,
-                "removed touch-id from this machine's key: anyone with a copy of its key file can now act \
-                 as this machine."
+                "removed touch-id from this machine's key, which now has no lock.\n\
+                 anyone with a copy of its key file can act as this machine."
             )?,
             Locked::TouchIdRemoved { plain: false } => writeln!(
                 err,
-                "removed touch-id from this machine's key; its passphrase opens it."
+                "removed touch-id from this machine's key, which now opens with its passphrase only."
             )?,
             Locked::NoTouchId => writeln!(
                 err,
@@ -104,7 +105,11 @@ impl LockCmd {
             )?,
             Locked::HasTouchId => writeln!(
                 err,
-                "this machine's key already opens with touch-id; nothing was changed."
+                "this machine's key already has touch-id as its only lock; nothing was changed."
+            )?,
+            Locked::PassphraseBesideTouchId => writeln!(
+                err,
+                "added a passphrase to this machine's key, beside touch-id."
             )?,
         }
         Ok(())

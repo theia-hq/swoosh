@@ -307,6 +307,47 @@ fn two_directories_are_a_usage_error() {
     assert!(refused.0.contains("name the method first"), "{}", refused.0);
 }
 
+/// The fix a two-directory usage error names is a method this build takes: `touch-id` on a Mac, the
+/// passphrase elsewhere. Red when a build names a method it does not have.
+#[test]
+fn the_usage_fix_names_a_method_this_build_takes() {
+    let refused = parse(&["./a", "./b"]).unwrap().target().unwrap_err();
+    let method = if cfg!(target_os = "macos") {
+        "touch-id"
+    } else {
+        "passphrase"
+    };
+    assert!(
+        refused.0.ends_with(&format!(
+            "name the method first: swoosh root lock {method} <dir>"
+        )),
+        "{}",
+        refused.0
+    );
+}
+
+/// `root lock --help` names `touch-id` as a method on a macOS build only. Red when a build offers a method it
+/// does not have.
+#[test]
+fn root_lock_help_names_touch_id_on_a_mac_only() {
+    use clap::CommandFactory as _;
+
+    let mut cli = crate::Cli::command();
+    cli.build();
+    let help = cli
+        .find_subcommand_mut("root")
+        .and_then(|root| root.find_subcommand_mut("lock"))
+        .unwrap()
+        .render_long_help()
+        .to_string();
+    let line = if cfg!(target_os = "macos") {
+        "how your root opens: passphrase, or touch-id beside it; or a copy's own directory"
+    } else {
+        "how your root opens: passphrase, or a copy's own directory"
+    };
+    assert!(help.contains(line), "{help}");
+}
+
 /// On a Mac, `touch-id` is a method, before a directory or alone.
 #[cfg(target_os = "macos")]
 #[test]
@@ -347,7 +388,7 @@ async fn root_lock_touch_id_adds_it_beside_the_passphrase() {
     result.unwrap();
     assert_eq!(
         err,
-        "added touch-id to your root on this Mac; its passphrase still opens it.\n"
+        "added touch-id to your root on this Mac, beside its passphrase.\n"
     );
     assert_eq!(prompt.events(), 1, "the passphrase");
     let [touch] = prompt.touches() else {
@@ -388,7 +429,7 @@ async fn root_lock_touch_id_on_a_copy_names_the_copy() {
     assert_eq!(
         err,
         format!(
-            "added touch-id to the copy of your root in {} on this Mac; its passphrase still opens it.\n",
+            "added touch-id to the copy of your root in {} on this Mac, beside its passphrase.\n",
             swoosh::escape::EscapedPath(&dir)
         )
     );
@@ -451,7 +492,7 @@ async fn root_lock_touch_id_remove_leaves_the_passphrase() {
     result.unwrap();
     assert_eq!(
         err,
-        "removed touch-id from your root; its passphrase opens it.\n"
+        "removed touch-id from your root, which now opens with its passphrase only.\n"
     );
     assert_eq!(locks(&home.root_key()), [keystore::Method::Passphrase]);
     assert!(prompt.touches().is_empty());
@@ -485,8 +526,9 @@ async fn root_lock_touch_id_over_a_dead_lock_says_to_check_touch_id_first() {
         prompt.warned(),
         [
             swoosh::touch::ROOT_BESIDE_PASSPHRASE,
-            "warning: touch-id does not open your root on this Mac now; if you did not add a fingerprint, \
-             check Touch ID & Password before setting it again: swoosh root lock touch-id"
+            "warning: touch-id does not open your root on this Mac now.\n\
+             the new lock will open with every fingerprint now in Touch ID & Password; if one is not yours, \
+             press ctrl-c and remove it first."
         ]
     );
 }

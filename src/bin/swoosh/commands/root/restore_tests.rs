@@ -1030,8 +1030,9 @@ fn overwrite(path: &Path, bytes: &[u8]) {
 
 /// The line a restore prints when the copy's `touch-id` lock does not open on this Mac: the line every use
 /// of it says, with the check on a fingerprint nobody added before setting it again.
-const DEAD_COPY: &str = "touch-id does not open your root on this Mac now; if you did not add a fingerprint, \
-     check Touch ID & Password before setting it again: swoosh root lock touch-id";
+const DEAD_COPY: &str = "touch-id does not open your root on this Mac now.\n\
+     check Touch ID & Password for a fingerprint you did not add, then set touch-id again: swoosh root lock \
+     touch-id";
 
 /// A copy whose `touch-id` lock does not open here is restored byte for byte, and one line says how to use
 /// it here; a lock that cannot be checked now gets no line, since it may be live. Red when an unchecked lock
@@ -1057,7 +1058,7 @@ async fn restore_keeps_a_dead_touch_id_lock_and_says_once() {
         let mut prompt = Counting::new([PASS]).at_this_mac(health);
         let (result, err) = restore_asking(&home, &dir, &Answering::nobody(), &mut prompt).await;
         result.unwrap();
-        assert_eq!(err.lines().any(|line| line == DEAD_COPY), said, "{err}");
+        assert_eq!(err.contains(DEAD_COPY), said, "{err}");
         assert_eq!(
             std::fs::read(home.root_key()).unwrap(),
             swoosh::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
@@ -1082,8 +1083,8 @@ async fn restore_onto_a_touch_id_only_machine_key_names_lock_touch_id() {
     result.unwrap();
     assert!(
         err.lines().any(|line| line
-            == "this machine's key opens with touch-id alone, and now keeps your root; give it a \
-                passphrase beside the touch: swoosh lock touch-id"),
+            == "this machine's key needs a passphrase beside touch-id while your root is on this \
+                machine: swoosh lock passphrase"),
         "{err}"
     );
 }

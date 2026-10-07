@@ -530,8 +530,10 @@ fn lock(methods: &[Method], touch: Option<TouchId>) -> String {
         .map(|method| match (method, touch) {
             (Method::Passphrase, _) => "passphrase",
             (Method::TouchId, Some(TouchId::Dead)) => "touch-id (does not open on this Mac now)",
-            (Method::TouchId, Some(TouchId::Unchecked)) => "touch-id (cannot check now)",
-            (Method::TouchId, Some(TouchId::Unasked)) => "touch-id (opens only on a Mac)",
+            (Method::TouchId, Some(TouchId::Unchecked)) => "touch-id (cannot be checked now)",
+            (Method::TouchId, Some(TouchId::Unasked)) => {
+                "touch-id (opens only on the Mac that set it)"
+            }
             (Method::TouchId, Some(TouchId::Live) | None) => "touch-id",
         })
         .collect::<Vec<_>>()
@@ -543,7 +545,9 @@ fn root_locks(touch: Option<TouchId>) -> &'static str {
     match touch {
         None => "a passphrase",
         Some(TouchId::Live) => "a passphrase and touch-id",
-        Some(TouchId::Unasked) => "a passphrase and touch-id, which opens only on a Mac",
+        Some(TouchId::Unasked) => {
+            "a passphrase and touch-id, which opens only on the Mac that set it"
+        }
         Some(TouchId::Dead) => "a passphrase and touch-id, which does not open on this Mac now",
         Some(TouchId::Unchecked) => "a passphrase and touch-id, which cannot be checked now",
     }

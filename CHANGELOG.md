@@ -4,6 +4,11 @@ All notable changes to swoosh, newest first.
 
 ## Unreleased
 
+### New
+- **`touch-id`, a lock on macOS.** `swoosh lock touch-id` locks this machine's key so a touch on this
+  Mac opens it; `swoosh root lock touch-id` adds the same lock beside your root's passphrase. `status`
+  says whether each lock opens here.
+
 ### Changed
 - **`path:` names the path that carries bytes.** A direct path with a relay kept on standby reads
   `direct`, where it read `through a relay`, and a relayed one names its relay:

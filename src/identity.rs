@@ -288,8 +288,11 @@ pub enum Locked {
     },
     /// `touch-id --remove` on a key with no `touch-id` lock: nothing to do.
     NoTouchId,
-    /// `touch-id` on a key under `touch-id` alone where no root is kept: it has the one lock asked for.
+    /// `touch-id` on a key under `touch-id` alone where no root is kept, which opens here: it has the one
+    /// lock asked for.
     HasTouchId,
+    /// A key under `touch-id` alone beside a kept root now has a passphrase beside it.
+    PassphraseBesideTouchId,
 }
 
 /// Set, change or remove the lock of `method` on this machine's key. The key never changes, so it runs beside
@@ -354,8 +357,14 @@ async fn set_passphrase(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<L
             Then::Drop
         };
         let act = TouchAct::AddPassphrase { new, then };
-        by_touch.change(home, prompt, act).await?;
-        return Ok(Locked::Set { first: true });
+        by_touch
+            .change(home, prompt, act, touch::SET_PASSPHRASE_ON_MACHINE_KEY)
+            .await?;
+        // Beside a root the touch stays, so the line says so; elsewhere the passphrase replaced it.
+        return Ok(match then {
+            Then::Keep => Locked::PassphraseBesideTouchId,
+            Then::Drop => Locked::Set { first: true },
+        });
     }
     let current = prove_passphrase(prompt, &locked)?;
     let new = crate::passphrase::choose(prompt, Asked::MachineKey)?;
@@ -390,26 +399,32 @@ async fn remove_passphrase(home: &Home, prompt: &mut impl Prompt) -> eyre::Resul
 }
 
 /// The refusal of `lock --remove` on a key that keeps its passphrase beside `touch-id` where a root is kept.
-pub const KEEPS_PASSPHRASE: &str = "this machine's key keeps its passphrase beside touch-id while your root is \
-     on this machine; to remove touch-id: swoosh lock touch-id --remove";
+pub const KEEPS_PASSPHRASE: &str = "this machine's key keeps its passphrase while your root is on this machine; \
+     to remove touch-id instead: swoosh lock touch-id --remove";
 
 /// Put a `touch-id` lock on this machine's key, or set it again where it has a passphrase to open it by. Asked
 /// only at this Mac's own screen; says what a new fingerprint does to it before anything is asked or written.
-/// A key under `touch-id` alone where no root is kept already has the one lock this asks for: nothing is
-/// asked and nothing changes, since a lock that reads live was made under the fingers enrolled now.
+/// A key under `touch-id` alone where no root is kept already has the one lock this asks for, so nothing is
+/// asked and nothing changes, and since a lock that reads live was made under the fingers enrolled now,
+/// nothing needs to. It is answered at this Mac's own screen only, by the lock's health: one that does not
+/// open here, or cannot be checked now, is refused with the line that says why, never called done.
 async fn set_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Locked> {
+    let here = prompt.touch_here();
+    if here != TouchHere::Here {
+        eyre::bail!("{}", touch::set_elsewhere(here, "swoosh lock touch-id"));
+    }
     let keeps_root = home.keeps_root()?;
     let file = key_file(home);
     let stored = file.load()?;
     if !keeps_root
-        && matches!(&stored, Some(Stored::Locked(locked))
-            if holds_touch_id(locked) && !touch::holds_passphrase(locked))
+        && let Some(Stored::Locked(locked)) = &stored
+        && holds_touch_id(locked)
+        && !touch::holds_passphrase(locked)
     {
+        // The route reads the health with no dialog: live goes on to a touch, which is not asked, since
+        // the lock is already the one asked for.
+        ByTouch::route(prompt, &file, locked)?;
         return Ok(Locked::HasTouchId);
-    }
-    let here = prompt.touch_here();
-    if here != TouchHere::Here {
-        eyre::bail!("{}", touch::set_elsewhere(here, "swoosh lock touch-id"));
     }
     prompt.warn(if keeps_root {
         touch::BESIDE_PASSPHRASE
@@ -459,7 +474,7 @@ async fn set_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Loc
             // opening is mended, so the old one is not asked for. One that does not open says first to check
             // for a fingerprint nobody added, since the new lock opens under every finger enrolled now.
             if prompt.health(&locked) == Some(keystore::Health::Dead) {
-                prompt.warn(&touch::Lines::of(Asked::MachineKey, &file, true).warning());
+                prompt.warn(&touch::Lines::of(Asked::MachineKey, &file, true).before_set_again());
             }
             let current = prove_passphrase(prompt, &locked)?;
             let then = if keeps_root { Then::Keep } else { Then::Drop };
@@ -474,8 +489,10 @@ async fn set_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Loc
                 new,
                 then: Then::Keep,
             };
-            by_touch.change(home, prompt, act).await?;
-            return Ok(Locked::TouchId { passphrase: true });
+            by_touch
+                .change(home, prompt, act, touch::SET_PASSPHRASE_ON_MACHINE_KEY)
+                .await?;
+            return Ok(Locked::PassphraseBesideTouchId);
         }
     };
     let home_lock = crate::home::HomeWrite::take(home).await?;
@@ -497,7 +514,12 @@ async fn remove_touch_id(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<
     }
     if !touch::holds_passphrase(&locked) {
         ByTouch::route(prompt, &file, &locked)?
-            .change(home, prompt, TouchAct::RemoveTouchId)
+            .change(
+                home,
+                prompt,
+                TouchAct::RemoveTouchId,
+                touch::REMOVE_TOUCH_ID_FROM_MACHINE_KEY,
+            )
             .await?;
         return Ok(Locked::TouchIdRemoved { plain: true });
     }
@@ -542,8 +564,8 @@ pub fn touch_id_alone_beside_root(home: &Home) -> bool {
 
 /// What is said where [`touch_id_alone_beside_root`] holds: after a root is made or restored here, and in
 /// `status`.
-pub const TOUCH_ID_ALONE_BESIDE_ROOT: &str = "this machine's key opens with touch-id alone, and now keeps your \
-     root; give it a passphrase beside the touch: swoosh lock touch-id";
+pub const TOUCH_ID_ALONE_BESIDE_ROOT: &str = "this machine's key needs a passphrase beside touch-id while your \
+     root is on this machine: swoosh lock passphrase";
 
 /// Whether the root kept in `home` has a `touch-id` lock, read from its header. A root that cannot be read
 /// says nothing here; every use of it says why.
@@ -576,19 +598,21 @@ impl<'a> ByTouch<'a> {
         }
     }
 
-    /// Change the key's locks through `act`, which the touch opens it for, under `home.lock`.
+    /// Change the key's locks through `act`, which the touch opens it for, under `home.lock`, with `reason`
+    /// in the dialog: the act's own, so the person sees the change they asked for.
     async fn change(
         self,
         home: &Home,
         prompt: &mut impl Prompt,
         act: TouchAct,
+        reason: &'static str,
     ) -> eyre::Result<()> {
         let lines = touch::Lines::of(Asked::MachineKey, self.file, false);
         let home_lock = crate::home::HomeWrite::take(home).await?;
         prompt.say(&lines.waiting());
         let touch = Touch {
             file: self.file.clone(),
-            reason: touch::CHANGE_MACHINE_KEY,
+            reason,
             act,
         };
         touch::changed(prompt.touch(touch), &lines)?;
@@ -605,6 +629,14 @@ enum Before {
     Untouched,
     /// The key was sealed under a chosen passphrase first, so it stays sealed under it.
     Sealed,
+}
+
+/// What a key sealed under a chosen passphrase before its touch is left with when the touch does not add
+/// `touch-id`: the last line of each refusal there. A macro, so `concat!` can join it into a constant.
+macro_rules! sealed_under_chosen {
+    () => {
+        "the key is locked with the passphrase you chose."
+    };
 }
 
 /// Put a new `touch-id` lock on this machine's key through `act`, which proves it with a touch, under
@@ -627,14 +659,21 @@ fn set_by_touch(
         (Before::Sealed, touch::Touched::Declined | touch::Touched::NotHere) => {
             eyre::bail!(SEALED_NOT_TOUCHED)
         }
+        // A failure says why, then what the key is left with, as a cancel does.
+        (Before::Sealed, touch::Touched::Failed(why)) => eyre::bail!(
+            "touch-id did not open this machine's key: {why:#}\n{}",
+            sealed_under_chosen!()
+        ),
         (_, touched) => touch::changed(touched, lines),
     }
 }
 
 /// The refusal when the touch that proves a new `touch-id` lock does not open, after the key was sealed
 /// under a passphrase chosen for it: the passphrase lock stays.
-pub const SEALED_NOT_TOUCHED: &str = "touch-id did not open this machine's key, so it was not added; the key is \
-     locked with the passphrase you chose";
+pub const SEALED_NOT_TOUCHED: &str = concat!(
+    "touch-id did not open this machine's key, so it was not added.\n",
+    sealed_under_chosen!()
+);
 
 /// A first passphrase for this machine's key, chosen at the terminal.
 fn choose_new(prompt: &mut impl Prompt) -> eyre::Result<keystore::Passphrase> {

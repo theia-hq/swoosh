@@ -13,8 +13,8 @@ use keystore::{Health, KeyFile, Method, Stored};
 #[cfg(target_os = "macos")]
 use super::Touch;
 use super::{
-    KEY_CHANGED, Lines, Route, SSH_VARIABLES, Stopped, TIMED_OUT, TOUCH_WAIT, TouchAct, TouchHere,
-    Touched, USE_ROOT, Unfinished, bounded, changed, open, over_ssh, route,
+    Lines, Route, SSH_VARIABLES, Stopped, TIMED_OUT, TOUCH_WAIT, TouchAct, TouchHere, Touched,
+    USE_ROOT, Unfinished, bounded, changed, open, over_ssh, route,
 };
 use crate::passphrase::Asked;
 use crate::testkit::Counting;
@@ -186,25 +186,40 @@ fn the_key_stores_refusals_read_as_a_touch_ends() {
     assert!(matches!(Touched::from(Ok(None)), Touched::Opened(None)));
 }
 
-/// A refusal after the new lock went on reads as half done, never as a touch that did not open. Red when
-/// the second write's failure is mapped as the touch's.
+/// A refusal after the new lock went on reads as half done, never as a touch that did not open, and names
+/// the lock left on and the command that takes it off. Red when the second write's failure is mapped as the
+/// touch's, or the lock left on is not carried.
 #[test]
 fn a_refusal_after_the_new_lock_reads_as_half_done() {
-    let unlock = keystore::Error::Unlock {
-        path: PathBuf::from("key"),
-        method: Method::Passphrase,
-    };
-    let touched = Touched::from(Err(Stopped::After(unlock)));
-    assert!(matches!(touched, Touched::HalfDone(_)), "{touched:?}");
     let (file, _) = machine("half-done", &DEVICE_PASSPHRASE_AND_TOUCH_ID, false);
     let lines = Lines::of(Asked::MachineKey, &file, true);
-    let refused = format!("{:#}", changed(touched, &lines).unwrap_err());
-    assert!(
-        refused
-            .starts_with("this machine's key has its new lock, but the old one did not come off"),
-        "{refused}"
-    );
-    assert!(!refused.contains("did not open"), "{refused}");
+    for (left, line_1, line_2) in [
+        (
+            Method::Passphrase,
+            "this machine's key has its new touch-id lock, but its passphrase did not come off: ",
+            "to take it off: swoosh lock --remove",
+        ),
+        (
+            Method::TouchId,
+            "this machine's key has its new passphrase, but its touch-id lock did not come off: ",
+            "to take it off: swoosh lock touch-id --remove",
+        ),
+    ] {
+        let unlock = keystore::Error::Unlock {
+            path: PathBuf::from("key"),
+            method: Method::Passphrase,
+        };
+        let touched = Touched::from(Err(Stopped::After(left, unlock)));
+        assert!(
+            matches!(&touched, Touched::HalfDone { left: kept, .. } if *kept == left),
+            "{touched:?}"
+        );
+        let refused = format!("{:#}", changed(touched, &lines).unwrap_err());
+        let lines: Vec<&str> = refused.lines().collect();
+        assert_eq!(lines.len(), 2, "{refused}");
+        assert!(lines[0].starts_with(line_1), "{refused}");
+        assert_eq!(lines[1], line_2, "{refused}");
+    }
 }
 
 /// A live lock at this Mac is touched, and the key it opens is the answer: no passphrase is asked.
@@ -234,7 +249,10 @@ fn a_touch_that_opens_another_key_is_refused() {
         .at_this_mac(Health::Live)
         .touching([Touched::Opened(Some(secret(0x11)))]);
     let refused = opened(&mut prompt, &file, &locked, Asked::Root).unwrap_err();
-    assert_eq!(format!("{refused:#}"), KEY_CHANGED);
+    assert_eq!(
+        format!("{refused:#}"),
+        "the file holding your root was replaced while this ran; run this again."
+    );
     assert_eq!(prompt.events(), 0, "no passphrase after another key");
 }
 
@@ -311,8 +329,9 @@ fn a_dead_root_lock_shows_no_dialog_and_leads_with_setting_it_again() {
     assert_eq!(
         prompt.warned(),
         [
-            "warning: touch-id does not open your root on this Mac now; if you did not add a fingerprint, \
-             check Touch ID & Password before setting it again: swoosh root lock touch-id"
+            "warning: touch-id does not open your root on this Mac now.\n\
+             check Touch ID & Password for a fingerprint you did not add, then set touch-id again: swoosh \
+             root lock touch-id"
         ]
     );
 }
@@ -440,8 +459,9 @@ fn a_dead_touch_id_only_key_names_the_finger_then_a_new_key() {
     let refused = opened(&mut prompt, &file, &locked, Asked::MachineKey).unwrap_err();
     assert_eq!(
         format!("{refused:#}"),
-        "touch-id does not open this machine's key on this Mac now. If you added a fingerprint, remove it \
-         and run this again; otherwise give this machine a new key and join again: swoosh leave --new-key"
+        "touch-id does not open this machine's key on this Mac now.\n\
+         if you added a fingerprint, removing it lets touch-id open the key again.\n\
+         otherwise, give this machine a new key and join again: swoosh leave --new-key"
     );
     assert!(prompt.touches().is_empty());
 }
@@ -455,7 +475,7 @@ fn a_dead_touch_id_only_key_beside_a_root_names_no_command() {
     let refused = opened(&mut prompt, &file, &locked, Asked::MachineKey).unwrap_err();
     let refused = format!("{refused:#}");
     assert!(!refused.contains("swoosh"), "{refused}");
-    assert!(refused.contains("remove it"), "{refused}");
+    assert!(refused.contains("removing it"), "{refused}");
 }
 
 /// Over ssh, a key with no passphrase refuses and names the variable.
@@ -492,7 +512,7 @@ fn a_two_lock_machine_key_falls_to_its_passphrase() {
     let key = opened(&mut prompt, &file, &locked, Asked::MachineKey).unwrap();
     assert_eq!(key, locked.public_key());
     assert!(
-        prompt.said()[0].ends_with("before setting it again: swoosh lock touch-id"),
+        prompt.said()[0].ends_with("then set touch-id again: swoosh lock touch-id"),
         "{:?}",
         prompt.said()
     );

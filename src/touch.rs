@@ -33,43 +33,59 @@ pub const TOUCH_WAIT: Duration = Duration::from_secs(60);
 pub const USE_MACHINE_KEY: &str = "use this machine's key";
 
 /// The reason a dialog shows to prove a new `touch-id` lock on this machine's key.
-pub const CHECK_MACHINE_KEY: &str = "check touch-id opens this machine's key";
+pub const CHECK_MACHINE_KEY: &str = "add Touch ID to this machine's key";
 
-/// The reason a dialog shows to open this machine's key for a change to its locks.
-pub const CHANGE_MACHINE_KEY: &str = "change the locks on this machine's key";
+/// The reason a dialog shows to open this machine's key, under `touch-id` alone, to put a passphrase on it.
+/// One reason per act, so the dialog names the change the person asked for.
+pub const SET_PASSPHRASE_ON_MACHINE_KEY: &str = "set a passphrase on this machine's key";
+
+/// The reason a dialog shows to open this machine's key, under `touch-id` alone, to take that lock off.
+pub const REMOVE_TOUCH_ID_FROM_MACHINE_KEY: &str = "remove Touch ID from this machine's key";
 
 /// The reason a dialog shows to open your root.
 pub const USE_ROOT: &str = "use your root";
 
 /// The reason a dialog shows to prove a new `touch-id` lock on your root.
-pub const CHECK_ROOT: &str = "check touch-id opens your root";
+pub const CHECK_ROOT: &str = "add Touch ID to your root";
 
-/// Said before `lock touch-id` asks or writes anything, where no root is kept: what a new fingerprint does to
-/// a key with one lock.
-pub const ONE_LOCK: &str = "touch-id will be this machine's key's one lock. Adding a fingerprint in Touch ID & \
-     Password stops it opening the key until that fingerprint is removed.";
+/// The second line of each notice before a `touch-id` lock is set: what a new fingerprint does to it. A
+/// macro, so `concat!` can join it into each notice as one constant.
+macro_rules! finger_added_later {
+    () => {
+        "a fingerprint added later in Touch ID & Password stops touch-id opening it until that fingerprint is \
+         removed."
+    };
+}
 
-/// Said before `lock touch-id` asks or writes anything, where a root is kept: the passphrase stays.
-pub const BESIDE_PASSPHRASE: &str = "touch-id goes beside this machine's key's passphrase. Adding a fingerprint \
-     in Touch ID & Password stops touch-id opening the key until that fingerprint is removed; the passphrase \
-     still opens it.";
+/// Said before `lock touch-id` asks or writes anything, where no root is kept: the key will have one lock.
+/// Two lines, said as one warning.
+pub const ONE_LOCK: &str = concat!(
+    "this machine's key will open with touch-id only.\n",
+    finger_added_later!()
+);
+
+/// Said before `lock touch-id` asks or writes anything, where a root is kept: a passphrase stays beside it.
+pub const BESIDE_PASSPHRASE: &str = concat!(
+    "this machine's key will open with touch-id or a passphrase, since your root is on this machine.\n",
+    finger_added_later!()
+);
 
 /// Said before `root lock touch-id` asks or writes anything.
-pub const ROOT_BESIDE_PASSPHRASE: &str = "Adding a fingerprint in Touch ID & Password stops touch-id opening your \
-     root until that fingerprint is removed; its passphrase still opens it.";
+pub const ROOT_BESIDE_PASSPHRASE: &str = concat!(
+    "your root will open with touch-id or its passphrase.\n",
+    finger_added_later!()
+);
 
-/// Said when your root and this machine's key come to open with `touch-id` both.
-pub const SHARED_FINGER: &str = "your root and this machine's key both open with touch-id on this Mac, and a \
-     Touch ID dialog cannot show which of the two it opens.";
+/// Said when your root and this machine's key come to open with `touch-id` both: a dialog shows whatever
+/// words its asker gives, so it cannot tell the two apart for the person.
+pub const SHARED_FINGER: &str = "your root and this machine's key will both open with touch-id on this Mac.\n\
+     any program running as you can ask for a touch with any words in the dialog, so touch it only for a \
+     command you just ran.";
 
 /// The refusal of a change by touch on a key file with no `touch-id` lock left to open it: it changed since
 /// it was read.
 pub const TOUCH_ID_GONE: &str =
-    "the key file changed while this ran, and has no touch-id lock now; run it again";
-
-/// The refusal when a touch opens a key other than the one the file's header named when it was checked: the
-/// file was replaced between the read and the touch's own load, so the key in hand is not the one vetted.
-pub const KEY_CHANGED: &str = "the key file changed while this ran; run it again";
+    "this machine's key lost its touch-id lock while this ran; run this again.";
 
 /// The refusal of setting `touch-id` anywhere but at this Mac's own screen, naming `command` to run there.
 pub fn set_elsewhere(here: TouchHere, command: &str) -> String {
@@ -97,10 +113,20 @@ pub(crate) fn changed(touched: Touched, lines: &Lines<'_>) -> eyre::Result<()> {
             eyre::bail!("touch-id did not open {}; nothing changed", lines.key())
         }
         Touched::Failed(why) => Err(why.wrap_err(format!("touch-id did not open {}", lines.key()))),
-        Touched::HalfDone(why) => eyre::bail!(
-            "{} has its new lock, but the old one did not come off: {why:#}; swoosh status says what is \
-             there",
-            lines.key()
+        // Only this machine's key drops a lock after adding one: a root keeps its passphrase.
+        Touched::HalfDone {
+            left: Method::Passphrase,
+            why,
+        } => eyre::bail!(
+            "this machine's key has its new touch-id lock, but its passphrase did not come off: {why:#}\n\
+             to take it off: swoosh lock --remove"
+        ),
+        Touched::HalfDone {
+            left: Method::TouchId,
+            why,
+        } => eyre::bail!(
+            "this machine's key has its new passphrase, but its touch-id lock did not come off: {why:#}\n\
+             to take it off: swoosh lock touch-id --remove"
         ),
         Touched::TimedOut => eyre::bail!("{TIMED_OUT}"),
     }
@@ -197,19 +223,25 @@ pub enum Touched {
     /// Anything else: the enclave failed, the unwrap refused (a lock someone else made with this Mac's
     /// enclave reads live and fails here), or the act's own write.
     Failed(eyre::Report),
-    /// The touch opened and the new lock is on, then taking the old lock off failed: the file holds both.
-    HalfDone(eyre::Report),
+    /// The touch opened and the new lock is on, then taking the old lock, `left`, off failed: the file holds
+    /// both.
+    HalfDone {
+        /// The lock that stayed on.
+        left: Method,
+        /// Why it stayed.
+        why: eyre::Report,
+    },
     /// Nobody touched in time. The dialog may still be up.
     TimedOut,
 }
 
 /// Where an act stopped: at the call that asks the touch, or at the write after it.
 #[derive(Debug)]
-pub enum Stopped {
+pub(crate) enum Stopped {
     /// The call that asks the touch refused, and nothing was written.
     Touch(keystore::Error),
-    /// The new lock is on; taking the old one off refused.
-    After(keystore::Error),
+    /// The new lock is on; taking the old one, of this method, off refused.
+    After(Method, keystore::Error),
 }
 
 impl From<keystore::Error> for Stopped {
@@ -224,7 +256,7 @@ impl Touch {
     /// # Errors
     ///
     /// The key store's refusal, the touch's own included, and where the act stopped.
-    pub fn run(self) -> Result<Option<keystore::Secret>, Stopped> {
+    pub(crate) fn run(self) -> Result<Option<keystore::Secret>, Stopped> {
         let Self { file, reason, act } = self;
         let touch = Unlock::TouchId { reason };
         let new = NewLock::TouchId { reason };
@@ -253,7 +285,7 @@ impl Touch {
                 file.add_lock(Some(with), new)?;
                 if then == Then::Drop {
                     file.remove_lock(with, Method::Passphrase)
-                        .map_err(Stopped::After)?;
+                        .map_err(|error| Stopped::After(Method::Passphrase, error))?;
                 }
                 Ok(None)
             }
@@ -261,7 +293,7 @@ impl Touch {
                 file.add_lock(Some(touch), NewLock::Passphrase(&new))?;
                 if then == Then::Drop {
                     file.remove_lock(Unlock::Passphrase(&new), Method::TouchId)
-                        .map_err(Stopped::After)?;
+                        .map_err(|error| Stopped::After(Method::TouchId, error))?;
                 }
                 Ok(None)
             }
@@ -279,7 +311,10 @@ impl From<Result<Option<keystore::Secret>, Stopped>> for Touched {
     fn from(answer: Result<Option<keystore::Secret>, Stopped>) -> Self {
         match answer {
             Ok(opened) => Self::Opened(opened),
-            Err(Stopped::After(error)) => Self::HalfDone(eyre::Report::new(error)),
+            Err(Stopped::After(left, error)) => Self::HalfDone {
+                left,
+                why: eyre::Report::new(error),
+            },
             Err(Stopped::Touch(keystore::Error::TouchId { source, .. })) => match source {
                 keystore::TouchIdError::Declined(_) => Self::Declined,
                 keystore::TouchIdError::NotHere(_) | keystore::TouchIdError::Unavailable => {
@@ -450,7 +485,7 @@ pub fn open(
                 Touched::Opened(Some(secret)) if secret.public_key() == locked.public_key() => {
                     return Ok(secret);
                 }
-                Touched::Opened(Some(_)) => eyre::bail!("{KEY_CHANGED}"),
+                Touched::Opened(Some(_)) => eyre::bail!("{}", lines.replaced()),
                 Touched::Opened(None) => Some(Aside::Say(
                     lines.failed(&eyre::eyre!("the touch opened no key")),
                 )),
@@ -458,7 +493,7 @@ pub fn open(
                 // A cancel is its own answer: the prompt that follows says the rest.
                 Touched::Declined => None,
                 Touched::NotHere => Some(Aside::Warn(lines.warning())),
-                Touched::Failed(why) | Touched::HalfDone(why) => {
+                Touched::Failed(why) | Touched::HalfDone { why, .. } => {
                     Some(Aside::Say(lines.failed(&why)))
                 }
             };
@@ -538,32 +573,55 @@ impl<'a> Lines<'a> {
     /// loses nothing whatever the cause, after the one check that a finger nobody added is not the cause. A
     /// machine key with no other lock cannot be set again: removing an added finger is the step that loses
     /// nothing, then a new key, which `leave` gives only where no root is kept.
+    ///
+    /// Several lines, one message: a caller that prefixes it (`warning: `, or `error: ` from `main`) prefixes
+    /// the first line only.
     pub fn dead(&self) -> String {
+        let key = self.key();
         if self.passphrase {
             return format!(
-                "touch-id does not open {} on this Mac now; if you did not add a fingerprint, check Touch ID \
-                 & Password before setting it again: {}",
-                self.key(),
+                "touch-id does not open {key} on this Mac now.\n\
+                 check Touch ID & Password for a fingerprint you did not add, then set touch-id again: {}",
                 self.again()
             );
         }
         match self.whose {
-            Whose::Machine => "touch-id does not open this machine's key on this Mac now. If you added a \
-                 fingerprint, remove it and run this again; otherwise give this machine a new key and join \
-                 again: swoosh leave --new-key"
+            Whose::Machine => "touch-id does not open this machine's key on this Mac now.\n\
+                 if you added a fingerprint, removing it lets touch-id open the key again.\n\
+                 otherwise, give this machine a new key and join again: swoosh leave --new-key"
                 .to_owned(),
             Whose::MachineKeepingRoot | Whose::Root => format!(
-                "touch-id does not open {} on this Mac now. If you added a fingerprint, remove it and run \
-                 this again",
-                self.key()
+                "touch-id does not open {key} on this Mac now.\n\
+                 if you added a fingerprint, removing it lets touch-id open the key again."
             ),
         }
     }
 
-    /// [`dead`](Self::dead), warned of at use on the way to the passphrase, and before a lock that does not
-    /// open is set again.
+    /// [`dead`](Self::dead), warned of at use on the way to the passphrase, where naming the command that sets
+    /// it again is the fix.
     pub fn warning(&self) -> String {
         format!("warning: {}", self.dead())
+    }
+
+    /// Warned of before a lock that does not open here is set again, by the command already running: so it
+    /// names no command, and says what the new lock will open with while there is still time to stop.
+    pub fn before_set_again(&self) -> String {
+        format!(
+            "warning: touch-id does not open {} on this Mac now.\n\
+             the new lock will open with every fingerprint now in Touch ID & Password; if one is not yours, \
+             press ctrl-c and remove it first.",
+            self.key()
+        )
+    }
+
+    /// The refusal when a touch opens a key other than the one the file's header named when it was checked:
+    /// the file was replaced between the read and the touch's own load, so the key in hand is not the one
+    /// vetted.
+    pub(crate) fn replaced(&self) -> String {
+        format!(
+            "the file holding {} was replaced while this ran; run this again.",
+            self.key()
+        )
     }
 
     /// The enclave could not say, with no dialog, whether the lock opens: a locked screen, a closed lid, a

@@ -110,9 +110,9 @@ enum Command {
     /// Manage local petnames: add a device, record a person's fleet signet, or remove one.
     #[command(subcommand)]
     Contact(contact::ContactCmd),
-    /// set, change or remove the passphrase on this machine's key
+    /// set, change or remove the lock on this machine's key
     Lock(lock::LockCmd),
-    /// copy, restore or forget your root, or change its passphrase
+    /// copy, restore or forget your root, or change its locks
     #[command(
         subcommand,
         subcommand_required = true,

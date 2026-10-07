@@ -15,7 +15,7 @@ const LEAVES: [(&str, &str); 4] = [
     ("restore", "put your root on this machine from a copy"),
     (
         "lock",
-        "change your root's passphrase, on this machine or in <dir>",
+        "change your root's locks, on this machine or in <dir>",
     ),
 ];
 
@@ -44,14 +44,14 @@ fn root_help_row_and_leaves_match_the_sheet() {
     assert!(
         row(
             "root",
-            "copy, restore or forget your root, or change its passphrase"
+            "copy, restore or forget your root, or change its locks"
         ),
         "{top}"
     );
     assert!(
         row(
             "lock",
-            "set, change or remove the passphrase on this machine's key"
+            "set, change or remove the lock on this machine's key"
         ),
         "{top}"
     );

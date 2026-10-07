@@ -1259,7 +1259,7 @@ async fn key_lock_names_touch_id_with_how_it_reads() {
         ),
         (
             keystore::Health::Unchecked,
-            "key lock: touch-id (cannot check now)",
+            "key lock: touch-id (cannot be checked now)",
         ),
     ] {
         let out = status_reading(&home, health).await;
@@ -1283,9 +1283,9 @@ async fn a_dead_touch_id_key_says_how_to_mend_it() {
     let out = status_reading(&home, keystore::Health::Dead).await;
     assert!(
         out.trim_end().ends_with(
-            "touch-id does not open this machine's key on this Mac now. If you added a fingerprint, remove \
-             it and run this again; otherwise give this machine a new key and join again: swoosh leave \
-             --new-key"
+            "touch-id does not open this machine's key on this Mac now.\n\
+             if you added a fingerprint, removing it lets touch-id open the key again.\n\
+             otherwise, give this machine a new key and join again: swoosh leave --new-key"
         ),
         "{out}"
     );
@@ -1302,8 +1302,9 @@ async fn the_root_line_names_touch_id_with_how_it_reads() {
         &swoosh::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
     );
     let root = TestRoot::seeded(ROOT).node_id();
-    let dead_line = "touch-id does not open your root on this Mac now; if you did not add a fingerprint, \
-                     check Touch ID & Password before setting it again: swoosh root lock touch-id";
+    let dead_line = "touch-id does not open your root on this Mac now.\n\
+                     check Touch ID & Password for a fingerprint you did not add, then set touch-id again: \
+                     swoosh root lock touch-id";
     for (health, locks) in [
         (keystore::Health::Live, "a passphrase and touch-id"),
         (
@@ -1319,7 +1320,7 @@ async fn the_root_line_names_touch_id_with_how_it_reads() {
         let line = format!("root:{root} on this machine, locked with {locks}.");
         assert!(out.lines().any(|seen| seen == line), "{line}\n{out}");
         assert_eq!(
-            out.lines().any(|seen| seen == dead_line),
+            out.contains(dead_line),
             health == keystore::Health::Dead,
             "{out}"
         );
@@ -1351,13 +1352,15 @@ async fn touch_id_unasked_says_it_opens_only_on_a_mac() {
     .unwrap()
     .render();
     assert!(
-        out.lines()
-            .any(|line| line == "key lock: passphrase, touch-id (opens only on a Mac)"),
+        out.lines().any(
+            |line| line == "key lock: passphrase, touch-id (opens only on the Mac that set it)"
+        ),
         "{out}"
     );
     let root = TestRoot::seeded(ROOT).node_id();
     let line = format!(
-        "root:{root} on this machine, locked with a passphrase and touch-id, which opens only on a Mac."
+        "root:{root} on this machine, locked with a passphrase and touch-id, which opens only on the Mac \
+         that set it."
     );
     assert!(out.lines().any(|seen| seen == line), "{line}\n{out}");
 }

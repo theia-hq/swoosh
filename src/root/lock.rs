@@ -121,7 +121,7 @@ pub async fn lock_touch_id(
         // Setting a lock that does not open here again says first to check for a fingerprint nobody added:
         // the new lock opens under every finger enrolled now.
         if holds && prompt.health(&target.locked) == Some(keystore::Health::Dead) {
-            prompt.warn(&lines.warning());
+            prompt.warn(&lines.before_set_again());
         }
     }
     let current = target.prove(prompt)?;

@@ -19,10 +19,18 @@ use swoosh::home::Home;
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::root::{Relocked, TouchIdChange};
 
-/// change your root's passphrase, on this machine or in <dir>
+/// change your root's locks, on this machine or in <dir>
 #[derive(Debug, Args)]
 pub struct RootLockCmd {
-    /// how your root opens: passphrase, or touch-id beside it; or a copy's own directory
+    // `touch-id` is a method on a macOS build only, so the help names it there only.
+    #[cfg_attr(
+        target_os = "macos",
+        doc = "how your root opens: passphrase, or touch-id beside it; or a copy's own directory"
+    )]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        doc = "how your root opens: passphrase, or a copy's own directory"
+    )]
     #[arg(value_name = "method", value_parser = first)]
     pub(crate) first: Option<First>,
     /// a copy's own directory; without it, your root on this machine
@@ -70,6 +78,12 @@ fn first(word: &str) -> Result<First, String> {
     ))
 }
 
+/// The method a usage error names before a `<dir>`: one this build takes, so the fix it prints runs here.
+#[cfg(target_os = "macos")]
+const FIRST_METHOD: &str = "touch-id";
+#[cfg(not(target_os = "macos"))]
+const FIRST_METHOD: &str = "passphrase";
+
 /// A usage error found once the arguments are read together, as clap would print it: exit 2.
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -93,7 +107,7 @@ impl RootLockCmd {
             (Some(First::Dir(dir)), None) => (Method::Passphrase, Some(dir.as_path())),
             (Some(First::Dir(dir)), Some(_)) => {
                 return Err(Usage(format!(
-                    "{} is not a lock method; name the method first: swoosh root lock touch-id <dir>",
+                    "{} is not a lock method; name the method first: swoosh root lock {FIRST_METHOD} <dir>",
                     EscapedPath(dir)
                 )));
             }
@@ -139,11 +153,11 @@ impl RootLockCmd {
                 match change {
                     TouchIdChange::Added => writeln!(
                         err,
-                        "added touch-id to {place} on this Mac; its passphrase still opens it."
+                        "added touch-id to {place} on this Mac, beside its passphrase."
                     )?,
                     TouchIdChange::Removed => writeln!(
                         err,
-                        "removed touch-id from {place}; its passphrase opens it."
+                        "removed touch-id from {place}, which now opens with its passphrase only."
                     )?,
                     TouchIdChange::NoTouchId => {
                         writeln!(err, "{place} has no touch-id; nothing was changed.")?;
