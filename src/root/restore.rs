@@ -6,12 +6,17 @@
 //!
 //! In two steps, so nothing is dialed before the prompt and a refusal binds no transport:
 //!
-//! 1. [`restore`]: every check, the copy's passphrase, then under `home.lock` the root's files in the order
-//!    a mint writes them, `root.key`, `devices`, `key.cert`, `root.pub`, the pin last. This machine's row
+//! 1. [`restore`]: every check, the copy's passphrase, then under `home.lock` the root's files. A copy is its
+//!    key and the last list it signed, so a copy without its list, or with one its root did not sign, is
+//!    refused before the prompt, and the bytes that verified then are the ones written. The order is
+//!    `devices`, then `root.key`, then this machine's row, `key.cert` and the pin. On a device of this root
+//!    `root.key` is the commit point (the home keeps the root from then on), so everything the copy brings
+//!    lands before it: on a device the list goes through the fold, the one path that writes `devices`, and
+//!    elsewhere it is written only over an older list or none, decided under the lock. This machine's row
 //!    needs nothing signed when it is live; a lapsed row is renewed and an absent one added under the
-//!    suggested name for 90 days, as a mint signs its own, and that cut is kept here, offered to nobody. A
-//!    crash before the pin leaves a root with no pin, which running this again (or the next `invite`)
-//!    finishes.
+//!    suggested name for 90 days, as a mint signs its own, and that cut is kept here, offered to nobody. On a
+//!    machine that kept no root, a crash before the pin leaves a root with no pin, which running this again
+//!    (or the next `invite`) finishes; on a device, the next act that cuts carries the row.
 //! 2. [`Restored::sync`]: an exchange with the devices the copy lists, then `invited-by`, for 10 s, which
 //!    brings the list here up to date and gives a device that is behind this one. If that shows this
 //!    machine's key revoked, the root's files go again, the pin last, and the restore refuses.
@@ -27,8 +32,8 @@ use rand::seq::SliceRandom as _;
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::{
-    Act, KEY_FILE, LIST_FILE, Root, RootError, header_key, not_admitting, read_header, read_list,
-    remove_file, still, take_standing, unix_now,
+    Act, KEY_FILE, LIST_FILE, Root, RootError, header_key, not_admitting, read_header,
+    read_list_at, remove_file, still, take_standing, unix_now,
 };
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
@@ -53,28 +58,58 @@ pub enum RestoreError {
         /// The directory named.
         dir: PathBuf,
     },
+    /// `<dir>` holds a root key but not the list of your devices beside it.
+    #[error(
+        "the copy in {} has no list of your devices beside its key, so it is not a whole copy of your root; use \
+         another copy.",
+        EscapedPath(.dir)
+    )]
+    NoList {
+        /// The directory named.
+        dir: PathBuf,
+    },
     /// This root is already kept here.
     #[error("your root is already on this machine.")]
     AlreadyHere,
     /// Another root is kept here.
     #[error(
-        "your root is on this machine: swoosh root backup <dir>, then swoosh root forget <dir>"
+        "this machine keeps root:{}, and the copy in {} is root:{}; to restore the copy here, first remove \
+         root:{} from this machine: swoosh root forget --help",
+        crate::credential::short(.held),
+        EscapedPath(.dir),
+        crate::credential::short(.root),
+        crate::credential::short(.held)
     )]
-    KeepsAnother,
+    KeepsAnother {
+        /// The root kept here.
+        held: NodeId,
+        /// The directory named.
+        dir: PathBuf,
+        /// The copy's root.
+        root: NodeId,
+    },
     /// This machine is a device of another root.
     #[error(
-        "this machine is a device of root:{}, not of this copy's root:{}; to start over: swoosh leave",
+        "the copy in {} is root:{}, and this machine is a device of root:{}; to restore the copy here, first \
+         leave root:{}: swoosh leave",
+        EscapedPath(.dir),
+        crate::credential::short(.root),
         crate::credential::short(.pin),
-        crate::credential::short(.root)
+        crate::credential::short(.pin)
     )]
     DeviceOfAnother {
+        /// The directory named.
+        dir: PathBuf,
         /// The root this machine trusts.
         pin: NodeId,
         /// The copy's root.
         root: NodeId,
     },
     /// This machine's key is revoked by this root.
-    #[error("this machine's key was revoked: swoosh leave --new-key first")]
+    #[error(
+        "this machine's key was revoked; to restore here, first give this machine a new key: swoosh leave \
+         --new-key"
+    )]
     RevokedOwnKey,
     /// The passphrase could not be asked for, or did not open the copy.
     #[error("{0}")]
@@ -108,6 +143,9 @@ pub struct Restored {
 pub struct Synced {
     /// `me/<name>` of the first device that answered, if one did.
     pub from: Option<String>,
+    /// Whether this machine's row waits for the next act that cuts: a list moved under the re-cut, which
+    /// then offered nothing.
+    pub waiting: bool,
 }
 
 /// Restore the root in the copy at `dir` on this machine: every check, the passphrase, then the root's files.
@@ -140,14 +178,28 @@ pub async fn restore(
         Standing::HoldsRoot { pin: held, .. } if held == root => {
             return Err(RestoreError::AlreadyHere);
         }
-        Standing::HoldsRoot { .. } => return Err(RestoreError::KeepsAnother),
+        Standing::HoldsRoot { pin: held, .. } => {
+            return Err(RestoreError::KeepsAnother {
+                held,
+                dir: dir.to_path_buf(),
+                root,
+            });
+        }
         Standing::InterruptedMint { root_key } if root_key != root => {
-            return Err(RestoreError::KeepsAnother);
+            return Err(RestoreError::KeepsAnother {
+                held: root_key,
+                dir: dir.to_path_buf(),
+                root,
+            });
         }
         // A restore that stopped before its pin: this run finishes it.
         Standing::InterruptedMint { .. } | Standing::Unpinned => false,
         Standing::Device { pin: trusted, .. } if trusted != root => {
-            return Err(RestoreError::DeviceOfAnother { pin: trusted, root });
+            return Err(RestoreError::DeviceOfAnother {
+                dir: dir.to_path_buf(),
+                pin: trusted,
+                root,
+            });
         }
         Standing::Device { .. } => true,
     };
@@ -157,13 +209,18 @@ pub async fn restore(
         .key()
         .verify_key()
         .map_err(RootError::from)?;
-    let copied = read_list(home, Some(dir), pin)?;
+    // The copy's list, required and verified now, before the prompt: these bytes are the ones written.
+    let Some((copied, copied_bytes)) = read_list_at(&dir.join(LIST_FILE), pin)? else {
+        return Err(RestoreError::NoList {
+            dir: dir.to_path_buf(),
+        });
+    };
     let held = crate::roster::read_held(&home.devices(), pin);
     let revokes_own = |list: Option<&crate::roster::RosterDoc>| {
         list.is_some_and(|list| list.is_revoked_key(&own))
     };
     if revoked.is_revoked_key(&own)
-        || revokes_own(copied.as_ref())
+        || revokes_own(Some(&copied))
         || revokes_own(held.as_ref().map(|(held, _)| held))
     {
         return Err(RestoreError::RevokedOwnKey);
@@ -179,8 +236,26 @@ pub async fn restore(
     let home_lock = HomeWrite::take(home).await.map_err(RootError::from)?;
     still(&home_lock, home, standing).await?;
     not_admitting(&home_lock, home)?;
-    // `root.key`, unless a restore that stopped left it: an unpinned home keeps no root but a revoked one,
-    // which is no root, so it goes first.
+    // 1. `devices`, never over a newer list: decided here, under the lock. A device folds the copy's list, the
+    // one path that writes `devices` (newer taken, the same number with other bytes kept as the conflict,
+    // older nothing); elsewhere the bytes are written only over an older list or none.
+    match standing {
+        Standing::Device { .. } => {
+            crate::roster::fold(&home_lock, home, &copied_bytes)
+                .await
+                .map_err(RootError::from)?;
+        }
+        Standing::Unpinned | Standing::InterruptedMint { .. } | Standing::HoldsRoot { .. } => {
+            let held_here = crate::roster::read_held(&home.devices(), pin);
+            if held_here.is_none_or(|(held, _)| held.epoch() < copied.epoch()) {
+                crate::roster::write(&home_lock, &home.devices(), &copied_bytes)
+                    .map_err(RootError::from)?;
+            }
+        }
+    }
+    drop(copied_bytes);
+    // 2. `root.key`, unless a restore that stopped left it: an unpinned home keeps no root but a revoked one,
+    // which is no root, so it goes first. On a device this is the commit point.
     if !matches!(standing, Standing::InterruptedMint { .. }) {
         remove_file(&home.root_key())?;
         KeyFile::root(home.root_key())
@@ -188,15 +263,8 @@ pub async fn restore(
             .map_err(RootError::from)?;
     }
     drop(passphrase);
-    // `devices`: the copy's list, when it is newer than the one held here.
-    let held_number = held.as_ref().map(|(held, _)| held.epoch());
-    if let Some(copied) = &copied
-        && held_number.is_none_or(|number| number < copied.epoch())
-    {
-        let path = dir.join(LIST_FILE);
-        let bytes = std::fs::read(&path).map_err(super::io_at(&path))?;
-        crate::roster::write(&home_lock, &home.devices(), &bytes).map_err(RootError::from)?;
-    }
+    super::seam(super::Seam::Keyed)?;
+    // 3. This machine's row, `key.cert` and the pin.
     let newest = crate::roster::read_held(&home.devices(), pin).map(|(list, _)| list);
     let mut act = Act::new(home, root, None, newest.as_ref(), Some(own));
     act.bring_forward(&mut io::sink())?;
@@ -285,11 +353,29 @@ impl Restored {
             root.act = Act::new(home, self.root, None, Some(&newer), Some(self.own));
             root.act.bring_forward(&mut io::sink())?;
             root.carry_own()?;
-            let committed = root.commit_to(&mut io::sink()).await?;
+            // A list that moved under the re-cut is not an error here: the root, the pin and this machine's
+            // standing are in place, and the next act that cuts carries the row.
+            let committed = match super::seam(super::Seam::ReCut) {
+                Ok(()) => root.commit_to(&mut io::sink()).await,
+                Err(moved) => Err(moved),
+            };
+            let committed = match committed {
+                Ok(committed) => committed,
+                Err(RootError::ListChanged) => {
+                    return Ok(Synced {
+                        from,
+                        waiting: true,
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
             if committed.number > newer.epoch() {
                 let _reach = committed.offer(dial).await;
             }
         }
-        Ok(Synced { from })
+        Ok(Synced {
+            from,
+            waiting: false,
+        })
     }
 }

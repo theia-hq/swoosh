@@ -7,6 +7,7 @@
 //! which running it again finishes.
 
 use std::io::{self, Read as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use tightbeam::identity::AsVerifyKey as _;
@@ -23,12 +24,15 @@ const KEY_CAP: u64 = 4096;
 /// Why a root could not be copied.
 #[derive(Debug, thiserror::Error)]
 pub enum BackupError {
-    /// This machine keeps no root.
+    /// This machine keeps no root and is no root's device.
     #[error(
         "this machine holds no root, so there is nothing to back up. A lost device is replaced, not restored: \
          invite a new one."
     )]
     NoRoot,
+    /// This machine is a device of a root kept elsewhere.
+    #[error("your root is not on this machine; back it up on the machine that keeps it.")]
+    NotHere,
     /// `<dir>` holds something other than a copy of this root.
     #[error(
         "{} is not empty; name a new directory: swoosh root backup {}",
@@ -39,8 +43,20 @@ pub enum BackupError {
         /// The directory named.
         dir: PathBuf,
     },
+    /// `<dir>` could not be read.
+    #[error("could not read {}: {source}", EscapedPath(.dir))]
+    Unreadable {
+        /// The directory named.
+        dir: PathBuf,
+        /// Why.
+        #[source]
+        source: io::Error,
+    },
     /// The copy, read back, is not this root's.
-    #[error("the copy in {} did not read back as your root", EscapedPath(.dir))]
+    #[error(
+        "the copy in {} does not read back as your root; do not rely on it. Your root is still on this machine.",
+        EscapedPath(.dir)
+    )]
     ReadBack {
         /// The directory named.
         dir: PathBuf,
@@ -50,8 +66,9 @@ pub enum BackupError {
     Root(#[from] RootError),
 }
 
-/// Copy the root kept on this machine into `dir`: a new directory, made owner-only, or one holding a copy
-/// of this same root, which is brought up to date. Asks for nothing and unlocks nothing.
+/// Copy the root kept on this machine into `dir`: a new directory, made owner-only, an empty one, made
+/// owner-only, or one holding a copy of this same root, which is brought up to date. Asks for nothing and
+/// unlocks nothing.
 ///
 /// # Errors
 ///
@@ -62,29 +79,40 @@ pub async fn backup(home: &Home, dir: &Path) -> Result<(), BackupError> {
         Standing::InterruptedMint { root_key } => {
             return Err(RootError::Unfinished { root: root_key }.into());
         }
-        Standing::Device { .. } | Standing::Unpinned => return Err(BackupError::NoRoot),
+        Standing::Device { .. } => return Err(BackupError::NotHere),
+        Standing::Unpinned => return Err(BackupError::NoRoot),
     };
     let pin = root.verify_key().map_err(RootError::from)?;
+    // Read before `home.lock` is taken: what a planted directory holds is judged with nobody waiting on it.
+    let held = copy_of_this_root(dir, root)?;
     // Under `home.lock`, so the key and the list are copied as one root act would leave them.
     let home_lock = HomeWrite::take(home).await.map_err(RootError::from)?;
-    let held = copy_of_this_root(dir, root)?;
     crate::config::create_store_dir(dir).map_err(super::io_at(dir))?;
+    if held.is_new() {
+        // A directory that was already there, empty, is made owner-only as a new one is.
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(super::io_at(dir))?;
+    }
     let list = read_list(home, None, pin)?;
-    let copied = held.as_ref().and_then(|held| held.list.as_ref());
     // A copy's list is only ever replaced by a newer one: a copy used with `--root` may be ahead of this
     // machine, and an older list over it would lose what it signed.
     if let Some(list) = &list
-        && copied.is_none_or(|copied| copied.epoch() < list.epoch())
+        && held
+            .list
+            .as_ref()
+            .is_none_or(|copied| copied.epoch() < list.epoch())
     {
         let bytes = std::fs::read(home.devices()).map_err(super::io_at(&home.devices()))?;
         write(&home_lock, &dir.join(LIST_FILE), &bytes)?;
     }
-    if !held.as_ref().is_some_and(|held| held.keyed) {
-        write(
-            &home_lock,
-            &dir.join(KEY_FILE),
-            &read_key(&home.root_key())?,
-        )?;
+    // The key is kept only when it is this machine's, byte for byte: a damaged or a different key in the copy
+    // is replaced, never reported as copied.
+    let key_bytes = read_key(&home.root_key())?;
+    if held.key.as_deref() != Some(key_bytes.as_slice()) {
+        write(&home_lock, &dir.join(KEY_FILE), &key_bytes)?;
+    }
+    for temp in &held.temps {
+        let _ = std::fs::remove_file(temp);
     }
     drop(home_lock);
     // Read back by its header alone, and its list verified under the root: the copy is this root's.
@@ -99,77 +127,94 @@ pub async fn backup(home: &Home, dir: &Path) -> Result<(), BackupError> {
 }
 
 /// What a directory named for a copy already holds of this root.
+#[derive(Default)]
 struct Held {
-    /// Whether `root.key` is there.
-    keyed: bool,
+    /// The bytes of `root.key`, when it is there.
+    key: Option<Vec<u8>>,
     /// The list beside it, verified under the root, when there is one.
     list: Option<crate::roster::RosterDoc>,
+    /// The temps a run killed mid-write left, removed once the copy is whole.
+    temps: Vec<PathBuf>,
 }
 
-/// What `dir` already holds, when it is a copy of `root` or nothing: `None` for a directory that is absent
-/// or empty. Anything else in it (another file, another root's key, a list this root did not sign) refuses,
-/// so a backup never writes into a directory that holds something else.
-fn copy_of_this_root(dir: &Path, root: bifrost::NodeId) -> Result<Option<Held>, BackupError> {
+impl Held {
+    /// Whether the directory holds no part of a copy: absent, empty, or temps alone.
+    fn is_new(&self) -> bool {
+        self.key.is_none() && self.list.is_none()
+    }
+}
+
+/// What `dir` already holds, when it is a copy of `root` or nothing. Anything else in it (another file, another
+/// root's key, a list this root did not sign) refuses, so a backup never writes into a directory that holds
+/// something else. A directory of temps alone, which a run killed during its first write leaves, is empty.
+fn copy_of_this_root(dir: &Path, root: bifrost::NodeId) -> Result<Held, BackupError> {
     let not_empty = || BackupError::NotEmpty {
         dir: dir.to_path_buf(),
     };
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(not_empty()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Held::default()),
+        Err(source) => {
+            return Err(BackupError::Unreadable {
+                dir: dir.to_path_buf(),
+                source,
+            });
+        }
     };
-    let mut names = Vec::new();
+    let mut held = Held::default();
+    let (mut keyed, mut listed) = (false, false);
+    // Stops at the first name that is not the copy's: a planted directory is not read through.
     for entry in entries {
-        let entry = entry.map_err(|_| not_empty())?;
-        names.push(entry.file_name());
-    }
-    if names.is_empty() {
-        return Ok(None);
-    }
-    // A run killed mid-write leaves its unique temp beside the file it was writing; it is ours to write over.
-    let ours = |name: &std::ffi::OsStr| {
+        let entry = entry.map_err(|source| BackupError::Unreadable {
+            dir: dir.to_path_buf(),
+            source,
+        })?;
+        let name = entry.file_name();
         let name = name.to_string_lossy();
-        [KEY_FILE, LIST_FILE]
+        if name == KEY_FILE {
+            keyed = true;
+        } else if name == LIST_FILE {
+            listed = true;
+        } else if [KEY_FILE, LIST_FILE]
             .iter()
-            .any(|file| name == *file || name.starts_with(&format!("{file}.tmp.")))
-    };
-    if !names.iter().all(|name| ours(name)) {
-        return Err(not_empty());
-    }
-    let pin = root.verify_key().map_err(RootError::from)?;
-    let key = dir.join(KEY_FILE);
-    let keyed = key.exists();
-    if keyed {
-        let held = read_header(&key).and_then(|locked| header_key(&key, &locked));
-        if !matches!(held, Ok(held) if held == root) {
+            .any(|file| name.starts_with(&format!("{file}.tmp.")))
+            && entry
+                .path()
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.is_file())
+        {
+            // A run killed mid-write leaves its unique temp beside the file it was writing.
+            held.temps.push(entry.path());
+        } else {
             return Err(not_empty());
         }
     }
-    let list = read_list_in(dir, pin).map_err(|_| not_empty())?;
-    if !keyed && list.is_none() {
-        return Err(not_empty());
+    let pin = root.verify_key().map_err(RootError::from)?;
+    if keyed {
+        let key = dir.join(KEY_FILE);
+        let header = read_header(&key).and_then(|locked| header_key(&key, &locked));
+        if !matches!(header, Ok(header) if header == root) {
+            return Err(not_empty());
+        }
+        held.key = Some(read_key(&key)?);
     }
-    Ok(Some(Held { keyed, list }))
+    if listed {
+        held.list = super::read_list_at(&dir.join(LIST_FILE), pin)
+            .map_err(|_| not_empty())?
+            .map(|(list, _)| list);
+    }
+    Ok(held)
 }
 
-/// The list in the copy at `dir`, verified under `pin`.
-fn read_list_in(
-    dir: &Path,
-    pin: nauthy::VerifyKey,
-) -> Result<Option<crate::roster::RosterDoc>, RootError> {
-    let path = dir.join(LIST_FILE);
-    match std::fs::read(&path) {
-        Ok(bytes) => crate::roster::verify(&bytes, pin)
-            .map(Some)
-            .map_err(|_| RootError::Damaged { path }),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(source) => Err(RootError::Io { path, source }),
-    }
-}
-
-/// The root key file's bytes, as stored: locked with its passphrase.
+/// The root key file's bytes, as stored: locked with its passphrase. A regular file only, read with a cap.
 fn read_key(path: &Path) -> Result<Vec<u8>, RootError> {
     let file = std::fs::File::open(path).map_err(super::io_at(path))?;
+    if !file.metadata().map_err(super::io_at(path))?.is_file() {
+        return Err(RootError::Io {
+            path: path.to_path_buf(),
+            source: io::ErrorKind::InvalidData.into(),
+        });
+    }
     let mut bytes = Vec::new();
     file.take(KEY_CAP + 1)
         .read_to_end(&mut bytes)

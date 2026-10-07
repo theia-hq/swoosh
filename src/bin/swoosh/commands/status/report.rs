@@ -176,6 +176,16 @@ impl Report {
                 }
             },
         }
+        // A root kept here whose machine's key is revoked still works; the devices refuse this machine.
+        if let Ok(Standing::HoldsRoot { pin, .. }) = Standing::read(home).await
+            && swoosh::root::own_key_revoked(home, pin.verify_key()?)?
+        {
+            report.nags.push(
+                "this machine's key was revoked, so your devices no longer admit it. Your root still works \
+                 here."
+                    .to_owned(),
+            );
+        }
         // No verb deletes it yet: the line names none.
         if Standing::revoked_root(home).await?.is_some() {
             report

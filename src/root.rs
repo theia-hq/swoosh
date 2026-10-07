@@ -89,6 +89,25 @@ pub(crate) const UNLOCK_NEEDS_TERMINAL: &str =
 /// the two commands that take it off this machine, one per line.
 pub const KEPT_HERE: &str = "your root is on this machine, and this runs only where no root is kept. Back it up: swoosh root backup <dir>\nthen remove it from this machine: swoosh root forget <dir>";
 
+/// The warning before the prompt of an act that cuts on the root kept here, when this machine's key is revoked:
+/// the act goes on, since the root's authority does not depend on this machine being one of your devices, and
+/// it signs no row for this machine.
+pub const OWN_KEY_REVOKED: &str = "warning: this machine's key was revoked, so your devices no longer admit it. Your root still works here.";
+
+/// Whether this machine's key is revoked, by this home's `revoked` or by the list of the root `root` held here.
+///
+/// # Errors
+///
+/// This machine's key or the revocations could not be read.
+pub fn own_key_revoked(home: &Home, root: VerifyKey) -> Result<bool, RootError> {
+    let Some(own) = own_key(home)? else {
+        return Ok(false);
+    };
+    let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
+    Ok(revoked.is_revoked_key(&own)
+        || read_held(&home.devices(), root).is_some_and(|(held, _)| held.is_revoked_key(&own)))
+}
+
 /// Where the root for one command is: kept in this home, or a copy in a directory given with `--root`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RootPlace {
@@ -721,6 +740,10 @@ impl Root {
         if !prompt.terminal() {
             return Err(RootError::NoTerminalToUnlock);
         }
+        // An act that cuts on the root kept here, with this machine's key revoked, goes on and says so first.
+        if verb.cuts() && act.copy.is_none() && own_key_revoked(home, act.key.verify_key()?)? {
+            let _ = writeln!(out, "{OWN_KEY_REVOKED}");
+        }
         let asked = act.asked();
         let (secret, _) = crate::passphrase::unlock(prompt, asked, |passphrase| {
             found.locked.unlock(Unlock::Passphrase(passphrase))
@@ -767,7 +790,7 @@ impl Root {
             return Ok(None);
         }
         // An act on the root kept here signs this machine a live row when it has none, so it signs.
-        if found.copy.is_none() && forward.lacks_own(now) {
+        if found.copy.is_none() && forward.lacks_own(now) && !own_key_revoked(home, pin)? {
             return Ok(None);
         }
         let Some(row) = book.rows.iter().find(|row| &row.label == name) else {
@@ -1500,17 +1523,35 @@ fn read_list(
     copy: Option<&Path>,
     root: VerifyKey,
 ) -> Result<Option<RosterDoc>, RootError> {
-    use std::io::Read as _;
-
     let path = match copy {
         Some(dir) => dir.join(LIST_FILE),
         None => home.devices(),
     };
-    let file = match std::fs::File::open(&path) {
+    Ok(read_list_at(&path, root)?.map(|(list, _)| list))
+}
+
+/// The list at `path`, verified under `root`, and the bytes that verified: `None` when nothing is there. Read
+/// once, capped at the largest list there can be, and only from a regular file, so a planted pipe or device
+/// can neither block the read nor grow it. A caller that writes the list writes these bytes, never the file
+/// read again.
+fn read_list_at(path: &Path, root: VerifyKey) -> Result<Option<(RosterDoc, Vec<u8>)>, RootError> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    let path = path.to_path_buf();
+    // Non-blocking, so opening a pipe returns at once; the type is then checked on the handle.
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&path)
+    {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(RootError::Io { path, source }),
     };
+    if !file.metadata().map_err(io_at(&path))?.is_file() {
+        return Err(RootError::Damaged { path });
+    }
     let mut bytes = Vec::new();
     file.take(MAX_ROSTER_BLOB + 1)
         .read_to_end(&mut bytes)
@@ -1518,9 +1559,10 @@ fn read_list(
     if bytes.len() as u64 > MAX_ROSTER_BLOB {
         return Err(RootError::Damaged { path });
     }
-    crate::roster::verify(&bytes, root)
-        .map(Some)
-        .map_err(|_| RootError::Damaged { path })
+    match crate::roster::verify(&bytes, root) {
+        Ok(list) => Ok(Some((list, bytes))),
+        Err(_) => Err(RootError::Damaged { path }),
+    }
 }
 
 /// Present step 6: refuse a copy this act cannot write, before anything is signed, since it writes what it
@@ -1676,10 +1718,20 @@ impl Root {
     /// a lapsed row or adding one under a name fresh against the records for 90 days. The commit's own fold
     /// takes its standing as this machine's. A revoked key is never signed.
     fn carry_own(&mut self) -> Result<(), RootError> {
-        match self.act.own {
-            Some(own) if self.act.book.lacks_own(self.act.now) => self.sign_own(own).map(drop),
-            _ => Ok(()),
+        let Some(own) = self.act.own else {
+            return Ok(());
+        };
+        if !self.act.book.lacks_own(self.act.now)
+            || own_key_revoked(&self.act.home, self.act.key.verify_key()?)?
+        {
+            return Ok(());
         }
+        self.sign_own(own)?;
+        // This machine's row is not a device the act adds or renews: a list folded meanwhile that already
+        // carries it is brought forward, never a reason to stop, as `take_own` leaves its row.
+        self.act.added.retain(|key| *key != own);
+        self.act.renewed.retain(|key| *key != own);
+        Ok(())
     }
 
     /// Sign this machine's standing: from its live row for its duration, or on a new row under the
@@ -1827,12 +1879,14 @@ struct Brought {
     capped: Vec<(DeviceLabel, usize, u64)>,
     /// Each row revoked because the update gave its name to another key.
     clashed: Vec<(DeviceLabel, VerifyKey)>,
+    /// This machine's row, renamed because the update gave its name to another device: the old name, the new.
+    renamed: Option<(DeviceLabel, DeviceLabel)>,
 }
 
 impl Brought {
     /// Whether the bring-forward added anything.
     fn any(&self) -> bool {
-        self.devices + self.revocations + self.marked > 0
+        self.devices + self.revocations + self.marked > 0 || self.renamed.is_some()
     }
 
     /// The one bring-forward line, with the capped and clashed rows appended.
@@ -1855,6 +1909,11 @@ impl Brought {
                 " me/{name} ({}) was also added on another copy of your root; it is revoked here. To keep \
                 that machine: on it, swoosh leave --new-key, then invite the new key under another name.",
                 crate::credential::short(key)
+            ));
+        }
+        if let Some((was, now)) = &self.renamed {
+            line.push_str(&format!(
+                " Another device took the name me/{was}; this machine is me/{now} now."
             ));
         }
         let _ = writeln!(out, "{line}");
@@ -1928,7 +1987,10 @@ impl Book {
             let fresh = fresh_name(member.label.as_str(), |name| {
                 name == &member.label || rows.iter().any(|row| &row.label == name)
             });
-            self.rows[index].label = fresh;
+            let was = core::mem::replace(&mut self.rows[index].label, fresh.clone());
+            // A second clash in one update renames it again; the line names where it started.
+            let was = brought.renamed.take().map_or(was, |(first, _)| first);
+            brought.renamed = Some((was, fresh));
         } else if let Some(index) = self
             .rows
             .iter()
@@ -2430,6 +2492,9 @@ enum Seam {
     Listed,
     /// This machine's standing is written, and the pin is not.
     Badged,
+    /// A restore's re-cut, after the sync and before its commit: a test makes the commit meet a list that
+    /// moved under it.
+    ReCut,
 }
 
 #[cfg(test)]
@@ -2440,6 +2505,10 @@ thread_local! {
 
 /// Stop here when a test asked to. Nothing outside tests.
 fn seam(at: Seam) -> Result<(), RootError> {
+    #[cfg(test)]
+    if STOP.get() == Some(at) && at == Seam::ReCut {
+        return Err(RootError::ListChanged);
+    }
     #[cfg(test)]
     if STOP.get() == Some(at) {
         return Err(RootError::Io {

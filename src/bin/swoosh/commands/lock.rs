@@ -18,7 +18,7 @@ pub struct LockCmd {
     /// how the key is locked
     #[arg(value_name = "method", default_value = "passphrase")]
     method: LockMethod,
-    /// take the lock off
+    /// remove the passphrase
     #[arg(long)]
     remove: bool,
 }
@@ -53,17 +53,23 @@ impl LockCmd {
         err: &mut impl Write,
     ) -> eyre::Result<()> {
         match swoosh::identity::lock(home, Method::from(self.method), self.remove, prompt).await? {
-            Locked::Set { first } => {
-                if first {
-                    writeln!(err, "`swoosh serve` will ask for it at every start.")?;
-                }
-                writeln!(err, "this machine's key now has a passphrase.")?;
+            Locked::Set { first: true } => writeln!(
+                err,
+                "set a passphrase on this machine's key. Every command that acts as this machine now asks \
+                 for it, so swoosh serve cannot start with nobody at a terminal."
+            )?,
+            Locked::Set { first: false } => {
+                writeln!(err, "changed the passphrase on this machine's key.")?;
             }
             Locked::Removed => writeln!(
                 err,
-                "this machine's key has no passphrase now: a copy of the file is this machine."
+                "removed the passphrase from this machine's key: anyone with a copy of its key file can now \
+                 act as this machine."
             )?,
-            Locked::AlreadyPlain => writeln!(err, "this machine's key has no passphrase")?,
+            Locked::AlreadyPlain => writeln!(
+                err,
+                "this machine's key has no passphrase; nothing was changed."
+            )?,
         }
         Ok(())
     }

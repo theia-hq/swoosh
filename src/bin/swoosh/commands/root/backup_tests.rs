@@ -145,11 +145,83 @@ async fn root_backup_asks_no_passphrase() {
 #[tokio::test]
 async fn root_backup_with_no_root_here_names_invite() {
     let home = scratch("backup-device");
-    crate::commands::invite::invite_tests::device_of(&home, &live(OWN, "desk")).await;
     let (refused, _) = backup(&home, &stick(&home)).await;
     assert_eq!(
         format!("{:#}", refused.unwrap_err()),
         "this machine holds no root, so there is nothing to back up. A lost device is replaced, not \
          restored: invite a new one."
+    );
+
+    // On a device of a root kept elsewhere: back it up where it is kept.
+    crate::commands::invite::invite_tests::device_of(&home, &live(OWN, "desk")).await;
+    let (refused, _) = backup(&home, &stick(&home)).await;
+    assert_eq!(
+        format!("{:#}", refused.unwrap_err()),
+        "your root is not on this machine; back it up on the machine that keeps it."
+    );
+}
+
+/// A run killed during its first write leaves only its temp: the next run finishes, and removes the temp.
+/// Red when a directory of temps is refused as not empty.
+#[tokio::test]
+async fn root_backup_killed_during_its_first_write_is_finished_by_running_it_again() {
+    let home = scratch("backup-killed-first");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let dir = stick(&home);
+    swoosh::config::create_store_dir(&dir).unwrap();
+    std::fs::write(dir.join("devices.tmp.1.0"), b"half a list").unwrap();
+    backup(&home, &dir).await.0.unwrap();
+    assert_eq!(names(&dir), ["devices", "root.key"], "the temp is gone");
+}
+
+/// A copy whose `root.key` names this root but is not this machine's key, byte for byte, is replaced, never
+/// kept and reported as copied. Red when the header alone decides.
+#[tokio::test]
+async fn root_backup_replaces_a_copy_key_that_differs() {
+    let home = scratch("backup-key-differs");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let dir = stick(&home);
+    backup(&home, &dir).await.0.unwrap();
+    // Flip a byte past the header: the header still names the root, and the key no longer opens.
+    let mut bytes = std::fs::read(dir.join("root.key")).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    std::fs::write(dir.join("root.key"), &bytes).unwrap();
+    backup(&home, &dir).await.0.unwrap();
+    assert_eq!(
+        std::fs::read(dir.join("root.key")).unwrap(),
+        std::fs::read(home.root_key()).unwrap()
+    );
+}
+
+/// An empty directory the backup adopts is made owner-only, as one it makes is. Red when its mode is kept.
+#[tokio::test]
+async fn root_backup_into_an_empty_directory_makes_it_owner_only() {
+    let home = scratch("backup-empty-dir");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let dir = stick(&home);
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    backup(&home, &dir).await.0.unwrap();
+    assert_eq!(mode(&dir), 0o700);
+}
+
+/// A planted pipe named `devices` is refused without blocking: the read checks the file's type first, and
+/// nothing holds `home.lock` while it is judged. Red when the read blocks on the pipe.
+#[tokio::test]
+async fn root_backup_refuses_a_planted_pipe_without_blocking() {
+    let home = scratch("backup-fifo");
+    holds(&home, &[live(OWN, "desk")], Vec::new()).await;
+    let dir = stick(&home);
+    swoosh::config::create_store_dir(&dir).unwrap();
+    let fifo = std::ffi::CString::new(dir.join("devices").to_str().unwrap()).unwrap();
+    // SAFETY: `fifo` is a live NUL-terminated path for the length of the call.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    let refused = tokio::time::timeout(core::time::Duration::from_secs(5), backup(&home, &dir))
+        .await
+        .expect("the backup does not block");
+    assert!(
+        format!("{:#}", refused.0.unwrap_err()).contains("is not empty"),
+        "a pipe is no list"
     );
 }

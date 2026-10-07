@@ -14,7 +14,7 @@ use swoosh::home::Home;
 /// copy your root to a new directory
 #[derive(Debug, Args)]
 pub struct BackupCmd {
-    /// the copy's own directory, made here
+    /// the directory to copy your root into
     #[arg(value_name = "dir")]
     pub(crate) dir: PathBuf,
 }

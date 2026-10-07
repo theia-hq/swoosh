@@ -382,11 +382,19 @@ impl Prompt for Counting {
     }
 
     fn choose(&mut self, _asked: Asked<'_>) -> eyre::Result<Choice> {
-        let text = self.answer(2)?;
+        // The terminal's round reads one entry for a short passphrase, which ends it before `again:`, and two
+        // otherwise.
+        let text = self.answer(0)?;
         if text.is_empty() {
+            self.reads += 2;
             return Ok(Choice::Mismatch);
         }
-        crate::passphrase::chosen(text)
+        let choice = crate::passphrase::chosen(text)?;
+        self.reads += match choice {
+            Choice::Short => 1,
+            Choice::Chosen(_) | Choice::Mismatch => 2,
+        };
+        Ok(choice)
     }
 
     fn say(&mut self, line: &str) {

@@ -2531,3 +2531,90 @@ async fn a_refused_offer_is_never_counted_as_taken() {
         }
     );
 }
+
+// --- restore's write order, at its seams ---
+
+/// A restore on a device of this root, killed after `root.key`, already holds the copy's list: on a device
+/// `root.key` is the commit point, so the list lands before it. The rerun refuses as already here, and the
+/// next act that cuts carries this machine's row. Red when `root.key` is written first.
+#[tokio::test]
+async fn a_restore_on_a_device_killed_after_its_key_holds_the_copys_list() {
+    let home = home("restore-killed-device");
+    device_of(&home, ROOT).await;
+    held(&home, &records(1, vec![own_row()], Vec::new(), Vec::new()));
+    let dir = beside(&home, "copy");
+    let _ = std::fs::remove_dir_all(&dir);
+    let laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]);
+    copy(
+        &dir,
+        ROOT,
+        &records(3, vec![laptop], Vec::new(), Vec::new()),
+    );
+
+    STOP.set(Some(Seam::Keyed));
+    let killed = super::restore(&home, &dir, &mut Counting::new([PASS])).await;
+    STOP.set(None);
+    assert!(killed.is_err(), "stopped at the seam");
+    let pin = TestRoot::seeded(ROOT).verify_key();
+    let held_now = crate::roster::read_held(&home.devices(), pin).unwrap().0;
+    assert_eq!(held_now.epoch(), Epoch(3), "the copy's list landed first");
+    assert!(matches!(standing(&home).await, Standing::HoldsRoot { .. }));
+
+    let again = super::restore(&home, &dir, &mut Counting::new([PASS])).await;
+    assert!(
+        matches!(again, Err(super::RestoreError::AlreadyHere)),
+        "{again:?}"
+    );
+
+    let (root, _) = present(
+        &home,
+        RootPlace::Home,
+        RootVerb::Invite,
+        &mut Counting::new([PASS]),
+    )
+    .await;
+    let (_, update) = commit(root.unwrap()).await;
+    assert!(
+        update
+            .members()
+            .iter()
+            .any(|member| member.node == key(OWN)),
+        "the next cut carries this machine's row"
+    );
+}
+
+/// A restore whose re-cut meets a list that moved under it succeeds: the root, the pin and this machine's
+/// standing are in place, nothing is offered, and the row waits for the next act that cuts. Red when the
+/// moved list fails the restore and tells the person to run it again.
+#[tokio::test]
+async fn a_restore_whose_re_cut_meets_a_moved_list_succeeds_and_says_the_row_waits() {
+    let home = home("restore-recut-moved");
+    let dir = beside(&home, "copy");
+    let _ = std::fs::remove_dir_all(&dir);
+    let laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]);
+    copy(
+        &dir,
+        ROOT,
+        &records(1, vec![laptop.clone()], Vec::new(), Vec::new()),
+    );
+    let fleet = records(3, vec![laptop], Vec::new(), Vec::new());
+    let device = sibling(&home, LAPTOP, STANDING_UNTIL, &fleet).await;
+    let dial = Loopback::new(
+        home.clone(),
+        [(TestNode::seeded(LAPTOP).node_id(), device.clone())],
+    );
+
+    let restored = super::restore(&home, &dir, &mut Counting::new([PASS]))
+        .await
+        .unwrap();
+    STOP.set(Some(Seam::ReCut));
+    let synced = restored.sync(&home, &dial).await;
+    STOP.set(None);
+    let synced = synced.expect("a moved list is not an error here");
+    assert!(synced.waiting, "the row waits for the next act");
+    assert!(matches!(standing(&home).await, Standing::HoldsRoot { .. }));
+    let theirs = crate::roster::read_held(&device.devices(), TestRoot::seeded(ROOT).verify_key())
+        .unwrap()
+        .0;
+    assert_eq!(theirs.epoch(), Epoch(3), "nothing was offered");
+}

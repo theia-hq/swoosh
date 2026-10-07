@@ -88,7 +88,8 @@ async fn lock_sets_one_and_warns_about_restart() {
     );
     assert_eq!(
         err,
-        "`swoosh serve` will ask for it at every start.\nthis machine's key now has a passphrase.\n"
+        "set a passphrase on this machine's key. Every command that acts as this machine now asks for it, \
+         so swoosh serve cannot start with nobody at a terminal.\n"
     );
 }
 
@@ -113,7 +114,7 @@ async fn lock_changes_an_existing_one_after_the_current_one() {
     let (result, err) = lock(&home, &[], &mut Counting::new([LONG, OTHER])).await;
     result.unwrap();
     assert_eq!(
-        err, "this machine's key now has a passphrase.\n",
+        err, "changed the passphrase on this machine's key.\n",
         "no warning the second time"
     );
     let mut opens = Counting::new([OTHER]);
@@ -145,7 +146,8 @@ async fn lock_remove_needs_the_current_one() {
     assert!(locks(&home).is_empty(), "plain now");
     assert_eq!(
         err,
-        "this machine's key has no passphrase now: a copy of the file is this machine.\n"
+        "removed the passphrase from this machine's key: anyone with a copy of its key file can now act as \
+         this machine.\n"
     );
 }
 
@@ -156,7 +158,10 @@ async fn lock_remove_on_an_unlocked_key_says_so_and_exits_0() {
     let mut prompt = Counting::refusing();
     let (result, err) = lock(&home, &["--remove"], &mut prompt).await;
     result.unwrap();
-    assert_eq!(err, "this machine's key has no passphrase\n");
+    assert_eq!(
+        err,
+        "this machine's key has no passphrase; nothing was changed.\n"
+    );
     assert_eq!(prompt.events(), 0);
 }
 
@@ -185,7 +190,7 @@ async fn lock_refuses_a_passphrase_below_the_minimum() {
     let (refused, _) = lock(&home, &[], &mut prompt).await;
     assert_eq!(
         format!("{:#}", refused.unwrap_err()),
-        swoosh::passphrase::TOO_SHORT
+        swoosh::passphrase::TOO_SHORT_LAST
     );
     assert!(snapshot(home.dir()) == before, "nothing written");
 }
@@ -269,7 +274,8 @@ async fn lock_at_no_terminal_says_it_needs_one() {
         let refusal = format!("{:#}", refused.unwrap_err());
         assert_eq!(
             refusal,
-            "changing this machine's key's passphrase needs a terminal: over swoosh ssh, add -t after --"
+            "changing or removing the passphrase on this machine's key needs a terminal: over swoosh ssh, add \
+             -t after --"
         );
         assert!(!refusal.contains("lock --remove"));
     }

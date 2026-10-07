@@ -418,7 +418,8 @@ async fn a_locked_file_with_a_malformed_header_names_the_file() {
     assert_eq!(
         format!("{refused:#}"),
         format!(
-            "the device key file at {} names a key nobody can hold; restore it from your backup.",
+            "this machine's key file at {} is damaged and holds no usable key; start this machine over \
+             with a new key: swoosh leave --new-key",
             crate::escape::EscapedPath(&home.key())
         )
     );

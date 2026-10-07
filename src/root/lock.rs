@@ -103,7 +103,7 @@ pub async fn lock(
         locked.unlock(Unlock::Passphrase(passphrase)).map(drop)
     })
     .map_err(prompt_error)?;
-    let new = crate::passphrase::choose(prompt, Asked::Root).map_err(prompt_error)?;
+    let new = crate::passphrase::choose(prompt, asked).map_err(prompt_error)?;
     // `home.lock` for the root kept here, the one file of the home this changes.
     let _home_lock = match dir {
         None => Some(HomeWrite::take(home).await.map_err(RootError::from)?),

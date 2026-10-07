@@ -221,7 +221,7 @@ impl InviteCmd {
                 .records()
                 .device(&name)
                 .filter(|row| row.until <= root.records().now())
-                .map(|row| (row.node, row.until)),
+                .map(|row| row.until),
             Plan::Add(_) | Plan::Keyed | Plan::Rekey => None,
         };
 
@@ -296,19 +296,11 @@ impl InviteCmd {
         writeln!(out, "{invite}")?;
         out.flush()?;
         let device = format!("me/{name}");
-        if let Some((key, ended)) = ended {
-            writeln!(
-                err,
-                "renewed {device}, which had ended on {}. Whatever machine holds {key} picks this up the next \
-                 time it reaches one of your devices.",
-                Date(ended)
-            )?;
-        }
         if let Some(until) = issued.unchanged {
             let own_row = row.as_ref().is_some_and(|row| Some(row.node) == own);
             writeln!(err, "{}", needs_no_renewal(&name, until, own_row))?;
         } else {
-            issued.lines(err, &device, until)?;
+            issued.lines(err, &device, until, ended)?;
         }
 
         let reach = committed.offer(dial).await;
@@ -353,16 +345,30 @@ impl Issued {
 
     /// The lines after a new invite: how long it runs, and, for one that carries a key, who it makes the
     /// device and that it is not renewed on its own.
-    fn lines(&self, err: &mut impl Write, device: &str, until: u64) -> io::Result<()> {
+    /// `ended` is the date a renewed device's standing had ended on, when it had.
+    fn lines(
+        &self,
+        err: &mut impl Write,
+        device: &str,
+        until: u64,
+        ended: Option<u64>,
+    ) -> io::Result<()> {
         let date = Date(until);
         let span = swoosh::grants::humanize(self.duration);
+        let had_ended = ended.map_or_else(String::new, |ended| {
+            format!("; it had ended on {}", Date(ended))
+        });
         if self.default {
             writeln!(
                 err,
-                "{device} runs {span} from now, until {date} (the default; --expires sets 1h to 365d)."
+                "{device} runs {span} from now, until {date} (the default; --expires sets 1h to \
+                 365d){had_ended}."
             )?;
         } else {
-            writeln!(err, "{device} runs {span} from now, until {date}.")?;
+            writeln!(
+                err,
+                "{device} runs {span} from now, until {date}{had_ended}."
+            )?;
         }
         match self.old_invite_until {
             Some(old) => writeln!(

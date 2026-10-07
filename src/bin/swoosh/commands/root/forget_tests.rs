@@ -24,6 +24,7 @@ struct FakeDisk {
     home: PathBuf,
     dataless: bool,
     in_memory: bool,
+    emptied: bool,
     read: RefCell<Vec<PathBuf>>,
 }
 
@@ -33,6 +34,7 @@ impl FakeDisk {
             home: home.dir().to_path_buf(),
             dataless: false,
             in_memory: false,
+            emptied: false,
             read: RefCell::default(),
         }
     }
@@ -48,6 +50,7 @@ impl Disk for FakeDisk {
             ino: metadata.ino(),
             dataless: !in_home && self.dataless,
             in_memory: !in_home && self.in_memory,
+            emptied: !in_home && self.emptied,
         })
     }
 }
@@ -185,10 +188,14 @@ async fn root_forget_refuses_a_copy_on_the_homes_filesystem() {
     let shown = dir.display();
     assert!(
         refusal.starts_with(&format!(
-            "{shown} is on the same disk as this machine's home, so it goes wherever this disk goes. Copy \
-             your root to another disk first: swoosh root backup {shown}"
+            "{shown} is on the same disk as this machine's home, so if this disk is lost, your root is lost \
+             with it. Copy your root to another disk first."
         )),
         "{refusal}"
+    );
+    assert!(
+        !refusal.contains("swoosh root backup"),
+        "no command that backs up into the same directory: {refusal}"
     );
     assert_eq!(prompt.events(), 0, "refused before the passphrase");
     assert!(home.root_key().exists());
@@ -206,7 +213,8 @@ async fn root_forget_refuses_a_copy_the_disk_says_is_in_memory() {
     assert_eq!(
         refusal(result),
         format!(
-            "{} is kept in memory and is emptied when this machine restarts.",
+            "{} is kept in memory and is emptied when this machine restarts; copy your root to another disk \
+             first.",
             dir.display()
         )
     );
@@ -438,7 +446,7 @@ async fn root_forget_confirms_the_copy_by_device_and_inode_under_the_lock() {
     });
     let (result, _) = forget(&home, &dir, &mut prompt, &FakeDisk::new(&home)).await;
     assert!(refusal(result).starts_with(&format!(
-        "the copy in {} changed while this ran",
+        "the copy in {} changed during the checks",
         dir.display()
     )));
     assert!(home.root_key().exists());
@@ -517,4 +525,92 @@ async fn root_forget_success_line_never_says_no_copy_is_left() {
         swoosh::standing::Standing::read(&home).await.unwrap(),
         swoosh::standing::Standing::Device { .. }
     ));
+}
+
+/// The copy confirmed is the bytes check 5 opened, byte for byte: a key rewritten in place while the prompt
+/// waits (same inode, same header) is refused, and the root stays. Red when only the header is compared.
+#[tokio::test]
+async fn root_forget_refuses_a_copy_rewritten_in_place_under_the_same_inode() {
+    let (home, dir) = kept("forget-in-place").await;
+    let key = dir.join("root.key");
+    let mut prompt = Meanwhile(|| {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let mut file = std::fs::OpenOptions::new().write(true).open(&key).unwrap();
+        let end = file.seek(SeekFrom::End(-1)).unwrap();
+        let last = std::fs::read(&key).unwrap()[usize::try_from(end).unwrap()];
+        file.write_all(&[last ^ 0xff]).unwrap();
+    });
+    let (result, _) = forget(&home, &dir, &mut prompt, &FakeDisk::new(&home)).await;
+    assert!(
+        refusal(result).starts_with(&format!(
+            "the copy in {} changed during the checks",
+            dir.display()
+        )),
+        "the in-place rewrite is caught"
+    );
+    assert!(home.root_key().exists());
+}
+
+/// A copy under `/tmp` or `/var/tmp` is refused whatever disk holds it: those are emptied on their own.
+/// Red when the place is judged by its disk alone.
+#[tokio::test]
+async fn root_forget_refuses_a_copy_under_tmp() {
+    let (home, dir) = kept("forget-tmp").await;
+    let disk = FakeDisk {
+        emptied: true,
+        ..FakeDisk::new(&home)
+    };
+    let mut prompt = Counting::new([PASS]);
+    let (result, _) = forget(&home, &dir, &mut prompt, &disk).await;
+    assert_eq!(
+        refusal(result),
+        format!(
+            "{} is in a folder this machine empties on its own; copy your root to another disk first.",
+            dir.display()
+        )
+    );
+    assert_eq!(prompt.events(), 0);
+    assert!(home.root_key().exists());
+}
+
+/// The real disk reads a path under `/tmp` or `/var/tmp`, links followed, as emptied on its own, and a path
+/// elsewhere as not. Red when the resolved prefix is not read.
+#[test]
+fn the_real_disk_reads_tmp_as_emptied() {
+    for temp in ["/tmp", "/var/tmp"] {
+        let dir = Path::new(temp).join(format!("swoosh-emptied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("f"), b"x").unwrap();
+        assert!(RealDisk.place(&dir.join("f")).unwrap().emptied, "{temp}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap();
+    assert!(!RealDisk.place(&home).unwrap().emptied);
+}
+
+/// A copy whose key is the root's own file here is refused before anything else, dataless or not. Red when
+/// the dataless pass lets it through.
+#[tokio::test]
+async fn root_forget_refuses_the_roots_own_file_as_its_copy() {
+    let (home, _) = kept("forget-own-file").await;
+    // Every file reads as dataless, the home's own key included: the one pass that skips the disk check.
+    struct AllDataless(FakeDisk);
+    impl Disk for AllDataless {
+        fn place(&self, path: &Path) -> std::io::Result<Place> {
+            let place = self.0.place(path)?;
+            Ok(Place {
+                dataless: true,
+                ..place
+            })
+        }
+    }
+    let disk = AllDataless(FakeDisk::new(&home));
+    let (result, _) = forget(&home, home.dir(), &mut Counting::new([PASS]), &disk).await;
+    assert!(
+        refusal(result).contains("is on the same disk as this machine's home"),
+        "the root's own file is no copy"
+    );
+    assert!(home.root_key().exists());
 }

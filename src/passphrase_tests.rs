@@ -6,8 +6,8 @@ use keystore::{KeyFile, Protection, Unlock};
 use zeroize::Zeroizing;
 
 use super::{
-    Asked, Choice, MINIMUM, MISMATCH, TOO_SHORT, TRIES, WORD_LIST, WORDS, choose, chosen, made,
-    passphrase, unlock,
+    Asked, Choice, MINIMUM, MISMATCH, MISMATCH_LAST, TOO_SHORT, TRIES, WORD_LIST, WORDS, choose,
+    chosen, made, passphrase, unlock,
 };
 use crate::testkit::Counting;
 
@@ -138,13 +138,14 @@ fn a_mismatch_or_a_short_passphrase_asks_both_again() {
     let mut prompt = Counting::new(["short", "", "a passphrase long enough"]);
     choose(&mut prompt, Asked::Root).expect("the third round takes");
     assert_eq!(prompt.events(), 3);
-    assert_eq!(prompt.reads(), 6);
+    // The terminal's round reads one entry for a short passphrase, two for the others.
+    assert_eq!(prompt.reads(), 5);
     assert_eq!(prompt.said(), [TOO_SHORT, MISMATCH]);
 
     let mut prompt = Counting::new(["short", "", "", "a passphrase long enough"]);
     let refused = choose(&mut prompt, Asked::MachineKey).expect_err("three refused rounds");
     assert_eq!(prompt.events(), TRIES);
-    assert_eq!(refused.to_string(), MISMATCH);
+    assert_eq!(refused.to_string(), MISMATCH_LAST);
 }
 
 /// A fresh owner-only directory under the system temp dir, unique to this test and process.
@@ -157,4 +158,102 @@ fn tempfile_dir(tag: &str) -> std::path::PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     crate::config::create_store_dir(&dir).expect("make the dir");
     dir
+}
+
+/// The terminal's round, scripted: each `ask` takes the next answer, or, for `again:` after a made phrase,
+/// types back the phrase it was shown. Records every prompt asked and every line said.
+#[derive(Default)]
+struct Script {
+    answers: std::collections::VecDeque<&'static str>,
+    asked: Vec<String>,
+    said: Vec<String>,
+}
+
+impl Script {
+    fn new(answers: impl IntoIterator<Item = &'static str>) -> Self {
+        Self {
+            answers: answers.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    /// The phrase the round showed, if it made one.
+    fn shown(&self) -> Option<String> {
+        self.said
+            .iter()
+            .find_map(|line| line.strip_prefix("your passphrase: "))
+            .map(str::to_owned)
+    }
+}
+
+impl super::Lines for Script {
+    fn say(&mut self, line: &str) -> eyre::Result<()> {
+        self.said.push(line.to_owned());
+        Ok(())
+    }
+
+    fn ask(&mut self, prompt: &str) -> eyre::Result<Zeroizing<String>> {
+        self.asked.push(prompt.to_owned());
+        if prompt == "again: "
+            && let Some(shown) = self.shown()
+        {
+            return Ok(Zeroizing::new(shown));
+        }
+        let answer = self
+            .answers
+            .pop_front()
+            .ok_or_else(|| eyre::eyre!("no answer left"))?;
+        Ok(text(answer))
+    }
+}
+
+/// A short first entry ends the round before `again:` is asked: the floor runs on the first entry, and one
+/// entry is read. Red when the floor moves after `again:`.
+#[test]
+fn the_floor_runs_before_again() {
+    let mut lines = Script::new(["fourteen chars", "fourteen chars"]);
+    let choice = super::round(&mut lines, Asked::Root).expect("a round");
+    assert!(matches!(choice, Choice::Short));
+    assert_eq!(lines.asked, ["new root passphrase: "]);
+    assert_eq!(
+        lines.said,
+        ["Choose a passphrase of at least 15 characters, or press Enter and swoosh makes one."]
+    );
+}
+
+/// An empty Enter makes a passphrase of five listed words, shows it where the person types, and asks for it
+/// once more; typed back, it is the one chosen. Red when the made phrase is skipped or `again:` is not
+/// asked.
+#[test]
+fn an_empty_enter_makes_a_phrase_and_asks_for_it_once_more() {
+    let mut lines = Script::new([""]);
+    let choice = super::round(&mut lines, Asked::MachineKey).expect("a round");
+    assert!(matches!(choice, Choice::Chosen(_)));
+    assert_eq!(
+        lines.asked,
+        ["new passphrase for this machine's key: ", "again: "]
+    );
+    let shown = lines.shown().expect("the phrase is shown");
+    let list: BTreeSet<&str> = WORD_LIST.lines().collect();
+    let words: Vec<&str> = shown.split(' ').collect();
+    assert_eq!(words.len(), WORDS);
+    assert!(words.iter().all(|word| list.contains(word)));
+    assert_eq!(
+        lines.said.last().map(String::as_str),
+        Some("Keep it where you keep your passwords, then type it once more.")
+    );
+}
+
+/// Two entries that differ end the round as a mismatch, after two reads; a copy's round names the copy.
+/// Red when the second entry is not compared.
+#[test]
+fn a_round_whose_entries_differ_is_a_mismatch() {
+    let dir = std::path::Path::new("/tmp/stick");
+    let mut lines = Script::new(["a passphrase long enough", "another passphrase entirely"]);
+    let choice = super::round(&mut lines, Asked::Copy(dir)).expect("a round");
+    assert!(matches!(choice, Choice::Mismatch));
+    assert_eq!(
+        lines.asked,
+        ["new passphrase for the copy in /tmp/stick: ", "again: "]
+    );
 }

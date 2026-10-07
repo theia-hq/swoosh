@@ -26,7 +26,8 @@ pub struct Replaced {
 }
 
 /// The refusal when the new key is to be locked and nobody is at a terminal to choose its passphrase.
-pub const CHOOSE_NEEDS_TERMINAL: &str = "the new key is locked like the old one, and choosing its passphrase needs a terminal: run this at one.";
+pub const CHOOSE_NEEDS_TERMINAL: &str = "the new key is locked like the old one, and choosing its passphrase \
+     needs a terminal: over swoosh ssh, add -t after --";
 
 /// A fresh random key written whole at `<home>/machine/key.new`, not yet in place. Staging runs every step that
 /// can ask or fail, so a caller stages first, makes its own writes, then [`put`](Self::put)s it. Dropped

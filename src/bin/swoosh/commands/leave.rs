@@ -77,6 +77,17 @@ impl LeaveCmd {
             Err(StandingError::Damaged(_)) => Was::Damaged {
                 root: swoosh::config::load_signet(home).await.ok().flatten(),
             },
+            // `--new-key` sets this machine's key aside and never needs its identity, so a key file damaged
+            // past use is a damaged home to it. A root kept here is still never left, and plain `leave` keeps
+            // refusing.
+            Err(StandingError::UnusableKey(_)) if self.new_key => {
+                if home.root_key().try_exists()? {
+                    eyre::bail!("{}", swoosh::root::KEPT_HERE);
+                }
+                Was::Damaged {
+                    root: swoosh::config::load_signet(home).await.ok().flatten(),
+                }
+            }
             Err(other) => return Err(other.into()),
         };
 
@@ -159,7 +170,9 @@ async fn still(_home_lock: &HomeWrite, home: &Home, was: &Was) -> eyre::Result<(
             (Was::Unpinned, Standing::Unpinned) => true,
             _ => false,
         },
-        Err(StandingError::Damaged(_)) => matches!(was, Was::Damaged { .. }),
+        Err(StandingError::Damaged(_) | StandingError::UnusableKey(_)) => {
+            matches!(was, Was::Damaged { .. })
+        }
         Err(other) => return Err(other.into()),
     };
     if !holds {

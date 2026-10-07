@@ -181,9 +181,15 @@ async fn restore_on_a_machine_keeping_another_root_names_backup_then_forget() {
         )
         .unwrap();
     let (result, _) = restore(&home, &dir, &Answering::nobody()).await;
+    let other = swoosh::credential::short(&TestRoot::seeded(0x31).node_id());
+    let short = swoosh::credential::short(&root());
     assert_eq!(
         format!("{:#}", result.unwrap_err()),
-        "your root is on this machine: swoosh root backup <dir>, then swoosh root forget <dir>"
+        format!(
+            "this machine keeps root:{short}, and the copy in {} is root:{other}; to restore the copy here, \
+             first remove root:{short} from this machine: swoosh root forget --help",
+            dir.display()
+        )
     );
 
     // And this same root, already kept here.
@@ -215,7 +221,8 @@ async fn restore_refuses_a_revoked_own_key() {
         .expect_err("refused");
     assert_eq!(
         format!("{refused:#}"),
-        "this machine's key was revoked: swoosh leave --new-key first"
+        "this machine's key was revoked; to restore here, first give this machine a new key: swoosh leave \
+         --new-key"
     );
     assert_eq!(prompt.events(), 0);
     assert!(!home.root_key().exists());
@@ -263,7 +270,8 @@ async fn restore_on_a_machine_revoked_after_the_copy_stops_before_commit() {
     let (result, _) = restore(&home, &dir, &dial).await;
     assert_eq!(
         format!("{:#}", result.unwrap_err()),
-        "this machine's key was revoked: swoosh leave --new-key first"
+        "this machine's key was revoked; to restore here, first give this machine a new key: swoosh leave \
+         --new-key"
     );
     assert!(!home.root_key().exists());
     assert!(!home.key_cert().exists());
@@ -499,10 +507,16 @@ async fn restore_on_a_device_of_another_root_names_leave() {
         )
         .unwrap();
     let (result, _) = restore(&home, &dir, &Answering::nobody()).await;
-    let refusal = format!("{:#}", result.unwrap_err());
-    assert!(
-        refusal.ends_with("to start over: swoosh leave"),
-        "{refusal}"
+    assert_eq!(
+        format!("{:#}", result.unwrap_err()),
+        format!(
+            "the copy in {} is root:{}, and this machine is a device of root:{}; to restore the copy here, \
+             first leave root:{}: swoosh leave",
+            dir.display(),
+            swoosh::credential::short(&other.node_id()),
+            swoosh::credential::short(&root()),
+            swoosh::credential::short(&root())
+        )
     );
 }
 
@@ -676,4 +690,137 @@ fn restore_takes_the_reach_flags() {
         }
         other => panic!("not root restore: {other:?}"),
     }
+}
+
+/// A prompt that runs `meanwhile` while the restore waits at it, then answers [`PASS`].
+struct Meanwhile<F: FnMut()>(F);
+
+impl<F: FnMut()> swoosh::passphrase::Prompt for Meanwhile<F> {
+    fn terminal(&self) -> bool {
+        true
+    }
+
+    fn unlock(&mut self, _asked: swoosh::passphrase::Asked<'_>) -> eyre::Result<Passphrase> {
+        (self.0)();
+        Ok(Passphrase::try_from(Zeroizing::new(PASS.to_owned())).unwrap())
+    }
+
+    fn choose(
+        &mut self,
+        _asked: swoosh::passphrase::Asked<'_>,
+    ) -> eyre::Result<swoosh::passphrase::Choice> {
+        eyre::bail!("nothing is chosen here")
+    }
+
+    fn say(&mut self, _line: &str) {}
+}
+
+/// Fold `list`, signed by the root, into `home` from another thread, as a running `serve` would.
+fn fold_from_beside(home: &Home, list: &RosterDoc) {
+    let (home, bytes) = (home.clone(), TestRoot::seeded(ROOT).sign_update(list));
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let home_lock = swoosh::home::HomeWrite::take(&home).await.unwrap();
+            swoosh::roster::fold(&home_lock, &home, &bytes)
+                .await
+                .unwrap();
+        });
+    })
+    .join()
+    .unwrap();
+}
+
+/// A copy is its key and the list beside it: one without its list is refused before the prompt, and
+/// nothing is written. Red when the restore signs from no records.
+#[tokio::test]
+async fn restore_refuses_a_copy_with_no_devices() {
+    let home = machine("restore-no-list", SPARE);
+    let dir = stick(&home, &records(1, &[live(LAPTOP, "laptop")], Vec::new()));
+    std::fs::remove_file(dir.join("devices")).unwrap();
+    let before = crate::commands::invite::invite_tests::snapshot(home.dir());
+    let mut prompt = Counting::refusing();
+    let refused = restore_cmd(&dir)
+        .restore(&home, &mut prompt)
+        .await
+        .expect_err("refused");
+    assert_eq!(
+        format!("{refused:#}"),
+        format!(
+            "the copy in {} has no list of your devices beside its key, so it is not a whole copy of your \
+             root; use another copy.",
+            dir.display()
+        )
+    );
+    assert_eq!(prompt.events(), 0);
+    assert!(crate::commands::invite::invite_tests::snapshot(home.dir()) == before);
+}
+
+/// The list written is the one verified before the prompt: bytes swapped in while the prompt waits are never
+/// read. Red when the file is read again after the prompt.
+#[tokio::test]
+async fn restore_writes_the_devices_bytes_it_verified() {
+    let home = machine("restore-verified-bytes", SPARE);
+    let list = records(1, &[live(LAPTOP, "laptop")], Vec::new());
+    let dir = stick(&home, &list);
+    let verified = std::fs::read(dir.join("devices")).unwrap();
+    let devices = dir.join("devices");
+    let mut prompt = Meanwhile(|| std::fs::write(&devices, b"not a list").unwrap());
+    let sync = restore_cmd(&dir).restore(&home, &mut prompt).await.unwrap();
+    sync.finish(&home, &Answering::nobody(), &mut Vec::new())
+        .await
+        .unwrap();
+    let here = held(&home);
+    assert!(
+        here.members()
+            .iter()
+            .any(|member| member.node == key(LAPTOP)),
+        "the verified list's device is listed"
+    );
+    assert_eq!(
+        swoosh::roster::verify(&verified, TestRoot::seeded(ROOT).verify_key())
+            .unwrap()
+            .epoch(),
+        swoosh::roster::Epoch(1)
+    );
+}
+
+/// A list newer than the copy, folded here while the restore waits at its prompt, is never written over:
+/// the decision is made under the lock. Red when it is made from the read before the prompt.
+#[tokio::test]
+async fn restore_never_writes_the_copys_list_over_a_newer_one() {
+    let home = scratch("restore-never-over");
+    let rows = [live(OWN, "desk"), live(LAPTOP, "laptop")];
+    device_of(&home, &rows[0]).await;
+    crate::commands::invite::invite_tests::held(&home, &records(1, &rows, Vec::new()));
+    let dir = stick(&home, &records(2, &rows, Vec::new()));
+    let newer = records(3, &rows, Vec::new());
+    let mut prompt = Meanwhile(|| fold_from_beside(&home, &newer));
+    let sync = restore_cmd(&dir).restore(&home, &mut prompt).await.unwrap();
+    sync.finish(&home, &Answering::nobody(), &mut Vec::new())
+        .await
+        .unwrap();
+    assert_eq!(held(&home).epoch(), swoosh::roster::Epoch(3));
+}
+
+/// On a device holding a list at the copy's number with other bytes, the copy's list is kept as the
+/// conflict and the list held stays. Red when it is written over, or dropped.
+#[tokio::test]
+async fn restore_on_a_device_keeps_a_copy_at_the_same_number_as_a_fork() {
+    let home = scratch("restore-fork");
+    let own = live(OWN, "desk");
+    device_of(&home, &own).await;
+    crate::commands::invite::invite_tests::held(
+        &home,
+        &records(2, &[own.clone(), live(LAPTOP, "laptop")], Vec::new()),
+    );
+    let before = std::fs::read(home.devices()).unwrap();
+    let dir = stick(&home, &records(2, &[own, live(0x43, "nas")], Vec::new()));
+    let copied = std::fs::read(dir.join("devices")).unwrap();
+    restore(&home, &dir, &Answering::nobody()).await.0.unwrap();
+    assert_eq!(std::fs::read(home.devices()).unwrap(), before);
+    assert_eq!(std::fs::read(home.devices_conflict()).unwrap(), copied);
 }

@@ -53,6 +53,9 @@ pub struct Place {
     pub dataless: bool,
     /// Whether its filesystem is kept in memory.
     pub in_memory: bool,
+    /// Whether it is under a directory this machine empties on its own (`/tmp`, `/var/tmp`), whatever
+    /// filesystem holds it.
+    pub emptied: bool,
 }
 
 /// Where check 4 reads a file's place from: the filesystem, or a test's stand-in.
@@ -79,8 +82,20 @@ impl Disk for RealDisk {
             ino: metadata.ino(),
             dataless: dataless(&metadata),
             in_memory: in_memory(path)?,
+            emptied: emptied(path),
         })
     }
+}
+
+/// Whether `path`, every link followed, is under `/tmp` or `/var/tmp`: emptied at boot or aged out on most
+/// systems, on whatever disk they sit (`/private` is where macOS keeps both).
+fn emptied(path: &Path) -> bool {
+    let Ok(resolved) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    ["/tmp", "/var/tmp", "/private/tmp", "/private/var/tmp"]
+        .iter()
+        .any(|temp| resolved.starts_with(temp))
 }
 
 /// Whether the file's bytes are in the cloud and not on this disk.
@@ -153,10 +168,19 @@ pub enum ForgetError {
     },
     /// Check 4: the copy is in memory.
     #[error(
-        "{} is kept in memory and is emptied when this machine restarts.",
+        "{} is kept in memory and is emptied when this machine restarts; copy your root to another disk first.",
         EscapedPath(.dir)
     )]
     InMemory {
+        /// The directory named.
+        dir: PathBuf,
+    },
+    /// Check 4: the copy is in a directory this machine empties on its own.
+    #[error(
+        "{} is in a folder this machine empties on its own; copy your root to another disk first.",
+        EscapedPath(.dir)
+    )]
+    Emptied {
         /// The directory named.
         dir: PathBuf,
     },
@@ -186,7 +210,7 @@ pub enum ForgetError {
     },
     /// Under the lock: a file of the copy is not the one check 4 read.
     #[error(
-        "the copy in {} changed while this ran; your root is still on this machine. Run it again: swoosh \
+        "the copy in {} changed during the checks; your root is still on this machine. Run it again: swoosh \
          root forget {}",
         EscapedPath(.dir),
         EscapedPath(.dir)
@@ -218,15 +242,16 @@ pub enum ForgetError {
 /// Check 4's same-disk refusal, with the line macOS adds for a synced folder.
 fn same_disk(dir: &Path) -> String {
     let line = format!(
-        "{} is on the same disk as this machine's home, so it goes wherever this disk goes. Copy your root to \
-         another disk first: swoosh root backup {}",
-        EscapedPath(dir),
+        "{} is on the same disk as this machine's home, so if this disk is lost, your root is lost with it. \
+         Copy your root to another disk first.",
         EscapedPath(dir)
     );
     if cfg!(target_os = "macos") {
         format!(
-            "{line}\nIn iCloud Drive or another synced folder, choose Remove Download on it first, then run \
-             this again."
+            "{line}\nIf {} is in iCloud Drive or another synced folder, choose Remove Download on it, then: \
+             swoosh root forget {}",
+            EscapedPath(dir),
+            EscapedPath(dir)
         )
     } else {
         line
@@ -272,6 +297,13 @@ pub async fn forget(
     let (key_place, list_place) = (place(disk, &key)?, place(disk, &list)?);
     let home_dev = place(disk, home.dir())?.dev;
     let synced = key_place.dataless && list_place.dataless;
+    // The copy's key is never the root's own file here, whatever else passes.
+    let own_file = place(disk, &home.root_key())?;
+    if (key_place.dev, key_place.ino) == (own_file.dev, own_file.ino) {
+        return Err(ForgetError::SameDisk {
+            dir: dir.to_path_buf(),
+        });
+    }
     if !synced {
         if key_place.dev == home_dev || list_place.dev == home_dev {
             return Err(ForgetError::SameDisk {
@@ -284,8 +316,17 @@ pub async fn forget(
             });
         }
     }
+    // After the disk: for the layouts the disk check misses (a subvolume, a separate `/home`), a directory
+    // this machine empties on its own is refused whatever filesystem holds it.
+    if key_place.emptied || list_place.emptied {
+        return Err(ForgetError::Emptied {
+            dir: dir.to_path_buf(),
+        });
+    }
     // 5. The copy opens under a passphrase typed now, as this root. Its header names another root before
     // anything is asked; the unlock proves the key.
+    // The bytes this check opens are kept: the copy confirmed under the lock is these, byte for byte.
+    let opened_bytes = read_key_bytes(&key)?;
     let locked = read_header(&key)?;
     let claimed = header_key(&key, &locked)?;
     if claimed != root {
@@ -316,6 +357,11 @@ pub async fn forget(
         });
     }
     drop(secret);
+    if read_key_bytes(&key)? != opened_bytes {
+        return Err(ForgetError::Changed {
+            dir: dir.to_path_buf(),
+        });
+    }
 
     // Under `home.lock`, from here to the last write.
     let home_lock = HomeWrite::take(home).await.map_err(RootError::from)?;
@@ -334,8 +380,7 @@ pub async fn forget(
     if !same(key_place, place(disk, &key)?) || !same(list_place, place(disk, &list)?) {
         return Err(changed());
     }
-    let again = read_header(&key).and_then(|locked| header_key(&key, &locked));
-    if !matches!(again, Ok(again) if again == root) {
+    if read_key_bytes(&key)? != opened_bytes {
         return Err(changed());
     }
     // 6. The copy's list is at least as new as this machine's.
@@ -351,24 +396,32 @@ pub async fn forget(
         let bytes = std::fs::read(home.devices()).map_err(super::io_at(&home.devices()))?;
         crate::config::write_private_atomic(&home_lock, &list, &bytes)
             .map_err(super::io_at(&list))?;
-        // A synced copy stops here, in one line that says what landed; any other run goes on to the delete,
-        // and says what it wrote first.
+        // A synced copy stops here, in one line that says what landed.
         if synced {
             return Err(ForgetError::Synced {
                 dir: dir.to_path_buf(),
             });
         }
+    }
+    // The copy is made durable before the one step that cannot be taken back.
+    for path in [&key, &list] {
+        std::fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(super::io_at(path))?;
+    }
+    sync_dir(dir)?;
+    super::remove_file(&home.root_key())?;
+    sync_dir(home.dir())?;
+    sweep_stages(home);
+    drop(home_lock);
+    // Said after the delete, so a line that states an effect never comes before a refusal.
+    if behind {
         let _ = writeln!(
             out,
             "brought the copy in {} up to date with this machine's list of your devices.",
             EscapedPath(dir)
         );
     }
-    super::remove_file(&home.root_key())?;
-    std::fs::File::open(home.dir())
-        .and_then(|home_dir| home_dir.sync_all())
-        .map_err(super::io_at(home.dir()))?;
-    drop(home_lock);
     Ok(Forgot {
         updated: behind,
         synced,
@@ -383,6 +436,49 @@ async fn held(home: &Home) -> Result<bifrost::NodeId, ForgetError> {
             Err(RootError::Unfinished { root: root_key }.into())
         }
         Standing::Device { .. } | Standing::Unpinned => Err(ForgetError::NotHere),
+    }
+}
+
+/// The bytes of the copy's `root.key`, read with a cap.
+fn read_key_bytes(path: &Path) -> Result<Vec<u8>, RootError> {
+    use std::io::Read as _;
+
+    /// A sealed root key is a few hundred bytes; the key store reads no more than this.
+    const CAP: u64 = 4096;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(CAP + 1).read_to_end(&mut bytes))
+        .map_err(super::io_at(path))?;
+    Ok(bytes)
+}
+
+/// Sync a directory, so the names in it are durable.
+fn sync_dir(dir: &Path) -> Result<(), RootError> {
+    std::fs::File::open(dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(super::io_at(dir))
+}
+
+/// Remove the stage files a killed key write left beside `root.key` here (`root.key.tmp.<pid>.<n>`): with the
+/// root gone, a stage is the one copy of it left in the home. Only regular files, best effort.
+fn sweep_stages(home: &Home) {
+    let Ok(entries) = std::fs::read_dir(home.dir()) else {
+        return;
+    };
+    let stage = format!("{KEY_FILE}.tmp.");
+    for entry in entries.flatten() {
+        let is_stage = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(&stage));
+        if is_stage
+            && entry
+                .path()
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.is_file())
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 

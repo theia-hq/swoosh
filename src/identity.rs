@@ -194,13 +194,25 @@ pub fn key_of(file: &KeyFile, stored: &Stored) -> Result<NodeId, UnusableKey> {
     }
 }
 
+/// The line for an [`UnusableKey`]. This machine's key is set aside by `leave --new-key`, which never needs
+/// its identity; which copy of a root to trust is the person's call, so the root's line names no command.
+fn unusable_line(unusable: &UnusableKey) -> String {
+    match unusable.kind {
+        keystore::Kind::Device => format!(
+            "this machine's key file at {} is damaged and holds no usable key; start this machine over with a \
+             new key: swoosh leave --new-key",
+            EscapedPath(&unusable.path)
+        ),
+        keystore::Kind::Root => format!(
+            "the root key file at {} is damaged and holds no usable key.",
+            EscapedPath(&unusable.path)
+        ),
+    }
+}
+
 /// A sealed key file whose header names a key nobody can hold: the file was changed outside swoosh.
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "the {} key file at {} names a key nobody can hold; restore it from your backup.",
-    match .kind { keystore::Kind::Device => "device", keystore::Kind::Root => "root" },
-    EscapedPath(.path)
-)]
+#[error("{}", unusable_line(self))]
 pub struct UnusableKey {
     /// The key file.
     pub path: std::path::PathBuf,

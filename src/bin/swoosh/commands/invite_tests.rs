@@ -1071,7 +1071,7 @@ async fn renewal_prints_its_list_after_the_prompt() {
 // --- renewing by name ---
 
 #[tokio::test]
-async fn renewing_a_lapsed_row_warns_before_the_prompt_and_says_renewed_after() {
+async fn renewing_a_lapsed_row_warns_before_the_prompt_and_says_it_had_ended_after() {
     let laptop = lapsed(LAPTOP, "laptop");
     let warning = format!(
         "warning: me/laptop ({}) ended on {}; renewing it lets whatever machine holds that key back in. If \
@@ -1079,12 +1079,7 @@ async fn renewing_a_lapsed_row_warns_before_the_prompt_and_says_renewed_after() 
         swoosh::credential::short(&key(LAPTOP)),
         Date(laptop.until),
     );
-    let renewed = format!(
-        "renewed me/laptop, which had ended on {}. Whatever machine holds {key} picks this up the next time \
-         it reaches one of your devices.",
-        Date(laptop.until),
-        key = key(LAPTOP)
-    );
+    let renewed = format!("; it had ended on {}.", Date(laptop.until));
 
     let home = scratch("lapsed-line");
     holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
@@ -1104,7 +1099,7 @@ async fn renewing_a_lapsed_row_warns_before_the_prompt_and_says_renewed_after() 
     let ran = invite_at(&home, &["laptop"], false).await;
     assert!(ran.result.is_err());
     assert!(!ran.err.contains("warning:"), "{}", ran.err);
-    assert!(!ran.err.contains("renewed"), "{}", ran.err);
+    assert!(!ran.err.contains("it had ended on"), "{}", ran.err);
     assert!(snapshot(home.dir()) == before, "nothing signed");
 }
 
@@ -2067,4 +2062,54 @@ async fn seeded_survives_a_bring_forward() {
         "still came with its key"
     );
     assert_eq!(carried.until, ci.until, "and was not renewed");
+}
+
+/// An act that cuts on the root kept here, with this machine's key revoked by the list held here, goes on:
+/// it warns before the prompt, cuts its own change, and signs no row for this machine. Red when the act
+/// signs this machine a row, refuses, or says nothing.
+#[tokio::test]
+async fn a_cutting_act_with_this_machines_key_revoked_signs_no_own_row_and_warns() {
+    let home = scratch("own-key-revoked");
+    holds(
+        &home,
+        &[revoked(OWN, "desk"), live(LAPTOP, "laptop")],
+        Vec::new(),
+    )
+    .await;
+    let ran = add_tv(&home).await;
+    let warning = "warning: this machine's key was revoked, so your devices no longer admit it. Your root \
+                   still works here.";
+    assert!(
+        ran.tape.at(warning) < ran.tape.at("<prompt>"),
+        "{}",
+        ran.err
+    );
+    let list = kept_list(&home);
+    assert!(list.members().iter().any(|member| member.node == key(TV)));
+    assert!(
+        !list.members().iter().any(|member| member.node == key(OWN)),
+        "no row for a revoked key"
+    );
+    assert!(list.is_revoked_key(&key(OWN)));
+}
+
+/// A named `invite` of a device that needs no renewal still signs, when the root kept here lists no live
+/// row for this machine: it carries one. Red when it takes the "needs no renewal" exit.
+#[tokio::test]
+async fn a_named_invite_with_nothing_due_carries_a_missing_own_row() {
+    let home = scratch("own-row-missing");
+    // me/laptop was renewed an hour ago: a renewal of it by name signs nothing on its own.
+    let laptop = fresh(LAPTOP, "laptop");
+    holds(&home, &[live(OWN, "desk"), laptop.clone()], Vec::new()).await;
+    held(&home, &records(2, &[laptop], Vec::new()));
+    let ran = invite(&home, &["laptop"]).await;
+    assert!(ran.result.is_ok(), "{:?}: {}", ran.result, ran.err);
+    assert_eq!(ran.prompts, 1, "it signs");
+    let list = kept_list(&home);
+    let own = list
+        .members()
+        .iter()
+        .find(|member| member.node == key(OWN))
+        .expect("a row for this machine");
+    assert!(own.until > now());
 }

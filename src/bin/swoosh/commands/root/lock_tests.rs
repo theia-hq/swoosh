@@ -151,7 +151,7 @@ async fn a_root_passphrase_below_the_minimum_is_refused() {
     let refused = swoosh::root::Root::mint_to(&home, &mut Counting::new(short), &mut Vec::new())
         .await
         .expect_err("a short root passphrase");
-    assert_eq!(refused.to_string(), swoosh::passphrase::TOO_SHORT);
+    assert_eq!(refused.to_string(), swoosh::passphrase::TOO_SHORT_LAST);
     assert!(content(&home) == before, "no root made");
 
     // At `root lock`, here and in a copy.
@@ -164,7 +164,7 @@ async fn a_root_passphrase_below_the_minimum_is_refused() {
         let (result, _) = root_lock(&home, at, &mut prompt).await;
         assert_eq!(
             format!("{:#}", result.unwrap_err()),
-            swoosh::passphrase::TOO_SHORT
+            swoosh::passphrase::TOO_SHORT_LAST
         );
     }
     assert!(content(&home) == here);

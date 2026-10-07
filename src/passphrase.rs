@@ -43,10 +43,14 @@ const WORD_LIST: &str = include_str!("passphrase/eff_large_wordlist.txt");
 
 /// The line before the first prompt of a passphrase to choose.
 const CHOOSE_HINT: &str =
-    "Type one of at least 15 characters, or press Enter and swoosh makes one.";
+    "Choose a passphrase of at least 15 characters, or press Enter and swoosh makes one.";
 
-/// The refusal of a chosen passphrase under [`MINIMUM`].
-pub const TOO_SHORT: &str = "a passphrase needs at least 15 characters; nothing was changed. Press Enter at the prompt and swoosh makes one.";
+/// Said between tries when a chosen passphrase is under [`MINIMUM`].
+pub const TOO_SHORT: &str = "that passphrase has fewer than 15 characters.";
+
+/// The refusal after the last try when a chosen passphrase is under [`MINIMUM`].
+pub const TOO_SHORT_LAST: &str =
+    "that passphrase has fewer than 15 characters; nothing was changed.";
 
 /// The refusal when this machine's key, which has a passphrase, is to be used and nobody is at a terminal to
 /// type it: the two ways out, the command last, which runs only at a terminal.
@@ -55,11 +59,14 @@ pub const NO_TERMINAL_FOR_KEY: &str = "this machine's key has a passphrase and t
 
 /// The refusal when the passphrase on this machine's key is to be changed or removed and nobody is at a
 /// terminal: never `lock --remove`, the command just run.
-pub const CHANGE_FOR_KEY_NEEDS_TERMINAL: &str =
-    "changing this machine's key's passphrase needs a terminal: over swoosh ssh, add -t after --";
+pub const CHANGE_FOR_KEY_NEEDS_TERMINAL: &str = "changing or removing the passphrase on this machine's key needs a \
+     terminal: over swoosh ssh, add -t after --";
 
-/// The refusal of two entries that differ.
-pub const MISMATCH: &str = "the two did not match.";
+/// Said between tries when the two entries differ.
+pub const MISMATCH: &str = "the two passphrases did not match.";
+
+/// The refusal after the last try when the two entries differ.
+pub const MISMATCH_LAST: &str = "the two passphrases did not match; nothing was changed.";
 
 /// What a prompt asks for: the key a passphrase opens or seals, named the way a person knows it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,15 +166,16 @@ pub fn unlock<T>(
 ///
 /// The reason the third round refused, or the prompt's own failure.
 pub fn choose(prompt: &mut impl Prompt, asked: Asked<'_>) -> eyre::Result<Passphrase> {
-    let mut last = MISMATCH;
+    let mut last = MISMATCH_LAST;
     for tried in 1..=TRIES {
-        last = match prompt.choose(asked)? {
+        let (between, at_last) = match prompt.choose(asked)? {
             Choice::Chosen(passphrase) => return Ok(passphrase),
-            Choice::Short => TOO_SHORT,
-            Choice::Mismatch => MISMATCH,
+            Choice::Short => (TOO_SHORT, TOO_SHORT_LAST),
+            Choice::Mismatch => (MISMATCH, MISMATCH_LAST),
         };
+        last = at_last;
         if tried < TRIES {
-            prompt.say(last);
+            prompt.say(between);
         }
     }
     eyre::bail!("{last}")
@@ -216,38 +224,59 @@ impl Prompt for Terminal {
             Asked::Copy(dir) => format!("passphrase for the copy in {}: ", EscapedPath(dir)),
             Asked::MachineKey => "passphrase for this machine's key: ".to_owned(),
         };
-        passphrase(Tty::open(asked)?.ask(&question)?)
+        passphrase(Tty::open(asked)?.read(&question)?)
     }
 
     fn choose(&mut self, asked: Asked<'_>) -> eyre::Result<Choice> {
-        let question = match asked {
-            Asked::Root | Asked::Copy(_) => "root passphrase: ",
-            Asked::MachineKey => "new passphrase for this machine's key: ",
-        };
-        let tty = Tty::open(asked)?;
-        tty.say(CHOOSE_HINT)?;
-        let mut first = tty.ask(question)?;
-        if first.is_empty() {
-            first = made();
-            // Shown on the terminal only, never on stdout or stderr, so a pipe, a log or a CI capture never
-            // holds it. Typed back once, because a root sealed under a phrase nobody wrote down is lost.
-            tty.say(&format!("your passphrase: {}", first.as_str()))?;
-            tty.say("Keep it where you keep your passwords, then type it once more.")?;
-        } else if let Choice::Short = chosen(Zeroizing::new(first.as_str().to_owned()))? {
-            return Ok(Choice::Short);
-        }
-        let second = tty.ask("again: ")?;
-        if first != second {
-            return Ok(Choice::Mismatch);
-        }
-        chosen(first)
+        round(&mut Tty::open(asked)?, asked)
     }
 
     fn say(&mut self, line: &str) {
         if let Ok(tty) = Tty::open(Asked::MachineKey) {
-            let _ = tty.say(line);
+            let _ = tty.tell(line);
         }
     }
+}
+
+/// Where one round of choosing reads and writes: the terminal, or a test's script.
+pub(crate) trait Lines {
+    /// Show `line` where the person types.
+    fn say(&mut self, line: &str) -> eyre::Result<()>;
+
+    /// Show `prompt`, then read one line, unechoed.
+    fn ask(&mut self, prompt: &str) -> eyre::Result<Zeroizing<String>>;
+}
+
+/// One round of choosing a new passphrase for `asked`, on `lines`: the hint, then the first entry. An empty
+/// entry makes a passphrase, shown where the person types and nowhere else; a short one ends the round before
+/// `again:` is asked, changing nothing. Then `again:`, which must match.
+pub(crate) fn round(lines: &mut impl Lines, asked: Asked<'_>) -> eyre::Result<Choice> {
+    let question = match asked {
+        Asked::Root => "new root passphrase: ".to_owned(),
+        Asked::Copy(dir) => format!("new passphrase for the copy in {}: ", EscapedPath(dir)),
+        Asked::MachineKey => "new passphrase for this machine's key: ".to_owned(),
+    };
+    lines.say(CHOOSE_HINT)?;
+    let mut first = lines.ask(&question)?;
+    if first.is_empty() {
+        first = made();
+        // Shown on the terminal only, never on stdout or stderr, so a pipe, a log or a CI capture never holds
+        // it, and built in a buffer that wipes itself. Typed back once, because a root sealed under a phrase
+        // nobody wrote down is lost.
+        let mut shown = Zeroizing::new(String::with_capacity(first.len() + 20));
+        shown.push_str("your passphrase: ");
+        shown.push_str(&first);
+        lines.say(&shown)?;
+        lines.say("Keep it where you keep your passwords, then type it once more.")?;
+    } else if let Choice::Short = chosen(Zeroizing::new(first.as_str().to_owned()))? {
+        // The one gate, `chosen`, before `again:` is asked.
+        return Ok(Choice::Short);
+    }
+    let second = lines.ask("again: ")?;
+    if first != second {
+        return Ok(Choice::Mismatch);
+    }
+    chosen(first)
 }
 
 /// Typed text as a passphrase: put in the one byte form every sealed file uses, and never empty.
@@ -257,6 +286,16 @@ pub(crate) fn passphrase(text: Zeroizing<String>) -> eyre::Result<Passphrase> {
 
 /// The open controlling terminal.
 struct Tty(std::fs::File);
+
+impl Lines for Tty {
+    fn say(&mut self, line: &str) -> eyre::Result<()> {
+        self.tell(line)
+    }
+
+    fn ask(&mut self, prompt: &str) -> eyre::Result<Zeroizing<String>> {
+        self.read(prompt)
+    }
+}
 
 impl Tty {
     /// Open `/dev/tty` for reading and writing. The prompt is written there too, so it reaches the
@@ -274,7 +313,7 @@ impl Tty {
     }
 
     /// Write `line` and end it.
-    fn say(&self, line: &str) -> eyre::Result<()> {
+    fn tell(&self, line: &str) -> eyre::Result<()> {
         use std::io::Write as _;
 
         (&self.0).write_all(format!("{line}\n").as_bytes())?;
@@ -282,7 +321,7 @@ impl Tty {
     }
 
     /// Write `prompt`, then read one line with echo off.
-    fn ask(&self, prompt: &str) -> eyre::Result<Zeroizing<String>> {
+    fn read(&self, prompt: &str) -> eyre::Result<Zeroizing<String>> {
         use std::io::Write as _;
 
         (&self.0).write_all(prompt.as_bytes())?;
