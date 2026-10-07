@@ -30,22 +30,22 @@ test-support = []
 # locally regardless of the rev; CI (no parent config) resolves the rev from GitHub. All bifrost-* crates
 # live in one repo, so they share one rev. Bump these deliberately each release (see the reproducible-build
 # gate in .github/workflows/release.yml and the lock-regen step in notes/02-DECISIONS.md).
-bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "00570a3c4f310c00521ce6b3ba6a113d4ac12036" }
-bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "00570a3c4f310c00521ce6b3ba6a113d4ac12036" }
-bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "00570a3c4f310c00521ce6b3ba6a113d4ac12036" }
-bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "00570a3c4f310c00521ce6b3ba6a113d4ac12036" }
-bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "00570a3c4f310c00521ce6b3ba6a113d4ac12036" }
+bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "da370eeff9722ffa32111813b8db91e4e1fd925c" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "da370eeff9722ffa32111813b8db91e4e1fd925c" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "da370eeff9722ffa32111813b8db91e4e1fd925c" }
+bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "da370eeff9722ffa32111813b8db91e4e1fd925c" }
+bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "da370eeff9722ffa32111813b8db91e4e1fd925c" }
 # The key file store, in its own repo, pinned to its v0.1.0 commit.
 keystore = { git = "https://github.com/theia-hq/keystore", rev = "70faffa51afbc6d9b219da173d43311a9cd3e8c4" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "a7c82bf58db5d54795b4a3c544da8ca7d2e0a81c" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "0a94560f4809d93575c0db8068e8dbcbe4fc33f3" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "3cfa31993e9e400fc41787f0000f6b7b9f89d93e" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "6939f4d65f6645706be603c4cccc04eb3010ed62" }
-measure = { git = "https://github.com/theia-hq/services", rev = "6939f4d65f6645706be603c4cccc04eb3010ed62" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "6939f4d65f6645706be603c4cccc04eb3010ed62", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "6939f4d65f6645706be603c4cccc04eb3010ed62" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "12429daf32d6ce99f58bc2ac5c5c27a64f8c000b" }
+measure = { git = "https://github.com/theia-hq/services", rev = "12429daf32d6ce99f58bc2ac5c5c27a64f8c000b" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "12429daf32d6ce99f58bc2ac5c5c27a64f8c000b", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "12429daf32d6ce99f58bc2ac5c5c27a64f8c000b" }
 
 # The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
 # sending it.
@@ -73,11 +73,15 @@ swoosh = { path = ".", features = ["test-support"] }
 
 # The in-process transport the `gated_measure` proof drives: two mem nodes share a global registry, so a
 # client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "00570a3c4f310c00521ce6b3ba6a113d4ac12036" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "da370eeff9722ffa32111813b8db91e4e1fd925c" }
 
 # `test-util` gives the control-client deadline test tokio's paused clock, so the 5 s read bound is
 # asserted without a wall-clock wait. Dev-only: the shipped binary never compiles it in.
 tokio = { version = "1", features = ["test-util"] }
+
+# A relay is named by its URL (`bifrost::Relay` is made from a `url::Url`), so a test builds the relayed path
+# a transport reports. Already in the tree through bifrost; dev-only.
+url = "2"
 
 [lints.clippy]
 unwrap_used = "deny"

@@ -626,6 +626,11 @@ impl bifrost::Session for HostilePeer {
 
     /// A double that carries nothing has nothing to end.
     fn close(&self) {}
+
+    /// No transport under it, so no path: the default `conn_info`'s, once.
+    fn path_changes(&self) -> bifrost::PathChanges {
+        bifrost::PathChanges::fixed(bifrost::Path::Unknown)
+    }
 }
 
 #[cfg(test)]

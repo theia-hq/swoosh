@@ -14,7 +14,7 @@ use nauthy::{Link, Service};
 use tightbeam::tunnel::{Connector, ServiceSession};
 
 use crate::contacts::{Candidate, Contacts};
-use crate::escape::escaped_report;
+use crate::escape::{Escaped, escaped_report};
 use crate::peer::Peer;
 use crate::transport;
 
@@ -292,16 +292,33 @@ pub fn fanout_outcome(
     }
 }
 
-/// The `path:` a session takes, for the line `ping`, `speed` and `status <machine>` print: `direct`, or
-/// `through a relay` for a path a relay still carries, read after a probe so a hole-punch that landed
-/// during it reports `direct`. A path that is direct and relayed at once is still `through a relay`: it
-/// is not direct until the relay is gone. A transport that does not expose its path says `unknown`
-/// rather than a reassuring answer.
-pub fn conn_path(info: &ConnInfo) -> &'static str {
-    match info.path {
-        Path::Direct => "direct",
-        Path::Relayed | Path::Mixed => "through a relay",
-        Path::Unknown => "unknown",
+/// The `path:` a session takes, for the line `ping`, `speed` and `status <machine>` print: the one path
+/// carrying its bytes, as the transport has selected it, read after a probe so a hole-punch that landed
+/// during it reports `direct`. A direct path with a relay kept open as a standby is `direct`: the relay
+/// carries nothing. A transport that does not expose its path says `unknown` rather than a reassuring
+/// answer.
+pub fn conn_path(info: &ConnInfo) -> PathLine<'_> {
+    PathLine(&info.path)
+}
+
+/// A [`Path`] in the words a line prints it in: `direct`, `relayed through <host>`, or `unknown`.
+///
+/// The relay's host is the transport's report, and a relay can be named by the peer, so it prints through
+/// the shared escaper, never raw. A relay URL with no host (not one a relay serves from) prints as
+/// `relayed`, naming nothing rather than the whole URL.
+#[derive(Debug, Clone, Copy)]
+pub struct PathLine<'a>(pub &'a Path);
+
+impl core::fmt::Display for PathLine<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Path::Direct => f.write_str("direct"),
+            Path::Relayed(relay) => match relay.url().host_str() {
+                Some(host) => write!(f, "relayed through {}", Escaped(host)),
+                None => f.write_str("relayed"),
+            },
+            Path::Unknown => f.write_str("unknown"),
+        }
     }
 }
 
