@@ -23,7 +23,9 @@ use nauthy::{Revocation, RevocationId, VerifyKey};
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
 
-use super::{Committed, MEANWHILE, Minted, Root, RootError, RootPlace, RootVerb, STOP, Seam};
+use super::{
+    BETWEEN_READS, Committed, MEANWHILE, Minted, Root, RootError, RootPlace, RootVerb, STOP, Seam,
+};
 use crate::codec::{Id, MAX_REVOKED, MAX_REVOKED_KEYS};
 use crate::config;
 use crate::contacts::DeviceLabel;
@@ -2581,6 +2583,78 @@ async fn a_restore_on_a_device_killed_after_its_key_holds_the_copys_list() {
             .any(|member| member.node == key(OWN)),
         "the next cut carries this machine's row"
     );
+}
+
+/// A prompt that runs `.0` when it is asked to unlock, then answers as `.1` does.
+struct Then<F: FnMut()>(F, Counting);
+
+impl<F: FnMut()> Prompt for Then<F> {
+    fn terminal(&self) -> bool {
+        true
+    }
+
+    fn unlock(&mut self, asked: Asked<'_>) -> eyre::Result<Passphrase> {
+        (self.0)();
+        self.1.unlock(asked)
+    }
+
+    fn choose(&mut self, asked: Asked<'_>) -> eyre::Result<Choice> {
+        self.1.choose(asked)
+    }
+
+    fn say(&mut self, line: &str) {
+        self.1.say(line);
+    }
+}
+
+/// A copy whose storage serves the key store other bytes than restore reads as bytes (A, then B, then A
+/// again) passes both of restore's reads around the unlock: the passphrase opens B, and A is what would be
+/// published. Staged and opened under the lock, A refuses as a copy that changed before anything is written,
+/// and leaves no stage. A is this root damaged, which does not open, and then another root sealed under the
+/// same passphrase, which opens but names another root. Red when the stage is published unproven, or proven
+/// by its unlock alone.
+#[tokio::test]
+async fn restore_refuses_bytes_that_do_not_open_after_they_were_staged() {
+    let mut damaged = sealed(ROOT);
+    let last = damaged.len() - 1;
+    damaged[last] ^= 0xff;
+    for (tag, served) in [("damaged", damaged), ("another-root", sealed(OTHER))] {
+        let home = home(&format!("restore-staged-{tag}"));
+        let dir = beside(&home, "copy");
+        let _ = std::fs::remove_dir_all(&dir);
+        copy(
+            &dir,
+            ROOT,
+            &records(1, vec![own_row()], Vec::new(), Vec::new()),
+        );
+        let key_file = dir.join("root.key");
+        // A as restore reads it, B for the key store's read, and A again for the prompt's re-read.
+        std::fs::write(&key_file, &served).unwrap();
+        let (at, own) = (key_file.clone(), sealed(ROOT));
+        BETWEEN_READS.set(Some(Box::new(move || std::fs::write(&at, own).unwrap())));
+        let mut prompt = Then(
+            || std::fs::write(&key_file, &served).unwrap(),
+            Counting::new([PASS]),
+        );
+        let refused = super::restore(&home, &dir, &mut prompt).await;
+        BETWEEN_READS.set(None);
+        assert!(
+            matches!(&refused, Err(super::RestoreError::Changed { dir: changed }) if *changed == dir),
+            "{tag}: {refused:?}"
+        );
+        assert_eq!(prompt.1.events(), 1, "{tag}: the key store's read opened");
+        assert!(!home.devices().exists(), "{tag}: no list written");
+        assert!(
+            !home.root_key().exists(),
+            "{tag}: the root was never written"
+        );
+        let stages: Vec<_> = std::fs::read_dir(home.dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with("root.key"))
+            .collect();
+        assert!(stages.is_empty(), "{tag}: no stage left: {stages:?}");
+    }
 }
 
 /// A list that lands while a restore's re-cut waits for the lock, and already lists this machine, is carried

@@ -2590,5 +2590,21 @@ async fn meanwhile(home_lock: &HomeWrite, home: &Home) -> Result<(), RootError> 
 }
 
 #[cfg(test)]
+thread_local! {
+    /// What a test does to a copy's `root.key` once restore has read it as bytes and before the key store
+    /// reads it, on the thread the restore runs on: to serve other bytes to each open, as some storage can.
+    static BETWEEN_READS: core::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// Run what a test left in [`BETWEEN_READS`]. Nothing outside tests.
+fn between_reads() {
+    #[cfg(test)]
+    if let Some(then) = BETWEEN_READS.take() {
+        then();
+    }
+}
+
+#[cfg(test)]
 #[path = "root_tests.rs"]
 mod root_tests;

@@ -501,8 +501,9 @@ fn sync_dir(dir: &Path) -> Result<(), RootError> {
         .map_err(super::io_at(dir))
 }
 
-/// Remove the stage files a killed key write left beside `root.key` here (`root.key.tmp.<pid>.<n>`): with the
-/// root gone, a stage is the one copy of it left in the home. Only regular files, best effort.
+/// Remove the stage files a killed key write left beside `root.key` here (`root.key.tmp.<pid>.<n>`, and a
+/// restore's `root.key.tmp.restore`): with the root gone, a stage is the one copy of it left in the home. Only
+/// regular files, best effort.
 fn sweep_stages(home: &Home) {
     let Ok(entries) = std::fs::read_dir(home.dir()) else {
         return;

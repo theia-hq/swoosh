@@ -8,16 +8,17 @@
 //!
 //! 1. [`restore`]: every check, the copy's passphrase, then under `home.lock` the root's files. A copy is its
 //!    key and the last list it signed, so a copy without its list, or with one its root did not sign, is
-//!    refused before the prompt, and the bytes that verified then are the ones written; so are the key's, the
-//!    bytes the passphrase opened, never sealed again. The order is `devices`, then `root.key`, then this
-//!    machine's row, `key.cert` and the pin. On a device of this root `root.key` is the commit point (the
-//!    home keeps the root from then on), so everything the copy brings lands before it: on a device the list
-//!    goes through the fold, the one path that writes `devices`, and elsewhere it is written only over an
-//!    older list or none, decided under the lock. This machine's row needs nothing signed when it is live; a
-//!    lapsed row is renewed and an absent one added under the suggested name for 90 days, as a mint signs its
-//!    own, and that cut is kept here, offered to nobody. On a machine that kept no root, a crash before the
-//!    pin leaves a root with no pin, which running this again (or the next `invite`) finishes; on a device,
-//!    the next act that cuts carries the row.
+//!    refused before the prompt, and the bytes that verified then are the ones written; so are the key's,
+//!    never sealed again, staged in the home and opened there with the passphrase as this root before
+//!    anything of the root is written, so the bytes published are bytes proven to open. The order is
+//!    `devices`, then `root.key`, then this machine's row, `key.cert` and the pin. On a device of this root
+//!    `root.key` is the commit point (the home keeps the root from then on), so everything the copy brings
+//!    lands before it: on a device the list goes through the fold, the one path that writes `devices`, and
+//!    elsewhere it is written only over an older list or none, decided under the lock. This machine's row
+//!    needs nothing signed when it is live; a lapsed row is renewed and an absent one added under the
+//!    suggested name for 90 days, as a mint signs its own, and that cut is kept here, offered to nobody. On a
+//!    machine that kept no root, a crash before the pin leaves a root with no pin, which running this again
+//!    (or the next `invite`) finishes; on a device, the next act that cuts carries the row.
 //! 2. [`Restored::sync`]: an exchange with the devices the copy lists, then `invited-by`, for 10 s, which
 //!    brings the list here up to date and gives a device that is behind this one. If that shows this
 //!    machine's key revoked, the root's files go again, the pin last, and the restore refuses.
@@ -27,14 +28,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
-use keystore::Unlock;
+use keystore::{KeyFile, Passphrase, Stored, Unlock};
 use nauthy::VerifyKey;
 use rand::seq::SliceRandom as _;
 use tightbeam::identity::AsVerifyKey as _;
 
 use super::{
-    Act, KEY_FILE, LIST_FILE, Renamed, Root, RootError, header_key, not_admitting, read_header,
-    read_key, read_list_at, remove_file, still, take_standing, unix_now,
+    Act, KEY_FILE, LIST_FILE, Renamed, Root, RootError, between_reads, header_key, not_admitting,
+    read_header, read_key, read_list_at, remove_file, still, take_standing, unix_now,
 };
 use crate::escape::EscapedPath;
 use crate::home::{Home, HomeWrite};
@@ -106,7 +107,8 @@ pub enum RestoreError {
         /// The copy's root.
         root: NodeId,
     },
-    /// The copy's key changed between the reads around its unlock.
+    /// The copy's key changed between the reads around its unlock, or its bytes, staged here, did not open
+    /// as this root with the passphrase that opened the copy.
     #[error(
         "the copy in {} changed while it was read; nothing was restored. Run it again: swoosh root restore {}",
         EscapedPath(.dir),
@@ -178,9 +180,12 @@ pub async fn restore(
             dir: dir.to_path_buf(),
         });
     }
-    // The copy's key as bytes, read before the key store reads it and again after the unlock: two reads that
-    // agree hold the key store's read between them, so the bytes written are the ones the passphrase opened.
+    // The copy's key as bytes, read before the key store reads it and again after the unlock, so a copy that
+    // changed during the prompt refuses before the lock. Agreeing reads prove nothing about the key store's
+    // read between them (storage can serve other bytes to each open), so these bytes are staged and opened
+    // again under the lock before they are published.
     let key_bytes = read_key(&key_file)?;
+    between_reads();
     let locked = read_header(&key_file)?;
     let root = header_key(&key_file, &locked)?;
     let pin = root.verify_key().map_err(RootError::from)?;
@@ -239,8 +244,9 @@ pub async fn restore(
     if !prompt.terminal() {
         return Err(RootError::NoTerminalToUnlock.into());
     }
-    // An unlock proves the header, so the key opened is this root's.
-    let (secret, _) = crate::passphrase::unlock(prompt, Asked::Copy(dir), |passphrase| {
+    // An unlock proves the header, so the key opened is this root's. The passphrase is kept to prove the
+    // bytes published.
+    let (secret, passphrase) = crate::passphrase::unlock(prompt, Asked::Copy(dir), |passphrase| {
         locked.unlock(Unlock::Passphrase(passphrase))
     })
     .map_err(|report| RestoreError::Prompt(format!("{report:#}")))?;
@@ -253,6 +259,21 @@ pub async fn restore(
     let home_lock = HomeWrite::take(home).await.map_err(RootError::from)?;
     still(&home_lock, home, standing).await?;
     not_admitting(&home_lock, home)?;
+    // The copy's key bytes, staged beside `root.key` and opened there as this root with the passphrase,
+    // before anything of the root is written: bytes that do not open refuse as a copy that changed, with
+    // nothing written. Not on a restore that stopped after its `root.key`, which keeps the one it wrote.
+    let staged = match standing {
+        Standing::InterruptedMint { .. } => None,
+        _ => Some(
+            Staged::prove(&home_lock, home, &key_bytes, root, &passphrase)?.ok_or_else(|| {
+                RestoreError::Changed {
+                    dir: dir.to_path_buf(),
+                }
+            })?,
+        ),
+    };
+    drop(key_bytes);
+    drop(passphrase);
     // 1. `devices`, never over a newer list: decided here, under the lock. A device folds the copy's list, the
     // one path that writes `devices` (newer taken, the same number with other bytes kept as the conflict,
     // older nothing); elsewhere the bytes are written only over an older list or none.
@@ -277,17 +298,15 @@ pub async fn restore(
     if super::own_key_revoked(home, pin)? {
         return Err(RestoreError::RevokedOwnKey);
     }
-    // 2. `root.key`, unless a restore that stopped left it: the copy's own bytes, the ones the passphrase
-    // opened, written over the revoked root an unpinned home may keep (which is no root). Never sealed again:
-    // it is the same key, the same lock, the same passphrase and the same file format, and a new sealing would
-    // differ only in its random salt and nonces, so nothing about how keys are stored changes, and a restored
-    // root is byte for byte its copy (a backup into that copy then keeps it). On a device this is the commit
-    // point.
-    if !matches!(standing, Standing::InterruptedMint { .. }) {
-        crate::config::write_private_atomic(&home_lock, &home.root_key(), &key_bytes)
-            .map_err(super::io_at(&home.root_key()))?;
+    // 2. `root.key`, unless a restore that stopped left it: the stage renamed into place, the copy's own
+    // bytes proven above, over the revoked root an unpinned home may keep (which is no root). Never sealed
+    // again: it is the same key, the same lock, the same passphrase and the same file format, and a new
+    // sealing would differ only in its random salt and nonces, so nothing about how keys are stored changes,
+    // and a restored root is byte for byte its copy (a backup into that copy then keeps it). On a device this
+    // is the commit point.
+    if let Some(staged) = staged {
+        staged.publish(&home_lock, home)?;
     }
-    drop(key_bytes);
     super::seam(super::Seam::Keyed)?;
     // 3. This machine's row, `key.cert` and the pin.
     let newest = crate::roster::read_held(&home.devices(), pin).map(|(list, _)| list);
@@ -328,6 +347,66 @@ pub async fn restore(
         unlocked: root_here,
         renamed,
     })
+}
+
+/// The copy's key bytes, staged in the home beside `root.key` (as `root.key.tmp.restore`) and proven there to
+/// open as this root, so the bytes published are the bytes proven. Dropped unpublished, the stage is removed.
+/// A crash after staging leaves it behind: nothing reads that name, the next restore writes over it, and
+/// `root forget` sweeps it with the root (every `root.key.tmp.` name is a stage of the root's key).
+#[derive(Debug)]
+struct Staged {
+    path: PathBuf,
+}
+
+impl Staged {
+    /// Stage `bytes` under the lock and open them as `root` with `passphrase`: `None`, the stage removed,
+    /// when they are not a sealed root key, name another root, or do not open.
+    ///
+    /// # Errors
+    ///
+    /// The stage could not be written, or the key store could not read it back.
+    fn prove(
+        home_lock: &HomeWrite,
+        home: &Home,
+        bytes: &[u8],
+        root: NodeId,
+        passphrase: &Passphrase,
+    ) -> Result<Option<Self>, RootError> {
+        let staged = Self {
+            path: home.dir().join(format!("{KEY_FILE}.tmp.restore")),
+        };
+        crate::config::write_private_atomic(home_lock, &staged.path, bytes)
+            .map_err(super::io_at(&staged.path))?;
+        let opens = match KeyFile::root(&staged.path).load() {
+            // An unlock proves the header, and the header names the root.
+            Ok(Some(Stored::Locked(locked))) => {
+                header_key(&staged.path, &locked).is_ok_and(|key| key == root)
+                    && locked.unlock(Unlock::Passphrase(passphrase)).is_ok()
+            }
+            Ok(Some(Stored::Plain(_)) | None) | Err(keystore::Error::Format { .. }) => false,
+            // A file this run wrote that cannot be read back is the home failing, not the copy changing.
+            Err(error) => return Err(error.into()),
+        };
+        Ok(opens.then_some(staged))
+    }
+
+    /// Rename the stage to `root.key`, durably.
+    ///
+    /// # Errors
+    ///
+    /// The rename, or the sync of the home after it, failed.
+    fn publish(self, home_lock: &HomeWrite, home: &Home) -> Result<(), RootError> {
+        let root_key = home.root_key();
+        crate::config::rename_private(home_lock, &self.path, &root_key)
+            .map_err(super::io_at(&root_key))
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        // Published, the name is gone already; any other failure leaves a stage the next restore writes over.
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 /// The live devices `act` lists, but `own`, in random order.
