@@ -28,7 +28,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Passphrase, Stored, Unlock};
+use keystore::{Health, KeyFile, Passphrase, Stored, Unlock};
 use nauthy::VerifyKey;
 use rand::seq::SliceRandom as _;
 use tightbeam::identity::AsVerifyKey as _;
@@ -152,6 +152,13 @@ pub struct Restored {
     /// This machine's row, renamed in the list the restore cut, when a fork kept here gave its name to
     /// another device.
     renamed: Option<Renamed>,
+    /// Whether the copy's `touch-id` lock does not open on this Mac now, as the enclave says with no dialog:
+    /// the root keeps it (a restore writes the copy's bytes), and a person sets it again to use it here.
+    /// Never on a lock that cannot be checked now.
+    pub touch_id_dead: bool,
+    /// Whether this machine's key opens with `touch-id` alone, which a machine that keeps a root does not
+    /// do: no verb gives it a new key there, so its key keeps a passphrase beside the touch.
+    pub machine_key_touch_id_alone: bool,
 }
 
 /// What the exchange after a restore found.
@@ -338,6 +345,9 @@ pub async fn restore(
     let written = crate::roster::read_held(&home.devices(), pin)
         .map_or(Epoch::UNVERSIONED, |(list, _)| list.epoch());
     drop(home_lock);
+    // Read with no dialog, after the restore is done, so it says what is there and asks nothing.
+    let touch_id_dead = prompt.health(&locked) == Some(Health::Dead);
+    let machine_key_touch_id_alone = crate::identity::touch_id_alone_beside_root(home);
     Ok(Restored {
         root,
         was_device,
@@ -346,6 +356,8 @@ pub async fn restore(
         written,
         unlocked: root_here,
         renamed,
+        touch_id_dead,
+        machine_key_touch_id_alone,
     })
 }
 

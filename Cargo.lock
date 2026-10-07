@@ -1291,6 +1291,7 @@ dependencies = [
  "ff 0.13.1",
  "generic-array 0.14.9",
  "group 0.13.0",
+ "hkdf 0.12.4",
  "pem-rfc7468 0.7.0",
  "pkcs8 0.10.2",
  "rand_core 0.6.4",
@@ -1312,7 +1313,7 @@ dependencies = [
  "digest 0.11.3",
  "ff 0.14.0",
  "group 0.14.0",
- "hkdf",
+ "hkdf 0.13.0",
  "hybrid-array",
  "pem-rfc7468 1.0.0",
  "pkcs8 0.11.0",
@@ -1393,7 +1394,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "fetch"
 version = "0.6.0"
-source = "git+https://github.com/theia-hq/services?rev=12429daf32d6ce99f58bc2ac5c5c27a64f8c000b#12429daf32d6ce99f58bc2ac5c5c27a64f8c000b"
+source = "git+https://github.com/theia-hq/services?rev=5438b29a5dce0a3be280a7effb51a820f250574e#5438b29a5dce0a3be280a7effb51a820f250574e"
 dependencies = [
  "futures",
  "reqwest 0.12.28",
@@ -1788,6 +1789,15 @@ dependencies = [
  "tinyvec",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "hkdf"
+version = "0.12.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b5f8eb2ad728638ea2c7d47a21db23b7b58a72ed6a38256b8a1849f15fbbdf7"
+dependencies = [
+ "hmac 0.12.1",
 ]
 
 [[package]]
@@ -2465,14 +2475,29 @@ dependencies = [
 [[package]]
 name = "keystore"
 version = "0.1.0"
-source = "git+https://github.com/theia-hq/keystore?rev=70faffa51afbc6d9b219da173d43311a9cd3e8c4#70faffa51afbc6d9b219da173d43311a9cd3e8c4"
+source = "git+https://github.com/theia-hq/keystore?rev=a1f149639572d3582d888f133dabd99293a0f911#a1f149639572d3582d888f133dabd99293a0f911"
 dependencies = [
  "argon2",
  "chacha20poly1305",
  "ed25519-dalek 2.2.0",
  "getrandom 0.4.3",
+ "hkdf 0.12.4",
  "icu_normalizer",
+ "keystore-enclave",
  "libc",
+ "p256 0.13.2",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "zeroize",
+]
+
+[[package]]
+name = "keystore-enclave"
+version = "0.1.0"
+source = "git+https://github.com/theia-hq/keystore?rev=a1f149639572d3582d888f133dabd99293a0f911#a1f149639572d3582d888f133dabd99293a0f911"
+dependencies = [
+ "core-foundation",
+ "security-framework-sys",
  "thiserror 2.0.20",
  "zeroize",
 ]
@@ -2568,7 +2593,7 @@ checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
 [[package]]
 name = "measure"
 version = "0.7.0"
-source = "git+https://github.com/theia-hq/services?rev=12429daf32d6ce99f58bc2ac5c5c27a64f8c000b#12429daf32d6ce99f58bc2ac5c5c27a64f8c000b"
+source = "git+https://github.com/theia-hq/services?rev=5438b29a5dce0a3be280a7effb51a820f250574e#5438b29a5dce0a3be280a7effb51a820f250574e"
 dependencies = [
  "bifrost",
  "futures",
@@ -4767,7 +4792,7 @@ dependencies = [
 [[package]]
 name = "sshh"
 version = "0.8.0"
-source = "git+https://github.com/theia-hq/services?rev=12429daf32d6ce99f58bc2ac5c5c27a64f8c000b#12429daf32d6ce99f58bc2ac5c5c27a64f8c000b"
+source = "git+https://github.com/theia-hq/services?rev=5438b29a5dce0a3be280a7effb51a820f250574e#5438b29a5dce0a3be280a7effb51a820f250574e"
 dependencies = [
  "blake3",
  "libc",
@@ -4996,7 +5021,7 @@ dependencies = [
 [[package]]
 name = "tightbeam"
 version = "0.18.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=3cfa31993e9e400fc41787f0000f6b7b9f89d93e#3cfa31993e9e400fc41787f0000f6b7b9f89d93e"
+source = "git+https://github.com/theia-hq/tightbeam?rev=e06a47a13f496f6ab100998ad77d931e6f93375f#e06a47a13f496f6ab100998ad77d931e6f93375f"
 dependencies = [
  "bifrost",
  "bifrost-iroh",
@@ -5020,7 +5045,7 @@ dependencies = [
 [[package]]
 name = "tightbeam-handler"
 version = "0.4.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=3cfa31993e9e400fc41787f0000f6b7b9f89d93e#3cfa31993e9e400fc41787f0000f6b7b9f89d93e"
+source = "git+https://github.com/theia-hq/tightbeam?rev=e06a47a13f496f6ab100998ad77d931e6f93375f#e06a47a13f496f6ab100998ad77d931e6f93375f"
 dependencies = [
  "bifrost-core",
  "nauthy",
@@ -5352,7 +5377,7 @@ dependencies = [
 [[package]]
 name = "transfer"
 version = "0.7.0"
-source = "git+https://github.com/theia-hq/services?rev=12429daf32d6ce99f58bc2ac5c5c27a64f8c000b#12429daf32d6ce99f58bc2ac5c5c27a64f8c000b"
+source = "git+https://github.com/theia-hq/services?rev=5438b29a5dce0a3be280a7effb51a820f250574e#5438b29a5dce0a3be280a7effb51a820f250574e"
 dependencies = [
  "blake3",
  "nauthy",

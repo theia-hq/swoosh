@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::time::SystemTime;
 
 use bifrost::NodeId;
-use keystore::Passphrase;
+use keystore::{Health, Passphrase};
 use nauthy::{Cap, CapError, Identity, Link, Service, Signed, VerifyKey};
 use tightbeam::identity::AsVerifyKey as _;
 use zeroize::Zeroizing;
@@ -26,6 +26,9 @@ use crate::home::{Home, HomeWrite, ServeLock};
 use crate::passphrase::{Asked, Choice, Prompt};
 use crate::roster::{Member, RevokedDevice, RosterDoc};
 use crate::sync::{Answer, Dial, ExchangeError};
+use crate::touch::{Touch, TouchHere, Touched};
+
+pub mod touch_id;
 
 /// A revoked device for an update: `node`, under the name `gone`, which any number of revoked devices may
 /// share. For a test that needs only the key revoked; one that reads the name builds its own.
@@ -318,6 +321,11 @@ pub fn stored_key(file: &keystore::KeyFile) -> NodeId {
 /// A [`Prompt`] that counts prompt events and the passphrases they read, answers from a script, and keeps
 /// what it was told between tries.
 ///
+/// A touch is scripted on its own: whether one may be asked here ([`at_this_mac`](Self::at_this_mac),
+/// [`here`](Self::here)), how a `touch-id` lock reads, and how each touch ends
+/// ([`touching`](Self::touching)). Unscripted, it asks for none, as a build with no enclave does. Every touch
+/// asked for is kept, act and all ([`touches`](Self::touches)), and one with no answer left fails.
+///
 /// One event is one call to `unlock` or `choose`, whatever the terminal behind it would read: one round of
 /// `choose` asks for the passphrase twice, and is still one event of two reads. A call with no answer left is
 /// still an event: it refuses the way a missing terminal does, after being asked. So a test that scripts
@@ -328,6 +336,11 @@ pub struct Counting {
     events: usize,
     reads: usize,
     said: Vec<String>,
+    warned: Vec<String>,
+    here: TouchHere,
+    health: Option<Health>,
+    touched: VecDeque<Touched>,
+    touches: Vec<Touch>,
 }
 
 impl Counting {
@@ -338,7 +351,42 @@ impl Counting {
             events: 0,
             reads: 0,
             said: Vec::new(),
+            warned: Vec::new(),
+            here: TouchHere::NoEnclave,
+            health: None,
+            touched: VecDeque::new(),
+            touches: Vec::new(),
         }
+    }
+
+    /// At this Mac's own terminal, where every `touch-id` lock reads `health`.
+    #[must_use]
+    pub fn at_this_mac(self, health: Health) -> Self {
+        Self {
+            here: TouchHere::Here,
+            health: Some(health),
+            ..self
+        }
+    }
+
+    /// Where a touch may or may not be asked, as `here` says.
+    #[must_use]
+    pub fn here(self, here: TouchHere) -> Self {
+        Self { here, ..self }
+    }
+
+    /// Each touch asked for ends as the next of `touched`, in order.
+    #[must_use]
+    pub fn touching(self, touched: impl IntoIterator<Item = Touched>) -> Self {
+        Self {
+            touched: touched.into_iter().collect(),
+            ..self
+        }
+    }
+
+    /// Every touch asked for, in order.
+    pub fn touches(&self) -> &[Touch] {
+        &self.touches
     }
 
     /// A prompt with no answers: every event refuses.
@@ -356,9 +404,14 @@ impl Counting {
         self.reads
     }
 
-    /// What the prompt was told between tries, in order.
+    /// What the prompt was told between tries, in order, warnings included.
     pub fn said(&self) -> &[String] {
         &self.said
+    }
+
+    /// What the prompt was warned of, in order: the lines bound for stderr.
+    pub fn warned(&self) -> &[String] {
+        &self.warned
     }
 
     fn answer(&mut self, reads: usize) -> eyre::Result<Zeroizing<String>> {
@@ -401,6 +454,33 @@ impl Prompt for Counting {
 
     fn say(&mut self, line: &str) {
         self.said.push(line.to_owned());
+    }
+
+    /// Kept beside what was said, in the same order, and apart in [`warned`](Self::warned), so a test reads
+    /// the conversation whole and each channel on its own.
+    fn warn(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+        self.warned.push(line.to_owned());
+    }
+
+    fn touch_here(&self) -> TouchHere {
+        self.here
+    }
+
+    /// The scripted reading, for a file that has a `touch-id` lock.
+    fn health(&self, locked: &keystore::Locked) -> Option<Health> {
+        locked
+            .methods()
+            .any(|method| method == keystore::Method::TouchId)
+            .then_some(self.health)
+            .flatten()
+    }
+
+    fn touch(&mut self, touch: Touch) -> Touched {
+        self.touches.push(touch);
+        self.touched
+            .pop_front()
+            .unwrap_or_else(|| Touched::Failed(eyre::eyre!("no scripted touch left")))
     }
 }
 

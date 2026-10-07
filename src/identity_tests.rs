@@ -8,6 +8,9 @@ use keystore::{Method, Stored};
 
 use crate::home::Home;
 use crate::passphrase::Scripted;
+use crate::testkit::Counting;
+use crate::testkit::touch_id::{DEVICE_PASSPHRASE_AND_TOUCH_ID, DEVICE_TOUCH_ID_ALONE, PASSPHRASE};
+use crate::touch::{Then, TouchAct, TouchHere, Touched};
 
 /// A unique home under the temp dir, created empty on entry. Returns `(home, dir)`. Shared with the
 /// `backup` and `protect` tests beneath this module.
@@ -448,5 +451,506 @@ async fn a_damaged_machine_key_beside_a_kept_root_names_no_command() {
         )
     );
 
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `bytes` as this machine's key in `home`, owner-only.
+fn placed(home: &Home, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    super::make_machine_dir(home).expect("the key's dir");
+    std::fs::write(home.key(), bytes).expect("write the key file");
+    std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600))
+        .expect("chmod 600");
+}
+
+/// A root kept in `home`, with a `touch-id` lock beside its passphrase.
+fn root_with_touch_id(home: &Home) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::write(
+        home.root_key(),
+        crate::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
+    )
+    .expect("write the root");
+    std::fs::set_permissions(home.root_key(), std::fs::Permissions::from_mode(0o600))
+        .expect("chmod 600");
+}
+
+/// The methods of this machine's key's locks.
+fn locks(home: &Home) -> Vec<Method> {
+    match keystore::KeyFile::device(home.key())
+        .load()
+        .expect("load")
+        .expect("a key")
+    {
+        Stored::Plain(_) => Vec::new(),
+        Stored::Locked(locked) => locked.methods().collect(),
+    }
+}
+
+/// A passphrase the minimum takes.
+const LONG: &str = "a passphrase long enough";
+
+/// `lock touch-id` at this Mac, the touch scripted to prove the new lock.
+async fn lock_touch_id(home: &Home, prompt: &mut Counting) -> eyre::Result<super::Locked> {
+    super::lock(home, Method::TouchId, false, prompt).await
+}
+
+fn proving(answers: impl IntoIterator<Item = &'static str>) -> Counting {
+    Counting::new(answers)
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Opened(None)])
+}
+
+/// Where no root is kept, `touch-id` replaces the passphrase as the key's one lock: the passphrase opens it,
+/// the touch proves the new lock, then the passphrase lock comes off. The line saying what a new fingerprint
+/// does comes before anything is asked. Red when the predicate says a root is kept.
+#[tokio::test]
+async fn lock_touch_id_where_no_root_is_kept_replaces_the_passphrase() {
+    let (home, dir) = home("touch-id-replaces");
+    sealed(&home, PASSPHRASE).await;
+    let mut prompt = proving([PASSPHRASE]);
+    let locked = lock_touch_id(&home, &mut prompt).await.unwrap();
+    assert_eq!(locked, super::Locked::TouchId { passphrase: false });
+    assert_eq!(prompt.events(), 1, "the passphrase that opens it");
+    let [touch] = prompt.touches() else {
+        panic!("one touch: {:?}", prompt.touches());
+    };
+    assert!(matches!(
+        touch.act,
+        TouchAct::BesidePassphrase {
+            then: Then::Drop,
+            ..
+        }
+    ));
+    assert_eq!(touch.reason, crate::touch::CHECK_MACHINE_KEY);
+    assert_eq!(prompt.said()[0], crate::touch::ONE_LOCK);
+    assert_eq!(
+        prompt.warned(),
+        [crate::touch::ONE_LOCK],
+        "the notice is a warning, and the wait for the touch is not"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Where a root is kept, the passphrase stays beside the touch, since no verb gives this machine a new key
+/// there; and with the root under `touch-id` too, the line says one dialog cannot show which of the two it
+/// opens. Red when the shared predicate is not read.
+#[tokio::test]
+async fn lock_touch_id_beside_a_kept_root_keeps_the_passphrase() {
+    let (home, dir) = home("touch-id-beside-root");
+    sealed(&home, PASSPHRASE).await;
+    root_with_touch_id(&home);
+    let mut prompt = proving([PASSPHRASE]);
+    let locked = lock_touch_id(&home, &mut prompt).await.unwrap();
+    assert_eq!(locked, super::Locked::TouchId { passphrase: true });
+    assert!(matches!(
+        prompt.touches()[0].act,
+        TouchAct::BesidePassphrase {
+            then: Then::Keep,
+            ..
+        }
+    ));
+    assert_eq!(
+        prompt.warned(),
+        [crate::touch::BESIDE_PASSPHRASE, crate::touch::SHARED_FINGER]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A plain key beside a kept root is sealed under a chosen passphrase first, then the touch goes beside it.
+/// Red when it is sealed under `touch-id` alone.
+#[tokio::test]
+async fn lock_touch_id_on_a_plain_key_beside_a_root_chooses_a_passphrase_first() {
+    let (home, dir) = home("touch-id-plain-root");
+    super::inspect(&home).expect("a plain key");
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    let mut prompt = proving([LONG]);
+    lock_touch_id(&home, &mut prompt).await.unwrap();
+    assert_eq!(
+        locks(&home),
+        [Method::Passphrase],
+        "sealed before the touch"
+    );
+    assert!(matches!(
+        prompt.touches()[0].act,
+        TouchAct::BesidePassphrase {
+            then: Then::Keep,
+            ..
+        }
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A touch that does not prove the new lock, after a plain key beside a root was sealed under a chosen
+/// passphrase, says the passphrase stays, never that nothing changed. Red when it says nothing changed.
+#[tokio::test]
+async fn a_declined_touch_after_sealing_says_the_passphrase_stays() {
+    let (home, dir) = home("touch-id-plain-root-declined");
+    super::inspect(&home).expect("a plain key");
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    let mut prompt = Counting::new([LONG])
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Declined]);
+    let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+    assert_eq!(format!("{refused:#}"), super::SEALED_NOT_TOUCHED);
+    assert_eq!(locks(&home), [Method::Passphrase]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A plain key where no root is kept is sealed by the touch alone.
+#[tokio::test]
+async fn lock_touch_id_on_a_plain_key_seals_it_by_the_touch() {
+    let (home, dir) = home("touch-id-plain");
+    super::inspect(&home).expect("a plain key");
+    let mut prompt = proving([]);
+    lock_touch_id(&home, &mut prompt).await.unwrap();
+    assert_eq!(prompt.events(), 0);
+    assert!(matches!(prompt.touches()[0].act, TouchAct::SealPlain));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Over ssh, `lock touch-id` refuses before anything is asked or written, naming the variable.
+#[tokio::test]
+async fn lock_touch_id_over_ssh_refuses_naming_the_variable() {
+    let (home, dir) = home("touch-id-ssh");
+    sealed(&home, PASSPHRASE).await;
+    let before = std::fs::read(home.key()).unwrap();
+    let mut prompt = Counting::new([PASSPHRASE]).here(TouchHere::OverSsh("SSH_CLIENT"));
+    let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+    assert_eq!(
+        format!("{refused:#}"),
+        "touch-id is set at this Mac's own screen, not over ssh (SSH_CLIENT is set); run it there: swoosh \
+         lock touch-id"
+    );
+    assert_eq!(prompt.events(), 0);
+    assert!(prompt.said().is_empty());
+    assert_eq!(std::fs::read(home.key()).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Under `touch-id` alone where no root is kept, the key already has the one lock asked for: nothing is
+/// asked, said or touched. Beside a kept root, it gains a passphrase instead. Red when it is set again.
+#[tokio::test]
+async fn lock_touch_id_on_a_touch_id_only_key_changes_nothing_or_adds_a_passphrase() {
+    let (home, dir) = home("touch-id-again");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    let before = std::fs::read(home.key()).unwrap();
+    let mut prompt = proving([]);
+    let locked = lock_touch_id(&home, &mut prompt).await.unwrap();
+    assert_eq!(locked, super::Locked::HasTouchId);
+    assert!(prompt.touches().is_empty(), "{:?}", prompt.touches());
+    assert_eq!(prompt.events(), 0);
+    assert!(prompt.said().is_empty(), "{:?}", prompt.said());
+    assert_eq!(std::fs::read(home.key()).unwrap(), before);
+
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    let mut prompt = proving([LONG]);
+    let locked = lock_touch_id(&home, &mut prompt).await.unwrap();
+    assert_eq!(locked, super::Locked::PassphraseBesideTouchId);
+    assert!(matches!(
+        prompt.touches()[0].act,
+        TouchAct::AddPassphrase {
+            then: Then::Keep,
+            ..
+        }
+    ));
+    assert_eq!(
+        prompt.touches()[0].reason,
+        crate::touch::SET_PASSPHRASE_ON_MACHINE_KEY
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `lock touch-id` on a key under `touch-id` alone with no root kept answers by the lock's health, read
+/// with no dialog: one that does not open here, or cannot be checked now, is refused with the line that says
+/// why, never called done, and nothing is touched or written. Red when the health is not read.
+#[tokio::test]
+async fn lock_touch_id_on_a_touch_id_only_key_that_does_not_open_is_refused() {
+    let (home, dir) = home("touch-id-has-not-live");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    let before = std::fs::read(home.key()).unwrap();
+    for (health, refusal) in [
+        (
+            keystore::Health::Dead,
+            "touch-id does not open this machine's key on this Mac now.\n\
+             if you added a fingerprint, removing it lets touch-id open the key again.\n\
+             otherwise, give this machine a new key and join again: swoosh leave --new-key",
+        ),
+        (
+            keystore::Health::Unchecked,
+            "touch-id cannot be checked now (the screen may be locked, or Touch ID locked out), and this \
+             machine's key has no other lock; unlock this Mac and run this again",
+        ),
+    ] {
+        let mut prompt = Counting::refusing().at_this_mac(health);
+        let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+        assert_eq!(format!("{refused:#}"), refusal, "{health:?}");
+        assert!(prompt.touches().is_empty());
+        assert_eq!(prompt.events(), 0);
+        assert_eq!(std::fs::read(home.key()).unwrap(), before);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Over ssh, `lock touch-id` on a key under `touch-id` alone is refused as any set is, never called done:
+/// the health that answers it is read only at this Mac's own screen. Red when the answer comes first.
+#[tokio::test]
+async fn lock_touch_id_on_a_touch_id_only_key_over_ssh_is_refused() {
+    let (home, dir) = home("touch-id-has-ssh");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    let mut prompt = Counting::refusing().here(TouchHere::OverSsh("SSH_TTY"));
+    let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("not over ssh (SSH_TTY is set)"),
+        "{refused:#}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A passphrase for a key under `touch-id` alone goes beside it where a root is kept, said as such, with
+/// the dialog naming that act. Red when it reads as a first passphrase.
+#[tokio::test]
+async fn lock_passphrase_on_a_touch_id_only_key_beside_a_root_goes_beside_it() {
+    let (home, dir) = home("passphrase-beside-touch");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    let mut prompt = proving([LONG]);
+    let locked = super::lock(&home, Method::Passphrase, false, &mut prompt)
+        .await
+        .unwrap();
+    assert_eq!(locked, super::Locked::PassphraseBesideTouchId);
+    assert_eq!(
+        prompt.touches()[0].reason,
+        crate::touch::SET_PASSPHRASE_ON_MACHINE_KEY
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `lock touch-id --remove` on a key under `touch-id` alone opens it by the touch, with the dialog naming
+/// the removal, and leaves it plain.
+#[tokio::test]
+async fn lock_touch_id_remove_on_a_touch_id_only_key_names_the_removal() {
+    let (home, dir) = home("remove-touch-id-alone");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    let mut prompt = proving([]);
+    let locked = super::lock(&home, Method::TouchId, true, &mut prompt)
+        .await
+        .unwrap();
+    assert_eq!(locked, super::Locked::TouchIdRemoved { plain: true });
+    assert!(matches!(prompt.touches()[0].act, TouchAct::RemoveTouchId));
+    assert_eq!(
+        prompt.touches()[0].reason,
+        crate::touch::REMOVE_TOUCH_ID_FROM_MACHINE_KEY
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A touch that fails after a plain key beside a root was sealed under a chosen passphrase says why, then
+/// that the passphrase stays. Red when the failure says only that the touch did not open.
+#[tokio::test]
+async fn a_failed_touch_after_sealing_says_the_passphrase_stays() {
+    let (home, dir) = home("touch-id-plain-root-failed");
+    super::inspect(&home).expect("a plain key");
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    let mut prompt = Counting::new([LONG])
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Failed(eyre::eyre!("the enclave refused"))]);
+    let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+    assert_eq!(
+        format!("{refused:#}"),
+        "touch-id did not open this machine's key: the enclave refused\n\
+         the key is locked with the passphrase you chose."
+    );
+    assert_eq!(locks(&home), [Method::Passphrase]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A passphrase for a key under `touch-id` alone replaces it where no root is kept.
+#[tokio::test]
+async fn lock_passphrase_on_a_touch_id_only_key_replaces_it() {
+    let (home, dir) = home("passphrase-replaces-touch");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    let mut prompt = proving([LONG]);
+    let locked = super::lock(&home, Method::Passphrase, false, &mut prompt)
+        .await
+        .unwrap();
+    assert_eq!(locked, super::Locked::Set { first: true });
+    assert!(matches!(
+        prompt.touches()[0].act,
+        TouchAct::AddPassphrase {
+            then: Then::Drop,
+            ..
+        }
+    ));
+    assert_eq!(
+        prompt.touches()[0].reason,
+        crate::touch::SET_PASSPHRASE_ON_MACHINE_KEY
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Beside a kept root, the passphrase is not removed from a key under `touch-id` too, so the key never ends
+/// on the touch alone there. Red when the refusal is dropped.
+#[tokio::test]
+async fn lock_remove_beside_a_root_keeps_the_passphrase_by_the_touch() {
+    let (home, dir) = home("remove-keeps-passphrase");
+    placed(&home, &DEVICE_PASSPHRASE_AND_TOUCH_ID);
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    let before = std::fs::read(home.key()).unwrap();
+    let mut prompt = Counting::new([PASSPHRASE]);
+    let refused = super::lock(&home, Method::Passphrase, true, &mut prompt)
+        .await
+        .unwrap_err();
+    assert_eq!(format!("{refused:#}"), super::KEEPS_PASSPHRASE);
+    assert_eq!(prompt.events(), 0);
+    assert_eq!(std::fs::read(home.key()).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `lock touch-id --remove` opens with the passphrase where there is one, and leaves it the one lock.
+#[tokio::test]
+async fn lock_touch_id_remove_leaves_the_passphrase() {
+    let (home, dir) = home("remove-touch-id");
+    placed(&home, &DEVICE_PASSPHRASE_AND_TOUCH_ID);
+    let mut prompt = Counting::new([PASSPHRASE]);
+    let locked = super::lock(&home, Method::TouchId, true, &mut prompt)
+        .await
+        .unwrap();
+    assert_eq!(locked, super::Locked::TouchIdRemoved { plain: false });
+    assert_eq!(locks(&home), [Method::Passphrase]);
+    assert!(prompt.touches().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `lock touch-id --remove` on a key with no `touch-id` changes nothing and asks nothing.
+#[tokio::test]
+async fn lock_touch_id_remove_with_none_changes_nothing() {
+    let (home, dir) = home("remove-no-touch-id");
+    sealed(&home, PASSPHRASE).await;
+    let mut prompt = Counting::refusing();
+    let locked = super::lock(&home, Method::TouchId, true, &mut prompt)
+        .await
+        .unwrap();
+    assert_eq!(locked, super::Locked::NoTouchId);
+    assert_eq!(prompt.events(), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A key under `touch-id` alone opens by the touch for a serving verb, as the node it was sealed as.
+#[tokio::test]
+async fn a_touch_id_only_key_resolves_by_the_touch() {
+    let (home, dir) = home("resolve-touch-id");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    let mut prompt = Counting::refusing()
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Opened(Some(keystore::Secret::take(
+            &mut [0x11; 32],
+        )))]);
+    let secret = super::resolve_with(super::Identity::Persisted, &home, &mut prompt).unwrap();
+    assert_eq!(
+        secret.node_id(),
+        crate::testkit::TestNode::seeded(0x11).node_id()
+    );
+    assert_eq!(prompt.touches()[0].reason, crate::touch::USE_MACHINE_KEY);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Under `touch-id` alone, a lock that does not open here is refused before a new passphrase is typed:
+/// `lock` routes the touch first. Red when the passphrase is chosen before the route.
+#[tokio::test]
+async fn a_dead_touch_id_only_key_refuses_before_a_passphrase_is_chosen() {
+    let (home, dir) = home("dead-before-choose");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    let mut prompt = Counting::new([LONG]).at_this_mac(keystore::Health::Dead);
+    let refused = super::lock(&home, Method::Passphrase, false, &mut prompt)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{refused:#}").starts_with("touch-id does not open this machine's key"),
+        "{refused:#}"
+    );
+    assert_eq!(prompt.events(), 0, "no passphrase chosen");
+
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    let mut prompt = Counting::new([LONG]).at_this_mac(keystore::Health::Dead);
+    let refused = lock_touch_id(&home, &mut prompt).await.unwrap_err();
+    assert!(
+        format!("{refused:#}").starts_with("touch-id does not open this machine's key"),
+        "{refused:#}"
+    );
+    assert_eq!(prompt.events(), 0, "no passphrase chosen beside a root");
+    assert!(prompt.touches().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Setting `touch-id` again over a lock that does not open here says first to check for a fingerprint
+/// nobody added, as a warning, before the passphrase is asked. Red when the old lock's health is not read.
+#[tokio::test]
+async fn setting_a_dead_touch_id_again_says_to_check_touch_id_first() {
+    let (home, dir) = home("dead-reset");
+    placed(&home, &DEVICE_PASSPHRASE_AND_TOUCH_ID);
+    let mut prompt = Counting::new([PASSPHRASE])
+        .at_this_mac(keystore::Health::Dead)
+        .touching([Touched::Opened(None)]);
+    lock_touch_id(&home, &mut prompt).await.unwrap();
+    assert_eq!(
+        prompt.warned(),
+        [
+            crate::touch::ONE_LOCK.to_owned(),
+            "warning: touch-id does not open this machine's key on this Mac now.\n\
+             the new lock will open with every fingerprint now in Touch ID & Password; if one is not yours, \
+             press ctrl-c and remove it first."
+                .to_owned()
+        ]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Joining again the invite whose key a home holds under `touch-id` alone opens it by the touch, and writes
+/// nothing: the open proves it. Red when the claim is proven by a passphrase the file does not hold.
+#[tokio::test]
+async fn rewriting_a_touch_id_only_key_proves_it_by_the_touch_and_writes_nothing() {
+    let (home, dir) = home("touch-id-rewrite");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    let before = std::fs::read(home.key()).unwrap();
+    let mut prompt = Counting::refusing()
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::Opened(Some(keystore::Secret::take(
+            &mut [0x11; 32],
+        )))]);
+    super::write_with(&[0x11; 32], &home, &mut prompt).expect("the same key, proven, is a no-op");
+    let [touch] = prompt.touches() else {
+        panic!("one touch: {:?}", prompt.touches());
+    };
+    assert!(matches!(touch.act, TouchAct::Open));
+    assert_eq!(touch.reason, crate::touch::USE_MACHINE_KEY);
+    assert_eq!(prompt.events(), 0);
+    assert_eq!(std::fs::read(home.key()).unwrap(), before);
+
+    let mut prompt = Counting::refusing()
+        .at_this_mac(keystore::Health::Live)
+        .touching([Touched::TimedOut]);
+    let refused = super::write_with(&[0x11; 32], &home, &mut prompt).unwrap_err();
+    assert_eq!(format!("{refused:#}"), crate::touch::TIMED_OUT);
+    assert_eq!(std::fs::read(home.key()).unwrap(), before);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The state a root arriving beside a key under `touch-id` alone leaves is read from the header alone:
+/// the key's lock list, and a root kept here. Red when either half is dropped.
+#[tokio::test]
+async fn touch_id_alone_beside_a_root_needs_both() {
+    let (home, dir) = home("alone-beside-root");
+    placed(&home, &DEVICE_TOUCH_ID_ALONE);
+    assert!(!super::touch_id_alone_beside_root(&home), "no root kept");
+    std::fs::write(home.root_key(), b"a root kept here").expect("a root beside it");
+    assert!(super::touch_id_alone_beside_root(&home));
+    placed(&home, &DEVICE_PASSPHRASE_AND_TOUCH_ID);
+    assert!(
+        !super::touch_id_alone_beside_root(&home),
+        "a passphrase beside it"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

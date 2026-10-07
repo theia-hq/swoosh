@@ -11,7 +11,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Method, Stored};
+use keystore::{Health, KeyFile, Method, Stored};
 use nauthy::{Denylist, VerifyKey};
 use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME};
 use swoosh::credential::short;
@@ -19,11 +19,12 @@ use swoosh::escape::EscapedPath;
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _};
+use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::{Date, Root, RootPlace};
 use swoosh::roster::{Member, RevokedDevice};
 use swoosh::serve::control_codec::{ControlError, DisabledList, ServiceMenu};
 use swoosh::standing::{Standing, StandingError};
-use swoosh::{badge, roster, standing, sync};
+use swoosh::{badge, roster, standing, sync, touch};
 use tightbeam::identity::AsVerifyKey as _;
 
 /// What bare `status` prints on stdout.
@@ -84,8 +85,12 @@ pub(crate) async fn run_to(
 /// Everything bare `status` says, gathered from the home's files before anything prints.
 #[derive(Debug)]
 pub(crate) struct Report {
-    /// This machine's key and how it is locked; `None` when the home has no key.
-    key: Option<(NodeId, Vec<Method>)>,
+    /// This machine's key, how it is locked, and its `touch-id` lock as the enclave reads it with no dialog;
+    /// `None` when the home has no key.
+    key: Option<(NodeId, Vec<Method>, Option<TouchId>)>,
+    /// The `touch-id` lock of the root kept here, as the enclave reads it with no dialog; `None` when it has
+    /// none, or no root is kept here.
+    root_touch: Option<TouchId>,
     /// The home's directory.
     home: String,
     /// The lines after `home:`: the root's line, or what this machine is when it is no device.
@@ -113,17 +118,34 @@ impl Report {
     /// Read the home: its standing, the root's records or the update it holds, its contacts, the links it
     /// shared, and what a running `serve` serves.
     pub(crate) async fn gather(home: &Home, key: Option<&Stored>, now: u64) -> eyre::Result<Self> {
+        Self::gather_with(home, key, now, &Terminal).await
+    }
+
+    /// [`gather`](Self::gather), asking `prompt` how each `touch-id` lock reads: never a dialog.
+    pub(crate) async fn gather_with(
+        home: &Home,
+        key: Option<&Stored>,
+        now: u64,
+        prompt: &impl Prompt,
+    ) -> eyre::Result<Self> {
+        let root_touch = match KeyFile::root(home.root_key()).load() {
+            Ok(Some(Stored::Locked(root))) => TouchId::of(prompt, &root),
+            _ => None,
+        };
         let mut report = Self {
             key: key
                 .map(|key| {
-                    let methods = match key {
-                        Stored::Plain(_) => Vec::new(),
-                        Stored::Locked(locked) => locked.methods().collect(),
+                    let (methods, touch) = match key {
+                        Stored::Plain(_) => (Vec::new(), None),
+                        Stored::Locked(locked) => {
+                            (locked.methods().collect(), TouchId::of(prompt, locked))
+                        }
                     };
                     swoosh::identity::key_of(&KeyFile::device(home.key()), key)
-                        .map(|node| (node, methods))
+                        .map(|node| (node, methods, touch))
                 })
                 .transpose()?,
+            root_touch,
             home: EscapedPath(home.dir()).to_string(),
             top: Vec::new(),
             this_machine: None,
@@ -176,6 +198,21 @@ impl Report {
                 }
             },
         }
+        // This machine's key under a `touch-id` lock that does not open here says how to mend it.
+        if let Some((_, methods, Some(TouchId::Dead))) = &report.key {
+            let file = KeyFile::device(home.key());
+            let passphrase = methods.contains(&Method::Passphrase);
+            report
+                .nags
+                .push(touch::Lines::of(Asked::MachineKey, &file, passphrase).dead());
+        }
+        // A key under `touch-id` alone beside a root kept here: the state a root made or restored beside it
+        // leaves, said until the passphrase goes beside the touch.
+        if swoosh::identity::touch_id_alone_beside_root(home) {
+            report
+                .nags
+                .push(swoosh::identity::TOUCH_ID_ALONE_BESIDE_ROOT.to_owned());
+        }
         // A root kept here whose machine's key is revoked still works; the devices refuse this machine.
         if let Ok(Standing::HoldsRoot { pin, .. }) = Standing::read(home).await
             && swoosh::root::own_key_revoked(home, pin.verify_key()?)?
@@ -224,8 +261,16 @@ impl Report {
             Standing::HoldsRoot { pin, until } => {
                 let inspected = Root::inspect(home, RootPlace::Home).await?;
                 self.top = vec![format!(
-                    "root:{pin} on this machine, locked with a passphrase."
+                    "root:{pin} on this machine, locked with {}.",
+                    root_locks(self.root_touch)
                 )];
+                // A lock that does not open says how to mend it, last; one that cannot be checked says
+                // nothing more than its line.
+                if self.root_touch == Some(TouchId::Dead) {
+                    let file = KeyFile::root(home.root_key());
+                    self.nags
+                        .push(touch::Lines::of(Asked::Root, &file, true).dead());
+                }
                 // Another copy of the root, or this machine, may have revoked a device since the last act
                 // here: the records as the next act would bring them forward say so before the list does.
                 let device = |row: &Member, revoked| DeviceRow {
@@ -301,7 +346,7 @@ impl Report {
             }
         };
         let until = unix(until);
-        let Some((key, _)) = self.key.as_ref() else {
+        let Some((key, _, _)) = self.key.as_ref() else {
             return Ok(());
         };
         let own = key.verify_key().ok();
@@ -371,7 +416,10 @@ impl Report {
     /// The devices table: every row the root has, revoked ones too; the root itself is never a row. A live
     /// row leaves the state column blank.
     fn devices(&mut self, title: String, rows: &[DeviceRow], now: u64) {
-        let own = self.key.as_ref().and_then(|(key, _)| key.verify_key().ok());
+        let own = self
+            .key
+            .as_ref()
+            .and_then(|(key, _, _)| key.verify_key().ok());
         let rows = rows
             .iter()
             .map(|row| {
@@ -426,10 +474,10 @@ impl Report {
     /// say what to do.
     pub(crate) fn render(&self) -> String {
         let mut head = match &self.key {
-            Some((key, methods)) => {
+            Some((key, methods, touch)) => {
                 vec![
                     format!("key: {key}"),
-                    format!("key lock: {}", lock(methods)),
+                    format!("key lock: {}", lock(methods, *touch)),
                 ]
             }
             None => vec!["key: none yet".to_owned()],
@@ -471,18 +519,67 @@ impl Report {
 }
 
 /// The words `key lock:` names the key's locks by: `none` for a plain key, else each lock's method, in the
-/// key file's order.
-fn lock(methods: &[Method]) -> String {
+/// key file's order, a `touch-id` lock with how it reads where that is not live: on a build with no enclave,
+/// that it opens only on a Mac, so nobody there reads it as a way in.
+fn lock(methods: &[Method], touch: Option<TouchId>) -> String {
     if methods.is_empty() {
         return "none".to_owned();
     }
     methods
         .iter()
-        .map(|method| match method {
-            Method::Passphrase => "passphrase",
+        .map(|method| match (method, touch) {
+            (Method::Passphrase, _) => "passphrase",
+            (Method::TouchId, Some(TouchId::Dead)) => "touch-id (does not open on this Mac now)",
+            (Method::TouchId, Some(TouchId::Unchecked)) => "touch-id (cannot be checked now)",
+            (Method::TouchId, Some(TouchId::Unasked)) => {
+                "touch-id (opens only on the Mac that set it)"
+            }
+            (Method::TouchId, Some(TouchId::Live) | None) => "touch-id",
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// What the root's line says it is locked with: its passphrase, and its `touch-id` lock with how it reads.
+fn root_locks(touch: Option<TouchId>) -> &'static str {
+    match touch {
+        None => "a passphrase",
+        Some(TouchId::Live) => "a passphrase and touch-id",
+        Some(TouchId::Unasked) => {
+            "a passphrase and touch-id, which opens only on the Mac that set it"
+        }
+        Some(TouchId::Dead) => "a passphrase and touch-id, which does not open on this Mac now",
+        Some(TouchId::Unchecked) => "a passphrase and touch-id, which cannot be checked now",
+    }
+}
+
+/// A `touch-id` lock as `status` reads it, with no dialog: the enclave's answer, or none on a build with no
+/// enclave. Unchecked never reads as dead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TouchId {
+    /// It opens with a touch here.
+    Live,
+    /// It does not open on this Mac now.
+    Dead,
+    /// The enclave could not say now.
+    Unchecked,
+    /// Not asked: this build has no enclave.
+    Unasked,
+}
+
+impl TouchId {
+    /// `locked`'s `touch-id` lock, as `prompt` reads it; `None` when it has none.
+    fn of(prompt: &impl Prompt, locked: &keystore::Locked) -> Option<Self> {
+        if !locked.methods().any(|method| method == Method::TouchId) {
+            return None;
+        }
+        Some(match prompt.health(locked) {
+            Some(Health::Live) => Self::Live,
+            Some(Health::Dead) => Self::Dead,
+            Some(Health::Unchecked) => Self::Unchecked,
+            None => Self::Unasked,
+        })
+    }
 }
 
 /// Whether a home with no key still holds what a device or a root leaves: a home restored from a system

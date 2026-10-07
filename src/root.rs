@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use bifrost::NodeId;
-use keystore::{KeyFile, Protection, Stored, Unlock};
+use keystore::{KeyFile, Protection, Stored};
 use nauthy::{Link, RevocationId, VerifyKey};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use zeroize::Zeroizing;
@@ -52,7 +52,7 @@ mod restore;
 
 pub use backup::{BackupError, Copied, backup};
 pub use forget::{Disk, ForgetError, Forgot, Place, RealDisk, forget};
-pub use lock::{Relocked, RootLockError, lock};
+pub use lock::{Relocked, RootLockError, TouchIdChange, lock, lock_touch_id};
 pub use restore::{RestoreError, Restored, Synced, restore};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
@@ -746,10 +746,15 @@ impl Root {
         if verb.cuts() && act.copy.is_none() && own_key_revoked(home, act.key.verify_key()?)? {
             let _ = writeln!(out, "{OWN_KEY_REVOKED}");
         }
-        let asked = act.asked();
-        let (secret, _) = crate::passphrase::unlock(prompt, asked, |passphrase| {
-            found.locked.unlock(Unlock::Passphrase(passphrase))
-        })
+        // A touch where the root has a `touch-id` lock that can be asked for here, else its passphrase.
+        let file = KeyFile::root(act.key_file());
+        let secret = crate::touch::open(
+            prompt,
+            &file,
+            &found.locked,
+            act.asked(),
+            crate::touch::USE_ROOT,
+        )
         .map_err(prompt_error)?;
         let mut root = Self { secret, act };
         if verb.cuts() {
@@ -1665,6 +1670,11 @@ async fn make(
     };
     root.act.minted = true;
     root.take_own(&home_lock, own)?;
+    // A root made beside a key under `touch-id` alone leaves the one state the two-lock rule refuses
+    // elsewhere; read from the header, so nothing is asked.
+    if crate::identity::touch_id_alone_beside_root(home) {
+        let _ = writeln!(out, "{}", crate::identity::TOUCH_ID_ALONE_BESIDE_ROOT);
+    }
     Ok(root)
 }
 
@@ -1708,9 +1718,13 @@ async fn finish(
         return Err(RootError::NoTerminalToUnlock);
     }
     // Asked before any line that states an effect, as `present` asks.
-    let (secret, _) = crate::passphrase::unlock(prompt, Asked::Root, |passphrase| {
-        locked.unlock(Unlock::Passphrase(passphrase))
-    })
+    let secret = crate::touch::open(
+        prompt,
+        &KeyFile::root(home.root_key()),
+        &locked,
+        Asked::Root,
+        crate::touch::USE_ROOT,
+    )
     .map_err(prompt_error)?;
     let mut root = Root { secret, act };
     root.act.bring_forward(out)?;

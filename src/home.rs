@@ -162,6 +162,16 @@ impl Home {
         self.dir.join("root.key")
     }
 
+    /// Whether a root is kept on this machine: something is at [`root_key`](Self::root_key). The one test
+    /// for it, which `leave` refuses by and the locks on this machine's key follow.
+    ///
+    /// # Errors
+    ///
+    /// Whether anything is there could not be told.
+    pub fn keeps_root(&self) -> std::io::Result<bool> {
+        keeps_root_in(&self.dir)
+    }
+
     /// `<home>/revoked`: everything this machine refuses for good, in one grow-only file: the links it
     /// took back, the device keys it no longer admits, and the roots it no longer trusts. A running `serve`
     /// reads it live. Read and written only through [`crate::revoked`].
@@ -322,6 +332,16 @@ pub(crate) fn canonical_to_be(path: &Path) -> PathBuf {
         }
     }
     resolved
+}
+
+/// [`Home::keeps_root`] for the home at `dir`, for a caller that holds a path into the home rather than the
+/// home.
+///
+/// # Errors
+///
+/// Whether anything is there could not be told.
+pub fn keeps_root_in(dir: &Path) -> std::io::Result<bool> {
+    dir.join("root.key").try_exists()
 }
 
 /// The per-user runtime root every `serve`'s socket lives under: `$XDG_RUNTIME_DIR/swoosh` on

@@ -303,6 +303,38 @@ async fn mint_asks_choose_then_repeat() {
     );
 }
 
+/// A root made beside a key under `touch-id` alone says what a restore says there: the key should take a
+/// passphrase beside the touch, since no verb gives this machine a new key once a root is kept. A plain key
+/// gets no such line. Red when the line is dropped.
+#[tokio::test]
+async fn a_root_made_beside_a_touch_id_only_key_says_to_add_a_passphrase() {
+    let home = home("mint-beside-touch-id");
+    crate::identity::make_machine_dir(&home).unwrap();
+    std::fs::write(home.key(), crate::testkit::touch_id::DEVICE_TOUCH_ID_ALONE).unwrap();
+    std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut out = Vec::new();
+    Root::mint_to(&home, &mut Counting::new([PASS]), &mut out)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.lines()
+            .any(|line| line == crate::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
+        "{out}"
+    );
+
+    let home = self::home("mint-beside-plain");
+    let mut out = Vec::new();
+    Root::mint_to(&home, &mut Counting::new([PASS]), &mut out)
+        .await
+        .unwrap();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        !out.contains(crate::identity::TOUCH_ID_ALONE_BESIDE_ROOT),
+        "{out}"
+    );
+}
+
 #[tokio::test]
 async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
     let home = home("mint-sealed");
@@ -2735,4 +2767,52 @@ async fn a_list_revoking_this_machine_after_its_row_was_renewed_never_stops_the_
         !left.members().iter().any(|member| member.node == key(OWN)),
         "no live row for a revoked key"
     );
+}
+
+// --- present: a root with a `touch-id` lock ---
+
+/// Make the root kept in `home` the one under its passphrase and a `touch-id` lock.
+fn touch_id_root(home: &Home) {
+    std::fs::remove_file(home.root_key()).unwrap();
+    private(
+        &home.root_key(),
+        &crate::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
+    );
+}
+
+/// A root with a live `touch-id` lock opens by one touch, asked with the root's reason, and no passphrase.
+/// Red when present asks the passphrase first.
+#[tokio::test]
+async fn present_opens_a_root_by_its_touch() {
+    let home = home("present-touch");
+    holds(&home, &records(0, vec![own_row()], Vec::new(), Vec::new())).await;
+    touch_id_root(&home);
+    let mut prompt = Counting::refusing()
+        .at_this_mac(keystore::Health::Live)
+        .touching([crate::touch::Touched::Opened(Some(keystore::Secret::take(
+            &mut TestRoot::seeded(ROOT).seed(),
+        )))]);
+    let (root, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
+    assert_eq!(root.unwrap().key(), TestRoot::seeded(ROOT).node_id());
+    assert_eq!(prompt.events(), 0);
+    let [touch] = prompt.touches() else {
+        panic!("one touch");
+    };
+    assert_eq!(touch.reason, crate::touch::USE_ROOT);
+    assert_eq!(touch.file.path(), home.root_key());
+}
+
+/// A cancel at present falls to the root's passphrase, which opens it.
+#[tokio::test]
+async fn present_falls_to_the_passphrase_on_a_cancel() {
+    let home = home("present-touch-cancel");
+    holds(&home, &records(0, vec![own_row()], Vec::new(), Vec::new())).await;
+    touch_id_root(&home);
+    let mut prompt = Counting::new([PASS])
+        .at_this_mac(keystore::Health::Live)
+        .touching([crate::touch::Touched::Declined]);
+    let (root, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
+    assert_eq!(root.unwrap().key(), TestRoot::seeded(ROOT).node_id());
+    assert_eq!(prompt.events(), 1);
+    assert_eq!(prompt.touches().len(), 1);
 }

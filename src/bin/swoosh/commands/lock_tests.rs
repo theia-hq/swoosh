@@ -49,16 +49,25 @@ fn lock_with_none_or_plain_is_a_usage_error() {
     }
 }
 
-/// `--help` offers exactly the methods `LockMethod` has, each mapped to the key store's. A value with no
-/// method arm fails to compile at `From<LockMethod> for Method`.
+/// The methods `lock` offers on this build: `touch-id` on a Mac only, where there is an enclave to make it.
+#[cfg(target_os = "macos")]
+const OFFERED: [&str; 2] = ["passphrase", "touch-id"];
+#[cfg(not(target_os = "macos"))]
+const OFFERED: [&str; 1] = ["passphrase"];
+
+/// `--help` offers exactly the methods `LockMethod` has on this build, each mapped to the key store's. A value
+/// with no method arm fails to compile at `From<LockMethod> for Method`. Red when `touch-id` is offered off a
+/// Mac.
 #[test]
 fn lock_help_lists_exactly_the_lockmethod_values() {
     let values: Vec<String> = LockMethod::value_variants()
         .iter()
         .map(|value| value.to_possible_value().unwrap().get_name().to_owned())
         .collect();
-    assert_eq!(values, ["passphrase"]);
+    assert_eq!(values, OFFERED);
     assert_eq!(Method::from(LockMethod::Passphrase), Method::Passphrase);
+    #[cfg(target_os = "macos")]
+    assert_eq!(Method::from(LockMethod::TouchId), Method::TouchId);
     let mut cli = Cli::command();
     let help = cli
         .find_subcommand_mut("lock")
@@ -69,7 +78,10 @@ fn lock_help_lists_exactly_the_lockmethod_values() {
     assert!(!help.contains("plain"), "{help}");
     // The short form: one line per argument, the values inline, never a block per value.
     assert!(!help.contains("Possible values:"), "{help}");
-    assert!(help.contains("[possible values: passphrase]"), "{help}");
+    assert!(
+        help.contains(&format!("[possible values: {}]", OFFERED.join(", "))),
+        "{help}"
+    );
 }
 
 /// A plain key gets a passphrase: the header is sealed, and the first time says `serve` asks at each start.
@@ -88,8 +100,9 @@ async fn lock_sets_one_and_warns_about_restart() {
     );
     assert_eq!(
         err,
-        "set a passphrase on this machine's key. Every command that acts as this machine now asks for it, \
-         so swoosh serve cannot start with nobody at a terminal.\n"
+        "set a passphrase on this machine's key.\n\
+         every command that acts as this machine now asks for it, so swoosh serve cannot start with nobody \
+         at a terminal.\n"
     );
 }
 
@@ -146,8 +159,8 @@ async fn lock_remove_needs_the_current_one() {
     assert!(locks(&home).is_empty(), "plain now");
     assert_eq!(
         err,
-        "removed the passphrase from this machine's key: anyone with a copy of its key file can now act as \
-         this machine.\n"
+        "removed the passphrase from this machine's key, which now has no lock.\n\
+         anyone with a copy of its key file can act as this machine.\n"
     );
 }
 
@@ -279,4 +292,62 @@ async fn lock_at_no_terminal_says_it_needs_one() {
         );
         assert!(!refusal.contains("lock --remove"));
     }
+}
+
+/// `lock touch-id` on a key under `touch-id` alone where no root is kept, whose lock reads live here, says it
+/// already has that one lock, and asks nothing. On a Mac only, where `touch-id` is a value; the decision itself is the library's, tested
+/// on every build.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn lock_touch_id_on_a_touch_id_only_key_says_nothing_changed() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = scratch("lock-touch-id-has");
+    swoosh::identity::make_machine_dir(&home).unwrap();
+    std::fs::write(home.key(), swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE).unwrap();
+    std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let mut prompt = Counting::refusing().at_this_mac(keystore::Health::Live);
+    let (result, err) = lock(&home, &["touch-id"], &mut prompt).await;
+    result.unwrap();
+    assert_eq!(
+        err,
+        "this machine's key already has touch-id as its only lock; nothing was changed.\n"
+    );
+    assert_eq!(prompt.events(), 0);
+    assert!(prompt.touches().is_empty());
+}
+
+/// A passphrase put on a key under `touch-id` alone beside a kept root goes beside the touch, and the done
+/// line says so. Red when it reads as a first passphrase, which would say every command now asks for it.
+#[tokio::test]
+async fn lock_passphrase_beside_touch_id_says_it_went_beside() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = scratch("lock-passphrase-beside-touch-id");
+    swoosh::identity::make_machine_dir(&home).unwrap();
+    std::fs::write(home.key(), swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE).unwrap();
+    std::fs::set_permissions(home.key(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(home.root_key(), b"a root kept here").unwrap();
+    let mut prompt = Counting::new([LONG])
+        .at_this_mac(keystore::Health::Live)
+        .touching([swoosh::touch::Touched::Opened(None)]);
+    let (result, err) = lock(&home, &["passphrase"], &mut prompt).await;
+    result.unwrap();
+    assert_eq!(
+        err,
+        "added a passphrase to this machine's key, beside touch-id.\n"
+    );
+}
+
+/// `lock --remove`'s help says it removes the lock named, whichever that is.
+#[test]
+fn lock_remove_help_names_this_lock() {
+    let mut cli = Cli::command();
+    cli.build();
+    let help = cli
+        .find_subcommand_mut("lock")
+        .unwrap()
+        .render_help()
+        .to_string();
+    assert!(help.contains("remove this lock instead"), "{help}");
 }

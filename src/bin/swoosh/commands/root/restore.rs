@@ -9,10 +9,12 @@ use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
+use keystore::KeyFile;
 use swoosh::home::Home;
-use swoosh::passphrase::{Prompt, Terminal};
+use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::Restored;
 use swoosh::sync::{Dial, NodeDial};
+use swoosh::touch::Lines;
 use swoosh::transport::ReachArgs;
 
 /// put your root on this machine from a copy
@@ -60,6 +62,8 @@ impl RestoreSync {
         err: &mut impl Write,
     ) -> eyre::Result<()> {
         let (root, was_device) = (self.restored.root, self.restored.was_device);
+        let touch_id_dead = self.restored.touch_id_dead;
+        let machine_key_touch_id_alone = self.restored.machine_key_touch_id_alone;
         let synced = self.restored.sync(home, dial).await?;
         let short = swoosh::credential::short(&root);
         match &synced.from {
@@ -84,6 +88,16 @@ impl RestoreSync {
                 "a copy of your root, locked with its passphrase, is wherever the lost copy is. A strong \
                  passphrase holds; a weak or seen one does not: then replace your root: swoosh revoke --help"
             )?;
+        }
+        // The copy's bytes are kept whole, a lock that does not open here included; these say what to do.
+        // A dead lock gets the line every use of it says, check on an added fingerprint and all: the command
+        // it names sets a lock that opens under every finger enrolled now.
+        if touch_id_dead {
+            let file = KeyFile::root(home.root_key());
+            writeln!(err, "{}", Lines::of(Asked::Root, &file, true).dead())?;
+        }
+        if machine_key_touch_id_alone {
+            writeln!(err, "{}", swoosh::identity::TOUCH_ID_ALONE_BESIDE_ROOT)?;
         }
         Ok(())
     }

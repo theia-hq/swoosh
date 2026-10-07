@@ -30,7 +30,7 @@ pub enum RootCmd {
     Forget(forget::ForgetCmd),
     /// put your root on this machine from a copy
     Restore(restore::RestoreCmd),
-    /// change your root's passphrase, on this machine or in <dir>
+    /// change your root's locks, on this machine or in <dir>
     Lock(lock::RootLockCmd),
 }
 
