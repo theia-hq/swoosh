@@ -18,7 +18,7 @@ rest is planned and lands as it is built.
 - [x] `invite add` / `adopt` enroll a second machine under your signet via a signed invite
 - [x] `ssh` open an ssh session to a peer over the overlay
 - [x] `reach` reach any service a peer serves, on stdout or a local port
-- [x] `send` push a file or directory to a peer, verified end to end
+- [x] `send` push a file or directory to a peer
 - [x] `fetch` mint a local URL whose fetch egresses at a node you name
 - [x] `sync` bring your device list up to date with your other devices, both ways
 - [x] `grant issue` / `narrow` `swoosh:` capability links, bearer or bound to a device or fleet

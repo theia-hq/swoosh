@@ -16,6 +16,15 @@ All notable changes to swoosh, newest first.
   same words.
 - **`ping -v` prints the path on its own line.** It prints first, then again each time the path
   changes, instead of on every probe line.
+- **A received file's line names who sent it.** It now reads
+  `<service>: received <path> (<bytes> bytes) from <key>`, where `<key>` is the machine that sent the file.
+- **`send` waits at most 10 minutes for the receiver to answer each file.** Then it reports
+  `the receiver did not answer within 10 minutes; the file may have arrived`. Before, it had no limit.
+
+### Fixed
+- **A push could replace a file in the receiving directory, or write outside it through a symlink.**
+  A pushed file now lands only as a new file inside that directory.
+  A name already taken there is refused, and `send` prints a `skip` line and exits non-zero.
 
 ## v0.14.1
 

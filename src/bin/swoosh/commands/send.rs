@@ -1,19 +1,20 @@
-//! `swoosh send <path>... <peer>`: PUSH a file or directory to a peer, verified end to end.
+//! `swoosh send <path>... <peer>`: PUSH a file or directory to a peer.
 //!
 //! The sender-initiates half of file transfer: you dial a waiting receiver (a node serving `recv:`), open
-//! one stream per file, and drive [`bifrost::wire`]'s verified [`Transfer`](bifrost::wire::Transfer)
-//! directly, the same engine `swoosh serve recv=recv:` receives with. A directory expands to every file
-//! under it, and files pipeline over concurrent streams (capped so one connection is not flooded); a file
-//! that cannot be read is skipped and reported, not fatal, so a courier sends what it can.
+//! one stream per file, and drive [`transfer::wire`]'s [`Transfer`](transfer::wire::Transfer) directly,
+//! the same wire `swoosh serve recv=recv:` receives with. A directory expands to every file under it, and
+//! files pipeline over concurrent streams (capped so one connection is not flooded); a file that cannot be
+//! read is skipped and reported, not fatal, so a courier sends what it can.
 //!
 //! The `recv:` service is family-gated like `ping`/`speed`, so send presents the same
 //! membership badge (or an explicit `--present` link) to prove membership before the receiver admits a
-//! stream. Integrity is checked end to end by `bifrost-wire`: the sender hashes each file with BLAKE3 and
-//! the receiver re-hashes as bytes arrive, so a truncated or tampered transfer is rejected, never written.
+//! stream. The sender hashes each file with BLAKE3 and the receiver re-hashes as bytes arrive, which
+//! catches a fault on the way and a file that changed while it was sent. It stops no lying sender, who
+//! names the root of whatever it sends: who sent the bytes is the gate's proof, and the receiver's line
+//! names that key.
 
 use std::path::{Path, PathBuf};
 
-use bifrost::wire::{Blob, Transfer};
 use bifrost::{Discovery, Node, Session, Transport};
 use clap::Args;
 use eyre::WrapErr as _;
@@ -25,6 +26,7 @@ use swoosh::escape::{Escaped, EscapedPath, causes, escaped_report};
 use swoosh::peer::Peer;
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
+use transfer::wire::{Blob, Transfer};
 
 /// The service name a receiver publishes and `swoosh send` reaches: a peer serving `recv:` receives,
 /// `swoosh send` pushes.
@@ -38,7 +40,7 @@ pub const RECV_SERVICE: &str = Unbound::RECV.name();
 /// pipeline depth; a receiver's exposer accepts these streams concurrently too, so both sides fan out.
 const MAX_INFLIGHT: usize = 16;
 
-/// Push a file or directory to a peer, addressed by their public key, verified end to end.
+/// Push a file or directory to a peer, addressed by their public key.
 #[derive(Debug, Args)]
 pub struct SendCmd {
     /// The files or directories to push.
@@ -189,8 +191,8 @@ impl SendCmd {
     }
 }
 
-/// Push one file over its own admitted stream: hash it, open a gated stream, and drive the verified
-/// transfer, naming the file by its relative name so the receiver saves it under that name.
+/// Push one file over its own admitted stream: hash it, open a gated stream, and drive the transfer,
+/// naming the file by its relative name so the receiver saves it under that name.
 async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre::Result<()> {
     let blob = {
         let mut file = tokio::fs::File::open(&path)

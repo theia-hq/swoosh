@@ -85,9 +85,8 @@ sending to ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
 sent app.tar (204800 bytes)
 ```
 
-Each file is hashed with BLAKE3 and re-checked on arrival, so a truncated or tampered transfer is
-rejected, never written. To ssh into the deploy box instead, serve `ssh=sshd:` there and run `swoosh ssh
-deploybox -- <command>` from the job.
+To ssh into the deploy box instead, serve `ssh=sshd:` there and run `swoosh ssh deploybox -- <command>`
+from the job.
 
 ## Cut the runner off
 

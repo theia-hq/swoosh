@@ -49,7 +49,7 @@ A keyless shell on this machine, run as the serving process's user. Serve it und
 
 ### `recv:<dir>`
 
-Receive pushed files into a directory, each verified end to end.
+Receive pushed files into a directory.
 
 - Posture: family-gated, no public form.
 - Example: `swoosh serve inbox=recv:/srv/releases`

@@ -4,15 +4,17 @@
 
 //! The gated send/recv (PUSH file transfer), end to end over the in-process transport: the proof that a
 //! pushed file rides the family gate (a MEMBER can send a file to a gated node, a STRANGER cannot), that the bytes
-//! are verified end to end, and that a tampered blob is REJECTED, never written.
+//! arrive whole, and that a blob whose bytes do not match the root its sender named is REJECTED, never landed.
 //!
 //! One node exposes `recv=recv:` behind a family gate rooted at a signet, built with the SAME `Recv` handler
 //! the `swoosh serve` product path instances per receive service (recv is bound per service by value,
 //! like `fetch:`, so this proof constructs the one receiver directly, into a real temp output
-//! directory). A member drives `bifrost-wire`'s verified `Transfer` over the gated `recv` service exactly as
+//! directory). A member drives `transfer::wire`'s `Transfer` over the gated `recv` service exactly as
 //! `swoosh send` does: it opens one stream per file, sends the blob, and the receiver saves it under the safe
 //! relative name. A stranger's push is refused at the gate. And a blob whose bytes do not match its advertised
-//! root is rejected by the receiver's BLAKE3 check, so a tampered transfer leaves no file behind.
+//! root is rejected by the receiver's BLAKE3 check and leaves no file behind. That check catches a fault on the
+//! way or a source that changed while it was sent; it stops no lying sender, who names the root of whatever it
+//! sends. Who sent a file is the gate's proof, and the product line names that key (`binding_proof`).
 //!
 //! A second proof (`two_receive_services_each_save_into_their_own_dir`) exercises the per-service de-merge
 //! end to end: two receive services, each its OWN `Recv` instance bound to ONLY its own output directory, so a
@@ -25,13 +27,14 @@
 use core::time::Duration;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use bifrost::wire::{Blob, Transfer};
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::Denylist;
 use swoosh::serve::{Activity, Recv, bind_recv};
 use swoosh::testkit::TestRoot;
+use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Router};
+use transfer::wire::{Blob, Transfer};
 use transfer::{Received, ReceivedSink};
 
 /// The byte the signet's fixed key is seeded with. Its ed25519 public half is the signet the family gate
@@ -39,7 +42,7 @@ use transfer::{Received, ReceivedSink};
 const SIGNET: u8 = 7;
 
 #[test]
-fn a_member_sends_a_file_a_stranger_is_refused_and_a_tampered_blob_is_rejected() {
+fn a_member_sends_a_file_a_stranger_is_refused_and_bytes_unlike_their_root_are_rejected() {
     let _serial = one_receiver_at_a_time();
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
@@ -57,7 +60,7 @@ fn a_member_sends_a_file_a_stranger_is_refused_and_a_tampered_blob_is_rejected()
 }
 
 /// The proof body: expose a gated recv node, send a file as a member, refuse a stranger, reject a
-/// tampered blob.
+/// blob whose bytes do not match its root.
 async fn proof() {
     let out = out_dir();
     let host = Node::new(MemTransport::bind(), NoDiscovery);
@@ -83,8 +86,8 @@ async fn proof() {
     let member = Node::new(MemTransport::bind(), NoDiscovery);
     let member_badge = signet_badge(SIGNET, member.node_id());
 
-    // Send a file exactly as `swoosh send` does: open the gated `recv` service, then drive `bifrost-wire`'s
-    // verified `Transfer` over one admitted stream, naming the file so the receiver saves it under that name.
+    // Send a file exactly as `swoosh send` does: open the gated `recv` service, then drive `transfer::wire`'s
+    // `Transfer` over one admitted stream, naming the file so the receiver saves it under that name.
     let payload = b"the quick brown fox jumps over the lazy dog".repeat(1000);
     let session = Connector::to_node(
         host_id,
@@ -122,8 +125,9 @@ async fn proof() {
         "a stranger must be refused at the gated recv service"
     );
 
-    // A TAMPERED blob: a member advertises one root but sends different bytes. The receiver's BLAKE3 check
-    // fails, so the send is NAKed (an error to the sender) and no file with that name is written.
+    // Bytes UNLIKE THEIR ROOT: a member advertises one root but sends different bytes, as a fault on the way
+    // or a file rewritten between its hash and its send would. The receiver's BLAKE3 check fails, so the send
+    // is NAKed (an error to the sender) and no file with that name lands.
     let session = Connector::to_node(
         host_id,
         "recv".parse().unwrap(),
@@ -136,17 +140,17 @@ async fn proof() {
     let honest = b"the bytes I hashed".to_vec();
     let blob = Blob::hash(&mut honest.as_slice()).await.unwrap();
     // Send DIFFERENT bytes than the hash names (same length, so only the content check can catch it).
-    let mut tampered = b"THE BYTES I SWAPD".to_vec();
-    tampered.resize(honest.len(), b'!');
+    let mut unlike = b"THE BYTES I SWAPD".to_vec();
+    unlike.resize(honest.len(), b'!');
     let result = Transfer::new(send, recv)
-        .send(b"tampered.txt", &blob, &mut tampered.as_slice())
+        .send(b"unlike.txt", &blob, &mut unlike.as_slice())
         .await;
     assert!(
         result.is_err(),
         "a blob whose bytes do not match its root must be rejected by the receiver"
     );
     assert!(
-        !out.join("tampered.txt").exists(),
+        !out.join("unlike.txt").exists(),
         "a rejected transfer must leave no file behind"
     );
 
@@ -322,6 +326,11 @@ async fn sink_proof() {
         "the fact carries the raw name"
     );
     assert_eq!(facts[0].bytes, payload.len() as u64);
+    assert_eq!(
+        facts[0].from,
+        member.node_id().verify_key().unwrap(),
+        "the fact names the key the gate admitted the pusher under"
+    );
 
     let _ = std::fs::remove_dir_all(&out);
 }
@@ -394,7 +403,11 @@ async fn binding_proof() {
         assert_eq!(wait_for_file(&dir.join(hostile)).await, payload);
     }
 
-    let expected = "loud: received evil\\nname\\u{1b}[31m\\r.txt (1500 bytes)\n";
+    // The line ends with the pusher's key as the gate proved it, whole: this is the line that tells an
+    // operator who sent the file.
+    let pusher = member.node_id().verify_key().unwrap();
+    let expected =
+        format!("loud: received evil\\nname\\u{{1b}}[31m\\r.txt (1500 bytes) from {pusher}\n");
     for _ in 0..200 {
         if !written.lock().unwrap().is_empty() {
             break;
@@ -406,7 +419,7 @@ async fn binding_proof() {
     assert_eq!(
         String::from_utf8_lossy(&written.lock().unwrap()),
         expected,
-        "the route bound with the renderer prints one escaped line, and the quiet route none"
+        "the route bound with the renderer prints one escaped line naming the pusher, and the quiet route none"
     );
 
     let _ = std::fs::remove_dir_all(&loud_dir);
@@ -461,7 +474,7 @@ impl std::io::Write for LogCapture {
 }
 
 /// Push one named file to a receiver `service` exactly as `swoosh send` does: open the gated service with the
-/// member badge, then drive `bifrost-wire`'s verified `Transfer` over one admitted stream.
+/// member badge, then drive `transfer::wire`'s `Transfer` over one admitted stream.
 async fn push_file(
     member: &Node<MemTransport, NoDiscovery>,
     host_id: NodeId,

@@ -27,7 +27,9 @@ other entry must be `name=target` and every target carries a scheme: a bare name
 with a message naming this form, a scheme nothing serves is refused by name,
 and a scheme that takes no argument refuses a tail (`ping=ping:80` is an error, not a forward).
 `control.stop` and `control.services` are always served, and member-only.
-Each file a receive service lands prints one line on stderr, such as `inbox: received notes.txt (1500 bytes)`.
+Each file a receive service lands prints one line on stderr, such as
+`inbox: received notes.txt (1500 bytes) from ed01uyi7g54bpea45hafea4gohlnay5bs23p3ck4z4g24dvcpeldkczq`.
+The key after `from` is the machine that sent the file.
 The sender chooses the name, so control characters in it are shown escaped. If stderr falls behind, some
 lines are dropped and a line says how many. `--quiet` turns these lines off, and `RUST_LOG` cannot turn
 them back on.

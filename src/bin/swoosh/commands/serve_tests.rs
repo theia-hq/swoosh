@@ -3155,11 +3155,11 @@ fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
         .activity(out.clone())
         .expect("a plain serve starts")
         .expect("a plain serve renders activity");
+    let sender = swoosh::testkit::TestNode::seeded(7).verify_key();
     activity.recv(svc("recv")).received(Received {
         path: "notes.txt".into(),
         bytes: 5,
-        // WF1 (services 8d6f5bc) names the sender; this test renders only the path and the length.
-        from: swoosh::testkit::TestNode::seeded(7).verify_key(),
+        from: sender,
     });
     drop(activity);
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -3167,8 +3167,8 @@ fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(
-        *out.0.lock().expect("the capture lock"),
-        b"recv: received notes.txt (5 bytes)\n",
+        String::from_utf8_lossy(&out.0.lock().expect("the capture lock")),
+        format!("recv: received notes.txt (5 bytes) from {sender}\n"),
         "a plain serve's renderer carries the line"
     );
 }
