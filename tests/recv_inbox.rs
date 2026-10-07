@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::Instant;
 
-use bifrost::wire::{Blob, Transfer};
 use bifrost::{Node, NodeId, Session as _};
 use bifrost_noise::Noise;
 use bifrost_quirk::Endpoint;
@@ -24,6 +23,7 @@ use swoosh::credential::Credential;
 use swoosh::reaching::BindRole;
 use swoosh::transport::PeerHint;
 use tightbeam::tunnel::Connector;
+use transfer::wire::{Blob, Transfer};
 
 /// The role the pushing node binds under: it browses the LAN and advertises nothing.
 const DIALING: BindRole = BindRole::Dialing(Credential::Family { present: None });

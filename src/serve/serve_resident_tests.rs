@@ -147,7 +147,7 @@ async fn a_version_mismatch_is_not_a_foreign_control_stream() {
 
 /// The resident ANSWERS a version-skewed request instead of closing on it, and the answer names both
 /// versions, so the peer learns what it wrote AND what this build speaks; one of them alone leaves it
-/// guessing at the other. This is what separates this wire from `bifrost-wire`, which is
+/// guessing at the other. This is what separates this wire from `transfer::wire`, which is
 /// write-then-read and has nobody listening when it finds the mismatch.
 #[tokio::test]
 async fn a_version_skewed_request_is_answered_naming_both_versions() {

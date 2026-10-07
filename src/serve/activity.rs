@@ -23,7 +23,7 @@ use std::{io, thread};
 use nauthy::Service;
 use transfer::{Received, ReceivedSink};
 
-use crate::escape::EscapedPath;
+use crate::escape::{Escaped, EscapedPath};
 
 /// How many rendered lines may wait on a stalled writer before new ones are dropped. A line is capped
 /// (a service name plus [`MAX_ESCAPED`](crate::escape::MAX_ESCAPED) characters of escapes), so the
@@ -72,8 +72,9 @@ impl Activity {
     }
 
     /// The sink for one receive route: every file its engine lands renders as
-    /// `<service>: received <path> (<bytes> bytes)`. The route's own name leads the line, because a node
-    /// serving two receive routes would otherwise print the same path for two different directories.
+    /// `<service>: received <path> (<bytes> bytes) from <key>`. The route's own name leads the line,
+    /// because a node serving two receive routes would otherwise print the same path for two different
+    /// directories.
     pub fn recv(&self, service: Service) -> RecvLines {
         RecvLines {
             service,
@@ -98,13 +99,21 @@ pub struct RecvLines {
 
 impl RecvLines {
     /// Render one landed file as its line. The ONE render site for a received path: the service name is
-    /// the operator's own validated route name, and the path is the peer's, so only the path is escaped.
+    /// the operator's own validated route name, and the path is the peer's, so the path is escaped.
+    ///
+    /// The line ends with who sent the file: `from`, the key the gate admitted the stream under. That
+    /// key, not the hash, is what holds against a lying sender, who names the root of whatever it sends,
+    /// so it is the one fact here the operator can act on (a squatted name shows a stranger's key). It
+    /// prints whole: nothing else on the line names the machine, so a short form would leave nothing to
+    /// compare or copy. A key's text is `ed01` and base32, so the escaper never changes it; it goes
+    /// through anyway, so this line has no peer-sourced field that skips the one escaper.
     fn line(&self, file: &Received) -> String {
         format!(
-            "{}: received {} ({} bytes)",
+            "{}: received {} ({} bytes) from {}",
             self.service,
             EscapedPath(&file.path),
-            file.bytes
+            file.bytes,
+            Escaped(&file.from.to_string())
         )
     }
 }

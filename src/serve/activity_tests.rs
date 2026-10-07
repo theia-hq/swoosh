@@ -84,12 +84,21 @@ fn recv_route() -> nauthy::Service {
     "recv".parse().expect("a valid service name")
 }
 
+/// The node every fact here is pushed by.
+fn sender() -> crate::testkit::TestNode {
+    crate::testkit::TestNode::seeded(7)
+}
+
+/// The sender's key as a line ends with it: whole, after `from`.
+fn from_sender() -> String {
+    format!("from {}", sender().verify_key())
+}
+
 fn landed(path: &str, bytes: u64) -> Received {
     Received {
         path: PathBuf::from(path),
         bytes,
-        // WF1 (services 8d6f5bc) names the sender; this test renders only the path and the length.
-        from: crate::testkit::TestNode::seeded(7).verify_key(),
+        from: sender().verify_key(),
     }
 }
 
@@ -120,7 +129,11 @@ fn a_hostile_received_path_is_escaped_in_the_rendered_bytes() {
         "the peer's newline forged a second line: {line:?}"
     );
     assert_eq!(
-        line, "recv: received evil\\nname\\u{1b}[31m\\r.txt (7 bytes)\n",
+        line,
+        format!(
+            "recv: received evil\\nname\\u{{1b}}[31m\\r.txt (7 bytes) {}\n",
+            from_sender()
+        ),
         "the line is service-qualified and every control character is escaped"
     );
 }
@@ -131,7 +144,10 @@ fn a_hostile_received_path_is_escaped_in_the_rendered_bytes() {
 fn a_path_that_reorders_or_hides_text_is_escaped() {
     assert_eq!(
         rendered("a\u{85}b\u{202e}c\u{200b}d", 1),
-        "recv: received a\\u{85}b\\u{202e}c\\u{200b}d (1 bytes)\n",
+        format!(
+            "recv: received a\\u{{85}}b\\u{{202e}}c\\u{{200b}}d (1 bytes) {}\n",
+            from_sender()
+        ),
     );
 }
 
@@ -141,7 +157,10 @@ fn a_path_of_blank_letters_is_escaped() {
     let name: String = BLANK_LETTERS.iter().collect();
     assert_eq!(
         rendered(&name, 1),
-        "recv: received \\u{115f}\\u{1160}\\u{3164}\\u{ffa0}\\u{2800} (1 bytes)\n",
+        format!(
+            "recv: received \\u{{115f}}\\u{{1160}}\\u{{3164}}\\u{{ffa0}}\\u{{2800}} (1 bytes) {}\n",
+            from_sender()
+        ),
     );
 }
 
@@ -150,7 +169,11 @@ fn a_path_of_blank_letters_is_escaped() {
 #[test]
 fn a_long_received_path_is_capped() {
     let long = "a".repeat(MAX_ESCAPED * 4);
-    let expected = format!("recv: received {}... (9 bytes)\n", "a".repeat(MAX_ESCAPED));
+    let expected = format!(
+        "recv: received {}... (9 bytes) {}\n",
+        "a".repeat(MAX_ESCAPED),
+        from_sender()
+    );
     assert_eq!(rendered(&long, 9), expected);
 }
 
@@ -169,7 +192,10 @@ fn each_route_leads_its_own_line() {
     drop(activity);
     assert_eq!(
         String::from_utf8(captured.bytes()).expect("the lines are utf-8"),
-        "alice: received notes.txt (3 bytes)\nbob: received notes.txt (4 bytes)\n",
+        format!(
+            "alice: received notes.txt (3 bytes) {from}\nbob: received notes.txt (4 bytes) {from}\n",
+            from = from_sender()
+        ),
     );
 }
 
@@ -221,8 +247,9 @@ fn a_wedged_writer_never_blocks_a_report_and_the_queue_holds_its_bound() {
     drop(sink);
     drop(activity);
     let lines = String::from_utf8(captured.bytes()).expect("the lines are utf-8");
-    let expected: Vec<String> = core::iter::once("recv: received first (1 bytes)".to_owned())
-        .chain((0..BACKLOG).map(|n| format!("recv: received queued-{n} (1 bytes)")))
+    let from = from_sender();
+    let expected: Vec<String> = core::iter::once(format!("recv: received first (1 bytes) {from}"))
+        .chain((0..BACKLOG).map(|n| format!("recv: received queued-{n} (1 bytes) {from}")))
         .chain(core::iter::once(format!(
             "{OVERFLOW} activity lines dropped while the output was stalled"
         )))
@@ -242,7 +269,7 @@ fn a_wedged_writer_never_blocks_a_report_and_the_queue_holds_its_bound() {
 fn a_drop_with_no_later_line_is_reported_while_the_node_runs() {
     let (out, captured) = capture();
     let activity = Activity::spawn(out).expect("the renderer starts");
-    let line = "recv: received last (1 bytes)\n";
+    let line = &format!("recv: received last (1 bytes) {}\n", from_sender());
     let notice = "1 activity line dropped while the output was stalled\n";
     activity.recv(recv_route()).received(landed("last", 1));
     wait_for_bytes(&captured, line);
