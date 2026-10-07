@@ -2736,3 +2736,51 @@ async fn a_list_revoking_this_machine_after_its_row_was_renewed_never_stops_the_
         "no live row for a revoked key"
     );
 }
+
+// --- present: a root with a `touch-id` lock ---
+
+/// Make the root kept in `home` the one under its passphrase and a `touch-id` lock.
+fn touch_id_root(home: &Home) {
+    std::fs::remove_file(home.root_key()).unwrap();
+    private(
+        &home.root_key(),
+        &crate::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
+    );
+}
+
+/// A root with a live `touch-id` lock opens by one touch, asked with the root's reason, and no passphrase.
+/// Red when present asks the passphrase first.
+#[tokio::test]
+async fn present_opens_a_root_by_its_touch() {
+    let home = home("present-touch");
+    holds(&home, &records(0, vec![own_row()], Vec::new(), Vec::new())).await;
+    touch_id_root(&home);
+    let mut prompt = Counting::refusing()
+        .at_this_mac(keystore::Health::Live)
+        .touching([crate::touch::Touched::Opened(Some(keystore::Secret::take(
+            &mut TestRoot::seeded(ROOT).seed(),
+        )))]);
+    let (root, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
+    assert_eq!(root.unwrap().key(), TestRoot::seeded(ROOT).node_id());
+    assert_eq!(prompt.events(), 0);
+    let [touch] = prompt.touches() else {
+        panic!("one touch");
+    };
+    assert_eq!(touch.reason, crate::touch::USE_ROOT);
+    assert_eq!(touch.file.path(), home.root_key());
+}
+
+/// A cancel at present falls to the root's passphrase, which opens it.
+#[tokio::test]
+async fn present_falls_to_the_passphrase_on_a_cancel() {
+    let home = home("present-touch-cancel");
+    holds(&home, &records(0, vec![own_row()], Vec::new(), Vec::new())).await;
+    touch_id_root(&home);
+    let mut prompt = Counting::new([PASS])
+        .at_this_mac(keystore::Health::Live)
+        .touching([crate::touch::Touched::Declined]);
+    let (root, _) = present(&home, RootPlace::Home, RootVerb::Invite, &mut prompt).await;
+    assert_eq!(root.unwrap().key(), TestRoot::seeded(ROOT).node_id());
+    assert_eq!(prompt.events(), 1);
+    assert_eq!(prompt.touches().len(), 1);
+}

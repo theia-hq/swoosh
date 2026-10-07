@@ -38,5 +38,6 @@ pub mod standing;
 pub mod sync;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;
+pub mod touch;
 pub mod transport;
 pub mod unbound;

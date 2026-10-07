@@ -81,7 +81,7 @@ impl LeaveCmd {
             // past use is a damaged home to it. A root kept here is still never left, and plain `leave` keeps
             // refusing.
             Err(StandingError::UnusableKey(_)) if self.new_key => {
-                if home.root_key().try_exists()? {
+                if home.keeps_root()? {
                     eyre::bail!("{}", swoosh::root::KEPT_HERE);
                 }
                 Was::Damaged {

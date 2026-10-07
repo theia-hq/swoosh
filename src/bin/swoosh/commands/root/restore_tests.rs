@@ -1021,3 +1021,68 @@ async fn restore_refuses_a_copy_whose_key_changes_during_the_prompt() {
     );
     assert!(!home.root_key().exists(), "the root was never written");
 }
+
+/// Overwrite `path` with `bytes`, owner-only.
+fn overwrite(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// The line a restore prints when the copy's `touch-id` lock does not open on this Mac.
+const DEAD_COPY: &str =
+    "the copy's touch-id does not open on this Mac; to use it here: swoosh root lock touch-id";
+
+/// A copy whose `touch-id` lock does not open here is restored byte for byte, and one line says how to use
+/// it here; a lock that cannot be checked now gets no line, since it may be live. Red when an unchecked lock
+/// is called dead, or the lock is dropped.
+#[tokio::test]
+async fn restore_keeps_a_dead_touch_id_lock_and_says_once() {
+    let list = records(1, &[live(LAPTOP, "laptop")], Vec::new());
+    for (tag, health, said) in [
+        ("restore-touch-id-dead", keystore::Health::Dead, true),
+        (
+            "restore-touch-id-unchecked",
+            keystore::Health::Unchecked,
+            false,
+        ),
+        ("restore-touch-id-live", keystore::Health::Live, false),
+    ] {
+        let home = machine(tag, SPARE);
+        let dir = stick(&home, &list);
+        overwrite(
+            &dir.join("root.key"),
+            &swoosh::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
+        );
+        let mut prompt = Counting::new([PASS]).at_this_mac(health);
+        let (result, err) = restore_asking(&home, &dir, &Answering::nobody(), &mut prompt).await;
+        result.unwrap();
+        assert_eq!(err.lines().any(|line| line == DEAD_COPY), said, "{err}");
+        assert_eq!(
+            std::fs::read(home.root_key()).unwrap(),
+            swoosh::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
+            "the copy's bytes, lock and all"
+        );
+        assert!(prompt.touches().is_empty(), "a restore asks no touch");
+    }
+}
+
+/// Restoring onto a machine whose key opens with `touch-id` alone says to give it a passphrase beside the
+/// touch, since no verb gives a new key where a root is kept. Red when the line is dropped.
+#[tokio::test]
+async fn restore_onto_a_touch_id_only_machine_key_names_lock_touch_id() {
+    let list = records(1, &[live(LAPTOP, "laptop")], Vec::new());
+    let home = machine("restore-onto-touch-id", OWN);
+    overwrite(
+        &home.key(),
+        &swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE,
+    );
+    let dir = stick(&home, &list);
+    let (result, err) = restore(&home, &dir, &Answering::nobody()).await;
+    result.unwrap();
+    assert!(
+        err.lines().any(|line| line
+            == "this machine's key opens with touch-id alone, and now keeps your root; give it a \
+                passphrase beside the touch: swoosh lock touch-id"),
+        "{err}"
+    );
+}

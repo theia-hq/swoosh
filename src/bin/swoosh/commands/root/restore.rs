@@ -60,6 +60,8 @@ impl RestoreSync {
         err: &mut impl Write,
     ) -> eyre::Result<()> {
         let (root, was_device) = (self.restored.root, self.restored.was_device);
+        let touch_id_dead = self.restored.touch_id_dead;
+        let machine_key_touch_id_alone = self.restored.machine_key_touch_id_alone;
         let synced = self.restored.sync(home, dial).await?;
         let short = swoosh::credential::short(&root);
         match &synced.from {
@@ -83,6 +85,20 @@ impl RestoreSync {
                 err,
                 "a copy of your root, locked with its passphrase, is wherever the lost copy is. A strong \
                  passphrase holds; a weak or seen one does not: then replace your root: swoosh revoke --help"
+            )?;
+        }
+        // The copy's bytes are kept whole, a lock that does not open here included; these say what to do.
+        if touch_id_dead {
+            writeln!(
+                err,
+                "the copy's touch-id does not open on this Mac; to use it here: swoosh root lock touch-id"
+            )?;
+        }
+        if machine_key_touch_id_alone {
+            writeln!(
+                err,
+                "this machine's key opens with touch-id alone, and now keeps your root; give it a passphrase \
+                 beside the touch: swoosh lock touch-id"
             )?;
         }
         Ok(())

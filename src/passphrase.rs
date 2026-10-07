@@ -13,14 +13,20 @@
 //!
 //! A prompt names the key it asks for ([`Asked`]), never its file: the person knows their root and this
 //! machine's key, not where swoosh keeps them.
+//!
+//! A touch is a person being asked too, so it rides the same seam: whether one may be asked here
+//! ([`Prompt::touch_here`]), what the enclave says of a `touch-id` lock without asking anyone
+//! ([`Prompt::health`]), and the touch itself ([`Prompt::touch`]). What to do with each answer is
+//! [`crate::touch`]'s.
 
 use std::path::Path;
 
-use keystore::Passphrase;
+use keystore::{Health, Locked, Method, Passphrase};
 use rand::Rng as _;
 use zeroize::Zeroizing;
 
 use crate::escape::EscapedPath;
+use crate::touch::{Touch, TouchHere, Touched};
 
 /// The longest passphrase line read, in bytes. A cap, so a stuck key or a pasted file cannot grow the
 /// buffer, and growing it is what would leave a copy of the passphrase behind in freed memory.
@@ -119,6 +125,24 @@ pub trait Prompt {
 
     /// Tell the person, where they type, why the last round did not take.
     fn say(&mut self, line: &str);
+
+    /// Whether a touch may be asked for here, read before any dialog. The default asks for none, so a
+    /// prompt that does not say otherwise never shows one and every key opens with its passphrase.
+    fn touch_here(&self) -> TouchHere {
+        TouchHere::NoEnclave
+    }
+
+    /// Whether `locked`'s `touch-id` lock can open it on this Mac, read with no dialog: `None` when the file
+    /// holds no such lock, or this build has no enclave to ask.
+    fn health(&self, _locked: &Locked) -> Option<Health> {
+        None
+    }
+
+    /// Ask for one touch, for `touch`'s act on its file, and wait for it, bounded. The default asks
+    /// nobody, and reads as a lock that does not open here.
+    fn touch(&mut self, _touch: Touch) -> Touched {
+        Touched::NotHere
+    }
 }
 
 /// A passphrase that did not open its key after the last try: the refusal, in the words of what was asked.
@@ -235,6 +259,33 @@ impl Prompt for Terminal {
         if let Ok(tty) = Tty::open(Asked::MachineKey) {
             let _ = tty.tell(line);
         }
+    }
+
+    /// A Mac's own session at a terminal, with no ssh session in the environment.
+    fn touch_here(&self) -> TouchHere {
+        if !cfg!(target_os = "macos") {
+            return TouchHere::NoEnclave;
+        }
+        if !self.terminal() {
+            return TouchHere::NoTerminal;
+        }
+        match crate::touch::over_ssh(|name| std::env::var_os(name)) {
+            Some(variable) => TouchHere::OverSsh(variable),
+            None => TouchHere::Here,
+        }
+    }
+
+    /// The enclave's own answer, on a build that has one. Elsewhere every `touch-id` lock reads dead,
+    /// which says nothing a person can act on, so it is not asked.
+    fn health(&self, locked: &Locked) -> Option<Health> {
+        if !cfg!(target_os = "macos") {
+            return None;
+        }
+        locked.health(Method::TouchId)
+    }
+
+    fn touch(&mut self, touch: Touch) -> Touched {
+        crate::touch::ask(touch)
     }
 }
 

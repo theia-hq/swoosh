@@ -1223,3 +1223,105 @@ async fn a_restored_root_keeper_is_told_only_verbs_that_run() {
         status(&home).await
     );
 }
+
+/// Overwrite `path` with `bytes`, owner-only.
+fn overwrite(path: &std::path::Path, bytes: &[u8]) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::write(path, bytes).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// The report for `home`, each `touch-id` lock reading `health`.
+async fn status_reading(home: &Home, health: keystore::Health) -> String {
+    let key = KeyFile::device(home.key()).load().unwrap();
+    let prompt = swoosh::testkit::Counting::refusing().at_this_mac(health);
+    super::Report::gather_with(home, key.as_ref(), unix_now(), &prompt)
+        .await
+        .unwrap()
+        .render()
+}
+
+/// `key lock:` names a `touch-id` lock with how it reads: plain when live, and never dead when it cannot be
+/// checked. Red when an unchecked lock reads as dead.
+#[tokio::test]
+async fn key_lock_names_touch_id_with_how_it_reads() {
+    let home = home("key-lock-touch-id");
+    overwrite(
+        &home.key(),
+        &swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE,
+    );
+    for (health, line) in [
+        (keystore::Health::Live, "key lock: touch-id"),
+        (
+            keystore::Health::Dead,
+            "key lock: touch-id (does not open on this Mac now)",
+        ),
+        (
+            keystore::Health::Unchecked,
+            "key lock: touch-id (cannot check now)",
+        ),
+    ] {
+        let out = status_reading(&home, health).await;
+        assert_eq!(out.lines().nth(1), Some(line), "{out}");
+        assert_eq!(
+            out.contains("does not open"),
+            health == keystore::Health::Dead,
+            "{out}"
+        );
+    }
+}
+
+/// A dead one-lock key where no root is kept says how to mend it: the finger, else a new key.
+#[tokio::test]
+async fn a_dead_touch_id_key_says_how_to_mend_it() {
+    let home = home("key-lock-touch-id-dead");
+    overwrite(
+        &home.key(),
+        &swoosh::testkit::touch_id::DEVICE_TOUCH_ID_ALONE,
+    );
+    let out = status_reading(&home, keystore::Health::Dead).await;
+    assert!(
+        out.trim_end().ends_with(
+            "touch-id does not open this machine's key on this Mac now. If you added a fingerprint, remove \
+             it and run this again; otherwise give this machine a new key and join again: swoosh leave \
+             --new-key"
+        ),
+        "{out}"
+    );
+}
+
+/// The root's line names its `touch-id` lock with how it reads, and a dead one says how to set it again,
+/// after the check on a fingerprint nobody added. Red when an unchecked lock gets the dead line.
+#[tokio::test]
+async fn the_root_line_names_touch_id_with_how_it_reads() {
+    let home = home("root-touch-id");
+    holds(&home).await;
+    overwrite(
+        &home.root_key(),
+        &swoosh::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
+    );
+    let root = TestRoot::seeded(ROOT).node_id();
+    let dead_line = "touch-id does not open your root on this Mac now; if you did not add a fingerprint, \
+                     check Touch ID & Password before setting it again: swoosh root lock touch-id";
+    for (health, locks) in [
+        (keystore::Health::Live, "a passphrase and touch-id"),
+        (
+            keystore::Health::Dead,
+            "a passphrase and touch-id, which does not open on this Mac now",
+        ),
+        (
+            keystore::Health::Unchecked,
+            "a passphrase and touch-id, which cannot be checked now",
+        ),
+    ] {
+        let out = status_reading(&home, health).await;
+        let line = format!("root:{root} on this machine, locked with {locks}.");
+        assert!(out.lines().any(|seen| seen == line), "{line}\n{out}");
+        assert_eq!(
+            out.lines().any(|seen| seen == dead_line),
+            health == keystore::Health::Dead,
+            "{out}"
+        );
+    }
+}

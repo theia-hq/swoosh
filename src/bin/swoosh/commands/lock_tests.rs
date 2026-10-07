@@ -49,16 +49,25 @@ fn lock_with_none_or_plain_is_a_usage_error() {
     }
 }
 
-/// `--help` offers exactly the methods `LockMethod` has, each mapped to the key store's. A value with no
-/// method arm fails to compile at `From<LockMethod> for Method`.
+/// The methods `lock` offers on this build: `touch-id` on a Mac only, where there is an enclave to make it.
+#[cfg(target_os = "macos")]
+const OFFERED: [&str; 2] = ["passphrase", "touch-id"];
+#[cfg(not(target_os = "macos"))]
+const OFFERED: [&str; 1] = ["passphrase"];
+
+/// `--help` offers exactly the methods `LockMethod` has on this build, each mapped to the key store's. A value
+/// with no method arm fails to compile at `From<LockMethod> for Method`. Red when `touch-id` is offered off a
+/// Mac.
 #[test]
 fn lock_help_lists_exactly_the_lockmethod_values() {
     let values: Vec<String> = LockMethod::value_variants()
         .iter()
         .map(|value| value.to_possible_value().unwrap().get_name().to_owned())
         .collect();
-    assert_eq!(values, ["passphrase"]);
+    assert_eq!(values, OFFERED);
     assert_eq!(Method::from(LockMethod::Passphrase), Method::Passphrase);
+    #[cfg(target_os = "macos")]
+    assert_eq!(Method::from(LockMethod::TouchId), Method::TouchId);
     let mut cli = Cli::command();
     let help = cli
         .find_subcommand_mut("lock")
@@ -69,7 +78,10 @@ fn lock_help_lists_exactly_the_lockmethod_values() {
     assert!(!help.contains("plain"), "{help}");
     // The short form: one line per argument, the values inline, never a block per value.
     assert!(!help.contains("Possible values:"), "{help}");
-    assert!(help.contains("[possible values: passphrase]"), "{help}");
+    assert!(
+        help.contains(&format!("[possible values: {}]", OFFERED.join(", "))),
+        "{help}"
+    );
 }
 
 /// A plain key gets a passphrase: the header is sealed, and the first time says `serve` asks at each start.

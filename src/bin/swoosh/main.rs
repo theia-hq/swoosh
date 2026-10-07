@@ -566,7 +566,15 @@ async fn run() -> eyre::Result<()> {
         // The passphrase on this machine's key, and the `root` leaves that need only the home: no store and
         // no transport, so they dispatch here beside the other local verbs.
         Verb::Lock(cmd) => return cmd.run(&home).await,
-        Verb::Root(cmd) => return cmd.run(&home).await,
+        Verb::Root(cmd) => {
+            return match cmd.run(&home).await {
+                Err(report) => match report.downcast_ref::<root::lock::Usage>() {
+                    Some(usage) => usage_error("root", &usage.0),
+                    None => Err(report),
+                },
+                done => done,
+            };
+        }
         // `root restore`: every check, the passphrase and the writes are local and come first; only the
         // exchange that brings the restored root up to date binds a transport, under the key it wrote for.
         Verb::RootRestore(cmd) => {
