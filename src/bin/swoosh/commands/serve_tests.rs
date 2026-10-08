@@ -3389,7 +3389,7 @@ async fn serve_admit_refuses_what_it_must_not_admit() {
     .unwrap();
     let mut seed = TestNode::seeded(0x11).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    keystore::KeyFile::device(home.key())
+    keystore::KeyFile::new(home.key())
         .write(
             &keystore::Secret::take(&mut seed),
             keystore::Protection::Plain,

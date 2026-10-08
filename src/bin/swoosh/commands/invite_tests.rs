@@ -90,7 +90,7 @@ pub(crate) fn scratch(tag: &str) -> Home {
     let home = Home::resolve(Some(dir)).unwrap();
     let mut seed = TestNode::seeded(OWN).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
     home
@@ -258,7 +258,7 @@ fn sealed() -> Vec<u8> {
             let path = dir.join("root.key");
             let passphrase = Passphrase::try_from(Zeroizing::new(PASS.to_owned())).unwrap();
             let mut seed = TestRoot::seeded(ROOT).seed();
-            KeyFile::root(&path)
+            KeyFile::strict(&path)
                 .write(
                     &keystore::Secret::take(&mut seed),
                     Protection::Passphrase(&passphrase),
@@ -1480,7 +1480,7 @@ async fn a_bound_renewal_of_a_key_carrying_row_keeps_the_warning() {
     let row = row_of(&state, "ci");
     assert!(row.until > ci.until, "renewed");
     assert_eq!(row.invite_until, ci.invite_until, "its invite's end stays");
-    let stored = KeyFile::device(home.key()).load().unwrap();
+    let stored = KeyFile::new(home.key()).load().unwrap();
     let report = crate::commands::status::report::Report::gather(&home, stored.as_ref(), now)
         .await
         .unwrap()
@@ -1727,7 +1727,7 @@ fn machine(tag: &str, seed: u8) -> Home {
     std::fs::remove_file(home.key()).unwrap();
     let mut bytes = TestNode::seeded(seed).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut bytes), Protection::Plain)
         .unwrap();
     home
@@ -1866,7 +1866,7 @@ async fn every_making_verb_prints_only_its_artifact_on_stdout() {
     )
     .await
     .unwrap();
-    let key = swoosh::testkit::stored_key(&KeyFile::device(home.key()));
+    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
     assert_eq!(String::from_utf8(out).unwrap(), format!("{key}\n"));
     assert!(!err.is_empty(), "the lines about it go to stderr");
 }
@@ -1983,7 +1983,7 @@ async fn a_root_on_this_machine_is_root_key_beside_devices() {
             .all(|name| !name.ends_with('/') || name == "machine/"),
         "no directory but machine/: {names:?}"
     );
-    let root = swoosh::testkit::stored_key(&KeyFile::root(home.root_key()));
+    let root = swoosh::testkit::stored_key(&KeyFile::strict(home.root_key()));
     let list = swoosh::roster::held(&home, root.verify_key().unwrap()).unwrap();
     assert_eq!(
         list.epoch(),

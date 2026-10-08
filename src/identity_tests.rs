@@ -283,7 +283,7 @@ pub(super) async fn sealed(home: &Home, passphrase: &'static str) -> bifrost::No
     .await
     .expect("seal a fresh key");
     assert_eq!(locked, super::Locked::Set { first: true });
-    crate::testkit::stored_key(&keystore::KeyFile::device(home.key()))
+    crate::testkit::stored_key(&keystore::KeyFile::new(home.key()))
 }
 
 /// A sealed key opens under its passphrase, for a serving verb and an outward dial alike, as the node it
@@ -347,7 +347,7 @@ async fn inspecting_a_sealed_key_asks_for_nothing() {
 
     let inspected = super::inspect(&home).expect("inspect a sealed home");
     assert_eq!(inspected, super::Inspected::Found(node));
-    let stored = keystore::KeyFile::device(home.key()).load().unwrap();
+    let stored = keystore::KeyFile::new(home.key()).load().unwrap();
     let Some(Stored::Locked(locked)) = stored else {
         panic!("the key stays locked");
     };
@@ -479,7 +479,7 @@ fn root_with_touch_id(home: &Home) {
 
 /// The methods of this machine's key's locks.
 fn locks(home: &Home) -> Vec<Method> {
-    match keystore::KeyFile::device(home.key())
+    match keystore::KeyFile::new(home.key())
         .load()
         .expect("load")
         .expect("a key")

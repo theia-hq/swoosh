@@ -50,7 +50,7 @@ impl NewKey {
     /// `<home>/machine/key.new`.
     pub fn stage(home: &Home, prompt: &mut impl Prompt) -> eyre::Result<Self> {
         let path = home.key();
-        let old = KeyFile::device(&path).load()?;
+        let old = KeyFile::new(&path).load()?;
         let locked = matches!(old, Some(Stored::Locked(_)));
         if locked && !prompt.terminal() {
             eyre::bail!("{CHOOSE_NEEDS_TERMINAL}");
@@ -76,7 +76,7 @@ impl NewKey {
             staged,
             put: false,
         };
-        KeyFile::device(&new.staged).write(&secret, protection)?;
+        KeyFile::new(&new.staged).write(&secret, protection)?;
         Ok(new)
     }
 

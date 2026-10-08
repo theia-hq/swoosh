@@ -102,7 +102,7 @@ async fn device(tag: &str, seed: u8, until: u64) -> Home {
     let home = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
     crate::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
     config::write_signet(&crate::testkit::lock(), &home, root().node_id()).unwrap();

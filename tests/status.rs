@@ -76,7 +76,7 @@ fn keyed(home: &Path) -> NodeId {
     config::create_store_dir(home.dir()).unwrap();
     swoosh::identity::make_machine_dir(&home).unwrap();
     let mut seed = TestNode::seeded(0x11).seed();
-    keystore::KeyFile::device(home.key())
+    keystore::KeyFile::new(home.key())
         .write(
             &keystore::Secret::take(&mut seed),
             keystore::Protection::Plain,
@@ -209,7 +209,7 @@ fn status_with_a_root_copy_never_prompts() {
     config::create_store_dir(home.dir()).unwrap();
     let mut seed = TestNode::seeded(0x11).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    keystore::KeyFile::device(home.key())
+    keystore::KeyFile::new(home.key())
         .write(
             &keystore::Secret::take(&mut seed),
             keystore::Protection::Plain,

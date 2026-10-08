@@ -38,7 +38,7 @@ async fn device(tag: &str, hours: u64) -> Home {
     let home = Home::resolve(Some(dir)).unwrap();
     let mut seed = TestNode::seeded(DESK).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
     let root = TestRoot::seeded(ROOT);

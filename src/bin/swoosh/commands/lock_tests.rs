@@ -33,7 +33,7 @@ async fn lock(home: &Home, args: &[&str], prompt: &mut Counting) -> (eyre::Resul
 
 /// The locks on this machine's key file: none for a plain one.
 fn locks(home: &Home) -> Vec<Method> {
-    match KeyFile::device(home.key()).load().unwrap().unwrap() {
+    match KeyFile::new(home.key()).load().unwrap().unwrap() {
         Stored::Plain(_) => Vec::new(),
         Stored::Locked(locked) => locked.methods().collect(),
     }
@@ -89,12 +89,12 @@ fn lock_help_lists_exactly_the_lockmethod_values() {
 #[tokio::test]
 async fn lock_sets_one_and_warns_about_restart() {
     let home = scratch("lock-sets");
-    let key = swoosh::testkit::stored_key(&KeyFile::device(home.key()));
+    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
     let (result, err) = lock(&home, &[], &mut Counting::new([LONG])).await;
     result.unwrap();
     assert_eq!(locks(&home), [Method::Passphrase]);
     assert_eq!(
-        swoosh::testkit::stored_key(&KeyFile::device(home.key())),
+        swoosh::testkit::stored_key(&KeyFile::new(home.key())),
         key,
         "lock never changes the key"
     );

@@ -1394,7 +1394,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "fetch"
 version = "0.6.0"
-source = "git+https://github.com/theia-hq/services?rev=335da0ce3334d19722a3026ad746134a30d4d87f#335da0ce3334d19722a3026ad746134a30d4d87f"
+source = "git+https://github.com/theia-hq/services?rev=08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec#08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec"
 dependencies = [
  "futures",
  "reqwest 0.12.28",
@@ -2475,7 +2475,7 @@ dependencies = [
 [[package]]
 name = "keystore"
 version = "0.1.0"
-source = "git+https://github.com/theia-hq/keystore?rev=a69da6bf268b2d98136032b6ec939100eb1b5072#a69da6bf268b2d98136032b6ec939100eb1b5072"
+source = "git+https://github.com/theia-hq/keystore?rev=783c87527663b6465bd735a85cbc84551583a87e#783c87527663b6465bd735a85cbc84551583a87e"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -2494,7 +2494,7 @@ dependencies = [
 [[package]]
 name = "keystore-enclave"
 version = "0.1.0"
-source = "git+https://github.com/theia-hq/keystore?rev=a69da6bf268b2d98136032b6ec939100eb1b5072#a69da6bf268b2d98136032b6ec939100eb1b5072"
+source = "git+https://github.com/theia-hq/keystore?rev=783c87527663b6465bd735a85cbc84551583a87e#783c87527663b6465bd735a85cbc84551583a87e"
 dependencies = [
  "core-foundation",
  "security-framework-sys",
@@ -2593,7 +2593,7 @@ checksum = "7ebb8d8732c6a6df3d8f032a82911cfc747e00efb95cc46e8d0acd5b5b88570c"
 [[package]]
 name = "measure"
 version = "0.7.0"
-source = "git+https://github.com/theia-hq/services?rev=335da0ce3334d19722a3026ad746134a30d4d87f#335da0ce3334d19722a3026ad746134a30d4d87f"
+source = "git+https://github.com/theia-hq/services?rev=08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec#08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec"
 dependencies = [
  "bifrost",
  "futures",
@@ -4792,7 +4792,7 @@ dependencies = [
 [[package]]
 name = "sshh"
 version = "0.8.0"
-source = "git+https://github.com/theia-hq/services?rev=335da0ce3334d19722a3026ad746134a30d4d87f#335da0ce3334d19722a3026ad746134a30d4d87f"
+source = "git+https://github.com/theia-hq/services?rev=08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec#08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec"
 dependencies = [
  "blake3",
  "libc",
@@ -5021,7 +5021,7 @@ dependencies = [
 [[package]]
 name = "tightbeam"
 version = "0.18.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=6a38c6676dd5dae3bcc3a587ae579c5657a1c0e2#6a38c6676dd5dae3bcc3a587ae579c5657a1c0e2"
+source = "git+https://github.com/theia-hq/tightbeam?rev=f82341f17e1191dba6bd4733a72e4f6cc9728b1b#f82341f17e1191dba6bd4733a72e4f6cc9728b1b"
 dependencies = [
  "bifrost",
  "bifrost-iroh",
@@ -5045,7 +5045,7 @@ dependencies = [
 [[package]]
 name = "tightbeam-handler"
 version = "0.4.0"
-source = "git+https://github.com/theia-hq/tightbeam?rev=6a38c6676dd5dae3bcc3a587ae579c5657a1c0e2#6a38c6676dd5dae3bcc3a587ae579c5657a1c0e2"
+source = "git+https://github.com/theia-hq/tightbeam?rev=f82341f17e1191dba6bd4733a72e4f6cc9728b1b#f82341f17e1191dba6bd4733a72e4f6cc9728b1b"
 dependencies = [
  "bifrost-core",
  "nauthy",
@@ -5377,7 +5377,7 @@ dependencies = [
 [[package]]
 name = "transfer"
 version = "0.7.0"
-source = "git+https://github.com/theia-hq/services?rev=335da0ce3334d19722a3026ad746134a30d4d87f#335da0ce3334d19722a3026ad746134a30d4d87f"
+source = "git+https://github.com/theia-hq/services?rev=08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec#08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec"
 dependencies = [
  "blake3",
  "nauthy",

@@ -62,7 +62,7 @@ pub(crate) async fn run_to(
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> eyre::Result<()> {
-    let key = KeyFile::device(home.key()).load()?;
+    let key = KeyFile::new(home.key()).load()?;
     if print == Print::Key {
         let Some(key) = key else {
             eyre::bail!(NO_KEY);
@@ -70,7 +70,7 @@ pub(crate) async fn run_to(
         writeln!(
             out,
             "{}",
-            swoosh::identity::key_of(&KeyFile::device(home.key()), &key)?
+            swoosh::identity::key_of(&KeyFile::new(home.key()), &key)?
         )?;
         return Ok(());
     }
@@ -128,7 +128,7 @@ impl Report {
         now: u64,
         prompt: &impl Prompt,
     ) -> eyre::Result<Self> {
-        let root_touch = match KeyFile::root(home.root_key()).load() {
+        let root_touch = match KeyFile::strict(home.root_key()).load() {
             Ok(Some(Stored::Locked(root))) => TouchId::of(prompt, &root),
             _ => None,
         };
@@ -141,7 +141,7 @@ impl Report {
                             (locked.methods().collect(), TouchId::of(prompt, locked))
                         }
                     };
-                    swoosh::identity::key_of(&KeyFile::device(home.key()), key)
+                    swoosh::identity::key_of(&KeyFile::new(home.key()), key)
                         .map(|node| (node, methods, touch))
                 })
                 .transpose()?,
@@ -200,7 +200,7 @@ impl Report {
         }
         // This machine's key under a `touch-id` lock that does not open here says how to mend it.
         if let Some((_, methods, Some(TouchId::Dead))) = &report.key {
-            let file = KeyFile::device(home.key());
+            let file = KeyFile::new(home.key());
             let passphrase = methods.contains(&Method::Passphrase);
             report
                 .nags
@@ -268,7 +268,7 @@ impl Report {
                 // A lock that does not open says how to mend it, last; one that cannot be checked says
                 // nothing more than its line.
                 if self.root_touch == Some(TouchId::Dead) {
-                    let file = KeyFile::root(home.root_key());
+                    let file = KeyFile::strict(home.root_key());
                     self.nags
                         .push(touch::Lines::of(Asked::Root, &file, true).dead());
                 }

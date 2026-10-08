@@ -322,7 +322,7 @@ async fn root_forget_refuses_another_root() {
     let other = TestRoot::seeded(0x31);
     let mut seed = other.seed();
     let passphrase = Passphrase::try_from(Zeroizing::new(PASS.to_owned())).unwrap();
-    KeyFile::root(dir.join("root.key"))
+    KeyFile::strict(dir.join("root.key"))
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),

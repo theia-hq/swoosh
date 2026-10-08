@@ -369,7 +369,7 @@ fn is_revoked(revoked: &Denylist, key: NodeId) -> bool {
 
 /// This machine's own key, from its key file's header. `None` when the home has no key yet.
 fn own_key(home: &Home) -> Result<Option<NodeId>, StandingError> {
-    let file = KeyFile::device(home.key());
+    let file = KeyFile::new(home.key());
     let stored = file.load().map_err(StandingError::OwnKey)?;
     Ok(stored
         .map(|stored| crate::identity::key_of(&file, &stored))
@@ -393,7 +393,7 @@ async fn held_root(home: &Home, revoked: &Denylist) -> Result<Option<NodeId>, St
 /// and a path that is not a regular file as that. One that could not be read is a read error. So a sound
 /// key with loose modes never reads as a torn one.
 fn root_key(path: PathBuf) -> Result<NodeId, StandingError> {
-    let file = KeyFile::root(&path);
+    let file = KeyFile::strict(&path);
     match file.load() {
         // A header no key could be is a file whose bytes are not a root key.
         Ok(Some(stored)) => crate::identity::key_of(&file, &stored).map_err(|_| {

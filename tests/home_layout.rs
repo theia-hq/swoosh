@@ -236,7 +236,7 @@ fn a_loose_root_key_names_chmod_not_damage() {
         "a passphrase long enough".to_owned(),
     ))
     .unwrap();
-    keystore::KeyFile::root(&root)
+    keystore::KeyFile::strict(&root)
         .write(
             &keystore::Secret::take(&mut seed),
             keystore::Protection::Passphrase(&passphrase),
