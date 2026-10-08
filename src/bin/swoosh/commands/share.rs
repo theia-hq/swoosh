@@ -115,7 +115,7 @@ const MAX_STDIN: u64 = 64 * 1024;
 
 /// The refusal for a sealed link handed to `share <link>`: one bound to a person or a machine, or one that
 /// works once. One line, true of both, so the refusal never says which kind a link is.
-const BOUND: &str = "this link cannot be passed on: ask whoever made it for another";
+const BOUND: &str = "this link cannot be copied: ask whoever made it for another";
 
 /// The line for your own devices as a recipient: they reach what this machine serves already.
 const YOURS: &str = "your devices already reach it.";
@@ -385,7 +385,7 @@ impl Issue {
             let gives = if runs_code {
                 format!("{service} opens a shell on this machine")
             } else {
-                format!("a link to anyone would give {service} with no limit")
+                format!("whoever holds a link to anyone could use {service} any number of times")
             };
             eyre::bail!(
                 "{gives}; share it with a person: swoosh share {service} <person>\nor make a link that \

@@ -213,7 +213,7 @@ async fn share_bound_link_refuses() {
     let ran = share(&home, &[&path]).await;
     assert_eq!(
         ran.refusal(),
-        "this link cannot be passed on: ask whoever made it for another"
+        "this link cannot be copied: ask whoever made it for another"
     );
     assert!(ran.out.is_empty(), "no link prints: {}", ran.out);
 }
@@ -870,8 +870,9 @@ async fn an_anyone_link_to_an_engine_never_open_to_anyone_is_refused() {
         assert_eq!(
             ran.refusal(),
             format!(
-                "a link to anyone would give {service} with no limit; share it with a person: swoosh share \
-                 {service} <person>\nor make a link that works once: swoosh share {service} anyone --once"
+                "whoever holds a link to anyone could use {service} any number of times; share it with a \
+                 person: swoosh share {service} <person>\nor make a link that works once: swoosh share {service} \
+                 anyone --once"
             ),
         );
         share(&home, &[service, "anyone", "--once"]).await.made();
@@ -1083,7 +1084,7 @@ async fn an_explicit_shell_link_cannot_be_delegated() {
     let ran = share(&home, &[&saved(&home, "once.link", &link)]).await;
     assert_eq!(
         ran.refusal(),
-        "this link cannot be passed on: ask whoever made it for another"
+        "this link cannot be copied: ask whoever made it for another"
     );
     assert!(ran.out.is_empty(), "no link prints: {}", ran.out);
 }
