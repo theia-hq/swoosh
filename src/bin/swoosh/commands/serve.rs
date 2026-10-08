@@ -43,9 +43,9 @@ use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
-    Activity, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope, InstanceLock,
-    RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop, StopKind,
-    Stopped, acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop,
+    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope,
+    InstanceLock, RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop,
+    StopKind, Stopped, acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop,
     extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
@@ -344,8 +344,9 @@ impl ServeCmd {
         let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
         let started = Started::of(&self.services, serve_toml.first_read(), home, &cwd)?;
         let mut requested = started.entries();
-        // A shell is never bound under a name whose live links were made for something else, since it would
-        // admit them: refused here, before anything binds or is written, whether named now or resumed.
+        // An engine that must never face an open gate is never bound under a name whose live links were made
+        // for something else, since it would admit them: refused here, before anything binds or is
+        // written, whether named now or resumed. The gate holds the same line for each link it admits.
         if let Some(refused) = LinksForAnother::in_home(home, requested.iter().map(String::as_str))?
         {
             return Err(refused.into());
@@ -421,6 +422,16 @@ impl ServeCmd {
         self.claim
             .as_ref()
             .map(|claim| claim.serve_toml.first_read())
+    }
+
+    /// What this run binds under each of its names, from the services it starts with (receive services
+    /// included), for its gate to check each link it signed against; nothing when the run was not claimed.
+    pub fn bound_targets(&self) -> BoundTargets {
+        self.claim
+            .as_ref()
+            .map_or_else(BoundTargets::default, |claim| {
+                BoundTargets::of(claim.started.entries().iter().map(String::as_str))
+            })
     }
 
     /// Check that this run may admit the devices of `root`, and record it in `serve.lock`, which its claim
@@ -682,13 +693,14 @@ impl ServeCmd {
             () = sync_rounds(node, &home) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             // A running `serve` gives service only at its start, so a relay, a resolver or a service
-            // changed in `serve.toml` waits for the next one; this says so once per change. A shell added
-            // under a name whose live links were made for something else is one that start will refuse,
-            // so that is said too, while the running set stays as it is.
+            // changed in `serve.toml` waits for the next one; this says so once per change. A service added
+            // or retargeted whose live links that start would refuse to bind it over ([`LinksForAnother`]) is
+            // said too, while the running set stays as it is.
             () = enabled.watch(|waiting| {
                 eprintln!("warning: {waiting}");
-                match LinksForAnother::among_added(&home, &enabled.held(), &waiting.added) {
-                    Ok(Some(refused)) => eprintln!("warning: {refused}"),
+                let changed: Vec<String> = waiting.added.iter().chain(&waiting.changed).cloned().collect();
+                match LinksForAnother::among_changed(&home, &enabled.held(), &changed) {
+                    Ok(Some(refused)) => eprintln!("warning: {}", refused.warning()),
                     Ok(None) => {}
                     Err(error) => tracing::warn!("could not check the added services: {error:#}"),
                 }

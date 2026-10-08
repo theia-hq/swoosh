@@ -145,9 +145,13 @@ async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey
         .with_bytes(|seed| Noise::new(host_transport, seed))
         .unwrap();
     let host = Node::new(host_transport, NoDiscovery);
-    let (gate, cut) = swoosh::gate::anchored(&server.home, host.node_id())
-        .await
-        .unwrap();
+    let (gate, cut) = swoosh::gate::anchored(
+        &server.home,
+        host.node_id(),
+        swoosh::serve::BoundTargets::default(),
+    )
+    .await
+    .unwrap();
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let exposer = Router::new(gate)
         .service(SERVICE.parse().unwrap(), Recorder(Arc::clone(&recorded)))

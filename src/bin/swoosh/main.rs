@@ -445,8 +445,13 @@ impl Outward {
                     .admit
                     .map(|root| tightbeam::identity::AsVerifyKey::verify_key(&root))
                     .transpose()?;
-                let (gate, cut) =
-                    swoosh::gate::anchored_admitting(home, secret.node_id(), admitted).await?;
+                let (gate, cut) = swoosh::gate::anchored_admitting(
+                    home,
+                    secret.node_id(),
+                    admitted,
+                    cmd.bound_targets(),
+                )
+                .await?;
                 Ok(Some(serve::ExposeContext {
                     #[cfg(feature = "ssh")]
                     host_seed: secret.ssh_host_seed(),
@@ -1730,9 +1735,10 @@ mod tests {
         swoosh::config::create_store_dir(&dir).expect("a scratch home");
         let home = Home::resolve(Some(dir.clone())).expect("the scratch home resolves");
         let own = swoosh::testkit::TestNode::seeded(0x61).node_id();
-        let (gate, _cut) = swoosh::gate::anchored(&home, own)
-            .await
-            .expect("the gate builds");
+        let (gate, _cut) =
+            swoosh::gate::anchored(&home, own, swoosh::serve::BoundTargets::default())
+                .await
+                .expect("the gate builds");
         let (router, _known) =
             swoosh::serve::bind_renewal(tightbeam::tunnel::Router::new(gate), &home)
                 .await

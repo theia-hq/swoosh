@@ -86,9 +86,13 @@ async fn proof() {
     let host_id = host.node_id();
     let serving = nas_home.clone();
     tokio::task::spawn_local(async move {
-        let (gate, cut) = swoosh::gate::anchored(&serving, TestNode::seeded(NAS).node_id())
-            .await
-            .unwrap();
+        let (gate, cut) = swoosh::gate::anchored(
+            &serving,
+            TestNode::seeded(NAS).node_id(),
+            swoosh::serve::BoundTargets::default(),
+        )
+        .await
+        .unwrap();
         Router::new(gate)
             .member_service(
                 SYNC_SERVICE.parse().unwrap(),
@@ -180,9 +184,13 @@ async fn lapsed_pull() {
     let host_id = host.node_id();
     let serving = nas_home.clone();
     tokio::task::spawn_local(async move {
-        let (gate, cut) = swoosh::gate::anchored(&serving, TestNode::seeded(NAS).node_id())
-            .await
-            .unwrap();
+        let (gate, cut) = swoosh::gate::anchored(
+            &serving,
+            TestNode::seeded(NAS).node_id(),
+            swoosh::serve::BoundTargets::default(),
+        )
+        .await
+        .unwrap();
         Router::new(gate)
             .member_service(
                 SYNC_SERVICE.parse().unwrap(),

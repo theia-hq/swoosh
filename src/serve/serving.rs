@@ -95,8 +95,13 @@ impl Started {
     }
 
     /// What a bare `serve` starts with from `kept`, the `serve.toml` at `path`: the list it records, else
-    /// the default. A running `serve` asks this of each later read too, for the services that file runs.
-    pub(crate) fn bare(kept: &ServeToml, path: &Path) -> Result<Self, ServingError> {
+    /// the default. A running `serve` asks this of each later read too, for the services that file runs,
+    /// and `share` asks it for what a name serves.
+    ///
+    /// # Errors
+    ///
+    /// [`ServingError::NotAService`] when `kept` lists something that is not a service form.
+    pub fn bare(kept: &ServeToml, path: &Path) -> Result<Self, ServingError> {
         let mut entries = Vec::new();
         for line in &kept.services {
             let not_a_service = || ServingError::NotAService {

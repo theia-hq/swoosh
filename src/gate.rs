@@ -23,14 +23,20 @@ use crate::escape::EscapedPath;
 use crate::grants::IssuedLedger;
 use crate::home::{Home, Loose, LooseFile, loose_in, read_trust_file};
 use crate::revoked::RevokedError;
+use crate::serve::BoundTargets;
 
 /// Build `serve`'s gate over `home`, for a machine whose own key is `own`, and the live cut that must be
 /// wired beside it (`.with_live_cuts(cut)`).
 ///
 /// The same in every standing: a machine with no pin admits no member, a pin to a root revoked here is
-/// no pin, and a link this machine signed is admitted whatever the pin, while its row is in the ledger.
-pub async fn anchored(home: &Home, own: NodeId) -> Result<(Gate, AnchorCut), GateError> {
-    anchored_admitting(home, own, None).await
+/// no pin, and a link this machine signed is admitted whatever the pin, while its row is in the ledger
+/// and it was made for what `bound` binds under its service's name.
+pub async fn anchored(
+    home: &Home,
+    own: NodeId,
+    bound: BoundTargets,
+) -> Result<(Gate, AnchorCut), GateError> {
+    anchored_admitting(home, own, None, bound).await
 }
 
 /// [`anchored`], admitting the devices of `admit` for this run in place of the pin when it is given: a
@@ -39,6 +45,7 @@ pub async fn anchored_admitting(
     home: &Home,
     own: NodeId,
     admit: Option<VerifyKey>,
+    bound: BoundTargets,
 ) -> Result<(Gate, AnchorCut), GateError> {
     let revoked = Arc::new(crate::revoked::open(home)?);
     let mut file_pin = FilePin::open(home, Arc::clone(&revoked));
@@ -49,7 +56,10 @@ pub async fn anchored_admitting(
         Arc::clone(&pin),
         own,
         Arc::clone(&revoked),
-        IssuedLedger::open(home),
+        IssuedLedger::open(home, bound).map_err(|source| GateError::Used {
+            path: home.links_used(),
+            source,
+        })?,
     );
     Ok((gate, AnchorCut { pin, own, revoked }))
 }
@@ -60,6 +70,18 @@ pub enum GateError {
     /// The revocations could not be read, or lost entries they once held.
     #[error(transparent)]
     Revoked(#[from] RevokedError),
+    /// The one-use links this machine admitted could not be read, so none may be admitted again.
+    #[error(
+        "{} cannot be read, so serve cannot tell which one-use links were used",
+        EscapedPath(path)
+    )]
+    Used {
+        /// `<home>/links.used`.
+        path: PathBuf,
+        /// Why.
+        #[source]
+        source: std::io::Error,
+    },
     /// This machine's own key is not a usable key.
     #[error("this machine's key is not a usable key: {0}")]
     OwnKey(#[from] nauthy::KeyError),

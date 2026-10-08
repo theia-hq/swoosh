@@ -7,20 +7,22 @@
 //!
 //! It is also the issuer's index from holder to that root id, which is what revoking a link by naming its
 //! holder, and `status`, read. Each row records what its service's name served when the link was made, so
-//! `serve` reads it at start too ([`LinksForAnother`]), and binds no shell under a name whose live links were
-//! made for something else. It is a who-can-reach-what record, so it is written `0600`, and it lives
+//! the gate admits the link only to that target, and `serve` reads it at start too ([`LinksForAnother`]),
+//! binding no engine that must never face an open gate under a name whose live links were made for
+//! something else. It is a who-can-reach-what record, so it is written `0600`, and it lives
 //! in the node home beside the identity so one home moves the whole identity and trust unit together.
 //!
 //! Every writer holds `home.lock`. An [`append`](Grants::append) is one `O_APPEND` line and a `sync_data`,
 //! so a link is on disk before it is printed, and the directory is synced when the file is first made; a
 //! rewrite (the prune an append runs once enough rows have expired) goes through the home's one write
-//! routine.
+//! routine. Beside it, `links.used` holds the one-use links spent; `serve` alone appends it, with no
+//! `home.lock` ([`IssuedLedger`]).
 
 use core::fmt;
 use core::num::ParseIntError;
 use core::str::FromStr;
 use core::time::Duration;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -31,6 +33,7 @@ use nauthy::{FileStamp, IssuedIds, RevocationId, STAT_DEBOUNCE, Service, Service
 
 use crate::escape::EscapedPath;
 use crate::home::HomeWrite;
+use crate::serve::{BoundTargets, NotATarget, ServedTarget};
 
 /// How many expired rows an [`append`](Grants::append) lets gather before it prunes them. A prune rewrites
 /// the whole file, so it waits until the rewrite removes enough to be worth it.
@@ -154,23 +157,25 @@ fn append_locked(
         crate::config::create_store_dir(parent).map_err(LedgerError::Io)?;
     }
     prune_expired(home_lock, path, prune_at).map_err(LedgerError::Io)?;
+    append_line(path, line).map_err(LedgerError::Io)
+}
+
+/// Append `line` to the private file at `path`, made `0600` when it is not there, and sync it, so it is on
+/// disk when this returns; a file this append made is durable only once the directory that names it is, so
+/// that is synced too. The caller is the file's one writer at a time.
+fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
     let made = !path.exists();
     let mut file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
         .mode(0o600)
-        .open(path)
-        .map_err(LedgerError::Io)?;
-    // Reassert 0600 even on a pre-existing ledger (create's mode fired only on first creation).
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .map_err(LedgerError::Io)?;
-    file.write_all(line.as_bytes()).map_err(LedgerError::Io)?;
-    file.sync_data().map_err(LedgerError::Io)?;
-    // A file this append made is durable only once the directory that names it is.
+        .open(path)?;
+    // Reassert 0600 even on a pre-existing file (create's mode fired only on first creation).
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(line.as_bytes())?;
+    file.sync_data()?;
     if made && let Some(parent) = path.parent() {
-        std::fs::File::open(parent)
-            .and_then(|dir| dir.sync_all())
-            .map_err(LedgerError::Io)?;
+        std::fs::File::open(parent)?.sync_all()?;
     }
     Ok(())
 }
@@ -203,9 +208,9 @@ fn prune_expired(home_lock: &HomeWrite, path: &Path, prune_at: usize) -> std::io
     crate::config::write_private_atomic(home_lock, path, kept.as_bytes())
 }
 
-/// The ledger as the gate reads it: the root revocation ids of every link this machine signed, so an
+/// The ledger as the gate reads it: the root revocation id of every link this machine signed, so an
 /// anchored gate admits a link rooted at this machine's own key only when this machine recorded issuing
-/// it.
+/// it, and only against the target it was made for.
 ///
 /// Live: it re-stats the file at most once per [`STAT_DEBOUNCE`] and re-reads it when its [`FileStamp`]
 /// changed, so a `share` run while `serve` runs is admitted with no restart.
@@ -214,22 +219,41 @@ fn prune_expired(home_lock: &HomeWrite, path: &Path, prune_at: usize) -> std::io
 /// (checked on the handle each read comes from), admits no self-anchored link until it can be read again,
 /// and each change between readable and unreadable is logged with the path. A missing file is readable and
 /// holds no links. One malformed line fails only that row.
+///
+/// A one-use link is spent on its first admission, and the spend is on disk before that admission is
+/// granted: its root id is appended to `<home>/links.used` and synced, and a write that fails refuses the
+/// link. `serve` is that file's only writer, and `serve.lock` makes it one per home, so the append takes
+/// no `home.lock`. The file is read once, when the gate is built, so a restarted `serve` keeps every link
+/// it spent. It is never `revoked`: the live cut reads that file, and would end the session the one use
+/// opened.
 pub struct IssuedLedger {
     path: PathBuf,
+    /// `<home>/links.used`, the one-use links spent.
+    used_path: PathBuf,
+    /// What this run bound under each name, which a link must have been made for.
+    bound: BoundTargets,
     state: Mutex<LedgerState>,
+}
+
+/// One row of the ledger, as the gate reads it.
+struct Issued {
+    /// The service the link reaches.
+    service: Service,
+    /// What its name served when it was made.
+    serves: Option<ServedTarget>,
+    /// Whether it admits once ([`GrantKind::Once`]).
+    once: bool,
 }
 
 /// What an [`IssuedLedger`] read last.
 struct LedgerState {
-    /// The ids the last successful read found; empty while the file is unreadable.
-    ids: HashSet<RevocationId>,
-    /// Which of `ids` are one-use links ([`GrantKind::Once`]).
-    once: HashSet<RevocationId>,
-    /// The one-use links this run has admitted once already. Kept across re-reads, since a link stays
-    /// used whatever the file does, and trimmed to the one-use ids the file still holds, so it never
-    /// outgrows the ledger. Held in memory only: a restarted `serve` starts with none.
+    /// The rows the last successful read found, by root id; empty while the file is unreadable.
+    rows: HashMap<RevocationId, Issued>,
+    /// The one-use links spent: those `links.used` held when the gate was built, and those this run
+    /// admitted since. Kept across re-reads, since a link stays used whatever the ledger does, and trimmed
+    /// to the one-use rows a read finds, so it never outgrows the ledger.
     used: HashSet<RevocationId>,
-    /// The stamp of the file the ids came from, `None` before a read or after a failed one.
+    /// The stamp of the file the rows came from, `None` before a read or after a failed one.
     stamp: Option<FileStamp>,
     /// When the file was last statted, to debounce the next stat.
     last_stat: Option<Instant>,
@@ -238,21 +262,59 @@ struct LedgerState {
 }
 
 impl IssuedLedger {
-    /// The ledger at `<home>/links`, read once now so `serve` logs an unreadable ledger at start.
-    pub fn open(home: &crate::home::Home) -> Self {
+    /// The ledger at `<home>/links`, checked against `bound`, with the one-use links `<home>/links.used`
+    /// holds already spent. The ledger is read once now so `serve` logs an unreadable one at start.
+    ///
+    /// # Errors
+    ///
+    /// `links.used` is there and could not be read: which one-use links were spent is unknown, so none
+    /// may be admitted.
+    // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
+    #[allow(clippy::std_instead_of_core)]
+    pub fn open(home: &crate::home::Home, bound: BoundTargets) -> std::io::Result<Self> {
+        let used_path = home.links_used();
+        let used = match crate::home::read_trust_file(&used_path) {
+            Ok(text) => Self::spent(&used_path, &text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashSet::new(),
+            Err(error) => return Err(error),
+        };
         let ledger = Self {
             path: home.links(),
+            used_path,
+            bound,
             state: Mutex::new(LedgerState {
-                ids: HashSet::new(),
-                once: HashSet::new(),
-                used: HashSet::new(),
+                rows: HashMap::new(),
+                used,
                 stamp: None,
                 last_stat: None,
                 readable: None,
             }),
         };
         ledger.refresh(&mut ledger.state.lock().unwrap_or_else(PoisonError::into_inner));
-        ledger
+        Ok(ledger)
+    }
+
+    /// The root ids in `text`, the body of `links.used`, one hex id per line, skipping and naming each line
+    /// that is not one.
+    fn spent(path: &Path, text: &str) -> HashSet<RevocationId> {
+        let mut used = HashSet::new();
+        for (index, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match RevocationId::from_hex(line) {
+                Ok(id) => {
+                    used.insert(id);
+                }
+                Err(_) => tracing::warn!(
+                    path = %EscapedPath(path),
+                    line = index + 1,
+                    "skipping a malformed line of the used one-use links"
+                ),
+            }
+        }
+        used
     }
 
     /// Re-read the file when its stamp changed, at most once per [`STAT_DEBOUNCE`].
@@ -279,21 +341,21 @@ impl IssuedLedger {
         };
         let readable = match read {
             Ok(None) => {
-                state.ids.clear();
-                state.once.clear();
+                state.rows.clear();
                 state.stamp = None;
                 true
             }
             Ok(Some((text, stamp))) => {
-                (state.ids, state.once) = self.parse(&text);
-                let once = &state.once;
-                state.used.retain(|id| once.contains(id));
+                state.rows = self.parse(&text);
+                let rows = &state.rows;
+                state
+                    .used
+                    .retain(|id| rows.get(id).is_some_and(|row| row.once));
                 state.stamp = stamp;
                 true
             }
             Err(error) => {
-                state.ids.clear();
-                state.once.clear();
+                state.rows.clear();
                 state.stamp = None;
                 if state.readable != Some(false) {
                     tracing::error!(
@@ -314,11 +376,9 @@ impl IssuedLedger {
         state.readable = Some(readable);
     }
 
-    /// The root ids in `text`, and which of them are one-use links, skipping and naming each line that
-    /// does not parse.
-    fn parse(&self, text: &str) -> (HashSet<RevocationId>, HashSet<RevocationId>) {
-        let mut ids = HashSet::new();
-        let mut once = HashSet::new();
+    /// The rows in `text`, by root id, skipping and naming each line that does not parse.
+    fn parse(&self, text: &str) -> HashMap<RevocationId, Issued> {
+        let mut rows = HashMap::new();
         for (index, line) in text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() {
@@ -326,10 +386,14 @@ impl IssuedLedger {
             }
             match GrantRecord::from_line(line) {
                 Ok(record) => {
-                    if record.kind == GrantKind::Once {
-                        once.insert(record.root_id.clone());
-                    }
-                    ids.insert(record.root_id);
+                    rows.insert(
+                        record.root_id,
+                        Issued {
+                            service: record.target,
+                            serves: record.serves,
+                            once: record.kind == GrantKind::Once,
+                        },
+                    );
                 }
                 Err(error) => tracing::warn!(
                     path = %EscapedPath(&self.path),
@@ -339,24 +403,39 @@ impl IssuedLedger {
                 ),
             }
         }
-        (ids, once)
+        rows
     }
 }
 
 impl IssuedIds for IssuedLedger {
-    /// Whether this machine recorded issuing the link `id` roots, and, for a one-use link, whether this is
-    /// its first admission. nauthy asks this last, once every other check on the link has passed, so the
-    /// first `true` for a one-use id is its one admission: the id is marked used then, and every later ask
-    /// is `false`, the refusal any unrecorded link gets. The unit is the admission, so each stream that
-    /// presents the link spends it, not each session.
+    /// Whether this machine recorded issuing the link `id` roots, for the target its service's name is
+    /// bound to in this run, and, for a one-use link, whether this is its first admission. nauthy asks
+    /// this last, once every other check on the link has passed, so the first `true` for a one-use id is
+    /// its one admission: the id is written to `links.used` and synced first, and every later ask is
+    /// `false`, the refusal any unrecorded link gets. A write that fails is `false` too. The unit is the
+    /// admission, so each stream that presents the link spends it, not each session.
     fn is_issued(&self, id: &RevocationId) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.refresh(&mut state);
-        if !state.ids.contains(id) {
+        let Some(row) = state.rows.get(id) else {
+            return false;
+        };
+        if !self.bound.admits(row.service.as_str(), row.serves.as_ref()) {
             return false;
         }
-        if !state.once.contains(id) {
+        if !row.once {
             return true;
+        }
+        if state.used.contains(id) {
+            return false;
+        }
+        if let Err(error) = append_line(&self.used_path, &format!("{}\n", id.to_hex())) {
+            tracing::error!(
+                path = %EscapedPath(&self.used_path),
+                %error,
+                "a one-use link was refused: its use could not be recorded"
+            );
+            return false;
         }
         state.used.insert(id.clone())
     }
@@ -449,7 +528,11 @@ impl GrantRecord {
         let target = next()?.parse::<Service>().map_err(LedgerError::Service)?;
         let serves = match next()? {
             SERVED_NOTHING => None,
-            served => Some(served.parse::<ServedTarget>()?),
+            served => Some(
+                served
+                    .parse::<ServedTarget>()
+                    .map_err(|NotATarget(text)| LedgerError::Served(text))?,
+            ),
         };
         let holder = next()?.to_owned();
         let expiry = from_unix_secs(next()?.parse::<u64>().map_err(LedgerError::Expiry)?);
@@ -470,54 +553,25 @@ impl GrantRecord {
     }
 }
 
-/// What a service's name served when a link to it was made: the target of its `serve` entry, `sshd:` or
-/// `tcp:localhost:22`. Parsed, so it always names a scheme (it holds a `:`) and holds no control character,
-/// which keeps it one field of one ledger line.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServedTarget(String);
-
-impl ServedTarget {
-    /// The target as its `serve` entry spells it.
-    pub fn as_str(&self) -> &str {
-        let Self(text) = self;
-        text
-    }
-}
-
-impl FromStr for ServedTarget {
-    type Err = LedgerError;
-
-    fn from_str(text: &str) -> Result<Self, Self::Err> {
-        if !text.contains(':') || text.chars().any(char::is_control) {
-            return Err(LedgerError::Served(text.to_owned()));
-        }
-        Ok(Self(text.to_owned()))
-    }
-}
-
-impl fmt::Display for ServedTarget {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// A name `serve` will not bind a code-running engine under: live links were shared for it while it
-/// served something else (or nothing), and a shell under the name would admit them. Its display is the
-/// refusal line.
+/// A name `serve` will not bind an engine that must never face an open gate under: live links were shared
+/// for it while it served something else (or nothing), and the engine would admit them. Its display is
+/// the refusal line; [`warning`](Self::warning) is the line a running `serve` logs for a change that the
+/// next start will refuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinksForAnother {
     /// The service name.
     name: String,
+    /// What the name would bind.
+    bound: ServedTarget,
     /// What the name served when each of those links was made, `None` for nothing; distinct, in order.
-    targets: Vec<Option<String>>,
-    /// Who each of them was shared with, as the ledger records them; distinct, in order.
-    holders: Vec<String>,
+    targets: Vec<Option<ServedTarget>>,
 }
 
 impl LinksForAnother {
-    /// The first of `entries` (`name=target`, as `serve` binds them) that binds a code-running engine under a
-    /// name with a live link in `records` made for another target, or `None` when none does. Live: not past
-    /// its expiry at `now`, and not in `revoked`.
+    /// The first of `entries` (`name=target`, as `serve` binds them) that binds an engine that must never
+    /// face an open gate under a name with a live link in `records` that the target would not admit
+    /// ([`ServedTarget::admits_made_for`]), or `None` when none does. Live: not past its expiry at `now`,
+    /// and not in `revoked`.
     pub fn first<'a>(
         entries: impl IntoIterator<Item = &'a str>,
         records: &[GrantRecord],
@@ -525,35 +579,21 @@ impl LinksForAnother {
         now: std::time::SystemTime,
     ) -> Option<Self> {
         entries.into_iter().find_map(|entry| {
-            let (name, target) = entry.split_once('=')?;
-            if !crate::serve::runs_code(target) {
-                return None;
-            }
+            let (name, bound) = never_public_entry(entry)?;
             let mut found: Option<Self> = None;
             for record in records.iter().filter(|record| {
                 record.target.as_str() == name
                     && record.expiry > now
                     && !revoked.is_revoked_any([&record.root_id])
-                    && record
-                        .serves
-                        .as_ref()
-                        .is_none_or(|served| served.as_str() != target)
+                    && !bound.admits_made_for(record.serves.as_ref())
             }) {
                 let found = found.get_or_insert_with(|| Self {
                     name: name.to_owned(),
+                    bound: ServedTarget::clone(&bound),
                     targets: Vec::new(),
-                    holders: Vec::new(),
                 });
-                let served = record.serves.as_ref().map(ToString::to_string);
-                if !found.targets.contains(&served) {
-                    found.targets.push(served);
-                }
-                let holder = match record.holder.as_str() {
-                    ANYONE => "anyone".to_owned(),
-                    key => key.to_owned(),
-                };
-                if !found.holders.contains(&holder) {
-                    found.holders.push(holder);
+                if !found.targets.contains(&record.serves) {
+                    found.targets.push(record.serves.clone());
                 }
             }
             found
@@ -561,24 +601,20 @@ impl LinksForAnother {
     }
 
     /// [`first`](Self::first) over `home`'s ledger and revocations as they stand now. Only an entry that
-    /// binds a code-running engine is checked, so a `serve` that binds none reads neither file and starts as
-    /// it did, whatever state they are in.
+    /// binds an engine that must never face an open gate is checked, so a `serve` that binds none reads
+    /// neither file and starts as it did, whatever state they are in.
     ///
     /// # Errors
     ///
-    /// The ledger or the revocations could not be read while an entry binds a code-running engine: the
-    /// check fails closed, so nothing binds.
+    /// The ledger or the revocations could not be read while an entry binds such an engine: the check fails
+    /// closed, so nothing binds.
     pub fn in_home<'a>(
         home: &crate::home::Home,
         entries: impl IntoIterator<Item = &'a str>,
     ) -> eyre::Result<Option<Self>> {
         let entries: Vec<&str> = entries
             .into_iter()
-            .filter(|entry| {
-                entry
-                    .split_once('=')
-                    .is_some_and(|(_, target)| crate::serve::runs_code(target))
-            })
+            .filter(|entry| never_public_entry(entry).is_some())
             .collect();
         if entries.is_empty() {
             return Ok(None);
@@ -593,17 +629,17 @@ impl LinksForAnother {
         ))
     }
 
-    /// The same check over services added to `held` (a `serve.toml` read while `serve` runs) under the names
-    /// `added`. An added service is never bound before the next start, so the running set stays either way;
-    /// this is what that start would refuse, for the run's log.
+    /// The same check over the services of `held` (a `serve.toml` read while `serve` runs) under `names`:
+    /// the ones added, and the ones whose target changed. Neither is bound before the next start, so the
+    /// running set stays either way; this is what that start would refuse, for the run's log.
     ///
     /// # Errors
     ///
     /// As [`in_home`](Self::in_home); a `held` that lists something that is not a service adds nothing.
-    pub fn among_added(
+    pub fn among_changed(
         home: &crate::home::Home,
         held: &crate::serve_toml::ServeToml,
-        added: &[String],
+        names: &[String],
     ) -> eyre::Result<Option<Self>> {
         let Ok(started) = crate::serve::Started::bare(held, &home.serve_toml()) else {
             return Ok(None);
@@ -614,28 +650,62 @@ impl LinksForAnother {
             entries.iter().map(String::as_str).filter(|entry| {
                 entry
                     .split_once('=')
-                    .is_some_and(|(name, _)| added.iter().any(|added| added == name))
+                    .is_some_and(|(name, _)| names.iter().any(|named| named == name))
             }),
+        )
+    }
+
+    /// The line a running `serve` logs, after `warning: `, for a change to `serve.toml` its next start will
+    /// refuse: what happens first, then the same reason and fixes as the refusal.
+    pub fn warning(&self) -> impl fmt::Display + '_ {
+        Warning(self)
+    }
+
+    /// The refusal after the name: what the links were made for, what they would reach, and the fixes.
+    fn reason(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let targets: Vec<&str> = self
+            .targets
+            .iter()
+            .map(|target| target.as_ref().map_or("nothing", ServedTarget::as_str))
+            .collect();
+        let (reach, what) = if self.bound.runs_code() {
+            ("open a shell".to_owned(), "the shell".to_owned())
+        } else {
+            (format!("reach {}", self.bound), self.bound.to_string())
+        };
+        write!(
+            f,
+            "has live links made when it served {targets}, and they would {reach}: serve {what} under \
+             another name, or revoke them first (swoosh status lists them under links you shared)",
+            targets = targets.join(" or "),
         )
     }
 }
 
-impl core::fmt::Display for LinksForAnother {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let targets: Vec<&str> = self
-            .targets
-            .iter()
-            .map(|target| target.as_deref().unwrap_or("not served"))
-            .collect();
-        write!(
-            f,
-            "links shared for {name} were made when it was {targets}, and a shell under that name would reach \
-             them: revoke them first (swoosh revoke <holder>, for {holders}), or serve the shell under another \
-             name.",
-            name = self.name,
-            targets = targets.join(" or "),
-            holders = self.holders.join(", "),
-        )
+/// The name and target of `entry` (`name=target`) when it binds an engine that must never face an open
+/// gate; `None` for any other entry, and for one whose target is no [`ServedTarget`], which `serve`
+/// refuses at bind.
+fn never_public_entry(entry: &str) -> Option<(&str, ServedTarget)> {
+    let (name, target) = entry.split_once('=')?;
+    let target: ServedTarget = target.parse().ok()?;
+    target.never_public().then_some((name, target))
+}
+
+impl fmt::Display for LinksForAnother {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} ", self.name)?;
+        self.reason(f)
+    }
+}
+
+/// [`LinksForAnother::warning`]'s line.
+struct Warning<'a>(&'a LinksForAnother);
+
+impl fmt::Display for Warning<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self(refused) = self;
+        write!(f, "the next serve will refuse {}: it ", refused.name)?;
+        refused.reason(f)
     }
 }
 
@@ -765,7 +835,7 @@ pub enum LedgerError {
     /// A line's service field was not a valid service name.
     #[error("grants ledger has an invalid service name")]
     Service(#[source] ServiceParseError),
-    /// A line's served-target field was not a target: no `:`, or a control character.
+    /// A line's served-target field was not a target: no scheme a `serve` binds, or a control character.
     #[error("grants ledger has an invalid served target {0:?}")]
     Served(String),
     /// A line's expiry field was not a decimal number of seconds.

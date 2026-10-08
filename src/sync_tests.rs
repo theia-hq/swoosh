@@ -959,7 +959,10 @@ async fn a_fold_never_revokes_this_machines_own_key() {
         !revoked.is_revoked_key(&key(DESK)),
         "but never this machine's own key"
     );
-    let (gate, _cut) = crate::gate::anchored(&desk, node(DESK)).await.unwrap();
+    let (gate, _cut) =
+        crate::gate::anchored(&desk, node(DESK), crate::serve::BoundTargets::default())
+            .await
+            .unwrap();
     assert!(
         matches!(
             gate.admit(

@@ -52,7 +52,7 @@ async fn sealed(seed: [u8; 32]) -> Noise<Endpoint> {
 
 /// The gate `serve` builds for a node from its home, over the diagnostics, with the live cut wired.
 async fn anchored_exposer(home: &Home, own: NodeId) -> tightbeam::tunnel::Exposer {
-    let (gate, cut) = swoosh::gate::anchored(home, own)
+    let (gate, cut) = swoosh::gate::anchored(home, own, swoosh::serve::BoundTargets::default())
         .await
         .expect("the gate builds");
     swoosh::serve::diagnostics(Router::new(gate), &[])

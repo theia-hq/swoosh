@@ -192,6 +192,13 @@ impl Home {
         self.dir.join("links")
     }
 
+    /// `<home>/links.used`: the one-use links of [`links`](Self::links) a `serve` has admitted once, one root
+    /// id per line, appended and synced before the admission is granted, so a restarted `serve` never admits
+    /// one again. A running `serve` is its only writer.
+    pub fn links_used(&self) -> PathBuf {
+        self.dir.join("links.used")
+    }
+
     /// `<home>/contacts.toml`: the address book of petnames this node resolves.
     pub fn contacts(&self) -> PathBuf {
         self.dir.join("contacts.toml")
@@ -204,13 +211,15 @@ impl Home {
         self.dir.join("known_hosts")
     }
 
-    /// The files whose contents decide whom this machine trusts: the pin, the links it signed, the
-    /// contacts book, everything it refuses for good, what `serve` runs, and the host keys `swoosh ssh`
-    /// pins (a writer who plants a host key there can sit between this machine and a peer).
-    fn trust_files(&self) -> [PathBuf; 7] {
+    /// The files whose contents decide whom this machine trusts: the pin, the links it signed and the
+    /// one-use ones it spent, the contacts book, everything it refuses for good, what `serve` runs, and the
+    /// host keys `swoosh ssh` pins (a writer who plants a host key there can sit between this machine and a
+    /// peer).
+    fn trust_files(&self) -> [PathBuf; 8] {
         [
             self.root_pub(),
             self.links(),
+            self.links_used(),
             self.contacts(),
             self.revoked(),
             self.revoked_written(),

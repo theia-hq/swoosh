@@ -324,6 +324,7 @@ fn what_a_running_serve_cannot_apply_is_named() {
             relay: true,
             resolver: false,
             added: vec!["files".to_owned(), "speed".to_owned()],
+            changed: Vec::new(),
         }
     );
     assert!(watcher.is_enabled(&service("ping")), "ping still served");
@@ -373,15 +374,59 @@ fn a_live_add_of_sshd_over_other_links_keeps_the_running_set() {
     let waiting = watcher.waiting();
     assert_eq!(waiting.added, ["ssh"], "ssh waits for the next start");
     assert!(watcher.is_enabled(&service("ping")), "ping is still served");
-    let refused = LinksForAnother::among_added(&scratch.home, &watcher.held(), &waiting.added)
+    let refused = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.added)
         .expect("the ledger reads")
         .expect("that start would refuse the shell");
     assert_eq!(
-        refused.to_string(),
-        format!(
-            "links shared for ssh were made when it was tcp:localhost:22, and a shell under that name \
-             would reach them: revoke them first (swoosh revoke <holder>, for {holder}), or serve the \
-             shell under another name."
-        )
+        refused.warning().to_string(),
+        "the next serve will refuse ssh: it has live links made when it served tcp:localhost:22, and \
+         they would open a shell: serve the shell under another name, or revoke them first (swoosh \
+         status lists them under links you shared)"
     );
+    assert!(
+        !refused.to_string().contains(&holder),
+        "no holder's key is printed"
+    );
+}
+
+/// A running name retargeted in `serve.toml` waits for the next start like an added one: the watcher names
+/// it, and when that start would refuse it over links made for the old target, the run logs that too.
+#[test]
+fn a_retarget_of_a_running_name_is_named_and_checked() {
+    use crate::grants::{Delegation, GrantKind, GrantRecord, Grants, LinksForAnother};
+
+    let scratch = Scratch::new("retarget");
+    list(&scratch, &["ping=ping:", "ssh=tcp:localhost:22"]);
+    Grants::at(scratch.home.links())
+        .append(
+            &crate::testkit::lock(),
+            &GrantRecord {
+                target: service("ssh"),
+                serves: Some("tcp:localhost:22".parse().expect("a target")),
+                kind: GrantKind::Bearer,
+                delegation: Delegation::Delegable,
+                holder: crate::grants::ANYONE.to_owned(),
+                root_id: nauthy::RevocationId::from_bytes(vec![0x62]),
+                expiry: std::time::SystemTime::now() + Duration::from_secs(3600),
+            },
+        )
+        .expect("record a link for ssh as a forward");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    watcher.serving(&bare(&scratch));
+
+    list(&scratch, &["ping=ping:", "ssh=sshd:"]);
+    past_the_debounce();
+    let waiting = watcher.waiting();
+    assert_eq!(
+        (waiting.added.as_slice(), waiting.changed.as_slice()),
+        (&[][..], &["ssh".to_owned()][..]),
+        "ssh's new target waits for the next start"
+    );
+    assert_eq!(
+        waiting.to_string(),
+        "the changed service ssh in serve.toml takes effect the next time serve starts"
+    );
+    let refused = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.changed)
+        .expect("the ledger reads");
+    assert!(refused.is_some(), "that start would refuse the shell");
 }

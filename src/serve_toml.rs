@@ -15,11 +15,12 @@
 //!
 //! A running `serve` takes service away live and gives it only when it starts, where its routes are
 //! proven and its banner says what it serves. So a service dropped from `services` is refused on its next
-//! stream, as one turned off is, while a service added there, and a changed relay or resolver, wait for
-//! the next `serve`; the watcher names what waits ([`Waiting`]) so the run can say so once.
+//! stream, as one turned off is, while a service added or retargeted there, and a changed relay or
+//! resolver, wait for the next `serve`; the watcher names what waits ([`Waiting`]) so the run can say so
+//! once.
 
 use core::time::Duration;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -275,9 +276,9 @@ pub struct LiveServeToml {
 
 /// What a running `serve` serves, fixed when its routes bound: what a later read is held against.
 struct Serving {
-    /// The names its services are bound under. Only these are refused for leaving `services`: the node's
-    /// own routes are bound by no entry.
-    names: BTreeSet<String>,
+    /// The names its services are bound under, each with its target. Only these are refused for leaving
+    /// `services`: the node's own routes are bound by no entry.
+    bound: BTreeMap<String, String>,
     /// The relay the file held once the run saved what it was told, which is the one it bound.
     relay: Option<RelayUrl>,
     /// The resolver, likewise.
@@ -285,8 +286,8 @@ struct Serving {
 }
 
 /// What `serve.toml` holds that a running `serve` applies only when it next starts: a relay or a resolver
-/// other than the one it bound, and the services it lists that the run does not serve. Empty when the file
-/// holds nothing the run is not doing.
+/// other than the one it bound, the services it lists that the run does not serve, and the ones it serves
+/// under another target. Empty when the file holds nothing the run is not doing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Waiting {
     /// The relay changed.
@@ -295,12 +296,14 @@ pub struct Waiting {
     pub resolver: bool,
     /// The services added, sorted.
     pub added: Vec<String>,
+    /// The services the run serves that the file gives another target, sorted.
+    pub changed: Vec<String>,
 }
 
 impl Waiting {
     /// Whether nothing waits.
     pub fn is_empty(&self) -> bool {
-        !self.relay && !self.resolver && self.added.is_empty()
+        !self.relay && !self.resolver && self.added.is_empty() && self.changed.is_empty()
     }
 }
 
@@ -321,7 +324,12 @@ impl core::fmt::Display for Waiting {
             [one] => items.push(format!("the added service {one}")),
             many => items.push(format!("the added services {}", and_list(many))),
         }
-        let verb = if items.len() == 1 && self.added.len() < 2 {
+        match self.changed.as_slice() {
+            [] => {}
+            [one] => items.push(format!("the changed service {one}")),
+            many => items.push(format!("the changed services {}", and_list(many))),
+        }
+        let verb = if items.len() == 1 && self.added.len() < 2 && self.changed.len() < 2 {
             "takes"
         } else {
             "take"
@@ -343,12 +351,25 @@ fn and_list(items: &[String]) -> String {
     }
 }
 
-/// The names `file`'s services run, as a bare `serve` started over the file at `path` would bind them;
-/// `None` when it lists a service that is not one.
-fn running(file: &ServeToml, path: &Path) -> Option<BTreeSet<String>> {
+/// The names `file`'s services run, each with its target, as a bare `serve` started over the file at `path`
+/// would bind them; `None` when it lists a service that is not one.
+fn running(file: &ServeToml, path: &Path) -> Option<BTreeMap<String, String>> {
     Started::bare(file, path)
         .ok()
-        .map(|started| started.names().into_iter().collect())
+        .map(|started| targets(&started))
+}
+
+/// The names `started` binds, each with its target; an entry with no name binds none.
+fn targets(started: &Started) -> BTreeMap<String, String> {
+    started
+        .entries()
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .split_once('=')
+                .map(|(name, target)| (name.to_owned(), target.to_owned()))
+        })
+        .collect()
 }
 
 /// The file a [`LiveServeToml`] reads, what it read first, and what it read last.
@@ -362,10 +383,10 @@ struct Watched {
 struct Held {
     /// The file, as the last good read found it.
     file: ServeToml,
-    /// The names `file`'s services run, as a bare `serve` would start them (the default when it lists
-    /// none). `None` only while the first read lists a service that is not one: a `serve` that named its
-    /// services started over such a file, and its own write replaces it.
-    running: Option<BTreeSet<String>>,
+    /// The names `file`'s services run, each with its target, as a bare `serve` would start them (the
+    /// default when it lists none). `None` only while the first read lists a service that is not one: a
+    /// `serve` that named its services started over such a file, and its own write replaces it.
+    running: Option<BTreeMap<String, String>>,
     /// What the run serves, once its routes bound; `None` before, when nothing is refused for leaving
     /// `services` and nothing waits.
     serving: Option<Serving>,
@@ -427,7 +448,7 @@ impl LiveServeToml {
     }
 
     /// Hold the file this run just wrote, at once rather than at the next stat, and fix what the run
-    /// serves: the names `started` bound and the relay and resolver the file now holds. Called once its
+    /// serves: the names `started` bound with their targets, and the relay and resolver the file now holds. Called once its
     /// routes bound and it saved what it was told, before the first stream, so its own write never reads
     /// as a service removed.
     pub fn serving(&self, started: &Started) {
@@ -436,7 +457,7 @@ impl LiveServeToml {
         held.last_stat = None;
         self.refresh(&mut held);
         held.serving = Some(Serving {
-            names: started.names().into_iter().collect(),
+            bound: targets(started),
             relay: held.file.relay.clone(),
             resolver: held.file.resolver.clone(),
         });
@@ -455,8 +476,20 @@ impl LiveServeToml {
                 .running
                 .iter()
                 .flatten()
-                .filter(|name| !serving.names.contains(*name))
-                .cloned()
+                .filter(|(name, _)| !serving.bound.contains_key(*name))
+                .map(|(name, _)| name.clone())
+                .collect(),
+            changed: held
+                .running
+                .iter()
+                .flatten()
+                .filter(|(name, target)| {
+                    serving
+                        .bound
+                        .get(*name)
+                        .is_some_and(|bound| bound != *target)
+                })
+                .map(|(name, _)| name.clone())
                 .collect(),
         }
     }
@@ -564,7 +597,13 @@ impl Held {
         self.serving
             .iter()
             .zip(&self.running)
-            .flat_map(|(serving, running)| serving.names.difference(running).cloned())
+            .flat_map(|(serving, running)| {
+                serving
+                    .bound
+                    .keys()
+                    .filter(|name| !running.contains_key(*name))
+                    .cloned()
+            })
     }
 
     /// Whether the gate refuses `name`: it is off, or it left `services`.

@@ -376,13 +376,20 @@ fn an_unknown_scheme_is_pointed_at_the_list_that_holds_both_halves() {
     }
 }
 
-/// [`never_public`] is each engine's own ceiling, read off the engine a gated `serve` binds: the answer is
+/// [`ServedTarget::never_public`] is each engine's own ceiling, read off the engine a gated `serve` binds: the answer is
 /// `true` exactly where the engine declares `Exposure = Never`, so the public proof refuses to open it, and
 /// `false` where it assembles open. A raw stream opens only through `--public-unsafe`, so it answers
 /// `false` and is never put to this proof. Every scheme has a case, so a new one cannot skip it.
 #[test]
 fn never_public_is_each_engines_own_ceiling() {
-    use swoosh::serve::{Scheme, bind_recv, never_public};
+    use swoosh::serve::{Scheme, ServedTarget, bind_recv};
+
+    let never_public = |target: &str| {
+        target
+            .parse::<ServedTarget>()
+            .unwrap_or_else(|error| panic!("{target}: {error}"))
+            .never_public()
+    };
 
     let name: nauthy::Service = "x".parse().expect("a name");
     let opened = |router: Router| router.public([name.clone()]).expose().is_ok();
@@ -436,7 +443,7 @@ fn never_public_is_each_engines_own_ceiling() {
     cases.push(("sshd:", None));
     let covered: BTreeSet<&str> = cases
         .iter()
-        .filter_map(|(target, _)| Scheme::of(target).map(Scheme::as_str))
+        .filter_map(|(target, _)| Scheme::parse(target).map(|(scheme, _)| scheme.as_str()))
         .collect();
     let every: BTreeSet<&str> = Scheme::ALL.iter().map(|scheme| scheme.as_str()).collect();
     assert_eq!(covered, every, "every scheme has a case");
@@ -451,10 +458,6 @@ fn never_public_is_each_engines_own_ceiling() {
             None => assert!(!never_public(target), "{target}: a raw stream"),
         }
     }
-    assert!(
-        !never_public("png:"),
-        "a scheme no serve binds is never bound"
-    );
 }
 
 /// THE defect the scheme-on-every-target grammar exists to kill. While a bare `host:port` was a legal
