@@ -66,7 +66,6 @@ fn a_contact_edit_waits_for_home_lock() {
 
     for (verb, args) in [
         ("add", ["add", "alice", key.as_str()].as_slice()),
-        ("signet", ["signet", "alice", key.as_str()].as_slice()),
         ("rm", ["rm", "alice"].as_slice()),
     ] {
         let home = scratch.0.join(verb);

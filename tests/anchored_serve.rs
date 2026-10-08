@@ -5,7 +5,7 @@
 //! and a dialer in this process reaches it with the credential each case is about.
 //!
 //! What is proven is what the composition root builds, not a gate assembled here: a machine with no pin
-//! admits no member, even one its own key signed; a link `grant issue` signed is admitted through the
+//! admits no member, even one its own key signed; a link `share` signed is admitted through the
 //! ledger and cut within a sweep once revoked; a link session outlives ten sweeps and the pin's removal;
 //! a fleet link's session outlives ten sweeps; and a pin written while `serve` runs is trusted at the next
 //! admission with no restart.
@@ -142,10 +142,10 @@ fn swoosh(home: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// The link `grant issue` prints for `args`, once a running `serve` can have seen its ledger row: the
+/// The link `share` prints for `args`, once a running `serve` can have seen its ledger row: the
 /// ledger is re-read at most once per debounce.
 fn issue(home: &Path, args: &[&str]) -> Link {
-    let mut full = vec!["grant", "issue"];
+    let mut full = vec!["share"];
     full.extend_from_slice(args);
     let link = swoosh::link::parse(&swoosh(home, &full)).expect("a link");
     std::thread::sleep(nauthy::STAT_DEBOUNCE + Duration::from_millis(100));
@@ -238,7 +238,7 @@ async fn a_pinless_serve_refuses_a_member_cap_at_its_own_key() {
 async fn a_node_signed_ssh_grant_opens_a_shell() {
     let scratch = Scratch::new("ssh");
     let served = serve(&scratch.0, &["ssh=sshd:"]);
-    let link = issue(&scratch.0, &["ssh"]);
+    let link = issue(&scratch.0, &["ssh", "anyone"]);
     let node = dialer(0x42, &served).await;
 
     let session = Connector::to_node(served.key, "ssh".parse().unwrap(), Some(link))
@@ -263,7 +263,7 @@ async fn a_node_signed_ssh_grant_opens_a_shell() {
 async fn a_self_slip_revoked_mid_session_is_cut() {
     let scratch = Scratch::new("revoked");
     let served = serve(&scratch.0, &["demo=echo:"]);
-    let link = issue(&scratch.0, &["demo"]);
+    let link = issue(&scratch.0, &["demo", "anyone"]);
     let node = dialer(0x43, &served).await;
 
     let session = echo_session(&node, &served, link.clone(), None).await;
@@ -292,7 +292,7 @@ async fn a_self_anchored_session_survives_ten_sweeps_and_a_leave() {
     )
     .unwrap();
     let served = serve(&scratch.0, &["demo=echo:"]);
-    let link = issue(&scratch.0, &["demo"]);
+    let link = issue(&scratch.0, &["demo", "anyone"]);
     let node = dialer(0x44, &served).await;
 
     let session = echo_session(&node, &served, link, None).await;
@@ -312,10 +312,11 @@ async fn a_fleet_bob_ssh_session_outlives_ten_sweeps() {
     let scratch = Scratch::new("fleet");
     let served = serve(&scratch.0, &["demo=echo:"]);
     let bob = TestRoot::seeded(0x52);
-    let link = issue(
+    swoosh(
         &scratch.0,
-        &["demo", "--for", &format!("fleet:{}", bob.node_id())],
+        &["contact", "add", "bob", &bob.node_id().to_string()],
     );
+    let link = issue(&scratch.0, &["demo", "bob"]);
     let node = dialer(0x45, &served).await;
     let badge = bob.device_badge(dialer_id(0x45), in_an_hour()).unwrap();
 
@@ -368,15 +369,15 @@ fn a_grant_is_on_disk_before_its_link_prints() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(&scratch.0)
-        .args(["grant", "issue", "demo"])
+        .args(["share", "demo", "anyone"])
         .env_remove("SWOOSH_HOME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("grant issue spawns");
+        .expect("share spawns");
     drop(child.stdout.take());
-    let status = child.wait().expect("grant issue ends");
+    let status = child.wait().expect("share ends");
     assert!(
         !status.success(),
         "printing to a closed pipe fails the command, the fault this is about"

@@ -226,16 +226,16 @@ fn serve(scratch: &Scratch, cwd: &Path, args: &[&str]) -> Served {
     }
 }
 
-/// The link `grant issue <service>` prints on the scratch's home, once a running `serve` can have seen its
+/// The link `share <service> anyone` prints on the scratch's home, once a running `serve` can have seen its
 /// ledger row.
 fn issue(scratch: &Scratch, service: &str) -> nauthy::Link {
     let output = scratch
-        .swoosh(&["grant", "issue", service])
+        .swoosh(&["share", service, "anyone"])
         .output()
         .expect("the binary runs");
     assert!(
         output.status.success(),
-        "grant issue failed: {}",
+        "share failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let link = swoosh::link::parse(&String::from_utf8(output.stdout).unwrap()).expect("a link");

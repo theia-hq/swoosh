@@ -6,7 +6,7 @@
 //! revocation id is recorded in the ledger, so naming the key later cuts the cap off at the gate without ever
 //! seeing the link again.
 //!
-//! The flow mirrors the product path: `grant issue --for` mints a bound link and records the grant; `swoosh
+//! The flow mirrors the product path: `share <service> <key>` mints a bound link and records the grant; `swoosh
 //! revoke <key>` (driven here through the real [`RevokeCmd`](revoke::RevokeCmd)) loads the ledger, finds the
 //! root id, and denylists it. A live exposer's gate consults [`Denylist::is_revoked`] on every dial, so
 //! asserting it now refuses the cap is asserting the gate refuses it.
@@ -57,7 +57,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     let cap = Cap::parse(link.as_str()).unwrap();
     let root_id = cap.root_revocation_id().unwrap();
 
-    // Record the grant in the mint-log ledger, as `grant issue --for` does.
+    // Record the grant in the mint-log ledger, as `share <service> <key>` does.
     let record = GrantRecord {
         target: service.clone(),
         kind: GrantKind::Device,

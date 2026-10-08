@@ -3068,8 +3068,8 @@ fn public_flag_requires_a_value_and_splits_on_commas() {
     );
 }
 
-/// The duration timer moved off `--for` onto `--expires` (`--for` is now the WHO family, reserved for
-/// `grant issue`). `--expires 30m` parses into the local timer; `--for 30m` no longer parses (the flag is
+/// The duration timer moved off `--for` onto `--expires` (`--for` once named who a link
+/// was for, which is `share`'s second positional now). `--expires 30m` parses into the local timer; `--for 30m` no longer parses (the flag is
 /// gone), so the overloaded word can never mean two things.
 #[test]
 fn serve_duration_is_expires_not_for() {

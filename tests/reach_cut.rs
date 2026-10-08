@@ -106,25 +106,6 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
     }
 }
 
-/// Run the binary on `home` with `args`, and return its stdout, failing on a refusal.
-fn swoosh(home: &Path, args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_swoosh"))
-        .arg("--home")
-        .arg(home)
-        .args(args)
-        .env_remove("SWOOSH_HOME")
-        .stdin(Stdio::null())
-        .output()
-        .expect("the binary runs");
-    assert!(
-        output.status.success(),
-        "`swoosh {}` failed: {}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
-
 /// Read one line from `from`, failing past `deadline` rather than hanging the run.
 fn line_within(from: impl std::io::Read + Send + 'static, deadline: Duration) -> String {
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -149,8 +130,7 @@ struct Lapsing {
 fn lapsing(scratch: &Scratch) -> Lapsing {
     let host = scratch.0.join("host");
     let served = serve(&host, &["echo=echo:"]);
-    let expires = format!("{}s", EXPIRES.as_secs());
-    let link = swoosh(&host, &["grant", "issue", "echo", "--expires", &expires]);
+    let link = sign_lapsing(&host);
     let lapses = Instant::now() + EXPIRES;
     // A running `serve` re-reads its ledger at most once per debounce.
     std::thread::sleep(nauthy::STAT_DEBOUNCE + Duration::from_millis(100));
@@ -159,6 +139,32 @@ fn lapsing(scratch: &Scratch) -> Lapsing {
         link: link.trim().to_owned(),
         lapses,
     }
+}
+
+/// A link to `host`'s echo that lapses [`EXPIRES`] from now, signed under the host's own key with the
+/// ledger row `share` writes for it. `share` makes nothing shorter than an hour, so the link is signed here.
+fn sign_lapsing(host: &Path) -> String {
+    let seed: [u8; 32] = std::fs::read(host.join("machine").join("key"))
+        .unwrap()
+        .try_into()
+        .expect("a plain key file is its 32 bytes");
+    let service: nauthy::Service = "echo".parse().unwrap();
+    let expiry = std::time::SystemTime::now() + EXPIRES;
+    let cap = swoosh::testkit::TestNode::from_seed(seed)
+        .slip(&service, expiry)
+        .unwrap();
+    let record = swoosh::grants::GrantRecord {
+        target: service,
+        kind: swoosh::grants::GrantKind::Bearer,
+        delegation: swoosh::grants::Delegation::Delegable,
+        holder: swoosh::grants::ANYONE.to_owned(),
+        root_id: cap.root_revocation_id().unwrap(),
+        expiry,
+    };
+    swoosh::grants::Grants::at(host.join("links"))
+        .append(&swoosh::testkit::lock(), &record)
+        .unwrap();
+    swoosh::link::Link::from(cap.link().unwrap()).to_string()
 }
 
 /// Reach the echo `lapsing` serves from a home under `scratch`, presenting its link, with `to` as the sink.

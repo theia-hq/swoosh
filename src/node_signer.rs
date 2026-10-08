@@ -8,9 +8,9 @@
 //! A slip is minted only through [`NodeSigner::mint_slip`]. The helper here that reads a [`Secret`] as a
 //! signing `nauthy::Identity`, `cap_identity`, is private to this module.
 //!
-//! That is not yet a guarantee that the key cannot be read as a signer elsewhere: [`Secret::with_bytes`]
-//! is public, so `secret.with_bytes(nauthy::Identity::from_secret)` still compiles anywhere until the
-//! `disallowed-methods` ban on `from_secret` lands (U22).
+//! [`Secret::with_bytes`] is public, so `secret.with_bytes(nauthy::Identity::from_secret)` would compile
+//! anywhere; `clippy.toml`'s `disallowed-methods` refuses it outside this module, `src/root.rs` and the
+//! test kit.
 //!
 //! ```
 //! use swoosh::grants::Delegation;
@@ -87,6 +87,8 @@ impl NodeSigner<'_> {
     /// A bearer slip is left open for its holder to narrow and pass on only when `delegation` is
     /// [`Delegable`](Delegation::Delegable). A bound slip is always sealed, and asking for a delegable one
     /// is refused rather than quietly sealed.
+    // This machine's key signs here, and nowhere else.
+    #[allow(clippy::disallowed_methods)]
     pub fn mint_slip(
         &self,
         service: &Service,
@@ -116,6 +118,8 @@ impl NodeSigner<'_> {
 impl Secret {
     /// This secret, read as a nauthy [`Identity`] that can sign. Private to this module, so what a
     /// [`NodeSigner`] may sign is the list of its methods.
+    // The one place this machine's key is read as a signer.
+    #[allow(clippy::disallowed_methods)]
     fn cap_identity(&self) -> Result<Identity, CapError> {
         self.with_bytes(Identity::from_secret)
     }

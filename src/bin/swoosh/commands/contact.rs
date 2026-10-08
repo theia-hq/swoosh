@@ -1,30 +1,29 @@
-//! `swoosh contact`: manage the local address book (petnames for peer identities).
+//! `swoosh contact`: save or remove another person's key under a name.
 //!
-//! A local verb group: unlike the reach verbs it binds no transport and dials nobody, it just edits the
-//! contacts file beside the identity. `main` dispatches this before composing any transport, since there
-//! is nothing to reach. Each leaf owns an `async fn run(self, ..)` that consumes it and persists. Each takes
-//! `home.lock` before it opens the book and holds it to the save, so a fold that lands meanwhile never
-//! loses the edit.
+//! A local verb group: it binds no transport and dials nobody, it just edits the contacts file beside the
+//! identity. `main` dispatches this before composing any transport, since there is nothing to reach. Each
+//! leaf owns an `async fn run(self, ..)` that consumes it and persists. Each takes `home.lock` before it
+//! opens the book and holds it to the save, so a fold that lands meanwhile never loses the edit.
+//!
+//! The shape of the name decides what is saved: `alice` is a person, saved with the key of their root, and
+//! `alice/laptop` is one machine of theirs, saved with its own key.
 //!
 //! `me/` is not edited here: it lists this person's own devices, and their root decides it. `add` and
 //! `rm` refuse it and write nothing.
 
 use clap::Subcommand;
-use swoosh::contacts::{ContactRef, Petname};
+use swoosh::contacts::ContactRef;
 use swoosh::home::Home;
 use swoosh::names::NameError;
 
 pub mod add;
 pub mod rm;
-pub mod signet;
 
-/// Manage local petnames: save a peer's key under a name, or remove one. `status` lists them.
+/// Save or remove another person's key under a name.
 #[derive(Debug, Subcommand)]
 pub enum ContactCmd {
-    /// Save a peer's key under a petname (`alice` or `alice/macbook` for a device).
+    /// Save a person's root key (`alice`), or one machine of theirs (`alice/laptop`).
     Add(add::AddCmd),
-    /// Record a person's signet root, so `--for fleet:<petname>` binds their fleet.
-    Signet(signet::SignetCmd),
     /// Remove a contact, or one of its devices (`alice` or `alice/macbook`).
     Rm(rm::RmCmd),
 }
@@ -34,7 +33,6 @@ impl ContactCmd {
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
         match self {
             Self::Add(cmd) => cmd.run(home).await,
-            Self::Signet(cmd) => cmd.run(home).await,
             Self::Rm(cmd) => cmd.run(home).await,
         }
     }
@@ -65,10 +63,4 @@ fn new_contact(text: &str) -> Result<ContactRef, String> {
         .unreserved()
         .map_err(|error| error.to_string())?;
     Ok(name)
-}
-
-/// Parse the person `contact signet` records, at the clap boundary (exit 2): a petname that is not
-/// reserved.
-fn new_person(text: &str) -> Result<Petname, NameError> {
-    text.parse::<Petname>()?.unreserved()
 }

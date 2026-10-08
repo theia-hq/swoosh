@@ -72,12 +72,12 @@ fn swoosh_with(home: &Path, args: &[&str], input: &str) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// `grant issue` prints the link a person hands on: `swoosh:`, then the key, a dot, and the token.
+/// `share` prints the link a person hands on: `swoosh:`, then the key, a dot, and the token.
 #[test]
 fn share_prints_the_swoosh_prefix() {
     let scratch = Scratch::new("share");
     let home = scratch.home("owner");
-    let printed = swoosh(&home, &["grant", "issue", "ping"]);
+    let printed = swoosh(&home, &["share", "ping", "anyone"]);
     let printed = printed.trim();
     let link = swoosh::link::parse(printed).expect("the printed link parses");
     assert_eq!(
@@ -93,7 +93,7 @@ fn share_prints_the_swoosh_prefix() {
 }
 
 /// The files a verb writes hold links bare: the standing `join` stores from an invite and the ledger
-/// `grant issue` appends carry no `swoosh:`.
+/// `share` appends carry no `swoosh:`.
 #[test]
 fn a_stored_link_carries_no_prefix() {
     let scratch = Scratch::new("stored");
@@ -119,7 +119,7 @@ fn a_stored_link_carries_no_prefix() {
         &["join", "--transport", "quirk+noise"],
         &format!("{invite}\n"),
     );
-    swoosh(&owner, &["grant", "issue", "ping"]);
+    swoosh(&owner, &["share", "ping", "anyone"]);
 
     let badge = std::fs::read_to_string(Home::resolve(Some(device)).unwrap().key_cert())
         .expect("join stores the badge");
@@ -144,7 +144,7 @@ fn a_stored_link_carries_no_prefix() {
 fn a_fresh_home_writes_key_and_links() {
     let scratch = Scratch::new("fresh");
     let home = scratch.home("owner");
-    swoosh(&home, &["grant", "issue", "ping"]);
+    swoosh(&home, &["share", "ping", "anyone"]);
 
     assert!(
         home.join("machine").join("key").is_file(),

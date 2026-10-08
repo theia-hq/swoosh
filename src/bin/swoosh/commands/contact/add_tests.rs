@@ -102,40 +102,79 @@ async fn a_capital_name_folds_to_lowercase() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// `me`, `root` and `anyone` never name a person or a device: each refuses at parse (exit 2) as a person
-/// in `contact add` and `contact signet`, and as a device, with the one reserved-name line.
+/// `me`, `root` and `anyone` never name a person or a device: each refuses at parse (exit 2), as a person and
+/// as a device; `me` names the verbs that add and remove your own devices, the others the one reserved-name
+/// line.
 #[test]
-fn a_reserved_name_refuses() {
-    let key = NodeId::from_ed25519_secret(&[7u8; 32]).to_string();
+fn contact_add_refuses_reserved_names() {
     for word in ["me", "root", "anyone", "Root"] {
         let folded = word.to_ascii_lowercase();
-        let signet = Cli::try_parse_from(["swoosh", "contact", "signet", word, key.as_str()])
-            .expect_err("a reserved person refuses");
+        let person = parse_add(word).expect_err("a reserved person refuses");
+        let under = parse_add(&format!("{word}/laptop")).expect_err("a reserved person refuses");
         let device = parse_add(&format!("alice/{word}")).expect_err("a reserved device refuses");
-        for error in [signet, device] {
-            assert_eq!(error.exit_code(), 2, "a reserved name is a usage error");
-            assert!(
-                error
-                    .to_string()
-                    .contains(&format!("{folded} is reserved: pick another name")),
-                "the refusal names the reserved word: {error}"
+        for error in [&person, &under, &device] {
+            assert_eq!(
+                error.exit_code(),
+                2,
+                "{word}: a reserved name is a usage error"
             );
         }
-        if folded != "me" {
-            let person = parse_add(word).expect_err("a reserved person refuses");
-            assert_eq!(person.exit_code(), 2, "a reserved name is a usage error");
-            assert!(
-                person
-                    .to_string()
-                    .contains(&format!("{folded} is reserved: pick another name")),
-                "the refusal names the reserved word: {person}"
-            );
+        assert!(
+            device
+                .to_string()
+                .contains(&format!("{folded} is reserved: pick another name")),
+            "the refusal names the reserved word: {device}"
+        );
+        let line = if folded == "me" {
+            "swoosh invite <name> <key>".to_owned()
+        } else {
+            format!("{folded} is reserved: pick another name")
+        };
+        for error in [&person, &under] {
+            assert!(error.to_string().contains(&line), "{word}: {error}");
         }
     }
     assert_eq!(
         "alice/root".parse::<ContactRef>(),
         Err(NameError::Reserved("root".to_owned()))
     );
+}
+
+/// The name's shape decides what is saved: a bare person is their root, which `share` binds a link to and no
+/// dial reaches; `<person>/<name>` is one machine. `contact signet` is gone.
+#[tokio::test]
+async fn contact_add_saves_a_person_as_a_root_and_a_name_as_a_machine() {
+    let home = home_with_book("shape").await;
+    let root = NodeId::from_ed25519_secret(&[6u8; 32]);
+    let laptop = NodeId::from_ed25519_secret(&[7u8; 32]);
+    add(&home, "alice", root).await.expect("a person is saved");
+    add(&home, "alice/laptop", laptop)
+        .await
+        .expect("a machine is saved");
+    let store = ContactsStore::open(&home).await.expect("open");
+    let alice = "alice".parse().expect("petname");
+    assert_eq!(
+        store.contacts().signet(&alice).map(|binding| binding.node),
+        Some(root),
+        "alice is saved with her root"
+    );
+    let machines: Vec<_> = store
+        .contacts()
+        .devices(&alice)
+        .expect("alice is saved")
+        .map(|(label, key)| (label.as_str().to_owned(), *key))
+        .collect();
+    assert_eq!(
+        machines,
+        [("laptop".to_owned(), laptop)],
+        "the root is no machine"
+    );
+    let key = root.to_string();
+    assert!(
+        Cli::try_parse_from(["swoosh", "contact", "signet", "alice", key.as_str()]).is_err(),
+        "`contact signet` is gone"
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
 }
 
 /// A torsioned key is refused as a contact's key at parse, with the line every typed key refuses with,

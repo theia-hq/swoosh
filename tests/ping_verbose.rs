@@ -141,7 +141,7 @@ fn ping_v_prints_the_sessions_path_before_its_probes() {
     let scratch = Scratch::new("path");
     let host = scratch.0.join("host");
     let served = serve(&host, &["ping"]);
-    let link = stdout(&host, &["grant", "issue", "ping"]);
+    let link = stdout(&host, &["share", "ping", "anyone"]);
     // A running `serve` re-reads its ledger at most once per debounce.
     std::thread::sleep(nauthy::STAT_DEBOUNCE + Duration::from_millis(100));
 

@@ -8,9 +8,8 @@
 //! A petname groups one or more device identities (WEAK grouping: manual, no cryptographic claim the
 //! devices are truly one person, that is HD-identity work sequenced for later). Address a specific device
 //! (`alice/macbook`) for that exact key, or the person (`alice`) for the ordered set of their devices, so
-//! a reach verb can try each until one connects. Adding under a person with no device label uses the
-//! reserved [`DeviceLabel::DEFAULT`] slot, so `contact add alice <key>` and `contact add alice/macbook
-//! <key>` coexist under one petname.
+//! a reach verb can try each until one connects. A person's root is kept beside their devices, never
+//! among them: `contact add alice <key>` saves it, `contact add alice/macbook <key>` saves a device.
 //!
 //! The store persists in the node home as `<home>/contacts.toml` (the same directory the identity key
 //! and the trust files live in, [`Home::contacts`](crate::home::Home::contacts)), a plain TOML table of
@@ -81,8 +80,8 @@ impl core::fmt::Display for Petname {
 ///
 /// A [`Name`] under the one name rule, never reserved: no device is `me`, `root` or `anyone`. This is the ONE
 /// label type, used both for local contacts and for a member in a [`RosterDoc`](crate::roster::RosterDoc),
-/// so the codec's `u16` length prefix stays total. A bare `contact add alice <key>` (no `/device`) uses the
-/// [`DEFAULT`](Self::DEFAULT) slot, so a person addressed without a device still resolves.
+/// so the codec's `u16` length prefix stays total. [`Contacts::add`] with no label uses the
+/// [`DEFAULT`](Self::DEFAULT) slot.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceLabel(String);
 
@@ -173,7 +172,7 @@ pub struct Binding {
 /// A signet is the key a person's fleet roots at (the root that vouches for their devices); it is NOT a
 /// device, so it lives in its own at-most-one slot, never in `devices`. Keeping it out of `devices` keeps
 /// it out of reach fan-out ([`resolve_candidates`](Contacts::resolve_candidates)) and out of `status`'s
-/// device columns: you never dial a signet, you BIND a fleet grant to it (`grant issue --for fleet:<petname>`).
+/// device columns: you never dial a signet, you BIND a link to it (`share <service> <petname>`).
 /// Modeling it as a distinct `Option` makes "a person has zero-or-one signet" the only representable shape.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Person {

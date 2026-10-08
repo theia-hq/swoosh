@@ -152,6 +152,8 @@ pub struct Keys {
     identity: Identity,
 }
 
+// Test code signs only through these methods: every signing call a test makes lands here.
+#[allow(clippy::disallowed_methods)]
 impl Keys {
     fn from_seed(seed: [u8; 32]) -> Self {
         #[expect(
