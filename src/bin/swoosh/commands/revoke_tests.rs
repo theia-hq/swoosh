@@ -2060,6 +2060,120 @@ async fn revoke_a_root_refuses_a_device_key_and_names_its_form() {
     }
 }
 
+/// A root this machine keeps or is pinned to stays a root when a list of its devices also names its key as
+/// `me/<name>`: a paste mistake upstream, or an update a thief signed. Each takes its own kind's arm, never
+/// the device-key refusal. Red when the device-key check runs before the root is classified.
+#[tokio::test]
+async fn revoke_a_root_whose_key_is_also_a_device_row_takes_its_own_arm() {
+    let rows = [live(OWN, "desk"), live(ROOT, "pasted")];
+    let holder = scratch("root-also-row-holder");
+    holds(&holder, &rows, Vec::new()).await;
+    let device = device("root-also-row-device", &rows).await;
+    for (what, home, prompts) in [("holder", holder, 1), ("device", device, 0)] {
+        let ran = revoke_root(&home, ROOT, &prefix(ROOT)).await;
+        let err = ran.ok().to_owned();
+        assert!(!err.contains("not a root"), "{what}: {err}");
+        assert_eq!(ran.confirms.len(), 1, "{what}: the prefix is asked");
+        assert_eq!(ran.prompts, prompts, "{what}");
+        assert!(latched(&home, ROOT), "{what}");
+        assert!(!home.root_pub().exists(), "{what}: root.pub is gone");
+        assert!(!home.root_key().exists(), "{what}: no root.key is left");
+    }
+}
+
+/// The device arm latches the root before it leaves: a latch that fails leaves the membership whole, so the
+/// rerun finds the pin again, never a home that left a root it still trusts. The latch is made to fail by a
+/// `revoked` that reads fine but has no room for one more line: within a line of nauthy's 4 MiB cap, which
+/// a write refuses to cross. Red when `leave` runs before the latch.
+#[tokio::test]
+async fn revoke_a_root_on_a_device_whose_latch_fails_keeps_its_membership() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    const CAP: usize = 4 << 20;
+    let home = device(
+        "root-device-latch-fails",
+        &[live(OWN, "desk"), live(LAPTOP, "laptop")],
+    )
+    .await;
+    let mut body = String::new();
+    for id in 0_u64.. {
+        let line = format!("id {id:016x}\n");
+        if body.len() + line.len() > CAP {
+            break;
+        }
+        body.push_str(&line);
+    }
+    let key_line = format!("key {}\n", TestRoot::seeded(ROOT).verify_key());
+    assert!(
+        CAP - body.len() < key_line.len(),
+        "the latch's line cannot fit"
+    );
+    std::fs::write(home.revoked(), &body).unwrap();
+    std::fs::set_permissions(home.revoked(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let ran = revoke_root(&home, ROOT, &prefix(ROOT)).await;
+    let refusal = ran.refusal();
+    assert!(
+        refusal.contains("is larger than a list of revocations can be"),
+        "{refusal}"
+    );
+    assert!(!latched(&home, ROOT));
+    for kept in [home.root_pub(), home.key_cert()] {
+        assert!(kept.exists(), "{} survives", kept.display());
+    }
+}
+
+/// A terminal that is there and fails to read the confirmation: what [`Prompt::confirm`] returns when the
+/// tty was opened and its read failed.
+struct BrokenTty;
+
+impl Prompt for BrokenTty {
+    fn terminal(&self) -> bool {
+        true
+    }
+
+    fn unlock(&mut self, _asked: Question<'_>) -> eyre::Result<Passphrase> {
+        eyre::bail!("no passphrase is asked before the prefix")
+    }
+
+    fn choose(&mut self, _asked: Question<'_>) -> eyre::Result<Choice> {
+        eyre::bail!("no passphrase is chosen here")
+    }
+
+    fn say(&mut self, _line: &str) {}
+
+    fn confirm(&mut self, _question: &str) -> eyre::Result<String> {
+        Err(std::io::Error::other("the tty read failed").into())
+    }
+}
+
+/// A confirmation that fails on an open terminal prints its own cause, never the missing-terminal line,
+/// and writes nothing. Red when every confirm failure reads as no terminal.
+#[tokio::test]
+async fn revoke_a_root_whose_confirmation_fails_to_read_prints_the_cause() {
+    let home = scratch("root-confirm-io");
+    let before = snapshot(home.dir());
+    let tape = Tape::default();
+    let mut err = Stream {
+        bytes: Vec::new(),
+        tape: tape.clone(),
+    };
+    let target = format!("root:{}", node(STRANGER));
+    let error = parse(&[&target])
+        .unwrap()
+        .block(
+            &home,
+            &b""[..],
+            &mut BrokenTty,
+            &Devices::all(&tape),
+            &mut err,
+        )
+        .await
+        .expect_err("the confirmation failed");
+    assert_eq!(format!("{error:#}"), "the tty read failed");
+    assert!(!latched(&home, STRANGER));
+    assert!(snapshot(home.dir()) == before, "nothing was written");
+}
+
 /// The lines before the prompt are said where the person types, never on stderr, so a stderr sent elsewhere
 /// never hides what the act ends. Red when they print on stderr.
 #[tokio::test]

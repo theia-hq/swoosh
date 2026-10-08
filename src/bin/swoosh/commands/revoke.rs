@@ -106,7 +106,7 @@ const RECIPE: &str = concat!(
 const ROOT_PREFIX: &str = "root:";
 
 /// The refusal when a root's revoke has no terminal to ask at: before anything is read, or when the
-/// confirmation could read no answer.
+/// confirmation finds it gone.
 const ROOT_NEEDS_TERMINAL: &str =
     "this cannot be undone, so it needs a terminal: over swoosh ssh, add -t after --";
 
@@ -251,7 +251,7 @@ impl RevokeCmd {
         }
     }
 
-    /// `root:<key>`: every check, then what this machine is to that root, then the typed prefix; then, by
+    /// `root:<key>`: what this machine is to that root, then every check, then the typed prefix; then, by
     /// what it is, the root's passphrase where it is kept, and the act under `home.lock`, the key latched
     /// first. Nothing is written before the prefix, nor before the passphrase where the root is kept.
     async fn revoke_root(
@@ -271,13 +271,17 @@ impl RevokeCmd {
         if own_key(home)?.is_some_and(|own| key.verify_key().is_ok_and(|key| key == own)) {
             eyre::bail!("that is this machine's key, not a root.");
         }
-        if let Some(refusal) = device_key(home, key).await? {
+        // Classified first, with no lock, prompt or write: a root this machine knows stays a root when a
+        // list of devices also names its key, so only a key no root here is asked as a device's.
+        let kind = Kind::of(home, key).await?;
+        if kind == Kind::Unknown
+            && let Some(refusal) = device_key(home, key).await?
+        {
             eyre::bail!("{refusal}");
         }
         if !prompt.terminal() {
             eyre::bail!("{ROOT_NEEDS_TERMINAL}");
         }
-        let kind = Kind::of(home, key).await?;
         let root = format!("root:{}", swoosh::credential::short(&key));
         // Where the prompt is, so a stderr sent elsewhere never leaves the person typing blind.
         for line in kind.before(&root) {
@@ -286,7 +290,12 @@ impl RevokeCmd {
         let prefix: String = key.to_string().chars().take(PREFIX).collect();
         let typed = prompt
             .confirm(&format!("Type {prefix} to revoke this root for good:"))
-            .map_err(|_| eyre::eyre!("{ROOT_NEEDS_TERMINAL}"))?;
+            // A terminal gone since the check is the missing terminal; a read or write that failed on an
+            // open one prints its own cause.
+            .map_err(|cause| match cause.downcast_ref::<std::io::Error>() {
+                Some(_) => cause,
+                None => eyre::eyre!("{ROOT_NEEDS_TERMINAL}"),
+            })?;
         if typed.trim() != prefix {
             eyre::bail!("that was not {prefix}; nothing was revoked.");
         }

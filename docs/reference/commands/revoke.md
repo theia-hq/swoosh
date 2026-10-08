@@ -39,7 +39,7 @@ what this machine is to that root, then asks you to type the key's first six cha
 - on one of that root's devices, the machine leaves it for good;
 - for a contact's root, or a root this machine does not know, this machine never trusts it.
 
-Given the key of a device this machine knows, yours or a contact's, it refuses and names the command to use instead.
+Given the key of a device this machine knows, yours or a contact's, and no root it knows, it refuses and names the command to use instead.
 If it stops partway, run it again to finish.
 `swoosh revoke --help` lists the steps to replace your root.
 
