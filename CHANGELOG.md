@@ -18,8 +18,14 @@ All notable changes to swoosh, newest first.
   writes it to a new private file instead. `--expires` takes a span like `2h`, `90d` or `1h30m`, from 1h to
   365d (default 1h), and the line prints it as typed. `swoosh share <link>` makes a copy of a link for
   `anyone` that ends sooner: any span up to its link's end.
+  A link to `anyone` for ssh, `ping`, `speed`, a receive service or a `fetch:` with no origin needs
+  `--once`: it works once, lasts 15 minutes at most, and cannot be copied.
 
 ### Changed
+- **`serve` warns when a shell, `ping`, `speed`, a receive service or a `fetch:` with no origin has live
+  links made for something else, and those links are refused when used.** A link made for one target is
+  refused by any other. Adding one to `serve.toml` while `serve` runs prints the same warning and leaves
+  the running services as they are.
 - **`share` replaces `grant`.** `grant issue` is `share <service> <who>`, and `grant narrow` is
   `share <link>`. A link for `anyone` can always be copied, so `--delegable` is gone.
 - **`contact add <person> <key>` saves that person's root.** A bare name (`alice`) saves the key that

@@ -17,6 +17,7 @@ use crate::config;
 use crate::grants::{Delegation, GrantKind, GrantRecord, Grants};
 use crate::home::Home;
 use crate::revoked::RevokedError;
+use crate::serve::BoundTargets;
 use crate::testkit::{TestNode, TestRoot};
 
 /// The serving machine's own key.
@@ -57,9 +58,13 @@ impl Scratch {
     }
 
     async fn gate(&self) -> (Gate, AnchorCut) {
-        anchored(&self.home, TestNode::seeded(OWN).node_id())
-            .await
-            .expect("the gate builds")
+        anchored(
+            &self.home,
+            TestNode::seeded(OWN).node_id(),
+            BoundTargets::default(),
+        )
+        .await
+        .expect("the gate builds")
     }
 }
 
@@ -226,6 +231,7 @@ async fn issued_slip(home: &Home) -> Cap {
             &crate::testkit::lock(),
             &GrantRecord {
                 target: service(),
+                serves: None,
                 kind: GrantKind::Bearer,
                 delegation: Delegation::Delegable,
                 holder: crate::grants::ANYONE.to_owned(),
@@ -235,6 +241,50 @@ async fn issued_slip(home: &Home) -> Cap {
         )
         .expect("record the slip");
     slip
+}
+
+/// A one-use link this machine signed, sealed and recorded as [`GrantKind::Once`].
+async fn one_use_slip(home: &Home) -> Cap {
+    let slip = TestNode::seeded(OWN)
+        .slip(&service(), in_an_hour())
+        .expect("mint a slip")
+        .seal()
+        .expect("seal it");
+    Grants::at(home.links())
+        .append(
+            &crate::testkit::lock(),
+            &GrantRecord {
+                target: service(),
+                serves: None,
+                kind: GrantKind::Once,
+                delegation: Delegation::Sealed,
+                holder: crate::grants::ANYONE.to_owned(),
+                root_id: slip.root_revocation_id().expect("a root id"),
+                expiry: in_an_hour(),
+            },
+        )
+        .expect("record the slip");
+    slip
+}
+
+/// A one-use link is admitted once, by its root id: refused after, and still refused once the ledger has
+/// been rewritten and read again, since what a run admitted stays admitted.
+#[tokio::test]
+async fn a_one_use_link_stays_used_when_the_ledger_is_read_again() {
+    let scratch = Scratch::new("once");
+    let once = one_use_slip(&scratch.home).await;
+    let (gate, _cut) = scratch.gate().await;
+    assert!(admits(&gate, &once), "the first admission");
+    assert!(!admits(&gate, &once), "the second is refused");
+
+    let other = issued_slip(&scratch.home).await;
+    past_the_debounce();
+    assert!(admits(&gate, &other), "the ledger was read again");
+    assert!(
+        admits(&gate, &other),
+        "a link that is not one-use admits again"
+    );
+    assert!(!admits(&gate, &once), "the one-use link stays used");
 }
 
 #[tokio::test]
@@ -357,16 +407,26 @@ async fn a_revoked_that_lost_entries_reads_as_damaged() {
     let scratch = Scratch::new("revoked-lost");
     let body = three_revoked_keys(&scratch.home);
     assert!(
-        anchored(&scratch.home, TestNode::seeded(OWN).node_id())
-            .await
-            .is_ok(),
+        anchored(
+            &scratch.home,
+            TestNode::seeded(OWN).node_id(),
+            BoundTargets::default()
+        )
+        .await
+        .is_ok(),
         "the file loads while it holds what its witness says"
     );
 
     let first = body.lines().next().expect("a line");
     std::fs::write(scratch.home.revoked(), format!("{first}\n{first}\n"))
         .expect("truncate the revocations");
-    let Err(error) = anchored(&scratch.home, TestNode::seeded(OWN).node_id()).await else {
+    let Err(error) = anchored(
+        &scratch.home,
+        TestNode::seeded(OWN).node_id(),
+        BoundTargets::default(),
+    )
+    .await
+    else {
         panic!("a truncated file must not load");
     };
     assert!(
@@ -391,9 +451,13 @@ async fn a_revoked_that_lost_entries_reads_as_damaged() {
 
     std::fs::remove_file(scratch.home.revoked()).expect("remove the revocations");
     assert!(
-        anchored(&scratch.home, TestNode::seeded(OWN).node_id())
-            .await
-            .is_err(),
+        anchored(
+            &scratch.home,
+            TestNode::seeded(OWN).node_id(),
+            BoundTargets::default()
+        )
+        .await
+        .is_err(),
         "a removed file beside its witness keeps serve's gate from building"
     );
 }
@@ -404,7 +468,12 @@ async fn an_unreadable_revoked_refuses_to_load() {
     std::fs::create_dir(scratch.home.revoked()).expect("a directory where the file goes");
     assert!(
         matches!(
-            anchored(&scratch.home, TestNode::seeded(OWN).node_id()).await,
+            anchored(
+                &scratch.home,
+                TestNode::seeded(OWN).node_id(),
+                BoundTargets::default()
+            )
+            .await,
             Err(GateError::Revoked(RevokedError::Io { .. }))
         ),
         "a file that cannot be read refuses the load"
@@ -419,7 +488,12 @@ async fn an_oversized_revoked_refuses_to_load() {
     std::fs::write(scratch.home.revoked(), line.repeat(copies)).expect("write the revocations");
     assert!(
         matches!(
-            anchored(&scratch.home, TestNode::seeded(OWN).node_id()).await,
+            anchored(
+                &scratch.home,
+                TestNode::seeded(OWN).node_id(),
+                BoundTargets::default()
+            )
+            .await,
             Err(GateError::Revoked(RevokedError::TooLarge { .. }))
         ),
         "a file past the cap refuses the load"
@@ -483,6 +557,7 @@ async fn an_admitted_root_is_trusted_for_the_run_and_writes_no_pin() {
         &scratch.home,
         TestNode::seeded(OWN).node_id(),
         Some(TestRoot::seeded(ROOT).verify_key()),
+        crate::serve::BoundTargets::default(),
     )
     .await
     .expect("the gate builds");
@@ -500,6 +575,7 @@ async fn an_admitted_root_is_trusted_for_the_run_and_writes_no_pin() {
         &revoked.home,
         TestNode::seeded(OWN).node_id(),
         Some(TestRoot::seeded(ROOT).verify_key()),
+        crate::serve::BoundTargets::default(),
     )
     .await
     .expect("the gate builds");
@@ -640,8 +716,12 @@ async fn a_revoked_others_can_write_refuses_to_load() {
     let scratch = Scratch::new("revoked-loose");
     revoke(&scratch.home, [Revocation::Key(device())]);
     set_mode(&scratch.home.revoked(), 0o660);
-    let Err(GateError::Revoked(RevokedError::Loose(loose))) =
-        anchored(&scratch.home, TestNode::seeded(OWN).node_id()).await
+    let Err(GateError::Revoked(RevokedError::Loose(loose))) = anchored(
+        &scratch.home,
+        TestNode::seeded(OWN).node_id(),
+        BoundTargets::default(),
+    )
+    .await
     else {
         panic!("a file others can write must refuse the load");
     };

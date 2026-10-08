@@ -156,6 +156,7 @@ fn sign_lapsing(host: &Path) -> String {
         .unwrap();
     let record = swoosh::grants::GrantRecord {
         target: service,
+        serves: None,
         kind: swoosh::grants::GrantKind::Bearer,
         delegation: swoosh::grants::Delegation::Delegable,
         holder: swoosh::grants::ANYONE.to_owned(),

@@ -230,7 +230,7 @@ fn serve(scratch: &Scratch, cwd: &Path, args: &[&str]) -> Served {
 /// ledger row.
 fn issue(scratch: &Scratch, service: &str) -> nauthy::Link {
     let output = scratch
-        .swoosh(&["share", service, "anyone"])
+        .swoosh(&["share", service, "anyone", "--once"])
         .output()
         .expect("the binary runs");
     assert!(

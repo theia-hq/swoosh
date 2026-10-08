@@ -445,8 +445,13 @@ impl Outward {
                     .admit
                     .map(|root| tightbeam::identity::AsVerifyKey::verify_key(&root))
                     .transpose()?;
-                let (gate, cut) =
-                    swoosh::gate::anchored_admitting(home, secret.node_id(), admitted).await?;
+                let (gate, cut) = swoosh::gate::anchored_admitting(
+                    home,
+                    secret.node_id(),
+                    admitted,
+                    cmd.bound_targets()?,
+                )
+                .await?;
                 Ok(Some(serve::ExposeContext {
                     #[cfg(feature = "ssh")]
                     host_seed: secret.ssh_host_seed(),
@@ -1193,17 +1198,16 @@ mod tests {
         );
     }
 
-    /// The gate `serve` builds refuses a pin to a root this home revoked, as if there were no pin, and
-    /// the context fails to resolve at all over a `revoked` it cannot read, rather than serving as if
-    /// nothing were revoked.
+    /// A `serve` asked for its gate before it claimed its home has no list of what it binds to check each
+    /// link against, so it builds no gate rather than one that admits every link.
     #[tokio::test]
-    async fn the_serve_gate_honors_the_homes_revoked_roots() {
-        let dir = std::env::temp_dir().join(format!("swoosh-latch-ctx-{}", std::process::id()));
+    async fn an_unclaimed_serve_builds_no_gate() {
+        let dir = std::env::temp_dir().join(format!("swoosh-unclaimed-ctx-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create an empty config dir");
         let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
         let secret = swoosh::identity::Secret::ephemeral();
-        let serve_verb = || match Cli::try_parse_from(["swoosh", "serve"])
+        let serve = match Cli::try_parse_from(["swoosh", "serve"])
             .expect("bare serve parses")
             .command
             .expect("serve is a command")
@@ -1211,6 +1215,36 @@ mod tests {
         {
             Verb::Outward(outward) => outward,
             _ => panic!("serve splits to a reaching verb"),
+        };
+        let built = serve.expose_context(&secret, &home).await;
+        let _ = std::fs::remove_dir_all(&dir);
+        let Err(error) = built else {
+            panic!("no gate before the claim");
+        };
+        assert!(
+            error.to_string().contains("before it claimed its home"),
+            "{error:#}"
+        );
+    }
+
+    /// The gate `serve` builds refuses a pin to a root this home revoked, as if there were no pin, and
+    /// fails to build at all over a `revoked` it cannot read, rather than serving as if nothing were
+    /// revoked.
+    #[tokio::test]
+    async fn the_serve_gate_honors_the_homes_revoked_roots() {
+        let dir = std::env::temp_dir().join(format!("swoosh-latch-ctx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create an empty config dir");
+        let home = Home::resolve(Some(dir.clone())).expect("resolve an explicit home");
+        let secret = swoosh::identity::Secret::ephemeral();
+        // The call `expose_context` makes for a claimed `serve`, which takes this machine's runtime
+        // directory and so is not made here.
+        let build = || {
+            swoosh::gate::anchored(
+                &home,
+                secret.node_id(),
+                swoosh::serve::BoundTargets::default(),
+            )
         };
         let disabled = swoosh::testkit::TestRoot::seeded(41);
         let live = swoosh::testkit::TestRoot::seeded(42);
@@ -1236,28 +1270,20 @@ mod tests {
 
         swoosh::config::write_signet(&swoosh::testkit::lock(), &home, disabled.node_id())
             .expect("pin the disabled root");
-        let expose = serve_verb()
-            .expose_context(&secret, &home)
-            .await
-            .expect("expose context resolves")
-            .expect("serve carries an expose context");
+        let (built, _cut) = build().await.expect("the gate builds");
         assert!(
-            !admits(&expose.gate, &disabled),
+            !admits(&built, &disabled),
             "a pin to a disabled root admits none of its devices"
         );
 
         swoosh::config::write_signet(&swoosh::testkit::lock(), &home, live.node_id())
             .expect("pin a live root");
-        let expose = serve_verb()
-            .expose_context(&secret, &home)
-            .await
-            .expect("expose context resolves")
-            .expect("serve carries an expose context");
-        assert!(admits(&expose.gate, &live), "a live pin admits its devices");
+        let (built, _cut) = build().await.expect("the gate builds");
+        assert!(admits(&built, &live), "a live pin admits its devices");
 
         std::fs::write(home.revoked(), "not a key\n").expect("corrupt the revocations");
         assert!(
-            serve_verb().expose_context(&secret, &home).await.is_err(),
+            build().await.is_err(),
             "an unreadable revoked stops the serve rather than trusting every root"
         );
 
@@ -1730,9 +1756,10 @@ mod tests {
         swoosh::config::create_store_dir(&dir).expect("a scratch home");
         let home = Home::resolve(Some(dir.clone())).expect("the scratch home resolves");
         let own = swoosh::testkit::TestNode::seeded(0x61).node_id();
-        let (gate, _cut) = swoosh::gate::anchored(&home, own)
-            .await
-            .expect("the gate builds");
+        let (gate, _cut) =
+            swoosh::gate::anchored(&home, own, swoosh::serve::BoundTargets::default())
+                .await
+                .expect("the gate builds");
         let (router, _known) =
             swoosh::serve::bind_renewal(tightbeam::tunnel::Router::new(gate), &home)
                 .await

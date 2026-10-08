@@ -376,6 +376,90 @@ fn an_unknown_scheme_is_pointed_at_the_list_that_holds_both_halves() {
     }
 }
 
+/// [`ServedTarget::never_public`] is each engine's own ceiling, read off the engine a gated `serve` binds: the answer is
+/// `true` exactly where the engine declares `Exposure = Never`, so the public proof refuses to open it, and
+/// `false` where it assembles open. A raw stream opens only through `--public-unsafe`, so it answers
+/// `false` and is never put to this proof. Every scheme has a case, so a new one cannot skip it.
+#[test]
+fn never_public_is_each_engines_own_ceiling() {
+    use swoosh::serve::{Scheme, ServedTarget, bind_recv};
+
+    let never_public = |target: &str| {
+        target
+            .parse::<ServedTarget>()
+            .unwrap_or_else(|error| panic!("{target}: {error}"))
+            .never_public()
+    };
+
+    let name: nauthy::Service = "x".parse().expect("a name");
+    let opened = |router: Router| router.public([name.clone()]).expose().is_ok();
+    let by_entry = |target: &str| {
+        bind_entry(Router::new(gated()), &format!("x={target}"), [0u8; 32], &[])
+            .unwrap_or_else(|error| panic!("x={target} binds: {error:#}"))
+    };
+    let mut cases: Vec<(&str, Option<Router>)> = vec![
+        ("ping:", Some(by_entry("ping:"))),
+        ("speed:", Some(by_entry("speed:"))),
+        ("tcp:localhost:1", Some(by_entry("tcp:localhost:1"))),
+        (
+            "unix:/tmp/swoosh-x.sock",
+            Some(by_entry("unix:/tmp/swoosh-x.sock")),
+        ),
+        ("echo:", Some(by_entry("echo:"))),
+        (
+            "recv:/tmp",
+            Some(bind_recv(Router::new(gated()), name.clone(), "/tmp".into(), None).expect("recv")),
+        ),
+        (
+            "fetch:",
+            Some(
+                Router::new(gated())
+                    .service(name.clone(), ::fetch::Fetch)
+                    .expect("fetch"),
+            ),
+        ),
+        (
+            "fetch:https://news.example",
+            Some(
+                Router::new(gated())
+                    .service(
+                        name.clone(),
+                        ::fetch::ScopedFetch::new(
+                            ::fetch::OriginAllowlist::parse(["https://news.example"])
+                                .expect("an origin"),
+                        )
+                        .expect("a scoped fetch"),
+                    )
+                    .expect("scoped fetch"),
+            ),
+        ),
+        ("file:/tmp/x", None),
+        ("fifo:/tmp/x", None),
+        ("stdin:", None),
+    ];
+    #[cfg(feature = "ssh")]
+    cases.push(("sshd:", Some(by_entry("sshd:"))));
+    #[cfg(not(feature = "ssh"))]
+    cases.push(("sshd:", None));
+    let covered: BTreeSet<&str> = cases
+        .iter()
+        .filter_map(|(target, _)| Scheme::parse(target).map(|(scheme, _)| scheme.as_str()))
+        .collect();
+    let every: BTreeSet<&str> = Scheme::ALL.iter().map(|scheme| scheme.as_str()).collect();
+    assert_eq!(covered, every, "every scheme has a case");
+    for (target, bound) in cases {
+        match bound {
+            Some(router) => assert_eq!(
+                never_public(target),
+                !opened(router),
+                "{target}: never_public is the engine's own ceiling"
+            ),
+            None if target == "sshd:" => assert!(never_public(target), "a shell is never open"),
+            None => assert!(!never_public(target), "{target}: a raw stream"),
+        }
+    }
+}
+
 /// THE defect the scheme-on-every-target grammar exists to kill. While a bare `host:port` was a legal
 /// target, `ping=ping:80` was syntactically indistinguishable from a forward to a host named `ping`, so a
 /// probe entry that missed the exact string `ping:` silently became a TCP forward instead. Every engine

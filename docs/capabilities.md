@@ -15,17 +15,17 @@ On the machine that serves:
 
 <!-- manual: the end time and the link differ per run -->
 ```console
-$ swoosh share ping anyone
-anyone can use ping on this machine until 15:04 (1h).
+$ swoosh share ping anyone --once
+anyone can use ping on this machine, once, until 14:19 (15m).
 the link dials this machine: it works while this machine serves ping.
 anyone holding this link can use it: send it privately.
 swoosh:ed01hcq6…
 ```
 
 Hand that last line over any channel (chat, a QR code). It names the node, the one service it grants,
-and the authority to reach it. The default life is one hour; `--expires` sets it, from 1h to 365d. Name a
-person, one of their machines, or a key instead of `anyone`, and a stolen copy is useless (see
-[the one trade](keys.md#the-one-trade)).
+and the authority to reach it. A link to anyone for ping works once, within 15 minutes. Name a person,
+one of their machines, or a key instead of `anyone` for a link that lasts (`--expires`, 1h to 365d,
+default 1h), and a stolen copy is useless (see [the one trade](keys.md#the-one-trade)).
 
 ## 2. Present it
 

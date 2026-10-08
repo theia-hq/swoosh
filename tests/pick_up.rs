@@ -107,9 +107,13 @@ async fn renewing(nas: &Home, laptop: NodeId) -> Link {
 /// anchored gate, with the live cut.
 fn serve(home: Home, host: Node<MemTransport, NoDiscovery>) {
     tokio::task::spawn_local(async move {
-        let (gate, cut) = swoosh::gate::anchored(&home, TestNode::seeded(NAS).node_id())
-            .await
-            .unwrap();
+        let (gate, cut) = swoosh::gate::anchored(
+            &home,
+            TestNode::seeded(NAS).node_id(),
+            swoosh::serve::BoundTargets::default(),
+        )
+        .await
+        .unwrap();
         let router = swoosh::serve::diagnostics(Router::new(gate), &[]).unwrap();
         let router = router
             .member_service(
@@ -327,9 +331,13 @@ fn a_revoked_key_reaches_no_route() {
 
 /// A router over `home`'s anchored gate carrying only the pick-up route, bound as `serve` binds it.
 async fn router(home: &Home) -> Router {
-    let (gate, _cut) = swoosh::gate::anchored(home, TestNode::seeded(NAS).node_id())
-        .await
-        .unwrap();
+    let (gate, _cut) = swoosh::gate::anchored(
+        home,
+        TestNode::seeded(NAS).node_id(),
+        swoosh::serve::BoundTargets::default(),
+    )
+    .await
+    .unwrap();
     swoosh::serve::bind_renewal(Router::new(gate), home)
         .await
         .unwrap()

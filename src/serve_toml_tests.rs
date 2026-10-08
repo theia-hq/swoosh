@@ -324,6 +324,7 @@ fn what_a_running_serve_cannot_apply_is_named() {
             relay: true,
             resolver: false,
             added: vec!["files".to_owned(), "speed".to_owned()],
+            changed: Vec::new(),
         }
     );
     assert!(watcher.is_enabled(&service("ping")), "ping still served");
@@ -340,4 +341,91 @@ fn what_a_running_serve_cannot_apply_is_named() {
         .to_string(),
         "the changed resolver in serve.toml takes effect the next time serve starts"
     );
+}
+
+/// A shell added to `serve.toml` under a name whose live links were made for another target is not bound
+/// while `serve` runs (nothing added is), and the warning that start will print is what the run prints.
+#[test]
+fn a_live_add_of_sshd_over_other_links_keeps_the_running_set() {
+    use crate::grants::{Delegation, GrantKind, GrantRecord, Grants, LinksForAnother};
+
+    let scratch = Scratch::new("live-shell");
+    list(&scratch, &["ping=ping:"]);
+    let holder = crate::testkit::TestNode::seeded(0x61).node_id().to_string();
+    Grants::at(scratch.home.links())
+        .append(
+            &crate::testkit::lock(),
+            &GrantRecord {
+                target: service("ssh"),
+                serves: Some("tcp:localhost:22".parse().expect("a target")),
+                kind: GrantKind::Device,
+                delegation: Delegation::Sealed,
+                holder: holder.clone(),
+                root_id: nauthy::RevocationId::from_bytes(vec![0x61]),
+                expiry: std::time::SystemTime::now() + Duration::from_secs(3600),
+            },
+        )
+        .expect("record a link for ssh as a forward");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    watcher.serving(&bare(&scratch));
+
+    list(&scratch, &["ping=ping:", "ssh"]);
+    past_the_debounce();
+    let waiting = watcher.waiting();
+    assert_eq!(waiting.added, ["ssh"], "ssh waits for the next start");
+    assert!(watcher.is_enabled(&service("ping")), "ping is still served");
+    let links = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.added)
+        .expect("the ledger reads")
+        .expect("that start would warn of the shell");
+    assert_eq!(
+        links.to_string(),
+        "ssh has live links made when it served tcp:localhost:22, and they are refused while it serves \
+         something else (swoosh status lists them under links you shared)"
+    );
+    assert!(
+        !links.to_string().contains(&holder),
+        "no holder's key is printed"
+    );
+}
+
+/// A running name retargeted in `serve.toml` waits for the next start like an added one: the watcher names
+/// it, and when that start would warn of links made for the old target, the run prints that too.
+#[test]
+fn a_retarget_of_a_running_name_is_named_and_checked() {
+    use crate::grants::{Delegation, GrantKind, GrantRecord, Grants, LinksForAnother};
+
+    let scratch = Scratch::new("retarget");
+    list(&scratch, &["ping=ping:", "ssh=tcp:localhost:22"]);
+    Grants::at(scratch.home.links())
+        .append(
+            &crate::testkit::lock(),
+            &GrantRecord {
+                target: service("ssh"),
+                serves: Some("tcp:localhost:22".parse().expect("a target")),
+                kind: GrantKind::Bearer,
+                delegation: Delegation::Delegable,
+                holder: crate::grants::ANYONE.to_owned(),
+                root_id: nauthy::RevocationId::from_bytes(vec![0x62]),
+                expiry: std::time::SystemTime::now() + Duration::from_secs(3600),
+            },
+        )
+        .expect("record a link for ssh as a forward");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    watcher.serving(&bare(&scratch));
+
+    list(&scratch, &["ping=ping:", "ssh=sshd:"]);
+    past_the_debounce();
+    let waiting = watcher.waiting();
+    assert_eq!(
+        (waiting.added.as_slice(), waiting.changed.as_slice()),
+        (&[][..], &["ssh".to_owned()][..]),
+        "ssh's new target waits for the next start"
+    );
+    assert_eq!(
+        waiting.to_string(),
+        "the changed service ssh in serve.toml takes effect the next time serve starts"
+    );
+    let links = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.changed)
+        .expect("the ledger reads");
+    assert!(links.is_some(), "that start would warn of the shell");
 }

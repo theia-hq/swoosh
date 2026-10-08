@@ -372,6 +372,7 @@ async fn a_link_row_prints_its_holder_by_kind() {
     let holder = |kind, holder: String| {
         let record = GrantRecord {
             target: "ssh".parse().expect("a service"),
+            serves: None,
             kind,
             delegation: Delegation::Sealed,
             holder,

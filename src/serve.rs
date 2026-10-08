@@ -25,6 +25,7 @@ mod control;
 mod renewal;
 mod resident;
 mod roster;
+mod scheme;
 mod services;
 mod serving;
 mod single;
@@ -44,6 +45,7 @@ pub use transfer::Recv;
 
 pub use self::renewal::{Known, Renewal};
 pub use self::roster::Exchange;
+pub use self::scheme::{BoundTargets, NotATarget, Scheme, ServedTarget};
 pub use self::services::ServiceList;
 pub use self::serving::{ServingError, Started};
 pub use self::stop::{STOP_ACK, Stop};
@@ -194,38 +196,49 @@ pub fn bind_entry(
         return router.parse(&[entry.to_owned()]);
     };
     let name: Service = name.parse()?;
-    // Every target is `<scheme>:<rest>`, so the dispatch splits the addr ONCE and matches the SCHEME, never
-    // the whole string. No scheme at all is not swoosh's to refuse either: tightbeam's grammar owns that
-    // teaching error like every other.
-    let Some((scheme, rest)) = addr.split_once(':') else {
+    // Every target is `<scheme>:<rest>`, so the dispatch parses the addr ONCE into its [`Scheme`] and
+    // matches that, never the whole string: an engine added to `Scheme` cannot compile without an arm here.
+    // No scheme at all, or one no `serve` binds, is not swoosh's to refuse either: tightbeam's grammar owns
+    // that teaching error like every other.
+    let Some((scheme, rest)) = Scheme::parse(addr) else {
         return router.parse(&[entry.to_owned()]).map_err(target_help);
     };
-    // ONE arm per scheme swoosh serves, matching the scheme alone. The arity check is a call inside each
-    // arm rather than a second arm listing the schemes again: two arms that must agree is how `ping:80`
-    // came to mean a forward to a host named `ping` in the first place, and a fifth zero-argument engine
-    // added to a second list is the same bug waiting.
+    // ONE arm per scheme swoosh serves. The arity check is a call inside each arm rather than a second arm
+    // listing the schemes again: two arms that must agree is how `ping:80` came to mean a forward to a host
+    // named `ping` in the first place, and a fifth zero-argument engine added to a second list is the same
+    // bug waiting.
     match scheme {
-        "ping" => {
+        Scheme::Ping => {
             no_argument(scheme, rest, entry)?;
             bind_ping(router, name, public)
         }
-        "speed" => {
+        Scheme::Speed => {
             no_argument(scheme, rest, entry)?;
             bind_speed(router, name, public)
         }
-        // Without the `ssh` engine compiled in there is no arm at all, so `sshd:` falls through to the
-        // refusal below and is told it is unknown, which is true of this build.
         #[cfg(feature = "ssh")]
-        "sshd" => {
+        Scheme::Sshd => {
             no_argument(scheme, rest, entry)?;
             router.service(name, sshh::Sshd::new(host_seed))
         }
+        // Without the `ssh` engine compiled in, `sshd:` falls through to tightbeam's refusal and is told it
+        // is unknown, which is true of this build.
+        #[cfg(not(feature = "ssh"))]
+        Scheme::Sshd => router.parse(&[entry.to_owned()]).map_err(target_help),
         // Not swoosh's: a `tcp:`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the `echo:`
-        // reflector, or a scheme nobody serves. tightbeam's grammar owns it, refusal included. Its
-        // refusal names the schemes IT routes, which cannot include the ones above without handing it a
+        // reflector. tightbeam's grammar owns them, refusal included. `recv:` and `fetch:` are taken out of
+        // the entries before any is bound here, so one that reaches this is refused by that grammar too.
+        // Its refusal names the schemes IT routes, which cannot include swoosh's without handing it a
         // scheme registry it deliberately does not have, so the pointer is added here instead: a reader
         // refused by either half gets told where the whole list is.
-        _ => router.parse(&[entry.to_owned()]).map_err(target_help),
+        Scheme::Recv
+        | Scheme::Fetch
+        | Scheme::Tcp
+        | Scheme::Unix
+        | Scheme::File
+        | Scheme::Fifo
+        | Scheme::Stdin
+        | Scheme::Echo => router.parse(&[entry.to_owned()]).map_err(target_help),
     }
 }
 
@@ -241,11 +254,14 @@ fn target_help(error: eyre::Report) -> eyre::Report {
 /// target (a probe, a throughput test, a shell), so none of them takes one, and a
 /// tail is a typo. Refused HERE, by the layer that serves the scheme: falling through would hand
 /// `ping=ping:80` to tightbeam, which would call `ping` unknown when swoosh is the thing serving it.
-fn no_argument(scheme: &str, rest: &str, entry: &str) -> eyre::Result<()> {
+fn no_argument(scheme: Scheme, rest: &str, entry: &str) -> eyre::Result<()> {
     if rest.is_empty() {
         return Ok(());
     }
-    eyre::bail!("`{scheme}:` takes no argument, but `{entry}` gives it `{rest}`")
+    eyre::bail!(
+        "`{}:` takes no argument, but `{entry}` gives it `{rest}`",
+        scheme.as_str()
+    )
 }
 
 /// Bind the `ping:` engine a route's exposure requires: the METERED engine when `name` is in the open set,
@@ -305,7 +321,7 @@ pub fn diagnostics(router: Router, public: &[Service]) -> eyre::Result<Router> {
 
 /// The scheme a receive service names, so the sink-dir extraction matches `recv:<dir>` on the ONE literal
 /// (the same literal the extraction and the banner gloss match), not a re-typed string that could drift.
-pub const RECV_SCHEME: &str = "recv";
+pub const RECV_SCHEME: &str = Scheme::Recv.as_str();
 
 /// One de-merged receive service: its served NAME (the wire name `swoosh send --service` requests, e.g. the
 /// default `recv`) and ONLY its own output directory. Because each receive service holds its own [`Recv`]
@@ -495,7 +511,7 @@ pub fn extract_recv_services(
 
 /// The scheme prefix a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE
 /// literal, not a re-typed string that could drift from it.
-const FETCH_SCHEME: &str = "fetch";
+const FETCH_SCHEME: &str = Scheme::Fetch.as_str();
 
 /// One de-merged fetch service: its served NAME (the wire name a dialer requests, e.g. `news`) and ONLY its
 /// own origin scope. Because each fetch service holds its own [`Fetch`] instance, a public fetch physically
@@ -503,6 +519,8 @@ const FETCH_SCHEME: &str = "fetch";
 /// fail-closed-by-convention.
 pub struct FetchService {
     name: String,
+    /// What follows `fetch:`, as [`Scheme::never_public`] reads it: empty for no origin.
+    origin: String,
     allow: OriginAllowlist,
 }
 
@@ -562,6 +580,7 @@ impl FetchScope {
             };
             services.push(FetchService {
                 name: name.to_owned(),
+                origin: origin.to_owned(),
                 allow,
             });
         }
@@ -588,11 +607,12 @@ impl FetchExposure {
     /// free anonymizing hop). Because each fetch service carries its own scope, this reasons about THIS public
     /// fetch, so a second origin-scoped fetch can no longer mask a bare public one. Refused at build time,
     /// before any banner or accepted stream, mirroring the sshd-cannot-be-public wall. A GATED fetch (not in
-    /// `--public`) stays legal unconstrained: the family gate is the terminator there.
+    /// `--public`) stays legal unconstrained: the family gate is the terminator there. The test is
+    /// [`Scheme::never_public`], the one `share` asks of a link to anyone.
     pub fn refuse_open_relay(&self, public: &[Service]) -> eyre::Result<()> {
         for service in &self.services {
             if public.iter().any(|name| name.as_str() == service.name)
-                && service.allow.is_unconstrained()
+                && Scheme::Fetch.never_public(&service.origin)
             {
                 eyre::bail!(
                     "a public fetch service must be origin-scoped \

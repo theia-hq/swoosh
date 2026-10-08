@@ -422,9 +422,10 @@ async fn a_shorter_revoked_never_unrevokes_live() {
             )
             .expect("pin the root");
             let own = NodeId::from_ed25519_secret(&[3u8; 32]);
-            let (gate, cut) = swoosh::gate::anchored(&scratch.home, own)
-                .await
-                .expect("the gate serve builds");
+            let (gate, cut) =
+                swoosh::gate::anchored(&scratch.home, own, swoosh::serve::BoundTargets::default())
+                    .await
+                    .expect("the gate serve builds");
             let exposer = Router::new(gate)
                 .service(
                     GATED.parse().expect("a name"),

@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use clap::Parser as _;
-use nauthy::{CapError, Link, Service};
+use nauthy::{CapError, Decision, Link, ProvenPeer, Service};
 use swoosh::contacts::ContactsStore;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
@@ -19,7 +19,7 @@ use swoosh::serve_toml::ServeToml;
 use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
 
-use super::{BOUND, End, ShareCmd, Span, Usage};
+use super::{End, ONCE_ANYONE, ShareCmd, Span, Usage};
 
 /// This machine's key.
 const OWN: u8 = 0x11;
@@ -211,7 +211,10 @@ async fn share_bound_link_refuses() {
         .unwrap();
     let path = saved(&home, "bound.link", &bound);
     let ran = share(&home, &[&path]).await;
-    assert_eq!(ran.refusal(), BOUND);
+    assert_eq!(
+        ran.refusal(),
+        "this link cannot be copied: ask whoever made it for another"
+    );
     assert!(ran.out.is_empty(), "no link prints: {}", ran.out);
 }
 
@@ -220,7 +223,7 @@ async fn share_save_writes_0600_and_refuses_an_existing_file() {
     let home = scratch("save").await;
     let file = path_in(&home, "x.link");
     let path = file.display().to_string();
-    let ran = share(&home, &["ssh", "anyone", "--save", &path]).await;
+    let ran = share(&home, &["demo", "anyone", "--save", &path]).await;
     assert_eq!(ran.made(), path, "stdout is the path alone");
     let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "the file is private");
@@ -231,7 +234,7 @@ async fn share_save_writes_0600_and_refuses_an_existing_file() {
     );
     swoosh::link::parse(held.trim()).expect("the file holds the link");
 
-    let again = share(&home, &["ssh", "anyone", "--save", &path]).await;
+    let again = share(&home, &["demo", "anyone", "--save", &path]).await;
     assert!(
         again.refusal().contains("exists already"),
         "{}",
@@ -253,7 +256,7 @@ async fn share_save_writes_0600_and_refuses_an_existing_file() {
 #[tokio::test]
 async fn share_reads_a_link_from_a_path() {
     let home = scratch("path").await;
-    let source = share(&home, &["ssh", "anyone", "--expires", "2h"])
+    let source = share(&home, &["demo", "anyone", "--expires", "2h"])
         .await
         .link();
     let path = saved(&home, "source.link", &source);
@@ -277,7 +280,7 @@ async fn share_reads_a_link_from_a_path() {
 #[tokio::test]
 async fn share_link_copy_defaults_to_the_sources_remaining_time() {
     let home = scratch("copy").await;
-    let source = share(&home, &["ssh", "anyone", "--expires", "2h"])
+    let source = share(&home, &["demo", "anyone", "--expires", "2h"])
         .await
         .link();
     let copy = share(&home, &[&saved(&home, "s.link", &source)]).await;
@@ -313,7 +316,7 @@ async fn share_link_copy_defaults_to_the_sources_remaining_time() {
 #[tokio::test]
 async fn share_link_with_a_recipient_is_a_usage_error() {
     let home = scratch("link-who").await;
-    let source = share(&home, &["ssh", "anyone"]).await.link();
+    let source = share(&home, &["demo", "anyone"]).await.link();
     let ran = share(&home, &[&saved(&home, "s.link", &source), "bob/laptop"]).await;
     let error = ran.result.as_ref().expect_err("a link takes no recipient");
     assert!(error.downcast_ref::<Usage>().is_some(), "exit 2: {error:#}");
@@ -387,31 +390,30 @@ async fn share_expires_is_one_hour_to_a_year() {
     let home = scratch("expires").await;
     for (span, ok) in [
         ("30m", false),
-        ("59m59s", false),
+        ("59m", false),
         ("1h", true),
         ("365d", true),
         ("366d", false),
     ] {
-        let ran = share(&home, &["ssh", "anyone", "--expires", span]).await;
-        match &ran.result {
-            Ok(()) => assert!(ok, "{span} is refused"),
-            Err(error) => {
-                assert!(!ok, "{span}: {error:#}");
-                assert_eq!(
-                    error.downcast_ref::<Usage>().map(|usage| usage.0.as_str()),
-                    Some("a link's --expires is 1h to 365d"),
-                    "{span}: exit 2"
-                );
-                assert!(
-                    ran.out.is_empty() && ran.err.is_empty(),
-                    "{span}: nothing prints"
-                );
-            }
+        let ran = share(&home, &["demo", "anyone", "--expires", span]).await;
+        if ok {
+            ran.made();
+            continue;
         }
+        let error = ran.result.as_ref().expect_err(span);
+        assert_eq!(
+            error.downcast_ref::<Usage>().map(|usage| usage.0.as_str()),
+            Some("a link's --expires is 1h to 365d"),
+            "{span}: a usage error, exit 2"
+        );
+        assert!(
+            ran.out.is_empty() && ran.err.is_empty(),
+            "{span}: nothing prints"
+        );
     }
     assert_eq!(rows(&home).await.len(), 2, "only the two shares made rows");
 
-    let source = share(&home, &["ssh", "anyone"]).await.link();
+    let source = share(&home, &["demo", "anyone"]).await.link();
     let copy = share(
         &home,
         &[&saved(&home, "s.link", &source), "--expires", "30m"],
@@ -442,14 +444,14 @@ fn a_span_parses_its_grammar_and_prints_as_typed() {
         ("1h30m", 5400),
         ("2h", 7200),
         ("90d", 90 * 86_400),
-        ("1d2h3m4s", 86_400 + 7200 + 180 + 4),
+        ("1d2h3m", 86_400 + 7200 + 180),
     ] {
         let span: Span = text.parse().unwrap();
         assert_eq!(span.duration(), Duration::from_secs(secs), "{text}");
         assert_eq!(span.to_string(), text, "{text} prints as typed");
     }
     for text in [
-        "", "h", "90", "1h1h", "30m1h", "1x", "0h", "0h0m", "-1h", "1 h", "1H",
+        "", "h", "90", "1h1h", "30m1h", "1x", "0h", "0h0m", "-1h", "1 h", "1H", "30s", "1m30s",
     ] {
         assert!(text.parse::<Span>().is_err(), "{text:?} is no span");
     }
@@ -467,7 +469,7 @@ fn a_span_parses_its_grammar_and_prints_as_typed() {
 async fn an_issue_line_prints_the_span_as_typed() {
     let home = scratch("span").await;
     for (span, printed) in [("90m", " (90m)."), ("1h30m", " (1h30m)."), ("2d", " (2d).")] {
-        let ran = share(&home, &["ssh", "anyone", "--expires", span]).await;
+        let ran = share(&home, &["demo", "anyone", "--expires", span]).await;
         ran.made();
         let first = ran.err.lines().next().unwrap();
         assert!(first.ends_with(printed), "{span}: {first}");
@@ -479,7 +481,7 @@ async fn an_anyone_link_is_unsealed_and_a_bound_link_is_sealed() {
     let home = scratch("sealed").await;
     with_bob(&home).await;
     let key = TestNode::seeded(BOB_LAPTOP).node_id().to_string();
-    let anyone = share(&home, &["ssh", "anyone"]).await.link();
+    let anyone = share(&home, &["demo", "anyone"]).await.link();
     anyone
         .narrow(None, Some(Duration::from_secs(60)))
         .expect("an anyone link narrows");
@@ -581,27 +583,28 @@ async fn every_share_states_what_it_gives() {
                     .all(|(at, c)| at == 2 || c.is_ascii_digit()),
             "{args:?}: the end is a clock time: {clock:?}"
         );
-        assert_eq!(
-            lines[1..],
-            [format!(
-                "the link dials this machine: it works while this machine serves {}.",
-                args[0]
-            )],
-            "{args:?}"
-        );
+        let mut rest = vec![format!(
+            "the link dials this machine: it works while this machine serves {}.",
+            args[0]
+        )];
+        // A shell shared with a person says what it reaches beyond this machine.
+        if args[0] == "ssh" {
+            rest.push("that shell can reach your other devices.".to_owned());
+        }
+        assert_eq!(lines[1..], rest, "{args:?}");
     }
-    let anyone = share(&home, &["ssh", "anyone", "--expires", "7d"]).await;
+    let anyone = share(&home, &["db", "anyone", "--expires", "7d"]).await;
     anyone.made();
     let lines: Vec<&str> = anyone.err.lines().collect();
     assert!(
-        lines[0].starts_with("anyone can open a shell on this machine until ")
+        lines[0].starts_with("anyone can reach db (localhost:5432 on this machine) until ")
             && lines[0].ends_with(" (7d)."),
         "{}",
         anyone.err
     );
     // Past a day, the end is a date: `15 Oct 2026`.
     let date: Vec<&str> = lines[0]
-        .trim_start_matches("anyone can open a shell on this machine until ")
+        .trim_start_matches("anyone can reach db (localhost:5432 on this machine) until ")
         .trim_end_matches(" (7d).")
         .split(' ')
         .collect();
@@ -636,13 +639,13 @@ impl std::io::Write for Closed {
 #[tokio::test]
 async fn a_share_records_its_row_before_the_link_prints() {
     let home = scratch("row").await;
-    let link = share(&home, &["ssh", "anyone"]).await.link();
+    let link = share(&home, &["demo", "anyone"]).await.link();
     let [row] = rows(&home).await.try_into().ok().unwrap();
     assert_eq!(Some(row.root_id), link.cap().root_revocation_id());
-    assert_eq!(row.target, "ssh".parse::<Service>().unwrap());
+    assert_eq!(row.target, "demo".parse::<Service>().unwrap());
     assert_eq!(row.holder, swoosh::grants::ANYONE);
 
-    let cmd = parse(&["ssh", "anyone"]).unwrap();
+    let cmd = parse(&["demo", "anyone"]).unwrap();
     let mut err = Vec::new();
     let failed = cmd
         .run(&home, &b""[..], &mut Closed, &mut err)
@@ -663,7 +666,7 @@ async fn a_refused_save_leaves_no_file_and_no_row() {
     let home = scratch("save-refused").await;
     let missing = path_in(&home, "no-such-dir").join("l.link");
     let path = missing.display().to_string();
-    let ran = share(&home, &["ssh", "anyone", "--save", &path]).await;
+    let ran = share(&home, &["demo", "anyone", "--save", &path]).await;
     assert_eq!(
         ran.refusal(),
         format!("could not make {path}: no such directory")
@@ -679,7 +682,7 @@ async fn a_refused_save_leaves_no_file_and_no_row() {
     let file = path_in(&home, "a-file");
     std::fs::write(&file, "").unwrap();
     let under_a_file = file.join("l.link").display().to_string();
-    let ran = share(&home, &["ssh", "anyone", "--save", &under_a_file]).await;
+    let ran = share(&home, &["demo", "anyone", "--save", &under_a_file]).await;
     assert_eq!(
         ran.refusal(),
         format!("could not make {under_a_file}: no such directory")
@@ -702,7 +705,7 @@ async fn a_save_into_an_unwritable_directory_leaves_no_file_and_no_row() {
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
     let file = dir.join("l.link");
     let path = file.display().to_string();
-    let ran = share(&home, &["ssh", "anyone", "--save", &path]).await;
+    let ran = share(&home, &["demo", "anyone", "--save", &path]).await;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(
         ran.refusal(),
@@ -789,4 +792,340 @@ async fn share_with_a_key_binds_that_one_machine() {
             .is_err(),
         "another machine is refused"
     );
+}
+
+/// Name `entries` in `home`'s `serve.toml`, as a bare `serve` would start them.
+fn serving(home: &Home, entries: &[&str]) {
+    ServeToml::update(&swoosh::testkit::lock(), home, |toml| {
+        toml.services = entries.iter().map(|&entry| entry.to_owned()).collect();
+    })
+    .unwrap();
+}
+
+/// Whether `home`'s `serve` gate admits `link` for `service` from the machine seeded `dialer`, now. A fresh
+/// gate reads the ledger as it stands.
+fn admits(gate: &nauthy::Gate, link: &Link, service: &str, dialer: u8) -> bool {
+    matches!(
+        gate.admit(
+            ProvenPeer::from_handshake(TestNode::seeded(dialer).verify_key()),
+            Some(link.cap()),
+            &service.parse().unwrap(),
+        ),
+        Decision::Admit
+    )
+}
+
+/// `home`'s `serve` gate, as the composition root builds it for a `serve` that binds `entries`.
+async fn gate(home: &Home, entries: &[&str]) -> nauthy::Gate {
+    swoosh::gate::anchored(
+        home,
+        TestNode::seeded(OWN).node_id(),
+        swoosh::serve::BoundTargets::of(entries.iter().copied()),
+    )
+    .await
+    .unwrap()
+    .0
+}
+
+/// `share ssh anyone` without `--once` refuses, exit 1, before anything is minted or recorded, and says
+/// both ways that work.
+#[tokio::test]
+async fn share_ssh_with_anyone_is_refused_and_mints_nothing() {
+    let home = scratch("ssh-anyone").await;
+    let ran = share(&home, &["ssh", "anyone"]).await;
+    let error = ran
+        .result
+        .as_ref()
+        .expect_err("an anyone link to a shell refuses");
+    assert!(
+        error.downcast_ref::<Usage>().is_none(),
+        "exit 1, not a usage error"
+    );
+    assert_eq!(
+        format!("error: {error:#}"),
+        "error: ssh opens a shell on this machine; share it with a person: swoosh share ssh <person>\n\
+         or make a link that works once: swoosh share ssh anyone --once"
+    );
+    assert!(ran.out.is_empty(), "no link prints: {}", ran.out);
+    assert!(rows(&home).await.is_empty(), "no row is written");
+}
+
+/// The refusal is the engine's ceiling, not "runs code": every engine that must never face an open gate
+/// refuses an `anyone` link, and a forward, a scoped fetch, a reflector or a name served by nothing does not.
+#[tokio::test]
+async fn an_anyone_link_to_an_engine_never_open_to_anyone_is_refused() {
+    let home = scratch("never-public").await;
+    serving(
+        &home,
+        &[
+            "inbox=recv:",
+            "web=fetch:",
+            "news=fetch:https://news.example",
+            "db=tcp:localhost:5432",
+            "demo=echo:",
+        ],
+    );
+    for service in ["ping", "speed", "inbox", "web"] {
+        let ran = share(&home, &[service, "anyone"]).await;
+        assert_eq!(
+            ran.refusal(),
+            format!(
+                "whoever holds a link to anyone could use {service} any number of times; share it with a \
+                 person: swoosh share {service} <person>\nor make a link that works once: swoosh share {service} \
+                 anyone --once"
+            ),
+        );
+        share(&home, &[service, "anyone", "--once"]).await.made();
+    }
+    for service in ["news", "db", "demo", "unserved"] {
+        share(&home, &[service, "anyone"]).await.made();
+    }
+}
+
+/// `--once` names what a link to anyone gains, so with any other recipient, or on a copy of a link, it is a
+/// usage error before anything is written.
+#[tokio::test]
+async fn once_with_a_bound_recipient_or_a_link_is_a_usage_error() {
+    let home = scratch("once-who").await;
+    with_bob(&home).await;
+    let key = TestNode::seeded(BOB_LAPTOP).node_id().to_string();
+    for who in ["bob", "bob/laptop", key.as_str()] {
+        let ran = share(&home, &["ssh", who, "--once"]).await;
+        let error = ran.result.as_ref().expect_err(who);
+        assert_eq!(
+            error.downcast_ref::<Usage>().map(|usage| usage.0.as_str()),
+            Some(ONCE_ANYONE),
+            "{who}: exit 2"
+        );
+    }
+    assert!(rows(&home).await.is_empty(), "no row is written");
+    let source = share(&home, &["demo", "anyone"]).await.link();
+    let path = saved(&home, "s.link", &source);
+    let stdin = format!("{}\n", swoosh::link::Link::from(source.clone()));
+    for ran in [
+        share(&home, &[&path, "--once"]).await,
+        share_with(&home, &["-", "--once"], stdin.as_bytes()).await,
+    ] {
+        let error = ran.result.as_ref().expect_err("a copy is never once");
+        assert_eq!(
+            error.downcast_ref::<Usage>().map(|usage| usage.0.as_str()),
+            Some(ONCE_ANYONE),
+            "exit 2"
+        );
+        assert!(ran.out.is_empty(), "no link prints: {}", ran.out);
+    }
+}
+
+/// A one-use link to a service that runs no code admits once, then refuses, whoever presents it; its
+/// grant line carries ", once,".
+#[tokio::test]
+async fn once_on_a_service_that_runs_no_code_works_once() {
+    let home = scratch("once-db").await;
+    serving(&home, &["db=tcp:localhost:5432"]);
+    let ran = share(&home, &["db", "anyone", "--once"]).await;
+    let link = ran.link();
+    let lines: Vec<&str> = ran.err.lines().collect();
+    assert!(
+        lines[0].starts_with("anyone can reach db (localhost:5432 on this machine), once, until ")
+            && lines[0].ends_with(" (15m)."),
+        "{}",
+        ran.err
+    );
+    assert_eq!(
+        lines[1..],
+        [
+            "the link dials this machine: it works while this machine serves db.",
+            "anyone holding this link can use it: send it privately.",
+        ]
+    );
+    let gate = gate(&home, &["db=tcp:localhost:5432"]).await;
+    assert!(admits(&gate, &link, "db", 0x51), "the first admission");
+    assert!(!admits(&gate, &link, "db", 0x51), "the same holder again");
+    assert!(!admits(&gate, &link, "db", 0x52), "anyone else after it");
+}
+
+/// `share ssh anyone --once` makes a sealed link the gate admits once, that ends in 15 minutes, and says
+/// that the shell reaches your other devices; `--expires` may only shorten it.
+#[tokio::test]
+async fn an_explicit_shell_link_works_once_and_expires_in_15_minutes() {
+    let home = scratch("once-ssh").await;
+    let ran = share(&home, &["ssh", "anyone", "--once"]).await;
+    let link = ran.link();
+    assert!(
+        ends(&link).abs_diff(from_now(Duration::from_secs(15 * 60))) <= 2,
+        "it ends in 15 minutes"
+    );
+    let lines: Vec<&str> = ran.err.lines().collect();
+    assert_eq!(lines.len(), 3, "{}", ran.err);
+    assert!(
+        lines[0].starts_with("anyone can open a shell on this machine, once, until ")
+            && lines[0].ends_with(" (15m)."),
+        "the end prints once, in the grant's line: {}",
+        ran.err
+    );
+    assert_eq!(
+        lines[1..],
+        [
+            "the link dials this machine: it works while this machine serves ssh.",
+            "that shell can reach your other devices: send the link privately.",
+        ]
+    );
+    let [row] = rows(&home).await.try_into().ok().unwrap();
+    assert_eq!(
+        (row.kind, row.delegation),
+        (GrantKind::Once, Delegation::Sealed)
+    );
+
+    let gate = gate(&home, &["ssh=sshd:"]).await;
+    assert!(admits(&gate, &link, "ssh", 0x51), "the first admission");
+    assert!(!admits(&gate, &link, "ssh", 0x51), "the second is refused");
+
+    let shorter = share(&home, &["ssh", "anyone", "--once", "--expires", "5m"]).await;
+    assert!(
+        ends(&shorter.link()).abs_diff(from_now(Duration::from_secs(5 * 60))) <= 2,
+        "--expires shortens it"
+    );
+    let longer = share(&home, &["ssh", "anyone", "--once", "--expires", "16m"]).await;
+    let error = longer.result.as_ref().expect_err("longer than 15m refuses");
+    assert_eq!(
+        error.downcast_ref::<Usage>().map(|usage| usage.0.as_str()),
+        Some("with --once, --expires is 15m at most"),
+        "exit 2"
+    );
+    assert_eq!(
+        rows(&home).await.len(),
+        2,
+        "the refused share writes no row"
+    );
+}
+
+/// A name retargeted while `serve` runs: `share` reads the new target from `serve.toml`, and records it,
+/// but the running gate holds what it bound, so a link made for the forward never reaches the shell.
+#[tokio::test]
+async fn a_retarget_mid_run_refuses_a_link_made_for_the_new_target() {
+    let home = scratch("retarget").await;
+    serving(&home, &["ssh=sshd:"]);
+    let running = gate(&home, &["ssh=sshd:"]).await;
+    serving(&home, &["ssh=tcp:localhost:22"]);
+    let link = share(&home, &["ssh", "anyone"]).await.link();
+    // Past the ledger's stat debounce, so the running gate reads the new row and the refusal is the
+    // target's, not an unread ledger's.
+    std::thread::sleep(nauthy::STAT_DEBOUNCE + Duration::from_millis(50));
+    assert!(
+        !admits(&running, &link, "ssh", 0x51),
+        "the running shell refuses a link made for a forward"
+    );
+}
+
+/// `share` folds a name in `serve.toml` as `serve` does, so `Web=sshd:` is the shell `serve` binds as `web`.
+#[tokio::test]
+async fn a_name_in_serve_toml_is_folded_as_serve_folds_it() {
+    let home = scratch("folded").await;
+    with_bob(&home).await;
+    serving(&home, &["Web=sshd:"]);
+    let ran = share(&home, &["web", "anyone"]).await;
+    assert!(
+        ran.refusal()
+            .starts_with("web opens a shell on this machine;"),
+        "{}",
+        ran.refusal()
+    );
+    share(&home, &["web", "bob/laptop"]).await.made();
+    let [row] = rows(&home).await.try_into().ok().unwrap();
+    assert_eq!(
+        row.serves.as_ref().map(ToString::to_string).as_deref(),
+        Some("sshd:")
+    );
+}
+
+/// A `share` that reads `serve.toml` before a named `serve ssh` writes it records the old target, and the
+/// gate that start builds refuses the link.
+#[tokio::test]
+async fn a_share_during_a_named_start_is_refused_by_that_start() {
+    let home = scratch("named-start").await;
+    serving(&home, &["ssh=tcp:localhost:22"]);
+    let link = share(&home, &["ssh", "anyone"]).await.link();
+    let started = gate(&home, &["ssh=sshd:"]).await;
+    assert!(
+        !admits(&started, &link, "ssh", 0x51),
+        "the shell that start binds refuses it"
+    );
+}
+
+/// An `anyone` link to a target whose scheme swoosh does not know is refused: nothing can say what it gives.
+#[tokio::test]
+async fn an_anyone_link_to_an_unknown_scheme_is_refused() {
+    let home = scratch("unknown-scheme").await;
+    serving(&home, &["odd=gopher:x"]);
+    for args in [&["odd", "anyone"][..], &["odd", "anyone", "--once"][..]] {
+        let ran = share(&home, args).await;
+        assert_eq!(
+            ran.refusal(),
+            "odd serves gopher:x, which swoosh does not know; share it with a person: swoosh share odd \
+             <person>",
+            "{args:?}"
+        );
+    }
+    assert!(rows(&home).await.is_empty(), "no row is written");
+}
+
+/// A one-use link is sealed: it cannot be narrowed into a further link, offline or through `share <link>`.
+#[tokio::test]
+async fn an_explicit_shell_link_cannot_be_delegated() {
+    let home = scratch("once-sealed").await;
+    let link = share(&home, &["ssh", "anyone", "--once"]).await.link();
+    assert!(
+        matches!(
+            link.narrow(None, Some(Duration::from_secs(60))),
+            Err(CapError::Attenuate(_))
+        ),
+        "a one-use link is sealed"
+    );
+    let ran = share(&home, &[&saved(&home, "once.link", &link)]).await;
+    assert_eq!(
+        ran.refusal(),
+        "this link cannot be copied: ask whoever made it for another"
+    );
+    assert!(ran.out.is_empty(), "no link prints: {}", ran.out);
+}
+
+/// A forward is no engine that must never face an open gate, so an `anyone` link to it is made as before.
+#[tokio::test]
+async fn share_a_forward_with_anyone_still_works() {
+    let home = scratch("forward").await;
+    serving(&home, &["db=tcp:localhost:5432"]);
+    let link = share(&home, &["db", "anyone"]).await.link();
+    link.narrow(None, Some(Duration::from_secs(60)))
+        .expect("it is the delegable link it always was");
+    let [row] = rows(&home).await.try_into().ok().unwrap();
+    assert_eq!(row.kind, GrantKind::Bearer);
+    assert_eq!(
+        row.serves.as_ref().map(ToString::to_string).as_deref(),
+        Some("tcp:localhost:5432"),
+        "the row records the forward"
+    );
+}
+
+/// The row of a shell shared with a device records `sshd:`, the target `ssh` stood for when it was made.
+#[tokio::test]
+async fn share_ssh_to_a_device_records_sshd() {
+    let home = scratch("records-sshd").await;
+    with_bob(&home).await;
+    share(&home, &["ssh", "bob/laptop"]).await.made();
+    let [row] = rows(&home).await.try_into().ok().unwrap();
+    assert_eq!(
+        row.serves.as_ref().map(ToString::to_string).as_deref(),
+        Some("sshd:")
+    );
+}
+
+/// A name `serve.toml` does not list and no built-in stands for serves nothing, and its row records none.
+#[tokio::test]
+async fn a_name_not_served_records_no_target() {
+    let home = scratch("records-none").await;
+    with_bob(&home).await;
+    serving(&home, &["db=tcp:localhost:5432"]);
+    share(&home, &["demo", "bob/laptop"]).await.made();
+    let [row] = rows(&home).await.try_into().ok().unwrap();
+    assert!(row.serves.is_none(), "nothing is recorded for demo");
 }
