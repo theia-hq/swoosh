@@ -214,7 +214,10 @@ fn proxy_origin(name: &str, url: &str) -> Result<(), EntryError> {
         return Ok(());
     };
     if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(EntryError::ProxyNotHttp(ProxyLine::new(name, "<url>")));
+        return Err(EntryError::ProxyNotHttp(ProxyLine::new(
+            name,
+            "https://<host>",
+        )));
     }
     let origin = parsed.origin();
     let bare = matches!(parsed.path(), "" | "/")
@@ -272,7 +275,7 @@ pub enum EntryError {
     #[error("a proxy reaches a whole site, so its URL takes no path or query: swoosh serve {0}")]
     ProxyNotAnOrigin(ProxyLine),
     /// A proxy whose URL is neither `http` nor `https`; the line names neither its host nor its path.
-    #[error("a proxy reaches an http or https site: swoosh serve {0}")]
+    #[error("a proxy reaches only http and https sites: swoosh serve {0}")]
     ProxyNotHttp(ProxyLine),
 }
 

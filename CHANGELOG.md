@@ -30,7 +30,7 @@ All notable changes to swoosh, newest first.
 - **A proxy serves a whole site.** `swoosh serve proxy:<url>` takes a site with no path or query, such as
   `proxy:https://example.com`; a request may ask for any path on that site, and none on another.
 - **`swoosh proxy`'s local URL answers only requests made to it.** It prints the URL alone on stdout, with a
-  random part in its path; a request without that part, or with a Host other than `127.0.0.1:<port>`, is
+  random part in its path; a request without that part, or with a Host that names another address, is
   refused, so only a client given the URL can use it.
 - **`--present` is gone.** Give a link, or a file holding one, where the machine goes:
   `swoosh ssh swoosh:…` or `swoosh ssh ./nas.link`.

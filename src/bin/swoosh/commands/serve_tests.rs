@@ -2788,9 +2788,9 @@ fn a_proxy_url_with_a_path_or_query_is_a_usage_error() {
 #[test]
 fn a_proxy_url_that_is_not_http_or_https_is_a_usage_error() {
     for (entry, form) in [
-        ("proxy:foo://h:1/p?sig=x", "proxy:<url>"),
-        ("dl=proxy:file:///etc/passwd", "dl=proxy:<url>"),
-        ("dl=proxy:data:text/plain,x", "dl=proxy:<url>"),
+        ("proxy:foo://h:1/p?sig=x", "proxy:https://<host>"),
+        ("dl=proxy:file:///etc/passwd", "dl=proxy:https://<host>"),
+        ("dl=proxy:data:text/plain,x", "dl=proxy:https://<host>"),
     ] {
         let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
             .expect_err("a proxy URL that is not http or https refuses");
@@ -2801,7 +2801,7 @@ fn a_proxy_url_that_is_not_http_or_https_is_a_usage_error() {
             .to_string();
         assert_eq!(
             line,
-            format!("a proxy reaches an http or https site: swoosh serve {form}"),
+            format!("a proxy reaches only http and https sites: swoosh serve {form}"),
             "`serve {entry}`"
         );
     }
