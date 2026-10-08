@@ -63,7 +63,7 @@ The step stays open until the node ends, so later steps do not run. From your ow
 $ swoosh ssh me/ci-runner
 ```
 
-The hold ends when `expires` elapses, or early: `swoosh stop --at me/ci-runner` from your machine.
+The hold ends when `expires` elapses, or early: `swoosh stop me/ci-runner` from your machine.
 
 ## Push an artifact out from the runner
 

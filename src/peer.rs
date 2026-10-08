@@ -7,7 +7,7 @@
 //! (`ping`/`speed`/`status`/`proxy`) fan a peer out via [`candidates`](Peer::candidates), the single-target
 //! verbs (`forward`/`send`/`service`) resolve one via [`connector`](Peer::connector). Both
 //! shapes read the SAME three arms, so `alice`, `alice/desk`, a raw key, and a `swoosh:` link all parse in
-//! one place, uniform across every dialing verb.
+//! one place, uniform across every verb that may reach any machine.
 
 use core::str::FromStr;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use bifrost::{KeyError, NodeId, NodeIdParseError};
 use nauthy::{Link, Service};
 use tightbeam::tunnel::Connector;
 
-use crate::contacts::{Candidate, ContactRef, Contacts, DeviceLabel, ME, Petname};
+use crate::contacts::{Candidate, ContactRef, Contacts, DeviceLabel, ME};
 use crate::credential::LinkExt as _;
 use crate::link::LinkError;
 use crate::names::NameError;
@@ -114,9 +114,16 @@ impl OwnDevice {
     /// name.
     pub fn key(&self, contacts: &Contacts) -> Option<NodeId> {
         contacts
-            .devices(&Petname::stored(ME).ok()?)?
+            .mine()
             .find(|(label, _)| *label == self.label())
             .map(|(_, node)| *node)
+    }
+}
+
+impl From<DeviceLabel> for OwnDevice {
+    /// The device of yours a label in the list of your devices names.
+    fn from(label: DeviceLabel) -> Self {
+        Self(label)
     }
 }
 

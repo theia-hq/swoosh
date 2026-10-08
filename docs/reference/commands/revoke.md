@@ -28,7 +28,7 @@ is kept (or with `--root <dir>`), the revoke asks for the root's passphrase afte
 then passes it to your other devices. If it cannot use your root, it says the device is blocked on this
 machine only, names how to finish, and exits 1. A revoked device's key can never be your device again: that
 machine runs `swoosh leave --new-key` at its console to be invited back. A stolen device can stop your
-other machines (`swoosh stop --at me/<name>`) until they learn it is revoked.
+other machines (`swoosh stop me/<name>`) until they learn it is revoked.
 
 **Ending a root.** `swoosh revoke root:<key>` cannot be undone, so it runs only at a terminal. It says
 what this machine is to that root, then asks you to type the key's first six characters

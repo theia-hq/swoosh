@@ -69,6 +69,7 @@ fn resident_over(dir: &std::path::Path, cancel: CancellationToken) -> Resident {
         empty_catalog(),
         crate::serve_toml::LiveServeToml::load(&home).expect("the services off load"),
         cancel,
+        std::sync::Arc::default(),
     )
 }
 

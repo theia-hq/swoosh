@@ -3,7 +3,7 @@
 //! Bare `stop` stops this machine's `serve` over the local control socket and prints the pid that answered;
 //! `stop me/<name>` dials that device's member-only `control.stop` and, once admitted, triggers a graceful
 //! teardown, the same stop a Ctrl-C or a `serve --expires` deadline gives. It stops the NODE (the node stops
-//! serving); it does not power off the machine, and nothing here can start it again.
+//! serving); it does not power off the machine, and it serves again when `swoosh serve` next runs there.
 //!
 //! The machine is only ever `me/<name>`, a name in the list of your devices. Every other shape (a bare word,
 //! `me` alone, a contact, a key, a link, a path, two machines) is a usage error, exit 2, before any transport
@@ -22,13 +22,14 @@
 //! A refusal is a LOUD typed error, never a silent success: if the node's gate does not admit this caller,
 //! opening the control stream fails and `stop` reports the refusal and exits non-zero.
 //!
-//! The one tolerant case is the teardown RACE: the stream open can fail because the node is already tearing
-//! itself down in response to the request (the goal state), not because the dial was refused. On a
-//! non-refusal stream-open failure the verb probes the peer for a bounded window: a peer that stays
-//! unreachable is gone or stopping, so the stop is reported as completed; a peer that still accepts a
-//! connection is live, so the original failure stands loudly (never masked).
+//! `Stopped` prints only on what proves the stop: the node's ack byte, or the stream it admitted closing
+//! cleanly as the node goes down. A stream open that fails for any other reason never saw the admission,
+//! so it cannot tell a node tearing itself down for this request from a path that dropped it: the verb
+//! probes the peer for a bounded window, and a peer still live has stopped nothing, while a peer gone
+//! may have stopped or may only be out of reach, and the line says the stop is unconfirmed.
 
 use core::time::Duration;
+use std::io;
 
 use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use clap::Args;
@@ -37,15 +38,15 @@ use swoosh::contacts::{ContactRef, Contacts, ContactsStore, DeviceLabel, ME, Pet
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
 use swoosh::peer::{OwnDevice, Peer};
+use swoosh::roster::RosterDoc;
 use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK};
 use swoosh::transport::ReachArgs;
-use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::Connector;
 use tokio::io::AsyncReadExt as _;
 
-/// How long a failed control-stream open is probed before it reads as a completed stop. The node closes its
-/// endpoint right after a graceful teardown, so an unreachable peer over this window is gone or stopping; a
-/// live peer answers a probe connect at once. Bounded so a peer that is merely slow still fails loudly.
+/// How long a failed control-stream open is probed, to tell a live peer (nothing was stopped) from one that
+/// went away (the stop is unconfirmed). A live peer answers a probe connect at once; an unreachable one over
+/// this window is gone, stopping, or out of reach, and the probe cannot tell which.
 const STOP_PROBE_WINDOW: Duration = Duration::from_secs(3);
 
 /// The delay between probe dials inside [`STOP_PROBE_WINDOW`].
@@ -57,11 +58,17 @@ pub const A_LINK_STOPS_NOTHING: &str = "a link cannot stop a machine; only your 
 /// The refusal for more than one machine.
 pub const ONE_MACHINE: &str = "swoosh stop takes one machine";
 
-/// Stop swoosh serve here, or on one of your own devices.
+/// The machine's argument id, which the composition root widens for its second parse.
+pub const MACHINE: &str = "machine";
+
+/// The detail line under a refusal when this machine holds no list of your devices to show.
+const KNOWS_NONE: &str = "This machine knows none of your devices.";
+
+/// Stop swoosh serve here or on one of your own devices.
 #[derive(Debug, Args)]
 pub struct StopCmd {
-    /// One of your own devices; none stops this machine
-    #[arg(value_name = "me/<name>", value_parser = Aim::parse)]
+    /// One of your own devices; leave it out to stop this machine
+    #[arg(id = MACHINE, value_name = "me/<name>", value_parser = Aim::parse)]
     pub machine: Option<Aim>,
     #[command(flatten)]
     pub reach: ReachArgs,
@@ -85,24 +92,28 @@ pub enum Aim {
     /// A `swoosh:` link or a path, which carries no right to stop a machine. Never opened or parsed, so
     /// the refusal neither reads a file nor prints the link's token back.
     Link,
+    /// Text that is no name, no key and no link. Kept as nothing, so its refusal cannot print it back.
+    NotAName,
 }
 
 impl Aim {
-    /// The value parser: every shape is sorted for [`resolve`](Self::resolve), a link or a path into
-    /// [`Link`](Self::Link) without being opened or parsed.
-    fn parse(text: &str) -> Result<Self, String> {
-        if swoosh::peer::is_path(text)
-            || swoosh::link::is_prefixed(text)
-            || swoosh::link::looks_bare(text)
-        {
+    /// The value parser: every shape is sorted for [`resolve`](Self::resolve), and none is refused here.
+    /// clap prints the typed value back with any value error, and a damaged link's token is still a
+    /// token, so this parser cannot fail: what is not a machine is refused later with a fixed line.
+    /// Any text holding a dot is a link, never opened or parsed: no name, key or `me/<name>` holds one.
+    pub fn parse(text: &str) -> Result<Self, core::convert::Infallible> {
+        if text.contains('.') || swoosh::peer::is_path(text) || swoosh::link::is_prefixed(text) {
             return Ok(Self::Link);
         }
-        if let Some(key) = swoosh::peer::raw_key(text).map_err(|error| error.to_string())? {
+        let Ok(key) = swoosh::peer::raw_key(text) else {
+            return Ok(Self::NotAName);
+        };
+        if let Some(key) = key {
             return Ok(Self::Key(key));
         }
-        let reference = text
-            .parse::<ContactRef>()
-            .map_err(|error| error.to_string())?;
+        let Ok(reference) = text.parse::<ContactRef>() else {
+            return Ok(Self::NotAName);
+        };
         if let Some(device) = OwnDevice::of(&reference) {
             return Ok(Self::Device(device));
         }
@@ -133,7 +144,7 @@ impl Aim {
             }
             Self::Me => Err(Usage(format!("which machine?\n  {}", yours.listed()))),
             Self::Word(word) => {
-                if yours.names(word.as_str()) {
+                if yours.names(&word) {
                     Err(Usage(format!(
                         "swoosh stop takes one of your machines: swoosh stop {ME}/{word}"
                     )))
@@ -144,14 +155,10 @@ impl Aim {
                         "you can stop only your own machines; {word} is a contact"
                     )))
                 } else {
-                    Err(Usage(match yours.first() {
-                        Some(example) => {
-                            format!("swoosh stop takes one of your machines, like {example}")
-                        }
-                        None => "swoosh stop takes one of your machines".to_owned(),
-                    }))
+                    Err(yours.takes_one())
                 }
             }
+            Self::NotAName => Err(yours.takes_one()),
             Self::Theirs(reference) => {
                 let person = reference.petname();
                 Err(Usage(
@@ -167,11 +174,10 @@ impl Aim {
                 ))
             }
             Self::Link => Err(Usage(A_LINK_STOPS_NOTHING.to_owned())),
-            Self::Key(key) => Err(Usage(match yours.contacts.saved_at(&key) {
-                Some(name) if name.petname().as_str() == ME && name.device().is_some() => {
-                    format!("name the machine: swoosh stop {name}")
-                }
-                _ => "that key is not one of your machines".to_owned(),
+            // Looked up among your devices only: the book may also hold the key under a contact's name.
+            Self::Key(key) => Err(Usage(match yours.mine().find(|(_, node)| *node == key) {
+                Some((device, _)) => format!("name the machine: swoosh stop {device}"),
+                None => "that key is not one of your machines".to_owned(),
             })),
         }
     }
@@ -204,25 +210,30 @@ struct Yours {
 
 impl Yours {
     /// Read the list of your devices this home holds. Local files only; nothing is written, nothing dials.
+    /// One open of the book reads the list `me` is derived from, and what it revokes comes from that same
+    /// list; this machine's own name is the one the list gives its key.
     async fn read(home: &Home) -> eyre::Result<Self> {
-        let contacts = ContactsStore::open(home).await?.contacts().clone();
-        let own = swoosh::renewal::own_label(home).await;
-        // The same read the book's `me` is derived from: a pin that cannot be read, or a list that does not
-        // verify under it, holds no devices and so revokes none either.
-        let revoked = match swoosh::config::load_signet(home).await {
-            Ok(Some(pin)) => pin
-                .verify_key()
-                .ok()
-                .and_then(|pin| swoosh::roster::held(home, pin))
-                .map(|list| {
-                    list.revoked_devices()
-                        .iter()
-                        .map(|device| device.label.clone())
-                        .collect()
-                })
-                .unwrap_or_default(),
-            Ok(None) | Err(_) => Vec::new(),
-        };
+        let store = ContactsStore::open(home).await?;
+        let revoked = store
+            .list()
+            .map(RosterDoc::revoked_devices)
+            .unwrap_or_default()
+            .iter()
+            .map(|device| device.label.clone())
+            .collect();
+        let contacts = store.contacts().clone();
+        let file = keystore::KeyFile::new(home.key());
+        let key = file
+            .load()
+            .ok()
+            .flatten()
+            .and_then(|stored| swoosh::identity::key_of(&file, &stored).ok());
+        let own = key.and_then(|key| {
+            contacts
+                .mine()
+                .find(|(_, node)| **node == key)
+                .map(|(label, _)| label.clone())
+        });
         Ok(Self {
             contacts,
             own,
@@ -230,38 +241,37 @@ impl Yours {
         })
     }
 
-    /// Your devices' names, `me/<name>`, in label order.
-    fn devices(&self) -> Vec<String> {
-        Petname::stored(ME)
-            .ok()
-            .and_then(|me| {
-                self.contacts
-                    .devices(&me)
-                    .map(|devices| devices.map(|(label, _)| format!("{ME}/{label}")).collect())
-            })
-            .unwrap_or_default()
+    /// Your devices and their keys, in label order.
+    fn mine(&self) -> impl Iterator<Item = (OwnDevice, NodeId)> + '_ {
+        self.contacts
+            .mine()
+            .map(|(label, node)| (OwnDevice::from(label.clone()), *node))
     }
 
     /// Whether `word` is one of your devices' names.
-    fn names(&self, word: &str) -> bool {
-        self.devices()
-            .iter()
-            .any(|name| name.strip_prefix("me/") == Some(word))
+    fn names(&self, word: &Petname) -> bool {
+        self.contacts
+            .mine()
+            .any(|(label, _)| label.as_str() == word.as_str())
     }
 
-    /// The first of your devices, to show the shape a machine takes.
-    fn first(&self) -> Option<String> {
-        self.devices().into_iter().next()
-    }
-
-    /// The detail line that lists your devices, or says this machine holds no list of them.
+    /// The detail line that lists your devices, or says this machine knows none of them.
     fn listed(&self) -> String {
-        let devices = self.devices();
+        let devices: Vec<String> = self.mine().map(|(device, _)| device.to_string()).collect();
         if devices.is_empty() {
-            "This machine holds no list of your devices.".to_owned()
+            KNOWS_NONE.to_owned()
         } else {
             format!("Yours: {}.", devices.join(", "))
         }
+    }
+
+    /// The refusal for a word that names nothing of yours: the shape a machine takes, shown by your first
+    /// device, or, with none known, that this machine knows none of them.
+    fn takes_one(&self) -> Usage {
+        Usage(match self.mine().next() {
+            Some((example, _)) => format!("swoosh stop takes one of your machines, like {example}"),
+            None => format!("swoosh stop takes one of your machines\n  {KNOWS_NONE}"),
+        })
     }
 }
 
@@ -406,36 +416,52 @@ impl StopDevice {
             Err(bifrost::Error::Refused(_)) => {
                 eyre::bail!("{device} refused: only your own devices can stop it")
             }
-            // The stream-open can lose the race with the very teardown the request triggered: the node
-            // cancels its token, closes its endpoint, and this side sees a transport failure instead of the
-            // torn ack tolerated below. Any such failure probes for the peer going down, and the original
-            // error stands if it stays live.
+            // Any other failure came before the admission, so this side cannot know whether the node
+            // took the request: it may have lost the race with the very teardown the request triggered, or
+            // the path may have dropped it. A peer still live after the probe has stopped nothing; a peer
+            // gone is never reported stopped, only unconfirmed.
             Err(error) => {
-                if !peer_gone(node, self.node, STOP_PROBE_WINDOW).await {
-                    tracing::debug!(
-                        error = %swoosh::escape::Escaped(&error.to_string()),
-                        "the stop's stream failed and the device is still up"
-                    );
-                    eyre::bail!("could not stop {device}\n  Nothing was stopped.");
+                tracing::debug!(
+                    error = %swoosh::escape::Escaped(&error.to_string()),
+                    "the stop's stream failed"
+                );
+                if peer_gone(node, self.node, STOP_PROBE_WINDOW).await {
+                    return Err(unconfirmed(device));
                 }
-                return Ok(stopped_line(device, self.node));
+                eyre::bail!("could not stop {device}\n  Nothing was stopped.");
             }
         };
 
-        // Read the node's ack byte: proof the stop was actioned, not merely that the dial was admitted. The
-        // node closes right after, so an unexpected EOF before the ack is itself the confirmation the node
-        // is going down; only a wrong byte on a live stream is a surprise worth naming.
+        // Read the node's ack byte: proof the stop was actioned, not merely that the dial was admitted.
         let mut ack = [0u8; 1];
-        match reader.read_exact(&mut ack).await {
-            Ok(_) if ack[0] == STOP_ACK => {}
-            Ok(_) => eyre::bail!("stopped {device}, but it sent an unexpected control reply"),
-            // The node tore the stream down as it stopped: expected on a successful stop.
-            Err(_eof) => {}
-        }
+        let read = reader.read_exact(&mut ack).await;
         drop(writer);
-
+        confirmed(read.map(|_| ack[0]), device)?;
         Ok(stopped_line(device, self.node))
     }
+}
+
+/// Whether the node's answer on the admitted control stream proves the stop: its ack byte, or the stream
+/// closing cleanly before one, which an admitted stop does as the node goes down. A wrong byte, or a
+/// stream broken any other way, proves nothing, so the device may still be running.
+fn confirmed(answer: io::Result<u8>, device: &OwnDevice) -> eyre::Result<()> {
+    match answer {
+        Ok(STOP_ACK) => Ok(()),
+        Ok(_) => eyre::bail!("{device} sent an unknown reply to the stop; it may still be running"),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
+        Err(error) => {
+            tracing::debug!(
+                error = %swoosh::escape::Escaped(&error.to_string()),
+                "the stop's stream broke before the node answered"
+            );
+            Err(unconfirmed(device))
+        }
+    }
+}
+
+/// The failure when the device may have stopped and nothing proves it did.
+fn unconfirmed(device: &OwnDevice) -> eyre::Report {
+    eyre::eyre!("could not confirm that {device} stopped; it may still be running")
 }
 
 /// The refusal when the device did not answer: nothing was stopped.
@@ -469,10 +495,10 @@ async fn peer_gone<T: Transport, D: Discovery>(
 }
 
 /// The two lines a stopped device prints: its name and short key (the line names the machine, so the short
-/// form only confirms which key), then that nothing here can start it again.
+/// form only confirms which key), then when it serves again.
 fn stopped_line(device: &OwnDevice, node: NodeId) -> String {
     format!(
-        "Stopped {device} ({}).\nNothing here can start it again: it serves when swoosh serve runs on {}.\n",
+        "Stopped {device} ({}).\nIt serves again when swoosh serve next runs on {}.\n",
         swoosh::credential::short(&node),
         device.label(),
     )

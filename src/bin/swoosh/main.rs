@@ -85,7 +85,7 @@ struct Cli {
 enum Command {
     /// Serve services on this machine; peers you admit reach them.
     Serve(serve::ServeCmd),
-    /// Stop swoosh serve here, or on one of your own devices.
+    /// Stop swoosh serve here or on one of your own devices
     Stop(stop::StopCmd),
     /// Read, enable, or disable this node's services (`ls`/`enable`/`disable`; `ls --at <peer>` reads a peer).
     #[command(subcommand)]
@@ -498,9 +498,11 @@ where
         }
         Err(error) if error.kind() == clap::error::ErrorKind::UnknownArgument => {
             // The model again with `stop` taking any number of plain words: a line it accepts was refused
-            // only for its extra machines. A line it refuses too stays clap's own error.
+            // only for its extra machines. A line it refuses too stays clap's own error, unless the
+            // argument clap names is a link typed as a second machine: refused with the fixed line
+            // instead, so its token is never printed back.
             let lenient = Cli::command().mut_subcommand("stop", |stop| {
-                stop.mut_arg("machine", |machine| {
+                stop.mut_arg(stop::MACHINE, |machine| {
                     machine
                         .num_args(1..)
                         .action(clap::ArgAction::Append)
@@ -509,6 +511,9 @@ where
             });
             match lenient.try_get_matches_from(&argv) {
                 Ok(_) => Err(usage(&["stop"], stop::ONE_MACHINE)),
+                Err(_) if stop_link_unexpected(&error) => {
+                    Err(usage(&["stop"], stop::A_LINK_STOPS_NOTHING))
+                }
                 Err(_) => Err(error),
             }
         }
@@ -524,6 +529,22 @@ where
         }) => Err(usage(&["stop"], stop::A_LINK_STOPS_NOTHING)),
         parsed => parsed,
     }
+}
+
+/// Whether `error`, an unexpected argument, is a link or a path typed on a `stop` line: the argument clap
+/// names sorts as a link, and the usage clap shows is `stop`'s. Read from clap's own error rather than argv,
+/// so a path given to another flag (`--home ./x`) never reads as a machine.
+fn stop_link_unexpected(error: &clap::Error) -> bool {
+    use clap::error::{ContextKind, ContextValue};
+
+    let Some(ContextValue::String(unexpected)) = error.get(ContextKind::InvalidArg) else {
+        return false;
+    };
+    let Some(ContextValue::StyledStr(usage)) = error.get(ContextKind::Usage) else {
+        return false;
+    };
+    usage.to_string().contains("swoosh stop")
+        && matches!(stop::Aim::parse(unexpected), Ok(stop::Aim::Link))
 }
 
 /// Exit as clap does on a usage error of the command at `path` (`["root", "lock"]`): `error: <message>`, its

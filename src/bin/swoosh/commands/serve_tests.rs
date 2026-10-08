@@ -1624,7 +1624,8 @@ fn resident_stop_classifies_from_its_source() {
         Stopped::Local,
         "the socket stop renders as the local stop"
     );
-    for source in [None, Some(StopKind::Wire), Some(StopKind::Expires)] {
+    let wire = StopKind::Wire(swoosh::testkit::TestNode::seeded(0x0b).verify_key());
+    for source in [None, Some(wire), Some(StopKind::Expires)] {
         assert_eq!(
             classify_stop(source),
             Stopped::Requested,
@@ -1650,10 +1651,7 @@ fn bare_serve() -> BTreeSet<String> {
     let exposer = update_route(router)
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
-            Stop::new(
-                CancellationToken::new(),
-                swoosh::contacts::Contacts::default(),
-            ),
+            Stop::new(CancellationToken::new(), std::sync::Arc::default()),
         )
         .expect("control.stop binds")
         .member_service(
@@ -1786,7 +1784,7 @@ fn the_control_socket_adds_no_service() {
     let router = update_route(router)
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
-            Stop::new(cancel, swoosh::contacts::Contacts::default()),
+            Stop::new(cancel, std::sync::Arc::default()),
         )
         .expect("control.stop binds")
         .member_service(

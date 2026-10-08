@@ -23,7 +23,7 @@ rest is planned and lands as it is built.
 - [x] `sync` bring your device list up to date with your other devices, both ways
 - [x] `share` a link to one service, for anyone or bound to a machine or a person's root, and shorter copies of a link
 - [x] `revoke` take back a link, one of your devices, or everything you shared with a contact
-- [x] `stop` stop a peer's node over the gated `control.stop` service
+- [x] `stop` stop swoosh serve here, or on one of your own devices
 
 ## Planned
 

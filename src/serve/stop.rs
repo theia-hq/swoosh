@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use nauthy::VerifyKey;
 use tightbeam::identity::AsNodeId as _;
 use tightbeam::open_policy::Never;
@@ -5,6 +7,8 @@ use tightbeam::tunnel::{BoxRead, BoxWrite, CancellationToken, Handler, ServeErro
 use tokio::io::AsyncWriteExt as _;
 
 use crate::contacts::Contacts;
+use crate::peer::OwnDevice;
+use crate::serve::{StopKind, StopSource};
 
 /// The `control.stop` handler swoosh injects: the remote node-lifecycle stop. It holds a CLONE of the
 /// node's teardown token as the node-control CAPABILITY (never a node handle), so when an admitted caller
@@ -25,9 +29,10 @@ use crate::contacts::Contacts;
 /// there is whether the `Admitted` witness can distinguish an owner device from another fleet device.
 ///
 /// Any of your devices may stop any other, so the stopped node says who did, on its own stderr: the
-/// one trail a stop leaves. The key is the one the connection proved ([`Served::peer`]) and the name is
-/// the one this node's own book holds for it; nothing on the line comes from the caller's request,
-/// so a caller cannot claim to be another device.
+/// one trail a stop leaves. The handler notes the key the connection proved ([`Served::peer`]) as the
+/// stop's source, and `serve` names it at teardown from this node's own book ([`stopped_by`]). The
+/// record holds only that key, so nothing on the line can come from the caller's request, and a caller
+/// cannot claim to be another device.
 ///
 /// On admission the handler cancels the token, then writes ONE ack byte so the client can confirm the stop
 /// was actioned (not merely that the dial was admitted): a positive, explicit confirmation, the honest
@@ -35,35 +40,22 @@ use crate::contacts::Contacts;
 ///
 /// Public so the `gated_stop` proof drives the SAME handler `serve` injects, not a hand-rolled near-copy,
 /// exactly as the `gated_measure` proof reuses `diagnostics`.
-pub struct Stop<Say = fn(&str)> {
+pub struct Stop {
     cancel: CancellationToken,
-    /// This node's devices and contacts, as `serve` read them: what names the key that stopped it.
-    contacts: Contacts,
-    /// Where the line naming who stopped the node goes: the node's stderr, or a test's capture.
-    say: Say,
+    /// Where the node records how it was asked to stop, shared with the run that reads it at teardown.
+    source: Arc<StopSource>,
 }
 
 impl Stop {
     /// Build the `control.stop` handler holding a CLONE of the node's teardown token as the node-control
-    /// capability (never a node handle): an admitted caller REQUESTS the graceful teardown by cancelling it.
-    /// `contacts` names who stopped it, on stderr.
-    pub fn new(cancel: CancellationToken, contacts: Contacts) -> Self {
-        Self::saying(cancel, contacts, to_stderr)
+    /// capability (never a node handle): an admitted caller REQUESTS the graceful teardown by cancelling it,
+    /// and the key it came from is noted in `source`.
+    pub fn new(cancel: CancellationToken, source: Arc<StopSource>) -> Self {
+        Self { cancel, source }
     }
 }
 
-impl<Say: Fn(&str) + Send + Sync + 'static> Stop<Say> {
-    /// [`new`](Stop::new), with the line naming who stopped the node handed to `say` instead of stderr.
-    pub fn saying(cancel: CancellationToken, contacts: Contacts, say: Say) -> Self {
-        Self {
-            cancel,
-            contacts,
-            say,
-        }
-    }
-}
-
-impl<Say: Fn(&str) + Send + Sync + 'static> Handler for Stop<Say> {
+impl Handler for Stop {
     // The route is member-only (declared in `serve`) and has no safe public form: the marker keeps an
     // open-gate pairing from ever being built, and the member floor refuses every non-member pre-Ok.
     type Exposure = Never;
@@ -74,10 +66,10 @@ impl<Say: Fn(&str) + Send + Sync + 'static> Handler for Stop<Say> {
         mut writer: BoxWrite,
         _reader: BoxRead,
     ) -> Result<(), ServeError> {
+        // Noted before the cancel, as the socket stop does, so the run reads a wire stop and its key. The
+        // caller's stream is never read: the key is the connection's.
+        self.source.note(StopKind::Wire(served.peer()));
         self.cancel.cancel();
-        // Said once the stop is requested, so the line states what happened. The caller's stream is never
-        // read: the key is the connection's.
-        (self.say)(&stopped_by(&self.contacts, served.peer()));
         // The ack byte: proof to the client that the stop landed. Written after the cancel so a client
         // reading it knows the teardown was requested, then flushed since the node is about to close.
         writer.write_all(&[STOP_ACK]).await?;
@@ -87,22 +79,22 @@ impl<Say: Fn(&str) + Send + Sync + 'static> Handler for Stop<Say> {
 }
 
 /// The line a node stopped over `control.stop` prints: the name this node holds for the key that stopped it
-/// and its short key, or the whole key when it holds no name for it.
-fn stopped_by(contacts: &Contacts, peer: VerifyKey) -> String {
+/// and its short key, or the whole key when it holds no name for it. One of your devices is named as yours
+/// first, whatever else the book saved the key under.
+pub fn stopped_by(contacts: &Contacts, peer: VerifyKey) -> String {
     // An admitted peer's key is one the transport proved, so it is always a usable key; the arm keeps the
     // whole key for one that somehow is not.
     let Ok(node) = peer.node_id() else {
         return format!("Stopped by {peer}.");
     };
-    match contacts.saved_at(&node) {
+    let mine = contacts
+        .mine()
+        .find(|(_, key)| **key == node)
+        .map(|(label, _)| OwnDevice::from(label.clone()).to_string());
+    match mine.or_else(|| contacts.saved_at(&node).map(|name| name.to_string())) {
         Some(name) => format!("Stopped by {name} ({}).", crate::credential::short(&node)),
         None => format!("Stopped by {node}."),
     }
-}
-
-/// Where a serving node says who stopped it.
-fn to_stderr(line: &str) {
-    eprintln!("{line}");
 }
 
 /// The single byte `control.stop` writes to confirm the stop was actioned. Any value works (the client only

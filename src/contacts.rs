@@ -240,6 +240,16 @@ impl Contacts {
         })
     }
 
+    /// Your own devices, the ones under `me`, label to identity, in label order; none when this machine
+    /// holds no list of them. `me` is always a name, so this needs no fallible lookup.
+    pub fn mine(&self) -> impl Iterator<Item = (&DeviceLabel, &NodeId)> {
+        self.people
+            .get(&Petname(ME.to_owned()))
+            .into_iter()
+            .flat_map(|person| person.devices.iter())
+            .map(|(label, binding)| (label, &binding.node))
+    }
+
     /// Resolve an address to its ordered [`Candidate`]s, each carrying the `<petname>/<device>` label it
     /// resolved from.
     ///

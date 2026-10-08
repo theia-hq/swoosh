@@ -8,7 +8,7 @@
 //!
 //! `control.stop` is one more member-only service, assembled through the SAME `Stop` handler the `swoosh
 //! serve` product path injects (not a hand-rolled near-copy) and declared member-only exactly as `serve`
-//! declares it. Four things are proven:
+//! declares it. Five things are proven:
 //!
 //! 1. `serve --for` shape: a local timer cancelling the token stops the exposer's `run`, gracefully.
 //! 2. `control.stop`: a MEMBER reaching the member-only service cancels the SAME token the exposer owns, so
@@ -17,6 +17,8 @@
 //!    the node keeps running.
 //! 4. A DELEGATE's `control.stop` slip is refused LOUDLY at the route's member floor BEFORE `Response::Ok`
 //!    (the gate grants the slip, the floor refuses it), and the node keeps running.
+//! 5. The stopped node records the key the connection proved as the stop's source, never a name from the
+//!    request, and names it from its own book, one of your devices first.
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a membership badge binds to whatever
 //! id the mem transport proves for the dialer (the same accommodation `gated_measure` documents at length):
@@ -24,13 +26,15 @@
 //! badge and refuses a non-signet one, which is the load-bearing stranger case for a stop.
 
 use core::time::Duration;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::Denylist;
 use swoosh::contacts::Contacts;
-use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop, Stopped};
+use swoosh::serve::{
+    CONTROL_STOP_SERVICE, STOP_ACK, Stop, StopKind, StopSource, Stopped, stopped_by,
+};
 use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router};
@@ -245,15 +249,22 @@ async fn a_control_stop_slip_is_refused_before_ok_and_the_node_keeps_running() {
         .await;
 }
 
-/// The stopped node says who stopped it, by the key the connection proved: with no name for that key in
-/// its book, the whole key. Any of your devices can stop any other, so this line is the one trail a stop
-/// leaves; print nothing and it is gone.
+/// The stopped node says who stopped it, by the key the connection proved: the handler records that key
+/// as the stop's source, and with no name for it in the book the line is the whole key. Any of your devices
+/// can stop any other, so this line is the one trail a stop leaves; record nothing and it is gone.
 #[tokio::test]
 async fn stopped_node_prints_who_stopped_it() {
     tokio::task::LocalSet::new()
         .run_until(async {
-            let (member, said) = stopped_by(|_| Contacts::default(), b"").await;
-            assert_eq!(said, vec![format!("Stopped by {member}.")]);
+            let (member, recorded) = stopped_over_the_wire(b"").await;
+            assert_eq!(recorded, Some(StopKind::Wire(member.verify_key().unwrap())));
+            let Some(StopKind::Wire(key)) = recorded else {
+                unreachable!("asserted above");
+            };
+            assert_eq!(
+                stopped_by(&Contacts::default(), key),
+                format!("Stopped by {member}.")
+            );
         })
         .await;
 }
@@ -265,65 +276,81 @@ async fn stopped_node_prints_who_stopped_it() {
 async fn stopped_by_line_names_the_authenticated_key() {
     tokio::task::LocalSet::new()
         .run_until(async {
+            let (member, recorded) = stopped_over_the_wire(b"me/nas").await;
+            let Some(StopKind::Wire(key)) = recorded else {
+                panic!("a wire stop records the key that asked: {recorded:?}");
+            };
+            let mut contacts = Contacts::default();
             let nas = TestNode::seeded(0x0a).node_id();
-            let (member, said) = stopped_by(
-                |member| {
-                    let mut contacts = Contacts::default();
-                    for (name, key) in [("laptop", member), ("nas", nas)] {
-                        contacts.add("me".parse().unwrap(), Some(name.parse().unwrap()), key);
-                    }
-                    contacts
-                },
-                b"me/nas",
-            )
-            .await;
-            let short: String = member.to_string().chars().take(12).collect();
+            for (name, node) in [("laptop", member), ("nas", nas)] {
+                contacts.add("me".parse().unwrap(), Some(name.parse().unwrap()), node);
+            }
             assert_eq!(
-                said,
-                vec![format!("Stopped by me/laptop ({short}\u{2026}).")]
+                stopped_by(&contacts, key),
+                format!("Stopped by me/laptop ({}).", short(member))
             );
         })
         .await;
 }
 
-/// Assemble a gated exposer serving `control.stop` (and the default reach diagnostics), rooted at the
-/// signet, through the SAME `Stop` handler the product `serve` path injects and with the SAME member-only
-/// declaration `serve` makes. The exposer owns `cancel`; the injected handler holds a clone as the
-/// node-control capability.
-async fn build_exposer(cancel: CancellationToken) -> Exposer {
-    build_exposer_with(Stop::new(cancel, Contacts::default())).await
+/// One of your devices that the book also holds under another name (saved as a contact's machine before it
+/// joined) is named as yours: look the key up in name order and `alice` comes before `me`.
+#[test]
+fn stopped_by_names_your_device_first() {
+    let laptop = TestNode::seeded(0x0c).node_id();
+    let mut contacts = Contacts::default();
+    contacts.add("alice".parse().unwrap(), Some("x".parse().unwrap()), laptop);
+    contacts.add(
+        "me".parse().unwrap(),
+        Some("laptop".parse().unwrap()),
+        laptop,
+    );
+    assert_eq!(
+        stopped_by(&contacts, laptop.verify_key().unwrap()),
+        format!("Stopped by me/laptop ({}).", short(laptop))
+    );
 }
 
-/// [`build_exposer`] around a `Stop` the caller built, so a test can hand it a book and capture its line.
-async fn build_exposer_with<Say: Fn(&str) + Send + Sync + 'static>(stop: Stop<Say>) -> Exposer {
+/// The short form of `node` a line that names the machine carries.
+fn short(node: NodeId) -> String {
+    let head: String = node.to_string().chars().take(12).collect();
+    format!("{head}\u{2026}")
+}
+
+/// Assemble a gated exposer serving `control.stop` and the default reach diagnostics, rooted at the signet,
+/// through the SAME `Stop` handler the product `serve` path injects and with the SAME member-only
+/// declaration `serve` makes. A second route is there because a node exposing exactly one service answers
+/// every name with it, which would let a dial to any service land on `control.stop`. The exposer owns
+/// `cancel`; the injected handler holds a clone as the node-control capability.
+async fn build_exposer(cancel: CancellationToken) -> Exposer {
+    build_exposer_noting(cancel, Arc::default()).await
+}
+
+/// [`build_exposer`], with the handler noting how the node was asked to stop in `source`.
+async fn build_exposer_noting(cancel: CancellationToken, source: Arc<StopSource>) -> Exposer {
     let signet = TestRoot::seeded(SIGNET).node_id();
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
-    Router::new(gate)
-        .member_service(CONTROL_STOP_SERVICE.parse().unwrap(), stop)
+    swoosh::serve::diagnostics(Router::new(gate), &[])
+        .unwrap()
+        .member_service(
+            CONTROL_STOP_SERVICE.parse().unwrap(),
+            Stop::new(cancel, source),
+        )
         .unwrap()
         .expose()
         .unwrap()
 }
 
-/// A member stops a node whose `Stop` names it from the book `book` makes of the member's key, writing
-/// `request` on the control stream first: the member's key, and the lines the stopped node said once its
-/// run has ended.
-async fn stopped_by(
-    book: impl FnOnce(NodeId) -> Contacts,
-    request: &[u8],
-) -> (NodeId, Vec<String>) {
-    let said = Arc::new(Mutex::new(Vec::new()));
+/// A member stops a node, writing `request` on the control stream first: the member's key, and how the
+/// stopped node recorded the stop once its run has ended.
+async fn stopped_over_the_wire(request: &[u8]) -> (NodeId, Option<StopKind>) {
     let host = Node::new(MemTransport::bind(), NoDiscovery);
     let host_id = host.node_id();
     let member = Node::new(MemTransport::bind(), NoDiscovery);
     let member_id = member.node_id();
-    let contacts = book(member_id);
     let cancel = CancellationToken::new();
-    let stop = Stop::saying(cancel.clone(), contacts, {
-        let said = Arc::clone(&said);
-        move |line: &str| said.lock().unwrap().push(line.to_owned())
-    });
-    let exposer = build_exposer_with(stop).await;
+    let source = Arc::new(StopSource::new());
+    let exposer = build_exposer_noting(cancel.clone(), Arc::clone(&source)).await;
     let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
 
     let badge = signet_badge(SIGNET, member_id);
@@ -352,8 +379,7 @@ async fn stopped_by(
         .expect("the stop ends the run")
         .expect("the run task joins")
         .expect("a graceful stop");
-    let said = said.lock().unwrap().clone();
-    (member_id, said)
+    (member_id, source.first())
 }
 
 /// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id):

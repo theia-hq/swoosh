@@ -286,7 +286,7 @@ fn bare_stop_stops_the_resident() {
     assert!(!again.status.success(), "no resident exits non-zero");
     let again_err = String::from_utf8_lossy(&again.stderr);
     assert!(
-        again_err.contains("swoosh serve is not running on this machine."),
+        again_err.contains("swoosh serve is not running on this machine"),
         "the error says nothing is running: {again_err}"
     );
 }
@@ -401,4 +401,26 @@ fn forward_without_a_local_end_exits_2_and_leaves_the_home_absent() {
         "the home is never made: {}",
         absent.display()
     );
+}
+
+/// A `stop` machine the list of your devices does not hold is a usage error found once the list is read:
+/// exit 2 as clap's own are, before any transport binds, with the line that says so and nothing written in
+/// the home. Map it as an ordinary failure and the same line exits 1.
+#[test]
+fn stop_a_device_you_do_not_have_exits_2_and_writes_nothing() {
+    let scratch = Scratch::new("stop-nsa");
+    let out = swoosh(&scratch, &["stop", "me/nsa"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with(
+            "error: you have no machine me/nsa\n  This machine knows none of your devices.\n"
+        ),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty(), "nothing on stdout");
+    let written: Vec<_> = std::fs::read_dir(&scratch.home_dir)
+        .expect("the home reads")
+        .collect();
+    assert!(written.is_empty(), "nothing is written: {written:?}");
 }

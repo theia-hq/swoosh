@@ -1,10 +1,11 @@
 //! `stop`'s tests: the machine shapes it refuses before anything binds, read against a real device home;
 //! the local stop over the control socket; and the remote stop over the in-process transport, its
 //! teardown race included: a peer that admits the session then vanishes before answering the control
-//! stream is reported as a completed stop, while a live peer behind the same failure stays loud.
+//! stream is never reported stopped, only unconfirmed, and a live peer behind the same failure stays loud.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -21,7 +22,9 @@ use swoosh::serve::{CONTROL_STOP_SERVICE, Resident, Stop, StopKind};
 use swoosh::testkit::{HostilePeer, STANDING_UNTIL, TestNode, TestRoot};
 use tightbeam::tunnel::{CancellationToken, Router, ServiceCatalog};
 
-use super::{A_LINK_STOPS_NOTHING, Aim, StopCmd, StopDevice, Target, Usage, Yours, stop_line};
+use super::{
+    A_LINK_STOPS_NOTHING, Aim, StopCmd, StopDevice, Target, Usage, Yours, confirmed, stop_line,
+};
 
 /// The root this machine's devices belong to.
 const ROOT: u8 = 0x61;
@@ -112,7 +115,7 @@ async fn device_home(tag: &str) -> (PathBuf, Home) {
 
 /// Parse `text` as `stop`'s machine and resolve it against `home`'s list of your devices.
 async fn aim(home: &Home, text: &str) -> Result<Target, String> {
-    let aim = Aim::parse(text)?;
+    let Ok(aim) = Aim::parse(text);
     let yours = Yours::read(home).await.expect("the list reads");
     aim.resolve(&yours).map_err(|Usage(line)| line)
 }
@@ -148,6 +151,47 @@ async fn stop_a_bare_word_is_never_a_machine() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// With no list of your devices, every refusal that would show yours says this machine knows none of them,
+/// the bare word's included. Drop the detail from the bare word and it alone prints with nothing under it.
+#[tokio::test]
+async fn stop_with_no_list_says_this_machine_knows_none_of_your_devices() {
+    let base = scratch("none");
+    let home = home_in(&base);
+    let none = "This machine knows none of your devices.";
+    assert_eq!(
+        refused(&home, "nas").await,
+        format!("swoosh stop takes one of your machines\n  {none}")
+    );
+    assert_eq!(
+        refused(&home, "me").await,
+        format!("which machine?\n  {none}")
+    );
+    assert_eq!(
+        refused(&home, "me/nsa").await,
+        format!("you have no machine me/nsa\n  {none}")
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Text that is no name, no key and no link is refused like a word that names nothing of yours, and is
+/// kept as nothing, so the refusal cannot print it back. Let the parser fail and clap prints it whole.
+#[tokio::test]
+async fn stop_refuses_text_that_is_no_name_without_keeping_it() {
+    let (base, home) = device_home("notaname").await;
+    for typed in ["bob laptop", "a/b/c", "me/nas!", "nas!", "-nas"] {
+        assert!(
+            matches!(Aim::parse(typed), Ok(Aim::NotAName)),
+            "{typed} is no name"
+        );
+        assert_eq!(
+            refused(&home, typed).await,
+            "swoosh stop takes one of your machines, like me/desk",
+            "{typed}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// `me` alone names no one machine: it refuses and lists yours. Hand it on and it stops your first device.
 #[tokio::test]
 async fn stop_me_without_a_name_refuses_and_dials_nothing() {
@@ -174,6 +218,20 @@ async fn stop_accepts_only_own_device_names() {
         "you can stop only your own machines; carol/nas is not one of them"
     );
     let nas = TestNode::seeded(NAS).node_id().to_string();
+    assert_eq!(
+        refused(&home, &nas).await,
+        "name the machine: swoosh stop me/nas"
+    );
+    // The book also holds nas's key under a contact, whose name sorts before `me`: the key is still one of
+    // yours. Look it up in the whole book and the first name found says it is not.
+    std::fs::write(
+        home.contacts(),
+        format!(
+            "[alice]\nx = \"{nas}\"\n\n[bob]\nlaptop = \"{}\"\n",
+            TestNode::seeded(BOB).node_id()
+        ),
+    )
+    .expect("nas saved under alice too");
     assert_eq!(
         refused(&home, &nas).await,
         "name the machine: swoosh stop me/nas"
@@ -274,10 +332,10 @@ async fn bare_stop_without_resident_is_teaching() {
         .run_local(&home)
         .await
         .expect_err("no resident must refuse, never a silent success");
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("swoosh serve is not running on this machine."),
-        "the error says nothing is running: {message}"
+    assert_eq!(
+        format!("{error:#}"),
+        "swoosh serve is not running on this machine",
+        "the error says nothing is running, as a clause with no closing period"
     );
 
     let _ = std::fs::remove_dir_all(&base);
@@ -355,6 +413,7 @@ fn resident(tag: &str) -> Running {
         )
         .expect("the services off load"),
         cancel.clone(),
+        Arc::default(),
     ));
     let serving = tokio::spawn({
         let this = Arc::clone(&resident);
@@ -409,7 +468,7 @@ async fn bare_stop_through_the_socket_cancels_the_resident() {
 
 /// `stop me/<name>` for `node`, resolved, as the root would hand it to the reach path.
 fn stop_device(node: NodeId) -> StopDevice {
-    let Some(Aim::Device(device)) = Aim::parse("me/pi").ok() else {
+    let Ok(Aim::Device(device)) = Aim::parse("me/pi") else {
         panic!("me/pi is a device shape");
     };
     StopDevice {
@@ -449,8 +508,8 @@ async fn stop_me_name_reaches_control_stop_with_no_ssh_or_socket_on_the_peer() {
         .await;
 }
 
-/// The remote success line names the machine and its key, then says nothing here can start it again.
-/// Print today's `stopped <key>.` and the name is gone.
+/// The remote success line names the machine and its key, then says when it serves again. Print today's
+/// `stopped <key>.` and the name is gone.
 #[tokio::test]
 async fn stop_remote_line_names_name_and_key() {
     tokio::task::LocalSet::new()
@@ -471,8 +530,8 @@ async fn stop_remote_line_names_name_and_key() {
             assert_eq!(
                 line,
                 format!(
-                    "Stopped me/pi ({short}\u{2026}).\nNothing here can start it again: it serves when \
-                     swoosh serve runs on pi.\n"
+                    "Stopped me/pi ({short}\u{2026}).\nIt serves again when swoosh serve next runs on \
+                     pi.\n"
                 )
             );
             let _ = run.await;
@@ -498,7 +557,7 @@ fn pi_serving_only_control_stop() -> (NodeId, tokio::task::JoinHandle<eyre::Resu
         .expect("the diagnostics bind")
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a service"),
-            Stop::new(cancel.clone(), swoosh::contacts::Contacts::default()),
+            Stop::new(cancel.clone(), Arc::default()),
         )
         .expect("control.stop binds")
         .expose()
@@ -526,11 +585,12 @@ async fn answer_with_a_vanishing_peer(peer: &MemTransport, vanish: bool) {
     drop(session);
 }
 
-/// The teardown race is a SUCCESS: the peer admits the session, then vanishes before answering the control
-/// stream, so the client's stream open fails ("stream") while the stop itself landed. The bounded probe
-/// sees the listener gone and reports the completed stop, with its line, instead of a failure.
+/// A peer gone behind a failed stream open is never reported stopped: the open never saw the admission, so
+/// the node tearing itself down for this request and a path that dropped it look the same. The line says
+/// the stop is unconfirmed and the verb fails. Report the race as a stop and a dropped path prints
+/// `Stopped` while the machine keeps serving.
 #[tokio::test(start_paused = true)]
-async fn a_teardown_race_reports_the_stop_as_completed() {
+async fn a_peer_gone_behind_a_failed_stream_open_is_unconfirmed() {
     let dialer = Node::new(MemTransport::bind(), NoDiscovery);
     let peer = MemTransport::bind();
     let peer_id = peer.node_id();
@@ -539,8 +599,40 @@ async fn a_teardown_race_reports_the_stop_as_completed() {
         stop_device(peer_id).run_stop(&dialer, None, None),
         answer_with_a_vanishing_peer(&peer, true),
     );
-    let line = result.expect("a peer gone behind the failed stream open is a completed stop");
-    assert!(line.starts_with("Stopped me/pi"), "{line}");
+    let error = result.expect_err("nothing proves the stop");
+    assert_eq!(
+        format!("{error:#}"),
+        "could not confirm that me/pi stopped; it may still be running"
+    );
+}
+
+/// Only the ack byte or a clean close proves an admitted stop. A wrong byte or a stream broken any other way
+/// proves nothing, and the line says the device may still be running. Take any read error as the node going
+/// down and a reset path prints `Stopped`.
+#[test]
+fn only_the_ack_or_a_clean_close_confirms_the_stop() {
+    let Ok(Aim::Device(pi)) = Aim::parse("me/pi") else {
+        panic!("me/pi is a device shape");
+    };
+    let broken = |kind| Err(io::Error::from(kind));
+    assert!(confirmed(Ok(swoosh::serve::STOP_ACK), &pi).is_ok());
+    assert!(confirmed(broken(io::ErrorKind::UnexpectedEof), &pi).is_ok());
+    let line = |answer| format!("{:#}", confirmed(answer, &pi).expect_err("not confirmed"));
+    assert_eq!(
+        line(Ok(b'x')),
+        "me/pi sent an unknown reply to the stop; it may still be running"
+    );
+    for kind in [
+        io::ErrorKind::ConnectionReset,
+        io::ErrorKind::ConnectionAborted,
+        io::ErrorKind::Other,
+    ] {
+        assert_eq!(
+            line(broken(kind)),
+            "could not confirm that me/pi stopped; it may still be running",
+            "{kind:?}"
+        );
+    }
 }
 
 /// A LIVE peer behind the same failed stream open is never masked: the endpoint stays registered, so the
@@ -586,7 +678,16 @@ fn stop_refuses_a_link_or_a_path_without_echoing_it() {
             .expect("a slip"),
     )
     .to_string();
-    for typed in ["./nas.link", link.as_str()] {
+    // A link with its key half damaged no longer parses as a key, so only the dot marks it a link.
+    let damaged = format!("swoosh:x{}", link.trim_start_matches("swoosh:"));
+    let bare_damaged = damaged.trim_start_matches("swoosh:").to_owned();
+    for typed in [
+        "./nas.link",
+        link.as_str(),
+        damaged.as_str(),
+        bare_damaged.as_str(),
+        "nas.local",
+    ] {
         let error = crate::parse_from(["swoosh", "stop", typed])
             .map(|_| ())
             .expect_err("a link or a path refuses");
@@ -601,6 +702,45 @@ fn stop_refuses_a_link_or_a_path_without_echoing_it() {
             "what was typed is not echoed: {printed}"
         );
     }
+}
+
+/// A link typed as a second machine on a line clap refuses for another reason too is refused as a link,
+/// never with clap's own error, which names the first argument it did not expect: the link. A path given to
+/// a flag is not a machine, so it leaves clap's error alone.
+#[test]
+fn stop_refuses_a_link_beside_an_unknown_flag_without_echoing_it() {
+    let link = swoosh::link::Link::from(
+        TestRoot::seeded(ROOT)
+            .bound_slip(
+                &CONTROL_STOP_SERVICE.parse().expect("a service"),
+                TestNode::seeded(NAS).verify_key(),
+                nauthy::Request::expires_in(Duration::from_secs(300)),
+            )
+            .expect("a slip"),
+    )
+    .to_string();
+    let token = link
+        .split_once('.')
+        .map(|(_, token)| token)
+        .expect("a token");
+    let error = crate::parse_from(["swoosh", "stop", "me/nas", link.as_str(), "--bogus"])
+        .map(|_| ())
+        .expect_err("the line refuses");
+    assert_eq!(error.exit_code(), 2);
+    let printed = error.to_string();
+    assert!(
+        printed.starts_with(&format!("error: {A_LINK_STOPS_NOTHING}\n")),
+        "{printed}"
+    );
+    assert!(
+        !printed.contains(token),
+        "the token is not echoed: {printed}"
+    );
+
+    let other = crate::parse_from(["swoosh", "--home", "./x", "stop", "--bogus"])
+        .map(|_| ())
+        .expect_err("an unknown flag refuses");
+    assert!(!other.to_string().contains(A_LINK_STOPS_NOTHING), "{other}");
 }
 
 /// A peer that closes the dial gives a reason, and that reason never reaches the line: the refusal is

@@ -11,6 +11,7 @@ use std::os::unix::io::AsRawFd as _;
 use std::sync::Arc;
 
 use bifrost::NodeId;
+use nauthy::VerifyKey;
 use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
@@ -61,13 +62,15 @@ pub struct Resident {
 }
 
 impl Resident {
-    /// Build the resident state over the served catalog and the teardown token clone.
+    /// Build the resident state over the served catalog, the teardown token clone, and the stop source the
+    /// run shares with every other path that may fire that token.
     pub fn new(
         node_id: NodeId,
         addr: Option<SocketAddr>,
         catalog: ServiceCatalog,
         off: LiveServeToml,
         cancel: CancellationToken,
+        stop_source: Arc<StopSource>,
     ) -> Self {
         Self {
             pid: std::process::id(),
@@ -77,7 +80,7 @@ impl Resident {
             catalog,
             off,
             cancel,
-            stop_source: Arc::new(StopSource::new()),
+            stop_source,
             conns: Arc::new(Semaphore::new(MAX_CONTROL_CONNS)),
             served: Arc::new(AtomicU64::new(0)),
         }
@@ -334,8 +337,9 @@ pub enum StopKind {
     Interrupted,
     /// A `--expires` deadline elapsed.
     Expires,
-    /// An admitted wire `control.stop` caller.
-    Wire,
+    /// An admitted wire `control.stop` caller, by the key its connection proved: the one record of which
+    /// device stopped the node.
+    Wire(VerifyKey),
     /// A local-uid socket `Stop`.
     Socket,
 }
