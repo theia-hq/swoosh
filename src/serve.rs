@@ -162,7 +162,15 @@ const BUILT_IN: [(&str, &str); 3] = [("ping", "ping:"), ("speed", "speed:"), ("s
 /// under this machine's address, and a name changes what a service is called, never what it reaches. So
 /// `proxy`, `proxy:` and `<name>=proxy:` refuse, and a proxy's URL is an origin only (see
 /// [`proxy_origin`]).
+///
+/// A bare `proxy:<url>` is read before any `name=` split, so an `=` in its query (a signed link) stays in
+/// the URL and the refusal names the URL, never a name the person did not type. Every other entry splits
+/// on its first `=`, so a name holding a `:` still meets the name rule.
 pub fn service_entry(entry: &str) -> Result<String, EntryError> {
+    if let Some((Scheme::Proxy, url)) = Scheme::parse(entry) {
+        proxy_origin(Scheme::Proxy.as_str(), url)?;
+        return Ok(format!("{}={entry}", Scheme::Proxy.as_str()));
+    }
     if let Some((name, target)) = entry.split_once('=') {
         let name = name.parse::<Name>()?;
         if let Some((Scheme::Proxy, url)) = Scheme::parse(target) {
@@ -170,27 +178,21 @@ pub fn service_entry(entry: &str) -> Result<String, EntryError> {
         }
         return Ok(format!("{name}={target}"));
     }
-    match Scheme::parse(entry) {
-        Some((Scheme::Proxy, url)) => {
-            proxy_origin(Scheme::Proxy.as_str(), url)?;
-            Ok(format!("{}={entry}", Scheme::Proxy.as_str()))
-        }
-        _ if entry.contains(':') => Ok(entry.to_owned()),
-        _ => {
-            let name: String = entry.parse::<Name>()?.into();
-            if name == Scheme::Proxy.as_str() {
-                return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(
-                    &name, "<url>",
-                )));
-            }
-            Ok(
-                match BUILT_IN.iter().find(|(built_in, _)| *built_in == name) {
-                    Some((_, target)) => format!("{name}={target}"),
-                    None => name,
-                },
-            )
-        }
+    if entry.contains(':') {
+        return Ok(entry.to_owned());
     }
+    let name: String = entry.parse::<Name>()?.into();
+    if name == Scheme::Proxy.as_str() {
+        return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(
+            &name, "<url>",
+        )));
+    }
+    Ok(
+        match BUILT_IN.iter().find(|(built_in, _)| *built_in == name) {
+            Some((_, target)) => format!("{name}={target}"),
+            None => name,
+        },
+    )
 }
 
 /// Hold a proxy's URL to what the engine scopes by: one origin, the scheme, host and port. The engine
@@ -198,6 +200,10 @@ pub fn service_entry(entry: &str) -> Result<String, EntryError> {
 /// service gives, and a query (a signed download link, say) would be stored and printed for nothing. An
 /// empty URL is no origin at all. A URL that does not parse passes here: the origin parse at expose time
 /// refuses it with the cause ([`ProxyScope::extract`]).
+///
+/// The engine fetches only `http` and `https`, so any other scheme is refused here, before its path and
+/// query could be stored; the line names neither. Both are special schemes in the URL grammar, so every
+/// URL past this check has a tuple origin.
 fn proxy_origin(name: &str, url: &str) -> Result<(), EntryError> {
     if url.is_empty() {
         return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(
@@ -207,11 +213,10 @@ fn proxy_origin(name: &str, url: &str) -> Result<(), EntryError> {
     let Ok(parsed) = url::Url::parse(url) else {
         return Ok(());
     };
-    let origin = parsed.origin();
-    // An opaque origin (a scheme with no host) is no web origin, and the expose-time parse refuses it.
-    if !origin.is_tuple() {
-        return Ok(());
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(EntryError::ProxyNotHttp(ProxyLine::new(name, "<url>")));
     }
+    let origin = parsed.origin();
     let bare = matches!(parsed.path(), "" | "/")
         && parsed.query().is_none()
         && parsed.fragment().is_none();
@@ -266,6 +271,9 @@ pub enum EntryError {
     /// A proxy whose URL carries a path, a query or a fragment; the line names its origin.
     #[error("a proxy reaches a whole site, so its URL takes no path or query: swoosh serve {0}")]
     ProxyNotAnOrigin(ProxyLine),
+    /// A proxy whose URL is neither `http` nor `https`; the line names neither its host nor its path.
+    #[error("a proxy reaches an http or https site: swoosh serve {0}")]
+    ProxyNotHttp(ProxyLine),
 }
 
 /// Bind one operator `name=addr` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
@@ -615,8 +623,7 @@ const PROXY_SCHEME: &str = Scheme::Proxy.as_str();
 /// fail-closed-by-convention.
 pub struct ProxyService {
     name: String,
-    /// What follows `proxy:`, as [`Scheme::never_public`] reads it: empty for no origin.
-    origin: String,
+    /// Never empty: [`ProxyScope::extract`] refuses a proxy with no origin.
     allow: OriginAllowlist,
 }
 
@@ -637,10 +644,11 @@ impl ProxyService {
 /// own origin scope) here, then binds one engine instance per name by value.
 ///
 /// A pure edge adapter over the raw request strings. A `name=proxy:<url>` is a named, origin-scoped proxy.
-/// A `name=proxy:` (no origin) would be an unconstrained one; [`service_entry`] refuses it before an entry
-/// gets here, and the open-relay refusal below still holds for a set built some other way. An entry
-/// without `=` names no service and is a teaching error, mirroring tightbeam's grammar. A malformed origin
-/// fails HERE, at expose time, not at dial time.
+/// A `name=proxy:` (no origin) would be an open egress relay; [`service_entry`] refuses it before an entry
+/// gets here, and this refuses it again for an entry from anywhere else, so no [`ProxyService`] holds an
+/// unconstrained scope and the binder has only the scoped engine to build. An entry without `=` names no
+/// service and is a teaching error, mirroring tightbeam's grammar. A malformed origin fails HERE, at expose
+/// time, not at dial time.
 pub struct ProxyScope;
 
 impl ProxyScope {
@@ -668,16 +676,15 @@ impl ProxyScope {
                 remaining.push(entry);
                 continue;
             };
-            // Each proxy service gets its OWN allowlist (only its own origin; empty = unconstrained): the
-            // per-instance isolation that makes the SSRF pivot unrepresentable.
-            let allow = if origin.is_empty() {
-                OriginAllowlist::default()
-            } else {
-                OriginAllowlist::parse([origin]).map_err(origin_refusal)?
-            };
+            // No origin is an open relay, never a scope.
+            if origin.is_empty() {
+                return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(name, "<url>")).into());
+            }
+            // Each proxy service gets its OWN allowlist (only its own origin): the per-instance isolation
+            // that makes the SSRF pivot unrepresentable.
+            let allow = OriginAllowlist::parse([origin]).map_err(origin_refusal)?;
             services.push(ProxyService {
                 name: name.to_owned(),
-                origin: origin.to_owned(),
                 allow,
             });
         }
@@ -702,7 +709,7 @@ fn origin_refusal(error: ::fetch::OriginError) -> eyre::Report {
 
 /// The operator's per-service proxy posture pulled from the requested services: one [`ProxyService`] per
 /// exposed proxy, each with its own scope. Read off the raw request strings in ONE place
-/// ([`ProxyScope::extract`]), so the refusal of an unconstrained public proxy has a single source of truth.
+/// ([`ProxyScope::extract`]).
 pub struct ProxyExposure {
     services: Vec<ProxyService>,
 }
@@ -711,28 +718,5 @@ impl ProxyExposure {
     /// The de-merged proxy services, each to be bound as its own engine instance.
     pub fn services(&self) -> &[ProxyService] {
         &self.services
-    }
-
-    /// Refuse the one illegal proxy shape PER SERVICE: a proxy service NAMED in `--public` whose allowlist is
-    /// unconstrained (any origin), which is an open egress relay (traffic-source laundering, a reflector, a
-    /// free anonymizing hop). Because each proxy service carries its own scope, this reasons about THIS public
-    /// proxy, so a second origin-scoped proxy can no longer mask a bare public one. Refused at build time,
-    /// before any banner or accepted stream, mirroring the sshd-cannot-be-public wall. A GATED proxy (not in
-    /// `--public`) stays legal unconstrained: the family gate is the terminator there. The test is
-    /// [`Scheme::never_public`], the one `share` asks of a link to anyone.
-    pub fn refuse_open_relay(&self, public: &[Service]) -> eyre::Result<()> {
-        for service in &self.services {
-            if public.iter().any(|name| name.as_str() == service.name)
-                && Scheme::Proxy.never_public(&service.origin)
-            {
-                eyre::bail!(
-                    "a public proxy service must be origin-scoped \
-                     (`serve {name}=proxy:https://origin --public {name}`); an unconstrained public proxy \
-                     is an open relay",
-                    name = service.name
-                );
-            }
-        }
-        Ok(())
     }
 }

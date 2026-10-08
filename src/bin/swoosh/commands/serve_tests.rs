@@ -2753,6 +2753,11 @@ fn a_proxy_url_with_a_path_or_query_is_a_usage_error() {
             "dl=proxy:http://cdn.example:8080/x",
             "dl=proxy:http://cdn.example:8080",
         ),
+        // Bare, with an `=` in its query: the `=` is the URL's, never a `name=` split.
+        (
+            "proxy:https://cdn.example/a?b=c",
+            "proxy:https://cdn.example",
+        ),
     ] {
         let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
             .expect_err("a proxy URL with a path or a query refuses");
@@ -2770,6 +2775,34 @@ fn a_proxy_url_with_a_path_or_query_is_a_usage_error() {
         assert!(
             <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry]).is_ok(),
             "`serve {entry}` names an origin"
+        );
+    }
+}
+
+/// The engine fetches only http and https, so a proxy URL with any other scheme is a usage error (exit 2),
+/// refused before its path and query are stored. Its line names neither: `foo://h:1` has an opaque origin
+/// the path check cannot read, and the engine's origin parse would take it (a host and a port).
+///
+/// Drop the scheme check and `foo:` reaches the path check, which names its opaque origin; `file:` and
+/// `data:` pass the entry and are refused only at expose.
+#[test]
+fn a_proxy_url_that_is_not_http_or_https_is_a_usage_error() {
+    for (entry, form) in [
+        ("proxy:foo://h:1/p?sig=x", "proxy:<url>"),
+        ("dl=proxy:file:///etc/passwd", "dl=proxy:<url>"),
+        ("dl=proxy:data:text/plain,x", "dl=proxy:<url>"),
+    ] {
+        let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
+            .expect_err("a proxy URL that is not http or https refuses");
+        assert_eq!(error.exit_code(), 2, "`serve {entry}` is a usage error");
+        // clap echoes the argv it refused; the entry's own line is what must name nothing typed.
+        let line = swoosh::serve::service_entry(entry)
+            .expect_err("refused at the entry")
+            .to_string();
+        assert_eq!(
+            line,
+            format!("a proxy reaches an http or https site: swoosh serve {form}"),
+            "`serve {entry}`"
         );
     }
 }
@@ -2870,6 +2903,27 @@ fn a_malformed_proxy_origin_is_refused_at_expose_time() {
     );
 }
 
+/// An entry that reaches the de-merge with no origin is refused there too, whatever path it came by: an
+/// empty scope is an open egress relay, so no proxy service is ever built unconstrained and the binder has
+/// only the scoped engine to bind.
+///
+/// Read an empty origin as an empty allowlist instead and each extracts, to a proxy that fetches any site.
+#[test]
+fn a_proxy_entry_with_no_origin_is_refused_at_the_de_merge() {
+    for entry in ["api=proxy:", "proxy=proxy:"] {
+        let mut requested = vec![entry.to_owned()];
+        let Err(error) = ProxyScope::extract(&mut requested) else {
+            panic!("`{entry}` names no origin and is refused");
+        };
+        assert!(
+            error
+                .to_string()
+                .starts_with("proxy needs what it reaches: "),
+            "`{entry}`: {error}"
+        );
+    }
+}
+
 /// BLOCKER-3: a PUBLIC proxy instance holds ONLY its own origin scope, so it cannot reach a GATED proxy
 /// instance's origins. The public `pub` and the gated `internal` are separate instances, each scoped to its
 /// OWN origin; there is no shared allowlist to over-permit.
@@ -2901,67 +2955,6 @@ fn a_public_proxy_instance_cannot_reach_a_gated_proxy_s_origins() {
     assert!(
         !internal.allow().is_unconstrained(),
         "the gated proxy holds its own internal origin only"
-    );
-}
-
-/// BLOCKER-3 masking sub-attack: an origin-scoped GATED proxy beside an unconstrained PUBLIC proxy must NOT
-/// mask the open relay. Per-service, `refuse_open_relay` reasons about the PUBLIC proxy's own scope, so an
-/// unconstrained public proxy is refused even when a second, scoped, gated proxy is present.
-#[test]
-fn a_scoped_gated_proxy_does_not_mask_a_bare_public_open_relay() {
-    let mut requested = vec![
-        "internal=proxy:http://10.0.0.5".to_owned(), // scoped, gated
-        "pub=proxy:".to_owned(),                     // unconstrained, public
-    ];
-    let proxy = ProxyScope::extract(&mut requested).expect("parse");
-    let public = vec![svc("pub")];
-    assert!(
-        proxy.refuse_open_relay(&public).is_err(),
-        "an unconstrained public proxy is an open relay even beside a scoped gated proxy (no masking)"
-    );
-}
-
-/// MAJOR-1: an unconstrained proxy NAMED in `--public` is refused at build time with a teaching error
-/// that names the problem and the fix, mirroring the sshd-cannot-be-public refusal.
-#[test]
-fn an_unconstrained_public_proxy_is_refused_as_an_open_relay() {
-    let mut requested = vec!["api=proxy:".to_owned()];
-    let proxy = ProxyScope::extract(&mut requested).expect("unconstrained proxy parses");
-    let public = vec![svc("api")];
-    let error = proxy
-        .refuse_open_relay(&public)
-        .expect_err("a public unconstrained proxy is an open relay and must be refused");
-    let message = format!("{error}");
-    assert!(
-        message.contains("origin-scoped") && message.contains("open relay"),
-        "the refusal teaches the fix (origin-scope it) and names the problem (an open relay): {message:?}"
-    );
-}
-
-/// A `serve api=proxy:https://origin --public api` (a SCOPED public proxy) is the safe, intended shape: its
-/// own allowlist is armed, so it is allowed.
-#[test]
-fn a_scoped_public_proxy_is_allowed() {
-    let mut requested = vec!["api=proxy:https://origin.example".to_owned()];
-    let proxy = ProxyScope::extract(&mut requested).expect("origin parses");
-    let public = vec![svc("api")];
-    assert!(
-        proxy.refuse_open_relay(&public).is_ok(),
-        "a public proxy scoped to an origin is armed, not an open relay"
-    );
-}
-
-/// The open-relay refusal reads the public set: an unconstrained proxy NOT named in `--public` passes it.
-/// A typed one never gets this far ([`serve_proxy_without_a_target_is_a_usage_error`]); this pins the
-/// refusal's own rule, for a set built some other way.
-#[test]
-fn the_open_relay_refusal_reads_only_the_public_set() {
-    let mut requested = vec!["api=proxy:".to_owned()];
-    let proxy = ProxyScope::extract(&mut requested).expect("unconstrained proxy parses");
-    // `api` is served but NOT public.
-    assert!(
-        proxy.refuse_open_relay(&[]).is_ok(),
-        "the refusal is about a public proxy; the gate stands in front of any other"
     );
 }
 

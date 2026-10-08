@@ -19,8 +19,8 @@ Usage: swoosh proxy [OPTIONS] <peer> <url>
 $ swoosh proxy me/nas https://example.com/big.iso
 ```
 
-It prints a `http://127.0.0.1:<port>/` URL. Point curl or a browser at it: the request leaves from `nas`, and
-`Range` passes through, so a stopped download resumes.
+It prints a local URL, `http://127.0.0.1:<port>/<token>/`, on stdout. Point curl or a browser at it: the
+request leaves from `nas`, and `Range` passes through, so a stopped download resumes.
 
 **Things to know.** The machine must serve the proxy (`swoosh serve proxy:<url>` there). Until it does, each
 request gets an error that names that line.

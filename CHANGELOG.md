@@ -25,8 +25,13 @@ All notable changes to swoosh, newest first.
 - **`forward` replaces `reach`, and `proxy` replaces `fetch`.** `swoosh forward <machine> <service> <port | ->`
   always names where the bytes go: a local port, or `-` for stdout; with neither it stops and says so.
   `swoosh proxy <machine> <url>` takes the machine first, in place of `--via`. A machine serves a proxy with
-  `swoosh serve proxy:<url>`, named `proxy`, or `<name>=proxy:<url>`; `swoosh serve proxy` alone is refused,
-  and `<name>=proxy:` with no URL is refused.
+  `swoosh serve proxy:<url>`, named `proxy`, or `<name>=proxy:<url>`; `swoosh serve proxy` alone, or
+  `<name>=proxy:` with no URL, is refused.
+- **A proxy serves a whole site.** `swoosh serve proxy:<url>` takes a site with no path or query, such as
+  `proxy:https://example.com`; a request may ask for any path on that site, and none on another.
+- **`swoosh proxy`'s local URL answers only requests made to it.** It prints the URL alone on stdout, with a
+  random part in its path; a request without that part, or with a Host other than `127.0.0.1:<port>`, is
+  refused, so only a client given the URL can use it.
 - **`--present` is gone.** Give a link, or a file holding one, where the machine goes:
   `swoosh ssh swoosh:…` or `swoosh ssh ./nas.link`.
 - **`serve` warns when a shell, `ping`, `speed` or a receive service has live links made for something

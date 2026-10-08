@@ -24,10 +24,15 @@ const TOKEN: &str = "00112233445566778899aabbccddeeff";
 /// The base URL the tests' proxy was given.
 const BASE: &str = "https://example.com/big.iso";
 
+/// `text` parsed, as clap parses a typed URL.
+fn url(text: &str) -> url::Url {
+    url::Url::parse(text).unwrap()
+}
+
 #[test]
 fn root_request_uses_the_base_verbatim() {
     assert_eq!(
-        origin_url("https://example.com/big.iso", "/").unwrap(),
+        origin_url(&url("https://example.com/big.iso"), "/").unwrap(),
         "https://example.com/big.iso"
     );
 }
@@ -35,7 +40,7 @@ fn root_request_uses_the_base_verbatim() {
 #[test]
 fn a_path_and_query_resolve_against_the_base() {
     assert_eq!(
-        origin_url("https://api.example.com", "/users?id=5").unwrap(),
+        origin_url(&url("https://api.example.com"), "/users?id=5").unwrap(),
         "https://api.example.com/users?id=5"
     );
 }
@@ -46,19 +51,21 @@ fn a_path_and_query_resolve_against_the_base() {
 #[test]
 fn a_trailing_slash_base_and_leading_slash_target_do_not_double_the_slash() {
     assert_eq!(
-        origin_url("https://api.example.com/", "/users").unwrap(),
+        origin_url(&url("https://api.example.com/"), "/users").unwrap(),
         "https://api.example.com/users"
     );
 }
 
-/// A base that is not a URL refuses in swoosh's words: the engine's own line names the engine, a word
-/// no person types, so it never reaches the downloader's error body.
+/// A URL that does not parse is a usage error (exit 2), refused before anything is dialed or printed.
+///
+/// Take the URL as text instead and it parses, to a run that prints a local URL and serves 502 on every
+/// request.
 #[test]
-fn a_base_that_is_not_a_url_never_names_the_engine() {
-    let error = origin_url("not a url", "/x").expect_err("a bad base refuses");
-    let line = format!("{error:#}");
-    assert!(line.starts_with("invalid proxy URL: "), "{line}");
-    assert!(!line.contains("fetch"), "{line}");
+fn a_proxy_url_that_does_not_parse_is_a_usage_error() {
+    let error =
+        <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "proxy", "nas", "not a url"])
+            .expect_err("a URL that does not parse refuses");
+    assert_eq!(error.exit_code(), 2, "{error}");
 }
 
 /// The listener the tests' requests are written to: loopback, port 8080, the fixed [`TOKEN`].
@@ -87,9 +94,7 @@ fn request(target: &str, hosts: &[&str]) -> Parsed {
 
 /// What the listener makes of `target`, sent to its own address.
 fn admitted(target: &str) -> Result<String, Refused> {
-    local()
-        .admit(&request(target, &["127.0.0.1:8080"]), BASE)
-        .map(|url| url.expect("the test's base composes"))
+    local().admit(&request(target, &["127.0.0.1:8080"]), &url(BASE))
 }
 
 /// A request sent to the printed URL is admitted, root and path alike: the token's segment is the
@@ -116,11 +121,35 @@ fn a_request_naming_another_host_is_refused() {
         ["127.0.0.1:8080", "rebound.example"].as_slice(),
     ] {
         assert_eq!(
-            local().admit(&request(&target, hosts), BASE).err(),
+            local().admit(&request(&target, hosts), &url(BASE)).err(),
             Some(Refused::Host),
             "Host {hosts:?}"
         );
     }
+}
+
+/// On port 80 a client writes the `Host` with no port, as http's default, so the bare address names the
+/// listener too; on any other port the port is part of the name.
+///
+/// Compare the `Host` to the address alone and a listener pinned to 80 refuses every request.
+#[test]
+fn on_port_80_the_host_may_omit_the_port() {
+    let target = format!("/{TOKEN}/");
+    let on_80 = local_at(SocketAddr::from(([127, 0, 0, 1], 80)));
+    for host in ["127.0.0.1", "127.0.0.1:80"] {
+        assert_eq!(
+            on_80.admit(&request(&target, &[host]), &url(BASE)),
+            Ok(BASE.to_owned()),
+            "Host {host}"
+        );
+    }
+    assert_eq!(
+        local()
+            .admit(&request(&target, &["127.0.0.1"]), &url(BASE))
+            .err(),
+        Some(Refused::Host),
+        "on 8080 the port is required"
+    );
 }
 
 /// The path must start with the token, as its whole first segment. Another account on this machine can
@@ -178,6 +207,21 @@ fn a_target_that_leaves_the_origin_is_refused() {
     assert_eq!(
         local().rest(&target),
         Ok("/\\evil.example/x"),
+        "the form check alone lets this through"
+    );
+    assert_eq!(admitted(&target), Err(Refused::Target));
+}
+
+/// A target that does not join onto the base is the client's bad request, refused as a target (400)
+/// before anything is dialed: `/\evil.example:99999/x` passes the form check, and the URL grammar reads
+/// it as a host with a port out of range.
+///
+/// Treat a failed join as the proxy's own failure instead and the client reads a 502.
+#[test]
+fn a_target_that_does_not_join_is_refused() {
+    let target = format!("/{TOKEN}/\\evil.example:99999/x");
+    assert!(
+        local().rest(&target).is_ok(),
         "the form check alone lets this through"
     );
     assert_eq!(admitted(&target), Err(Refused::Target));

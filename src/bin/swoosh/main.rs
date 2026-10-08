@@ -1150,7 +1150,7 @@ mod tests {
         else {
             panic!("proxy parses to the proxy verb");
         };
-        assert_eq!(cmd.url, "https://example.com");
+        assert_eq!(cmd.url.as_str(), "https://example.com/");
         assert!(
             Cli::try_parse_from(["swoosh", "proxy", "https://example.com", "--via", &peer])
                 .is_err(),
@@ -1864,6 +1864,14 @@ mod tests {
             error.to_string().contains(
                 "control.stop is not a name: a name uses a-z, 0-9 and -, and starts with a letter or digit."
             ),
+            "the refusal states the rule: {error}"
+        );
+        // A `:` in the name is no exception: the entry is still read as `name=target`.
+        let error = Cli::try_parse_from(["swoosh", "serve", "a:b=tcp:127.0.0.1:1"])
+            .expect_err("a name holding a colon refuses");
+        assert_eq!(error.exit_code(), 2, "a bad name is a usage error");
+        assert!(
+            error.to_string().contains("a:b is not a name"),
             "the refusal states the rule: {error}"
         );
         let Some(Command::Serve(cmd)) =

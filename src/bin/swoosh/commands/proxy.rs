@@ -42,8 +42,10 @@ pub struct ProxyCmd {
     #[arg(value_name = "peer")]
     pub peer: Peer,
     /// The origin URL to reach (path and query on the local URL resolve against it).
+    // Parsed here, so a URL that does not parse is a usage error before anything is dialed, and each
+    // request joins onto the one parsed value instead of re-reading the text.
     #[arg(value_name = "url")]
-    pub url: String,
+    pub url: url::Url,
     /// which served service to reach
     // The default is taken FROM the table that knows a bare `swoosh serve` does not bind it (an
     // unscoped relay egresses under the exit node's own IP, so there is no default to inherit), so
@@ -204,7 +206,7 @@ impl ProxyCmd {
             .map_err(|_| eyre::eyre!("no request within {HEAD_TIMEOUT:?}"))??;
         let parsed = parse_request(&head)?;
         let origin = match local.admit(&parsed, &self.url) {
-            Ok(origin) => origin?,
+            Ok(origin) => origin,
             Err(refused) => {
                 *responded = true;
                 return respond_error(tcp, refused.status(), refused.body()).await;
@@ -364,32 +366,30 @@ impl Local {
         }
     }
 
-    /// The origin URL one request asks for, or the reason this listener refuses it. The outer `Result` is
-    /// a local refusal, served before anything is dialed; the inner one is a URL that does not compose.
+    /// The origin URL one request asks for, or the reason this listener refuses it, served before
+    /// anything is dialed.
     ///
     /// In order: the `Host` must be this listener's address, so a page that rebinds its own name to
     /// loopback is refused; the target must be one this listener answers ([`rest`](Self::rest)); and the
     /// composed URL must still be on the base's origin, whatever else the target holds (a `\` the URL
     /// grammar reads as `/`, say).
-    fn admit(&self, request: &Parsed, base: &str) -> Result<eyre::Result<String>, Refused> {
+    fn admit(&self, request: &Parsed, base: &url::Url) -> Result<String, Refused> {
         let mut hosts = request
             .headers
             .iter()
             .filter(|(name, _)| name.eq_ignore_ascii_case("host"));
         let host = hosts.next().map(|(_, value)| value.as_str());
-        if host != Some(self.addr.to_string().as_str()) || hosts.next().is_some() {
+        if !host.is_some_and(|host| self.is_host(host)) || hosts.next().is_some() {
             return Err(Refused::Host);
         }
-        let rest = self.rest(&request.target)?;
-        let url = match origin_url(base, rest) {
-            Ok(url) => url,
-            Err(error) => return Ok(Err(error)),
-        };
-        // A root request is the base itself, on its own origin by definition.
-        if url != base && !same_origin(base, &url) {
-            return Err(Refused::Target);
-        }
-        Ok(Ok(url))
+        origin_url(base, self.rest(&request.target)?)
+    }
+
+    /// Whether `host` names this listener: its address, or on port 80 its address with no port, which is
+    /// how a client writes the `Host` for http's default port.
+    fn is_host(&self, host: &str) -> bool {
+        host == self.addr.to_string()
+            || (self.addr.port() == 80 && host == self.addr.ip().to_string())
     }
 
     /// What follows the token in a target this listener answers. It must be origin-form (`/…`), so an
@@ -430,19 +430,6 @@ impl core::fmt::Display for Local {
     }
 }
 
-/// Whether `url` is on `base`'s origin (scheme, host and port). Read by the same URL parser the join
-/// used, so the check and the request cannot disagree on the host; a URL that does not parse, or an
-/// opaque origin, is never the same.
-fn same_origin(base: &str, url: &str) -> bool {
-    match (url::Url::parse(base), url::Url::parse(url)) {
-        (Ok(base), Ok(url)) => {
-            let origin = base.origin();
-            origin.is_tuple() && origin == url.origin()
-        }
-        _ => false,
-    }
-}
-
 /// A request the local listener refuses before anything is dialed. Its body names no part of the
 /// request and nothing of this run, so a refused page learns only that it was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,7 +438,8 @@ enum Refused {
     Host,
     /// The path does not start with this run's token.
     Token,
-    /// The target is not origin-form, or would leave the origin of the URL this run was given.
+    /// The target is not origin-form, does not join onto the URL this run was given, or would leave
+    /// that URL's origin.
     Target,
 }
 
@@ -468,29 +456,32 @@ impl Refused {
     fn body(self) -> &'static str {
         match self {
             Refused::Host | Refused::Token => "use the URL swoosh proxy printed",
-            Refused::Target => "a request through this URL stays on the site it names",
+            Refused::Target => "this URL reaches only the site swoosh proxy was started with",
         }
     }
 }
 
 /// The origin URL for one request, from what follows the token: the base as given for a root request
-/// (empty, or `/`), else that path and query resolved against the base, so a download hits the exact file
-/// the base names and an API proxy forwards the path.
+/// (empty, or `/`), else that path and query joined onto the base, so a download hits the exact file the
+/// base names and an API proxy forwards the path.
 ///
-/// Delegates the composition to [`::fetch::compose_url`], which PARSES the base and joins the target as a URL
-/// rather than string-concatenating: joining merges the two paths per the URL grammar, so a base with a
-/// trailing slash and a target with a leading one (`https://x/` + `/a`) yield `https://x/a`, not the
-/// `https://x//a` a raw `format!` produces. A root request keeps the base VERBATIM: the base already names
-/// the exact resource (the download case), and joining `/` would discard any path the base carries.
-fn origin_url(base: &str, target: &str) -> eyre::Result<String> {
+/// Joined as a URL rather than string-concatenated: joining merges the two paths per the URL grammar, so
+/// a base with a trailing slash and a target with a leading one (`https://x/` + `/a`) yield `https://x/a`,
+/// not the `https://x//a` a raw `format!` produces. A root request keeps the base as parsed: the base
+/// already names the exact resource (the download case), and joining `/` would discard any path it
+/// carries. A joined URL must stay on the base's origin (scheme, host and port), read by the same parser
+/// that joined it, so the check and the request cannot disagree on the host; a target that does not join,
+/// or that leaves the origin, is the client's bad request.
+fn origin_url(base: &url::Url, target: &str) -> Result<String, Refused> {
     if target == "/" || target.is_empty() {
-        return Ok(base.to_owned());
+        return Ok(base.as_str().to_owned());
     }
-    ::fetch::compose_url(base, target).map_err(|error| match error {
-        // The engine's own line names the engine; this one names what a person typed.
-        ::fetch::ComposeError::Base(source) => eyre::eyre!("invalid proxy URL: {source}"),
-        target @ ::fetch::ComposeError::Target { .. } => eyre::eyre!(target),
-    })
+    let url = base.join(target).map_err(|_| Refused::Target)?;
+    let origin = base.origin();
+    if !origin.is_tuple() || origin != url.origin() {
+        return Err(Refused::Target);
+    }
+    Ok(url.into())
 }
 
 /// Read an HTTP request head (up to the blank line) one byte at a time. Bounded so a client that never

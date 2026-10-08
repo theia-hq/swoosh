@@ -558,17 +558,13 @@ impl ServeCmd {
         let (bound, known) = bind_renewal(router, &home).await?;
         router = bound;
         for scoped in proxy.services() {
-            // One engine handler per proxy service, holding ONLY its own origin scope. An unconstrained
-            // scope is the NEVER engine (the open proof refuses to expose it); a non-empty scope is the
-            // OPT-IN engine, which applies the 16 MiB/30s responder bounds by construction.
+            // One engine handler per proxy service, holding ONLY its own origin scope. Every scope names an
+            // origin (`ProxyScope::extract` refuses one that does not), so each is the OPT-IN engine, which
+            // applies the 16 MiB/30s responder bounds by construction.
             let name = scoped.name().parse()?;
-            router = if scoped.allow().is_unconstrained() {
-                router.service(name, ::fetch::Fetch)?
-            } else {
-                let scoped_fetch = ::fetch::ScopedFetch::new(scoped.allow().clone())
-                    .map_err(|error| eyre::eyre!(error))?;
-                router.service(name, scoped_fetch)?
-            };
+            let scoped_fetch = ::fetch::ScopedFetch::new(scoped.allow().clone())
+                .map_err(|error| eyre::eyre!(error))?;
+            router = router.service(name, scoped_fetch)?;
         }
         // The node's activity renderer, or none at all under `--quiet`: with no renderer no engine gets a
         // sink, so quiet silences every activity line by construction.
@@ -582,8 +578,6 @@ impl ServeCmd {
         // The node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the route's
         // access class after the gate admits and before any `Response::Ok`.
         router = router.member_service(CONTROL_STOP_SERVICE.parse()?, Stop::new(cancel.clone()))?;
-        // Refuse an unconstrained PUBLIC proxy per-service at build time (an open egress relay).
-        proxy.refuse_open_relay(&self.public)?;
         // Declare both open overlays from the operator's raw names. The proof runs at `.expose()` below,
         // before anything is recorded or a banner advertises a service it will not serve.
         router = router
