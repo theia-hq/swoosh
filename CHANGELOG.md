@@ -15,8 +15,8 @@ All notable changes to swoosh, newest first.
 
 ### Changed
 - **`revoke me/<name>` prints `revoked` only once your root has revoked the device.** If it cannot
-  use your root, it prints one `error:` line saying the device is blocked on this machine only,
-  names how to finish, and exits 1.
+  use your root, it prints an `error:` saying the device is blocked on this machine only and names the
+  fix, then exits 1.
 - **`path:` names the path that carries bytes.** A direct path with a relay kept on standby reads
   `direct`, where it read `through a relay`, and a relayed one names its relay:
   `path: relayed through euc1-1.relay.n0.iroh.link`. `ping`, `speed` and `status <machine>` print the
