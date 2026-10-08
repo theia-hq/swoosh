@@ -69,21 +69,25 @@ fn a_name_the_client_did_not_default_to_is_left_alone() {
     }
 }
 
-/// Every row teaches an entry that binds its OWN name: `<name>=<scheme>:`, the exact shape `serve`
-/// parses. A row whose entry bound some other name would send an operator to run a line that leaves
-/// the dial failing exactly as before.
+/// Every row teaches an entry that binds its OWN name, read through the parser `serve` runs: an entry
+/// that bound some other name would send an operator to run a line that leaves the dial failing exactly
+/// as before. Each placeholder is filled with a value first, since the parser reads a proxy's URL.
 #[test]
 fn every_row_teaches_an_entry_that_binds_its_own_name() {
     let mut names = BTreeSet::new();
     for unbound in Unbound::all() {
         let (name, entry) = (unbound.name(), unbound.entry());
-        assert!(
-            entry.starts_with(&format!("{name}=")),
+        let typed = entry
+            .replace("<url>", "https://example.com")
+            .replace("<dir>", "/srv/inbox");
+        let parsed = crate::serve::service_entry(&typed).expect("the entry a row teaches parses");
+        let (bound, target) = parsed
+            .split_once('=')
+            .expect("a parsed entry is always `name=target`");
+        assert_eq!(
+            bound, name,
             "`{entry}` must bind `{name}`, the name the client dials"
         );
-        let (_, target) = entry
-            .split_once('=')
-            .expect("the assertion above found the `=`");
         assert!(
             target.contains(':'),
             "`{entry}` must name a target scheme, which is what `serve` parses"

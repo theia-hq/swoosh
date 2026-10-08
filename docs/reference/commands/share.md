@@ -33,8 +33,8 @@ swoosh:ed01…
 
 **Things to know.** Only the link goes to stdout, so `swoosh share ssh anyone --once > ssh.link` captures it
 alone. A link for a person, a machine or a key works only there and cannot be copied; a link for `anyone`
-works for whoever holds it, so send it privately. A link to `anyone` for ssh, `ping`, `speed`, a receive
-service or a `fetch:` with no origin needs `--once`: it works once, within 15 minutes, and cannot be copied;
+works for whoever holds it, so send it privately. A link to `anyone` for ssh, `ping`, `speed` or a receive
+service needs `--once`: it works once, within 15 minutes, and cannot be copied;
 for longer, `swoosh share ssh <person>`. A copy never outlives its link. `swoosh share ssh bob` needs bob's
 root saved first: `swoosh contact add bob <root key>`. Take a link back with [`swoosh revoke`](revoke.md).
 

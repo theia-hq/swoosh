@@ -543,10 +543,10 @@ mod tests {
 
     /// The `forward` the bridge's command line is, with the local end it names.
     fn bridge(command: Option<crate::Command>) -> crate::commands::forward::ForwardCmd {
-        let Some(crate::Command::Forward(args)) = command else {
+        let Some(crate::Command::Forward(cmd)) = command else {
             panic!("the bridge is the public `forward` verb");
         };
-        args.local_end().expect("the bridge names its local end")
+        cmd
     }
 
     /// The `UserKnownHostsFile` real ssh reads from `argv`, through `ssh -G` (which prints the options it

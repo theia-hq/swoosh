@@ -9,7 +9,7 @@
 //! All three slots are POSITIONAL and REQUIRED, because none is ever optional and a slot that is never
 //! optional is a positional. The local end has no default: nothing defaults to the terminal and nothing
 //! defaults to the served port, so every form states where the bytes go. A missing local end is a usage
-//! error that names the three, found before anything is opened or bound.
+//! error that names the three ([`NO_LOCAL_END`]), found at parse, before anything is opened or bound.
 //!
 //! Drives tightbeam's tunnel wire under swoosh's OWN identity, through the one
 //! [`connect`](crate::commands::connect::connect) runner, selected here by the single [`To`]. It is also
@@ -24,12 +24,9 @@ use swoosh::transport::ReachArgs;
 
 use crate::commands::connect::{To, connect};
 
-/// The `forward` command line as clap parses it. The local end is required, so `--help` shows it so; the
-/// composition root parses a line missing only it once more with it optional, so the one refusal that
-/// names the machine and the service is printed instead of clap's own. [`local_end`](Self::local_end)
-/// turns it into the [`ForwardCmd`] that runs, which always has one.
+/// A machine's served service, forwarded to the local end it names.
 #[derive(Debug, Args)]
-pub struct ForwardArgs {
+pub struct ForwardCmd {
     /// the machine to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
@@ -37,10 +34,10 @@ pub struct ForwardArgs {
     #[arg(value_name = "service", value_parser = swoosh::names::service)]
     pub service: Service,
     /// where the bytes go: a local port, `unix:<path>`, or `-` for stdout
-    // `Option` only so the refusal can name what was typed: clap's own "required argument" line cannot
-    // carry the machine and the service. Never defaulted (see the module docs).
-    #[arg(id = LOCAL_END, value_name = "port | unix:<path> | -", required = true)]
-    pub end: Option<To>,
+    // Never defaulted (see the module docs). The id is named so the composition root can tell a line
+    // missing only this slot from one missing anything else, and print the three ends for it.
+    #[arg(id = LOCAL_END, value_name = "port | unix:<path> | -")]
+    pub to: To,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -48,49 +45,11 @@ pub struct ForwardArgs {
 /// The local end's argument id, which the composition root makes optional for its second parse.
 pub const LOCAL_END: &str = "local-end";
 
-impl ForwardArgs {
-    /// The forward to run, or the refusal when no local end was given.
-    pub fn local_end(self) -> Result<ForwardCmd, NoLocalEnd> {
-        match self.end {
-            Some(to) => Ok(ForwardCmd {
-                peer: self.peer,
-                service: self.service,
-                to,
-                reach: self.reach,
-            }),
-            None => Err(NoLocalEnd {
-                peer: self.peer,
-                service: self.service,
-            }),
-        }
-    }
-}
-
-/// A `forward` typed with no local end. A usage error (exit 2): the command is incomplete, and the line
-/// names the three ends it can take.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "swoosh forward {peer} {service} needs a local end: a port (5432), unix:<path>, or - for stdout."
-)]
-pub struct NoLocalEnd {
-    /// The machine as typed.
-    peer: Peer,
-    /// The service as typed.
-    service: Service,
-}
-
-/// A machine's served service, forwarded to the local end it names.
-#[derive(Debug)]
-pub struct ForwardCmd {
-    /// The machine to reach.
-    pub peer: Peer,
-    /// The served service to reach.
-    pub service: Service,
-    /// Where the bytes go.
-    pub to: To,
-    /// The reach-family flags.
-    pub reach: ReachArgs,
-}
+/// The refusal for a `forward` typed with no local end: a usage error (exit 2) naming the three ends. It
+/// names neither the machine nor the service: a short key or a link's short form echoed back would read
+/// as a command to copy, and neither runs.
+pub const NO_LOCAL_END: &str =
+    "forward needs a local end: a port (5432), unix:<path>, or - for stdout";
 
 impl swoosh::reaching::Reaching for ForwardCmd {
     fn reach_args(&self) -> &swoosh::transport::ReachArgs {

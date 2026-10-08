@@ -369,3 +369,35 @@ fn serve_removes_its_runtime_leaf_on_exit() {
         leaf.display()
     );
 }
+
+/// A `forward` with no local end is refused at parse, before the home is read or made: exit 2, the line
+/// that names the three ends, and the `--home` it named still absent. A refusal that ran after the home
+/// was resolved would have had to read, and could have written, a home for a command line that was never
+/// whole.
+#[test]
+fn forward_without_a_local_end_exits_2_and_leaves_the_home_absent() {
+    let scratch = Scratch::new("no-local-end");
+    let absent = scratch.base.join("absent");
+    let out = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+        .args(["--home", absent.to_str().expect("utf-8 home")])
+        .args(["forward", "me/nas", "db"])
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .expect("the swoosh binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with(
+            "error: forward needs a local end: a port (5432), unix:<path>, or - for stdout\n"
+        ),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty(), "nothing on stdout");
+    assert!(
+        !absent.exists(),
+        "the home is never made: {}",
+        absent.display()
+    );
+}

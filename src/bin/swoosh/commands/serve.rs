@@ -58,7 +58,7 @@ use tightbeam::tunnel::{CancellationToken, Exposer, ManifestEntry, Posture, Rout
 #[derive(Debug, Args)]
 pub struct ServeCmd {
     /// publish services as `name=target` (bare: the last list, else `ping` and `speed`)
-    // The long form lists every target scheme, both halves: the three engines swoosh serves and the six
+    // The long form lists every target scheme, both halves: the five engines swoosh serves and the six
     // forms the tunnel grammar routes. A refusal from either half points here, so this list is the one a
     // mistyped scheme is sent to and it has to be complete.
     #[arg(
@@ -70,6 +70,8 @@ pub struct ServeCmd {
                      \x20 ping:            round-trip probe\n\
                      \x20 speed:           throughput test\n\
                      \x20 sshd:            a shell, keyless (the node's gate is the auth)\n\
+                     \x20 proxy:<url>      requests to one site, made from this machine\n\
+                     \x20 recv:<dir>       files pushed into <dir>\n\
                      \n\
                      and it forwards or streams:\n\
                      \x20 tcp:<host>:<port>  a local TCP service\n\
@@ -79,7 +81,7 @@ pub struct ServeCmd {
                      \x20 stdin:             this process's own stdin\n\
                      \x20 echo:              reflects whatever is sent\n\
                      \n\
-                     The three swoosh serves take no argument, and neither do `stdin:` and `echo:`. \
+                     `ping:`, `speed:` and `sshd:` take no argument, and neither do `stdin:` and `echo:`. \
                      A live single-writer source (`stdin:`, `fifo:`) may be suffixed `+lossy` to fan \
                      out to many readers at once, dropping bytes for one that falls behind."
     )]

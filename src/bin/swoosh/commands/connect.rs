@@ -19,7 +19,7 @@
 
 use core::str::FromStr;
 use core::time::Duration;
-use std::io::Read as _;
+use std::io::{IsTerminal as _, Read as _};
 use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, NodeId, Refusal, Session, Transport};
@@ -73,10 +73,7 @@ impl FromStr for To {
         }
         match text.parse::<u16>() {
             Ok(port) if port != 0 => Ok(To::Port(port)),
-            _ => eyre::bail!(
-                "`{text}` is not a local end. Use a port (1..=65535), `-` for stdout (compose with the \
-                 shell, e.g. `- > out`), or `unix:<path>` for a local socket listener"
-            ),
+            _ => eyre::bail!("a local end is a port (5432), unix:<path>, or - for stdout"),
         }
     }
 }
@@ -84,7 +81,7 @@ impl FromStr for To {
 /// The ONE connect path, driven by `forward` directly and by `swoosh ssh` through it. Resolve the [`Peer`]
 /// to the node to dial via the shared [`Peer::connector`] (slot 1 the grant, slot 2 a membership badge for
 /// a signet-bound slip's AND), then drive the sink [`To`] names: forward a local port (proving admission,
-/// then printing swoosh's own `forwarding …` line), stream stdin/stdout (no banner: ssh owns the tty), or
+/// then printing swoosh's own start lines on stderr), stream stdin/stdout (no banner: ssh owns the tty), or
 /// the reserved unix listener. A refused forward surfaces the host's reason here and exits non-zero,
 /// never a fake banner.
 pub async fn connect<T: Transport, D: Discovery>(
@@ -104,16 +101,16 @@ pub async fn connect<T: Transport, D: Discovery>(
     };
     let dial = peer.connector(contacts, service, slot1, slot2)?.dial();
     match to {
-        To::Port(port) => forward_port(node, peer, dial, &request, port)
+        To::Port(port) => forward_port(node, Machine::of(contacts, dial), dial, &request, port)
             .await
             .map_err(escaped_report),
         To::Stdout => pipe_stdio(node, dial, &request)
             .await
             .map_err(escaped_report),
-        To::UnixListener(path) => eyre::bail!(
-            "unix:{} is reserved, not yet built (bind a port and connect to it, or use `-`)",
-            path.display()
-        ),
+        // The path is not echoed: a typed path would read as a missing socket, not a missing feature.
+        To::UnixListener(_) => {
+            eyre::bail!("a unix:<path> local end is not built yet: use a port, or - for stdout")
+        }
     }
 }
 
@@ -136,15 +133,16 @@ async fn admitted<S: Session>(
     })
 }
 
-/// Reach the peer, prove the gate admits this request, bind the local port, print the `forwarding` line
-/// naming `peer` as typed, then forward each local connection over its own stream until the session ends.
+/// Reach the peer, prove the gate admits this request, bind the local port, say so on stderr naming the
+/// `machine`, then forward each local connection over its own stream until the session ends.
 ///
 /// Admission is proven on one probe stream before the line prints, so a refusal fails here with the host's
 /// reason rather than as a silent reset once the line is out. Every later stream presents the same request
-/// to the same gate.
+/// to the same gate. stdout stays empty: the port was typed, so the line carries nothing a script needs,
+/// and `forward`'s stdout is only ever the stream.
 async fn forward_port<T: Transport, D: Discovery>(
     node: &Node<T, D>,
-    peer: &Peer,
+    machine: Machine,
     dial: NodeId,
     request: &Request,
     port: u16,
@@ -155,22 +153,53 @@ async fn forward_port<T: Transport, D: Discovery>(
         return Err(DialRefused { dial, refusal }.into());
     }
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    println!(
-        "forwarding {peer}'s {} to 127.0.0.1:{port}. ctrl-c to stop.",
+    eprintln!(
+        "Forwarding {} on {machine} to 127.0.0.1:{port}.",
         request.service
     );
+    press_ctrl_c();
     forward(&session, request, listener).await
 }
 
-/// The most local connections one forward holds at once, carried or waiting for a stream. Above a QUIC
-/// peer's usual concurrent-stream limit (100 on iroh), and far enough below a default descriptor limit
+/// The second start line of a long-running local end, on stderr, at a terminal only: a supervisor or a
+/// script reading the stream has no ctrl-c to press.
+pub fn press_ctrl_c() {
+    if std::io::stderr().is_terminal() {
+        eprintln!("Press ctrl-c to stop.");
+    }
+}
+
+/// A machine as a printed line names it: the name this home holds for its key (`me/nas`, `alice/laptop`),
+/// else the whole key. Never a short key, which no command accepts, and never a link, whose token prints
+/// only as the artifact that made it. Built from the key actually dialed, so a link typed as the peer
+/// prints as the machine it addresses.
+pub struct Machine(String);
+
+impl Machine {
+    /// How `node` prints for a person reading this home's lines.
+    pub fn of(contacts: &Contacts, node: NodeId) -> Self {
+        Self(match contacts.saved_at(&node) {
+            Some(name) => name.to_string(),
+            None => node.to_string(),
+        })
+    }
+}
+
+impl core::fmt::Display for Machine {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The most local connections one forward or proxy holds at once, carried or waiting for a stream. Above a
+/// QUIC peer's usual concurrent-stream limit (100 on iroh), and far enough below a default descriptor limit
 /// (256 on macOS) that connections waiting for a stream cannot exhaust the process. Past it, new
 /// connections wait in the kernel's listen backlog.
-const MAX_PIPES: usize = 128;
+pub const MAX_PIPES: usize = 128;
 
-/// How long the forward waits before accepting again after an accept fails. An error such as running out
-/// of descriptors repeats on every attempt until something frees, so retrying at once would spin.
-const ACCEPT_RETRY: Duration = Duration::from_millis(100);
+/// How long a local listener waits before accepting again after an accept fails. An error such as running
+/// out of descriptors repeats on every attempt until something frees, so retrying at once would spin.
+pub const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 /// Forward each accepted local connection over its own stream, until the session ends: then the forward
 /// is over, and every connection it carried has already ended with it.
@@ -317,7 +346,7 @@ mod tests {
     use swoosh::contacts::Contacts;
     use swoosh::testkit::HostilePeer;
 
-    use super::{To, connect};
+    use super::{Machine, To, connect};
 
     /// A gate's refusal detail holding a carriage return, an ESC CSI sequence and a bidi override.
     const HOSTILE: &str = "no\r\u{1b}[2Kforwarding 127.0.0.1:1 to x\u{202e}";
@@ -398,5 +427,29 @@ mod tests {
         ] {
             assert!(bad.parse::<To>().is_err(), "`{bad}` must be rejected");
         }
+        // The refusal spells the three ends the way the missing-end line does, and echoes nothing typed.
+        let refused = "web".parse::<To>().expect_err("web is no local end");
+        assert_eq!(
+            refused.to_string(),
+            "a local end is a port (5432), unix:<path>, or - for stdout"
+        );
+    }
+
+    /// A machine prints as this home's name for its key, else the whole key: a short key is accepted by no
+    /// command, so a line that printed one would hand the reader something that does not run.
+    #[test]
+    fn a_machine_prints_as_its_saved_name_else_its_whole_key() {
+        let nas = bifrost::NodeId::from_ed25519_secret(&[3u8; 32]);
+        let stranger = bifrost::NodeId::from_ed25519_secret(&[4u8; 32]);
+        let mut contacts = Contacts::default();
+        contacts
+            .save(&"me/nas".parse().expect("a device name"), nas)
+            .expect("the name is free");
+        assert_eq!(Machine::of(&contacts, nas).to_string(), "me/nas");
+        assert_eq!(
+            Machine::of(&contacts, stranger).to_string(),
+            stranger.to_string(),
+            "an unnamed machine prints its whole key"
+        );
     }
 }

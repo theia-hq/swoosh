@@ -158,22 +158,30 @@ const BUILT_IN: [(&str, &str); 3] = [("ping", "ping:"), ("speed", "speed:"), ("s
 /// `sshd:` is named `ssh`; any other bare target (`tcp:…`, holding the scheme's `:`) passes through, so the
 /// tunnel grammar teaches the `name=target` shape.
 ///
-/// A proxy typed with nothing to reach (`proxy`, `proxy:`) refuses: an empty origin is an open egress
-/// relay under this machine's address, so a proxy is always served with its target, and one that names
-/// none is never guessed into existence. A named `<name>=proxy:` is the operator spelling it out, and
-/// stays theirs to serve behind the gate.
+/// A proxy is always served with what it reaches, named or not: an empty origin is an open egress relay
+/// under this machine's address, and a name changes what a service is called, never what it reaches. So
+/// `proxy`, `proxy:` and `<name>=proxy:` refuse, and a proxy's URL is an origin only (see
+/// [`proxy_origin`]).
 pub fn service_entry(entry: &str) -> Result<String, EntryError> {
     if let Some((name, target)) = entry.split_once('=') {
-        return Ok(format!("{}={target}", name.parse::<Name>()?));
+        let name = name.parse::<Name>()?;
+        if let Some((Scheme::Proxy, url)) = Scheme::parse(target) {
+            proxy_origin(name.as_str(), url)?;
+        }
+        return Ok(format!("{name}={target}"));
     }
     match Scheme::parse(entry) {
-        Some((Scheme::Proxy, "")) => Err(EntryError::ProxyWithoutTarget),
-        Some((Scheme::Proxy, _)) => Ok(format!("{}={entry}", Scheme::Proxy.as_str())),
+        Some((Scheme::Proxy, url)) => {
+            proxy_origin(Scheme::Proxy.as_str(), url)?;
+            Ok(format!("{}={entry}", Scheme::Proxy.as_str()))
+        }
         _ if entry.contains(':') => Ok(entry.to_owned()),
         _ => {
             let name: String = entry.parse::<Name>()?.into();
             if name == Scheme::Proxy.as_str() {
-                return Err(EntryError::ProxyWithoutTarget);
+                return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(
+                    &name, "<url>",
+                )));
             }
             Ok(
                 match BUILT_IN.iter().find(|(built_in, _)| *built_in == name) {
@@ -185,15 +193,79 @@ pub fn service_entry(entry: &str) -> Result<String, EntryError> {
     }
 }
 
+/// Hold a proxy's URL to what the engine scopes by: one origin, the scheme, host and port. The engine
+/// admits every path and query on that origin, so a URL that carried a path would promise less than the
+/// service gives, and a query (a signed download link, say) would be stored and printed for nothing. An
+/// empty URL is no origin at all. A URL that does not parse passes here: the origin parse at expose time
+/// refuses it with the cause ([`ProxyScope::extract`]).
+fn proxy_origin(name: &str, url: &str) -> Result<(), EntryError> {
+    if url.is_empty() {
+        return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(
+            name, "<url>",
+        )));
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return Ok(());
+    };
+    let origin = parsed.origin();
+    // An opaque origin (a scheme with no host) is no web origin, and the expose-time parse refuses it.
+    if !origin.is_tuple() {
+        return Ok(());
+    }
+    let bare = matches!(parsed.path(), "" | "/")
+        && parsed.query().is_none()
+        && parsed.fragment().is_none();
+    if bare {
+        return Ok(());
+    }
+    Err(EntryError::ProxyNotAnOrigin(ProxyLine::new(
+        name,
+        &origin.ascii_serialization(),
+    )))
+}
+
+/// The `serve` entry a proxy refusal teaches, in its shortest form: `proxy:<url>` for the service named
+/// `proxy` (it names itself), `<name>=proxy:<url>` for any other.
+#[derive(Debug)]
+pub struct ProxyLine {
+    /// The served name, folded.
+    name: String,
+    /// What follows `proxy:`: a placeholder, or the origin to type.
+    url: String,
+}
+
+impl ProxyLine {
+    /// The line for the service `name`, reaching `url`.
+    fn new(name: &str, url: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            url: url.to_owned(),
+        }
+    }
+}
+
+impl core::fmt::Display for ProxyLine {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let proxy = Scheme::Proxy.as_str();
+        if self.name != proxy {
+            write!(f, "{}=", self.name)?;
+        }
+        write!(f, "{proxy}:{}", self.url)
+    }
+}
+
 /// Why a typed `serve` entry is not one.
 #[derive(Debug, thiserror::Error)]
 pub enum EntryError {
     /// Its name breaks the one name rule: the rule's own line.
     #[error(transparent)]
     Name(#[from] NameError),
-    /// A proxy with nothing to reach (see [`service_entry`]).
-    #[error("proxy needs what it reaches: swoosh serve proxy:<url>")]
-    ProxyWithoutTarget,
+    /// A proxy with nothing to reach, named or not (see [`service_entry`]).
+    #[error("proxy needs what it reaches: swoosh serve {0}")]
+    ProxyWithoutTarget(ProxyLine),
+    /// A proxy whose URL carries a path, a query or a fragment; the line names its origin.
+    #[error("a proxy reaches a whole site, so its URL takes no path or query: swoosh serve {0}")]
+    ProxyNotAnOrigin(ProxyLine),
 }
 
 /// Bind one operator `name=addr` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
@@ -564,10 +636,11 @@ impl ProxyService {
 /// origin its addr grammar cannot carry, so swoosh separates each into its OWN [`ProxyService`] (name + its
 /// own origin scope) here, then binds one engine instance per name by value.
 ///
-/// A pure edge adapter over the raw request strings. A `name=proxy:` (no origin) is an unconstrained proxy
-/// under its own name; a `name=proxy:<url>` is a named, origin-scoped proxy. An entry without `=` names
-/// no service and is a teaching error, mirroring tightbeam's grammar. A malformed origin fails HERE, at
-/// expose time, not at dial time.
+/// A pure edge adapter over the raw request strings. A `name=proxy:<url>` is a named, origin-scoped proxy.
+/// A `name=proxy:` (no origin) would be an unconstrained one; [`service_entry`] refuses it before an entry
+/// gets here, and the open-relay refusal below still holds for a set built some other way. An entry
+/// without `=` names no service and is a teaching error, mirroring tightbeam's grammar. A malformed origin
+/// fails HERE, at expose time, not at dial time.
 pub struct ProxyScope;
 
 impl ProxyScope {
@@ -619,7 +692,7 @@ impl ProxyScope {
 fn origin_refusal(error: ::fetch::OriginError) -> eyre::Report {
     match error {
         ::fetch::OriginError::Userinfo => {
-            eyre::eyre!("url carries userinfo (user:pass@), which a proxy origin must not")
+            eyre::eyre!("a proxy URL cannot carry a user or password (user:pass@)")
         }
         other @ (::fetch::OriginError::Url(_)
         | ::fetch::OriginError::NoHost

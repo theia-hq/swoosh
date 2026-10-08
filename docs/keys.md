@@ -156,11 +156,7 @@ any reach verb.
 Nothing else is needed: the link names the node, names the one service it grants, and proves you may reach
 it. It works only for that service, and stops the moment it expires or the issuer revokes it.
 
-When you already reach a node another way (a petname you recorded, say) but hold a separate grant,
-present it with `--present`.
-
-Your own devices never need a link: their membership gets them in. Reach for `--present` only to reach
-as a delegate holding someone's grant.
+Your own devices never need a link: their membership gets them in.
 
 ## Glossary
 

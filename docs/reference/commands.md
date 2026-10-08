@@ -22,7 +22,6 @@ These apply to most commands and are omitted from the per-command signatures bel
   [run the relay and the resolver yourself](../transports.md#self-run).
 - `--resolver <url>` where address records are published and read (fleet-wide). See
   [run the relay and the resolver yourself](../transports.md#self-run).
-- `--present <link>` present a `swoosh:` capability link when reaching a gated peer you are not a member of.
 
 ## Commands
 
@@ -38,8 +37,8 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="ping"></a>[`swoosh ping`](commands/ping.md): measure round-trip time to a peer, addressed by key
 - <a id="speed"></a>[`swoosh speed`](commands/speed.md): measure throughput to a peer, addressed by key
 - <a id="status"></a>[`swoosh status`](commands/status.md): show this machine: its key, lock, root, devices, contacts, links and services
-- <a id="fetch"></a>[`swoosh fetch`](commands/fetch.md): mint a local URL that fetches an origin through a named node
-- <a id="reach"></a>[`swoosh reach`](commands/reach.md): reach any service a peer serves, on stdout or a local port
+- <a id="proxy"></a>[`swoosh proxy`](commands/proxy.md): get a local URL that reaches a site through a machine you name
+- <a id="forward"></a>[`swoosh forward`](commands/forward.md): forward a machine's service to a local port or stdout
 - <a id="send"></a>[`swoosh send`](commands/send.md): push a file or directory to a peer
 - <a id="sync"></a>[`swoosh sync`](commands/sync.md): bring your device list up to date with your other devices, both ways
 - <a id="contact"></a>[`swoosh contact`](commands/contact.md): save or remove another person's key under a name

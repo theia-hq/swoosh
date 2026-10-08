@@ -60,15 +60,15 @@ Receive pushed files into a directory.
   directory that holds it, and a directory inside it.
 - Limits: [transfer](https://github.com/theia-hq/services/blob/main/crates/transfer/README.md).
 
-### `fetch:<origin>`
+### `proxy:<url>`
 
-The node performs an HTTP `GET`/`HEAD` for the caller and streams the origin response back.
+The machine makes an HTTP `GET`/`HEAD` to the site for the caller and streams the response back.
 
-- Posture: family-gated. `--public news` is allowed only when the fetch is origin-scoped; an
-  unconstrained public fetch is refused at startup as an open relay. A bare `fetch:` (any public origin)
-  is fine gated.
-- Example: `swoosh serve news=fetch:https://news.example`
-- Limits: [fetch](https://github.com/theia-hq/services/blob/main/crates/fetch/README.md).
+- Posture: family-gated. `swoosh serve proxy:<url>` serves it as `proxy`; `<name>=proxy:<url>` names another.
+  It reaches only the site its URL names, and `--public <name>` opens it to anyone, for that site only. A proxy
+  is always served with its URL.
+- Example: `swoosh serve news=proxy:https://news.example`
+- Limits: [the proxy engine](https://github.com/theia-hq/services/blob/main/crates/fetch/README.md).
 
 ### `tcp:<host>:<port>` and `unix:<path>`
 
@@ -147,8 +147,8 @@ that uses tightbeam:
 Every service row links the doc that owns its sharp edges. The engine limits live in the
 [services repo](https://github.com/theia-hq/services); the raw-stream and forward rules live in the
 [tightbeam README](https://github.com/theia-hq/tightbeam#what-a-forward-carries). On the command side:
-[serve](commands/serve.md) for the flags, and [send](commands/send.md), [fetch](commands/fetch.md),
-[ssh](commands/ssh.md), [reach](commands/reach.md), [service](commands/service.md),
+[serve](commands/serve.md) for the flags, and [send](commands/send.md), [proxy](commands/proxy.md),
+[ssh](commands/ssh.md), [forward](commands/forward.md), [service](commands/service.md),
 [stop](commands/stop.md), and [sync](commands/sync.md) for the client verbs. The gate itself is
 [Keys](../keys.md#the-gate). An open `ping` or `speed` is metered by the engine, per
 [Public service](../use-cases/public-service.md#the-limit).

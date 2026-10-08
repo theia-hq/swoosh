@@ -43,10 +43,10 @@ tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "f82341f17e11
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec" }
-measure = { git = "https://github.com/theia-hq/services", rev = "08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "08a9e5c8a741bcb24e8dbcc9f7894fbccdf541ec" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "dda3977ec08a86b4c8382026260a882cc225d5e1" }
+measure = { git = "https://github.com/theia-hq/services", rev = "dda3977ec08a86b4c8382026260a882cc225d5e1" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "dda3977ec08a86b4c8382026260a882cc225d5e1", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "dda3977ec08a86b4c8382026260a882cc225d5e1" }
 
 # The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
 # sending it.
@@ -65,6 +65,10 @@ tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net",
 toml = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# A `proxy:<url>` is read as a URL once, at the serve entry, so a path or query is refused there rather
+# than stored and shown beside a scope that ignores it; `swoosh proxy` compares origins with the same
+# parser. Already in the tree through `fetch` and bifrost.
+url = "2"
 zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
@@ -79,10 +83,6 @@ bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "5ae6634dd835
 # `test-util` gives the control-client deadline test tokio's paused clock, so the 5 s read bound is
 # asserted without a wall-clock wait. Dev-only: the shipped binary never compiles it in.
 tokio = { version = "1", features = ["test-util"] }
-
-# A relay is named by its URL (`bifrost::Relay` is made from a `url::Url`), so a test builds the relayed path
-# a transport reports. Already in the tree through bifrost; dev-only.
-url = "2"
 
 [lints.clippy]
 unwrap_used = "deny"

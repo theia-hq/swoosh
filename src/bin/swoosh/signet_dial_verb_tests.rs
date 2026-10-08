@@ -51,15 +51,13 @@ fn shown(link: &nauthy::Link) -> String {
 #[derive(Parser)]
 struct ForwardWrap {
     #[command(flatten)]
-    args: forward::ForwardArgs,
+    cmd: forward::ForwardCmd,
 }
 
 fn forward_to_peer(peer: &str) -> forward::ForwardCmd {
     ForwardWrap::try_parse_from(["forward", peer, "ssh", "-"])
         .expect("the verb parses with a peer, a service and a local end")
-        .args
-        .local_end()
-        .expect("the local end is named")
+        .cmd
 }
 
 /// Clap-parse a `ping` verb whose PEER is the given string (a raw key, a petname, or a `swoosh:` link): a

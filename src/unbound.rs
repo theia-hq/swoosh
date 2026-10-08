@@ -32,7 +32,7 @@
 pub struct Unbound {
     /// The wire name the verb dials when the user names no service.
     name: &'static str,
-    /// The `name=target` entry a peer's `swoosh serve` must carry to bind that name.
+    /// The entry a peer's `swoosh serve` must carry to bind that name, in its shortest form.
     entry: &'static str,
 }
 
@@ -53,11 +53,11 @@ impl Unbound {
     };
     /// `swoosh proxy`'s default: the exit node serves a `proxy:` relay. The entry names a URL for the
     /// same reason [`RECV`](Self::RECV) names a dir: an unscoped proxy is an egress relay under the peer's
-    /// own IP, so the scoped spelling is the one a refusal should teach. Spelled `name=target` like every
-    /// row, though `serve proxy:<url>` names itself `proxy` too.
+    /// own IP, so the scoped spelling is the one a refusal should teach. A bare `proxy:<url>` names itself
+    /// `proxy`, so the entry needs no `name=`.
     pub const PROXY: Self = Self {
         name: "proxy",
-        entry: "proxy=proxy:<url>",
+        entry: "proxy:<url>",
     };
 
     /// The wire name the verb dials when the user names no service.
@@ -65,7 +65,7 @@ impl Unbound {
         self.name
     }
 
-    /// The `name=target` entry a peer's `swoosh serve` must carry to bind [`name`](Self::name).
+    /// The entry a peer's `swoosh serve` must carry to bind [`name`](Self::name).
     pub const fn entry(&self) -> &'static str {
         self.entry
     }

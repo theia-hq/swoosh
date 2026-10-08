@@ -2696,25 +2696,98 @@ fn a_bare_proxy_url_names_itself_proxy() {
     );
 }
 
-/// A proxy is always served with what it reaches: `serve proxy` and `serve proxy:` name no origin, and an
-/// empty origin is an open egress relay under this machine's address. Each is a usage error (exit 2) that
-/// names the form to type, refused at parse, before anything binds.
+/// A proxy is always served with what it reaches, named or not: `serve proxy`, `serve proxy:` and
+/// `serve files=proxy:` name no origin, and an empty origin is an open egress relay under this machine's
+/// address. Each is a usage error (exit 2) that names the form to type, with the name typed, refused at
+/// parse, before anything binds.
 ///
-/// Bind it with an empty origin instead (`proxy` read as `proxy=proxy:`) and the parse succeeds: the node
-/// would serve an unconstrained relay nobody asked for.
+/// Bind it with an empty origin instead (`proxy` read as `proxy=proxy:`, or a named one let through) and
+/// the parse succeeds: the node would serve an unconstrained relay nobody asked for.
 #[test]
 fn serve_proxy_without_a_target_is_a_usage_error() {
-    for entry in ["proxy", "Proxy", "proxy:"] {
+    for (entry, form) in [
+        ("proxy", "proxy:<url>"),
+        ("Proxy", "proxy:<url>"),
+        ("proxy:", "proxy:<url>"),
+        ("proxy=proxy:", "proxy:<url>"),
+        ("files=proxy:", "files=proxy:<url>"),
+        ("Files=proxy:", "files=proxy:<url>"),
+    ] {
         let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
             .expect_err("a proxy with nothing to reach refuses");
         assert_eq!(error.exit_code(), 2, "`serve {entry}` is a usage error");
         assert!(
-            error
-                .to_string()
-                .contains("proxy needs what it reaches: swoosh serve proxy:<url>"),
+            error.to_string().contains(&format!(
+                "proxy needs what it reaches: swoosh serve {form}\n"
+            )),
             "`serve {entry}` names the form to type: {error}"
         );
     }
+}
+
+/// A proxy's URL is an origin only. The engine admits every path and query on the origin it is given, so
+/// a path would promise one file and serve the whole site, and a query (a signed link) would be stored and
+/// printed for nothing. A usage error (exit 2) that names the origin to type instead, with the name typed.
+///
+/// Read the whole URL as the scope instead and each parses, to a service wider than its line says.
+#[test]
+fn a_proxy_url_with_a_path_or_query_is_a_usage_error() {
+    for (entry, form) in [
+        (
+            "proxy:https://cdn.example/releases/v1.iso",
+            "proxy:https://cdn.example",
+        ),
+        (
+            "dl=proxy:https://cdn.example/v1.iso?X-Amz-Signature=abc",
+            "dl=proxy:https://cdn.example",
+        ),
+        (
+            "dl=proxy:https://cdn.example/?a=b",
+            "dl=proxy:https://cdn.example",
+        ),
+        (
+            "dl=proxy:https://cdn.example/#top",
+            "dl=proxy:https://cdn.example",
+        ),
+        (
+            "dl=proxy:http://cdn.example:8080/x",
+            "dl=proxy:http://cdn.example:8080",
+        ),
+    ] {
+        let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
+            .expect_err("a proxy URL with a path or a query refuses");
+        assert_eq!(error.exit_code(), 2, "`serve {entry}` is a usage error");
+        assert!(
+            error.to_string().contains(&format!(
+                "a proxy reaches a whole site, so its URL takes no path or query: swoosh serve {form}\n"
+            )),
+            "`serve {entry}` names the origin to type: {error}"
+        );
+    }
+
+    // The origin, with or without its trailing slash, is the form that serves.
+    for entry in ["proxy:https://cdn.example", "dl=proxy:https://cdn.example/"] {
+        assert!(
+            <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry]).is_ok(),
+            "`serve {entry}` names an origin"
+        );
+    }
+}
+
+/// A proxy URL with a user or password is refused in swoosh's words: the engine's own line names the
+/// engine, a word no person types.
+#[test]
+fn a_proxy_origin_with_userinfo_never_names_the_engine() {
+    let mut requested = vec!["name=proxy:https://u:p@host.example".to_owned()];
+    let Err(error) = ProxyScope::extract(&mut requested) else {
+        panic!("a proxy URL with a user and password is refused");
+    };
+    let line = format!("{error:#}");
+    assert_eq!(
+        line,
+        "a proxy URL cannot carry a user or password (user:pass@)"
+    );
+    assert!(!line.contains("fetch"), "{line}");
 }
 
 /// Two `name=proxy:<origin>` services de-merge into TWO separate `ProxyService`s, each with its own served
@@ -2878,16 +2951,17 @@ fn a_scoped_public_proxy_is_allowed() {
     );
 }
 
-/// A `name=proxy:` that is NOT named in `--public` stays legal: it is gated (the family gate terminates it),
-/// so an unconstrained allowlist is not an open relay. Only a PUBLIC unconstrained proxy is refused.
+/// The open-relay refusal reads the public set: an unconstrained proxy NOT named in `--public` passes it.
+/// A typed one never gets this far ([`serve_proxy_without_a_target_is_a_usage_error`]); this pins the
+/// refusal's own rule, for a set built some other way.
 #[test]
-fn a_gated_bare_proxy_is_allowed() {
+fn the_open_relay_refusal_reads_only_the_public_set() {
     let mut requested = vec!["api=proxy:".to_owned()];
     let proxy = ProxyScope::extract(&mut requested).expect("unconstrained proxy parses");
     // `api` is served but NOT public.
     assert!(
         proxy.refuse_open_relay(&[]).is_ok(),
-        "a gated (member-only) proxy is unchanged; the family gate terminates it"
+        "the refusal is about a public proxy; the gate stands in front of any other"
     );
 }
 

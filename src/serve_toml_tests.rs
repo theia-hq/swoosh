@@ -203,7 +203,7 @@ fn bare(scratch: &Scratch) -> crate::serve::Started {
 #[test]
 fn a_service_removed_from_serve_toml_refuses_new_streams() {
     let scratch = Scratch::new("removed");
-    list(&scratch, &["files=proxy:", "ping=ping:"]);
+    list(&scratch, &["files=recv:", "ping=ping:"]);
     let watcher = LiveServeToml::load(&scratch.home).expect("load");
     watcher.serving(&bare(&scratch));
     assert!(watcher.is_enabled(&service("files")), "served at the start");
@@ -225,7 +225,7 @@ fn a_service_removed_from_serve_toml_refuses_new_streams() {
     assert_eq!(watcher.refused(), ["files"], "the status reports it");
     assert!(watcher.waiting().is_empty(), "a removal waits for nothing");
 
-    list(&scratch, &["files=proxy:", "ping=ping:"]);
+    list(&scratch, &["files=recv:", "ping=ping:"]);
     past_the_debounce();
     assert!(
         watcher.is_enabled(&service("files")),
@@ -254,7 +254,7 @@ fn an_emptied_services_keeps_the_default_set() {
 #[test]
 fn a_services_entry_that_is_not_a_service_keeps_what_was_held() {
     let scratch = Scratch::new("not-a-service");
-    list(&scratch, &["files=proxy:"]);
+    list(&scratch, &["files=recv:"]);
     let watcher = LiveServeToml::load(&scratch.home).expect("load");
     watcher.serving(&bare(&scratch));
 
@@ -263,7 +263,7 @@ fn a_services_entry_that_is_not_a_service_keeps_what_was_held() {
     assert!(watcher.is_enabled(&service("files")), "still served");
     assert_eq!(
         watcher.held().services,
-        ["files=proxy:"],
+        ["files=recv:"],
         "the list held is kept"
     );
 }
@@ -282,8 +282,8 @@ fn the_runs_own_write_is_held_at_once() {
         "the stat is fresh"
     );
 
-    // `serve files=proxy:`: what it names, recorded once its routes bound, read straight after.
-    let started = crate::serve::Started::Named(vec!["files=proxy:".to_owned()]);
+    // `serve files=recv:`: what it names, recorded once its routes bound, read straight after.
+    let started = crate::serve::Started::Named(vec!["files=recv:".to_owned()]);
     ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
         started.record(file);
     })
@@ -311,7 +311,7 @@ fn what_a_running_serve_cannot_apply_is_named() {
         "the bound relay waits for nothing"
     );
 
-    list(&scratch, &["ping=ping:", "speed=speed:", "files=proxy:"]);
+    list(&scratch, &["ping=ping:", "speed=speed:", "files=recv:"]);
     ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
         file.relay = Some("https://other.example".parse().expect("a relay"));
     })

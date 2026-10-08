@@ -2,11 +2,19 @@
 //!
 //! A URL-minting reverse proxy: a downloader (xget, curl) pulls from the local listener; each request
 //! rides one bifrost stream to a cap-gated `proxy:` service on that machine; it performs the origin HTTP
-//! GET/HEAD and streams the response straight back, `Range` intact so a resumable download works. It stays
-//! scoped to the one origin you named (a reverse proxy for one origin, not an open VPN). The machine runs
-//! the services engine named `fetch`; that name is internal and never printed.
+//! GET/HEAD and streams the response straight back, `Range` intact so a resumable download works. The
+//! machine runs the services engine named `fetch`; that name is internal and never printed.
+//!
+//! The local URL carries this run's credential, so the listener answers only the URL it printed: the
+//! `Host` must be the listener's own address (a page that rebinds a name to loopback sends its own), the
+//! path must start with a random token (another account on this machine can find the port, never the
+//! token), and every request stays on the origin of the URL you named, whatever its target says. What
+//! comes back from the machine is checked before it reaches a local client, and the listener holds at most
+//! [`MAX_PIPES`] connections, each with [`HEAD_TIMEOUT`] to send its request.
 
-use core::net::Ipv4Addr;
+use core::future::Future;
+use core::net::{Ipv4Addr, SocketAddr};
+use core::time::Duration;
 
 use ::fetch::http::{FetchRequest, FetchResponse};
 use bifrost::{Discovery, Node, Session, Transport};
@@ -22,6 +30,8 @@ use swoosh::unbound::Unbound;
 use tightbeam::protocol::{Request, Response};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
+
+use crate::commands::connect::{ACCEPT_RETRY, MAX_PIPES, Machine, press_ctrl_c};
 
 /// Mint a local URL that reaches an origin through a machine you name (your own exit, over the overlay).
 #[derive(Debug, Args)]
@@ -97,6 +107,11 @@ impl swoosh::reaching::Reaching for ProxyCmd {
     }
 }
 
+/// How long a local client has to send its whole request head. A connection that sends nothing holds a
+/// descriptor and a slot under [`MAX_PIPES`]; this is what gives them back. The same span the engine at
+/// the far end allows an origin's answer.
+pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl ProxyCmd {
     /// Dial the exit node, bind a loopback listener, print the local URL, and serve each request over its
     /// own bifrost stream until Ctrl-C.
@@ -104,6 +119,9 @@ impl ProxyCmd {
     /// `present` is the ALREADY-RESOLVED badge from the composition root: the member badge rooted at the
     /// dialing key by default (so the owner reaching their OWN gated exit node admits), the link typed as
     /// the peer if the caller gave one. `proxy:` is family-gated, so every per-request stream presents it.
+    ///
+    /// The URL is the one thing on stdout, a made artifact a script reads as the first line; the lines for
+    /// the person ride stderr.
     async fn run_proxy<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -112,40 +130,20 @@ impl ProxyCmd {
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
-        let Reached { session, label } = reach::dial(node, contacts, &self.peer, bound).await?;
+        let Reached { session, .. } = reach::dial(node, contacts, &self.peer, bound).await?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
-        let addr = listener.local_addr()?;
-        println!("swoosh proxy ready. local URL:\n");
-        println!("    http://{addr}/\n");
-        println!(
-            "proxying {} through {label}. hand this URL to a downloader. ctrl-c to stop.",
-            self.url
+        let local = Local::new(listener.local_addr()?);
+        println!("{local}");
+        eprintln!(
+            "Proxying {} through {}.",
+            self.url,
+            Machine::of(contacts, session.peer())
         );
-
-        // Each request rides its own bifrost stream, served concurrently, so a downloader's parallel
-        // ranged GETs do not stall behind one slow transfer. A transient local accept error is logged
-        // and the listener keeps running (matching the tunnel siblings), never tearing down in-flight
-        // downloads.
-        let mut pipes = FuturesUnordered::new();
-        loop {
-            tokio::select! {
-                accepted = listener.accept() => {
-                    let (tcp, _) = match accepted {
-                        Ok(accepted) => accepted,
-                        Err(error) => {
-                            tracing::warn!(%error, "local accept failed; still listening");
-                            continue;
-                        }
-                    };
-                    pipes.push(self.serve(tcp, &session, present.as_ref(), membership.as_ref()));
-                }
-                Some(result) = pipes.next(), if !pipes.is_empty() => {
-                    if let Err(error) = result {
-                        tracing::warn!(%error, "proxy request ended");
-                    }
-                }
-            }
-        }
+        press_ctrl_c();
+        accept_each(listener, MAX_PIPES, |tcp| {
+            self.serve(tcp, &local, &session, present.as_ref(), membership.as_ref())
+        })
+        .await
     }
 
     /// Serve one inbound HTTP request. A failure BEFORE any response bytes are written serves a `502` so
@@ -154,13 +152,21 @@ impl ProxyCmd {
     async fn serve<S: Session>(
         &self,
         mut tcp: TcpStream,
+        local: &Local,
         session: &S,
         present: Option<&Link>,
         membership: Option<&Link>,
     ) -> eyre::Result<()> {
         let mut responded = false;
         if let Err(error) = self
-            .relay(&mut tcp, session, present, membership, &mut responded)
+            .relay(
+                &mut tcp,
+                local,
+                session,
+                present,
+                membership,
+                &mut responded,
+            )
             .await
         {
             if !responded {
@@ -181,21 +187,32 @@ impl ProxyCmd {
 
     /// Relay one request to the `proxy:` service and stream the response back, setting `responded` the
     /// moment any HTTP response has begun (so the caller knows a `502` is no longer safe to send).
+    ///
+    /// The local checks ([`Local::admit`]) run before the stream opens, so a request this run did not
+    /// print the URL for never reaches the machine or carries the credential.
     async fn relay<S: Session>(
         &self,
         tcp: &mut TcpStream,
+        local: &Local,
         session: &S,
         present: Option<&Link>,
         membership: Option<&Link>,
         responded: &mut bool,
     ) -> eyre::Result<()> {
-        let head = read_head(tcp).await?;
+        let head = tokio::time::timeout(HEAD_TIMEOUT, read_head(tcp))
+            .await
+            .map_err(|_| eyre::eyre!("no request within {HEAD_TIMEOUT:?}"))??;
+        let parsed = parse_request(&head)?;
+        let origin = match local.admit(&parsed, &self.url) {
+            Ok(origin) => origin?,
+            Err(refused) => {
+                *responded = true;
+                return respond_error(tcp, refused.status(), refused.body()).await;
+            }
+        };
         let Parsed {
-            method,
-            target,
-            headers,
-        } = parse_request(&head)?;
-        let origin = origin_url(&self.url, &target)?;
+            method, headers, ..
+        } = parsed;
 
         let (mut writer, mut reader) = session.open_bi().await?;
         // The checked writer (the same rule the library's `Connector` applies): a credential-bearing
@@ -258,8 +275,11 @@ impl ProxyCmd {
         .await?;
         match FetchResponse::read(&mut reader).await? {
             FetchResponse::Ok { status, headers } => {
+                // Checked before a byte of it is written, so a head the machine sent malformed is a
+                // `502` from the fallback rather than lines injected into the local response.
+                let head = Head::checked(status, headers)?;
                 *responded = true;
-                write_response_head(tcp, status, &headers).await?;
+                head.write(tcp).await?;
                 // The body follows on the same stream; stream it to the client until the node closes.
                 tokio::io::copy(&mut reader, tcp).await?;
                 tcp.shutdown().await?;
@@ -289,23 +309,186 @@ impl ProxyCmd {
     }
 }
 
-/// The origin URL for one request: the base as given for a root request (`/`), else the inbound path and
-/// query resolved against the base, so a download hits the exact file the base names and an API proxy
-/// forwards the path.
+/// Accept each local connection and hand it to `serve`, all served concurrently, until the process ends.
+///
+/// Each request rides its own bifrost stream, so a downloader's parallel ranged GETs do not stall behind
+/// one slow transfer. At most `cap` are held at once ([`MAX_PIPES`] in a run; past it, new connections
+/// wait in the kernel's backlog), and a failed accept pauses for [`ACCEPT_RETRY`] rather than spinning, the same
+/// bounds `forward` keeps. One failed accept or request never tears down the ones in flight.
+async fn accept_each<F, Fut>(listener: TcpListener, cap: usize, mut serve: F) -> eyre::Result<()>
+where
+    F: FnMut(TcpStream) -> Fut,
+    Fut: Future<Output = eyre::Result<()>>,
+{
+    let mut pipes = FuturesUnordered::new();
+    // Set after a failed accept: accepting resumes once `retry` fires.
+    let retry = tokio::time::sleep(Duration::ZERO);
+    tokio::pin!(retry);
+    let mut paused = false;
+    loop {
+        tokio::select! {
+            () = &mut retry, if paused => paused = false,
+            // Accept only below the cap: a connection waiting for its head holds a descriptor.
+            accepted = listener.accept(), if !paused && pipes.len() < cap => match accepted {
+                Ok((tcp, _)) => pipes.push(serve(tcp)),
+                Err(error) => {
+                    tracing::warn!(%error, "local accept failed; still listening");
+                    retry.as_mut().reset(tokio::time::Instant::now() + ACCEPT_RETRY);
+                    paused = true;
+                }
+            },
+            Some(result) = pipes.next(), if !pipes.is_empty() => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "proxy request ended");
+                }
+            }
+        }
+    }
+}
+
+/// The loopback listener this run printed, and the only requests it answers: those sent to its own
+/// address, under its own random path token.
+struct Local {
+    /// The listener's address, which a request's `Host` must name.
+    addr: SocketAddr,
+    /// The first path segment of every request this run answers: 128 random bits, printed only in the URL.
+    token: String,
+}
+
+impl Local {
+    /// The listener at `addr`, with a fresh token.
+    fn new(addr: SocketAddr) -> Self {
+        Self {
+            addr,
+            token: data_encoding::HEXLOWER.encode(&rand::random::<[u8; 16]>()),
+        }
+    }
+
+    /// The origin URL one request asks for, or the reason this listener refuses it. The outer `Result` is
+    /// a local refusal, served before anything is dialed; the inner one is a URL that does not compose.
+    ///
+    /// In order: the `Host` must be this listener's address, so a page that rebinds its own name to
+    /// loopback is refused; the target must be one this listener answers ([`rest`](Self::rest)); and the
+    /// composed URL must still be on the base's origin, whatever else the target holds (a `\` the URL
+    /// grammar reads as `/`, say).
+    fn admit(&self, request: &Parsed, base: &str) -> Result<eyre::Result<String>, Refused> {
+        let mut hosts = request
+            .headers
+            .iter()
+            .filter(|(name, _)| name.eq_ignore_ascii_case("host"));
+        let host = hosts.next().map(|(_, value)| value.as_str());
+        if host != Some(self.addr.to_string().as_str()) || hosts.next().is_some() {
+            return Err(Refused::Host);
+        }
+        let rest = self.rest(&request.target)?;
+        let url = match origin_url(base, rest) {
+            Ok(url) => url,
+            Err(error) => return Ok(Err(error)),
+        };
+        // A root request is the base itself, on its own origin by definition.
+        if url != base && !same_origin(base, &url) {
+            return Err(Refused::Target);
+        }
+        Ok(Ok(url))
+    }
+
+    /// What follows the token in a target this listener answers. It must be origin-form (`/…`), so an
+    /// absolute-form target (`http://elsewhere/`) cannot name another site; it must start with the token;
+    /// and what follows the token must not start `//`, which a URL join reads as a new host.
+    fn rest<'t>(&self, target: &'t str) -> Result<&'t str, Refused> {
+        if !target.starts_with('/') {
+            return Err(Refused::Target);
+        }
+        let Some(rest) = self.after_token(target) else {
+            return Err(Refused::Token);
+        };
+        if rest.starts_with("//") {
+            return Err(Refused::Target);
+        }
+        Ok(rest)
+    }
+
+    /// What follows `/<token>` in `target`, when the token is the whole first segment: empty, or starting
+    /// with `/` or `?`. Compared without an early exit, so a local process timing its guesses learns
+    /// nothing of the token from how long a wrong one took.
+    fn after_token<'t>(&self, target: &'t str) -> Option<&'t str> {
+        let segment = target.get(1..=self.token.len())?;
+        let rest = target.get(self.token.len() + 1..)?;
+        let differs = segment
+            .bytes()
+            .zip(self.token.bytes())
+            .fold(0_u8, |acc, (left, right)| acc | (left ^ right));
+        let ends = rest.is_empty() || rest.starts_with('/') || rest.starts_with('?');
+        (differs == 0 && ends).then_some(rest)
+    }
+}
+
+impl core::fmt::Display for Local {
+    /// The local URL, as printed: `http://127.0.0.1:<port>/<token>/`.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "http://{}/{}/", self.addr, self.token)
+    }
+}
+
+/// Whether `url` is on `base`'s origin (scheme, host and port). Read by the same URL parser the join
+/// used, so the check and the request cannot disagree on the host; a URL that does not parse, or an
+/// opaque origin, is never the same.
+fn same_origin(base: &str, url: &str) -> bool {
+    match (url::Url::parse(base), url::Url::parse(url)) {
+        (Ok(base), Ok(url)) => {
+            let origin = base.origin();
+            origin.is_tuple() && origin == url.origin()
+        }
+        _ => false,
+    }
+}
+
+/// A request the local listener refuses before anything is dialed. Its body names no part of the
+/// request and nothing of this run, so a refused page learns only that it was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refused {
+    /// The `Host` is not this listener's address, or there is more than one.
+    Host,
+    /// The path does not start with this run's token.
+    Token,
+    /// The target is not origin-form, or would leave the origin of the URL this run was given.
+    Target,
+}
+
+impl Refused {
+    /// The status a downloader reads.
+    fn status(self) -> Status {
+        match self {
+            Refused::Host | Refused::Target => Status::BadRequest,
+            Refused::Token => Status::NotFound,
+        }
+    }
+
+    /// The body a downloader reads.
+    fn body(self) -> &'static str {
+        match self {
+            Refused::Host | Refused::Token => "use the URL swoosh proxy printed",
+            Refused::Target => "a request through this URL stays on the site it names",
+        }
+    }
+}
+
+/// The origin URL for one request, from what follows the token: the base as given for a root request
+/// (empty, or `/`), else that path and query resolved against the base, so a download hits the exact file
+/// the base names and an API proxy forwards the path.
 ///
 /// Delegates the composition to [`::fetch::compose_url`], which PARSES the base and joins the target as a URL
 /// rather than string-concatenating: joining merges the two paths per the URL grammar, so a base with a
 /// trailing slash and a target with a leading one (`https://x/` + `/a`) yield `https://x/a`, not the
-/// `https://x//a` a raw `format!` produces. A root request (`/`, or empty) keeps the base VERBATIM: the base
-/// already names the exact resource (the download case), and joining `/` would discard any path the base
-/// carries.
+/// `https://x//a` a raw `format!` produces. A root request keeps the base VERBATIM: the base already names
+/// the exact resource (the download case), and joining `/` would discard any path the base carries.
 fn origin_url(base: &str, target: &str) -> eyre::Result<String> {
     if target == "/" || target.is_empty() {
         return Ok(base.to_owned());
     }
     ::fetch::compose_url(base, target).map_err(|error| match error {
         // The engine's own line names the engine; this one names what a person typed.
-        ::fetch::ComposeError::Base(source) => eyre::eyre!("invalid proxy url: {source}"),
+        ::fetch::ComposeError::Base(source) => eyre::eyre!("invalid proxy URL: {source}"),
         target @ ::fetch::ComposeError::Target { .. } => eyre::eyre!(target),
     })
 }
@@ -370,36 +553,85 @@ fn parse_request(head: &[u8]) -> eyre::Result<Parsed> {
     })
 }
 
-/// Write the response status line and headers to the client, forwarding the origin's headers verbatim
-/// except the framing ones we set ourselves (`Connection: close`, so the client reads the body to EOF).
-async fn write_response_head(
-    tcp: &mut TcpStream,
+/// A response head from the machine, checked so it can be written to a local client as it is: a final
+/// status, and header lines that are each one line. The machine at the far end writes these fields, and a
+/// hostile one could put a line break in a value to split the response or re-add the framing headers this
+/// proxy sets itself.
+#[derive(Debug)]
+struct Head {
     status: u16,
-    headers: &[(String, String)],
-) -> eyre::Result<()> {
-    let mut head = format!("HTTP/1.1 {status} {}\r\n", reason(status));
-    for (name, value) in headers {
-        let lower = name.to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "connection" | "transfer-encoding" | "keep-alive"
-        ) {
-            continue;
+    headers: Vec<(String, String)>,
+}
+
+impl Head {
+    /// Check a head as it came off the wire. A status outside `200..=599` is refused (an informational
+    /// one has no place on a closed response), and so is a header whose name is not an HTTP token or
+    /// whose value holds a CR, an LF or a NUL. The framing headers this proxy sets itself are dropped.
+    fn checked(status: u16, headers: Vec<(String, String)>) -> Result<Self, BadHead> {
+        if !(200..=599).contains(&status) {
+            return Err(BadHead::Status(status));
         }
-        head.push_str(&format!("{name}: {value}\r\n"));
+        let mut kept = Vec::with_capacity(headers.len());
+        for (name, value) in headers {
+            let token = !name.is_empty() && name.bytes().all(is_tchar);
+            if !token || value.bytes().any(|byte| matches!(byte, b'\r' | b'\n' | 0)) {
+                return Err(BadHead::Header);
+            }
+            if matches!(
+                name.to_ascii_lowercase().as_str(),
+                "connection" | "transfer-encoding" | "keep-alive"
+            ) {
+                continue;
+            }
+            kept.push((name, value));
+        }
+        Ok(Self {
+            status,
+            headers: kept,
+        })
     }
-    head.push_str("Connection: close\r\n\r\n");
-    tcp.write_all(head.as_bytes()).await?;
-    Ok(())
+
+    /// Write the status line and headers to the client, then `Connection: close`, so the client reads the
+    /// body to EOF.
+    async fn write(&self, tcp: &mut TcpStream) -> eyre::Result<()> {
+        let mut head = format!("HTTP/1.1 {} {}\r\n", self.status, reason(self.status));
+        for (name, value) in &self.headers {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+        head.push_str("Connection: close\r\n\r\n");
+        tcp.write_all(head.as_bytes()).await?;
+        Ok(())
+    }
+}
+
+/// Whether `byte` may appear in an HTTP header name (RFC 9110 `tchar`).
+fn is_tchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// A response head from the machine this proxy will not pass on.
+#[derive(Debug, thiserror::Error)]
+enum BadHead {
+    /// A status that is not a final one.
+    #[error("the machine answered with an invalid status {0}")]
+    Status(u16),
+    /// A header name that is not a token, or a value with a line break or a NUL.
+    #[error("the machine answered with an invalid header")]
+    Header,
 }
 
 /// An error status a `proxy` serves, chosen so a downloader can tell the failure apart by status
-/// alone: a dial the exit node did not admit is authorization (`403`), a node that could not serve the
-/// request or a bad upstream is a gateway failure (`502`).
-#[derive(Debug, Clone, Copy)]
+/// alone: a request this listener refuses is the client's (`400`, or `404` without the token), a dial the
+/// exit node did not admit is authorization (`403`), a node that could not serve the request or a bad
+/// upstream is a gateway failure (`502`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
+    /// The request is not one this listener answers: the wrong `Host`, or a target that leaves the origin.
+    BadRequest,
     /// The exit node did not admit YOU: an authorization failure, not a bad gateway.
     Forbidden,
+    /// The path does not carry this run's token.
+    NotFound,
     /// The node could not serve the request, the origin failed, or the node's refusal is one this build
     /// cannot read: a gateway failure, and never a claim about the caller's authority.
     BadGateway,
@@ -409,7 +641,9 @@ impl Status {
     /// The status line pieces (`code`, `reason`) for this error status.
     fn parts(self) -> (u16, &'static str) {
         match self {
+            Status::BadRequest => (400, "Bad Request"),
             Status::Forbidden => (403, "Forbidden"),
+            Status::NotFound => (404, "Not Found"),
             Status::BadGateway => (502, "Bad Gateway"),
         }
     }
@@ -447,222 +681,5 @@ fn reason(status: u16) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use core::time::Duration;
-
-    use bifrost::{Announced, Session};
-    use clap::Parser as _;
-    use swoosh::credential::Credential;
-    use swoosh::reaching::{BindRole, Reaching as _};
-    use swoosh::testkit::TestNode;
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio::net::{TcpListener, TcpStream};
-
-    use super::{ProxyCmd, origin_url};
-
-    #[test]
-    fn root_request_uses_the_base_verbatim() {
-        assert_eq!(
-            origin_url("https://example.com/big.iso", "/").unwrap(),
-            "https://example.com/big.iso"
-        );
-    }
-
-    #[test]
-    fn a_path_and_query_resolve_against_the_base() {
-        assert_eq!(
-            origin_url("https://api.example.com", "/users?id=5").unwrap(),
-            "https://api.example.com/users?id=5"
-        );
-    }
-
-    /// A base with a trailing slash and a target with a leading one compose to ONE slash, not two: the join
-    /// merges the paths per the URL grammar, so `https://api.example.com/` + `/users` is
-    /// `https://api.example.com/users`, never the `https://api.example.com//users` a raw `format!` yields.
-    #[test]
-    fn a_trailing_slash_base_and_leading_slash_target_do_not_double_the_slash() {
-        assert_eq!(
-            origin_url("https://api.example.com/", "/users").unwrap(),
-            "https://api.example.com/users"
-        );
-    }
-
-    /// A base that is not a URL refuses in swoosh's words: the engine's own line names the engine, a word
-    /// no person types, so it never reaches the downloader's error body.
-    #[test]
-    fn a_base_that_is_not_a_url_never_names_the_engine() {
-        let error = origin_url("not a url", "/x").expect_err("a bad base refuses");
-        let line = format!("{error:#}");
-        assert!(line.starts_with("invalid proxy url: "), "{line}");
-        assert!(!line.contains("fetch"), "{line}");
-    }
-
-    /// A thin clap wrapper so a test can parse a `ProxyCmd` from a real argv the same way the binary does.
-    #[derive(clap::Parser)]
-    struct Wrap {
-        #[command(flatten)]
-        proxy: ProxyCmd,
-    }
-
-    /// `swoosh proxy <peer> <url>` is FAMILY-gated by default: it dials carrying the `Family` credential,
-    /// so the owner reaching their OWN exit node presents the member badge (the fix for the
-    /// owner-reaching-own-node 403). Before this redesign the verb was slip-only and an owner with no slip
-    /// was refused. The identity derived from `Family` is `PersistedIfPresent`, so the self-badge roots
-    /// correctly.
-    #[test]
-    fn proxy_is_family_gated_by_default_so_it_presents_a_badge() {
-        let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-        let cmd = Wrap::try_parse_from(["swoosh", &key, "http://example.com/x"])
-            .expect("proxy parses")
-            .proxy;
-        assert!(
-            matches!(
-                cmd.bind_role(),
-                BindRole::Dialing(Credential::Family { present: None })
-            ),
-            "proxy to a key dials presenting the member badge"
-        );
-        assert_eq!(
-            cmd.identity(),
-            swoosh::identity::Identity::PersistedIfPresent,
-            "a Family credential fuses the identity to PersistedIfPresent so the self-badge roots"
-        );
-    }
-
-    /// A session declaring the announced profile: enough for `relay` to reach the request write, which
-    /// must refuse before any byte reaches the far half.
-    struct AnnouncedSession;
-
-    impl Session for AnnouncedSession {
-        type Security = Announced;
-        type Write = tokio::io::WriteHalf<tokio::io::DuplexStream>;
-        type Read = tokio::io::ReadHalf<tokio::io::DuplexStream>;
-
-        fn peer(&self) -> bifrost::NodeId {
-            bifrost::NodeId::from_ed25519_secret(&[0u8; 32])
-        }
-
-        async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
-            let (near, _far) = tokio::io::duplex(1024);
-            let (read, write) = tokio::io::split(near);
-            Ok((write, read))
-        }
-
-        async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
-            Err(bifrost::Error::Closed)
-        }
-
-        async fn wait_closed(&self) {}
-
-        /// A double that carries nothing has nothing to end.
-        fn close(&self) {}
-
-        /// No transport under it, so no path, once.
-        fn path_changes(&self) -> bifrost::PathChanges {
-            bifrost::PathChanges::fixed(bifrost::Path::Unknown)
-        }
-    }
-
-    /// The line the DOWNLOADER reads. A `proxy` request that fails serves an HTTP error body, and
-    /// that body is where this verb's refusal is actually read, so that is where the `serve` line the
-    /// exit node would need has to land. Driven through the same announced-session refusal as the
-    /// test below: this failure never reached the exit node at all and still carries the line, which
-    /// is the property being held. The line is owed to the name this client SENT, never to an answer,
-    /// so it can never report which refusal came back.
-    #[tokio::test]
-    async fn a_failed_request_names_the_serve_line_for_the_defaulted_service() {
-        let defaulted = failure_body(&[]).await;
-        assert!(
-            defaulted.contains("swoosh serve proxy=proxy:<url>"),
-            "the defaulted service names the line that would bind it: {defaulted}"
-        );
-
-        // A service the operator NAMED is theirs; the client has nothing to teach about it and adds
-        // nothing.
-        let named = failure_body(&["--service", "news"]).await;
-        assert!(
-            !named.contains("swoosh serve"),
-            "a named service gets no serve line appended: {named}"
-        );
-    }
-
-    /// Drive one inbound request through `serve` over a session that refuses the credential write, and
-    /// return the whole HTTP response the local downloader reads. `extra` is appended to the verb's
-    /// argv, so a case can name its own `--service`.
-    async fn failure_body(extra: &[&str]) -> String {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut client = TcpStream::connect(addr).await.unwrap();
-        let (server, _) = listener.accept().await.unwrap();
-        client
-            .write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
-            .await
-            .unwrap();
-
-        let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-        let mut argv = vec!["swoosh", &key, "http://example.com/x"];
-        argv.extend_from_slice(extra);
-        let cmd = Wrap::try_parse_from(argv).expect("proxy parses").proxy;
-        let node = TestNode::seeded(7);
-        let link = node
-            .member_badge(
-                node.verify_key(),
-                nauthy::Request::expires_in(Duration::from_secs(3600)),
-            )
-            .unwrap()
-            .link()
-            .unwrap();
-        assert!(
-            cmd.serve(server, &AnnouncedSession, Some(&link), None)
-                .await
-                .is_err(),
-            "the relay refuses the credential write"
-        );
-
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).await.unwrap();
-        String::from_utf8_lossy(&response).into_owned()
-    }
-
-    /// The proxy path bypasses `Connector`, so it carries the checked writer itself: presenting a
-    /// credential over an announced session refuses before any byte, and the local URL serves its 502
-    /// with the teaching cause instead of quietly shipping the credential to whoever answered.
-    #[tokio::test]
-    async fn proxy_refuses_to_present_a_credential_over_an_announced_session() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut client = TcpStream::connect(addr).await.unwrap();
-        let (server, _) = listener.accept().await.unwrap();
-        client
-            .write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
-            .await
-            .unwrap();
-
-        let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-        let cmd = Wrap::try_parse_from(["swoosh", &key, "http://example.com/x"])
-            .expect("proxy parses")
-            .proxy;
-        let node = TestNode::seeded(7);
-        let link = node
-            .member_badge(
-                node.verify_key(),
-                nauthy::Request::expires_in(Duration::from_secs(3600)),
-            )
-            .unwrap()
-            .link()
-            .unwrap();
-
-        assert!(
-            cmd.serve(server, &AnnouncedSession, Some(&link), None)
-                .await
-                .is_err(),
-            "the relay refuses the credential write"
-        );
-
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).await.unwrap();
-        let text = String::from_utf8_lossy(&response);
-        assert!(text.starts_with("HTTP/1.1 502 Bad Gateway"), "{text}");
-        assert!(text.contains("does not prove the peer"), "{text}");
-    }
-}
+#[path = "proxy_tests.rs"]
+mod tests;

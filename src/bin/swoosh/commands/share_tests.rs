@@ -859,7 +859,7 @@ async fn an_anyone_link_to_an_engine_never_open_to_anyone_is_refused() {
         &home,
         &[
             "inbox=recv:",
-            "web=proxy:",
+            "web=recv:/srv/web",
             "news=proxy:https://news.example",
             "db=tcp:localhost:5432",
             "demo=echo:",

@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 
 use bifrost::{Discovery, Node, Transport};
-use clap::{CommandFactory, FromArgMatches as _, Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::home::Home;
 use swoosh::identity::Identity;
@@ -98,8 +98,8 @@ enum Command {
     ///
     /// `status <machine>` shows how you reach one.
     Status(status::StatusCmd),
-    /// Forward a machine's service to a local port, a unix socket, or stdout.
-    Forward(forward::ForwardArgs),
+    /// Forward a machine's service to a local port or stdout
+    Forward(forward::ForwardCmd),
     /// Mint a local URL that reaches an origin through a machine you name.
     Proxy(proxy::ProxyCmd),
     /// Push a file or directory to a peer.
@@ -274,15 +274,7 @@ impl Command {
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Share(cmd) => Verb::Share(cmd),
-            // A `forward` with no local end is refused here, before anything is opened or bound: the
-            // line names what was typed, which clap's own required-argument error cannot.
-            Self::Forward(args) => match args.local_end() {
-                Ok(cmd) => Verb::Outward(Outward::Forward(cmd)),
-                Err(missing) => Verb::Usage {
-                    path: &["forward"],
-                    message: missing.to_string(),
-                },
-            },
+            Self::Forward(cmd) => Verb::Outward(Outward::Forward(cmd)),
             Self::Send(cmd) => Verb::Outward(Outward::Send(cmd)),
             Self::Sync(cmd) => Verb::Outward(Outward::Sync(cmd)),
             // `stop --at <peer>` reaches a peer's `control.stop`; a bare `stop` stops YOUR OWN node over
@@ -363,14 +355,6 @@ enum Verb {
     Share(share::ShareCmd),
     /// Reaches a peer; binds a transport.
     Outward(Outward),
-    /// A command line found incomplete only once parsed (a `forward` with no local end): exits 2 with its
-    /// usage line, as clap's own errors do, before the home is resolved.
-    Usage {
-        /// The command it is the usage of (`["forward"]`).
-        path: &'static [&'static str],
-        /// The refusal, naming what was typed.
-        message: String,
-    },
 }
 
 impl Outward {
@@ -492,25 +476,27 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-/// Parse `argv`. A `forward` missing only its local end parses anyway, with none, so its refusal can name the
-/// machine and the service typed ([`forward::NoLocalEnd`]), which clap's own required-argument line cannot;
-/// the local end stays required in the model `--help` renders. Every other error is clap's own.
+/// Parse `argv`. A `forward` missing only its local end is refused with [`forward::NO_LOCAL_END`], which says
+/// what `-` means where clap's own required-argument line shows only the metavar. Every other error is
+/// clap's own. Refused here, at parse, so nothing is read, opened or bound first, the home included.
 fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
 where
     I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
+    T: Into<std::ffi::OsString>,
 {
     let argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
     match Cli::try_parse_from(&argv) {
         Err(error) if error.kind() == clap::error::ErrorKind::MissingRequiredArgument => {
+            // The model again with only `forward`'s local end optional: a line it accepts was missing that
+            // slot and nothing else. A line it refuses too was missing something else, and clap's own
+            // error stands.
             let lenient = Cli::command().mut_subcommand("forward", |forward| {
                 forward.mut_arg(forward::LOCAL_END, |end| end.required(false))
             });
-            // A line the lenient model refuses too was missing something else: clap's own error stands.
-            lenient
-                .try_get_matches_from(&argv)
-                .and_then(|matches| Cli::from_arg_matches(&matches))
-                .map_err(|_| error)
+            match lenient.try_get_matches_from(&argv) {
+                Ok(_) => Err(usage(&["forward"], forward::NO_LOCAL_END)),
+                Err(_) => Err(error),
+            }
         }
         parsed => parsed,
     }
@@ -574,12 +560,7 @@ async fn run() -> eyre::Result<()> {
         eprint!("{}", Cli::command().render_help());
         std::process::exit(2);
     };
-    // Split first: it reads nothing, and a command line found incomplete here is a usage error whatever
-    // state the home is in, as clap's own are.
     let verb = command.split();
-    if let Verb::Usage { path, message } = &verb {
-        usage_error(path, message);
-    }
 
     // The node home, resolved ONCE from `--home`/`SWOOSH_HOME` (else the platform default): every
     // node path (identity key, signet, badge, contacts, denylist, ledger) derives from it, so a verb never
@@ -595,8 +576,6 @@ async fn run() -> eyre::Result<()> {
     // opened: `tree` is pure introspection over clap's own model, and `contact` only edits the address
     // book. A reaching verb falls through to bind a transport below.
     let reach = match verb {
-        // Refused above, before the home was resolved.
-        Verb::Usage { path, message } => usage_error(path, &message),
         Verb::Tree(cmd) => return cmd.run(&Cli::command()),
         // A bare `swoosh service ls` (no `--at`): read your own node's live table over the local control
         // socket. Run it here, before any transport is composed, the same local dispatch the other
@@ -1105,16 +1084,14 @@ mod tests {
 
         // `forward` is the flat generic dial; its local end is a port, `-` (stdout), or `unix:<path>`.
         for end in ["5432", "-", "unix:/run/x.sock"] {
-            let Some(Command::Forward(args)) =
-                Cli::try_parse_from(["swoosh", "forward", &peer, "web", end])
-                    .expect("forward parses each local end")
-                    .command
-            else {
-                panic!("forward {end} parses to the forward verb");
-            };
             assert!(
-                args.local_end().is_ok(),
-                "forward {end} names its local end"
+                matches!(
+                    Cli::try_parse_from(["swoosh", "forward", &peer, "web", end])
+                        .expect("forward parses each local end")
+                        .command,
+                    Some(Command::Forward(_))
+                ),
+                "forward {end} parses to the forward verb"
             );
         }
         // A bare path or a source-only scheme is a hard parse error, never a silent misparse.
@@ -1182,11 +1159,11 @@ mod tests {
     }
 
     /// The generic dial's slots, pinned: the SERVICE has no default, and the LOCAL END has none either.
-    /// A `forward` with no local end parses (so the refusal can name what was typed) and splits to a usage
-    /// error, exit 2, whose line names the machine, the service and the three local ends.
+    /// A `forward` with no local end is a usage error, exit 2, whose line names the three local ends and
+    /// neither the machine nor the service, under forward's own usage line.
     ///
-    /// Default the local end to `-` and the split goes outward instead: the bytes would silently go to
-    /// the terminal, which is the default the surface rules out.
+    /// Default the local end to `-` and the line parses instead: the bytes would silently go to the
+    /// terminal, which is the default the surface rules out.
     #[test]
     fn forward_without_a_local_end_is_a_usage_error() {
         assert!(
@@ -1198,29 +1175,27 @@ mod tests {
                 .is_err(),
             "the service is a positional, not a flag: `--service` is not a spelling of it"
         );
-
+        // A line missing more than the local end keeps clap's own error, never the local-end line.
+        let other = parse_from(["swoosh", "forward", "me/nas"])
+            .expect_err("a forward with no service refuses");
         assert_eq!(
-            Cli::try_parse_from(["swoosh", "forward", "me/nas", "db"])
-                .expect_err("the model --help renders requires the local end")
-                .kind(),
+            other.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
-        let command = parse_from(["swoosh", "forward", "me/nas", "db"])
-            .expect("a forward with no local end parses, so the refusal can name it")
-            .command
-            .expect("a command");
-        let Verb::Usage { path, message } = command.split() else {
-            panic!("a forward with no local end must split to a usage error, never a dial");
-        };
-        assert_eq!(
-            message,
-            "swoosh forward me/nas db needs a local end: a port (5432), unix:<path>, or - for stdout."
-        );
-        let error = usage(path, &message);
+
+        let error = parse_from(["swoosh", "forward", "me/nas", "db"])
+            .expect_err("a forward with no local end refuses at parse");
         assert_eq!(error.exit_code(), 2, "a usage error exits 2");
+        let printed = error.to_string();
         assert!(
-            error.to_string().contains("Usage: swoosh forward"),
-            "it prints forward's own usage line: {error}"
+            printed.starts_with(
+                "error: forward needs a local end: a port (5432), unix:<path>, or - for stdout\n"
+            ),
+            "the line names the three ends and nothing typed: {printed}"
+        );
+        assert!(
+            printed.contains("Usage: swoosh forward"),
+            "it prints forward's own usage line: {printed}"
         );
     }
 
@@ -1241,10 +1216,9 @@ mod tests {
         ])
         .expect("the ProxyCommand line parses as a forward");
         assert_eq!(cli.home, Some(PathBuf::from("/tmp/yah")));
-        let Some(Command::Forward(args)) = cli.command else {
+        let Some(Command::Forward(cmd)) = cli.command else {
             panic!("the ProxyCommand line is a `forward`");
         };
-        let cmd = args.local_end().expect("the bridge names its local end");
         assert_eq!(cmd.service.as_str(), "ssh");
         assert_eq!(
             cmd.to,

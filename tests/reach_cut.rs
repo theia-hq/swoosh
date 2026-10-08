@@ -171,12 +171,12 @@ fn sign_lapsing(host: &Path) -> String {
 
 /// Forward the echo `lapsing` serves from a home under `scratch`, its link typed as the machine, with `to` as
 /// the local end.
-/// Every pipe is piped; stderr is read whole on a thread, returned beside the child.
+/// Every pipe is piped; stderr is read a line at a time on a thread, each line handed over as it comes.
 fn forward(
     scratch: &Scratch,
     lapsing: &Lapsing,
     to: &str,
-) -> (KillOnDrop, std::thread::JoinHandle<String>) {
+) -> (KillOnDrop, std::sync::mpsc::Receiver<String>) {
     let hint = format!("{}={}", lapsing.served.key, lapsing.served.addr);
     let mut child = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_swoosh"))
@@ -191,11 +191,15 @@ fn forward(
             .spawn()
             .expect("forward spawns"),
     );
-    let mut err_pipe = child.0.stderr.take().expect("piped stderr");
-    let stderr = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = err_pipe.read_to_string(&mut text);
-        text
+    let err_pipe = child.0.stderr.take().expect("piped stderr");
+    let (sender, stderr) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(err_pipe).lines() {
+            let Ok(line) = line else { return };
+            if sender.send(line).is_err() {
+                return;
+            }
+        }
     });
     (child, stderr)
 }
@@ -204,7 +208,7 @@ fn forward(
 /// line on stderr and no reason for the cut.
 fn ends_at_the_cut(
     mut forward: KillOnDrop,
-    stderr: std::thread::JoinHandle<String>,
+    stderr: std::sync::mpsc::Receiver<String>,
     lapses: Instant,
 ) {
     assert!(
@@ -213,9 +217,10 @@ fn ends_at_the_cut(
     );
     let status = exited_by(&mut forward.0, lapses + SWEEP + EXIT);
     assert!(!status.success(), "a cut session exits nonzero: {status}");
-    let printed = stderr.join().expect("the stderr reader");
+    // The child has exited, so its stderr closes and the reader's channel with it.
+    let printed: Vec<String> = stderr.iter().collect();
     assert!(
-        printed.starts_with("error: connection lost") && printed.lines().count() == 1,
+        printed.len() == 1 && printed[0].starts_with("error: connection lost"),
         "one connection-lost line, with no reason for the cut: {printed:?}"
     );
 }
@@ -266,13 +271,17 @@ fn a_forward_ends_when_the_host_cuts_the_session() {
         .port();
     let (mut forward, stderr) = forward(&scratch, &lapsing, &port.to_string());
 
-    // The forward is admitted and listening once its line prints.
-    let stdout: ChildStdout = forward.0.stdout.take().expect("piped stdout");
-    let banner = line_within(stdout, EXPIRES);
-    assert!(
-        banner.starts_with("forwarding ")
-            && banner.ends_with(&format!("'s echo to 127.0.0.1:{port}. ctrl-c to stop.\n")),
-        "the forward prints its line once admitted: {banner:?}"
+    // The forward is admitted and listening once its line prints, on stderr. The machine prints whole,
+    // since this home holds no name for it; the ctrl-c line is for a terminal, and stderr here is a pipe.
+    let started = stderr
+        .recv_timeout(EXPIRES)
+        .expect("the start line arrives once admitted");
+    assert_eq!(
+        started,
+        format!(
+            "Forwarding echo on {} to 127.0.0.1:{port}.",
+            lapsing.served.key
+        ),
     );
 
     // One line there and back over a forwarded connection, held open and silent after.
@@ -287,6 +296,12 @@ fn a_forward_ends_when_the_host_cuts_the_session() {
         "the link is admitted and the echo answers before it lapses"
     );
 
+    let mut stdout: ChildStdout = forward.0.stdout.take().expect("piped stdout");
     ends_at_the_cut(forward, stderr, lapsing.lapses);
     drop(connection);
+    let mut printed = String::new();
+    stdout
+        .read_to_string(&mut printed)
+        .expect("read the exited forward's stdout");
+    assert_eq!(printed, "", "a port forward's stdout carries nothing");
 }
