@@ -303,10 +303,10 @@ async fn a_remote_stop_waits_for_the_first_round() {
             let host_id = host.node_id();
             let cancel = CancellationToken::new();
             let source = Arc::new(StopSource::new());
-            let (first_round, held) = FirstRound::hold_stop(AllEnabled);
-            let exposer = build_exposer_noting(cancel.clone(), Arc::clone(&source))
-                .await
-                .with_enabled(held);
+            let (exposer, first_round) = FirstRound::hold(
+                build_exposer_noting(cancel.clone(), Arc::clone(&source)).await,
+                AllEnabled,
+            );
             let run = tokio::task::spawn_local({
                 let cancel = cancel.clone();
                 async move { exposer.run(&host, cancel).await }

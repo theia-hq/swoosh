@@ -585,6 +585,36 @@ async fn stop_remote_line_names_name_and_key() {
         .await;
 }
 
+/// A device that refuses the stop gets the rule, then what to try: a machine that has just started refuses
+/// a stop from another device until its first sync with your devices ends, and the wire says only "not
+/// admitted", so one line alone tells your own device it is not one of yours.
+#[tokio::test]
+async fn a_refused_stop_says_to_try_again_if_the_machine_has_just_started() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (pi, run) = pi_serving_only_control_stop();
+            let me = Node::new(MemTransport::bind(), NoDiscovery);
+            let stranger = TestRoot::seeded(BOB)
+                .device_badge(
+                    me.node_id(),
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL),
+                )
+                .expect("a badge");
+            let error = stop_device(pi)
+                .run_stop(&me, Some(stranger), None)
+                .await
+                .expect_err("pi refuses a badge of another root");
+            assert_eq!(
+                format!("{error:#}"),
+                "me/pi refused: only your own devices can stop it\n  If it has just started, try again in \
+                 a minute."
+            );
+            assert!(!run.is_finished(), "and pi keeps serving");
+            run.abort();
+        })
+        .await;
+}
+
 /// pi, serving the member-only `control.stop` and the gated diagnostics behind a gate rooted at `ROOT`, and
 /// no ssh and no control socket, on its own task: its key, and its run. A second route is there because a
 /// node exposing exactly one service answers every name with it, which would let a dial to any service land

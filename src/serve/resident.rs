@@ -36,8 +36,9 @@ pub const DISABLED_NAMES_CAP: usize = 1024;
 pub const ACCEPT_BACKOFF: Duration = Duration::from_millis(50);
 
 /// The resident state the accept loop serves from. Built once at `serve` start; every query reads
-/// the services off through the gate's own [`LiveServeToml`], so the status and the gate never
-/// disagree, and the socket is never a data channel into the gate.
+/// the services off through the gate's own [`LiveServeToml`], so the status and the gate agree on every
+/// service, and the socket is never a data channel into the gate. The gate asks it through the first
+/// round's hold, which refuses only `control.stop`, a node route the status never lists as off.
 pub struct Resident {
     /// The resident's pid, reported in the status reply.
     pid: u32,
@@ -49,7 +50,8 @@ pub struct Resident {
     addr: Option<SocketAddr>,
     /// The served catalog snapshot (the same snapshot `run_serve` cuts for `control.services`).
     catalog: ServiceCatalog,
-    /// The services off, read live: the same instance the gate asks per stream.
+    /// The services off, read live: the same instance the gate asks per stream, there through the first
+    /// round's hold.
     off: LiveServeToml,
     /// A CLONE of the node's teardown token: firing it REQUESTS the stop; the exposer acts on it.
     cancel: CancellationToken,

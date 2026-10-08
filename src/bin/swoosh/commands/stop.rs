@@ -415,7 +415,9 @@ impl StopDevice {
             Ok(stream) => stream,
             // A refusal is a LIVE peer saying no, so it is never raced away.
             Err(bifrost::Error::Refused(_)) => {
-                eyre::bail!("{device} refused: only your own devices can stop it")
+                eyre::bail!(
+                    "{device} refused: only your own devices can stop it\n  If it has just started, try again in a minute."
+                )
             }
             // Any other failure came before the admission, so this side cannot know whether the node
             // took the request: it may have lost the race with the very teardown the request triggered, or

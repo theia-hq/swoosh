@@ -25,5 +25,7 @@ Bare `swoosh stop` stops swoosh serve on this machine: `Stopped swoosh serve her
 [runs swoosh serve at login](../../use-cases/run-at-login.md#the-limit) starts it again on its own. `stop` takes
 only your own devices, by name; a contact's machine, a key or a link is refused, because only
 [your devices can stop a machine](../services.md#control-stop). The stopped machine prints which device stopped it.
+Just after swoosh serve starts, a machine takes a stop from another device only once it has
+[synced your device list](sync.md): 20 seconds at most, longer if its date has passed or it has been revoked.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

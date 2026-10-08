@@ -208,6 +208,12 @@ async fn dial_with(
         }
         code @ (MINE | BOTH) => {
             let theirs = read_update(&mut reader).await?;
+            // Both answers carry another update than the one this machine named. One that sends back the
+            // very update named is out of turn: taken as a take, it would let any device end a round with
+            // a copy of this machine's own list before the device holding a newer one is asked.
+            if digest(&theirs) == digest(bytes) {
+                return Err(ExchangeError::Protocol);
+            }
             if code == BOTH {
                 write_update(&mut writer, bytes).await?;
             }

@@ -5,7 +5,9 @@ use nauthy::{Service, VerifyKey};
 use tightbeam::enabled::EnabledServices;
 use tightbeam::identity::AsNodeId as _;
 use tightbeam::open_policy::Never;
-use tightbeam::tunnel::{BoxRead, BoxWrite, CancellationToken, Handler, ServeError, Served};
+use tightbeam::tunnel::{
+    BoxRead, BoxWrite, CancellationToken, Exposer, Handler, ServeError, Served,
+};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;
 
@@ -104,7 +106,7 @@ impl Handler for Stop {
     }
 }
 
-/// The first sync round of a run, held by the round: [`finished`](Self::finished) opens `control.stop`.
+/// The first sync round of a run: [`finished`](Self::finished) opens `control.stop`.
 ///
 /// A device that was stopped misses the revocations offered while it was down, and a revoked device that
 /// keeps stopping it would keep it from ever folding its own revocation. So a run takes no remote stop
@@ -112,10 +114,30 @@ impl Handler for Stop {
 /// list, no device answering within the round's bound, or nothing to ask on a machine that is not one of
 /// your devices. A stop that waited for a newer list would leave such a machine never stoppable from
 /// another device. A stop typed on the machine never passes the gate, so it is never held.
+///
+/// How long the hold lasts is the round's own bound: usually at most 20 s (5 s per device, 20 s in all).
+/// When your devices refuse this machine because its date has passed or it was revoked, the round first
+/// picks up its renewal, asking every device under `me` for 5 s each, then runs a second 20 s pass: at
+/// worst 40 s plus 5 s per device under `me`, plus any wait for `home.lock`. Nothing caps the whole: a
+/// cap would open the stop before the second pass, the one that can carry the revocation in that case.
+#[derive(Debug)]
+#[must_use = "control.stop stays refused until finished() is called"]
 pub struct FirstRound(watch::Sender<bool>);
 
 impl FirstRound {
-    /// The round's half, and `enabled` with `control.stop` refused until the round has finished.
+    /// Hold `control.stop` on `exposer` until the round's half is [`finished`](Self::finished): `enabled`
+    /// is the live oracle the gate asks, wrapped so it refuses `control.stop` until then. One call wires
+    /// both halves, so a run cannot hold the round without the exposer reading it, or the reverse.
+    pub fn hold(
+        exposer: Exposer,
+        enabled: impl EnabledServices + Send + Sync + 'static,
+    ) -> (Exposer, Self) {
+        let (first_round, held) = Self::hold_stop(enabled);
+        (exposer.with_enabled(held), first_round)
+    }
+
+    /// The round's half, and `enabled` with `control.stop` refused until the round has finished: the two
+    /// halves apart, for a caller that watches the oracle itself. A run wires them with [`hold`](Self::hold).
     pub fn hold_stop<E>(enabled: E) -> (Self, StopAfterFirstRound<E>) {
         // A watch rather than a bare flag: the gate reads it without waiting on every stream, and a
         // caller can also wait for the round to end.
@@ -133,6 +155,7 @@ impl FirstRound {
 /// The live enabled oracle with `control.stop` refused until the run's first sync round has ended. The
 /// gate asks it after admission and before any answer, so a held stop is refused exactly as a caller the
 /// gate turned away, and the stop handler never runs. Every other name is the inner oracle's to answer.
+#[derive(Debug)]
 pub struct StopAfterFirstRound<E> {
     enabled: E,
     /// Whether the first round has ended, sent once by [`FirstRound::finished`].
@@ -141,7 +164,8 @@ pub struct StopAfterFirstRound<E> {
 
 impl<E> StopAfterFirstRound<E> {
     /// Wait until the first round has ended; at once when it already has. A round dropped before it
-    /// finished never opens the stop, so this waits on.
+    /// finished never opens the stop, so this waits on. For tests, which watch the hold from outside.
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn opened(&self) {
         let mut open = self.open.clone();
         if open.wait_for(|open| *open).await.is_err() {
