@@ -1,10 +1,11 @@
+use core::time::Duration;
 use std::sync::Arc;
 
 use nauthy::VerifyKey;
 use tightbeam::identity::AsNodeId as _;
 use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{BoxRead, BoxWrite, CancellationToken, Handler, ServeError, Served};
-use tokio::io::AsyncWriteExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use crate::contacts::Contacts;
 use crate::peer::OwnDevice;
@@ -34,9 +35,13 @@ use crate::serve::{StopKind, StopSource};
 /// record holds only that key, so nothing on the line can come from the caller's request, and a caller
 /// cannot claim to be another device.
 ///
-/// On admission the handler cancels the token, then writes ONE ack byte so the client can confirm the stop
+/// On admission the handler writes ONE ack byte and finishes its side, so the client can confirm the stop
 /// was actioned (not merely that the dial was admitted): a positive, explicit confirmation, the honest
-/// counterpart to the loud typed refusal a non-admitted caller gets at the gate.
+/// counterpart to the loud typed refusal a non-admitted caller gets at the gate. Only once the caller
+/// closes its side (or [`ACK_GRACE`] passes) does it note the stop and cancel the token. The order is the
+/// point: the teardown drops the connection at once, and a QUIC close may discard bytes still in flight,
+/// so a node that cancelled first could stop for real while its ack never arrived. The side that receives
+/// last is the only one that knows the data landed, so the caller closes first and the node stops after.
 ///
 /// Public so the `gated_stop` proof drives the SAME handler `serve` injects, not a hand-rolled near-copy,
 /// exactly as the `gated_measure` proof reuses `diagnostics`.
@@ -64,17 +69,28 @@ impl Handler for Stop {
         &self,
         served: Served<Self>,
         mut writer: BoxWrite,
-        _reader: BoxRead,
+        mut reader: BoxRead,
     ) -> Result<(), ServeError> {
-        // Noted before the cancel, as the socket stop does, so the run reads a wire stop and its key. The
-        // caller's stream is never read: the key is the connection's.
+        // The ack byte, then the end of this side, so the caller holds both before anything tears down.
+        // Kept as a value, never `?`-ed: an admitted stop must happen whatever the stream did.
+        let acked = async {
+            writer.write_all(&[STOP_ACK]).await?;
+            writer.shutdown().await
+        }
+        .await;
+        // Wait for the caller's side to end: its close after reading the ack, a broken stream, or the
+        // bound, whichever is first. Read only to see it end; nothing read is kept, since the key is the
+        // connection's. The cap bounds what a caller can make the node read on its way down.
+        let mut ignored = (&mut reader).take(CALLER_BYTES);
+        let _ = tokio::time::timeout(
+            ACK_GRACE,
+            tokio::io::copy(&mut ignored, &mut tokio::io::sink()),
+        )
+        .await;
+        // Noted before the cancel, as the socket stop does, so the run reads a wire stop and its key.
         self.source.note(StopKind::Wire(served.peer()));
         self.cancel.cancel();
-        // The ack byte: proof to the client that the stop landed. Written after the cancel so a client
-        // reading it knows the teardown was requested, then flushed since the node is about to close.
-        writer.write_all(&[STOP_ACK]).await?;
-        writer.flush().await?;
-        Ok(())
+        acked.map_err(Into::into)
     }
 }
 
@@ -96,6 +112,17 @@ pub fn stopped_by(contacts: &Contacts, peer: VerifyKey) -> String {
         None => format!("Stopped by {node}."),
     }
 }
+
+/// How long the stopped node waits for the caller to close its side after the ack, before it stops anyway.
+/// The caller closes the moment it reads the ack, so on a live path this is one round trip; the bound is
+/// for a caller that never closes, which can then delay the stop by this much and no more. A member may
+/// stop the node outright, so the delay gives it nothing it did not already hold.
+pub const ACK_GRACE: Duration = Duration::from_secs(2);
+
+/// The most the stopped node reads from the caller while it waits for the close. The caller sends nothing
+/// after its request, so any cap works; one that does send more than this ends the wait early, which can
+/// cost only that caller its ack.
+const CALLER_BYTES: u64 = 64;
 
 /// The single byte `control.stop` writes to confirm the stop was actioned. Any value works (the client only
 /// needs to read one byte on an admitted stream); a printable `.` keeps a raw wire dump legible.

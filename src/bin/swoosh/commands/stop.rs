@@ -42,7 +42,7 @@ use swoosh::roster::RosterDoc;
 use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK};
 use swoosh::transport::ReachArgs;
 use tightbeam::tunnel::Connector;
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// How long a failed control-stream open is probed, to tell a live peer (nothing was stopped) from one that
 /// went away (the stop is unconfirmed). A live peer answers a probe connect at once; an unreachable one over
@@ -397,9 +397,10 @@ impl StopDevice {
         let device = &self.device;
 
         // A service-scoped session whose one `open_bi` speaks the `control.stop` request and presents the
-        // badge. On admission the node cancels its teardown token and writes one ack byte; a refusal maps to
-        // a loud stream error here. The connect chain can carry the peer's text (the reason it gave for
-        // closing), so it goes only to the log, escaped, never onto the line.
+        // badge. On admission the node writes one ack byte and waits for this side to close before it
+        // cancels its teardown token; a refusal maps to a loud stream error here. The connect chain can
+        // carry the peer's text (the reason it gave for closing), so it goes only to the log, escaped, never
+        // onto the line.
         let session = match connector.open_service(node).await {
             Ok(session) => session,
             Err(error) => {
@@ -410,7 +411,7 @@ impl StopDevice {
                 return Err(unreachable(device));
             }
         };
-        let (writer, mut reader) = match session.open_bi().await {
+        let (mut writer, mut reader) = match session.open_bi().await {
             Ok(stream) => stream,
             // A refusal is a LIVE peer saying no, so it is never raced away.
             Err(bifrost::Error::Refused(_)) => {
@@ -435,7 +436,11 @@ impl StopDevice {
         // Read the node's ack byte: proof the stop was actioned, not merely that the dial was admitted.
         let mut ack = [0u8; 1];
         let read = reader.read_exact(&mut ack).await;
-        drop(writer);
+        // Close this side the moment the ack is read: the node stops only once it sees this end, so its
+        // teardown cannot drop the ack in flight. Shut down, not only dropped, since a dropped writer does
+        // not end the stream on every transport. Any end counts there, so a close that fails or is lost on
+        // the way still stops it within its bound.
+        let _ = writer.shutdown().await;
         confirmed(read.map(|_| ack[0]), device)?;
         Ok(stopped_line(device, self.node))
     }
@@ -443,11 +448,11 @@ impl StopDevice {
 
 /// Whether the node's answer on the admitted control stream proves the stop: its ack byte, or the stream
 /// closing cleanly before one, which an admitted stop does as the node goes down. A wrong byte, or a
-/// stream broken any other way, proves nothing, so the device may still be running.
+/// stream broken any other way, proves nothing, so the device may still be serving.
 fn confirmed(answer: io::Result<u8>, device: &OwnDevice) -> eyre::Result<()> {
     match answer {
         Ok(STOP_ACK) => Ok(()),
-        Ok(_) => eyre::bail!("{device} sent an unknown reply to the stop; it may still be running"),
+        Ok(_) => eyre::bail!("{device} sent an unknown reply to the stop; it may still be serving"),
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
         Err(error) => {
             tracing::debug!(
@@ -461,7 +466,7 @@ fn confirmed(answer: io::Result<u8>, device: &OwnDevice) -> eyre::Result<()> {
 
 /// The failure when the device may have stopped and nothing proves it did.
 fn unconfirmed(device: &OwnDevice) -> eyre::Report {
-    eyre::eyre!("could not confirm that {device} stopped; it may still be running")
+    eyre::eyre!("could not confirm that {device} stopped; it may still be serving")
 }
 
 /// The refusal when the device did not answer: nothing was stopped.

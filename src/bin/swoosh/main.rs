@@ -53,6 +53,10 @@ const HOME_HELP: &str = "home (default ~/.local/state/swoosh; honors $XDG_STATE_
 #[derive(Debug, Parser)]
 #[command(
     name = "swoosh",
+    // Every usage line says `swoosh` whatever the program file is called (a release asset is
+    // `swoosh-aarch64-macos`, a symlink may be `sw`): the docs teach `swoosh`, and the stop line's link
+    // refusal reads `swoosh stop` in clap's usage to know the line was `stop`'s.
+    bin_name = "swoosh",
     version,
     about = "Work with a machine addressed by its public key: reach it, measure it, and more.",
     // A bare `swoosh` is a mistake, not a default action: print the help on stderr and exit 2. This

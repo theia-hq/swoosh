@@ -602,12 +602,12 @@ async fn a_peer_gone_behind_a_failed_stream_open_is_unconfirmed() {
     let error = result.expect_err("nothing proves the stop");
     assert_eq!(
         format!("{error:#}"),
-        "could not confirm that me/pi stopped; it may still be running"
+        "could not confirm that me/pi stopped; it may still be serving"
     );
 }
 
 /// Only the ack byte or a clean close proves an admitted stop. A wrong byte or a stream broken any other way
-/// proves nothing, and the line says the device may still be running. Take any read error as the node going
+/// proves nothing, and the line says the device may still be serving. Take any read error as the node going
 /// down and a reset path prints `Stopped`.
 #[test]
 fn only_the_ack_or_a_clean_close_confirms_the_stop() {
@@ -620,16 +620,19 @@ fn only_the_ack_or_a_clean_close_confirms_the_stop() {
     let line = |answer| format!("{:#}", confirmed(answer, &pi).expect_err("not confirmed"));
     assert_eq!(
         line(Ok(b'x')),
-        "me/pi sent an unknown reply to the stop; it may still be running"
+        "me/pi sent an unknown reply to the stop; it may still be serving"
     );
+    // `NotConnected` is what a lost QUIC connection reads as (iroh's): the node's teardown and a dropped
+    // path look the same there, so neither proves the stop.
     for kind in [
+        io::ErrorKind::NotConnected,
         io::ErrorKind::ConnectionReset,
         io::ErrorKind::ConnectionAborted,
         io::ErrorKind::Other,
     ] {
         assert_eq!(
             line(broken(kind)),
-            "could not confirm that me/pi stopped; it may still be running",
+            "could not confirm that me/pi stopped; it may still be serving",
             "{kind:?}"
         );
     }
@@ -705,7 +708,8 @@ fn stop_refuses_a_link_or_a_path_without_echoing_it() {
 }
 
 /// A link typed as a second machine on a line clap refuses for another reason too is refused as a link,
-/// never with clap's own error, which names the first argument it did not expect: the link. A path given to
+/// never with clap's own error, which names the first argument it did not expect: the link. That holds
+/// whatever the program file is called, since the refusal knows the line from clap's usage. A path given to
 /// a flag is not a machine, so it leaves clap's error alone.
 #[test]
 fn stop_refuses_a_link_beside_an_unknown_flag_without_echoing_it() {
@@ -723,19 +727,22 @@ fn stop_refuses_a_link_beside_an_unknown_flag_without_echoing_it() {
         .split_once('.')
         .map(|(_, token)| token)
         .expect("a token");
-    let error = crate::parse_from(["swoosh", "stop", "me/nas", link.as_str(), "--bogus"])
-        .map(|_| ())
-        .expect_err("the line refuses");
-    assert_eq!(error.exit_code(), 2);
-    let printed = error.to_string();
-    assert!(
-        printed.starts_with(&format!("error: {A_LINK_STOPS_NOTHING}\n")),
-        "{printed}"
-    );
-    assert!(
-        !printed.contains(token),
-        "the token is not echoed: {printed}"
-    );
+    // Whatever the program file is called: a release asset keeps its platform name, a symlink its own.
+    for program in ["swoosh", "swoosh-aarch64-macos", "sw"] {
+        let error = crate::parse_from([program, "stop", "me/nas", link.as_str(), "--bogus"])
+            .map(|_| ())
+            .expect_err("the line refuses");
+        assert_eq!(error.exit_code(), 2);
+        let printed = error.to_string();
+        assert!(
+            printed.starts_with(&format!("error: {A_LINK_STOPS_NOTHING}\n")),
+            "{program}: {printed}"
+        );
+        assert!(
+            !printed.contains(token),
+            "{program}: the token is not echoed: {printed}"
+        );
+    }
 
     let other = crate::parse_from(["swoosh", "--home", "./x", "stop", "--bogus"])
         .map(|_| ())

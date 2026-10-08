@@ -48,7 +48,7 @@ pub use self::roster::Exchange;
 pub use self::scheme::{BoundTargets, NotATarget, Scheme, ServedTarget};
 pub use self::services::ServiceList;
 pub use self::serving::{ServingError, Started};
-pub use self::stop::{STOP_ACK, Stop, stopped_by};
+pub use self::stop::{ACK_GRACE, STOP_ACK, Stop, stopped_by};
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
 /// teardown (the remote twin of a local Ctrl-C or a `--expires` deadline). The client verb is `swoosh stop`.

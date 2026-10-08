@@ -8,7 +8,7 @@
 //!
 //! `control.stop` is one more member-only service, assembled through the SAME `Stop` handler the `swoosh
 //! serve` product path injects (not a hand-rolled near-copy) and declared member-only exactly as `serve`
-//! declares it. Five things are proven:
+//! declares it. Six things are proven:
 //!
 //! 1. `serve --for` shape: a local timer cancelling the token stops the exposer's `run`, gracefully.
 //! 2. `control.stop`: a MEMBER reaching the member-only service cancels the SAME token the exposer owns, so
@@ -19,6 +19,8 @@
 //!    (the gate grants the slip, the floor refuses it), and the node keeps running.
 //! 5. The stopped node records the key the connection proved as the stop's source, never a name from the
 //!    request, and names it from its own book, one of your devices first.
+//! 6. The node stops only once the member has closed its side after the ack, so its teardown cannot drop
+//!    the ack in flight; a member that never closes delays the stop by the bound and no more.
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a membership badge binds to whatever
 //! id the mem transport proves for the dialer (the same accommodation `gated_measure` documents at length):
@@ -33,7 +35,7 @@ use bifrost_mem::MemTransport;
 use nauthy::Denylist;
 use swoosh::contacts::Contacts;
 use swoosh::serve::{
-    CONTROL_STOP_SERVICE, STOP_ACK, Stop, StopKind, StopSource, Stopped, stopped_by,
+    ACK_GRACE, CONTROL_STOP_SERVICE, STOP_ACK, Stop, StopKind, StopSource, Stopped, stopped_by,
 };
 use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
@@ -100,7 +102,7 @@ async fn a_member_stops_a_gated_node_over_control_stop() {
             .open_service(&member)
             .await
             .expect("member reaches control.stop");
-            let (writer, mut reader) = session
+            let (mut writer, mut reader) = session
                 .open_bi()
                 .await
                 .expect("a member is admitted at the gated control.stop service");
@@ -112,7 +114,8 @@ async fn a_member_stops_a_gated_node_over_control_stop() {
                 .await
                 .expect("the node acks the stop before closing");
             assert_eq!(ack[0], STOP_ACK, "the node acks with the stop byte");
-            drop(writer);
+            // The member closes its side, as the client does: the node stops once it sees that end.
+            writer.shutdown().await.expect("the member closes its side");
 
             // The stop cancelled the exposer's token, so its run returns gracefully. This `Ok` is EXACTLY
             // what `serve` classifies as a graceful, exit-0 stop: its run maps an exposer `Ok` (the token
@@ -129,6 +132,66 @@ async fn a_member_stops_a_gated_node_over_control_stop() {
                 stopped.message().contains("gracefully"),
                 "the graceful-stop line names it a graceful stop: {:?}",
                 stopped.message()
+            );
+        })
+        .await;
+}
+
+/// The node stops only once the member has closed its side after reading the ack: until then the run goes
+/// on and nothing is noted, and the close ends it at once. Cancel before the ack has left and the teardown
+/// can drop it in flight, so a stop that worked reports itself unconfirmed.
+#[tokio::test(start_paused = true)]
+async fn the_node_stops_once_the_member_closes_after_the_ack() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut stopping = acked_stop().await;
+            tokio::time::sleep(ACK_GRACE / 2).await;
+            assert!(
+                !stopping.run.is_finished(),
+                "the node waits for the member's close before it stops"
+            );
+            assert_eq!(
+                stopping.source.first(),
+                None,
+                "nothing is noted before the close"
+            );
+
+            let closed = tokio::time::Instant::now();
+            stopping.close().await;
+            stopping.ended().await;
+            assert!(
+                closed.elapsed() < ACK_GRACE / 2,
+                "the close ends the run at once, not at the bound: {:?}",
+                closed.elapsed()
+            );
+        })
+        .await;
+}
+
+/// A member that reads the ack and never closes its side still stops the node, at the bound: the stop it
+/// asked for always happens, and holding the stream open delays it by the bound and no more.
+#[tokio::test(start_paused = true)]
+async fn a_member_holding_its_side_open_stops_the_node_at_the_bound() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let started = tokio::time::Instant::now();
+            let stopping = acked_stop().await;
+            let member = stopping.member;
+            let source = Arc::clone(&stopping.source);
+            stopping.ended().await;
+            assert!(
+                started.elapsed() >= ACK_GRACE,
+                "a held side delays the stop to the bound: {:?}",
+                started.elapsed()
+            );
+            assert!(
+                started.elapsed() < ACK_GRACE * 2,
+                "and no further: {:?}",
+                started.elapsed()
+            );
+            assert_eq!(
+                source.first(),
+                Some(StopKind::Wire(member.verify_key().unwrap()))
             );
         })
         .await;
@@ -366,20 +429,90 @@ async fn stopped_over_the_wire(request: &[u8]) -> (NodeId, Option<StopKind>) {
         .open_bi()
         .await
         .expect("a member is admitted at control.stop");
-    // The node never reads the stream, so the write may find it already closed by the stop it asked for.
+    // The node reads the stream only to see it end and keeps nothing, so a request written there is read
+    // and dropped.
     let _ = writer.write_all(request).await;
     let mut ack = [0u8; 1];
     reader
         .read_exact(&mut ack)
         .await
         .expect("the node acks the stop");
-    drop(writer);
+    writer.shutdown().await.expect("the member closes its side");
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .expect("the stop ends the run")
         .expect("the run task joins")
         .expect("a graceful stop");
     (member_id, source.first())
+}
+
+/// A node a member has asked to stop, past the ack: its run, how it notes the stop, the member's key, and
+/// the member's side of the stream, still open.
+struct Stopping {
+    run: tokio::task::JoinHandle<eyre::Result<()>>,
+    source: Arc<StopSource>,
+    member: NodeId,
+    /// The member's writer, until [`close`](Self::close).
+    writer: Option<Box<dyn tokio::io::AsyncWrite + Unpin>>,
+    /// The member's reader, session and node, held so only the writer's close ends the stream.
+    _held: Box<dyn core::any::Any>,
+}
+
+impl Stopping {
+    /// The member closes its side, as the client does once it holds the ack.
+    async fn close(&mut self) {
+        if let Some(mut writer) = self.writer.take() {
+            writer.shutdown().await.expect("the member closes its side");
+        }
+    }
+
+    /// Wait for the run to end, gracefully, within the bound and a margin.
+    async fn ended(self) {
+        tokio::time::timeout(ACK_GRACE * 2, self.run)
+            .await
+            .expect("the stop ends the run within the bound")
+            .expect("the run task joins")
+            .expect("a graceful stop");
+    }
+}
+
+/// A member asks a node to stop and reads the ack, holding its side open.
+async fn acked_stop() -> Stopping {
+    let host = Node::new(MemTransport::bind(), NoDiscovery);
+    let host_id = host.node_id();
+    let member = Node::new(MemTransport::bind(), NoDiscovery);
+    let member_id = member.node_id();
+    let cancel = CancellationToken::new();
+    let source = Arc::new(StopSource::new());
+    let exposer = build_exposer_noting(cancel.clone(), Arc::clone(&source)).await;
+    let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
+
+    let badge = signet_badge(SIGNET, member_id);
+    let session = Connector::to_node(
+        host_id,
+        CONTROL_STOP_SERVICE.parse().unwrap(),
+        Some(badge.parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("member reaches control.stop");
+    let (writer, mut reader) = session
+        .open_bi()
+        .await
+        .expect("a member is admitted at control.stop");
+    let mut ack = [0u8; 1];
+    reader
+        .read_exact(&mut ack)
+        .await
+        .expect("the node acks the stop");
+    assert_eq!(ack[0], STOP_ACK);
+    Stopping {
+        run,
+        source,
+        member: member_id,
+        writer: Some(Box::new(writer)),
+        _held: Box::new((reader, session, member)),
+    }
 }
 
 /// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id):

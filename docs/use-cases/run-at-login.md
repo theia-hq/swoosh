@@ -63,8 +63,9 @@ $ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.theia.swoosh.plist
 ## The limit
 
 The service manager keeps the node up: it starts it at login or boot and restarts it when the process
-exits, so `kill` does not stop it. Disable it for good with `systemctl --user disable --now swoosh`
-(Linux) or `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.theia.swoosh.plist` (macOS).
+exits, so after `kill` or `swoosh stop` it starts again. Disable it for good with
+`systemctl --user disable --now swoosh` (Linux) or
+`launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.theia.swoosh.plist` (macOS).
 
 ## Next
 

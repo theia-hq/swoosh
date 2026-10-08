@@ -32,7 +32,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 `commands.md#<command>` keep resolving to this index, which then links to the focused page.
 
 - <a id="serve"></a>[`swoosh serve`](commands/serve.md): be a node, publish named services behind your signet gate
-- <a id="stop"></a>[`swoosh stop`](commands/stop.md): stop swoosh serve here, or on one of your own devices
+- <a id="stop"></a>[`swoosh stop`](commands/stop.md): stop swoosh serve here or on one of your own devices
 - <a id="service"></a>[`swoosh service`](commands/service.md): list a peer's menu, or enable/disable a service on your node
 - <a id="ping"></a>[`swoosh ping`](commands/ping.md): measure round-trip time to a peer, addressed by key
 - <a id="speed"></a>[`swoosh speed`](commands/speed.md): measure throughput to a peer, addressed by key
