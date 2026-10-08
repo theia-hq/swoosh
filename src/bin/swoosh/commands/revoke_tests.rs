@@ -1358,7 +1358,7 @@ async fn status_names_a_device_revoked_here() {
     .await;
     let _ = revoke(&home, &["me/laptop"]).await.ok().to_owned();
 
-    let stored = keystore::KeyFile::device(home.key()).load().unwrap();
+    let stored = keystore::KeyFile::new(home.key()).load().unwrap();
     let out = super::super::status::report::Report::gather(&home, stored.as_ref(), now())
         .await
         .unwrap()
@@ -1411,7 +1411,7 @@ async fn contact_root(home: &Home, person: &str, seed: u8) {
 
 /// The `status` report for `home`, rendered.
 async fn status(home: &Home) -> String {
-    let stored = keystore::KeyFile::device(home.key()).load().unwrap();
+    let stored = keystore::KeyFile::new(home.key()).load().unwrap();
     super::super::status::report::Report::gather(home, stored.as_ref(), now())
         .await
         .unwrap()

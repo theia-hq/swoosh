@@ -68,7 +68,7 @@ pub async fn lock(
     let current = target.prove(prompt)?;
     let new = crate::passphrase::choose(prompt, target.asked).map_err(prompt_error)?;
     let _home_lock = target.home_lock(home).await?;
-    KeyFile::root(&target.path)
+    KeyFile::strict(&target.path)
         .add_lock(
             Some(Unlock::Passphrase(&current)),
             NewLock::Passphrase(&new),
@@ -111,7 +111,7 @@ pub async fn lock_touch_id(
     if !prompt.terminal() {
         return Err(RootError::NoTerminalToUnlock.into());
     }
-    let file = KeyFile::root(&target.path);
+    let file = KeyFile::strict(&target.path);
     let lines = touch::Lines::of(target.asked, &file, true);
     if !remove {
         prompt.warn(touch::ROOT_BESIDE_PASSPHRASE);
@@ -249,7 +249,7 @@ fn prompt_error(report: eyre::Report) -> RootLockError {
 /// Whether this machine's key has a `touch-id` lock, read from its header.
 fn machine_key_opens_by_touch(home: &Home) -> bool {
     matches!(
-        KeyFile::device(home.key()).load(),
+        KeyFile::new(home.key()).load(),
         Ok(Some(keystore::Stored::Locked(key)))
             if key.methods().any(|method| method == Method::TouchId)
     )

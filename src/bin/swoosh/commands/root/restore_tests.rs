@@ -46,7 +46,7 @@ async fn sibling(home: &Home, seed: u8, list: &RosterDoc) -> Home {
     let device = Home::resolve(Some(dir)).unwrap();
     swoosh::identity::make_machine_dir(&device).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
-    KeyFile::device(device.key())
+    KeyFile::new(device.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
     swoosh::config::write_signet(&swoosh::testkit::lock(), &device, root()).unwrap();
@@ -67,7 +67,7 @@ fn machine(tag: &str, seed: u8) -> Home {
     let home = scratch(tag);
     std::fs::remove_file(home.key()).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
     home
@@ -117,7 +117,7 @@ fn row_for(home: &Home, key: VerifyKey) -> Option<swoosh::roster::Member> {
 }
 
 fn own_key(home: &Home) -> bifrost::NodeId {
-    swoosh::testkit::stored_key(&KeyFile::device(home.key()))
+    swoosh::testkit::stored_key(&KeyFile::new(home.key()))
 }
 
 /// `--replace-key` is gone: a lost machine is replaced, not restored. Red when the flag is kept.
@@ -174,7 +174,7 @@ async fn restore_on_a_machine_keeping_another_root_names_backup_then_forget() {
     swoosh::config::create_store_dir(&dir).unwrap();
     let mut seed = TestRoot::seeded(0x31).seed();
     let passphrase = Passphrase::try_from(Zeroizing::new(PASS.to_owned())).unwrap();
-    KeyFile::root(dir.join("root.key"))
+    KeyFile::strict(dir.join("root.key"))
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),
@@ -500,7 +500,7 @@ async fn restore_on_a_device_of_another_root_names_leave() {
     let other = TestRoot::seeded(0x31);
     let mut seed = other.seed();
     let passphrase = Passphrase::try_from(Zeroizing::new(PASS.to_owned())).unwrap();
-    KeyFile::root(dir.join("root.key"))
+    KeyFile::strict(dir.join("root.key"))
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),

@@ -749,7 +749,7 @@ impl Root {
             let _ = writeln!(out, "{OWN_KEY_REVOKED}");
         }
         // A touch where the root has a `touch-id` lock that can be asked for here, else its passphrase.
-        let file = KeyFile::root(act.key_file());
+        let file = KeyFile::strict(act.key_file());
         let secret = crate::touch::open(
             prompt,
             &file,
@@ -1510,7 +1510,7 @@ async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<
 
 /// The root's key file at `path`: sealed, and of the root kind.
 fn read_header(path: &Path) -> Result<keystore::Locked, RootError> {
-    let file = KeyFile::root(path);
+    let file = KeyFile::strict(path);
     match file.load() {
         // A sealed root key always keeps its passphrase lock (the key store refuses one without), so any
         // sealed file of the root kind opens at a prompt here.
@@ -1669,7 +1669,7 @@ async fn make(
     not_admitting(&home_lock, home)?;
     // An unpinned home keeps no root but a revoked one, which is no root: the new one takes its place.
     remove_file(&key_file)?;
-    KeyFile::root(&key_file).write(&secret, Protection::Passphrase(&passphrase))?;
+    KeyFile::strict(&key_file).write(&secret, Protection::Passphrase(&passphrase))?;
     seam(Seam::Keyed)?;
     let mut root = Root {
         act: Act::new(
@@ -1733,7 +1733,7 @@ async fn finish(
     // Asked before any line that states an effect, as `present` asks.
     let secret = crate::touch::open(
         prompt,
-        &KeyFile::root(home.root_key()),
+        &KeyFile::strict(home.root_key()),
         &locked,
         Asked::Root,
         crate::touch::USE_ROOT,
@@ -2513,7 +2513,7 @@ fn live_ids(row: &Member, now: u64) -> usize {
 
 /// This machine's key, from its key file's header, when it has one.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, RootError> {
-    let file = KeyFile::device(home.key());
+    let file = KeyFile::new(home.key());
     match file.load()? {
         Some(stored) => Ok(Some(crate::identity::key_of(&file, &stored)?.verify_key()?)),
         None => Ok(None),

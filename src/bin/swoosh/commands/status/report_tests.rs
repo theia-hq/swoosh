@@ -47,7 +47,7 @@ fn home(tag: &str) -> Home {
     let home = Home::resolve(Some(dir)).expect("the scratch home resolves");
     let mut seed = TestNode::seeded(OWN).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .expect("this machine's key");
     home
@@ -88,7 +88,7 @@ fn root_key(home: &Home) {
     let passphrase =
         Passphrase::try_from(Zeroizing::new("a passphrase".to_owned())).expect("a passphrase");
     let mut seed = TestRoot::seeded(ROOT).seed();
-    KeyFile::root(home.root_key())
+    KeyFile::strict(home.root_key())
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),
@@ -812,7 +812,7 @@ async fn status_prints_key_lock_then_home() {
     let passphrase =
         Passphrase::try_from(Zeroizing::new("a passphrase".to_owned())).expect("a passphrase");
     let mut seed = TestNode::seeded(OWN).seed();
-    KeyFile::device(sealed.key())
+    KeyFile::new(sealed.key())
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),
@@ -1238,7 +1238,7 @@ fn overwrite(path: &std::path::Path, bytes: &[u8]) {
 
 /// The report for `home`, each `touch-id` lock reading `health`.
 async fn status_reading(home: &Home, health: keystore::Health) -> String {
-    let key = KeyFile::device(home.key()).load().unwrap();
+    let key = KeyFile::new(home.key()).load().unwrap();
     let prompt = swoosh::testkit::Counting::refusing().at_this_mac(health);
     super::Report::gather_with(home, key.as_ref(), unix_now(), &prompt)
         .await
@@ -1345,7 +1345,7 @@ async fn touch_id_unasked_says_it_opens_only_on_a_mac() {
         &home.root_key(),
         &swoosh::testkit::touch_id::ROOT_PASSPHRASE_AND_TOUCH_ID,
     );
-    let key = KeyFile::device(home.key()).load().unwrap();
+    let key = KeyFile::new(home.key()).load().unwrap();
     let out = super::Report::gather_with(
         &home,
         key.as_ref(),

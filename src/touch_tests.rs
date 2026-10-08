@@ -46,7 +46,7 @@ fn private(path: &std::path::Path, bytes: &[u8]) {
 fn root(tag: &str) -> (KeyFile, keystore::Locked) {
     let path = scratch(tag).join("root.key");
     private(&path, &ROOT_PASSPHRASE_AND_TOUCH_ID);
-    loaded(KeyFile::root(path))
+    loaded(KeyFile::strict(path))
 }
 
 /// `bytes` as this machine's key in a home, beside a root when `root_kept`.
@@ -57,7 +57,7 @@ fn machine(tag: &str, bytes: &[u8], root_kept: bool) -> (KeyFile, keystore::Lock
     }
     let path = home.join("machine").join("key");
     private(&path, bytes);
-    loaded(KeyFile::device(path))
+    loaded(KeyFile::new(path))
 }
 
 fn loaded(file: KeyFile) -> (KeyFile, keystore::Locked) {
@@ -155,6 +155,57 @@ fn the_key_stores_refusals_read_as_a_touch_ends() {
         Touched::Failed(_)
     ));
     assert!(matches!(Touched::from(Ok(None)), Touched::Opened(None)));
+}
+
+/// The key store's touch-id refusal `source`, carried as the call that asks the touch stopped, read as a
+/// touch's end. Each refusal below carries what the enclave said, built here as the key store lets a
+/// dependent build it, so every arm of the mapping is guarded off a Mac and without a finger.
+fn refused(source: keystore::TouchIdError) -> Touched {
+    Touched::from(Err(Stopped::Touch(keystore::Error::TouchId {
+        path: PathBuf::from("key"),
+        source,
+    })))
+}
+
+/// What the enclave said, for a refusal that must carry it.
+fn enclave(said: &str) -> keystore::EnclaveError {
+    keystore::EnclaveError::new(std::io::Error::other(said.to_owned()))
+}
+
+/// No touch in time reads as a timeout, never a cancel or a failure: a failure falls to the passphrase,
+/// and nobody who let the dialog run out is there to type one. Red when the timeout's arm is dropped to
+/// the catch-all or mapped to any other end.
+#[test]
+fn no_touch_in_time_reads_as_a_timeout() {
+    let touched = refused(keystore::TouchIdError::TimedOut(enclave("no touch")));
+    assert!(matches!(touched, Touched::TimedOut), "{touched:?}");
+}
+
+/// A cancel or a touch that did not match reads as declined. Red when it reads as a failure, which would
+/// say the touch failed when the person only said no.
+#[test]
+fn a_cancel_reads_as_declined() {
+    let touched = refused(keystore::TouchIdError::Declined(enclave("cancelled")));
+    assert!(matches!(touched, Touched::Declined), "{touched:?}");
+}
+
+/// A lock the enclave turned down after the dialog reads as one that does not open on this Mac, never a
+/// cancel. Red when it reads as declined or as a failure.
+#[test]
+fn a_lock_the_enclave_turns_down_reads_as_not_here() {
+    let touched = refused(keystore::TouchIdError::NotHere(enclave("not this Mac")));
+    assert!(matches!(touched, Touched::NotHere), "{touched:?}");
+}
+
+/// The enclave's own failure reads as a failure, carried whole with what the enclave said. Red when it
+/// reads as a refusal a person made, or the cause is dropped.
+#[test]
+fn an_enclave_failure_reads_as_a_failure_with_its_cause() {
+    let touched = refused(keystore::TouchIdError::Enclave(enclave("it broke")));
+    let Touched::Failed(why) = touched else {
+        panic!("{touched:?}");
+    };
+    assert!(format!("{why:#}").contains("it broke"), "{why:#}");
 }
 
 /// A refusal after the new lock went on reads as half done, never as a touch that did not open, and names
@@ -376,7 +427,7 @@ fn a_build_with_no_enclave_says_nothing_of_touch_id() {
 #[test]
 fn a_file_with_no_touch_id_lock_asks_its_passphrase() {
     let path = scratch("passphrase-only").join("machine").join("key");
-    let file = KeyFile::device(&path);
+    let file = KeyFile::new(&path);
     let under =
         keystore::Passphrase::try_from(zeroize::Zeroizing::new(PASSPHRASE.to_owned())).unwrap();
     file.write(&secret(0x11), keystore::Protection::Passphrase(&under))
@@ -498,7 +549,7 @@ fn a_two_lock_machine_key_falls_to_its_passphrase() {
 fn the_terminal_touch_locks_then_opens_a_key() {
     use crate::passphrase::{Prompt as _, Terminal};
 
-    let file = KeyFile::device(scratch("hardware-opens").join("machine").join("key"));
+    let file = KeyFile::new(scratch("hardware-opens").join("machine").join("key"));
     let made = Touch {
         file: file.clone(),
         reason: "make a test key (touch to allow)",
@@ -526,7 +577,7 @@ fn the_terminal_touch_locks_then_opens_a_key() {
 fn the_terminal_touch_reads_a_cancel_as_declined() {
     use crate::passphrase::{Prompt as _, Terminal};
 
-    let file = KeyFile::device(scratch("hardware-cancel").join("machine").join("key"));
+    let file = KeyFile::new(scratch("hardware-cancel").join("machine").join("key"));
     let made = Touch {
         file: file.clone(),
         reason: "make a test key (touch to allow)",
@@ -550,7 +601,7 @@ fn the_terminal_touch_reads_a_cancel_as_declined() {
 fn the_terminal_touch_times_out_after_a_minute() {
     use crate::passphrase::{Prompt as _, Terminal};
 
-    let file = KeyFile::device(scratch("hardware-timeout").join("machine").join("key"));
+    let file = KeyFile::new(scratch("hardware-timeout").join("machine").join("key"));
     let made = Touch {
         file: file.clone(),
         reason: "make a test key (touch to allow)",
@@ -584,14 +635,14 @@ mod hardware_acts {
 
     /// A machine key in a fresh home, written under `protection`.
     fn written(tag: &str, protection: Protection<'_>) -> KeyFile {
-        let file = KeyFile::device(scratch(tag).join("machine").join("key"));
+        let file = KeyFile::new(scratch(tag).join("machine").join("key"));
         file.write(&secret(0x61), protection).unwrap();
         file
     }
 
     /// A machine key in a fresh home, sealed by a first touch under `touch-id` alone.
     fn touched(tag: &str) -> KeyFile {
-        let file = KeyFile::device(scratch(tag).join("machine").join("key"));
+        let file = KeyFile::new(scratch(tag).join("machine").join("key"));
         let made = Touch {
             file: file.clone(),
             reason: "make a test key (touch to allow)",

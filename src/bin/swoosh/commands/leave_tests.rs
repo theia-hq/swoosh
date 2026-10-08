@@ -67,7 +67,7 @@ fn scratch_with(tag: &str, locked: bool) -> Home {
     };
     let mut seed = TestNode::seeded(OWN).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut seed), protection)
         .unwrap();
     home
@@ -225,7 +225,7 @@ async fn read(home: &Home) -> Standing {
 }
 
 fn stored_key(home: &Home) -> NodeId {
-    swoosh::testkit::stored_key(&KeyFile::device(home.key()))
+    swoosh::testkit::stored_key(&KeyFile::new(home.key()))
 }
 
 /// Keep `ROOT` in `home`: a plain 32-byte key file, which the standing reads by its key without a prompt.
@@ -394,7 +394,7 @@ async fn leave_new_key_on_an_unpinned_home_replaces_the_key() {
     assert_eq!(ran.out, format!("{key}\n"), "stdout is the new key alone");
     let kept = home.machine().join("key.replaced-2026-09-25");
     assert_eq!(
-        swoosh::testkit::stored_key(&KeyFile::device(&kept)),
+        swoosh::testkit::stored_key(&KeyFile::new(&kept)),
         node(OWN),
         "the old key is kept aside"
     );
@@ -491,7 +491,7 @@ async fn leave_new_key_locks_the_new_key_when_the_old_one_was_locked() {
     ran.left();
     assert_eq!(ran.prompts, 1, "a new passphrase is chosen, once");
     assert!(matches!(
-        KeyFile::device(home.key()).load().unwrap().unwrap(),
+        KeyFile::new(home.key()).load().unwrap().unwrap(),
         Stored::Locked(_)
     ));
 }

@@ -39,7 +39,7 @@ fn home(tag: &str) -> Home {
     let home = Home::resolve(Some(dir)).expect("resolve the home");
     let mut seed = TestNode::seeded(OWN).seed();
     crate::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .expect("write this machine's key");
     home
@@ -211,7 +211,7 @@ async fn a_sealed_root_key_is_read_by_its_header_without_a_prompt() {
     let passphrase = crate::passphrase::passphrase(Zeroizing::new("correct horse".to_owned()))
         .expect("a passphrase");
     let mut seed = TestRoot::seeded(ROOT).seed();
-    KeyFile::root(home.root_key())
+    KeyFile::strict(home.root_key())
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),

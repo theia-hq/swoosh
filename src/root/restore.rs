@@ -389,7 +389,7 @@ impl Staged {
         };
         crate::config::write_private_atomic(home_lock, &staged.path, bytes)
             .map_err(super::io_at(&staged.path))?;
-        let opens = match KeyFile::root(&staged.path).load() {
+        let opens = match KeyFile::strict(&staged.path).load() {
             // An unlock proves the header, and the header names the root.
             Ok(Some(Stored::Locked(locked))) => {
                 header_key(&staged.path, &locked).is_ok_and(|key| key == root)

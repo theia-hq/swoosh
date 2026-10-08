@@ -126,7 +126,7 @@ fn home(tag: &str) -> Home {
     let home = Home::resolve(Some(dir)).unwrap();
     let mut seed = TestNode::seeded(OWN).seed();
     crate::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
     home
@@ -155,7 +155,7 @@ fn sealed(seed: u8) -> Vec<u8> {
             config::create_store_dir(&dir).unwrap();
             let path = dir.join("root.key");
             let mut bytes = TestRoot::seeded(seed).seed();
-            KeyFile::root(&path)
+            KeyFile::strict(&path)
                 .write(
                     &keystore::Secret::take(&mut bytes),
                     Protection::Passphrase(&passphrase()),
@@ -255,7 +255,7 @@ async fn sibling(home: &Home, seed: u8, until: u64, update: &RosterDoc) -> Home 
     let device = Home::resolve(Some(dir)).unwrap();
     let mut secret = TestNode::seeded(seed).seed();
     crate::identity::make_machine_dir(&device).unwrap();
-    KeyFile::device(device.key())
+    KeyFile::new(device.key())
         .write(&keystore::Secret::take(&mut secret), Protection::Plain)
         .unwrap();
     let root = TestRoot::seeded(ROOT);
@@ -345,9 +345,9 @@ async fn the_first_invite_mints_a_sealed_root_and_this_machines_standing() {
         panic!("an unpinned home makes a root");
     };
     let root_key = root.key();
-    match KeyFile::root(home.root_key()).load().unwrap() {
+    match KeyFile::strict(home.root_key()).load().unwrap() {
         Some(Stored::Locked(_)) => assert_eq!(
-            crate::testkit::stored_key(&KeyFile::root(home.root_key())),
+            crate::testkit::stored_key(&KeyFile::strict(home.root_key())),
             root_key
         ),
         other => panic!("the root key is sealed, of the root kind: {other:?}"),
@@ -760,7 +760,7 @@ async fn a_device_key_file_in_the_root_slot_is_refused_by_kind() {
     let dir = beside(&home, "copy");
     config::create_store_dir(&dir).unwrap();
     let mut seed = TestRoot::seeded(ROOT).seed();
-    KeyFile::device(dir.join("root.key"))
+    KeyFile::new(dir.join("root.key"))
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase()),

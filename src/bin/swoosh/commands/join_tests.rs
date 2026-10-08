@@ -74,7 +74,7 @@ fn keyed(tag: &str, seed: u8) -> Home {
     let home = empty(tag);
     let mut bytes = TestNode::seeded(seed).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut bytes), Protection::Plain)
         .unwrap();
     home
@@ -443,7 +443,7 @@ async fn bare_join_at_a_terminal_on_a_fresh_home_takes_a_keyed_invite() {
         "{}",
         ran.err
     );
-    let key = swoosh::testkit::stored_key(&KeyFile::device(home.key()));
+    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
     assert_eq!(key, carried, "the invite's key is this machine's key");
     assert!(!home.machine().join("key.new").exists());
     assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
@@ -463,7 +463,7 @@ async fn the_key_bare_join_prints_outlives_a_paste_that_never_comes() {
     )
     .await;
     let _ = first.refusal();
-    let key = swoosh::testkit::stored_key(&KeyFile::device(home.key()));
+    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
     assert!(
         first
             .err
@@ -787,7 +787,7 @@ async fn a_key_carrying_invite_becomes_this_machines_key() {
     let home = empty("carrying");
     let seed = [0x78; 32];
     join(&home, &carrying(seed, "runner")).await.joined();
-    let key = swoosh::testkit::stored_key(&KeyFile::device(home.key()));
+    let key = swoosh::testkit::stored_key(&KeyFile::new(home.key()));
     assert_eq!(key, NodeId::from_ed25519_secret(&seed));
     assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(ROOT)));
 }
@@ -840,7 +840,7 @@ async fn a_lapsed_key_carrying_invite_never_reaches_the_door() {
     .await;
     refused_before_writing(&ran, "this invite ended on ", &home, &before);
     assert!(
-        KeyFile::device(home.key()).load().unwrap().is_none(),
+        KeyFile::new(home.key()).load().unwrap().is_none(),
         "no key is written"
     );
 }
@@ -1088,7 +1088,7 @@ async fn join_refuses_a_locked_key_over_pipes() {
         Passphrase::try_from(Zeroizing::new("correct horse battery staple".to_owned())).unwrap();
     let mut seed = TestNode::seeded(OWN).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),
@@ -1261,7 +1261,7 @@ async fn each_unfinished_act_is_finished_by_its_verb() {
         Standing::revoked_root(&revoking).await.unwrap(),
         Some(root(ROOT))
     );
-    let stored = KeyFile::device(revoking.key()).load().unwrap();
+    let stored = KeyFile::new(revoking.key()).load().unwrap();
     let report = crate::commands::status::report::Report::gather(&revoking, stored.as_ref(), now())
         .await
         .unwrap()

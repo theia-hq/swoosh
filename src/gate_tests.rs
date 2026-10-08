@@ -515,7 +515,7 @@ async fn a_damaged_server_serves_a_link_it_signed() {
     let scratch = Scratch::new("damaged-link");
     let mut seed = TestNode::seeded(OWN).seed();
     crate::identity::make_machine_dir(&scratch.home).unwrap();
-    keystore::KeyFile::device(scratch.home.key())
+    keystore::KeyFile::new(scratch.home.key())
         .write(
             &keystore::Secret::take(&mut seed),
             keystore::Protection::Plain,

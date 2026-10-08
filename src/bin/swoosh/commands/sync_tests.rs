@@ -87,7 +87,7 @@ fn home(tag: &str) -> Home {
     let home = Home::resolve(Some(dir)).unwrap();
     let mut seed = TestNode::seeded(0x11).seed();
     swoosh::identity::make_machine_dir(&home).unwrap();
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
         .write(&keystore::Secret::take(&mut seed), Protection::Plain)
         .unwrap();
     home
@@ -108,7 +108,7 @@ async fn sync_refuses_each_standing_that_is_not_a_device() {
     let passphrase =
         keystore::Passphrase::try_from(zeroize::Zeroizing::new("a root passphrase".to_owned()))
             .unwrap();
-    KeyFile::root(interrupted.root_key())
+    KeyFile::strict(interrupted.root_key())
         .write(
             &keystore::Secret::take(&mut seed),
             Protection::Passphrase(&passphrase),

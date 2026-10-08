@@ -243,8 +243,8 @@ impl Whose {
     /// turns away. A root that cannot be ruled out counts as kept: the line then names no command.
     pub fn of(file: &KeyFile) -> Self {
         match file.kind() {
-            keystore::Kind::Root => Self::Root,
-            keystore::Kind::Device => {
+            keystore::Kind::Strict => Self::Root,
+            keystore::Kind::Standard => {
                 let absent = file
                     .path()
                     .parent()
@@ -571,7 +571,7 @@ pub const TOUCH_ID_ALONE_BESIDE_ROOT: &str = "this machine's key needs a passphr
 /// says nothing here; every use of it says why.
 fn root_opens_by_touch(home: &Home) -> bool {
     matches!(
-        KeyFile::root(home.root_key()).load(),
+        KeyFile::strict(home.root_key()).load(),
         Ok(Some(Stored::Locked(root))) if holds_touch_id(&root)
     )
 }
@@ -689,7 +689,7 @@ pub const CHOOSE_FOR_KEY_NEEDS_TERMINAL: &str =
 
 /// The home's key file.
 fn key_file(home: &Home) -> KeyFile {
-    KeyFile::device(home.key())
+    KeyFile::new(home.key())
 }
 
 /// The key the file holds, unlocked, or `None` only when nothing is at the path.
@@ -906,7 +906,7 @@ pub fn replace_made(
     }
     let mut copy = Zeroizing::new(*seed);
     let secret = keystore::Secret::take(&mut copy);
-    let staged = KeyFile::device(home.machine().join("key.new"));
+    let staged = KeyFile::new(home.machine().join("key.new"));
     replace::remove(staged.path())?;
     staged.write(&secret, Protection::Plain)?;
     std::fs::rename(staged.path(), file.path())?;

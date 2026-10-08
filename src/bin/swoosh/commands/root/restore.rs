@@ -93,7 +93,7 @@ impl RestoreSync {
         // A dead lock gets the line every use of it says, check on an added fingerprint and all: the command
         // it names sets a lock that opens under every finger enrolled now.
         if touch_id_dead {
-            let file = KeyFile::root(home.root_key());
+            let file = KeyFile::strict(home.root_key());
             writeln!(err, "{}", Lines::of(Asked::Root, &file, true).dead())?;
         }
         if machine_key_touch_id_alone {

@@ -41,7 +41,7 @@ fn content(home: &Home) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
 
 /// Whether the root key at `path` opens under `passphrase`.
 fn opens(path: &Path, passphrase: &str) -> bool {
-    let Some(Stored::Locked(locked)) = KeyFile::root(path).load().unwrap() else {
+    let Some(Stored::Locked(locked)) = KeyFile::strict(path).load().unwrap() else {
         panic!("a sealed root key");
     };
     let passphrase =
@@ -257,7 +257,7 @@ fn with_touch_id(path: &Path) {
 
 /// The methods of the root key's locks at `path`.
 fn locks(path: &Path) -> Vec<keystore::Method> {
-    let Some(Stored::Locked(locked)) = KeyFile::root(path).load().unwrap() else {
+    let Some(Stored::Locked(locked)) = KeyFile::strict(path).load().unwrap() else {
         panic!("a sealed root key");
     };
     locked.methods().collect()

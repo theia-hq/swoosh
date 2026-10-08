@@ -222,7 +222,7 @@ fn revoke(home_lock: &HomeWrite, home: &Home, doc: &RosterDoc) -> Result<(), Fol
 /// This machine's key, from its key file's header; `None` when it has none, or the header is not a usable
 /// key.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, FoldError> {
-    let file = keystore::KeyFile::device(home.key());
+    let file = keystore::KeyFile::new(home.key());
     Ok(file
         .load()
         .map_err(|error| eyre::eyre!(error))?

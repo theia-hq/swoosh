@@ -74,7 +74,7 @@ impl JoinCmd {
 
         // The invite, alone.
         let root = invite.standing.root().node_id()?;
-        let file = KeyFile::device(home.key());
+        let file = KeyFile::new(home.key());
         let stored = file.load()?;
         let stored_key = stored
             .as_ref()

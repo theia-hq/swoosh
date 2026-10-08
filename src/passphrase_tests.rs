@@ -42,7 +42,7 @@ fn a_chosen_passphrase_under_15_characters_is_refused() {
 #[test]
 fn an_unlock_takes_any_passphrase_the_file_opens_under() {
     let dir = tempfile_dir("unlock-any");
-    let file = KeyFile::device(dir.join("key"));
+    let file = KeyFile::new(dir.join("key"));
     let secret = keystore::Secret::generate().expect("a key");
     let short = passphrase(text("abc")).expect("a passphrase");
     file.write(&secret, Protection::Passphrase(&short))
@@ -92,7 +92,7 @@ fn the_word_list_is_7776_distinct_words() {
 fn a_wrong_passphrase_asks_again_up_to_three_times() {
     let dir = tempfile_dir("three-tries");
     let path = dir.join("key");
-    let file = KeyFile::device(&path);
+    let file = KeyFile::new(&path);
     let secret = keystore::Secret::generate().expect("a key");
     let right = passphrase(text("the right passphrase")).expect("a passphrase");
     file.write(&secret, Protection::Passphrase(&right))

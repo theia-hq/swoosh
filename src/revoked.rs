@@ -157,7 +157,7 @@ pub fn add(
 /// This machine's key, from its key file's header; `None` when it has none, or the header is not a usable
 /// key.
 fn own_key(home: &Home) -> Result<Option<VerifyKey>, RevokedError> {
-    let file = keystore::KeyFile::device(home.key());
+    let file = keystore::KeyFile::new(home.key());
     let stored = file.load().map_err(|error| RevokedError::Io {
         path: home.key(),
         source: io::Error::other(error),
