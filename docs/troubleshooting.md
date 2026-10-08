@@ -54,8 +54,8 @@ Fix one of:
 
 - If it is your own node, enroll this machine: `swoosh invite add <label>` on the machine that holds your
   signet, then `swoosh adopt` here.
-- If someone else runs it, ask them for a [capability link](keys.md#grant) and add `--present swoosh:…` to
-  your command.
+- If someone else runs it, ask them for a [capability link](keys.md#grant) and use it where the machine
+  goes: `swoosh ping swoosh:…`.
 - If the service is meant to be public, the owner opens it with `swoosh serve --public <service>`.
 - If the menu from `swoosh service ls --at <peer>` is missing the service, the node is not serving it:
   serve that name on the node, or reach one it does serve.

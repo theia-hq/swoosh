@@ -285,43 +285,6 @@ async fn bare_ls_rejects_the_reach_flags() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// A bare `service ls` reaches no peer, so `--present` has nothing to select: it is refused with the
-/// exact teaching line, never silently dropped (I.3, MAJOR-1).
-#[tokio::test]
-async fn bare_ls_rejects_present() {
-    #[derive(clap::Parser)]
-    struct Wrap {
-        #[command(flatten)]
-        ls: ServiceLsCmd,
-    }
-
-    let base = scratch("present");
-    let home = home_in(&base);
-    let link = swoosh::link::Link::from(
-        swoosh::testkit::TestRoot::seeded(0xb0)
-            .device_badge(
-                swoosh::testkit::TestNode::seeded(0xb1).node_id(),
-                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
-            )
-            .expect("mint a stand-in slip"),
-    )
-    .to_string();
-    let ls = Wrap::try_parse_from(["x", "--present", &link])
-        .expect("bare service ls --present parses")
-        .ls;
-
-    let error = ls
-        .run_local(&home)
-        .await
-        .expect_err("--present without --at must refuse, never be ignored");
-    assert_eq!(
-        format!("{error:#}"),
-        "--present only applies when reaching a peer; drop it or name one"
-    );
-
-    let _ = std::fs::remove_dir_all(&base);
-}
-
 /// How many times the wire's own cap the flooding fixture offers. Comfortably past the cap so a bounded
 /// read is visibly bounded, and finite so that REMOVING the cap fails the assertions below instead of
 /// hanging the suite on an endless peer, which reports nothing.

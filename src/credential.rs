@@ -74,13 +74,15 @@ pub fn short(key: &impl core::fmt::Display) -> String {
 #[derive(Debug, Clone)]
 pub enum Credential {
     /// Reaches a FAMILY-GATED service: presents this device's stored member badge, bound to the dialing
-    /// key, which an explicit `--present` link overrides. A machine that is not a device has none to
-    /// present. Derives [`Identity::PersistedIfPresent`](crate::identity::Identity::PersistedIfPresent),
-    /// so the badge is bound to the same key the dial binds under.
+    /// key, unless the peer was typed as a link, which then presents instead. A machine that is not a
+    /// device has none to present. Derives
+    /// [`Identity::PersistedIfPresent`](crate::identity::Identity::PersistedIfPresent), so the badge is
+    /// bound to the same key the dial binds under.
     Family {
-        /// A delegate's explicit `--present` slip, if given; it overrides the default member badge. The
-        /// ONLY surviving `Option` on this path, and an honest one (the user optionally overrode), not
-        /// "the author forgot".
+        /// The link the peer was typed as, if it was one; it overrides the default member badge. The
+        /// ONLY surviving `Option` on this path, and an honest one (the user typed a link where the
+        /// machine goes), not "the author forgot". A link is given only where the machine goes, never
+        /// beside it, so the two can never disagree.
         present: Option<Link>,
     },
     /// An `anyone` link typed as the peer: presented alone, under a throwaway key. It admits whoever holds
@@ -92,13 +94,11 @@ pub enum Credential {
 impl Credential {
     /// What a dial to `peer` for `service` presents: an `anyone` link typed as the peer presents alone
     /// ([`Anyone`](Self::Anyone)); any other peer presents as this home ([`Family`](Self::Family)), with a
-    /// link peer, else the explicit `present`, as its slip.
-    pub fn dialing(peer: &Peer, present: Option<Link>, service: &str) -> Self {
+    /// link peer as its slip.
+    pub fn dialing(peer: &Peer, service: &str) -> Self {
         match peer.self_present() {
             Some(link) if admits_anyone(&link, service) => Self::Anyone(link),
-            link => Self::Family {
-                present: link.or(present),
-            },
+            present => Self::Family { present },
         }
     }
 
@@ -153,7 +153,7 @@ pub enum WarmMode {
     /// The default member-badge dial: the resident may reach as THIS home's node. The peer sees the
     /// resident key, which is the warm-reuse tradeoff.
     Resident,
-    /// A personal credential (an explicit `--present` slip, or a link-as-peer): never warm. A personal
+    /// A personal credential (a link typed as the peer): never warm. A personal
     /// credential must not ride the socket.
     Personal,
 }

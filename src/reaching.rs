@@ -16,8 +16,8 @@
 //! that spelling reads equally as "a deliberate stranger dial", so a dialing verb transcribed with it
 //! reaches its own fleet carrying nothing and still compiles.
 //!
-//! [`resolve`] is the ONE home of the `--present`-overrides-self-badge rule that used to be copy-pasted
-//! into six verbs: it turns a declared [`Credential`] into the concrete badge to present, once, in the
+//! [`resolve`] is the ONE home of the link-overrides-self-badge rule that used to be copy-pasted into
+//! six verbs: it turns a declared [`Credential`] into the concrete badge to present, once, in the
 //! composition root. Being that one home makes it the one home of the badge's EXPIRY rule too: a stored
 //! badge that is already dead is refused here, locally, before any dial, so the operator reads the cause
 //! and the fix instead of the far gate's deliberately uniform `not admitted`.
@@ -54,8 +54,8 @@ pub struct ReachCtx<'a> {
     /// own error names none of them, so without this an unreachable resolver of your own reads as "the
     /// peer is offline".
     pub bound: &'a transport::Bound,
-    /// Slot 1, the grant to present, resolved ONCE in the composition root via [`resolve`]: a `--present`
-    /// slip if given, else the stored member badge on a device (the plain member dial). `None` for the
+    /// Slot 1, the grant to present, resolved ONCE in the composition root via [`resolve`]: the link the
+    /// peer was typed as, else the stored member badge on a device (the plain member dial). `None` for the
     /// [`Serving`](BindRole::Serving) verb, which resolves no slots because it never dials, and for a
     /// plain dial from a machine that is not a device, which has no badge to present.
     pub present: Option<Link>,
@@ -86,14 +86,6 @@ pub trait Reaching {
     /// with no default body, so a new dialing verb states it; a verb that dials no peer of its own says
     /// `None`.
     fn dialed(&self) -> Option<&crate::peer::Peer>;
-
-    /// Reject a redundant `--present` alongside a self-addressing `swoosh:` link peer: the link already
-    /// presents its own credential (it is folded into [`credential`](Self::credential)), so a second
-    /// explicit one is ambiguous. REQUIRED with no default body and dispatched ONCE in the composition
-    /// root, so a new dialing verb cannot silently skip the conflict check (the same no-forgettable-invariant
-    /// discipline `credential`/`identity` enforce). A verb whose peer cannot be a self-addressing link, or
-    /// that has no `--present`, returns `Ok(())`.
-    fn reject_redundant_present(&self) -> eyre::Result<()>;
 
     /// The identity this verb binds under. REQUIRED with NO default body: a verb must state it, so a
     /// verb that needs the persisted key for a reason of its own (`serve` must come up at ONE address
@@ -191,7 +183,7 @@ impl BindRole {
 /// empty only on a plain dial from a machine that is not a device: it has no badge, and this machine's
 /// own key never signs one for itself.
 pub struct Resolved {
-    /// Slot 1: the grant (a `--present` slip, or the stored member badge when none was given).
+    /// Slot 1: the grant (the link typed as the peer, or the stored member badge when none was).
     pub grant: Option<Link>,
     /// Slot 2: the member badge under the dialing key, attached ONLY when the slot-1 slip is signet-bound
     /// and pins the dialer's own fleet (its gate ANDs a fleet badge under the fleet it names). `None` for
@@ -213,10 +205,10 @@ impl Resolved {
 /// before the transport binds.
 ///
 /// It presents by standing, and the choice never depends on the peer. On a `Device` or `HoldsRoot` home
-/// the stored badge is slot 1 of a plain dial, and the pin is this device's own fleet, so a `--present`
+/// the stored badge is slot 1 of a plain dial, and the pin is this device's own fleet, so a link-as-peer
 /// slip naming that fleet carries the badge in slot 2. On any other standing (`Unpinned`,
 /// `InterruptedMint`, or a damaged home) there is no badge and no own fleet: a plain dial presents
-/// nothing, and a slip dials alone. A delegate's explicit `--present` slip is always slot 1. Reached only
+/// nothing, and a slip dials alone. A link typed as the peer is always slot 1. Reached only
 /// from a [`Dialing`](BindRole::Dialing) verb: a serving verb resolves no slots because it presents none.
 ///
 /// A stored badge that is already dead REFUSES the dial here (see [`into_slot`]), and one inside
@@ -248,7 +240,7 @@ async fn resolve_to<W: std::io::Write>(
     let badge = device_badge(home).await?;
     let node = secret.node_id();
     match present {
-        // A `--present` (or link-as-peer) slip is slot 1. Attach the member badge in slot 2 ONLY when
+        // A link-as-peer slip is slot 1. Attach the member badge in slot 2 ONLY when
         // the slip pins the SAME fleet the dialer's own badge roots under: that is the only dial where
         // the badge can help admission (the far gate ANDs a fleet badge under the fleet the slip names,
         // and a badge for a fleet you are not in never verifies there). A slip pinning any OTHER fleet,
@@ -364,25 +356,11 @@ pub async fn renew_before_dial<W: std::io::Write>(
     }
 }
 
-/// Reject `--present` on a BARE (local) invocation: the flag selects the slip to present when reaching
-/// a PEER, and a bare `status`/`stop`/`service ls` reaches no peer (it queries the local resident over
-/// the control socket). The bare arms return before the composition root's
-/// [`reject_redundant_present`](Reaching::reject_redundant_present), so without this guard the flag
-/// parsed and was silently ignored (I.3 forbids a flag with no effect). One home for the exact teaching
-/// line, called by each bare arm before it resolves the local socket.
-pub fn reject_bare_present(present: Option<&Link>) -> eyre::Result<()> {
-    if present.is_some() {
-        eyre::bail!("--present only applies when reaching a peer; drop it or name one");
-    }
-    Ok(())
-}
-
 /// Reject the reach-family flags on a BARE (local) invocation: `--transport`, `--local`, `--peer`,
 /// `--relay`, and `--resolver` choose how a PEER is bound and found, and a bare `status`/`stop`/`service
 /// ls` reaches no peer (it queries the local resident over the control socket). The bare arms return
 /// before the composition root reads these flags, so without this guard they parsed and were silently
-/// ignored (I.3 forbids a flag with no effect). One home for the teaching line, called by each bare arm
-/// beside [`reject_bare_present`].
+/// ignored (I.3 forbids a flag with no effect). One home for the teaching line, called by each bare arm.
 pub fn reject_bare_reach(reach: &transport::ReachArgs) -> eyre::Result<()> {
     if reach.transport != transport::Transport::default() {
         eyre::bail!("--transport only applies when reaching a peer; drop it or name one");
@@ -474,13 +452,13 @@ mod tests {
         assert!(grant.is_none(), "a damaged home presents no badge");
     }
 
-    /// REGRESSION, the privacy rule: a `--present` slip that is NOT signet-bound (a plain member
+    /// REGRESSION, the privacy rule: a link-as-peer slip that is NOT signet-bound (a plain member
     /// badge, a bearer or device slip) is slot 1 alone; slot 2 stays `None`, so the dialer never leaks its
     /// own device-to-signet membership badge on a non-signet dial.
     #[tokio::test]
     async fn family_with_a_plain_slip_attaches_no_membership_badge() {
         let secret = Secret::ephemeral();
-        // A member badge stands in for a plain (non-signet-bound) `--present` slip.
+        // A member badge stands in for a plain (non-signet-bound) link-as-peer slip.
         let slip = crate::testkit::TestRoot::seeded(0xb0)
             .device_badge(
                 crate::testkit::TestNode::seeded(0xb1).node_id(),
@@ -509,7 +487,7 @@ mod tests {
         );
     }
 
-    /// A `--present` SIGNET-BOUND slip DOES attach the member badge in slot 2 when it pins the dialer's OWN
+    /// A SIGNET-BOUND link-as-peer slip DOES attach the member badge in slot 2 when it pins the dialer's OWN
     /// fleet: this is the only dial that needs the two-cred AND (the work-issued slip in slot 1, the dialer's
     /// own fleet badge in slot 2), and the only dial where the badge can actually help admission.
     #[tokio::test]
@@ -589,10 +567,9 @@ mod tests {
         );
     }
 
-    /// REGRESSION (defect #1): a signet-bound `swoosh:` link passed AS THE PEER (not via `--present`) folds
-    /// through `bind_role()` -> `resolve()` and attaches slot 2, IDENTICAL to passing it via `--present`.
-    /// A `Peer::Capability` self-presents its own link, so the peer-link and a `--present` link resolve
-    /// through ONE path. Before this consolidation a signet-bound link-as-peer dropped slot 2 (it dialed via
+    /// REGRESSION (defect #1): a signet-bound `swoosh:` link passed AS THE PEER folds through
+    /// `bind_role()` -> `resolve()` and attaches slot 2. A `Peer::Capability` self-presents its own link,
+    /// so a link peer resolves through the ONE path every slip takes. Before this consolidation a signet-bound link-as-peer dropped slot 2 (it dialed via
     /// `from_link`, which ignored the resolver).
     #[tokio::test]
     async fn a_signet_bound_link_as_peer_attaches_slot_two() {
@@ -610,8 +587,8 @@ mod tests {
             .expect("mint a signet-bound slip")
             .to_string();
 
-        // The slip arrives AS THE PEER: a `Capability` peer self-presents its own link, which the verb's
-        // the credential fold puts it in `present` exactly as an explicit `--present` slip would be.
+        // The slip arrives AS THE PEER: a `Capability` peer self-presents its own link, which the
+        // credential fold puts in `present`.
         let peer: Peer = format!("{}{link_text}", crate::link::PREFIX)
             .parse()
             .expect("a swoosh: link is a peer");
@@ -625,7 +602,7 @@ mod tests {
         assert_eq!(
             grant.as_ref().map(Link::as_str),
             Some(link_text.as_str()),
-            "slot 1 is the link, whether it came via --present or as the peer"
+            "slot 1 is the link the peer was typed as"
         );
         let membership = membership
             .expect("a signet-bound link-as-peer attaches slot 2 (defect #1: it used to drop it)");
@@ -636,7 +613,7 @@ mod tests {
     }
 
     /// A NON-signet `swoosh:` link passed as the peer folds to slot 1 alone; slot 2 stays `None`, so a
-    /// link-as-peer never over-shares this device's signet linkage, mirroring the `--present` privacy rule.
+    /// link-as-peer never over-shares this device's signet linkage, mirroring the slip privacy rule.
     #[tokio::test]
     async fn a_plain_link_as_peer_attaches_only_slot_one() {
         let secret = Secret::ephemeral();

@@ -34,7 +34,7 @@ use swoosh::{credential, reaching, transport};
 // The verb modules this binary dispatches to, each its own tree beside the composition root. The
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
-    contact, fetch, invite, join, leave, lock, ping, reach, revoke, root, send, serve, service,
+    contact, forward, invite, join, leave, lock, ping, proxy, revoke, root, send, serve, service,
     share, speed, ssh, status, stop, sync, tree,
 };
 
@@ -98,10 +98,10 @@ enum Command {
     ///
     /// `status <machine>` shows how you reach one.
     Status(status::StatusCmd),
-    /// Mint a local URL that fetches an origin through a node you name.
-    Fetch(fetch::FetchCmd),
-    /// Reach a peer's served service: stdout by default, or `--to <port>`.
-    Reach(reach::ReachCmd),
+    /// Forward a machine's service to a local port or stdout
+    Forward(forward::ForwardCmd),
+    /// Mint a local URL that reaches an origin through a machine you name.
+    Proxy(proxy::ProxyCmd),
     /// Push a file or directory to a peer.
     #[command(name = "send")]
     Send(send::SendCmd),
@@ -138,13 +138,13 @@ enum Command {
 
 /// Declare the reaching verbs ONCE: the list below becomes both the [`Reach`] enum and its whole
 /// [`Reaching`] impl, so a verb joins the reach family by adding one line rather than an arm in each of
-/// six parallel matches. Six hand-written arm lists is the shape the retired `self_badge()` drifted in:
+/// five parallel matches. Five hand-written arm lists is the shape the retired `self_badge()` drifted in:
 /// nothing keeps them in step but the author's eye, and a `_` wildcard in any one of them silently admits
-/// a verb that never stated its auth need. Generated, the six cannot disagree, and a verb missing from the
+/// a verb that never stated its auth need. Generated, the five cannot disagree, and a verb missing from the
 /// list is a compile error at [`Command::split`] rather than a verb that reaches a gate carrying nothing.
 ///
 /// Earned by that invariant, not by the keystrokes: the forwarding is mechanical, identical per arm, and
-/// there is no way to express "these six matches share one arm list" in the type system, because
+/// there is no way to express "these five matches share one arm list" in the type system, because
 /// [`Reaching::run`] is generic over the transport and cannot be a `dyn` object.
 macro_rules! reaching_verbs {
     ($($(#[$note:meta])* $verb:ident($cmd:ty)),+ $(,)?) => {
@@ -169,14 +169,6 @@ macro_rules! reaching_verbs {
             fn dialed(&self) -> Option<&swoosh::peer::Peer> {
                 match self {
                     $(Self::$verb(cmd) => cmd.dialed(),)+
-                }
-            }
-
-            /// Reject a redundant `--present` alongside a self-addressing `swoosh:` link peer, ONCE for every
-            /// reaching verb, so the guard can never be forgotten in a verb's own `run`.
-            fn reject_redundant_present(&self) -> eyre::Result<()> {
-                match self {
-                    $(Self::$verb(cmd) => cmd.reject_redundant_present(),)+
                 }
             }
 
@@ -225,11 +217,11 @@ reaching_verbs! {
     Ping(ping::PingCmd),
     Speed(speed::SpeedCmd),
     Status(status::StatusCmd),
-    Fetch(fetch::FetchCmd),
-    /// `swoosh reach`: the generic dial, any service, any sink. Presents a membership badge (like
-    /// `ping`/`send`), which a `--present` slip overrides, so it rides the reach path under the persisted
-    /// identity when one exists.
-    Reach(reach::ReachCmd),
+    Proxy(proxy::ProxyCmd),
+    /// `swoosh forward`: the generic dial, any service, any local end. Presents a membership badge (like
+    /// `ping`/`send`), which a link typed as the peer overrides, so it rides the reach path under the
+    /// persisted identity when one exists.
+    Forward(forward::ForwardCmd),
     /// `swoosh send`: push files to a peer's gated `recv:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
     Send(send::SendCmd),
@@ -282,7 +274,7 @@ impl Command {
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
             Self::Share(cmd) => Verb::Share(cmd),
-            Self::Reach(cmd) => Verb::Outward(Outward::Reach(cmd)),
+            Self::Forward(cmd) => Verb::Outward(Outward::Forward(cmd)),
             Self::Send(cmd) => Verb::Outward(Outward::Send(cmd)),
             Self::Sync(cmd) => Verb::Outward(Outward::Sync(cmd)),
             // `stop --at <peer>` reaches a peer's `control.stop`; a bare `stop` stops YOUR OWN node over
@@ -312,7 +304,7 @@ impl Command {
                 Some(_) => Verb::Outward(Outward::Status(cmd)),
                 None => Verb::Status(cmd),
             },
-            Self::Fetch(cmd) => Verb::Outward(Outward::Fetch(cmd)),
+            Self::Proxy(cmd) => Verb::Outward(Outward::Proxy(cmd)),
         }
     }
 }
@@ -484,6 +476,32 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
+/// Parse `argv`. A `forward` missing only its local end is refused with [`forward::NO_LOCAL_END`], which says
+/// what `-` means where clap's own required-argument line shows only the metavar. Every other error is
+/// clap's own. Refused here, at parse, so nothing is read, opened or bound first, the home included.
+fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString>,
+{
+    let argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
+    match Cli::try_parse_from(&argv) {
+        Err(error) if error.kind() == clap::error::ErrorKind::MissingRequiredArgument => {
+            // The model again with only `forward`'s local end optional: a line it accepts was missing that
+            // slot and nothing else. A line it refuses too was missing something else, and clap's own
+            // error stands.
+            let lenient = Cli::command().mut_subcommand("forward", |forward| {
+                forward.mut_arg(forward::LOCAL_END, |end| end.required(false))
+            });
+            match lenient.try_get_matches_from(&argv) {
+                Ok(_) => Err(usage(&["forward"], forward::NO_LOCAL_END)),
+                Err(_) => Err(error),
+            }
+        }
+        parsed => parsed,
+    }
+}
+
 /// Exit as clap does on a usage error of the command at `path` (`["root", "lock"]`): `error: <message>`, its
 /// usage line, and exit 2. For a usage error found only once the verb runs, such as stdin that held no link.
 fn usage_error(path: &[&str], message: &str) -> ! {
@@ -527,13 +545,13 @@ async fn run() -> eyre::Result<()> {
         .with_env_filter(log_filter(
             std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok(),
         ))
-        // Diagnostics ride stderr, never stdout: stdout is a verb's product (`swoosh fetch` writes the
-        // body there) and the action's public log, so a log line must not interleave. The action holds
+        // Diagnostics ride stderr, never stdout: stdout is a verb's product (`swoosh forward -` writes the
+        // stream there) and the action's public log, so a log line must not interleave. The action holds
         // serve's stderr in a file and echoes it only on failure, redacted.
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
+    let cli = parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit());
 
     // No verb given (a bare `swoosh`, even with `SWOOSH_HOME` set): a mistake, so the help goes to stderr
     // with exit 2, as clap's own `arg_required_else_help` does (stdout stays empty, no `error:` line).
@@ -542,6 +560,7 @@ async fn run() -> eyre::Result<()> {
         eprint!("{}", Cli::command().render_help());
         std::process::exit(2);
     };
+    let verb = command.split();
 
     // The node home, resolved ONCE from `--home`/`SWOOSH_HOME` (else the platform default): every
     // node path (identity key, signet, badge, contacts, denylist, ledger) derives from it, so a verb never
@@ -556,7 +575,7 @@ async fn run() -> eyre::Result<()> {
     // Local verbs run here, before any transport is composed and (for `tree`) before the store is even
     // opened: `tree` is pure introspection over clap's own model, and `contact` only edits the address
     // book. A reaching verb falls through to bind a transport below.
-    let reach = match command.split() {
+    let reach = match verb {
         Verb::Tree(cmd) => return cmd.run(&Cli::command()),
         // A bare `swoosh service ls` (no `--at`): read your own node's live table over the local control
         // socket. Run it here, before any transport is composed, the same local dispatch the other
@@ -725,10 +744,6 @@ async fn run() -> eyre::Result<()> {
             },
         },
     };
-    // Reject a redundant `--present` alongside a self-addressing `swoosh:` link peer ONCE here, before any
-    // dial, so the conflict is loud and compiler-forced for every verb (each states its own check via
-    // `Reaching::reject_redundant_present`), never a per-verb one-liner a new verb could forget.
-    reach.reject_redundant_present()?;
     // Resolve the membership badge to present BEFORE the secret is consumed by the transport bind: a
     // device presents its STORED badge (bound to this key, which the dial then binds under, so the far
     // gate's device-binding matches), and a machine that is not a device presents none. The exposer
@@ -1040,22 +1055,17 @@ mod tests {
         }
     }
 
-    /// The `tunnel` noun is retired: its two leaves are now the flat top-level verbs `serve` (publish
-    /// services) and `reach` (the generic dial). `swoosh tunnel ...` no longer resolves; `serve` and
-    /// `reach` do, and the `forward` spelling `reach` replaced is gone with the noun.
+    /// The `tunnel` noun is retired: its two leaves are the flat top-level verbs `serve` (publish
+    /// services) and `forward` (the generic dial). `swoosh tunnel ...` does not resolve; `serve` and
+    /// `forward` do.
     #[test]
-    fn tunnel_and_forward_are_gone_and_serve_and_reach_are_flat() {
+    fn tunnel_is_gone_and_serve_and_forward_are_flat() {
         let peer = NodeId::from_ed25519_secret(&[2u8; 32]).to_string();
 
-        // The retired noun and both old paths are unknown commands now.
+        // The retired noun and both old paths are unknown commands.
         assert!(Cli::try_parse_from(["swoosh", "tunnel"]).is_err());
         assert!(Cli::try_parse_from(["swoosh", "tunnel", "expose", "ping=ping:"]).is_err());
-        assert!(Cli::try_parse_from(["swoosh", "tunnel", "connect", &peer, "--to", "22"]).is_err());
-        // `forward` is retired as a word: one spelling per act, and the act is `reach`.
-        assert!(
-            Cli::try_parse_from(["swoosh", "forward", &peer, "--to", "5432"]).is_err(),
-            "the retired `forward` spelling must not resolve, not even as a hidden alias"
-        );
+        assert!(Cli::try_parse_from(["swoosh", "tunnel", "connect", &peer, "22"]).is_err());
 
         // `serve` is the primary publish verb: bare (default `ping` + `speed`) and with an
         // explicit service set.
@@ -1072,101 +1082,142 @@ mod tests {
             Some(Command::Serve(_))
         ));
 
-        // `reach` is the flat generic dial; `--to` takes a port, `-` (stdout), or `unix:<path>`.
-        for to in ["5432", "-", "unix:/run/x.sock"] {
+        // `forward` is the flat generic dial; its local end is a port, `-` (stdout), or `unix:<path>`.
+        for end in ["5432", "-", "unix:/run/x.sock"] {
             assert!(
                 matches!(
-                    Cli::try_parse_from(["swoosh", "reach", &peer, "web", "--to", to])
-                        .expect("reach parses each --to form")
+                    Cli::try_parse_from(["swoosh", "forward", &peer, "web", end])
+                        .expect("forward parses each local end")
                         .command,
-                    Some(Command::Reach(_))
+                    Some(Command::Forward(_))
                 ),
-                "reach --to {to} should parse"
+                "forward {end} parses to the forward verb"
             );
         }
         // A bare path or a source-only scheme is a hard parse error, never a silent misparse.
         for bad in ["/tmp/out", "fifo:/tmp/x", "0"] {
             assert!(
-                Cli::try_parse_from(["swoosh", "reach", &peer, "web", "--to", bad]).is_err(),
-                "reach --to {bad} must be rejected"
+                Cli::try_parse_from(["swoosh", "forward", &peer, "web", bad]).is_err(),
+                "forward {bad} must be rejected"
             );
         }
-        // `--stdio` is gone: the old boolean no longer parses.
+        // The local end is a positional: neither `--to` nor the retired `--stdio` boolean resolves.
+        for flag in [["--to", "-"].as_slice(), ["--stdio"].as_slice()] {
+            let mut argv = vec!["swoosh", "forward", peer.as_str(), "web"];
+            argv.extend_from_slice(flag);
+            assert!(
+                Cli::try_parse_from(&argv).is_err(),
+                "{argv:?} must not resolve"
+            );
+        }
+    }
+
+    /// `reach` is no command, not even a hidden alias: one spelling per act, and the act is `forward`.
+    /// clap refuses it as an unknown subcommand, a usage error.
+    #[test]
+    fn reach_is_not_a_command() {
+        let peer = NodeId::from_ed25519_secret(&[2u8; 32]).to_string();
+        for argv in [
+            vec!["swoosh", "reach"],
+            vec!["swoosh", "reach", peer.as_str(), "web", "-"],
+            vec!["swoosh", "reach", peer.as_str(), "web", "--to", "-"],
+        ] {
+            let error = Cli::try_parse_from(&argv).expect_err("reach is no command");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::InvalidSubcommand,
+                "{argv:?}"
+            );
+            assert_eq!(error.exit_code(), 2, "{argv:?}");
+        }
         assert!(
-            Cli::try_parse_from(["swoosh", "reach", &peer, "web", "--stdio"]).is_err(),
-            "the retired --stdio boolean must not resolve"
+            Cli::command().find_subcommand("reach").is_none(),
+            "no subcommand, visible or hidden, is named reach"
         );
     }
 
-    /// The generic dial's two defaults, pinned: the SINK defaults to stdout, and the SERVICE has no
-    /// default at all.
-    ///
-    /// Both halves fail if the guard is dropped. Re-add `default_value` to the service slot (the
-    /// `default` ghost that shipped through v0.11.1, a name no `serve` binds) and the first assertion
-    /// stops erroring; drop `default_value = "-"` from `--to` and the flagless form stops parsing. The
-    /// pair is the whole shape ruled for `reach`: the common case takes no flags, and the slot the user
-    /// must always fill is a positional clap refuses to invent.
+    /// `fetch` is no command either: its act is `proxy`, with the machine first.
     #[test]
-    fn reach_requires_a_service_and_defaults_its_sink_to_stdout() {
+    fn fetch_is_not_a_command_and_proxy_takes_the_machine_first() {
         let peer = NodeId::from_ed25519_secret(&[2u8; 32]).to_string();
-
+        let error = Cli::try_parse_from(["swoosh", "fetch", "https://example.com", "--via", &peer])
+            .expect_err("fetch is no command");
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+        let Some(Command::Proxy(cmd)) =
+            Cli::try_parse_from(["swoosh", "proxy", &peer, "https://example.com"])
+                .expect("proxy parses")
+                .command
+        else {
+            panic!("proxy parses to the proxy verb");
+        };
+        assert_eq!(cmd.url.as_str(), "https://example.com/");
         assert!(
-            Cli::try_parse_from(["swoosh", "reach", &peer]).is_err(),
-            "the service slot is required: a dial with no service must be clap's own error here, \
-             never a default name the far gate refuses without saying why"
+            Cli::try_parse_from(["swoosh", "proxy", "https://example.com", "--via", &peer])
+                .is_err(),
+            "`--via` is gone: the machine is the first positional"
+        );
+    }
+
+    /// The generic dial's slots, pinned: the SERVICE has no default, and the LOCAL END has none either.
+    /// A `forward` with no local end is a usage error, exit 2, whose line names the three local ends and
+    /// neither the machine nor the service, under forward's own usage line.
+    ///
+    /// Default the local end to `-` and the line parses instead: the bytes would silently go to the
+    /// terminal, which is the default the surface rules out.
+    #[test]
+    fn forward_without_a_local_end_is_a_usage_error() {
+        assert!(
+            Cli::try_parse_from(["swoosh", "forward", "me/nas"]).is_err(),
+            "the service slot is required: a dial with no service is clap's own error here"
         );
         assert!(
-            Cli::try_parse_from(["swoosh", "reach", &peer, "--service", "web"]).is_err(),
+            Cli::try_parse_from(["swoosh", "forward", "me/nas", "--service", "db", "5432"])
+                .is_err(),
             "the service is a positional, not a flag: `--service` is not a spelling of it"
         );
-
-        let Some(Command::Reach(cmd)) = Cli::try_parse_from(["swoosh", "reach", &peer, "web"])
-            .expect("the flagless form parses: peer, service, nothing else")
-            .command
-        else {
-            panic!("`reach` parses to the reach verb");
-        };
-        assert_eq!(cmd.service.as_str(), "web");
+        // A line missing more than the local end keeps clap's own error, never the local-end line.
+        let other = parse_from(["swoosh", "forward", "me/nas"])
+            .expect_err("a forward with no service refuses");
         assert_eq!(
-            cmd.to,
-            commands::connect::To::Stdout,
-            "the sink defaults to stdout, so the common case composes with the shell"
+            other.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let error = parse_from(["swoosh", "forward", "me/nas", "db"])
+            .expect_err("a forward with no local end refuses at parse");
+        assert_eq!(error.exit_code(), 2, "a usage error exits 2");
+        let printed = error.to_string();
+        assert!(
+            printed.starts_with(
+                "error: forward needs a local end: a port (5432), unix:<path>, or - for stdout\n"
+            ),
+            "the line names the three ends and nothing typed: {printed}"
+        );
+        assert!(
+            printed.contains("Usage: swoosh forward"),
+            "it prints forward's own usage line: {printed}"
         );
     }
 
-    /// The `swoosh ssh` ProxyCommand ABI, which is now the PUBLIC `reach` verb: ssh re-invokes
-    /// `<self> reach <key> <service> --to -`, so the exact line that carries an ssh session is one an
-    /// operator can run by hand to debug a launch that fails. It was a hidden leaf whose argv nothing
-    /// else could type, and the leaf differed from `reach` in one observable: it declared
-    /// `Identity::Persisted`, so a FAILED dial from an unprovisioned home minted the key a later
-    /// `serve` would gate its whole fleet on.
+    /// The `swoosh ssh` ProxyCommand ABI, which is the PUBLIC `forward` verb: ssh re-invokes
+    /// `<self> forward <peer> <service> -`, so the exact line that carries an ssh session is one an
+    /// operator can run by hand to debug a launch that fails.
     ///
     /// This is the PARSING half of that ABI; `ssh_argv`'s tests are the writing half. Every token the
-    /// launcher may append rides one line, in the order it writes them: the global `--home`, the
-    /// `--present` slip, then one `--peer <key>=<addr>` per hint.
+    /// launcher may append rides one line, in the order it writes them: the global `--home`, then one
+    /// `--peer <key>=<addr>` per hint. No link rides beside the peer: a link is given where the machine
+    /// goes, or not at all.
     #[test]
-    fn the_ssh_proxycommand_line_parses_as_a_public_reach() {
+    fn the_ssh_proxycommand_line_parses_as_a_public_forward() {
         let peer = NodeId::from_ed25519_secret(&[1u8; 32]).to_string();
-        let link = shown_link();
         let hint = format!("{peer}=127.0.0.1:9000");
         let cli = Cli::try_parse_from([
-            "swoosh",
-            "reach",
-            &peer,
-            "ssh",
-            "--to",
-            "-",
-            "--home",
-            "/tmp/yah",
-            "--present",
-            &link,
-            "--peer",
-            &hint,
+            "swoosh", "forward", &peer, "ssh", "-", "--home", "/tmp/yah", "--peer", &hint,
         ])
-        .expect("the ProxyCommand line parses as a reach");
+        .expect("the ProxyCommand line parses as a forward");
         assert_eq!(cli.home, Some(PathBuf::from("/tmp/yah")));
-        let Some(Command::Reach(cmd)) = cli.command else {
-            panic!("the ProxyCommand line is a `reach`");
+        let Some(Command::Forward(cmd)) = cli.command else {
+            panic!("the ProxyCommand line is a `forward`");
         };
         assert_eq!(cmd.service.as_str(), "ssh");
         assert_eq!(
@@ -1174,28 +1225,49 @@ mod tests {
             commands::connect::To::Stdout,
             "the bridge streams the single service over stdin/stdout"
         );
-        assert_eq!(
-            cmd.present.as_ref().map(nauthy::Link::as_str),
-            link.strip_prefix(swoosh::link::PREFIX),
-            "the bridge presents the bare link"
-        );
         assert_eq!(cmd.reach.peer.len(), 1, "each `--peer` hint rides verbatim");
 
-        // The retired spelling is gone: a stale `swoosh ssh` launched from an older binary's config, or
+        // The retired spellings are gone: a stale `swoosh ssh` launched from an older binary's config, or
         // a hand-typed guess, gets clap's unknown-subcommand error rather than a hidden verb.
+        for retired in ["tunnel-connect", "reach"] {
+            assert!(
+                Cli::try_parse_from(["swoosh", retired, &peer, "ssh", "-"]).is_err(),
+                "`{retired}` is no spelling of this act"
+            );
+        }
+    }
+
+    /// No verb takes `--present`: a link is given where the machine goes. Walked over the real command
+    /// tree, hidden flags included, so a verb added later with the flag fails here.
+    #[test]
+    fn no_verb_has_a_present_flag() {
+        fn walk(command: &clap::Command, path: &str, found: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if arg.get_long() == Some("present") {
+                    found.push(format!("{path} --present"));
+                }
+            }
+            for sub in command.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), found);
+            }
+        }
+        let mut found = Vec::new();
+        let mut root = Cli::command();
+        root.build();
+        walk(&root, "swoosh", &mut found);
         assert!(
-            Cli::try_parse_from([
-                "swoosh",
-                "tunnel-connect",
-                &peer,
-                "--service",
-                "ssh",
-                "--to",
-                "-"
-            ])
-            .is_err(),
-            "the hidden bridge leaf is gone; `reach` is the one spelling of this act"
+            found.is_empty(),
+            "verbs that still take --present: {found:?}"
         );
+        // And every `--help` reads the same: the word appears in none of them.
+        for sub in root.get_subcommands_mut() {
+            let help = sub.render_long_help().to_string();
+            assert!(
+                !help.contains("--present"),
+                "`swoosh {}` --help names --present",
+                sub.get_name()
+            );
+        }
     }
 
     /// A `serve` asked for its gate before it claimed its home has no list of what it binds to check each
@@ -1304,8 +1376,8 @@ mod tests {
     }
 
     /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `swoosh:` link all
-    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`reach`/`send`/`stop --at`/
-    /// `service ls --at`/`fetch --via`/`ssh`. `stop` and `service ls` carry the peer on `--at`
+    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/`send`/`stop --at`/
+    /// `service ls --at`/`proxy`/`ssh`. `stop` and `service ls` carry the peer on `--at`
     /// (bare acts on your own node); the rest carry it positionally.
     #[test]
     fn every_dialing_verb_takes_a_petname_a_key_and_a_link() {
@@ -1316,11 +1388,11 @@ mod tests {
                 &["swoosh", "ping", peer],
                 &["swoosh", "speed", peer],
                 &["swoosh", "status", peer],
-                &["swoosh", "reach", peer, "web", "--to", "5432"],
+                &["swoosh", "forward", peer, "web", "5432"],
                 &["swoosh", "send", "afile", peer],
                 &["swoosh", "stop", "--at", peer],
                 &["swoosh", "service", "ls", "--at", peer],
-                &["swoosh", "fetch", "http://example.com/x", "--via", peer],
+                &["swoosh", "proxy", peer, "http://example.com/x"],
                 &["swoosh", "ssh", peer],
             ];
             for argv in cases {
@@ -1500,11 +1572,11 @@ mod tests {
             (vec!["swoosh", "speed", &key], IrohBind::Dialing),
             (vec!["swoosh", "status", &key], IrohBind::Dialing),
             (
-                vec!["swoosh", "fetch", "https://example.com", "--via", &key],
+                vec!["swoosh", "proxy", &key, "https://example.com"],
                 IrohBind::Dialing,
             ),
             (
-                vec!["swoosh", "reach", &key, "web", "--to", "-"],
+                vec!["swoosh", "forward", &key, "web", "-"],
                 IrohBind::Dialing,
             ),
             (vec!["swoosh", "send", "notes.md", &key], IrohBind::Dialing),
@@ -1794,6 +1866,14 @@ mod tests {
             ),
             "the refusal states the rule: {error}"
         );
+        // A `:` in the name is no exception: the entry is still read as `name=target`.
+        let error = Cli::try_parse_from(["swoosh", "serve", "a:b=tcp:127.0.0.1:1"])
+            .expect_err("a name holding a colon refuses");
+        assert_eq!(error.exit_code(), 2, "a bad name is a usage error");
+        assert!(
+            error.to_string().contains("a:b is not a name"),
+            "the refusal states the rule: {error}"
+        );
         let Some(Command::Serve(cmd)) =
             Cli::try_parse_from(["swoosh", "serve", "Web=tcp:localhost:1"])
                 .expect("a capital name parses")
@@ -1813,7 +1893,7 @@ mod tests {
             vec!["swoosh", "share", "control.stop", "anyone"],
             vec!["swoosh", "service", "disable", "control.stop"],
             vec!["swoosh", "service", "enable", "control.stop"],
-            vec!["swoosh", "reach", key.as_str(), "control.stop"],
+            vec!["swoosh", "forward", key.as_str(), "control.stop", "-"],
             vec!["swoosh", "ssh", key.as_str(), "--service", "control.stop"],
             vec![
                 "swoosh",
@@ -1851,10 +1931,11 @@ mod tests {
             panic!("share parses to a service");
         };
         assert_eq!(service.as_str(), "web");
-        let Some(Command::Reach(cmd)) = parsed(&["swoosh", "reach", key.as_str(), "Web"]) else {
-            panic!("reach parses");
+        let Some(Command::Forward(args)) = parsed(&["swoosh", "forward", key.as_str(), "Web", "-"])
+        else {
+            panic!("forward parses");
         };
-        assert_eq!(cmd.service.as_str(), "web");
+        assert_eq!(args.service.as_str(), "web");
     }
 
     /// A device typed as an address follows the one name rule, and its refusal is the rule's own line, not a

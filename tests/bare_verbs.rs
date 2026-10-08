@@ -221,35 +221,6 @@ fn bare_stop_stops_the_resident() {
         "the serving line names what the resident serves: {status_out}"
     );
 
-    // A bare `--present` is refused, never silently dropped (I.3, MAJOR-1): exit non-zero with the
-    // exact teaching line, and the resident is untouched (the later real stop still finds it).
-    let link = swoosh::link::Link::from(
-        swoosh::testkit::TestRoot::seeded(0xb0)
-            .device_badge(
-                swoosh::testkit::TestNode::seeded(0xb1).node_id(),
-                nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
-            )
-            .expect("mint a stand-in slip"),
-    )
-    .to_string();
-    let cases: [&[&str]; 3] = [
-        &["status", "--present", link.as_str()],
-        &["service", "ls", "--present", link.as_str()],
-        &["stop", "--present", link.as_str()],
-    ];
-    for args in cases {
-        let refused = swoosh(&scratch, args);
-        assert!(
-            !refused.status.success(),
-            "bare {args:?} with --present exits non-zero"
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&refused.stderr).trim_end(),
-            "error: --present only applies when reaching a peer; drop it or name one",
-            "the refusal names the rule: {args:?}"
-        );
-    }
-
     // A bare reach flag is refused by name too (I.3, B4): the trio binds a transport and seeds discovery
     // for a peer, and a bare verb reaches none, so each is a loud error, never a silent no-op. The
     // resident stays untouched (the later real stop still finds it).
@@ -396,5 +367,37 @@ fn serve_removes_its_runtime_leaf_on_exit() {
         !leaf.exists(),
         "the stopped resident leaves no runtime leaf: {}",
         leaf.display()
+    );
+}
+
+/// A `forward` with no local end is refused at parse, before the home is read or made: exit 2, the line
+/// that names the three ends, and the `--home` it named still absent. A refusal that ran after the home
+/// was resolved would have had to read, and could have written, a home for a command line that was never
+/// whole.
+#[test]
+fn forward_without_a_local_end_exits_2_and_leaves_the_home_absent() {
+    let scratch = Scratch::new("no-local-end");
+    let absent = scratch.base.join("absent");
+    let out = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+        .args(["--home", absent.to_str().expect("utf-8 home")])
+        .args(["forward", "me/nas", "db"])
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .stdin(Stdio::null())
+        .output()
+        .expect("the swoosh binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with(
+            "error: forward needs a local end: a port (5432), unix:<path>, or - for stdout\n"
+        ),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty(), "nothing on stdout");
+    assert!(
+        !absent.exists(),
+        "the home is never made: {}",
+        absent.display()
     );
 }

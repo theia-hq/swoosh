@@ -39,7 +39,7 @@ laptop and their spare both reach the box, with the same link:
 
 <!-- manual: interactive ssh -->
 ```console
-$ swoosh ssh buildbox --present swoosh:ed01hcq6…
+$ swoosh ssh swoosh:ed01hcq6…
 ```
 
 They reach `ssh` and nothing else. The link names one service; the gate refuses everything it does not

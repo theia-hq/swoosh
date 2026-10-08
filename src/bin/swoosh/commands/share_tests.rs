@@ -538,7 +538,7 @@ async fn every_share_states_what_it_gives() {
         toml.services = vec![
             "db=tcp:localhost:5432".to_owned(),
             "sock=unix:/run/db.sock".to_owned(),
-            "news=fetch:https://news.example".to_owned(),
+            "news=proxy:https://news.example".to_owned(),
         ];
     })
     .unwrap();
@@ -851,7 +851,7 @@ async fn share_ssh_with_anyone_is_refused_and_mints_nothing() {
 }
 
 /// The refusal is the engine's ceiling, not "runs code": every engine that must never face an open gate
-/// refuses an `anyone` link, and a forward, a scoped fetch, a reflector or a name served by nothing does not.
+/// refuses an `anyone` link, and a forward, a scoped proxy, a reflector or a name served by nothing does not.
 #[tokio::test]
 async fn an_anyone_link_to_an_engine_never_open_to_anyone_is_refused() {
     let home = scratch("never-public").await;
@@ -859,8 +859,8 @@ async fn an_anyone_link_to_an_engine_never_open_to_anyone_is_refused() {
         &home,
         &[
             "inbox=recv:",
-            "web=fetch:",
-            "news=fetch:https://news.example",
+            "web=recv:/srv/web",
+            "news=proxy:https://news.example",
             "db=tcp:localhost:5432",
             "demo=echo:",
         ],

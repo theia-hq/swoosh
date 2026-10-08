@@ -48,6 +48,8 @@ fn swoosh(home: &Path, args: &[&str]) -> Output {
 #[test]
 fn a_serve_that_did_not_start_saves_no_relay() {
     let scratch = Scratch::new("no-start");
+    // A receive service is never public, so `--public web` refuses once the transport is bound.
+    let web = format!("web=recv:{}", scratch.0.join("inbox").display());
     let out = swoosh(
         &scratch.0,
         &[
@@ -56,7 +58,7 @@ fn a_serve_that_did_not_start_saves_no_relay() {
             "https://relay.example/",
             "--public",
             "web",
-            "web=fetch:",
+            &web,
         ],
     );
     assert_eq!(

@@ -121,18 +121,18 @@ async fn share(server: &Scratch, bind: Bind) -> Link {
     link
 }
 
-/// Dial `link` from `desk` as `swoosh reach <link> ssh` does, at `server`'s gate. Returns whether the gate
+/// Dial `link` from `desk` as `swoosh forward <link> ssh -` does, at `server`'s gate. Returns whether the gate
 /// admitted the dial and, when it did, the key the server recorded for the dialer.
 async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey> {
     let printed = swoosh::link::Link::from(Link::clone(link)).to_string();
-    let Some(command) = Cli::try_parse_from(["swoosh", "reach", printed.as_str(), SERVICE])
+    let Some(command) = Cli::try_parse_from(["swoosh", "forward", printed.as_str(), SERVICE, "-"])
         .unwrap()
         .command
     else {
-        panic!("reach parses");
+        panic!("forward parses");
     };
     let Verb::Outward(outward) = command.split() else {
-        panic!("reach is a reaching verb");
+        panic!("forward is a reaching verb");
     };
 
     // The server: `serve`'s gate over its home, one gated route that records who it admitted.
@@ -178,13 +178,13 @@ async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey
     let discovery = PeerHint::discovery(&transport, [hint], &bind_role).discovery;
     let node = Node::new(transport, discovery);
     let BindRole::Dialing(credential) = bind_role else {
-        panic!("reach dials");
+        panic!("forward dials");
     };
     let (slot1, slot2) = reaching::resolve(credential, &secret, &desk.home)
         .await
         .unwrap()
         .into_slots();
-    let peer = outward.dialed().expect("reach names its peer");
+    let peer = outward.dialed().expect("forward names its peer");
     let connector = peer
         .connector(&Contacts::default(), SERVICE.parse().unwrap(), slot1, slot2)
         .unwrap();

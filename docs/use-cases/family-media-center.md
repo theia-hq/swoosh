@@ -61,7 +61,7 @@ the box:
 
 <!-- manual: long-running port bind -->
 ```console
-$ swoosh reach mediacenter tv --to 8096 --present swoosh:ed01hcq6…
+$ swoosh forward swoosh:ed01hcq6… tv 8096
 ```
 
 Then she opens `http://127.0.0.1:8096` and watches. Any device her signet vouches for can present that

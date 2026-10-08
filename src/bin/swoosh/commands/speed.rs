@@ -38,15 +38,6 @@ pub struct SpeedCmd {
     /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
     #[arg(value_name = "peer")]
     pub peer: Peer,
-    /// present a `swoosh:` capability link to reach a gated peer
-    #[arg(
-        long,
-        value_name = "link",
-        value_parser = swoosh::link::parse,
-        long_help = "Optional: your own devices need no link, the dial presents this \
-                     device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
-    )]
-    pub present: Option<Link>,
     /// Measure the upload direction (this node sends).
     #[arg(long)]
     pub up: bool,
@@ -76,10 +67,6 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         Some(&self.peer)
     }
 
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        self.peer.reject_redundant_present(self.present.as_ref())
-    }
-
     fn identity(&self) -> swoosh::identity::Identity {
         self.bind_role().identity()
     }
@@ -88,15 +75,14 @@ impl swoosh::reaching::Reaching for SpeedCmd {
     /// home key, so its bind must not write the key's address record (0.9.0 F1).
     ///
     /// `speed` reaches the peer's family-gated `speed` service, so it presents the member badge rooted at
-    /// the dialing key (like `ping`). `Family` fuses the identity to `PersistedIfPresent`. The effective
-    /// slip is the FOLD of a self-addressing `swoosh:` link-as-peer with an explicit `--present`, threaded
-    /// INTO the credential so the ONE resolver owns both slots.
+    /// the dialing key (like `ping`). `Family` fuses the identity to `PersistedIfPresent`. A
+    /// self-addressing `swoosh:` link-as-peer is threaded INTO the credential so the ONE resolver owns both
+    /// slots.
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
             &self.peer,
-            self.present.clone(),
             reach::SPEED_SERVICE,
         ))
     }
@@ -128,13 +114,11 @@ impl SpeedCmd {
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
-        // The redundant-present conflict is rejected ONCE in the composition root via
-        // `Reaching::reject_redundant_present`, before this runs.
         let mode = self.mode();
         let limit = self.limit();
-        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
-        // link-as-peer through that same resolver, so the verb never threads `--present` itself.
+        // link-as-peer through that same resolver, so the verb never threads a slip itself.
         let service: Service = reach::SPEED_SERVICE.parse()?;
         let Resolved { session, label } = reach::dial_service(
             node, contacts, &self.peer, &service, present, membership, bound,

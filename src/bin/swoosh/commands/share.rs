@@ -620,7 +620,7 @@ impl Gives {
                 service: name.to_owned(),
                 to: served.argument().to_owned(),
             },
-            Scheme::Fetch => Self::Proxy {
+            Scheme::Proxy => Self::Proxy {
                 origin: served.argument().to_owned(),
             },
             Scheme::Ping

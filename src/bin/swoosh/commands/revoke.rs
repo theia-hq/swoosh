@@ -1052,11 +1052,6 @@ impl swoosh::reaching::Reaching for RevokeRoot {
         None
     }
 
-    /// `revoke` takes no `--present`, so there is nothing to conflict.
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        Ok(())
-    }
-
     fn identity(&self) -> swoosh::identity::Identity {
         self.bind_role().identity()
     }

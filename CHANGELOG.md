@@ -18,12 +18,24 @@ All notable changes to swoosh, newest first.
   writes it to a new private file instead. `--expires` takes a span like `2h`, `90d` or `1h30m`, from 1h to
   365d (default 1h), and the line prints it as typed. `swoosh share <link>` makes a copy of a link for
   `anyone` that ends sooner: any span up to its link's end.
-  A link to `anyone` for ssh, `ping`, `speed`, a receive service or a `fetch:` with no origin needs
-  `--once`: it works once, lasts 15 minutes at most, and cannot be copied.
+  A link to `anyone` for ssh, `ping`, `speed` or a receive service needs `--once`: it works once, lasts
+  15 minutes at most, and cannot be copied.
 
 ### Changed
-- **`serve` warns when a shell, `ping`, `speed`, a receive service or a `fetch:` with no origin has live
-  links made for something else, and those links are refused when used.** A link made for one target is
+- **`forward` replaces `reach`, and `proxy` replaces `fetch`.** `swoosh forward <machine> <service> <port | ->`
+  always names where the bytes go: a local port, or `-` for stdout; with neither it stops and says so.
+  `swoosh proxy <machine> <url>` takes the machine first, in place of `--via`. A machine serves a proxy with
+  `swoosh serve proxy:<url>`, named `proxy`, or `<name>=proxy:<url>`; `swoosh serve proxy` alone, or
+  `<name>=proxy:` with no URL, is refused.
+- **A proxy serves a whole site.** `swoosh serve proxy:<url>` takes a site with no path or query, such as
+  `proxy:https://example.com`; a request may ask for any path on that site, and none on another.
+- **`swoosh proxy`'s local URL answers only requests made to it.** It prints the URL alone on stdout, with a
+  random part in its path; a request without that part, or with a Host that names another address, is
+  refused, so only a client given the URL can use it.
+- **`--present` is gone.** Give a link, or a file holding one, where the machine goes:
+  `swoosh ssh swoosh:…` or `swoosh ssh ./nas.link`.
+- **`serve` warns when a shell, `ping`, `speed` or a receive service has live links made for something
+  else, and those links are refused when used.** A link made for one target is
   refused by any other. Adding one to `serve.toml` while `serve` runs prints the same warning and leaves
   the running services as they are.
 - **`share` replaces `grant`.** `grant issue` is `share <service> <who>`, and `grant narrow` is

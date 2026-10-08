@@ -10,7 +10,6 @@ Usage: swoosh ssh [OPTIONS] <peer> [-- <ssh args>...]
   <peer>          a petname, a raw node id, or a swoosh: link
   [ssh args]...   forwarded verbatim to ssh, after --
   --service <name>   the exposed service name to reach [default: ssh]
-  --present <link>   a swoosh: capability link to present to a gated peer
 ```
 
 **Example.** `swoosh ssh desk -- ls` runs a one-off command; `swoosh ssh desk -- -p 2222` passes ssh

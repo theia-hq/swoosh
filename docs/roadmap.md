@@ -17,9 +17,9 @@ rest is planned and lands as it is built.
 - [x] `status` print this machine's key and what it is, minting a key if absent
 - [x] `invite add` / `adopt` enroll a second machine under your signet via a signed invite
 - [x] `ssh` open an ssh session to a peer over the overlay
-- [x] `reach` reach any service a peer serves, on stdout or a local port
+- [x] `forward` forward a machine's service to a local port or stdout
 - [x] `send` push a file or directory to a peer
-- [x] `fetch` mint a local URL whose fetch egresses at a node you name
+- [x] `proxy` get a local URL that reaches a site through a machine you name
 - [x] `sync` bring your device list up to date with your other devices, both ways
 - [x] `share` a link to one service, for anyone or bound to a machine or a person's root, and shorter copies of a link
 - [x] `revoke` take back a link, one of your devices, or everything you shared with a contact

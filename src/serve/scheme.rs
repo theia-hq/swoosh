@@ -12,7 +12,7 @@ use std::collections::HashMap;
 macro_rules! schemes {
     ($($(#[$doc:meta])* $variant:ident => $text:literal,)+) => {
         /// Every scheme a `serve` entry can name: swoosh's own engines (`ping:`, `speed:`, `sshd:`, `recv:`,
-        /// `fetch:`) and tightbeam's primitives. An enum so that what a scheme's engine may face is one
+        /// `proxy:`) and tightbeam's primitives. An enum so that what a scheme's engine may face is one
         /// exhaustive match: a scheme added here must answer [`runs_code`](Self::runs_code) and
         /// [`never_public`](Self::never_public), and `bind_entry` must bind it, before it compiles.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,8 +51,8 @@ schemes! {
     Sshd => "sshd",
     /// `recv:<dir>`, files pushed into a directory.
     Recv => "recv",
-    /// `fetch:<origin>`, requests made from this machine.
-    Fetch => "fetch",
+    /// `proxy:<url>`, requests made from this machine.
+    Proxy => "proxy",
     /// `tcp:<host>:<port>`, a forward to a local address.
     Tcp => "tcp",
     /// `unix:<path>`, a forward to a local socket.
@@ -84,7 +84,7 @@ impl Scheme {
             Self::Ping
             | Self::Speed
             | Self::Recv
-            | Self::Fetch
+            | Self::Proxy
             | Self::Tcp
             | Self::Unix
             | Self::File
@@ -98,12 +98,12 @@ impl Scheme {
     /// declares it must never face an open gate (`type Exposure = Never`): it runs code, has no limits of
     /// its own, or writes this machine's disk. Such an engine is opened to anyone neither by `--public` nor
     /// by a link to anyone. The shell, the owner-tier `ping` and `speed` (an open one binds the metered
-    /// engine instead), receiving files, and a `fetch:` scoped to no origin (an open relay). A forward and
+    /// engine instead), receiving files, and a `proxy:` scoped to no origin (an open relay). A forward and
     /// the reflector may face anyone; so may a raw stream, which opens only through `--public-unsafe`.
     pub fn never_public(self, argument: &str) -> bool {
         match self {
             Self::Sshd | Self::Ping | Self::Speed | Self::Recv => true,
-            Self::Fetch => argument.is_empty(),
+            Self::Proxy => argument.is_empty(),
             Self::Tcp | Self::Unix | Self::Echo | Self::File | Self::Fifo | Self::Stdin => false,
         }
     }

@@ -22,8 +22,8 @@ use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
-    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, DEFAULT_SERVICES, Exchange, FetchScope,
-    FetchService, SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry, extract_recv_services,
+    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, DEFAULT_SERVICES, Exchange, ProxyScope,
+    ProxyService, SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry, extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
@@ -411,15 +411,15 @@ fn never_public_is_each_engines_own_ceiling() {
             Some(bind_recv(Router::new(gated()), name.clone(), "/tmp".into(), None).expect("recv")),
         ),
         (
-            "fetch:",
+            "proxy:",
             Some(
                 Router::new(gated())
                     .service(name.clone(), ::fetch::Fetch)
-                    .expect("fetch"),
+                    .expect("proxy"),
             ),
         ),
         (
-            "fetch:https://news.example",
+            "proxy:https://news.example",
             Some(
                 Router::new(gated())
                     .service(
@@ -428,9 +428,9 @@ fn never_public_is_each_engines_own_ceiling() {
                             ::fetch::OriginAllowlist::parse(["https://news.example"])
                                 .expect("an origin"),
                         )
-                        .expect("a scoped fetch"),
+                        .expect("a scoped proxy"),
                     )
-                    .expect("scoped fetch"),
+                    .expect("scoped proxy"),
             ),
         ),
         ("file:/tmp/x", None),
@@ -1724,7 +1724,7 @@ fn every_defaulted_service_name_is_bound_by_a_bare_serve_or_teaches_its_serve_en
 
     // The walk must be able to SEE the defaults it vets: a walk that matched nothing would pass this
     // test for free, which is the shape of a test that reports a guard as covered without running it.
-    for named in ["ssh", "recv", "fetch"] {
+    for named in ["ssh", "recv", "proxy"] {
         assert!(
             defaults.contains(named),
             "the walk found no `--service` default `{named}`: either it is not looking where the \
@@ -2672,28 +2672,179 @@ async fn control_round_trip(socket: &Path, request: Request) -> Result<Response,
     Response::read(&mut stream).await
 }
 
-/// Two `name=fetch:<origin>` services de-merge into TWO separate `FetchService`s, each with its own served
-/// name, its OWN unspellable synthetic scheme, and ONLY its own origin scope. `extract` removes them from the
-/// requested set (leaving the non-fetch entries for the router's grammar).
+/// `serve proxy:<url>` names itself `proxy`, the way `sshd:` names itself `ssh`; a named instance keeps the
+/// name it was given.
 #[test]
-fn named_fetch_origins_de_merge_into_per_service_instances() {
+fn a_bare_proxy_url_names_itself_proxy() {
+    let Some(crate::Command::Serve(cmd)) = <crate::Cli as clap::Parser>::try_parse_from([
+        "swoosh",
+        "serve",
+        "proxy:https://pkgs.example.com",
+        "pkgs=proxy:https://pkgs.example.com",
+    ])
+    .expect("both proxy forms parse")
+    .command
+    else {
+        panic!("serve parses to the serve verb");
+    };
+    assert_eq!(
+        cmd.services,
+        [
+            "proxy=proxy:https://pkgs.example.com",
+            "pkgs=proxy:https://pkgs.example.com"
+        ]
+    );
+}
+
+/// A proxy is always served with what it reaches, named or not: `serve proxy`, `serve proxy:` and
+/// `serve files=proxy:` name no origin, and an empty origin is an open egress relay under this machine's
+/// address. Each is a usage error (exit 2) that names the form to type, with the name typed, refused at
+/// parse, before anything binds.
+///
+/// Bind it with an empty origin instead (`proxy` read as `proxy=proxy:`, or a named one let through) and
+/// the parse succeeds: the node would serve an unconstrained relay nobody asked for.
+#[test]
+fn serve_proxy_without_a_target_is_a_usage_error() {
+    for (entry, form) in [
+        ("proxy", "proxy:<url>"),
+        ("Proxy", "proxy:<url>"),
+        ("proxy:", "proxy:<url>"),
+        ("proxy=proxy:", "proxy:<url>"),
+        ("files=proxy:", "files=proxy:<url>"),
+        ("Files=proxy:", "files=proxy:<url>"),
+    ] {
+        let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
+            .expect_err("a proxy with nothing to reach refuses");
+        assert_eq!(error.exit_code(), 2, "`serve {entry}` is a usage error");
+        assert!(
+            error.to_string().contains(&format!(
+                "proxy needs what it reaches: swoosh serve {form}\n"
+            )),
+            "`serve {entry}` names the form to type: {error}"
+        );
+    }
+}
+
+/// A proxy's URL is an origin only. The engine admits every path and query on the origin it is given, so
+/// a path would promise one file and serve the whole site, and a query (a signed link) would be stored and
+/// printed for nothing. A usage error (exit 2) that names the origin to type instead, with the name typed.
+///
+/// Read the whole URL as the scope instead and each parses, to a service wider than its line says.
+#[test]
+fn a_proxy_url_with_a_path_or_query_is_a_usage_error() {
+    for (entry, form) in [
+        (
+            "proxy:https://cdn.example/releases/v1.iso",
+            "proxy:https://cdn.example",
+        ),
+        (
+            "dl=proxy:https://cdn.example/v1.iso?X-Amz-Signature=abc",
+            "dl=proxy:https://cdn.example",
+        ),
+        (
+            "dl=proxy:https://cdn.example/?a=b",
+            "dl=proxy:https://cdn.example",
+        ),
+        (
+            "dl=proxy:https://cdn.example/#top",
+            "dl=proxy:https://cdn.example",
+        ),
+        (
+            "dl=proxy:http://cdn.example:8080/x",
+            "dl=proxy:http://cdn.example:8080",
+        ),
+        // Bare, with an `=` in its query: the `=` is the URL's, never a `name=` split.
+        (
+            "proxy:https://cdn.example/a?b=c",
+            "proxy:https://cdn.example",
+        ),
+    ] {
+        let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
+            .expect_err("a proxy URL with a path or a query refuses");
+        assert_eq!(error.exit_code(), 2, "`serve {entry}` is a usage error");
+        assert!(
+            error.to_string().contains(&format!(
+                "a proxy reaches a whole site, so its URL takes no path or query: swoosh serve {form}\n"
+            )),
+            "`serve {entry}` names the origin to type: {error}"
+        );
+    }
+
+    // The origin, with or without its trailing slash, is the form that serves.
+    for entry in ["proxy:https://cdn.example", "dl=proxy:https://cdn.example/"] {
+        assert!(
+            <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry]).is_ok(),
+            "`serve {entry}` names an origin"
+        );
+    }
+}
+
+/// The engine fetches only http and https, so a proxy URL with any other scheme is a usage error (exit 2),
+/// refused before its path and query are stored. Its line names neither: `foo://h:1` has an opaque origin
+/// the path check cannot read, and the engine's origin parse would take it (a host and a port).
+///
+/// Drop the scheme check and `foo:` reaches the path check, which names its opaque origin; `file:` and
+/// `data:` pass the entry and are refused only at expose.
+#[test]
+fn a_proxy_url_that_is_not_http_or_https_is_a_usage_error() {
+    for (entry, form) in [
+        ("proxy:foo://h:1/p?sig=x", "proxy:https://<host>"),
+        ("dl=proxy:file:///etc/passwd", "dl=proxy:https://<host>"),
+        ("dl=proxy:data:text/plain,x", "dl=proxy:https://<host>"),
+    ] {
+        let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
+            .expect_err("a proxy URL that is not http or https refuses");
+        assert_eq!(error.exit_code(), 2, "`serve {entry}` is a usage error");
+        // clap echoes the argv it refused; the entry's own line is what must name nothing typed.
+        let line = swoosh::serve::service_entry(entry)
+            .expect_err("refused at the entry")
+            .to_string();
+        assert_eq!(
+            line,
+            format!("a proxy reaches only http and https sites: swoosh serve {form}"),
+            "`serve {entry}`"
+        );
+    }
+}
+
+/// A proxy URL with a user or password is refused in swoosh's words: the engine's own line names the
+/// engine, a word no person types.
+#[test]
+fn a_proxy_origin_with_userinfo_never_names_the_engine() {
+    let mut requested = vec!["name=proxy:https://u:p@host.example".to_owned()];
+    let Err(error) = ProxyScope::extract(&mut requested) else {
+        panic!("a proxy URL with a user and password is refused");
+    };
+    let line = format!("{error:#}");
+    assert_eq!(
+        line,
+        "a proxy URL cannot carry a user or password (user:pass@)"
+    );
+    assert!(!line.contains("fetch"), "{line}");
+}
+
+/// Two `name=proxy:<origin>` services de-merge into TWO separate `ProxyService`s, each with its own served
+/// name, its OWN unspellable synthetic scheme, and ONLY its own origin scope. `extract` removes them from the
+/// requested set (leaving the non-proxy entries for the router's grammar).
+#[test]
+fn named_proxy_origins_de_merge_into_per_service_instances() {
     let mut requested = vec![
-        "news=fetch:https://news.example".to_owned(),
-        "apple=fetch:https://apple.example".to_owned(),
+        "news=proxy:https://news.example".to_owned(),
+        "apple=proxy:https://apple.example".to_owned(),
     ];
-    let fetch = FetchScope::extract(&mut requested).expect("origins parse");
+    let proxy = ProxyScope::extract(&mut requested).expect("origins parse");
 
     assert!(
         requested.is_empty(),
-        "fetch entries are removed from the set the router then binds"
+        "proxy entries are removed from the set the router then binds"
     );
-    let services = fetch.services();
+    let services = proxy.services();
     assert_eq!(
         services.len(),
         2,
-        "two fetch services de-merge into two instances"
+        "two proxy services de-merge into two instances"
     );
-    let names: Vec<&str> = services.iter().map(FetchService::name).collect();
+    let names: Vec<&str> = services.iter().map(ProxyService::name).collect();
     assert!(
         names.contains(&"news") && names.contains(&"apple"),
         "each keeps its served name"
@@ -2704,13 +2855,14 @@ fn named_fetch_origins_de_merge_into_per_service_instances() {
     );
 }
 
-/// A bare `fetch:` (no `=`, no name) names no service and is refused with the `name=target` teaching
-/// error: only `name=fetch:<origin>` is spelled.
+/// An entry with no `=` that reaches the de-merge names no service and is refused with the `name=target`
+/// teaching error. A typed bare `proxy:<url>` never gets here unnamed ([`a_bare_proxy_url_names_itself_proxy`]);
+/// this is the de-merge's own guard, for an entry from anywhere else.
 #[test]
-fn bare_fetch_is_refused_with_the_name_addr_teaching_error() {
-    let mut requested = vec!["fetch:".to_owned()];
-    let Err(error) = FetchScope::extract(&mut requested) else {
-        panic!("a bare `fetch:` should be refused, not served");
+fn bare_proxy_is_refused_with_the_name_addr_teaching_error() {
+    let mut requested = vec!["proxy:".to_owned()];
+    let Err(error) = ProxyScope::extract(&mut requested) else {
+        panic!("a bare `proxy:` should be refused, not served");
     };
     assert!(
         error.to_string().contains("name=target"),
@@ -2718,55 +2870,76 @@ fn bare_fetch_is_refused_with_the_name_addr_teaching_error() {
     );
 }
 
-/// Non-fetch services pass through in order, and only fetch is de-merged out, so extraction is scoped to fetch
+/// Non-proxy services pass through in order, and only proxy is de-merged out, so extraction is scoped to proxy
 /// and does not disturb the rest of the requested set.
 #[test]
-fn non_fetch_services_pass_through_and_only_fetch_is_removed() {
+fn non_proxy_services_pass_through_and_only_proxy_is_removed() {
     let mut requested = vec![
         "ping=ping:".to_owned(),
         "web=tcp:127.0.0.1:8080".to_owned(),
-        "gh=fetch:https://api.github.com".to_owned(),
+        "gh=proxy:https://api.github.com".to_owned(),
     ];
-    let fetch = FetchScope::extract(&mut requested).expect("origin parses");
+    let proxy = ProxyScope::extract(&mut requested).expect("origin parses");
 
     assert_eq!(
         requested,
         vec!["ping=ping:".to_owned(), "web=tcp:127.0.0.1:8080".to_owned()],
-        "the fetch entry is removed; ping and the raw forward are left exactly as given, in order"
+        "the proxy entry is removed; ping and the raw forward are left exactly as given, in order"
     );
     assert_eq!(
-        fetch.services().len(),
+        proxy.services().len(),
         1,
-        "only the one fetch service is de-merged out"
+        "only the one proxy service is de-merged out"
     );
 }
 
 /// A malformed origin fails at expose time with a teaching error, not at dial time as an opaque refusal.
 #[test]
-fn a_malformed_fetch_origin_is_refused_at_expose_time() {
-    let mut requested = vec!["bad=fetch:not a url".to_owned()];
+fn a_malformed_proxy_origin_is_refused_at_expose_time() {
+    let mut requested = vec!["bad=proxy:not a url".to_owned()];
     assert!(
-        FetchScope::extract(&mut requested).is_err(),
+        ProxyScope::extract(&mut requested).is_err(),
         "an unparseable origin is refused when the service is declared"
     );
 }
 
-/// BLOCKER-3: a PUBLIC fetch instance holds ONLY its own origin scope, so it cannot reach a GATED fetch
+/// An entry that reaches the de-merge with no origin is refused there too, whatever path it came by: an
+/// empty scope is an open egress relay, so no proxy service is ever built unconstrained and the binder has
+/// only the scoped engine to bind.
+///
+/// Read an empty origin as an empty allowlist instead and each extracts, to a proxy that fetches any site.
+#[test]
+fn a_proxy_entry_with_no_origin_is_refused_at_the_de_merge() {
+    for entry in ["api=proxy:", "proxy=proxy:"] {
+        let mut requested = vec![entry.to_owned()];
+        let Err(error) = ProxyScope::extract(&mut requested) else {
+            panic!("`{entry}` names no origin and is refused");
+        };
+        assert!(
+            error
+                .to_string()
+                .starts_with("proxy needs what it reaches: "),
+            "`{entry}`: {error}"
+        );
+    }
+}
+
+/// BLOCKER-3: a PUBLIC proxy instance holds ONLY its own origin scope, so it cannot reach a GATED proxy
 /// instance's origins. The public `pub` and the gated `internal` are separate instances, each scoped to its
 /// OWN origin; there is no shared allowlist to over-permit.
 #[test]
-fn a_public_fetch_instance_cannot_reach_a_gated_fetch_s_origins() {
+fn a_public_proxy_instance_cannot_reach_a_gated_proxy_s_origins() {
     let mut requested = vec![
-        "pub=fetch:https://public.example".to_owned(),
-        "internal=fetch:http://10.0.0.5".to_owned(),
+        "pub=proxy:https://public.example".to_owned(),
+        "internal=proxy:http://10.0.0.5".to_owned(),
     ];
-    let fetch = FetchScope::extract(&mut requested).expect("parse");
-    let public = fetch
+    let proxy = ProxyScope::extract(&mut requested).expect("parse");
+    let public = proxy
         .services()
         .iter()
         .find(|s| s.name() == "pub")
         .expect("pub");
-    let internal = fetch
+    let internal = proxy
         .services()
         .iter()
         .find(|s| s.name() == "internal")
@@ -2777,71 +2950,11 @@ fn a_public_fetch_instance_cannot_reach_a_gated_fetch_s_origins() {
     // an allowlist admits ONLY its listed origin, exact-match, is proven in `fetch`'s own origin tests.)
     assert!(
         !public.allow().is_unconstrained(),
-        "the public fetch is scoped to its own origin only"
+        "the public proxy is scoped to its own origin only"
     );
     assert!(
         !internal.allow().is_unconstrained(),
-        "the gated fetch holds its own internal origin only"
-    );
-}
-
-/// BLOCKER-3 masking sub-attack: an origin-scoped GATED fetch beside an unconstrained PUBLIC fetch must NOT
-/// mask the open relay. Per-service, `refuse_open_relay` reasons about the PUBLIC fetch's own scope, so an
-/// unconstrained public fetch is refused even when a second, scoped, gated fetch is present.
-#[test]
-fn a_scoped_gated_fetch_does_not_mask_a_bare_public_open_relay() {
-    let mut requested = vec![
-        "internal=fetch:http://10.0.0.5".to_owned(), // scoped, gated
-        "pub=fetch:".to_owned(),                     // unconstrained, public
-    ];
-    let fetch = FetchScope::extract(&mut requested).expect("parse");
-    let public = vec![svc("pub")];
-    assert!(
-        fetch.refuse_open_relay(&public).is_err(),
-        "an unconstrained public fetch is an open relay even beside a scoped gated fetch (no masking)"
-    );
-}
-
-/// MAJOR-1: an unconstrained fetch NAMED in `--public` is refused at build time with a teaching error
-/// that names the problem and the fix, mirroring the sshd-cannot-be-public refusal.
-#[test]
-fn an_unconstrained_public_fetch_is_refused_as_an_open_relay() {
-    let mut requested = vec!["api=fetch:".to_owned()];
-    let fetch = FetchScope::extract(&mut requested).expect("unconstrained fetch parses");
-    let public = vec![svc("api")];
-    let error = fetch
-        .refuse_open_relay(&public)
-        .expect_err("a public unconstrained fetch is an open relay and must be refused");
-    let message = format!("{error}");
-    assert!(
-        message.contains("origin-scoped") && message.contains("open relay"),
-        "the refusal teaches the fix (origin-scope it) and names the problem (an open relay): {message:?}"
-    );
-}
-
-/// A `serve api=fetch:https://origin --public api` (a SCOPED public fetch) is the safe, intended shape: its
-/// own allowlist is armed, so it is allowed.
-#[test]
-fn a_scoped_public_fetch_is_allowed() {
-    let mut requested = vec!["api=fetch:https://origin.example".to_owned()];
-    let fetch = FetchScope::extract(&mut requested).expect("origin parses");
-    let public = vec![svc("api")];
-    assert!(
-        fetch.refuse_open_relay(&public).is_ok(),
-        "a public fetch scoped to an origin is armed, not an open relay"
-    );
-}
-
-/// A `name=fetch:` that is NOT named in `--public` stays legal: it is gated (the family gate terminates it),
-/// so an unconstrained allowlist is not an open relay. Only a PUBLIC unconstrained fetch is refused.
-#[test]
-fn a_gated_bare_fetch_is_allowed() {
-    let mut requested = vec!["api=fetch:".to_owned()];
-    let fetch = FetchScope::extract(&mut requested).expect("unconstrained fetch parses");
-    // `api` is served but NOT public.
-    assert!(
-        fetch.refuse_open_relay(&[]).is_ok(),
-        "a gated (member-only) fetch is unchanged; the family gate terminates it"
+        "the gated proxy holds its own internal origin only"
     );
 }
 

@@ -39,14 +39,6 @@ ed01hcq6balrlxwa via iroh: mixed (direct to 192.168.1.115:51445 and relayed)
   rtt min/avg/max/mdev = 0.891/1.075/1.277/0.135 ms
 ```
 
-If they already reach the node another way (a petname they saved, say), they name the peer and present
-the link separately:
-
-<!-- manual: needs a live gated peer -->
-```console
-$ swoosh ping ed01hcq6… --present swoosh:ed01hcq6…
-```
-
 The gate checks the link offline, against your key. The holder gets that one service and nothing else.
 
 ## 3. It expires, or you revoke it

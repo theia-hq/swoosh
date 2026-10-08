@@ -154,22 +154,129 @@ const BUILT_IN: [(&str, &str); 3] = [("ping", "ping:"), ("speed", "speed:"), ("s
 /// Parse one typed `serve` entry: the name follows the one name rule and is folded, the target passes
 /// through for [`bind_entry`] to read. A typed name is never dotted, so it can never be an internal route
 /// (`control.stop`). A bare `<service>` (no `=`) is a name too, folded the same way, and a built-in one
-/// becomes its full form (`ssh` is `ssh=sshd:`); a bare target (`fetch:`, holding the scheme's `:`) passes
-/// through, so the tunnel grammar teaches the `name=target` shape.
-pub fn service_entry(entry: &str) -> Result<String, NameError> {
-    match entry.split_once('=') {
-        Some((name, target)) => Ok(format!("{}={target}", name.parse::<Name>()?)),
-        None if entry.contains(':') => Ok(entry.to_owned()),
-        None => {
-            let name: String = entry.parse::<Name>()?.into();
-            Ok(
-                match BUILT_IN.iter().find(|(built_in, _)| *built_in == name) {
-                    Some((_, target)) => format!("{name}={target}"),
-                    None => name,
-                },
-            )
+/// becomes its full form (`ssh` is `ssh=sshd:`). A bare `proxy:<url>` names itself `proxy`, the way
+/// `sshd:` is named `ssh`; any other bare target (`tcp:…`, holding the scheme's `:`) passes through, so the
+/// tunnel grammar teaches the `name=target` shape.
+///
+/// A proxy is always served with what it reaches, named or not: an empty origin is an open egress relay
+/// under this machine's address, and a name changes what a service is called, never what it reaches. So
+/// `proxy`, `proxy:` and `<name>=proxy:` refuse, and a proxy's URL is an origin only (see
+/// [`proxy_origin`]).
+///
+/// A bare `proxy:<url>` is read before any `name=` split, so an `=` in its query (a signed link) stays in
+/// the URL and the refusal names the URL, never a name the person did not type. Every other entry splits
+/// on its first `=`, so a name holding a `:` still meets the name rule.
+pub fn service_entry(entry: &str) -> Result<String, EntryError> {
+    if let Some((Scheme::Proxy, url)) = Scheme::parse(entry) {
+        proxy_origin(Scheme::Proxy.as_str(), url)?;
+        return Ok(format!("{}={entry}", Scheme::Proxy.as_str()));
+    }
+    if let Some((name, target)) = entry.split_once('=') {
+        let name = name.parse::<Name>()?;
+        if let Some((Scheme::Proxy, url)) = Scheme::parse(target) {
+            proxy_origin(name.as_str(), url)?;
+        }
+        return Ok(format!("{name}={target}"));
+    }
+    if entry.contains(':') {
+        return Ok(entry.to_owned());
+    }
+    let name: String = entry.parse::<Name>()?.into();
+    if name == Scheme::Proxy.as_str() {
+        return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(
+            &name, "<url>",
+        )));
+    }
+    Ok(
+        match BUILT_IN.iter().find(|(built_in, _)| *built_in == name) {
+            Some((_, target)) => format!("{name}={target}"),
+            None => name,
+        },
+    )
+}
+
+/// Hold a proxy's URL to what the engine scopes by: one origin, the scheme, host and port. The engine
+/// admits every path and query on that origin, so a URL that carried a path would promise less than the
+/// service gives, and a query (a signed download link, say) would be stored and printed for nothing. An
+/// empty URL is no origin at all. A URL that does not parse passes here: the origin parse at expose time
+/// refuses it with the cause ([`ProxyScope::extract`]).
+///
+/// The engine fetches only `http` and `https`, so any other scheme is refused here, before its path and
+/// query could be stored; the line names neither. Both are special schemes in the URL grammar, so every
+/// URL past this check has a tuple origin.
+fn proxy_origin(name: &str, url: &str) -> Result<(), EntryError> {
+    if url.is_empty() {
+        return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(
+            name, "<url>",
+        )));
+    }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return Ok(());
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(EntryError::ProxyNotHttp(ProxyLine::new(
+            name,
+            "https://<host>",
+        )));
+    }
+    let origin = parsed.origin();
+    let bare = matches!(parsed.path(), "" | "/")
+        && parsed.query().is_none()
+        && parsed.fragment().is_none();
+    if bare {
+        return Ok(());
+    }
+    Err(EntryError::ProxyNotAnOrigin(ProxyLine::new(
+        name,
+        &origin.ascii_serialization(),
+    )))
+}
+
+/// The `serve` entry a proxy refusal teaches, in its shortest form: `proxy:<url>` for the service named
+/// `proxy` (it names itself), `<name>=proxy:<url>` for any other.
+#[derive(Debug)]
+pub struct ProxyLine {
+    /// The served name, folded.
+    name: String,
+    /// What follows `proxy:`: a placeholder, or the origin to type.
+    url: String,
+}
+
+impl ProxyLine {
+    /// The line for the service `name`, reaching `url`.
+    fn new(name: &str, url: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            url: url.to_owned(),
         }
     }
+}
+
+impl core::fmt::Display for ProxyLine {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let proxy = Scheme::Proxy.as_str();
+        if self.name != proxy {
+            write!(f, "{}=", self.name)?;
+        }
+        write!(f, "{proxy}:{}", self.url)
+    }
+}
+
+/// Why a typed `serve` entry is not one.
+#[derive(Debug, thiserror::Error)]
+pub enum EntryError {
+    /// Its name breaks the one name rule: the rule's own line.
+    #[error(transparent)]
+    Name(#[from] NameError),
+    /// A proxy with nothing to reach, named or not (see [`service_entry`]).
+    #[error("proxy needs what it reaches: swoosh serve {0}")]
+    ProxyWithoutTarget(ProxyLine),
+    /// A proxy whose URL carries a path, a query or a fragment; the line names its origin.
+    #[error("a proxy reaches a whole site, so its URL takes no path or query: swoosh serve {0}")]
+    ProxyNotAnOrigin(ProxyLine),
+    /// A proxy whose URL is neither `http` nor `https`; the line names neither its host nor its path.
+    #[error("a proxy reaches only http and https sites: swoosh serve {0}")]
+    ProxyNotHttp(ProxyLine),
 }
 
 /// Bind one operator `name=addr` service entry onto `router`. Handlers bind by VALUE (the scheme namespace
@@ -226,13 +333,13 @@ pub fn bind_entry(
         #[cfg(not(feature = "ssh"))]
         Scheme::Sshd => router.parse(&[entry.to_owned()]).map_err(target_help),
         // Not swoosh's: a `tcp:`/`unix:` forward, a `file:`/`fifo:`/`stdin:` raw stream, the `echo:`
-        // reflector. tightbeam's grammar owns them, refusal included. `recv:` and `fetch:` are taken out of
+        // reflector. tightbeam's grammar owns them, refusal included. `recv:` and `proxy:` are taken out of
         // the entries before any is bound here, so one that reaches this is refused by that grammar too.
         // Its refusal names the schemes IT routes, which cannot include swoosh's without handing it a
         // scheme registry it deliberately does not have, so the pointer is added here instead: a reader
         // refused by either half gets told where the whole list is.
         Scheme::Recv
-        | Scheme::Fetch
+        | Scheme::Proxy
         | Scheme::Tcp
         | Scheme::Unix
         | Scheme::File
@@ -327,7 +434,7 @@ pub const RECV_SCHEME: &str = Scheme::Recv.as_str();
 /// default `recv`) and ONLY its own output directory. Because each receive service holds its own [`Recv`]
 /// instance, `a=recv:/x b=recv:/y` writes alice's pushes into /x and bob's into /y: a node-wide sink cannot
 /// say which of two receive services saves where, so the dir rides the per-service instance, the same
-/// de-merge `fetch:` uses.
+/// de-merge `proxy:` uses.
 pub struct RecvService {
     name: String,
     out: PathBuf,
@@ -509,22 +616,21 @@ pub fn extract_recv_services(
     Ok(services)
 }
 
-/// The scheme prefix a fetch service names, so the origin-extraction matches `fetch:<origin>` on the ONE
+/// The scheme prefix a proxy service names, so the origin-extraction matches `proxy:<url>` on the ONE
 /// literal, not a re-typed string that could drift from it.
-const FETCH_SCHEME: &str = Scheme::Fetch.as_str();
+const PROXY_SCHEME: &str = Scheme::Proxy.as_str();
 
-/// One de-merged fetch service: its served NAME (the wire name a dialer requests, e.g. `news`) and ONLY its
-/// own origin scope. Because each fetch service holds its own [`Fetch`] instance, a public fetch physically
-/// cannot reach a gated fetch's origins: the SSRF pivot is unrepresentable, not
+/// One de-merged proxy service: its served NAME (the wire name a dialer requests, e.g. `news`) and ONLY its
+/// own origin scope. Because each proxy service holds its own engine instance, a public proxy physically
+/// cannot reach a gated proxy's origins: the SSRF pivot is unrepresentable, not
 /// fail-closed-by-convention.
-pub struct FetchService {
+pub struct ProxyService {
     name: String,
-    /// What follows `fetch:`, as [`Scheme::never_public`] reads it: empty for no origin.
-    origin: String,
+    /// Never empty: [`ProxyScope::extract`] refuses a proxy with no origin.
     allow: OriginAllowlist,
 }
 
-impl FetchService {
+impl ProxyService {
     /// The served name a dialer requests and `--public` names.
     pub fn name(&self) -> &str {
         &self.name
@@ -536,22 +642,24 @@ impl FetchService {
     }
 }
 
-/// De-merges the fetch services out of the requested set: a `name=fetch:<origin>` entry hands the router an
-/// origin its addr grammar cannot carry, so swoosh separates each into its OWN [`FetchService`] (name + its
-/// own origin scope) here, then binds one `Fetch` instance per name by value.
+/// De-merges the proxy services out of the requested set: a `name=proxy:<url>` entry hands the router an
+/// origin its addr grammar cannot carry, so swoosh separates each into its OWN [`ProxyService`] (name + its
+/// own origin scope) here, then binds one engine instance per name by value.
 ///
-/// A pure edge adapter over the raw request strings. A `name=fetch:` (no origin) is an unconstrained fetch
-/// under its own name; a `name=fetch:<origin>` is a named, origin-scoped fetch. An entry without `=` names
-/// no service and is a teaching error, mirroring tightbeam's grammar. A malformed origin fails HERE, at
-/// expose time, not at dial time.
-pub struct FetchScope;
+/// A pure edge adapter over the raw request strings. A `name=proxy:<url>` is a named, origin-scoped proxy.
+/// A `name=proxy:` (no origin) would be an open egress relay; [`service_entry`] refuses it before an entry
+/// gets here, and this refuses it again for an entry from anywhere else, so no [`ProxyService`] holds an
+/// unconstrained scope and the binder has only the scoped engine to build. An entry without `=` names no
+/// service and is a teaching error, mirroring tightbeam's grammar. A malformed origin fails HERE, at expose
+/// time, not at dial time.
+pub struct ProxyScope;
 
-impl FetchScope {
-    /// Remove every fetch entry from `requested` (leaving the non-fetch services for the router's grammar)
-    /// and return them as one [`FetchService`] each: its served name and only its own [`OriginAllowlist`].
-    /// Non-fetch entries are left in place, in order. A malformed origin fails HERE with a teaching message.
-    pub fn extract(requested: &mut Vec<String>) -> eyre::Result<FetchExposure> {
-        let mut services: Vec<FetchService> = Vec::new();
+impl ProxyScope {
+    /// Remove every proxy entry from `requested` (leaving the other services for the router's grammar)
+    /// and return them as one [`ProxyService`] each: its served name and only its own [`OriginAllowlist`].
+    /// Other entries are left in place, in order. A malformed origin fails HERE with a teaching message.
+    pub fn extract(requested: &mut Vec<String>) -> eyre::Result<ProxyExposure> {
+        let mut services: Vec<ProxyService> = Vec::new();
         let mut remaining: Vec<String> = Vec::new();
         for entry in requested.drain(..) {
             // Split off the `name=` prefix; only the ADDR side names a scheme, so the origin is read
@@ -559,69 +667,59 @@ impl FetchScope {
             let Some((name, addr)) = entry.split_once('=') else {
                 eyre::bail!(
                     "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
-                     `news=fetch:https://news.example`"
+                     `news=proxy:https://news.example`"
                 );
             };
-            // A fetch service is `fetch:` optionally followed by an origin. A non-fetch entry passes through
+            // A proxy service is `proxy:` optionally followed by an origin. Any other entry passes through
             // unchanged, in order, for the router's own grammar.
             let Some(origin) = addr
-                .strip_prefix(FETCH_SCHEME)
+                .strip_prefix(PROXY_SCHEME)
                 .and_then(|rest| rest.strip_prefix(':'))
             else {
                 remaining.push(entry);
                 continue;
             };
-            // Each fetch service gets its OWN allowlist (only its own origin; empty = unconstrained): the
-            // per-instance isolation that makes the SSRF pivot unrepresentable.
-            let allow = if origin.is_empty() {
-                OriginAllowlist::default()
-            } else {
-                OriginAllowlist::parse([origin]).map_err(|error| eyre::eyre!(error))?
-            };
-            services.push(FetchService {
+            // No origin is an open relay, never a scope.
+            if origin.is_empty() {
+                return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(name, "<url>")).into());
+            }
+            // Each proxy service gets its OWN allowlist (only its own origin): the per-instance isolation
+            // that makes the SSRF pivot unrepresentable.
+            let allow = OriginAllowlist::parse([origin]).map_err(origin_refusal)?;
+            services.push(ProxyService {
                 name: name.to_owned(),
-                origin: origin.to_owned(),
                 allow,
             });
         }
         *requested = remaining;
-        Ok(FetchExposure { services })
+        Ok(ProxyExposure { services })
     }
 }
 
-/// The operator's per-service fetch posture pulled from the requested services: one [`FetchService`] per
-/// exposed fetch, each with its own scope. Read off the raw request strings in ONE place
-/// ([`FetchScope::extract`]), so the refusal of an unconstrained public fetch has a single source of truth.
-pub struct FetchExposure {
-    services: Vec<FetchService>,
-}
-
-impl FetchExposure {
-    /// The de-merged fetch services, each to be bound as its own `Fetch` instance.
-    pub fn services(&self) -> &[FetchService] {
-        &self.services
-    }
-
-    /// Refuse the one illegal fetch shape PER SERVICE: a fetch service NAMED in `--public` whose allowlist is
-    /// unconstrained (any origin), which is an open egress relay (traffic-source laundering, a reflector, a
-    /// free anonymizing hop). Because each fetch service carries its own scope, this reasons about THIS public
-    /// fetch, so a second origin-scoped fetch can no longer mask a bare public one. Refused at build time,
-    /// before any banner or accepted stream, mirroring the sshd-cannot-be-public wall. A GATED fetch (not in
-    /// `--public`) stays legal unconstrained: the family gate is the terminator there. The test is
-    /// [`Scheme::never_public`], the one `share` asks of a link to anyone.
-    pub fn refuse_open_relay(&self, public: &[Service]) -> eyre::Result<()> {
-        for service in &self.services {
-            if public.iter().any(|name| name.as_str() == service.name)
-                && Scheme::Fetch.never_public(&service.origin)
-            {
-                eyre::bail!(
-                    "a public fetch service must be origin-scoped \
-                     (`serve {name}=fetch:https://origin --public {name}`); an unconstrained public fetch \
-                     is an open relay",
-                    name = service.name
-                );
-            }
+/// An origin the engine refused, in swoosh's words where the engine's own line names the engine: `fetch`
+/// is the services crate's internal name and never a word a person types or reads. Matched on the variant, never
+/// on its text; every other refusal already speaks of the URL alone, and passes through as it is.
+fn origin_refusal(error: ::fetch::OriginError) -> eyre::Report {
+    match error {
+        ::fetch::OriginError::Userinfo => {
+            eyre::eyre!("a proxy URL cannot carry a user or password (user:pass@)")
         }
-        Ok(())
+        other @ (::fetch::OriginError::Url(_)
+        | ::fetch::OriginError::NoHost
+        | ::fetch::OriginError::NoPort) => eyre::eyre!(other),
+    }
+}
+
+/// The operator's per-service proxy posture pulled from the requested services: one [`ProxyService`] per
+/// exposed proxy, each with its own scope. Read off the raw request strings in ONE place
+/// ([`ProxyScope::extract`]).
+pub struct ProxyExposure {
+    services: Vec<ProxyService>,
+}
+
+impl ProxyExposure {
+    /// The de-merged proxy services, each to be bound as its own engine instance.
+    pub fn services(&self) -> &[ProxyService] {
+        &self.services
     }
 }

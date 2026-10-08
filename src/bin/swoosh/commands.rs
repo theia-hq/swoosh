@@ -3,13 +3,13 @@
 
 pub mod connect;
 pub mod contact;
-pub mod fetch;
+pub mod forward;
 pub mod invite;
 pub mod join;
 pub mod leave;
 pub mod lock;
 pub mod ping;
-pub mod reach;
+pub mod proxy;
 pub mod revoke;
 pub mod root;
 pub mod send;
