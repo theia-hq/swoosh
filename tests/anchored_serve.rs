@@ -514,9 +514,8 @@ fn serve_warns_of_sshd_under_a_name_with_links_for_another_target() {
     let served = serve(&scratch.0, &["ssh=sshd:"]);
     assert_eq!(
         served.stderr_line("live links"),
-        "warning: ssh has live links made when it served tcp:localhost:22 or nothing, and they would open \
-         a shell: serve the shell under another name, or revoke them first (swoosh status lists them under \
-         links you shared)"
+        "warning: ssh has live links made when it served tcp:localhost:22 or nothing, and they are refused \
+         while it serves something else (swoosh status lists them under links you shared)"
     );
     let stderr = served.stderr.lock().unwrap().join("\n");
     assert!(
@@ -543,9 +542,8 @@ async fn serve_warns_of_a_shell_over_an_anyone_link_and_its_gate_refuses_it() {
     let warning = served.stderr_line("live links");
     assert_eq!(
         warning,
-        "warning: ssh has live links made when it served tcp:localhost:22, and they would open a shell: \
-         serve the shell under another name, or revoke them first (swoosh status lists them under links \
-         you shared)"
+        "warning: ssh has live links made when it served tcp:localhost:22, and they are refused while it \
+         serves something else (swoosh status lists them under links you shared)"
     );
     assert!(!warning.contains("swoosh revoke"), "{warning}");
 
@@ -573,14 +571,10 @@ fn serve_warns_of_recv_under_a_name_with_anyone_links_for_another_target() {
     let warning = served.stderr_line("live links");
     drop(served);
     let _ = std::fs::remove_dir_all(&dir);
-    let target = format!("recv:{}", dir.display());
     assert_eq!(
         warning,
-        format!(
-            "warning: drop has live links made when it served nothing, and they would reach {target}: \
-             serve {target} under another name, or revoke them first (swoosh status lists them under links \
-             you shared)"
-        )
+        "warning: drop has live links made when it served nothing, and they are refused while it serves \
+         something else (swoosh status lists them under links you shared)"
     );
 }
 

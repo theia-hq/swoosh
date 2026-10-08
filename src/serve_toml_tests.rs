@@ -379,8 +379,8 @@ fn a_live_add_of_sshd_over_other_links_keeps_the_running_set() {
         .expect("that start would warn of the shell");
     assert_eq!(
         links.to_string(),
-        "ssh has live links made when it served tcp:localhost:22, and they would open a shell: serve the \
-         shell under another name, or revoke them first (swoosh status lists them under links you shared)"
+        "ssh has live links made when it served tcp:localhost:22, and they are refused while it serves \
+         something else (swoosh status lists them under links you shared)"
     );
     assert!(
         !links.to_string().contains(&holder),

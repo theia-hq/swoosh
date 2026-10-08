@@ -575,8 +575,6 @@ impl GrantRecord {
 pub struct LinksForAnother {
     /// The service name.
     name: String,
-    /// What the name would bind.
-    bound: ServedTarget,
     /// What the name served when each of those links was made, `None` for nothing; distinct, in order.
     targets: Vec<Option<ServedTarget>>,
 }
@@ -603,7 +601,6 @@ impl LinksForAnother {
             }) {
                 let found = found.get_or_insert_with(|| Self {
                     name: name.to_owned(),
-                    bound: ServedTarget::clone(&bound),
                     targets: Vec::new(),
                 });
                 if !found.targets.contains(&record.serves) {
@@ -669,22 +666,19 @@ impl LinksForAnother {
         )
     }
 
-    /// The line after the name: what the links were made for, what they would reach, and the fixes.
+    /// The line after the name: what the links were made for, that the gate refuses them, and where to
+    /// find their holders. One sentence for every engine: the gate refuses such a link per use, so the
+    /// links open nothing and no fix is owed before the start.
     fn reason(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let targets: Vec<&str> = self
             .targets
             .iter()
             .map(|target| target.as_ref().map_or("nothing", ServedTarget::as_str))
             .collect();
-        let (reach, what) = if self.bound.runs_code() {
-            ("open a shell".to_owned(), "the shell".to_owned())
-        } else {
-            (format!("reach {}", self.bound), self.bound.to_string())
-        };
         write!(
             f,
-            "has live links made when it served {targets}, and they would {reach}: serve {what} under \
-             another name, or revoke them first (swoosh status lists them under links you shared)",
+            "has live links made when it served {targets}, and they are refused while it serves something \
+             else (swoosh status lists them under links you shared)",
             targets = targets.join(" or "),
         )
     }

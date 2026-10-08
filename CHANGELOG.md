@@ -23,8 +23,8 @@ All notable changes to swoosh, newest first.
 
 ### Changed
 - **`serve` warns when a shell, `ping`, `speed`, a receive service or a `fetch:` with no origin has live
-  links made for something else, and those links are refused when used.** A link works only against the
-  target it was made for. Adding one to `serve.toml` while `serve` runs prints the same warning and leaves
+  links made for something else, and those links are refused when used.** A link made for one target is
+  refused by any other. Adding one to `serve.toml` while `serve` runs prints the same warning and leaves
   the running services as they are.
 - **`share` replaces `grant`.** `grant issue` is `share <service> <who>`, and `grant narrow` is
   `share <link>`. A link for `anyone` can always be copied, so `--delegable` is gone.
