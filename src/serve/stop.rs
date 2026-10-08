@@ -42,6 +42,7 @@ use crate::serve::{StopKind, StopSource};
 /// point: the teardown drops the connection at once, and a QUIC close may discard bytes still in flight,
 /// so a node that cancelled first could stop for real while its ack never arrived. The side that receives
 /// last is the only one that knows the data landed, so the caller closes first and the node stops after.
+/// A handler dropped during that wait, once the ack has left, still notes the stop and cancels the token.
 ///
 /// Public so the `gated_stop` proof drives the SAME handler `serve` injects, not a hand-rolled near-copy,
 /// exactly as the `gated_measure` proof reuses `diagnostics`.
@@ -73,11 +74,19 @@ impl Handler for Stop {
     ) -> Result<(), ServeError> {
         // The ack byte, then the end of this side, so the caller holds both before anything tears down.
         // Kept as a value, never `?`-ed: an admitted stop must happen whatever the stream did.
-        let acked = async {
-            writer.write_all(&[STOP_ACK]).await?;
-            writer.shutdown().await
-        }
-        .await;
+        let written = writer.write_all(&[STOP_ACK]).await;
+        // Armed once the byte has left this handler, since from then the caller may hold the ack and
+        // print `Stopped`. Something can still drop this future in the wait below (a live cut ending the
+        // session), and the guard turns that drop into the stop the caller was told happened. Before the
+        // write nothing is armed: a handler dropped there sent no ack, so its caller claims nothing.
+        let stopping = StopOnDrop {
+            stop: self,
+            peer: served.peer(),
+        };
+        let acked = match written {
+            Ok(()) => writer.shutdown().await,
+            Err(error) => Err(error),
+        };
         // Wait for the caller's side to end: its close after reading the ack, a broken stream, or the
         // bound, whichever is first. Read only to see it end; nothing read is kept, since the key is the
         // connection's. The cap bounds what a caller can make the node read on its way down.
@@ -87,10 +96,26 @@ impl Handler for Stop {
             tokio::io::copy(&mut ignored, &mut tokio::io::sink()),
         )
         .await;
-        // Noted before the cancel, as the socket stop does, so the run reads a wire stop and its key.
-        self.source.note(StopKind::Wire(served.peer()));
-        self.cancel.cancel();
+        // The normal path stops through the guard too, so the note and cancel live in one place.
+        drop(stopping);
         acked.map_err(Into::into)
+    }
+}
+
+/// The stop an acked `control.stop` owes, fired when dropped: on the handler's own return, or when the
+/// handler's future is dropped mid-wait. Either way the caller's `Stopped` stays true.
+struct StopOnDrop<'a> {
+    stop: &'a Stop,
+    /// The key the connection proved, noted as the stop's source.
+    peer: VerifyKey,
+}
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        // Noted before the cancel, as the socket stop does, so the run reads a wire stop and its key. On a
+        // drop racing Ctrl-C this can note the wire stop first, which is true too: both asked.
+        self.stop.source.note(StopKind::Wire(self.peer));
+        self.stop.cancel.cancel();
     }
 }
 

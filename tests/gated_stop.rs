@@ -20,7 +20,8 @@
 //! 5. The stopped node records the key the connection proved as the stop's source, never a name from the
 //!    request, and names it from its own book, one of your devices first.
 //! 6. The node stops only once the member has closed its side after the ack, so its teardown cannot drop
-//!    the ack in flight; a member that never closes delays the stop by the bound and no more.
+//!    the ack in flight; a member that never closes delays the stop by the bound and no more; and a handler
+//!    dropped in that wait still stops the node.
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a membership badge binds to whatever
 //! id the mem transport proves for the dialer (the same accommodation `gated_measure` documents at length):
@@ -192,6 +193,41 @@ async fn a_member_holding_its_side_open_stops_the_node_at_the_bound() {
             assert_eq!(
                 source.first(),
                 Some(StopKind::Wire(member.verify_key().unwrap()))
+            );
+        })
+        .await;
+}
+
+/// A handler dropped after the ack, while it waits for the member's close, still stops the node: it notes
+/// the member and cancels the token. A live cut ending the session in that window drops it this way, and
+/// the member has already printed `Stopped`, so the node must not run on with nothing noted.
+#[tokio::test(start_paused = true)]
+async fn a_handler_dropped_after_the_ack_still_stops_the_node() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let stopping = acked_stop().await;
+            tokio::time::sleep(ACK_GRACE / 2).await;
+            assert!(
+                !stopping.cancel.is_cancelled(),
+                "the handler is still waiting"
+            );
+            assert_eq!(stopping.source.first(), None, "nothing is noted yet");
+
+            // Drop the run mid-wait, and the handler future with it; the member's side stays open.
+            stopping.run.abort();
+            let aborted = stopping.run.await;
+            assert!(
+                aborted.is_err_and(|error| error.is_cancelled()),
+                "the run was dropped, not ended"
+            );
+            assert!(
+                stopping.cancel.is_cancelled(),
+                "a dropped handler cancels the token"
+            );
+            assert_eq!(
+                stopping.source.first(),
+                Some(StopKind::Wire(stopping.member.verify_key().unwrap())),
+                "and notes the member that asked"
             );
         })
         .await;
@@ -451,6 +487,8 @@ async fn stopped_over_the_wire(request: &[u8]) -> (NodeId, Option<StopKind>) {
 struct Stopping {
     run: tokio::task::JoinHandle<eyre::Result<()>>,
     source: Arc<StopSource>,
+    /// The node's teardown token, the one the handler cancels.
+    cancel: CancellationToken,
     member: NodeId,
     /// The member's writer, until [`close`](Self::close).
     writer: Option<Box<dyn tokio::io::AsyncWrite + Unpin>>,
@@ -485,7 +523,10 @@ async fn acked_stop() -> Stopping {
     let cancel = CancellationToken::new();
     let source = Arc::new(StopSource::new());
     let exposer = build_exposer_noting(cancel.clone(), Arc::clone(&source)).await;
-    let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
+    let run = tokio::task::spawn_local({
+        let cancel = cancel.clone();
+        async move { exposer.run(&host, cancel).await }
+    });
 
     let badge = signet_badge(SIGNET, member_id);
     let session = Connector::to_node(
@@ -509,6 +550,7 @@ async fn acked_stop() -> Stopping {
     Stopping {
         run,
         source,
+        cancel,
         member: member_id,
         writer: Some(Box::new(writer)),
         _held: Box::new((reader, session, member)),

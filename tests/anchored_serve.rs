@@ -169,18 +169,18 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
 }
 
 /// Serve `home` with `entries` under `--quiet`, which prints no banner: the key and address come from its
-/// control socket's status instead, once it answers. Its stdout is kept, to show what it printed.
-async fn serve_quiet(home: &Path, entries: &[&str]) -> (Served, Arc<Mutex<String>>) {
+/// control socket's status instead, once it answers. Also returns the thread reading its stdout, which yields
+/// everything printed once the child has exited.
+async fn serve_quiet(home: &Path, entries: &[&str]) -> (Served, std::thread::JoinHandle<String>) {
     use std::io::Read as _;
 
     let (mut child, stderr) = spawn_serve(home, &["--quiet"], entries);
-    let printed = Arc::new(Mutex::new(String::new()));
     let mut pipe = child.stdout.take().expect("piped stdout");
-    let sink = Arc::clone(&printed);
-    std::thread::spawn(move || {
+    // Read to EOF, so joining the thread after the child exits yields everything it printed.
+    let printed = std::thread::spawn(move || {
         let mut text = String::new();
         let _ = pipe.read_to_string(&mut text);
-        sink.lock().unwrap().push_str(&text);
+        text
     });
     let socket = control_socket(home);
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -551,8 +551,7 @@ async fn a_quiet_serve_stopped_over_the_wire_says_who_stopped_it() {
         format!("Stopped by {}.", dialer_id(0x4c)),
         "the stopped machine names the key that stopped it"
     );
-    std::thread::sleep(Duration::from_millis(100));
-    let printed = stdout.lock().unwrap().clone();
+    let printed = stdout.join().expect("the stdout reader joins");
     assert!(
         !printed.contains("key: "),
         "--quiet prints no banner: {printed}"
