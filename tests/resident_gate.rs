@@ -102,6 +102,7 @@ fn running_resident(
         ServiceCatalog::decode(&0u32.to_be_bytes()).expect("empty catalog"),
         off,
         cancel.clone(),
+        Arc::default(),
     ));
     (resident, control)
 }

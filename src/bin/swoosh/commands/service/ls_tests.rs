@@ -240,7 +240,7 @@ async fn bare_ls_without_resident_is_teaching() {
         .expect_err("no resident must refuse, never an empty table");
     let message = format!("{error:#}");
     assert!(
-        message.contains("swoosh serve is not running on this machine."),
+        message.contains("swoosh serve is not running on this machine"),
         "the error says nothing is running: {message}"
     );
 

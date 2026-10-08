@@ -43,6 +43,7 @@ fn test_resident(cancel: CancellationToken, home: &Path) -> Resident {
         empty_catalog(),
         crate::serve_toml::LiveServeToml::load(&home).expect("the services off load"),
         cancel,
+        std::sync::Arc::default(),
     )
 }
 
@@ -489,7 +490,7 @@ fn control_errors_render_through_their_taxonomy() {
         super::control_error_report(ControlError::NoResident)
     );
     assert!(
-        missing.contains("swoosh serve is not running on this machine."),
+        missing.contains("swoosh serve is not running on this machine"),
         "the missing-serve error says nothing is running: {missing}"
     );
 

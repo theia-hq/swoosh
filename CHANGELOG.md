@@ -22,6 +22,9 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **`stop` takes one of your own devices.** `swoosh stop` stops swoosh serve here; `swoosh stop me/<name>`
+  stops it on one of your devices, and that machine prints which device stopped it. A contact's machine, a
+  key or a link is refused. `--at` is gone.
 - **`forward` replaces `reach`, and `proxy` replaces `fetch`.** `swoosh forward <machine> <service> <port | ->`
   always names where the bytes go: a local port, or `-` for stdout; with neither it stops and says so.
   `swoosh proxy <machine> <url>` takes the machine first, in place of `--via`. A machine serves a proxy with

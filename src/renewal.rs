@@ -25,7 +25,7 @@ use nauthy::{Link, Revocations as _, VerifyKey};
 use tightbeam::tunnel::Connector;
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
-use crate::contacts::{ContactsStore, DeviceLabel, ME, Petname};
+use crate::contacts::{ContactsStore, DeviceLabel};
 use crate::home::Home;
 use crate::roster::{MAX_BADGE, read_held};
 use crate::serve::RENEWAL_SERVICE;
@@ -322,11 +322,10 @@ pub async fn own_label(home: &Home) -> Option<DeviceLabel> {
     let file = keystore::KeyFile::new(home.key());
     let own = crate::identity::key_of(&file, &file.load().ok().flatten()?).ok()?;
     let store = ContactsStore::open(home).await.ok()?;
-    let me = Petname::stored(ME).ok()?;
     store
         .contacts()
-        .devices(&me)
-        .and_then(|mut devices| devices.find(|(_, key)| **key == own))
+        .mine()
+        .find(|(_, key)| **key == own)
         .map(|(label, _)| label.clone())
 }
 

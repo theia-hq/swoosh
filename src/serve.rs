@@ -48,7 +48,7 @@ pub use self::roster::Exchange;
 pub use self::scheme::{BoundTargets, NotATarget, Scheme, ServedTarget};
 pub use self::services::ServiceList;
 pub use self::serving::{ServingError, Started};
-pub use self::stop::{STOP_ACK, Stop};
+pub use self::stop::{ACK_GRACE, STOP_ACK, Stop, stopped_by};
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
 /// teardown (the remote twin of a local Ctrl-C or a `--expires` deadline). The client verb is `swoosh stop`.
@@ -116,13 +116,13 @@ impl Stopped {
 /// Classify a finished resident run from its recorded [`StopSource`], never from the select arm
 /// that happened to complete: the socket `Stop` records [`StopKind::Socket`] before it cancels the
 /// token, so the local stop stays [`Stopped::Local`] even when the exposer arm wins the poll. A
-/// wire `control.stop` records nothing and a `--expires` deadline records nothing, so both render
-/// as [`Stopped::Requested`]; a Ctrl-C records itself and renders [`Stopped::Interrupted`].
+/// wire `control.stop` records the key that asked and a `--expires` deadline records nothing, so both
+/// render as [`Stopped::Requested`]; a Ctrl-C records itself and renders [`Stopped::Interrupted`].
 pub fn classify_stop(source: Option<StopKind>) -> Stopped {
     match source {
         Some(StopKind::Socket) => Stopped::Local,
         Some(StopKind::Interrupted) => Stopped::Interrupted,
-        Some(StopKind::Expires | StopKind::Wire) | None => Stopped::Requested,
+        Some(StopKind::Expires | StopKind::Wire(_)) | None => Stopped::Requested,
     }
 }
 

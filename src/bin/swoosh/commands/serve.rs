@@ -45,8 +45,8 @@ use swoosh::renewal::PickUp;
 use swoosh::serve::{
     Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, InstanceLock,
     ProxyScope, RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop,
-    StopKind, Stopped, acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop,
-    extract_recv_services, refuse_recv_into_home,
+    StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv, bind_renewal,
+    classify_stop, extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -541,6 +541,9 @@ impl ServeCmd {
         // CLONE as the node-control capability: they may REQUEST the stop, never tear the node down
         // themselves.
         let cancel = CancellationToken::new();
+        // How the node was asked to stop, noted by whichever path fires `cancel` first: the socket stop,
+        // a Ctrl-C, or `control.stop` with the key that asked. Read once more at teardown, to say who.
+        let stop_source = std::sync::Arc::new(StopSource::new());
         // The node BASE gate is the one the composition root built, the same in every standing. Opening
         // individual services is the separate `--public`/`--public-unsafe` overlay, never a node-wide value.
         let public = self.public.clone();
@@ -577,7 +580,10 @@ impl ServeCmd {
         }
         // The node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the route's
         // access class after the gate admits and before any `Response::Ok`.
-        router = router.member_service(CONTROL_STOP_SERVICE.parse()?, Stop::new(cancel.clone()))?;
+        router = router.member_service(
+            CONTROL_STOP_SERVICE.parse()?,
+            Stop::new(cancel.clone(), std::sync::Arc::clone(&stop_source)),
+        )?;
         // Declare both open overlays from the operator's raw names. The proof runs at `.expose()` below,
         // before anything is recorded or a banner advertises a service it will not serve.
         router = router
@@ -635,6 +641,7 @@ impl ServeCmd {
             tightbeam::tunnel::ServiceCatalog::clone(&catalog),
             enabled.clone(),
             cancel.clone(),
+            std::sync::Arc::clone(&stop_source),
         ));
 
         if !self.quiet {
@@ -709,6 +716,20 @@ impl ServeCmd {
                 unreachable!("serve.toml is checked until the node stops")
             }
         };
+        // One of your devices stopped it over `control.stop`: say which, on stderr and under `--quiet` too,
+        // since any of them may stop any other and this line is the trail. Named from the book as it reads
+        // now, not as it read at start, so a device that joined since is named; a book that does not read
+        // leaves the whole key, never a failed stop.
+        if let Some(StopKind::Wire(key)) = stop_source.first() {
+            let contacts = match ContactsStore::open(&home).await {
+                Ok(store) => store.contacts().clone(),
+                Err(error) => {
+                    tracing::debug!(%error, "could not read the book to name who stopped this node");
+                    swoosh::contacts::Contacts::default()
+                }
+            };
+            eprintln!("{}", swoosh::serve::stopped_by(&contacts, key));
+        }
         // The teardown line is best-effort: a piped consumer may have already closed stdout by the time
         // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic.
         {

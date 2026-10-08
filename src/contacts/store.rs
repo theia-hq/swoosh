@@ -19,6 +19,7 @@ use tightbeam::identity::AsVerifyKey as _;
 use super::{Binding, Contacts, DeviceLabel, ME, Petname};
 use crate::home::{Home, HomeWrite};
 use crate::names::NameError;
+use crate::roster::RosterDoc;
 
 /// A contacts file at a known path, loaded into a mutable [`Contacts`] and saved back atomically.
 ///
@@ -30,6 +31,8 @@ use crate::names::NameError;
 pub struct ContactsStore {
     path: PathBuf,
     contacts: Contacts,
+    /// The list of your devices `me` was derived from, as verified at open.
+    list: Option<RosterDoc>,
 }
 
 impl ContactsStore {
@@ -56,7 +59,17 @@ impl ContactsStore {
             Ok(None) | Err(_) => None,
         };
         contacts.derive_me(devices.as_ref());
-        Ok(Self { path, contacts })
+        Ok(Self {
+            path,
+            contacts,
+            list: devices,
+        })
+    }
+
+    /// The list of your devices this home holds, verified under its pin at open: what `me` was derived
+    /// from, so a reader that also needs what it revokes reads the files once. `None` when there is none.
+    pub fn list(&self) -> Option<&RosterDoc> {
+        self.list.as_ref()
     }
 
     /// The loaded address book, to read.

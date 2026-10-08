@@ -111,14 +111,14 @@ no entry can name it. Your other devices reach it on their own, and with `swoosh
   route. Unmetered: the handler sets no cap, and no public form can ever open it.
 - Limits: [sync](commands/sync.md).
 
-### `control.stop` and `control.services`
+### <a id="control-stop"></a>`control.stop` and `control.services`
 
 Node control: `control.stop` ends the node, `control.services` lists what it serves. Both are always
 served, whatever else you name.
 
 - Posture: member-only, stricter than gated. A stranger is refused at the gate, and a `swoosh:` grant
   naming one is refused at the route, so only your own devices can stop or inspect a node.
-- Client: `swoosh stop --at <peer>` and `swoosh service ls --at <peer>`.
+- Client: `swoosh stop me/<name>` and `swoosh service ls --at <peer>`.
 - Limits: [stop](commands/stop.md) and [service](commands/service.md).
 
 ## Posture

@@ -64,7 +64,7 @@ async fn proof() {
             .unwrap()
             .member_service(
                 CONTROL_STOP_SERVICE.parse().unwrap(),
-                Stop::new(CancellationToken::new()),
+                Stop::new(CancellationToken::new(), std::sync::Arc::default()),
             )
             .unwrap()
             .expose()

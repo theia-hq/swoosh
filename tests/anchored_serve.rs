@@ -27,6 +27,8 @@ use bifrost_quirk::Endpoint;
 use nauthy::{Link, Request};
 use swoosh::credential::Credential;
 use swoosh::reaching::BindRole;
+use swoosh::serve::CONTROL_STOP_SERVICE;
+use swoosh::serve::control_codec::{self, ControlError, Response};
 use swoosh::testkit::TestRoot;
 use swoosh::transport::PeerHint;
 use tightbeam::tunnel::{Connector, ServiceSession};
@@ -88,6 +90,20 @@ impl Served {
     }
 }
 
+impl Served {
+    /// Wait a bounded time for it to exit on its own.
+    async fn exited(&mut self) -> std::process::ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "serve did not stop");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 impl Drop for Served {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -95,13 +111,14 @@ impl Drop for Served {
     }
 }
 
-/// Serve `home` with `entries` over `quirk+noise`, and wait for its banner: the key it answers at and its
-/// loopback address, from the transport block `--verbose` adds.
-fn serve(home: &Path, entries: &[&str]) -> Served {
+/// Start `swoosh serve` on `home` over `quirk+noise` with `flags` and `entries`, its stderr read line by
+/// line on a thread of its own.
+fn spawn_serve(home: &Path, flags: &[&str], entries: &[&str]) -> (Child, Arc<Mutex<Vec<String>>>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(home)
-        .args(["serve", "--transport", "quirk+noise", "--verbose"])
+        .args(["serve", "--transport", "quirk+noise"])
+        .args(flags)
         .args(entries)
         .env("XDG_RUNTIME_DIR", runtime_dir(home))
         .env_remove("SWOOSH_HOME")
@@ -118,6 +135,13 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
             lines_read.lock().unwrap().push(line);
         }
     });
+    (child, stderr)
+}
+
+/// Serve `home` with `entries` over `quirk+noise`, and wait for its banner: the key it answers at and its
+/// loopback address, from the transport block `--verbose` adds.
+fn serve(home: &Path, entries: &[&str]) -> Served {
+    let (mut child, stderr) = spawn_serve(home, &["--verbose"], entries);
     let stdout = child.stdout.take().expect("piped stdout");
     let mut lines = BufReader::new(stdout).lines();
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -142,6 +166,72 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
         addr: addr.unwrap(),
         stderr,
     }
+}
+
+/// Serve `home` with `entries` under `--quiet`, which prints no banner: the key and address come from its
+/// control socket's status instead, once it answers. Also returns the thread reading its stdout, which yields
+/// everything printed once the child has exited.
+async fn serve_quiet(home: &Path, entries: &[&str]) -> (Served, std::thread::JoinHandle<String>) {
+    use std::io::Read as _;
+
+    let (mut child, stderr) = spawn_serve(home, &["--quiet"], entries);
+    let mut pipe = child.stdout.take().expect("piped stdout");
+    // Read to EOF, so joining the thread after the child exits yields everything it printed.
+    let printed = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = pipe.read_to_string(&mut text);
+        text
+    });
+    let socket = control_socket(home);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "serve exited before its socket answered"
+        );
+        assert!(Instant::now() < deadline, "serve's socket never answered");
+        if let Ok(Ok(Response::Status(status))) =
+            tokio::time::timeout(Duration::from_secs(5), status_of(&socket)).await
+        {
+            break status;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let served = Served {
+        child,
+        key: status.node_id,
+        // The status names the bind's first dialable address, which may be a LAN one; the port is the
+        // bind's, so dial it on loopback, as the banner's `(this machine)` row does.
+        addr: SocketAddr::new(
+            core::net::Ipv4Addr::LOCALHOST.into(),
+            status.addr.expect("a quirk bind has an address").port(),
+        ),
+        stderr,
+    };
+    (served, printed)
+}
+
+/// The control socket a `serve` spawned on `home` listens on: on Linux under the runtime directory the
+/// harness hands it, on macOS under the per-user root, which ignores `XDG_RUNTIME_DIR`.
+fn control_socket(home: &Path) -> PathBuf {
+    let home_at = swoosh::home::Home::resolve(Some(home.to_owned())).unwrap();
+    #[cfg(target_os = "macos")]
+    let leaf = home_at.runtime_dir().unwrap();
+    #[cfg(not(target_os = "macos"))]
+    let leaf = home_at.runtime_leaf(&runtime_dir(home).join("swoosh"));
+    leaf.join("control.sock")
+}
+
+/// One status read over the control socket at `socket`.
+async fn status_of(socket: &Path) -> Result<Response, ControlError> {
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .map_err(ControlError::Io)?;
+    control_codec::Request::Status
+        .write(&mut stream)
+        .await
+        .map_err(ControlError::Io)?;
+    Response::read(&mut stream).await
 }
 
 /// A private runtime directory for `home`'s `serve`, inside the scratch home so it goes with it.
@@ -419,6 +509,53 @@ async fn a_pin_written_under_serve_is_trusted_without_restart() {
         .await
         .expect("the pin written while serving is trusted at the next admission");
     assert!(echoes(&mut write, &mut read).await, "and served");
+}
+
+/// One of your devices stops a `serve --quiet` over `control.stop`, and the stopped machine still says who
+/// did, on stderr: the one trail a stop leaves, so `--quiet` must not take it. The member reads the ack and
+/// closes, and the machine exits 0 having printed no banner.
+#[tokio::test]
+async fn a_quiet_serve_stopped_over_the_wire_says_who_stopped_it() {
+    let scratch = Scratch::new("quiet-stop");
+    let root = TestRoot::seeded(0x54);
+    swoosh::config::write_signet(&swoosh::testkit::lock(), &scratch.home(), root.node_id())
+        .unwrap();
+    let (mut served, stdout) = serve_quiet(&scratch.0, &["demo=echo:"]).await;
+    {
+        let node = dialer(0x4c, &served).await;
+        let badge = root.device_badge(dialer_id(0x4c), in_an_hour()).unwrap();
+        let session = Connector::to_node(
+            served.key,
+            CONTROL_STOP_SERVICE.parse().unwrap(),
+            Some(badge),
+        )
+        .open_service(&node)
+        .await
+        .expect("connect");
+        let (mut write, mut read) = open(&session)
+            .await
+            .expect("one of your devices is admitted at control.stop");
+        let mut ack = [0u8; 1];
+        tokio::time::timeout(Duration::from_secs(10), read.read_exact(&mut ack))
+            .await
+            .expect("the ack arrives within the deadline")
+            .expect("the node acks the stop over a real transport");
+        assert_eq!(ack[0], swoosh::serve::STOP_ACK);
+        write.shutdown().await.expect("the member closes its side");
+    }
+
+    let status = served.exited().await;
+    assert!(status.success(), "a stopped serve exits 0: {status}");
+    assert_eq!(
+        served.stderr_line("Stopped by"),
+        format!("Stopped by {}.", dialer_id(0x4c)),
+        "the stopped machine names the key that stopped it"
+    );
+    let printed = stdout.join().expect("the stdout reader joins");
+    assert!(
+        !printed.contains("key: "),
+        "--quiet prints no banner: {printed}"
+    );
 }
 
 /// A fault right after the link is printed (its stdout is a closed pipe) still leaves the row on disk,
