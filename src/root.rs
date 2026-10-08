@@ -49,11 +49,13 @@ mod backup;
 mod forget;
 mod lock;
 mod restore;
+mod retire;
 
 pub use backup::{BackupError, Copied, backup};
 pub use forget::{Disk, ForgetError, Forgot, Place, RealDisk, forget};
 pub use lock::{Relocked, RootLockError, TouchIdChange, lock, lock_touch_id};
 pub use restore::{RestoreError, Restored, Synced, restore};
+pub use retire::{finish as finish_retire, retire};
 
 /// The root's key file in its directory: always sealed, and of the root kind.
 pub const KEY_FILE: &str = "root.key";
@@ -1458,6 +1460,13 @@ struct Found {
 async fn find(home: &Home, place: &RootPlace, verb: Option<RootVerb>) -> Result<Found, RootError> {
     let (copy, pin, device) = match (place, Standing::read(home).await?) {
         (RootPlace::Home, Standing::HoldsRoot { pin, .. }) => (None, Some(pin), true),
+        // A root whose making or restore stopped is still a root to end: retiring it needs no pin and no
+        // standing, and its passphrase is the same proof a made one asks. Every other act finishes it first.
+        (RootPlace::Home, Standing::InterruptedMint { .. })
+            if verb == Some(RootVerb::RevokeRoot) =>
+        {
+            (None, None, false)
+        }
         (RootPlace::Home, Standing::InterruptedMint { root_key }) => {
             return Err(RootError::Unfinished { root: root_key });
         }
@@ -2554,7 +2563,7 @@ fn at(unix: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(unix)
 }
 
-/// A point in a mint where a test stops it, as a crash would.
+/// A point in a mint, a restore or a retire where a test stops it, as a crash would.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Seam {
     /// `root.key` is written, and no list beside it yet.
@@ -2563,6 +2572,12 @@ enum Seam {
     Listed,
     /// This machine's standing is written, and the pin is not.
     Badged,
+    /// A retire latched its root, and has removed nothing yet.
+    Latched,
+    /// A retire removed the list of your devices, and this machine's standing and the pin are still here.
+    Delisted,
+    /// A retire removed the pin, and `root.key` is still here.
+    Left,
 }
 
 #[cfg(test)]

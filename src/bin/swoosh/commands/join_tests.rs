@@ -1149,12 +1149,13 @@ async fn unfinished(home: &Home) -> String {
 }
 
 /// Each act that stopped part way reads as not finished, naming its verb, and running that verb again
-/// finishes it: a first join and a switch by `join`, a leave by `leave`, a mint by `invite`. (`revoke
-/// root:<key>` joins them when that form lands.)
+/// finishes it: a first join and a switch by `join`, a leave by `leave`, a mint by `invite`, a root's
+/// revoke by `revoke root:<key>`.
 #[tokio::test]
 async fn each_unfinished_act_is_finished_by_its_verb() {
     use crate::commands::invite::invite_tests;
     use crate::commands::leave::leave_tests;
+    use crate::commands::revoke::revoke_tests;
 
     // A first join, stopped after its standing and before its pin.
     let joining = scratch("stopped-join");
@@ -1244,6 +1245,78 @@ async fn each_unfinished_act_is_finished_by_its_verb() {
         "the finish took this machine's standing from the list"
     );
     assert!(matches!(read(&minting).await, Standing::HoldsRoot { pin, .. } if pin == root(ROOT)));
+
+    // A root's revoke where it is kept, stopped after its latch: `root.key` and every file it vouched for
+    // are still here, rooted at a revoked key, and read as no root. `status` names the command, whole.
+    let revoking = invite_tests::scratch("stopped-revoke-root");
+    invite_tests::holds(&revoking, &[invite_tests::live(OWN, "desk")], Vec::new()).await;
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &revoking,
+        [nauthy::Revocation::Key(TestRoot::seeded(ROOT).verify_key())],
+    )
+    .unwrap();
+    assert_eq!(read(&revoking).await, Standing::Unpinned);
+    assert_eq!(
+        Standing::revoked_root(&revoking).await.unwrap(),
+        Some(root(ROOT))
+    );
+    let stored = KeyFile::device(revoking.key()).load().unwrap();
+    let report = crate::commands::status::report::Report::gather(&revoking, stored.as_ref(), now())
+        .await
+        .unwrap()
+        .render();
+    assert!(
+        report.contains(&format!(
+            "a revoked root is still on this machine; to delete it: swoosh revoke root:{}",
+            root(ROOT)
+        )),
+        "{report}"
+    );
+    let _ = revoke_tests::revoke_root(&revoking, ROOT, &revoke_tests::prefix(ROOT))
+        .await
+        .ok()
+        .to_owned();
+    assert!(!revoking.root_key().exists(), "the revoked root is gone");
+    assert!(!revoking.root_pub().exists(), "and the pin it vouched for");
+    assert_eq!(Standing::revoked_root(&revoking).await.unwrap(), None);
+}
+
+/// A root's revoke stopped after its latch, then a `join` to another root: the join takes the revoked
+/// `root.key` off under its lock, as a mint does, so running the revoke again finds no root kept here and
+/// leaves this machine a device of the root it joined. Red when the join leaves the revoked `root.key` beside
+/// the new root's pin.
+#[tokio::test]
+async fn a_join_after_a_stopped_root_revoke_takes_the_revoked_root_off() {
+    use crate::commands::invite::invite_tests;
+    use crate::commands::revoke::revoke_tests;
+
+    let home = invite_tests::scratch("join-after-revoke");
+    invite_tests::holds(&home, &[invite_tests::live(OWN, "desk")], Vec::new()).await;
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(TestRoot::seeded(ROOT).verify_key())],
+    )
+    .unwrap();
+    join(&home, &bound(OTHER, node(OWN), "desk", now() + 90 * DAY))
+        .await
+        .joined();
+    assert!(
+        !home.root_key().exists(),
+        "the join took the revoked root.key off"
+    );
+    assert!(matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(OTHER)));
+
+    let _ = revoke_tests::revoke_root(&home, ROOT, &revoke_tests::prefix(ROOT))
+        .await
+        .ok()
+        .to_owned();
+    assert!(
+        matches!(read(&home).await, Standing::Device { pin, .. } if pin == root(OTHER)),
+        "this machine stays a device of the root it joined"
+    );
+    assert!(home.key_cert().exists() && home.root_pub().exists());
 }
 
 /// The name an invite gives this machine is an unsigned hint: before a list of your devices lands, this

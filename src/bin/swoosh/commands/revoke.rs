@@ -6,13 +6,24 @@
 //! revoke <person>              every link given to any device of that contact, or bound to their root
 //! revoke <person>/<name>       every link given to that device's key
 //! revoke <key>                 every link given to that key
+//! revoke root:<key>            that root, for good, on this machine
 //! ```
 //!
-//! Every form blocks here first, in this machine's own `revoked`, which a running
+//! Every form but the root's blocks here first, in this machine's own `revoked`, which a running
 //! `serve` reads live. A link this machine signed, and a link it gave a key, were only ever admitted here,
 //! so that block is the whole revoke. A device is admitted by all your devices: with your root (kept here,
 //! or `--root <dir>`) the revoke then presents it, cuts, and offers the cut; without it, it stays on this
-//! machine and says so. Only the root's passphrase is ever asked for, and only after the block is written.
+//! machine and says so. Only the root's passphrase is ever asked for, and only after the block is written;
+//! a root step that cannot run says the device is blocked here only, in one line, and exits 1.
+//!
+//! `root:<key>` is the one form that ends something everywhere, so it is the one form that asks first: only
+//! from argv (a link read from stdin or a file is never a root), never a key one of your devices or a
+//! contact's holds, only at a terminal, and only once the person has read what this machine is to that root
+//! and typed the key's first six characters. Then, by what this machine is to it: where the root is kept,
+//! its passphrase, and the root and every file it vouched for go ([`swoosh::root::retire`]); on its device,
+//! the device files and the pin go; for a contact's root, the links given to it are revoked. Each latches the
+//! key into `revoked` first, so a crash leaves files rooted at a revoked key, which every read takes as
+//! absent, and running it again finishes.
 
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -26,8 +37,9 @@ use swoosh::home::{Home, HomeWrite};
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::reach_report::{Reach, What};
 use swoosh::root::{Root, RootError, RootPlace, RootVerb};
+use swoosh::roster::Epoch;
 use swoosh::standing::{Standing, StandingError};
-use swoosh::sync::{Dial, NodeDial};
+use swoosh::sync::{Answer, Dial, ExchangeError, NodeDial};
 use swoosh::transport::ReachArgs;
 use tightbeam::identity::AsVerifyKey as _;
 
@@ -36,6 +48,7 @@ const MAX_STDIN: u64 = 64 * 1024;
 
 /// Take back a link, a device, or everything you shared with a contact; or end a root for good.
 #[derive(Debug, Args)]
+#[command(after_long_help = RECIPE)]
 pub struct RevokeCmd {
     /// what to take back
     #[arg(
@@ -65,14 +78,58 @@ pub enum Target {
     PersonDevice(ContactRef),
     /// A key.
     Key(NodeId),
+    /// `root:<key>`: a root, typed in argv and nowhere else.
+    Root(NodeId),
 }
 
-/// The positional: `-`, a path, a link, a key, `me/<name>`, a person or one of their devices. A bare word
-/// is a person, never `me/<name>`. Anything else, a `root:` key included until its form lands, is a usage
-/// error.
+/// The steps to replace your root, printed by `revoke --help` and never by `-h`: the one verb whose long
+/// help carries a recipe, since the act cannot be undone and nobody should compose it on the worst day.
+/// The link the first line makes is bound to a key made for the rescue, in its own home, which the old
+/// root never listed and so a thief holding it cannot revoke first.
+const RECIPE: &str = concat!(
+    "To replace your root:\n",
+    "  desk$   (umask 077; swoosh ssh me/nas -- swoosh share ssh $(swoosh --home ~/.swoosh-rescue leave --new-key) --expires 7d > ~/nas.link)\n",
+    "  desk$   swoosh --home ~/.swoosh-rescue ssh ~/nas.link -- -t swoosh revoke root:ed01OLD…\n",
+    "  desk$   swoosh revoke root:ed01OLD…\n",
+    "  desk$   swoosh invite laptop ed01L…\n",
+    "  desk$   swoosh invite nas ed01NAS… > nas.invite\n",
+    "  desk$   swoosh --home ~/.swoosh-rescue ssh ~/nas.link -- swoosh join < nas.invite\n",
+    "  laptop$ swoosh revoke root:ed01OLD…; swoosh join\n",
+    // A runner named for no repo: no tracked file here names a repo that depends on swoosh (layering
+    // check 4).
+    "  desk$   swoosh invite runner --new-key | gh secret set SWOOSH_INVITE --repo <you>/<repo>\n",
+    "  friend$ swoosh contact add <you> root:ed01NEW…\n",
+    "  desk$   swoosh ssh me/nas -- swoosh revoke - < ~/nas.link; rm -r ~/nas.link ~/.swoosh-rescue",
+);
+
+/// The prefix that types a root, ASCII case aside.
+const ROOT_PREFIX: &str = "root:";
+
+/// The refusal when a root's revoke has no terminal to ask at: before anything is read, or when the
+/// confirmation finds it gone.
+const ROOT_NEEDS_TERMINAL: &str =
+    "this cannot be undone, so it needs a terminal: over swoosh ssh, add -t after --";
+
+/// The positional: `-`, a path, a link, a key, `root:<key>`, `me/<name>`, a person or one of their
+/// devices. A bare word is a person, never `me/<name>`, and a bare key is always the key form, never a
+/// root. `root:` with anything after it that is not a key, a name included, is a usage error; `root`
+/// alone is the reserved name's.
 fn target(text: &str) -> Result<Target, String> {
     if text == "-" {
         return Ok(Target::Stdin);
+    }
+    if let Some(rest) = text
+        .get(..ROOT_PREFIX.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(ROOT_PREFIX))
+        .and_then(|_| text.get(ROOT_PREFIX.len()..))
+    {
+        return match swoosh::peer::raw_key(rest) {
+            Ok(Some(key)) => Ok(Target::Root(key)),
+            Ok(None) => Err(format!(
+                "{text} is not a root key; to see yours: swoosh status"
+            )),
+            Err(unusable) => Err(unusable.to_string()),
+        };
     }
     if swoosh::peer::is_path(text) {
         return swoosh::peer::read_link_file(text)
@@ -143,11 +200,14 @@ pub struct RevokeRoot {
 
 impl RevokeCmd {
     /// Everything before the root: refuse what the target refuses, write this machine's block, and print
-    /// what it did. `Some` when a device part follows that needs the root.
+    /// what it did. `Some` when a device part follows that needs the root. A root's revoke runs whole here,
+    /// asking `prompt`; it cuts nothing, so `dial` is never dialed.
     pub async fn block(
         &self,
         home: &Home,
         stdin: impl Read,
+        prompt: &mut impl Prompt,
+        dial: &impl Dial,
         err: &mut impl Write,
     ) -> eyre::Result<Option<Publish>> {
         let target = match &self.target {
@@ -155,6 +215,10 @@ impl RevokeCmd {
             other => other.clone(),
         };
         match target {
+            Target::Root(key) => {
+                self.revoke_root(home, key, prompt, dial, err).await?;
+                Ok(None)
+            }
             Target::Link(link) => self.link(home, &link, err).await,
             Target::Device(name) => self.device(home, &name, None, err).await,
             Target::Person(person) => {
@@ -185,6 +249,95 @@ impl RevokeCmd {
             }
             Target::Stdin => Err(Usage("stdin held no swoosh: link.".to_owned()).into()),
         }
+    }
+
+    /// `root:<key>`: what this machine is to that root, then every check, then the typed prefix; then, by
+    /// what it is, the root's passphrase where it is kept, and the act under `home.lock`, the key latched
+    /// first. Nothing is written before the prefix, nor before the passphrase where the root is kept.
+    async fn revoke_root(
+        &self,
+        home: &Home,
+        key: NodeId,
+        prompt: &mut impl Prompt,
+        dial: &impl Dial,
+        err: &mut impl Write,
+    ) -> eyre::Result<()> {
+        if self.root.is_some() {
+            return Err(Usage(
+                "--root is for acts that use your root; revoking a root needs none.".to_owned(),
+            )
+            .into());
+        }
+        if own_key(home)?.is_some_and(|own| key.verify_key().is_ok_and(|key| key == own)) {
+            eyre::bail!("that is this machine's key, not a root.");
+        }
+        // Classified first, with no lock, prompt or write: a root this machine knows stays a root when a
+        // list of devices also names its key, so only a key no root here is asked as a device's.
+        let kind = Kind::of(home, key).await?;
+        if kind == Kind::Unknown
+            && let Some(refusal) = device_key(home, key).await?
+        {
+            eyre::bail!("{refusal}");
+        }
+        if !prompt.terminal() {
+            eyre::bail!("{ROOT_NEEDS_TERMINAL}");
+        }
+        let root = format!("root:{}", swoosh::credential::short(&key));
+        // Where the prompt is, so a stderr sent elsewhere never leaves the person typing blind.
+        for line in kind.before(&root) {
+            prompt.say(&line);
+        }
+        let prefix: String = key.to_string().chars().take(PREFIX).collect();
+        let typed = prompt
+            .confirm(&format!("Type {prefix} to revoke this root for good:"))
+            // A terminal gone since the check is the missing terminal; a read or write that failed on an
+            // open one prints its own cause.
+            .map_err(|cause| match cause.downcast_ref::<std::io::Error>() {
+                Some(_) => cause,
+                None => eyre::eyre!("{ROOT_NEEDS_TERMINAL}"),
+            })?;
+        if typed.trim() != prefix {
+            eyre::bail!("that was not {prefix}; nothing was revoked.");
+        }
+
+        match &kind {
+            Kind::Holder(Held::Pinned | Held::HalfMade) => {
+                swoosh::root::retire(home, key, prompt, dial, err).await?;
+            }
+            Kind::Holder(Held::Latched) => swoosh::root::finish_retire(home, key).await?,
+            Kind::Device { .. } | Kind::Contact(_) | Kind::Unknown => {
+                let home_lock = HomeWrite::take(home).await?;
+                // What this machine is to the root may have moved while the person typed: a join or a
+                // contact added meanwhile.
+                if Kind::of(home, key).await? != kind {
+                    eyre::bail!("{}", swoosh::standing::CHANGED);
+                }
+                let links = match &kind {
+                    Kind::Contact(_) => given_to(home, &[key.to_string()]).await?,
+                    _ => Vec::new(),
+                };
+                let latch = Revocation::Key(key.verify_key()?);
+                swoosh::revoked::add(
+                    &home_lock,
+                    home,
+                    links.into_iter().map(Revocation::Id).chain([latch]),
+                )?;
+                if matches!(kind, Kind::Device { .. }) {
+                    swoosh::joining::leave(&home_lock, home)?;
+                }
+            }
+        }
+        for line in kind.after(&root) {
+            writeln!(err, "{line}")?;
+        }
+        if kind.admitted() && swoosh::home::serve_running(home).await {
+            writeln!(
+                err,
+                "sessions from devices of {root} end now, yours too if you reached this machine as one."
+            )?;
+            writeln!(err, "sessions through links this machine made stay open.")?;
+        }
+        Ok(())
     }
 
     /// `--root` on a form where nothing needs the root refuses, before anything is written.
@@ -316,12 +469,9 @@ impl RevokeCmd {
         let device = format!("me/{name}");
 
         match source.place {
+            // Said only once the root step commits ([`Publish::run`]): until then the device is blocked on
+            // this machine alone.
             Some(place) => {
-                writeln!(
-                    err,
-                    "revoked {device}: blocked here now. This key can never be your device again; {name} will \
-                     need `swoosh leave --new-key` at its console."
-                )?;
                 let listed = source
                     .rows
                     .iter()
@@ -420,6 +570,200 @@ impl RevokeCmd {
     }
 }
 
+/// How many characters of a root's key the person types to revoke it.
+const PREFIX: usize = 6;
+
+/// What this machine is to a root a `revoke root:<key>` names, read from its files as they lie. A root a
+/// revoke latched and did not finish still reads as what it was, so running the revoke again finishes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Kind {
+    /// The root is kept here.
+    Holder(Held),
+    /// This machine is the root's device, `name` among your devices when its list says so. `latched` when a
+    /// revoke latched the root and stopped, so only the pin's file still names it.
+    Device {
+        name: Option<DeviceLabel>,
+        latched: bool,
+    },
+    /// The root of a contact.
+    Contact(Petname),
+    /// A root this machine does not know.
+    Unknown,
+}
+
+/// How the root kept here stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    /// Made, and this machine's pin.
+    Pinned,
+    /// Its making or restore stopped after `root.key` and before the pin: a root all the same, and nothing
+    /// was ever admitted here under it.
+    HalfMade,
+    /// Latched by a revoke that stopped: what it left goes with no passphrase.
+    Latched,
+}
+
+impl Kind {
+    /// Read with no lock, no prompt and no write. A home whose records disagree refuses, as every verb that
+    /// needs to know which root it trusts does.
+    async fn of(home: &Home, key: NodeId) -> eyre::Result<Self> {
+        if Standing::revoked_root(home).await? == Some(key) {
+            return Ok(Self::Holder(Held::Latched));
+        }
+        let standing = match Standing::read(home).await {
+            Ok(standing) => standing,
+            Err(StandingError::Damaged(what)) => {
+                eyre::bail!("{}", swoosh::standing::damaged_line(&what))
+            }
+            Err(other) => return Err(other.into()),
+        };
+        match standing {
+            Standing::HoldsRoot { pin, .. } if pin == key => {
+                return Ok(Self::Holder(Held::Pinned));
+            }
+            // A root half made here is retired as a made one: it asks its passphrase, then latches and goes.
+            Standing::InterruptedMint { root_key } if root_key == key => {
+                return Ok(Self::Holder(Held::HalfMade));
+            }
+            Standing::Device { pin, .. } if pin == key => {
+                return Ok(Self::Device {
+                    name: swoosh::renewal::own_label(home).await,
+                    latched: false,
+                });
+            }
+            _ => {}
+        }
+        // A pin a revoke latched and did not remove reads as no pin; its file still names the root.
+        if pinned_file(home).await == Some(key) {
+            return Ok(Self::Device {
+                name: None,
+                latched: true,
+            });
+        }
+        let store = ContactsStore::open(home).await?;
+        let contacts = store.contacts();
+        Ok(contacts
+            .petnames()
+            .find(|person| {
+                person.as_str() != ME
+                    && contacts
+                        .signet(person)
+                        .is_some_and(|binding| binding.node == key)
+            })
+            .map_or(Self::Unknown, |person| Self::Contact(person.clone())))
+    }
+
+    /// Whether this machine admitted sessions under the root until this act: it was the live pin. A root
+    /// half made was never pinned, and one a stopped revoke latched ended its sessions then.
+    fn admitted(&self) -> bool {
+        matches!(
+            self,
+            Self::Holder(Held::Pinned) | Self::Device { latched: false, .. }
+        )
+    }
+
+    /// The lines before the prompt: what this machine is to `root`, and what revoking it does here.
+    fn before(&self, root: &str) -> Vec<String> {
+        match self {
+            Self::Holder(_) => vec![format!(
+                "this machine keeps {root}; this deletes it here and ends it for good."
+            )],
+            Self::Device {
+                name: Some(name), ..
+            } => vec![format!(
+                "this machine is me/{name}, a device of {root}; it leaves that root and can never join it \
+                 again."
+            )],
+            Self::Device { name: None, .. } => vec![format!(
+                "this machine is a device of {root}; it leaves that root and can never join it again."
+            )],
+            Self::Contact(person) => vec![
+                format!("{root} is {person}'s root; this machine will never trust it again."),
+                format!("to stop sharing with {person} instead: swoosh revoke {person}"),
+            ],
+            Self::Unknown => vec![format!(
+                "this machine does not know {root}, and will never trust it."
+            )],
+        }
+    }
+
+    /// The lines once the act has committed.
+    fn after(&self, root: &str) -> Vec<String> {
+        match self {
+            Self::Holder(_) => vec![
+                format!("retired {root}, your root, on this machine."),
+                "to make a new root: swoosh invite <name> <key>".to_owned(),
+                "tell your contacts; each of them runs: swoosh contact add <you> <new root key>"
+                    .to_owned(),
+            ],
+            Self::Device { .. } => vec![
+                format!("left {root} for good."),
+                "to join a new root: swoosh join".to_owned(),
+            ],
+            Self::Contact(_) | Self::Unknown => vec![format!("revoked {root} here for good.")],
+        }
+    }
+}
+
+/// The refusal when `key` is a device's, one of yours or a contact's, and so never a root: the root form
+/// would latch it as a root this machine does not know, and your root's next act would carry that to every
+/// one of your devices. `None` when no device here holds it.
+async fn device_key(home: &Home, key: NodeId) -> eyre::Result<Option<String>> {
+    let store = ContactsStore::open(home).await?;
+    let contacts = store.contacts();
+    for person in contacts.petnames() {
+        let Some(name) = contacts
+            .devices(person)
+            .and_then(|mut devices| devices.find(|(_, node)| **node == key))
+            .map(|(name, _)| name)
+        else {
+            continue;
+        };
+        return Ok(Some(if person.as_str() == ME {
+            format!(
+                "that is me/{name}'s key, not a root; to revoke the device: swoosh revoke me/{name}"
+            )
+        } else {
+            format!(
+                "that is {person}/{name}'s key, not a root; to take back the links this machine gave it: \
+                 swoosh revoke {person}/{name}"
+            )
+        }));
+    }
+    Ok(None)
+}
+
+/// The root `root.pub` names, read as the file lies: a pin this machine revoked included, which every
+/// other read takes as no pin. `None` when there is none, or it is not one key.
+async fn pinned_file(home: &Home) -> Option<NodeId> {
+    swoosh::home::read_trust_file_async(&home.root_pub())
+        .await
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// The dial a root's revoke is given outside tests: the act cuts nothing, so nothing is dialed, and a dial
+/// refuses.
+#[derive(Debug, Clone, Copy)]
+pub struct Undialed;
+
+impl Dial for Undialed {
+    async fn exchange(&self, _peer: NodeId) -> Result<Answer, ExchangeError> {
+        Err(eyre::eyre!("a root's revoke dials none of your devices").into())
+    }
+
+    async fn offer(
+        &self,
+        peer: NodeId,
+        _number: Epoch,
+        _bytes: &[u8],
+    ) -> Result<Answer, ExchangeError> {
+        self.exchange(peer).await
+    }
+}
+
 /// The line after a device's reach line, when this machine had given its key links.
 const LINKS_LINE: &str =
     "and the links this machine gave it: blocked (only this machine admitted them).";
@@ -455,7 +799,9 @@ fn ids(held: &[swoosh::roster::Id]) -> Vec<RevocationId> {
 }
 
 impl Publish {
-    /// Present the root, revoke the device, cut, and offer the cut; then say which of your devices took it.
+    /// Present the root, revoke the device, cut, and offer the cut; then say which of your devices took it,
+    /// and that the device can never come back under its key. A root step that cannot finish says the
+    /// device is blocked on this machine only ([`partway`]).
     pub(crate) async fn run(
         self,
         home: &Home,
@@ -463,11 +809,16 @@ impl Publish {
         dial: &impl Dial,
         err: &mut impl Write,
     ) -> eyre::Result<()> {
-        let mut root =
-            Root::present_to(home, self.place, RootVerb::Revoke, prompt, dial, err).await?;
-        root.revoke_device(&self.name, self.key, &self.listed)?;
-        let _ = root.renew_due()?;
-        let committed = root.commit_to(err).await?;
+        let name = &self.name;
+        let committed = async {
+            let mut root =
+                Root::present_to(home, self.place, RootVerb::Revoke, prompt, dial, err).await?;
+            root.revoke_device(name, self.key, &self.listed)?;
+            let _ = root.renew_due()?;
+            root.commit_to(err).await
+        }
+        .await
+        .map_err(|error| partway(name, error))?;
         let reach = committed.offer(dial).await;
         writeln!(
             err,
@@ -477,7 +828,35 @@ impl Publish {
         if self.links {
             writeln!(err, "{LINKS_LINE}")?;
         }
+        writeln!(
+            err,
+            "me/{name} can never rejoin your devices with its current key."
+        )?;
+        writeln!(
+            err,
+            "to add {name} again, first run this at its console: swoosh leave --new-key"
+        )?;
         Ok(())
+    }
+}
+
+/// The refusal when the root step of `revoke me/<name>` stops, its block on this machine already written:
+/// what landed and what did not. A cause this names the fix for is one line; any other is the partway
+/// sentence, then the cause's own line, which names its own fix. A Ctrl-C at the prompt ends by its signal,
+/// and says nothing.
+fn partway(name: &DeviceLabel, error: RootError) -> eyre::Report {
+    let blocked = format!("me/{name} is blocked on this machine, not yet on your other devices");
+    match error {
+        RootError::NoTerminalToUnlock => eyre::eyre!(
+            "{blocked}; your root's passphrase needs a terminal: over swoosh ssh, add -t after --"
+        ),
+        // A third wrong passphrase, or a prompt that ended without one; or the home changed under the act,
+        // which a rerun reads afresh.
+        RootError::Prompt(_) | RootError::NotOnThisMachine | RootError::NoRootHere => {
+            eyre::eyre!("{blocked}; to finish, run it again: swoosh revoke me/{name}")
+        }
+        // One message, two lines: a cause chained after a colon would run its sentences into this one.
+        other => eyre::eyre!("{blocked}.\n{other}"),
     }
 }
 
@@ -707,4 +1086,4 @@ impl swoosh::reaching::Reaching for RevokeRoot {
 
 #[cfg(test)]
 #[path = "revoke_tests.rs"]
-mod revoke_tests;
+pub(crate) mod revoke_tests;

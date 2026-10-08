@@ -89,7 +89,16 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
         .unwrap()
         .cmd;
     let mut err = Vec::new();
-    let publish = cmd.block(&home, &b""[..], &mut err).await.unwrap();
+    let publish = cmd
+        .block(
+            &home,
+            &b""[..],
+            &mut swoosh::testkit::Counting::refusing(),
+            &revoke::Undialed,
+            &mut err,
+        )
+        .await
+        .unwrap();
     assert!(publish.is_none(), "a key's links need no root");
 
     // After revocation: the gate's revocation check (the seam a live exposer consults) now refuses the cap.

@@ -8,8 +8,15 @@ All notable changes to swoosh, newest first.
 - **`touch-id`, a lock on macOS.** `swoosh lock touch-id` locks this machine's key so a touch on this
   Mac opens it; `swoosh root lock touch-id` adds the same lock beside your root's passphrase. `status`
   says whether each lock opens here.
+- **`revoke root:<key>` ends a root for good on the machine it runs on.** It needs a terminal and the
+  first six characters of the key typed back. Where the root is kept, it asks for the root's passphrase
+  and deletes the root; on one of its devices, the machine leaves it; anywhere else, this machine never
+  trusts it.
 
 ### Changed
+- **`revoke me/<name>` prints `revoked` only once your root has revoked the device.** If it cannot
+  use your root, it prints an `error:` saying the device is blocked on this machine only and names the
+  fix, then exits 1.
 - **`path:` names the path that carries bytes.** A direct path with a relay kept on standby reads
   `direct`, where it read `through a relay`, and a relayed one names its relay:
   `path: relayed through euc1-1.relay.n0.iroh.link`. `ping`, `speed` and `status <machine>` print the

@@ -606,11 +606,17 @@ async fn run() -> eyre::Result<()> {
         Verb::Leave(cmd) => return cmd.run(&home).await,
         // Revokes: the block and its lines are local and come first, before any transport is composed,
         // so nothing a bind does can delay or stop them. Only a device's part that your root publishes
-        // goes on to bind, to sync and to offer the cut.
+        // goes on to bind, to sync and to offer the cut. A root's revoke runs whole here: it dials nobody.
         Verb::Revoke(cmd) => {
             cmd.reach.reject_unused_reach()?;
             match cmd
-                .block(&home, std::io::stdin().lock(), &mut std::io::stderr())
+                .block(
+                    &home,
+                    std::io::stdin().lock(),
+                    &mut swoosh::passphrase::Terminal,
+                    &revoke::Undialed,
+                    &mut std::io::stderr(),
+                )
                 .await
             {
                 Ok(Some(publish)) => Outward::Revoke(revoke::RevokeRoot {

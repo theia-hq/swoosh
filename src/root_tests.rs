@@ -2816,3 +2816,246 @@ async fn present_falls_to_the_passphrase_on_a_cancel() {
     assert_eq!(prompt.events(), 1);
     assert_eq!(prompt.touches().len(), 1);
 }
+
+// --- retire: its order at its seams, the half-made root, the re-checks ---
+
+/// Retire the root kept on `home`, the person having typed `typed`, answering with `prompt`.
+async fn retire(home: &Home, typed: NodeId, prompt: &mut impl Prompt) -> Result<(), RootError> {
+    let dial = Answering::with(Answer::Same);
+    super::retire(home, typed, prompt, &dial, &mut io::sink()).await
+}
+
+fn root_id(seed: u8) -> NodeId {
+    TestRoot::seeded(seed).node_id()
+}
+
+/// Whether `home` refuses `root` for good.
+fn latched(home: &Home, root: NodeId) -> bool {
+    crate::revoked::open(home)
+        .unwrap()
+        .is_revoked_key(&root.verify_key().unwrap())
+}
+
+/// Every file a retire takes off.
+fn retired_files(home: &Home) -> [PathBuf; 7] {
+    [
+        home.key_cert(),
+        home.synced(),
+        home.invited_by(),
+        home.devices(),
+        home.devices_conflict(),
+        home.root_pub(),
+        home.root_key(),
+    ]
+}
+
+/// Assert every file a retire takes off is gone, and nothing names the root any more.
+async fn all_retired(home: &Home, what: &str) {
+    for gone in retired_files(home) {
+        assert!(!gone.exists(), "{what}: {} is gone", gone.display());
+    }
+    assert_eq!(standing(home).await, Standing::Unpinned, "{what}");
+    assert_eq!(Standing::revoked_root(home).await.unwrap(), None, "{what}");
+}
+
+/// A retire killed at each of its seams has latched its root before it removed anything, keeps the revoked
+/// `root.key` that names the root to finish until the end, and is finished by the rerun with no passphrase.
+/// Red when the latch moves after the deletes (stopped at `Latched` the files are gone, stopped at
+/// `Delisted` nothing is latched), or when `root.key` goes before the pin (stopped at `Left`, no revoked
+/// root is left to name the finish).
+#[tokio::test]
+async fn a_retire_killed_at_each_seam_is_latched_and_finished_by_the_rerun() {
+    for seam in [Seam::Latched, Seam::Delisted, Seam::Left] {
+        let home = home(&format!("retire-{seam:?}"));
+        let laptop = row(LAPTOP, "laptop", vec![id(LAPTOP, STANDING_UNTIL)]);
+        holds(
+            &home,
+            &records(1, vec![own_row(), laptop], Vec::new(), Vec::new()),
+        )
+        .await;
+        STOP.set(Some(seam));
+        let killed = retire(&home, root_id(ROOT), &mut Counting::new([PASS])).await;
+        STOP.set(None);
+        assert!(killed.is_err(), "{seam:?}: stopped at the seam");
+        assert!(
+            latched(&home, root_id(ROOT)),
+            "{seam:?}: the latch is first"
+        );
+        assert_eq!(
+            Standing::revoked_root(&home).await.unwrap(),
+            Some(root_id(ROOT)),
+            "{seam:?}: the revoked root.key names the root to finish"
+        );
+        assert_eq!(
+            standing(&home).await,
+            Standing::Unpinned,
+            "{seam:?}: a revoked root is never one to mint from"
+        );
+        let here = |path: PathBuf| path.exists();
+        match seam {
+            Seam::Latched => {
+                for kept in [home.key_cert(), home.devices(), home.root_pub()] {
+                    assert!(here(kept), "{seam:?}: nothing removed before the latch");
+                }
+            }
+            Seam::Delisted => {
+                assert!(!here(home.devices()), "{seam:?}");
+                assert!(here(home.key_cert()) && here(home.root_pub()), "{seam:?}");
+            }
+            _ => assert!(!here(home.root_pub()), "{seam:?}: the pin is gone"),
+        }
+
+        super::finish_retire(&home, root_id(ROOT)).await.unwrap();
+        all_retired(&home, &format!("{seam:?}")).await;
+    }
+}
+
+/// A root whose making stopped after `root.key`, and one whose restore did, are retired as made roots:
+/// their passphrase, then the latch, and every file goes. Red when the present refuses a half-made root
+/// for a retire, as it does for every other act.
+#[tokio::test]
+async fn a_half_made_root_is_retired_as_a_made_one() {
+    let minted = home("retire-half-minted");
+    STOP.set(Some(Seam::Keyed));
+    let stopped = Root::mint_to(&minted, &mut Counting::new([PASS]), &mut io::sink()).await;
+    STOP.set(None);
+    assert!(stopped.is_err());
+    assert!(!minted.devices().exists());
+    let Standing::InterruptedMint { root_key: made } = standing(&minted).await else {
+        panic!("a mint stopped after root.key");
+    };
+
+    let restored = home("retire-half-restored");
+    let dir = beside(&restored, "copy");
+    let _ = std::fs::remove_dir_all(&dir);
+    copy(
+        &dir,
+        ROOT,
+        &records(1, vec![own_row()], Vec::new(), Vec::new()),
+    );
+    STOP.set(Some(Seam::Keyed));
+    let stopped = super::restore(&restored, &dir, &mut Counting::new([PASS])).await;
+    STOP.set(None);
+    assert!(stopped.is_err());
+    assert!(restored.devices().exists());
+    assert_eq!(
+        standing(&restored).await,
+        Standing::InterruptedMint {
+            root_key: root_id(ROOT)
+        }
+    );
+
+    for (what, home, root) in [("mint", minted, made), ("restore", restored, root_id(ROOT))] {
+        let mut prompt = Counting::new([PASS]);
+        retire(&home, root, &mut prompt).await.unwrap();
+        assert_eq!(prompt.events(), 1, "{what}: its passphrase is asked");
+        assert!(latched(&home, root), "{what}: latched");
+        all_retired(&home, what).await;
+    }
+}
+
+/// A retire takes only the root the person typed: the root unlocked must be it, even when the files moved
+/// to name the typed root while the passphrase was asked. Red when the unlocked root is not compared with
+/// the typed one.
+#[tokio::test]
+async fn a_retire_refuses_a_root_other_than_the_one_typed() {
+    let home = home("retire-typed");
+    device_of(&home, OTHER).await;
+    private(&home.root_key(), &sealed(OTHER));
+    // While the passphrase of OTHER is asked, the home is made to hold ROOT, the root typed.
+    let swap = || {
+        for path in [home.root_key(), home.root_pub(), home.key_cert()] {
+            std::fs::remove_file(path).unwrap();
+        }
+        let root = TestRoot::seeded(ROOT);
+        config::write_signet(&crate::testkit::lock(), &home, root.node_id()).unwrap();
+        let until = SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL);
+        let badge = root
+            .device_badge(TestNode::seeded(OWN).node_id(), until)
+            .unwrap();
+        config::write_badge(&crate::testkit::lock(), &home, &badge).unwrap();
+        private(&home.root_key(), &sealed(ROOT));
+    };
+    let refused = retire(&home, root_id(ROOT), &mut Then(swap, Counting::new([PASS]))).await;
+    assert!(
+        matches!(refused, Err(RootError::StandingChanged)),
+        "{refused:?}"
+    );
+    assert!(!latched(&home, root_id(ROOT)) && !latched(&home, root_id(OTHER)));
+    assert!(home.root_key().exists() && home.root_pub().exists());
+}
+
+/// What this machine is to the root is read again under `home.lock`: a root taken off this machine while
+/// the passphrase was asked (a `root forget`) stops the retire before its latch. Red when the re-check is
+/// dropped.
+#[tokio::test]
+async fn a_retire_whose_standing_moved_during_the_prompt_writes_nothing() {
+    let home = home("retire-moved");
+    holds(&home, &records(1, vec![own_row()], Vec::new(), Vec::new())).await;
+    let forget = || {
+        for path in [home.root_key(), home.root_pub(), home.key_cert()] {
+            std::fs::remove_file(path).unwrap();
+        }
+    };
+    let refused = retire(
+        &home,
+        root_id(ROOT),
+        &mut Then(forget, Counting::new([PASS])),
+    )
+    .await;
+    assert!(
+        matches!(refused, Err(RootError::StandingChanged)),
+        "{refused:?}"
+    );
+    assert!(!latched(&home, root_id(ROOT)), "nothing latched");
+    assert!(home.devices().exists(), "nothing removed");
+}
+
+/// A finish takes off only the root that is revoked here: asked for another, it removes nothing. Red when
+/// the finish does not read the revoked root again under `home.lock`.
+#[tokio::test]
+async fn a_finish_for_a_root_not_revoked_here_removes_nothing() {
+    let home = home("finish-other");
+    holds(&home, &records(1, vec![own_row()], Vec::new(), Vec::new())).await;
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &home,
+        [Revocation::Key(TestRoot::seeded(ROOT).verify_key())],
+    )
+    .unwrap();
+    let refused = super::finish_retire(&home, root_id(OTHER)).await;
+    assert!(
+        matches!(refused, Err(RootError::StandingChanged)),
+        "{refused:?}"
+    );
+    assert!(home.root_key().exists() && home.root_pub().exists());
+}
+
+/// A retire stopped after its latch, then a `join` to another root, then the finish: the finish removes the
+/// revoked `root.key` alone, and this machine stays a device of the root it joined. Red when the finish
+/// strips the device files whatever the pin names.
+#[tokio::test]
+async fn a_finish_after_a_join_to_another_root_keeps_that_roots_files() {
+    let home = home("finish-joined");
+    device_of(&home, OTHER).await;
+    std::fs::write(
+        home.devices(),
+        TestRoot::seeded(OTHER).sign_update(&records(1, vec![own_row()], Vec::new(), Vec::new())),
+    )
+    .unwrap();
+    private(&home.root_key(), &sealed(ROOT));
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &home,
+        [Revocation::Key(TestRoot::seeded(ROOT).verify_key())],
+    )
+    .unwrap();
+    assert!(matches!(standing(&home).await, Standing::Device { pin, .. } if pin == root_id(OTHER)));
+
+    super::finish_retire(&home, root_id(ROOT)).await.unwrap();
+    assert!(!home.root_key().exists(), "the revoked root.key goes");
+    for kept in [home.root_pub(), home.key_cert(), home.devices()] {
+        assert!(kept.exists(), "{} stays", kept.display());
+    }
+    assert!(matches!(standing(&home).await, Standing::Device { pin, .. } if pin == root_id(OTHER)));
+}

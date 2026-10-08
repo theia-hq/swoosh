@@ -18,6 +18,9 @@
 //! ([`Prompt::touch_here`]), what the enclave says of a `touch-id` lock without asking anyone
 //! ([`Prompt::health`]), and the touch itself ([`Prompt::touch`]). What to do with each answer is
 //! [`crate::touch`]'s.
+//!
+//! A typed confirmation of an act that cannot be undone rides the seam as well ([`Prompt::confirm`]), on the
+//! same terminal but shown as it is typed, since it is no secret.
 
 use std::path::Path;
 
@@ -123,8 +126,16 @@ pub trait Prompt {
     /// [`chosen`]) before it is asked again, or made when it is empty; then the second, which must match.
     fn choose(&mut self, asked: Asked<'_>) -> eyre::Result<Choice>;
 
-    /// Tell the person, where they type, why the last round did not take.
+    /// Tell the person, where they type, why the last round did not take, or what the question after the
+    /// line is about.
     fn say(&mut self, line: &str);
+
+    /// Ask `question` and read one line, shown as it is typed: a confirmation, never a secret. A line too
+    /// long to read is no answer anyone typed to confirm, and reads as empty. The default has nobody to ask
+    /// and refuses, so only a prompt that says otherwise ever confirms an act.
+    fn confirm(&mut self, _question: &str) -> eyre::Result<String> {
+        eyre::bail!("nobody is at a terminal to answer")
+    }
 
     /// Warn the person: a notice before a write, or why a lock was passed over. Warnings ride stderr, as
     /// every other warning the binary prints does, so a capture of the command keeps them; a line that
@@ -269,6 +280,20 @@ impl Prompt for Terminal {
         }
     }
 
+    /// On `/dev/tty` too, with echo on: the answer is typed text a person checks as they type it.
+    fn confirm(&mut self, question: &str) -> eyre::Result<String> {
+        use std::io::Write as _;
+
+        // Asked only once `terminal` said yes; a terminal gone since refuses as having none.
+        let tty = Tty::open(Asked::MachineKey)
+            .map_err(|_| eyre::eyre!("nobody is at a terminal to answer"))?;
+        (&tty.0).write_all(question.as_bytes())?;
+        (&tty.0).write_all(b" ")?;
+        // An answer past the cap reads as empty, so it confirms nothing and is refused as a wrong one.
+        let line = tty.read_answer()?.unwrap_or_default();
+        Ok(String::from_utf8_lossy(&line).into_owned())
+    }
+
     fn warn(&mut self, line: &str) {
         eprintln!("{line}");
     }
@@ -408,6 +433,28 @@ impl Tty {
 
     /// One line from the terminal, without its line ending, in a buffer that never grows.
     fn read_line(&self) -> eyre::Result<Zeroizing<Vec<u8>>> {
+        match self.read_capped()? {
+            Some(line) => Ok(line),
+            None => eyre::bail!("the passphrase is longer than {MAX_LINE} bytes"),
+        }
+    }
+
+    /// One answer to a confirmation, as [`read_line`](Self::read_line) reads it, or `None` when it runs past
+    /// [`MAX_LINE`]. The rest of that line is read and dropped, so none of it is left for the shell to run.
+    fn read_answer(&self) -> eyre::Result<Option<Zeroizing<Vec<u8>>>> {
+        use std::io::Read as _;
+
+        let line = self.read_capped()?;
+        if line.is_none() {
+            let mut byte = [0u8; 1];
+            while (&self.0).read(&mut byte)? != 0 && byte[0] != b'\n' {}
+        }
+        Ok(line)
+    }
+
+    /// One line from the terminal, without its line ending, or `None` at the first byte past [`MAX_LINE`],
+    /// read no further.
+    fn read_capped(&self) -> eyre::Result<Option<Zeroizing<Vec<u8>>>> {
         use std::io::Read as _;
 
         let mut line = Zeroizing::new(Vec::with_capacity(MAX_LINE));
@@ -418,14 +465,14 @@ impl Tty {
                 break;
             }
             if line.len() == MAX_LINE {
-                eyre::bail!("the passphrase is longer than {MAX_LINE} bytes");
+                return Ok(None);
             }
             line.push(byte[0]);
         }
         if line.last() == Some(&b'\r') {
             line.pop();
         }
-        Ok(line)
+        Ok(Some(line))
     }
 }
 

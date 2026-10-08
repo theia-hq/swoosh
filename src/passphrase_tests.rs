@@ -257,3 +257,28 @@ fn a_round_whose_entries_differ_is_a_mismatch() {
         ["new passphrase for the copy in /tmp/stick: ", "again: "]
     );
 }
+
+/// An answer to a confirmation past the cap reads as no answer, and the rest of its line is read and dropped,
+/// so none of it is left on the terminal for the shell; the next line is read whole. The passphrase read keeps
+/// its refusal. Red when the long line is cut at the cap and its rest left to read.
+#[test]
+fn a_confirmation_past_the_cap_reads_as_no_answer_and_leaves_nothing() {
+    let dir = tempfile_dir("long-answer");
+    let path = dir.join("typed");
+    let mut typed = vec![b'x'; super::MAX_LINE + 976];
+    typed.extend_from_slice(b"\nnext\n");
+    std::fs::write(&path, &typed).unwrap();
+    let tty = super::Tty(std::fs::File::open(&path).unwrap());
+    assert!(
+        tty.read_answer().unwrap().is_none(),
+        "past the cap is no answer"
+    );
+    assert_eq!(tty.read_answer().unwrap().unwrap().as_slice(), b"next");
+
+    let tty = super::Tty(std::fs::File::open(&path).unwrap());
+    assert_eq!(
+        tty.read_line().unwrap_err().to_string(),
+        "the passphrase is longer than 1024 bytes"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
