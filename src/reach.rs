@@ -510,7 +510,7 @@ mod tests {
         )
     }
 
-    // `dial`, the raw reach `fetch` takes: a target no device connected to prints the last connect's
+    // `dial`, the raw reach `proxy` takes: a target no device connected to prints the last connect's
     // cause chain, and a cause can be the peer's own text.
     #[tokio::test]
     async fn a_hostile_connect_failure_prints_escaped() {

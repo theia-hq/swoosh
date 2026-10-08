@@ -154,14 +154,13 @@ fn ping_v_prints_the_sessions_path_before_its_probes() {
             "quirk+noise",
             "--peer",
             &hint,
-            "--present",
-            link.trim(),
             "-v",
             "-c",
             "2",
             "-i",
             "0.1",
-            &served.key,
+            // The link is given where the machine goes: it names the host and carries the grant.
+            link.trim(),
         ],
     );
     let lines: Vec<&str> = printed.lines().collect();

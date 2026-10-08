@@ -3,7 +3,7 @@
 //!
 //! A bare `swoosh serve` binds `ping`, `speed`, the two `control.*` routes and the member-gated update
 //! route, and nothing else: a default service may cost a peer bandwidth, but never code execution, a
-//! byte of its disk, or a packet from its IP. Three verbs (`ssh`, `send`, `fetch`) therefore
+//! byte of its disk, or a packet from its IP. Three verbs (`ssh`, `send`, `proxy`) therefore
 //! default to names a zero-config peer does not serve, and the refusal that comes back names nothing,
 //! deliberately: the wire refusal is uniform so a stranger never learns what a node serves or does not.
 //! So the client says it instead, out of the table below, which pairs each of those names with the
@@ -51,12 +51,13 @@ impl Unbound {
         name: "recv",
         entry: "recv=recv:<dir>",
     };
-    /// `swoosh fetch`'s default: the exit node serves a `fetch:` relay. The entry names an ORIGIN for
-    /// the same reason [`RECV`](Self::RECV) names a dir: an unscoped fetch is an egress relay under the
-    /// peer's own IP, so the scoped spelling is the one a refusal should teach.
-    pub const FETCH: Self = Self {
-        name: "fetch",
-        entry: "fetch=fetch:<origin>",
+    /// `swoosh proxy`'s default: the exit node serves a `proxy:` relay. The entry names a URL for the
+    /// same reason [`RECV`](Self::RECV) names a dir: an unscoped proxy is an egress relay under the peer's
+    /// own IP, so the scoped spelling is the one a refusal should teach. Spelled `name=target` like every
+    /// row, though `serve proxy:<url>` names itself `proxy` too.
+    pub const PROXY: Self = Self {
+        name: "proxy",
+        entry: "proxy=proxy:<url>",
     };
 
     /// The wire name the verb dials when the user names no service.
@@ -109,10 +110,10 @@ impl Unbound {
     }
 }
 
-/// The table, in the order a reader meets the verbs: reach a shell, push a file, relay a fetch. A
+/// The table, in the order a reader meets the verbs: reach a shell, push a file, go through a proxy. A
 /// `static` (not a `const`) so a row can be handed out as `&'static`, which is what lets
 /// [`Unbound::dialed`] return a borrow rather than a copy of a row the caller then has to own.
-static UNBOUND: [Unbound; 3] = [Unbound::SSH, Unbound::RECV, Unbound::FETCH];
+static UNBOUND: [Unbound; 3] = [Unbound::SSH, Unbound::RECV, Unbound::PROXY];
 
 #[cfg(test)]
 #[path = "unbound_tests.rs"]

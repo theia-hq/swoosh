@@ -7,7 +7,7 @@
 //! read is skipped and reported, not fatal, so a courier sends what it can.
 //!
 //! The `recv:` service is family-gated like `ping`/`speed`, so send presents the same
-//! membership badge (or an explicit `--present` link) to prove membership before the receiver admits a
+//! membership badge (or the link typed as the peer) to prove membership before the receiver admits a
 //! stream. The sender hashes each file with BLAKE3 and the receiver re-hashes as bytes arrive, which
 //! catches a fault on the way and a file that changed while it was sent. It stops no lying sender, who
 //! names the root of whatever it sends: who sent the bytes is the gate's proof, and the receiver's line
@@ -52,15 +52,6 @@ pub struct SendCmd {
     /// the peer's file-receiving service
     #[arg(long, value_name = "service", default_value = RECV_SERVICE, value_parser = swoosh::names::service)]
     pub service: Service,
-    /// present a `swoosh:` capability link to reach a gated peer
-    #[arg(
-        long,
-        value_name = "link",
-        value_parser = swoosh::link::parse,
-        long_help = "Optional: your own devices need no link; this machine's membership badge is \
-                     presented automatically. Pass a `swoosh:` link only to reach as a delegate."
-    )]
-    pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -75,10 +66,6 @@ impl swoosh::reaching::Reaching for SendCmd {
         Some(&self.peer)
     }
 
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        self.peer.reject_redundant_present(self.present.as_ref())
-    }
-
     fn identity(&self) -> swoosh::identity::Identity {
         self.bind_role().identity()
     }
@@ -87,16 +74,14 @@ impl swoosh::reaching::Reaching for SendCmd {
     /// home key, so its bind must not write the key's address record (0.9.0 F1).
     ///
     /// `send` pushes to the peer's family-gated `recv:` service, so it presents the member badge rooted
-    /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. The effective slip is the
-    /// FOLD of a self-addressing `swoosh:` link-as-peer with an explicit `--present`, threaded INTO the
-    /// credential so the ONE resolver owns both slots (so a signet-bound link-as-peer computes its slot-2
-    /// badge exactly as a `--present` link does).
+    /// at the dialing key. `Family` fuses the identity to `PersistedIfPresent`. A self-addressing
+    /// `swoosh:` link-as-peer is threaded INTO the credential so the ONE resolver owns both slots (so a
+    /// signet-bound link-as-peer computes its slot-2 badge there).
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
             &self.peer,
-            self.present.clone(),
             self.service.as_str(),
         ))
     }
@@ -119,8 +104,8 @@ impl swoosh::reaching::Reaching for SendCmd {
 
 impl SendCmd {
     /// Reach the peer's `recv:` service and push every named file over its own gated stream, expanding
-    /// directories first. Presents the resolved `present` (this device's membership badge, or an explicit
-    /// `--present` link) so the receiver's family gate admits each stream. A file that cannot be read is
+    /// directories first. Presents the resolved `present` (this device's membership badge, or the link typed
+    /// as the peer) so the receiver's family gate admits each stream. A file that cannot be read is
     /// skipped and reported; the run ends non-zero if any item failed.
     async fn run_send<T: Transport, D: Discovery>(
         self,
@@ -129,10 +114,9 @@ impl SendCmd {
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
-        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
-        // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
-        // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
+        // link-as-peer through that same resolver, so the verb never threads a slip itself.
         let service = self.service.clone();
         let connector = self
             .peer

@@ -4,8 +4,8 @@
 //! A "peer to dial" is a higher-level concept than the address book, so it composes the contacts domain
 //! (`ContactRef`, `Candidate`, `Contacts`) rather than squatting in it, and it unifies the two dial-target
 //! types the reach and tunnel families used to keep apart: the multi-device diagnostic verbs
-//! (`ping`/`speed`/`status`/`fetch`) fan a peer out via [`candidates`](Peer::candidates), the single-target
-//! verbs (`reach`/`send`/`stop`/`service`/`fleet`) resolve one via [`connector`](Peer::connector). Both
+//! (`ping`/`speed`/`status`/`proxy`) fan a peer out via [`candidates`](Peer::candidates), the single-target
+//! verbs (`forward`/`send`/`stop`/`service`) resolve one via [`connector`](Peer::connector). Both
 //! shapes read the SAME three arms, so `alice`, `alice/desk`, a raw key, and a `swoosh:` link all parse in
 //! one place, uniform across every dialing verb.
 
@@ -29,8 +29,8 @@ use crate::names::NameError;
 /// the credential); else a raw base32 node id is dialed verbatim; else the text is a saved petname resolved
 /// against the contact store just before dialing (deferred because the store loads at startup, not at the
 /// clap boundary). Every dialing verb holds this in its peer slot, so `alice`, `alice/desk`, a raw key, and
-/// a `swoosh:` link all parse in one place, uniform across `ping`/`speed`/`status`/`fetch`/`reach`/`send`/
-/// `stop`/`service`/`ssh`.
+/// a `swoosh:` link all parse in one place, uniform across `ping`/`speed`/`status`/`proxy`/`forward`/
+/// `send`/`stop`/`service`/`ssh`.
 #[derive(Debug, Clone)]
 pub enum Peer {
     /// A saved petname (`alice`, `me/ci`), resolved against the store at dial time. Fan-out capable: a
@@ -39,7 +39,8 @@ pub enum Peer {
     /// A literal node id, dialed verbatim with no store lookup.
     Raw(NodeId),
     /// A `swoosh:` capability link. Self-addressing: it supplies the dial target (the cap's root node) AND
-    /// the slot-1 credential, so a separate `--present` is redundant (see the fold in [`self_present`](Self::self_present)).
+    /// the slot-1 credential (see the fold in [`self_present`](Self::self_present)), so a link is given
+    /// where the machine goes and never beside it.
     Capability {
         /// The link.
         link: Link,
@@ -269,7 +270,7 @@ pub enum PeerParseError {
 }
 
 impl Peer {
-    /// FAN-OUT resolution, for the multi-device verbs (`ping`/`speed`/`status`/`fetch`). A [`Named`](Self::Named)
+    /// FAN-OUT resolution, for the multi-device verbs (`ping`/`speed`/`status`/`proxy`). A [`Named`](Self::Named)
     /// person resolves to ALL devices in label order; [`Raw`](Self::Raw) to one; a [`Capability`](Self::Capability)
     /// link to exactly one (the cap's root node it self-addresses), so a link degenerates to a single
     /// candidate exactly as `Raw` does. An unknown name surfaces the contact resolver's clean error, never a
@@ -292,11 +293,11 @@ impl Peer {
         }
     }
 
-    /// SINGLE-CONNECTOR resolution, for the single-target verbs (`reach`/`send`/`stop`/`service`/`fleet`).
+    /// SINGLE-CONNECTOR resolution, for the single-target verbs (`forward`/`send`/`stop`/`service`).
     /// The resolver ALWAYS builds via [`Connector::to_node`] with the slot-1/slot-2 the caller resolved;
     /// the [`Capability`](Self::Capability) arm differs ONLY in computing the dial target from the link's
     /// root. It NEVER calls [`Connector::from_link`]: the link's credential arrives as `slot1` from the
-    /// ONE resolver (the peer's link is folded into `--present`), so slot 1 and slot 2 stay owned by
+    /// ONE resolver (the peer's link is folded into the credential), so slot 1 and slot 2 stay owned by
     /// [`resolve`](crate::reaching::resolve) for every arm. A bare person resolves to the FIRST device in
     /// label order (these verbs dial one node); an unknown petname is a loud error here.
     pub fn connector(
@@ -327,10 +328,9 @@ impl Peer {
         })
     }
 
-    /// The credential this peer self-supplies when it is a self-addressing link, else `None`. This is what
-    /// the fold prefers over an explicit `--present`: a `swoosh:` link passed AS the peer flows through the
-    /// same [`resolve`](crate::reaching::resolve) path as an explicit `--present`, so a signet-bound
-    /// link-as-peer computes its slot-2 member badge exactly as a `--present` link does.
+    /// The credential this peer self-supplies when it is a self-addressing link, else `None`. A `swoosh:`
+    /// link passed AS the peer flows through the one [`resolve`](crate::reaching::resolve) path, so a
+    /// signet-bound link-as-peer computes its slot-2 member badge there.
     pub fn self_present(&self) -> Option<Link> {
         match self {
             Self::Capability { link, .. } => Some(link.clone()),
@@ -344,21 +344,6 @@ impl Peer {
             Self::Capability { file, .. } => file.as_deref(),
             _ => None,
         }
-    }
-
-    /// Reject a redundant `--present` alongside a self-addressing link peer: the link already presents its
-    /// own credential, so a second one is ambiguous. A no-op for a [`Named`](Self::Named)/[`Raw`](Self::Raw)
-    /// peer, where `--present` is the credential (the fleet/delegate case, a slip rooted elsewhere). Called
-    /// once at the top of each verb's run before resolving, so the conflict is loud and local while
-    /// [`bind_role`](crate::reaching::Reaching::bind_role), which carries the credential, stays infallible.
-    pub fn reject_redundant_present(&self, explicit: Option<&Link>) -> eyre::Result<()> {
-        if matches!(self, Self::Capability { .. }) && explicit.is_some() {
-            eyre::bail!(
-                "a `swoosh:` link peer already presents its own credential; drop `--present` (or name \
-                 a petname/key peer to present a different link)"
-            );
-        }
-        Ok(())
     }
 }
 
@@ -392,7 +377,7 @@ mod tests {
     }
 
     /// A real signet-bound `swoosh:` link (work issues it for a foreign fleet), so a test can assert a
-    /// `Capability` peer self-addresses to the cap ROOT and folds its slip like an explicit `--present`.
+    /// `Capability` peer self-addresses to the cap ROOT and folds its slip into the credential.
     fn signet_link() -> String {
         let slip = crate::testkit::TestNode::seeded(1)
             .fleet_slip(
@@ -662,30 +647,6 @@ mod tests {
                 "HOME is not set, so ~/ has nowhere to point; type the file's full path",
             );
         }
-    }
-
-    /// A `swoosh:` link peer plus an explicit `--present` is a LOUD conflict (the link already presents its
-    /// own credential); a link peer with no `--present`, and a `Named`/`Raw` peer WITH `--present` (the
-    /// delegate case, a slip rooted elsewhere), are both fine.
-    #[test]
-    fn link_peer_plus_present_is_a_loud_error() {
-        let link = signet_link();
-        let peer = link.parse::<Peer>().expect("a link peer");
-        let explicit: Link = crate::link::parse(&link).expect("a slip");
-        assert!(
-            peer.reject_redundant_present(Some(&explicit)).is_err(),
-            "a link peer + --present is a loud conflict, not a silent pick"
-        );
-        assert!(
-            peer.reject_redundant_present(None).is_ok(),
-            "a link peer with no --present is fine"
-        );
-
-        let named = "alice".parse::<Peer>().expect("a petname peer");
-        assert!(
-            named.reject_redundant_present(Some(&explicit)).is_ok(),
-            "a petname peer + --present presents a slip rooted elsewhere: allowed"
-        );
     }
 
     /// A `Capability` peer's `connector` builds via `to_node` with the slots the resolver handed it, never

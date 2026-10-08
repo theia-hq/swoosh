@@ -10,7 +10,7 @@
 //! `control.stop` is MEMBER-only, not merely family-gated: the node admits a whole-node membership badge
 //! (your own devices), and refuses a delegated slip at the route's member floor with the same uniform
 //! refusal a gate miss gives, before any `Response::Ok`. So `stop --at` presents this device's
-//! membership badge; a `--present` slip reaches the gate but cannot stop the node. For a fleet
+//! membership badge; a link typed as the peer reaches the gate but cannot stop the node. For a fleet
 //! this means any of your own devices can stop it, which is correct for a CI teardown.
 //! Hardening the lifecycle further (an arm->confirm nonce + a single-use device-bound destroy-cap, ideally
 //! owner-only so another fleet device cannot stop the node) is a follow-up, and it needs a security review
@@ -71,15 +71,6 @@ pub struct StopCmd {
                      A peer is a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link."
     )]
     pub at: Option<Peer>,
-    /// present a `swoosh:` capability link to reach a gated peer
-    #[arg(
-        long,
-        value_name = "link",
-        value_parser = swoosh::link::parse,
-        long_help = "Optional: your own devices need no link, the dial presents this \
-                     device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
-    )]
-    pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -94,13 +85,6 @@ impl swoosh::reaching::Reaching for StopCmd {
         self.at.as_ref()
     }
 
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        match &self.at {
-            Some(peer) => peer.reject_redundant_present(self.present.as_ref()),
-            None => Ok(()),
-        }
-    }
-
     fn identity(&self) -> swoosh::identity::Identity {
         self.bind_role().identity()
     }
@@ -110,17 +94,14 @@ impl swoosh::reaching::Reaching for StopCmd {
     ///
     /// `stop --at` reaches the peer's family-gated `control.stop` service, so it presents the member badge
     /// rooted at the dialing key (only a family member may stop the node). `Family` fuses the identity to
-    /// `PersistedIfPresent`. The effective slip is the FOLD of a self-addressing `swoosh:` link in the `--at`
-    /// peer with an explicit `--present`, threaded INTO the credential so the ONE resolver owns both slots.
+    /// `PersistedIfPresent`. A self-addressing `swoosh:` link in the `--at` peer is threaded INTO the
+    /// credential so the ONE resolver owns both slots.
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        let present = self.present.clone();
         swoosh::reaching::BindRole::Dialing(match &self.at {
-            Some(peer) => {
-                swoosh::credential::Credential::dialing(peer, present, CONTROL_STOP_SERVICE)
-            }
-            None => swoosh::credential::Credential::Family { present },
+            Some(peer) => swoosh::credential::Credential::dialing(peer, CONTROL_STOP_SERVICE),
+            None => swoosh::credential::Credential::Family { present: None },
         })
     }
 
@@ -149,9 +130,6 @@ impl StopCmd {
     /// client resolution teaches the fix (`swoosh serve`) and exits non-zero, never a
     /// silent success.
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
-        // A bare `stop` reaches no peer, so an explicit `--present` has nothing to select: refuse it
-        // rather than silently dropping it (I.3), before touching the socket.
-        swoosh::reaching::reject_bare_present(self.present.as_ref())?;
         // The reach trio binds a transport and seeds discovery for a PEER; a bare `stop` binds neither,
         // so the flags are refused by name rather than silently ignored (I.3, B4).
         swoosh::reaching::reject_bare_reach(&self.reach)?;
@@ -170,7 +148,7 @@ impl StopCmd {
     }
 
     /// Reach the peer's member-only `control.stop` service and trigger a graceful stop. Presents the
-    /// resolved `present` (this device's membership badge, or an explicit `--present` link) so the gate
+    /// resolved `present` (this device's membership badge, or the link typed as the peer) so the gate
     /// rules on the stream; only a whole-node member passes the route's member floor, and a node that does
     /// not admit this caller refuses LOUDLY here, never a silent no-op. `--at` is required to reach this
     /// path (a bare `stop` split to [`run_local`](Self::run_local)), so a missing target is a root-dispatch
@@ -188,10 +166,9 @@ impl StopCmd {
             );
         };
 
-        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
-        // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
-        // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
+        // link-as-peer through that same resolver, so the verb never threads a slip itself.
         let connector = peer.connector(
             contacts,
             CONTROL_STOP_SERVICE.parse::<Service>()?,

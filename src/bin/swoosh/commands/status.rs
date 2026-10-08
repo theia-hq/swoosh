@@ -42,15 +42,6 @@ pub struct StatusCmd {
     /// Print this machine's key and nothing else.
     #[arg(long, conflicts_with = "peer")]
     pub key: bool,
-    /// present a `swoosh:` capability link to reach a gated peer
-    #[arg(
-        long,
-        value_name = "link",
-        value_parser = swoosh::link::parse,
-        long_help = "Optional: your own devices need no link, the dial presents this \
-                     device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
-    )]
-    pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -65,13 +56,6 @@ impl swoosh::reaching::Reaching for StatusCmd {
         self.peer.as_ref()
     }
 
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        match &self.peer {
-            Some(peer) => peer.reject_redundant_present(self.present.as_ref()),
-            None => Ok(()),
-        }
-    }
-
     fn identity(&self) -> swoosh::identity::Identity {
         self.bind_role().identity()
     }
@@ -80,18 +64,15 @@ impl swoosh::reaching::Reaching for StatusCmd {
     /// home key, so its bind must not write the key's address record (0.9.0 F1).
     ///
     /// `status` probes the peer's family-gated `ping` service, so it presents the member badge rooted at
-    /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. The
-    /// effective slip is the FOLD of a self-addressing `swoosh:` link-as-peer with an explicit `--present`,
-    /// threaded INTO the credential so the ONE resolver owns both slots.
+    /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. A
+    /// self-addressing `swoosh:` link-as-peer is threaded INTO the credential so the ONE resolver owns both
+    /// slots.
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        let present = self.present.clone();
         swoosh::reaching::BindRole::Dialing(match &self.peer {
-            Some(peer) => {
-                swoosh::credential::Credential::dialing(peer, present, reach::PING_SERVICE)
-            }
-            None => swoosh::credential::Credential::Family { present },
+            Some(peer) => swoosh::credential::Credential::dialing(peer, reach::PING_SERVICE),
+            None => swoosh::credential::Credential::Family { present: None },
         })
     }
 
@@ -123,8 +104,6 @@ impl StatusCmd {
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
-        // The redundant-present conflict is rejected ONCE in the composition root via
-        // `Reaching::reject_redundant_present`, before this runs.
         //
         // A bare `status` splits to `run_local` in the root BEFORE any transport is composed, so a
         // missing peer here is a root-dispatch bug, not a user error.
@@ -134,9 +113,9 @@ impl StatusCmd {
             );
         };
         let candidates = reach::candidates(&peer, contacts)?;
-        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
-        // link-as-peer through that same resolver, so the verb never threads `--present` itself.
+        // link-as-peer through that same resolver, so the verb never threads a slip itself.
 
         // Report each device, folding how far each one got: the exit code is green only if some device
         // actually answered the probe, so a fan-out where every device was unreachable, refused, or broke
@@ -168,9 +147,6 @@ impl StatusCmd {
     /// The bare (no-peer) path: this machine, from its own files. Runs BEFORE any transport is composed
     /// (dispatched locally in the root), so a bare `swoosh status` never binds an endpoint and never dials.
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
-        // A bare `status` reaches no peer, so an explicit `--present` has nothing to select: refuse it
-        // rather than silently dropping it (I.3), before touching the home.
-        swoosh::reaching::reject_bare_present(self.present.as_ref())?;
         // The reach trio binds a transport and seeds discovery for a PEER; a bare `status` binds
         // neither, so the flags are refused by name rather than silently ignored (I.3, B4).
         swoosh::reaching::reject_bare_reach(&self.reach)?;
@@ -394,46 +370,6 @@ mod tests {
         assert_eq!(humanize_secs(90), "1m 30s");
         assert_eq!(humanize_secs(2 * 3600 + 14 * 60), "2h 14m");
         assert_eq!(humanize_secs(3 * 86_400 + 5 * 3600), "3d 5h");
-    }
-
-    /// A bare `status` reaches no peer, so `--present` has nothing to select: it is refused with the
-    /// exact teaching line, never silently dropped (I.3, MAJOR-1).
-    #[tokio::test]
-    async fn bare_status_rejects_present() {
-        #[derive(clap::Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            status: super::StatusCmd,
-        }
-
-        let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-        let base =
-            std::env::temp_dir().join(format!("sw4-status-present-{}-{seq}", std::process::id()));
-        std::fs::create_dir_all(base.join("home")).expect("scratch home");
-        let home = Home::resolve(Some(base.join("home"))).expect("the scratch home resolves");
-        let link = swoosh::link::Link::from(
-            swoosh::testkit::TestRoot::seeded(0xb0)
-                .device_badge(
-                    swoosh::testkit::TestNode::seeded(0xb1).node_id(),
-                    nauthy::Request::expires_in(core::time::Duration::from_secs(300)),
-                )
-                .expect("mint a stand-in slip"),
-        )
-        .to_string();
-        let status = Wrap::try_parse_from(["x", "--present", &link])
-            .expect("bare status --present parses")
-            .status;
-
-        let error = status
-            .run_local(&home)
-            .await
-            .expect_err("--present without a peer must refuse, never be ignored");
-        assert_eq!(
-            format!("{error:#}"),
-            "--present only applies when reaching a peer; drop it or name one"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A bare `status` reaches no peer, so the reach trio (`--transport`/`--local`/`--peer`) has nothing

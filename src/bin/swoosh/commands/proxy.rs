@@ -1,9 +1,10 @@
-//! `swoosh fetch <url>`: mint a local http URL whose fetches egress at a node you name.
+//! `swoosh proxy <peer> <url>`: mint a local http URL whose requests leave from a machine you name.
 //!
 //! A URL-minting reverse proxy: a downloader (xget, curl) pulls from the local listener; each request
-//! rides one bifrost stream to a cap-gated `fetch:` service on the `--via` node; that node performs the
-//! origin HTTP GET/HEAD and streams the response straight back, `Range` intact so a resumable download
-//! works. It stays scoped to the one origin you named (a reverse proxy for one origin, not an open VPN).
+//! rides one bifrost stream to a cap-gated `proxy:` service on that machine; it performs the origin HTTP
+//! GET/HEAD and streams the response straight back, `Range` intact so a resumable download works. It stays
+//! scoped to the one origin you named (a reverse proxy for one origin, not an open VPN). The machine runs
+//! the services engine named `fetch`; that name is internal and never printed.
 
 use core::net::Ipv4Addr;
 
@@ -22,31 +23,24 @@ use tightbeam::protocol::{Request, Response};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
-/// Mint a local URL that fetches an origin through a node you name (your own janus, over the overlay).
+/// Mint a local URL that reaches an origin through a machine you name (your own exit, over the overlay).
 #[derive(Debug, Args)]
-pub struct FetchCmd {
-    /// The origin URL to fetch (path and query on the local URL resolve against it).
+pub struct ProxyCmd {
+    /// the machine to go through: a petname (`usa`, `alice/box`), a raw node id, or a `swoosh:` link
+    // Positional and first, like every verb's machine: the machine is never optional, and a flag that
+    // is never optional is a positional.
+    #[arg(value_name = "peer")]
+    pub peer: Peer,
+    /// The origin URL to reach (path and query on the local URL resolve against it).
     #[arg(value_name = "url")]
     pub url: String,
-    /// the node to fetch through: a petname (`usa`, `alice/box`), a raw node id, or a `swoosh:` link
-    #[arg(long, value_name = "peer")]
-    pub via: Peer,
     /// which served service to reach
     // The default is taken FROM the table that knows a bare `swoosh serve` does not bind it (an
     // unscoped relay egresses under the exit node's own IP, so there is no default to inherit), so
     // the name this verb dials and the name a failed request teaches the `serve` line for are one
     // value.
-    #[arg(long, value_name = "service", default_value = Unbound::FETCH.name(), value_parser = swoosh::names::service)]
+    #[arg(long, value_name = "service", default_value = Unbound::PROXY.name(), value_parser = swoosh::names::service)]
     pub service: Service,
-    /// present a `swoosh:` capability link to reach a gated node
-    #[arg(
-        long,
-        value_name = "link",
-        value_parser = swoosh::link::parse,
-        long_help = "Optional: your own devices need no link; this machine's membership badge is \
-                     presented automatically. Pass a `swoosh:` link only to reach as a delegate."
-    )]
-    pub present: Option<Link>,
     /// Pin the local listener port (default: an OS-assigned free port).
     #[arg(long, value_name = "port")]
     pub port: Option<u16>,
@@ -54,18 +48,14 @@ pub struct FetchCmd {
     pub reach: ReachArgs,
 }
 
-impl swoosh::reaching::Reaching for FetchCmd {
+impl swoosh::reaching::Reaching for ProxyCmd {
     fn reach_args(&self) -> &swoosh::transport::ReachArgs {
         &self.reach
     }
 
     /// The peer this verb dials, for the stale-list exchange after it runs.
     fn dialed(&self) -> Option<&swoosh::peer::Peer> {
-        Some(&self.via)
-    }
-
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        self.via.reject_redundant_present(self.present.as_ref())
+        Some(&self.peer)
     }
 
     fn identity(&self) -> swoosh::identity::Identity {
@@ -75,24 +65,23 @@ impl swoosh::reaching::Reaching for FetchCmd {
     /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
     /// home key, so its bind must not write the key's address record (0.9.0 F1).
     ///
-    /// `fetch:` is FAMILY-GATED: the owner reaching their OWN exit node presents the member badge by
-    /// default (rooted at the dialing key), and a delegate may override with `--present <slip>`. Stating
+    /// `proxy:` is FAMILY-GATED: the owner reaching their OWN exit node presents the member badge by
+    /// default (rooted at the dialing key), and a delegate types their link as the peer instead. Stating
     /// `Family` FUSES the identity to `PersistedIfPresent`, so the owner's self-badge roots at the same
     /// key the dial binds under and admits: this is the one-line fix for the owner-reaching-own-node 403
-    /// (the verb used to dial `Ephemeral` + slip-only, so an owner with no slip was refused). The effective
-    /// slip is the FOLD of a self-addressing `swoosh:` link in the `--via` peer with an explicit `--present`,
-    /// threaded INTO the credential so the ONE resolver owns both slots.
+    /// (the verb used to dial `Ephemeral` + slip-only, so an owner with no slip was refused). A
+    /// self-addressing `swoosh:` link in the peer slot is threaded INTO the credential so the ONE resolver
+    /// owns both slots.
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(swoosh::credential::Credential::dialing(
-            &self.via,
-            self.present.clone(),
+            &self.peer,
             self.service.as_str(),
         ))
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `fetch` reads `contacts` (to resolve `--via`),
+    /// Uniform dispatch: unpack the reach context and run. `proxy` reads `contacts` (to resolve its peer),
     /// the `transport` label, and the resolved `present` badge; it ignores `key`.
     async fn run<T: Transport, D: Discovery>(
         self,
@@ -103,19 +92,19 @@ impl swoosh::reaching::Reaching for FetchCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_fetch(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
+        self.run_proxy(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
             .await
     }
 }
 
-impl FetchCmd {
+impl ProxyCmd {
     /// Dial the exit node, bind a loopback listener, print the local URL, and serve each request over its
     /// own bifrost stream until Ctrl-C.
     ///
     /// `present` is the ALREADY-RESOLVED badge from the composition root: the member badge rooted at the
-    /// dialing key by default (so the owner reaching their OWN gated exit node admits), a `--present` slip
-    /// if the caller gave one. `fetch:` is family-gated, so every per-request stream presents it.
-    async fn run_fetch<T: Transport, D: Discovery>(
+    /// dialing key by default (so the owner reaching their OWN gated exit node admits), the link typed as
+    /// the peer if the caller gave one. `proxy:` is family-gated, so every per-request stream presents it.
+    async fn run_proxy<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
@@ -123,15 +112,13 @@ impl FetchCmd {
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
-        // The redundant-present conflict is rejected ONCE in the composition root via
-        // `Reaching::reject_redundant_present`, before this runs.
-        let Reached { session, label } = reach::dial(node, contacts, &self.via, bound).await?;
+        let Reached { session, label } = reach::dial(node, contacts, &self.peer, bound).await?;
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
         let addr = listener.local_addr()?;
-        println!("swoosh fetch ready. local URL:\n");
+        println!("swoosh proxy ready. local URL:\n");
         println!("    http://{addr}/\n");
         println!(
-            "fetching {} via {label}. hand this URL to a downloader. ctrl-c to stop.",
+            "proxying {} through {label}. hand this URL to a downloader. ctrl-c to stop.",
             self.url
         );
 
@@ -154,7 +141,7 @@ impl FetchCmd {
                 }
                 Some(result) = pipes.next(), if !pipes.is_empty() => {
                     if let Err(error) = result {
-                        tracing::warn!(%error, "fetch request ended");
+                        tracing::warn!(%error, "proxy request ended");
                     }
                 }
             }
@@ -183,7 +170,7 @@ impl FetchCmd {
                 let _ = respond_error(
                     &mut tcp,
                     Status::BadGateway,
-                    &self.body(format!("fetch failed: {error:#}")),
+                    &self.body(format!("proxy failed: {error:#}")),
                 )
                 .await;
             }
@@ -192,7 +179,7 @@ impl FetchCmd {
         Ok(())
     }
 
-    /// Relay one request to the `fetch:` service and stream the response back, setting `responded` the
+    /// Relay one request to the `proxy:` service and stream the response back, setting `responded` the
     /// moment any HTTP response has begun (so the caller knows a `502` is no longer safe to send).
     async fn relay<S: Session>(
         &self,
@@ -213,7 +200,7 @@ impl FetchCmd {
         let (mut writer, mut reader) = session.open_bi().await?;
         // The checked writer (the same rule the library's `Connector` applies): a credential-bearing
         // request refuses, before any byte, when the selected transport's declared profile does not
-        // prove the peer. This fetch path dials a raw session and bypasses `Connector`, so it carries
+        // prove the peer. This proxy path dials a raw session and bypasses `Connector`, so it carries
         // the check itself; the refusal surfaces here as the local 502 cause.
         Request {
             service: self.service.to_string(),
@@ -248,7 +235,7 @@ impl FetchCmd {
                 unreadable => {
                     tracing::error!(
                         refusal = %unreadable,
-                        "the fetch node refused with a class this build cannot read; serving 502 \
+                        "the proxy machine refused with a class this build cannot read; serving 502 \
                          rather than guessing an authorization answer"
                     );
                     Status::BadGateway
@@ -257,7 +244,7 @@ impl FetchCmd {
             return respond_error(
                 tcp,
                 status,
-                &self.body(format!("fetch service refused: {refusal}")),
+                &self.body(format!("proxy service refused: {refusal}")),
             )
             .await;
         }
@@ -306,7 +293,7 @@ impl FetchCmd {
 /// query resolved against the base, so a download hits the exact file the base names and an API proxy
 /// forwards the path.
 ///
-/// Delegates the composition to [`fetch::compose_url`], which PARSES the base and joins the target as a URL
+/// Delegates the composition to [`::fetch::compose_url`], which PARSES the base and joins the target as a URL
 /// rather than string-concatenating: joining merges the two paths per the URL grammar, so a base with a
 /// trailing slash and a target with a leading one (`https://x/` + `/a`) yield `https://x/a`, not the
 /// `https://x//a` a raw `format!` produces. A root request (`/`, or empty) keeps the base VERBATIM: the base
@@ -316,7 +303,11 @@ fn origin_url(base: &str, target: &str) -> eyre::Result<String> {
     if target == "/" || target.is_empty() {
         return Ok(base.to_owned());
     }
-    fetch::compose_url(base, target).map_err(|error| eyre::eyre!(error))
+    ::fetch::compose_url(base, target).map_err(|error| match error {
+        // The engine's own line names the engine; this one names what a person typed.
+        ::fetch::ComposeError::Base(source) => eyre::eyre!("invalid proxy url: {source}"),
+        target @ ::fetch::ComposeError::Target { .. } => eyre::eyre!(target),
+    })
 }
 
 /// Read an HTTP request head (up to the blank line) one byte at a time. Bounded so a client that never
@@ -339,7 +330,7 @@ async fn read_head(tcp: &mut TcpStream) -> eyre::Result<Vec<u8>> {
     Ok(head)
 }
 
-/// A parsed inbound request head: the pieces we relay onward to the fetch service.
+/// A parsed inbound request head: the pieces we relay onward to the proxy service.
 struct Parsed {
     method: String,
     target: String,
@@ -402,7 +393,7 @@ async fn write_response_head(
     Ok(())
 }
 
-/// An error status a `fetch` proxy serves, chosen so a downloader can tell the failure apart by status
+/// An error status a `proxy` serves, chosen so a downloader can tell the failure apart by status
 /// alone: a dial the exit node did not admit is authorization (`403`), a node that could not serve the
 /// request or a bad upstream is a gateway failure (`502`).
 #[derive(Debug, Clone, Copy)]
@@ -467,7 +458,7 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::{FetchCmd, origin_url};
+    use super::{ProxyCmd, origin_url};
 
     #[test]
     fn root_request_uses_the_base_verbatim() {
@@ -496,30 +487,40 @@ mod tests {
         );
     }
 
-    /// A thin clap wrapper so a test can parse a `FetchCmd` from a real argv the same way the binary does.
+    /// A base that is not a URL refuses in swoosh's words: the engine's own line names the engine, a word
+    /// no person types, so it never reaches the downloader's error body.
+    #[test]
+    fn a_base_that_is_not_a_url_never_names_the_engine() {
+        let error = origin_url("not a url", "/x").expect_err("a bad base refuses");
+        let line = format!("{error:#}");
+        assert!(line.starts_with("invalid proxy url: "), "{line}");
+        assert!(!line.contains("fetch"), "{line}");
+    }
+
+    /// A thin clap wrapper so a test can parse a `ProxyCmd` from a real argv the same way the binary does.
     #[derive(clap::Parser)]
     struct Wrap {
         #[command(flatten)]
-        fetch: FetchCmd,
+        proxy: ProxyCmd,
     }
 
-    /// `swoosh fetch --via <peer>` is FAMILY-gated by default: it dials carrying the `Family` credential,
+    /// `swoosh proxy <peer> <url>` is FAMILY-gated by default: it dials carrying the `Family` credential,
     /// so the owner reaching their OWN exit node presents the member badge (the fix for the
-    /// owner-reaching-own-node 403). Before this redesign `fetch` was slip-only and an owner with no slip
+    /// owner-reaching-own-node 403). Before this redesign the verb was slip-only and an owner with no slip
     /// was refused. The identity derived from `Family` is `PersistedIfPresent`, so the self-badge roots
     /// correctly.
     #[test]
-    fn fetch_is_family_gated_by_default_so_it_presents_a_badge() {
+    fn proxy_is_family_gated_by_default_so_it_presents_a_badge() {
         let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-        let cmd = Wrap::try_parse_from(["swoosh", "http://example.com/x", "--via", &key])
-            .expect("fetch parses")
-            .fetch;
+        let cmd = Wrap::try_parse_from(["swoosh", &key, "http://example.com/x"])
+            .expect("proxy parses")
+            .proxy;
         assert!(
             matches!(
                 cmd.bind_role(),
                 BindRole::Dialing(Credential::Family { present: None })
             ),
-            "fetch with no --present dials presenting the member badge"
+            "proxy to a key dials presenting the member badge"
         );
         assert_eq!(
             cmd.identity(),
@@ -562,7 +563,7 @@ mod tests {
         }
     }
 
-    /// The line the DOWNLOADER reads. A `fetch` request that fails serves an HTTP error body, and
+    /// The line the DOWNLOADER reads. A `proxy` request that fails serves an HTTP error body, and
     /// that body is where this verb's refusal is actually read, so that is where the `serve` line the
     /// exit node would need has to land. Driven through the same announced-session refusal as the
     /// test below: this failure never reached the exit node at all and still carries the line, which
@@ -572,7 +573,7 @@ mod tests {
     async fn a_failed_request_names_the_serve_line_for_the_defaulted_service() {
         let defaulted = failure_body(&[]).await;
         assert!(
-            defaulted.contains("swoosh serve fetch=fetch:<origin>"),
+            defaulted.contains("swoosh serve proxy=proxy:<url>"),
             "the defaulted service names the line that would bind it: {defaulted}"
         );
 
@@ -599,9 +600,9 @@ mod tests {
             .unwrap();
 
         let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-        let mut argv = vec!["swoosh", "http://example.com/x", "--via", &key];
+        let mut argv = vec!["swoosh", &key, "http://example.com/x"];
         argv.extend_from_slice(extra);
-        let cmd = Wrap::try_parse_from(argv).expect("fetch parses").fetch;
+        let cmd = Wrap::try_parse_from(argv).expect("proxy parses").proxy;
         let node = TestNode::seeded(7);
         let link = node
             .member_badge(
@@ -623,11 +624,11 @@ mod tests {
         String::from_utf8_lossy(&response).into_owned()
     }
 
-    /// The fetch path bypasses `Connector`, so it carries the checked writer itself: presenting a
+    /// The proxy path bypasses `Connector`, so it carries the checked writer itself: presenting a
     /// credential over an announced session refuses before any byte, and the local URL serves its 502
     /// with the teaching cause instead of quietly shipping the credential to whoever answered.
     #[tokio::test]
-    async fn fetch_refuses_to_present_a_credential_over_an_announced_session() {
+    async fn proxy_refuses_to_present_a_credential_over_an_announced_session() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
         let mut client = TcpStream::connect(addr).await.unwrap();
@@ -638,9 +639,9 @@ mod tests {
             .unwrap();
 
         let key = bifrost::NodeId::from_ed25519_secret(&[5u8; 32]).to_string();
-        let cmd = Wrap::try_parse_from(["swoosh", "http://example.com/x", "--via", &key])
-            .expect("fetch parses")
-            .fetch;
+        let cmd = Wrap::try_parse_from(["swoosh", &key, "http://example.com/x"])
+            .expect("proxy parses")
+            .proxy;
         let node = TestNode::seeded(7);
         let link = node
             .member_badge(

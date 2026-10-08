@@ -56,7 +56,7 @@ fn a_serve_that_did_not_start_saves_no_relay() {
             "https://relay.example/",
             "--public",
             "web",
-            "web=fetch:",
+            "web=proxy:",
         ],
     );
     assert_eq!(

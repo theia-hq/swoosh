@@ -10,7 +10,7 @@
 //! the same key `swoosh ssh` and a signed link root at, gates on the pin read live from swoosh's own
 //! store and on the links this machine signed, and derives the ssh host seed from swoosh's secret, so an
 //! `ssh` service presents the host key a client pins. swoosh assembles the whole route table itself
-//! (`fetch`/`recv` instances, `ping`/`speed`, the update route, and `sshd` under the `ssh` feature),
+//! (`proxy`/`recv` instances, `ping`/`speed`, the update route, and `sshd` under the `ssh` feature),
 //! takes the gate the composition root built ([`swoosh::gate::anchored`]), and prints its OWN banner.
 //! `--expires` is a LOCAL timer with no security surface: when its deadline passes the node ends by
 //! itself, the same graceful teardown a Ctrl-C gives.
@@ -43,8 +43,8 @@ use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
-    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FetchScope,
-    InstanceLock, RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop,
+    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, InstanceLock,
+    ProxyScope, RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop,
     StopKind, Stopped, acquire_single, bind_entry, bind_recv, bind_renewal, classify_stop,
     extract_recv_services, refuse_recv_into_home,
 };
@@ -275,12 +275,6 @@ impl Reaching for ServeCmd {
         None
     }
 
-    /// `serve` is the gate: it dials no peer and takes no `--present`, so there is no self-addressing link
-    /// peer to conflict with. The check is vacuously satisfied.
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        Ok(())
-    }
-
     /// `serve` MUST be reachable at one stable address across runs, so it declares `Persisted`
     /// EXPLICITLY. This is a written declaration the compiler requires, not a forgettable override, so a
     /// serve verb cannot silently come up on a key that changes every run.
@@ -497,7 +491,7 @@ async fn running_services(home: &Home) -> Option<Vec<String>> {
 
 impl ServeCmd {
     /// Serve the services this run started with under swoosh's identity by driving the tunnel core
-    /// directly: parse the services, assemble the route table (`fetch`/`recv` instances, `ping`/`speed`,
+    /// directly: parse the services, assemble the route table (`proxy`/`recv` instances, `ping`/`speed`,
     /// the update route, and `sshd` under the `ssh` feature) behind the gate the composition root built,
     /// record what it serves, print swoosh's banner, and run the exposer and the control socket with the
     /// live cut wired. A service stays gated unless `--public` opens it.
@@ -526,7 +520,7 @@ impl ServeCmd {
             listener,
         } = claim;
         // The served names in the order the person gave them, for the banner and the per-service lines:
-        // read from every entry, before the fetch and receive services were pulled out.
+        // read from every entry, before the proxy and receive services were pulled out.
         let names = started.names();
         // Every node answers its own `control.stop` and member-only `control.services`, always, whatever
         // else it serves: the node-lifecycle control surface is part of being a node, not a service the
@@ -535,11 +529,11 @@ impl ServeCmd {
         // whole-node member BEFORE any `Response::Ok`, so a delegate holding a `control.stop` slip cannot
         // stop the node.
         //
-        // Pull each fetch service out of the requested set BEFORE the router binds it, and de-merge: every
-        // `name=fetch:<origin>` becomes its OWN handler instance holding ONLY its own origin scope. A public
-        // fetch handler therefore physically holds only its own origins and cannot reach a gated fetch's
+        // Pull each proxy service out of the requested set BEFORE the router binds it, and de-merge: every
+        // `name=proxy:<url>` becomes its OWN handler instance holding ONLY its own origin scope. A public
+        // proxy handler therefore physically holds only its own origins and cannot reach a gated proxy's
         // origins: the SSRF pivot is unrepresentable, not fail-closed-by-convention.
-        let fetch = FetchScope::extract(&mut requested)?;
+        let proxy = ProxyScope::extract(&mut requested)?;
         // The node's ONE teardown authority. The exposer owns it (it is what acts on the cancel); a local
         // `--expires` timer, the gated `control.stop` handler, and the local socket `Stop` each hold a
         // CLONE as the node-control capability: they may REQUEST the stop, never tear the node down
@@ -561,8 +555,8 @@ impl ServeCmd {
         // reach the handler: a key the update lists live.
         let (bound, known) = bind_renewal(router, &home).await?;
         router = bound;
-        for scoped in fetch.services() {
-            // One engine handler per fetch service, holding ONLY its own origin scope. An unconstrained
+        for scoped in proxy.services() {
+            // One engine handler per proxy service, holding ONLY its own origin scope. An unconstrained
             // scope is the NEVER engine (the open proof refuses to expose it); a non-empty scope is the
             // OPT-IN engine, which applies the 16 MiB/30s responder bounds by construction.
             let name = scoped.name().parse()?;
@@ -579,15 +573,15 @@ impl ServeCmd {
         let activity = self.activity(std::io::stderr())?;
         for service in &recv {
             // One `Recv` instance per receive service, holding ONLY its own output dir: de-merged the SAME way
-            // as fetch, at the claim, where each dir was checked and the inbox made.
+            // as proxy, at the claim, where each dir was checked and the inbox made.
             let name: Service = service.name().parse()?;
             router = bind_recv(router, name, service.out().to_owned(), activity.as_ref())?;
         }
         // The node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the route's
         // access class after the gate admits and before any `Response::Ok`.
         router = router.member_service(CONTROL_STOP_SERVICE.parse()?, Stop::new(cancel.clone()))?;
-        // Refuse an unconstrained PUBLIC fetch per-service at build time (an open egress relay).
-        fetch.refuse_open_relay(&self.public)?;
+        // Refuse an unconstrained PUBLIC proxy per-service at build time (an open egress relay).
+        proxy.refuse_open_relay(&self.public)?;
         // Declare both open overlays from the operator's raw names. The proof runs at `.expose()` below,
         // before anything is recorded or a banner advertises a service it will not serve.
         router = router

@@ -42,11 +42,6 @@ impl swoosh::reaching::Reaching for SyncCmd {
         None
     }
 
-    /// `sync` takes no `--present` and no peer, so there is nothing to conflict.
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        Ok(())
-    }
-
     fn identity(&self) -> swoosh::identity::Identity {
         self.bind_role().identity()
     }

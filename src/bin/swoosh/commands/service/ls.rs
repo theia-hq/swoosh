@@ -9,7 +9,7 @@
 //! `control.services` handler.
 //!
 //! `control.services` is family-gated like `ping`/`speed`/`stop`, so `service ls` presents the same
-//! membership badge (or an explicit `--present` link) to prove membership before the peer admits the read. A
+//! membership badge (or the link typed as the peer) to prove membership before the peer admits the read. A
 //! stranger is refused LOUDLY here (a typed error, non-zero exit), never a silent empty table: a refusal is not
 //! "the peer serves nothing".
 
@@ -40,15 +40,6 @@ pub struct ServiceLsCmd {
                      A peer is a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link."
     )]
     pub at: Option<Peer>,
-    /// present a `swoosh:` capability link to reach a gated peer
-    #[arg(
-        long,
-        value_name = "link",
-        value_parser = swoosh::link::parse,
-        long_help = "Optional: your own devices need no link, the dial presents this \
-                     device's membership badge. Pass a `swoosh:` link only to reach as a delegate."
-    )]
-    pub present: Option<Link>,
     #[command(flatten)]
     pub reach: ReachArgs,
 }
@@ -63,13 +54,6 @@ impl swoosh::reaching::Reaching for ServiceLsCmd {
         self.at.as_ref()
     }
 
-    fn reject_redundant_present(&self) -> eyre::Result<()> {
-        match &self.at {
-            Some(peer) => peer.reject_redundant_present(self.present.as_ref()),
-            None => Ok(()),
-        }
-    }
-
     fn identity(&self) -> swoosh::identity::Identity {
         self.bind_role().identity()
     }
@@ -79,18 +63,14 @@ impl swoosh::reaching::Reaching for ServiceLsCmd {
     ///
     /// `service ls` reaches the peer's family-gated `control.services` read, so it presents the member badge
     /// rooted at the dialing key (only a family member may read the menu). `Family` fuses the identity to
-    /// `PersistedIfPresent`, like `stop`/`status`. The effective slip is the FOLD of a self-addressing
-    /// `swoosh:` link in the `--at` peer with an explicit `--present`, threaded INTO the credential so the
-    /// ONE resolver owns both slots.
+    /// `PersistedIfPresent`, like `stop`/`status`. A self-addressing `swoosh:` link in the `--at` peer is
+    /// threaded INTO the credential so the ONE resolver owns both slots.
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
-        let present = self.present.clone();
         swoosh::reaching::BindRole::Dialing(match &self.at {
-            Some(peer) => {
-                swoosh::credential::Credential::dialing(peer, present, CONTROL_SERVICES_SERVICE)
-            }
-            None => swoosh::credential::Credential::Family { present },
+            Some(peer) => swoosh::credential::Credential::dialing(peer, CONTROL_SERVICES_SERVICE),
+            None => swoosh::credential::Credential::Family { present: None },
         })
     }
 
@@ -119,9 +99,6 @@ impl ServiceLsCmd {
     /// the client resolution teaches the fix (`swoosh serve`) and exits non-zero rather
     /// than printing an empty table that reads as "this node serves nothing".
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
-        // A bare `service ls` reaches no peer, so an explicit `--present` has nothing to select: refuse
-        // it rather than silently dropping it (I.3), before touching the socket.
-        swoosh::reaching::reject_bare_present(self.present.as_ref())?;
         // The reach trio binds a transport and seeds discovery for a PEER; a bare `service ls` binds
         // neither, so the flags are refused by name rather than silently ignored (I.3, B4).
         swoosh::reaching::reject_bare_reach(&self.reach)?;
@@ -137,7 +114,7 @@ impl ServiceLsCmd {
     }
 
     /// Reach the peer's gated `control.services` read and print its `SERVICE  GATE` table. Presents the
-    /// resolved `present` (this device's membership badge, or an explicit `--present` link) so the peer's
+    /// resolved `present` (this device's membership badge, or the link typed as the peer) so the peer's
     /// family gate admits the read; a peer that does not admit this caller refuses LOUDLY here, never a
     /// silent empty table. `--at` is required to reach this path (a bare `service ls` split to
     /// [`run_local`](Self::run_local)), so a missing target is a root-dispatch bug, surfaced as an internal
@@ -155,10 +132,9 @@ impl ServiceLsCmd {
             );
         };
 
-        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (present-or-badge in
+        // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
-        // link-as-peer through that same resolver, and the redundant-present conflict was rejected there too
-        // (`Reaching::reject_redundant_present`), so the verb never threads `--present` itself.
+        // link-as-peer through that same resolver, so the verb never threads a slip itself.
         let connector = peer.connector(
             contacts,
             CONTROL_SERVICES_SERVICE.parse::<Service>()?,

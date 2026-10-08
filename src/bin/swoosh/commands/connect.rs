@@ -1,6 +1,6 @@
 //! The one swoosh connect runner, and the [`To`] sink selector it is parameterized by.
 //!
-//! NOT a verb: `swoosh reach <peer> <service> [--to <port | - | unix:PATH>]` is the surface, and this is
+//! NOT a verb: `swoosh forward <peer> <service> <port | unix:<path> | ->` is the surface, and this is
 //! the body it drives. The two halves are split because the act ("dial a peer's served service,
 //! optionally presenting a cap, then drive it") is one thing while WHERE the bytes go is a choice the
 //! caller makes: `Port` binds a local port and forwards each connection, `Stdout` streams the single
@@ -8,7 +8,7 @@
 //! choice lives in exactly one place (the caller picks `present` before handing off).
 //!
 //! `swoosh ssh` reaches the same runner the same way, through the PUBLIC verb: its `ProxyCommand`
-//! re-invokes THIS binary as `<self> reach <key> <service> --to -` via `current_exe()` (not a separate
+//! re-invokes THIS binary as `<self> forward <peer> <service> -` via `current_exe()` (not a separate
 //! `tightbeam` binary on PATH), so the bridge an operator debugs by hand is the one ssh runs.
 //!
 //! Both sinks end when the host ends the session (it exited, or it cut the session on a revoke or an
@@ -35,7 +35,7 @@ use tokio::io::{self, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
-/// Where a reached service's bytes go locally: the one `--to` selector, parsed to a closed enum so the
+/// Where a reached service's bytes go locally: `forward`'s local end, parsed to a closed enum so the
 /// three sinks are disjoint and "two sinks at once" is unrepresentable (no `ArgGroup`, no two-bool trap).
 ///
 /// swoosh's OWN selector, so its connect surfaces never name tightbeam's CLI-layer arg type. The arms are
@@ -74,14 +74,14 @@ impl FromStr for To {
         match text.parse::<u16>() {
             Ok(port) if port != 0 => Ok(To::Port(port)),
             _ => eyre::bail!(
-                "`{text}` is not a valid --to target. Use a port (1..=65535), `-` for stdout (compose \
-                 with the shell, e.g. `--to - > out`), or `unix:<path>` for a local socket listener"
+                "`{text}` is not a local end. Use a port (1..=65535), `-` for stdout (compose with the \
+                 shell, e.g. `- > out`), or `unix:<path>` for a local socket listener"
             ),
         }
     }
 }
 
-/// The ONE connect path, driven by `reach` directly and by `swoosh ssh` through it. Resolve the [`Peer`]
+/// The ONE connect path, driven by `forward` directly and by `swoosh ssh` through it. Resolve the [`Peer`]
 /// to the node to dial via the shared [`Peer::connector`] (slot 1 the grant, slot 2 a membership badge for
 /// a signet-bound slip's AND), then drive the sink [`To`] names: forward a local port (proving admission,
 /// then printing swoosh's own `forwarding …` line), stream stdin/stdout (no banner: ssh owns the tty), or
@@ -104,14 +104,14 @@ pub async fn connect<T: Transport, D: Discovery>(
     };
     let dial = peer.connector(contacts, service, slot1, slot2)?.dial();
     match to {
-        To::Port(port) => forward_port(node, dial, &request, port)
+        To::Port(port) => forward_port(node, peer, dial, &request, port)
             .await
             .map_err(escaped_report),
         To::Stdout => pipe_stdio(node, dial, &request)
             .await
             .map_err(escaped_report),
         To::UnixListener(path) => eyre::bail!(
-            "--to unix:{} is reserved, not yet built (bind a port and connect to it, or use `--to -`)",
+            "unix:{} is reserved, not yet built (bind a port and connect to it, or use `-`)",
             path.display()
         ),
     }
@@ -136,14 +136,15 @@ async fn admitted<S: Session>(
     })
 }
 
-/// Reach the peer, prove the gate admits this request, bind the local port, print the `forwarding` line,
-/// then forward each local connection over its own stream until the session ends.
+/// Reach the peer, prove the gate admits this request, bind the local port, print the `forwarding` line
+/// naming `peer` as typed, then forward each local connection over its own stream until the session ends.
 ///
 /// Admission is proven on one probe stream before the line prints, so a refusal fails here with the host's
 /// reason rather than as a silent reset once the line is out. Every later stream presents the same request
 /// to the same gate.
 async fn forward_port<T: Transport, D: Discovery>(
     node: &Node<T, D>,
+    peer: &Peer,
     dial: NodeId,
     request: &Request,
     port: u16,
@@ -155,7 +156,7 @@ async fn forward_port<T: Transport, D: Discovery>(
     }
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     println!(
-        "forwarding 127.0.0.1:{port} to {dial} ({})",
+        "forwarding {peer}'s {} to 127.0.0.1:{port}. ctrl-c to stop.",
         request.service
     );
     forward(&session, request, listener).await
@@ -355,7 +356,7 @@ mod tests {
         );
     }
 
-    // The stdio bridge (`--to -`, and `swoosh ssh`'s ProxyCommand through it) prints the same refusal the
+    // The stdio bridge (`-`, and `swoosh ssh`'s ProxyCommand through it) prints the same refusal the
     // same way.
     #[tokio::test]
     async fn a_hostile_stdio_refusal_prints_escaped() {
