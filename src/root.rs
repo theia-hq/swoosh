@@ -1172,6 +1172,8 @@ impl Root {
     }
 
     /// `bytes`, signed as a document of this root.
+    // The root signs here and in `sign_member`, and nowhere else.
+    #[allow(clippy::disallowed_methods)]
     fn sign(&self, bytes: &[u8]) -> Result<Vec<u8>, RootError> {
         self.secret
             .with_bytes(nauthy::Identity::from_secret)
@@ -1180,6 +1182,8 @@ impl Root {
     }
 
     /// A sealed device standing for `key` until `until`, and its id.
+    // The root signs here and in `sign`, and nowhere else.
+    #[allow(clippy::disallowed_methods)]
     fn sign_member(&self, key: VerifyKey, until: u64) -> Result<(Link, Id), RootError> {
         let cap = self
             .secret

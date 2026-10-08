@@ -53,7 +53,7 @@ impl Name {
     }
 }
 
-/// Parse a service name a person typed (`serve --public <service>`, `grant issue <service>`, `reach <peer>
+/// Parse a service name a person typed (`serve --public <service>`, `share <service>`, `reach <peer>
 /// <service>`, ...): the one name rule, folded, as the [`Service`] the router and the grant carry. A dotted
 /// internal route (`control.stop`) is never a name, so it can never be typed.
 pub fn service(text: &str) -> Result<Service, NameError> {

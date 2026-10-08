@@ -184,7 +184,7 @@ fn prune_expired(home_lock: &HomeWrite, path: &Path, prune_at: usize) -> std::io
 /// it.
 ///
 /// Live: it re-stats the file at most once per [`STAT_DEBOUNCE`] and re-reads it when its [`FileStamp`]
-/// changed, so a `grant issue` run while `serve` runs is admitted with no restart.
+/// changed, so a `share` run while `serve` runs is admitted with no restart.
 ///
 /// It fails closed. A file that cannot be opened or read, or that another user owns or others can write
 /// (checked on the handle each read comes from), admits no self-anchored link until it can be read again,
@@ -466,8 +466,8 @@ impl FromStr for Delegation {
 }
 
 /// A duration as its largest whole unit, `<n>d`/`<n>h`/`<n>m`/`<n>s`. Coarse on purpose: a grant lifetime is
-/// a rough "how much longer", not a stopwatch. Shared by `grant issue` (framing the fresh lifetime) and
-/// `invite` (a device's).
+/// a rough "how much longer", not a stopwatch. `invite` frames a device's life with it; `share` prints the
+/// span as typed instead, since a rounded span misstates what a link gives.
 pub fn humanize(span: Duration) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;

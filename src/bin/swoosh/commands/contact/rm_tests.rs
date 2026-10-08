@@ -70,3 +70,84 @@ async fn removing_a_peer_is_saved() {
     );
     let _ = std::fs::remove_dir_all(home.dir());
 }
+
+/// A ledger row given to `holder` for an hour, ended or not: what `share` records.
+async fn given(home: &Home, holder: NodeId, ends: std::time::SystemTime) -> nauthy::RevocationId {
+    let link = swoosh::testkit::TestNode::seeded(0x41)
+        .slip(&"ssh".parse().expect("a service"), ends)
+        .expect("a slip");
+    let root_id = link.root_revocation_id().expect("an id");
+    swoosh::grants::Grants::at(home.links())
+        .append(
+            &swoosh::testkit::lock(),
+            &swoosh::grants::GrantRecord {
+                target: "ssh".parse().expect("a service"),
+                kind: swoosh::grants::GrantKind::Device,
+                delegation: swoosh::grants::Delegation::Sealed,
+                holder: holder.to_string(),
+                root_id: nauthy::RevocationId::clone(&root_id),
+                expiry: ends,
+            },
+        )
+        .expect("append the row");
+    root_id
+}
+
+fn in_an_hour() -> std::time::SystemTime {
+    std::time::SystemTime::now() + core::time::Duration::from_secs(3600)
+}
+
+/// A contact with live links refuses, naming how many and the revoke that ends them; the book is left as it
+/// was. Links to the person's root count for the person, and a device's for the device.
+#[tokio::test]
+async fn contact_rm_with_live_links_refuses() {
+    let home = populated_home("live").await;
+    let root = NodeId::from_ed25519_secret(&[6u8; 32]);
+    let mut store = ContactsStore::open(&home).await.expect("open");
+    store
+        .contacts_mut()
+        .set_signet("alice".parse().expect("alice"), root);
+    store.save(&swoosh::testkit::lock()).expect("save");
+    given(&home, NodeId::from_ed25519_secret(&[5u8; 32]), in_an_hour()).await;
+    given(&home, root, in_an_hour()).await;
+    let before = std::fs::read(home.contacts()).expect("read the book");
+
+    let error = remove(&home, "alice").await.expect_err("live links refuse");
+    assert_eq!(
+        format!("{error:#}"),
+        "links you shared with alice are live (2): revoke them first: swoosh revoke alice"
+    );
+    let device = remove(&home, "alice/macbook")
+        .await
+        .expect_err("a device's live link refuses");
+    assert_eq!(
+        format!("{device:#}"),
+        "links you shared with alice/macbook are live (1): revoke them first: swoosh revoke \
+         alice/macbook"
+    );
+    assert_eq!(
+        std::fs::read(home.contacts()).expect("read the book"),
+        before,
+        "nothing is written"
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// An ended link or a revoked one admits nobody, so it does not hold a contact in the book.
+#[tokio::test]
+async fn an_ended_or_revoked_link_does_not_block_rm() {
+    let home = populated_home("dead").await;
+    let macbook = NodeId::from_ed25519_secret(&[5u8; 32]);
+    given(&home, macbook, std::time::SystemTime::now()).await;
+    let revoked = given(&home, macbook, in_an_hour()).await;
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Id(revoked)],
+    )
+    .expect("revoke the link");
+    remove(&home, "alice")
+        .await
+        .expect("no live link holds alice");
+    let _ = std::fs::remove_dir_all(home.dir());
+}

@@ -1,2 +1,18 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+
+# Signing with a key is done in three places only: the root (`src/root.rs`), this machine's own key
+# (`src/node_signer.rs`), and the test kit (`src/testkit.rs`). Each carries the one
+# `#[allow(clippy::disallowed_methods)]`; anywhere else, a direct nauthy signing call is a lint error, so
+# what a key may sign stays the list of those three modules' methods.
+disallowed-methods = [
+    { path = "nauthy::Identity::from_secret", reason = "a key signs only through Root, NodeSigner or the test kit" },
+    { path = "nauthy::Identity::sign_document", reason = "a key signs only through Root, NodeSigner or the test kit" },
+    { path = "nauthy::Identity::mint", reason = "a key signs only through Root, NodeSigner or the test kit" },
+    { path = "nauthy::Identity::mint_member", reason = "a key signs only through Root, NodeSigner or the test kit" },
+    { path = "nauthy::Identity::mint_bound", reason = "a key signs only through Root, NodeSigner or the test kit" },
+    { path = "nauthy::Identity::mint_authority_slip", reason = "a key signs only through Root, NodeSigner or the test kit" },
+    { path = "nauthy::Link::mint", reason = "a key signs only through Root, NodeSigner or the test kit" },
+    { path = "nauthy::Link::mint_bound", reason = "a key signs only through Root, NodeSigner or the test kit" },
+    { path = "nauthy::Link::mint_authority_bound", reason = "a key signs only through Root, NodeSigner or the test kit" },
+]

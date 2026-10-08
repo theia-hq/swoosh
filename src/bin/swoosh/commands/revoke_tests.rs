@@ -521,7 +521,7 @@ async fn revoke_dash_reads_a_link_from_stdin() {
         .err()
         .and_then(|error| error.downcast_ref::<Usage>())
         .expect("a root key on stdin is a usage error");
-    assert_eq!(usage.0, "stdin held no swoosh: link.");
+    assert_eq!(usage.0, "stdin held no link.");
 
     let file = dir("stdin-path");
     std::fs::create_dir_all(&file).unwrap();
@@ -1561,7 +1561,7 @@ async fn revoke_reads_only_a_link_from_stdin_or_a_path() {
         .err()
         .and_then(|error| error.downcast_ref::<Usage>())
         .expect("a root key on stdin is a usage error");
-    assert_eq!(usage.0, "stdin held no swoosh: link.");
+    assert_eq!(usage.0, "stdin held no link.");
     assert!(ran.confirms.is_empty(), "nothing is asked");
 
     let file = dir("root-in-a-file");
@@ -2347,4 +2347,117 @@ async fn revoke_a_device_whose_root_step_stops_prints_the_partway_line_then_its_
     );
     assert!(!ran.err.contains("revoked"), "{}", ran.err);
     assert!(blocks_key(&home, LAPTOP).await, "the block is written");
+}
+
+/// The recipe's first line, run on nas against the real `share`: the link it makes is bound to the key
+/// `leave --new-key` made in the rescue home, so it admits that home and not desk's key, and it is sealed,
+/// so no holder passes it on. Its last line, `revoke -` on nas with the link on stdin, ends it there.
+#[tokio::test]
+async fn the_recipe_link_is_bound_to_a_rescue_key() {
+    let nas = scratch("recipe-nas");
+    device_of(&nas, &live(OWN, "nas")).await;
+    let rescue_dir = dir("recipe-rescue");
+    swoosh::config::create_store_dir(&rescue_dir).unwrap();
+    let rescue = Home::resolve(Some(rescue_dir)).unwrap();
+
+    // Line 1's inner `$(…)`: a new key in its own home, printed on stdout.
+    let made = "$(swoosh --home ~/.swoosh-rescue leave --new-key)";
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    super::super::leave::LeaveCmd { new_key: true }
+        .leave(
+            &rescue,
+            &mut Counting::refusing(),
+            SystemTime::now(),
+            &mut out,
+            &mut err,
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "leave --new-key on an empty home: {error:#}\n{}",
+                String::from_utf8_lossy(&err)
+            )
+        });
+    let rescue_key = String::from_utf8(out).unwrap().trim().to_owned();
+    let rescue_key: NodeId = rescue_key.parse().expect("stdout is the new key alone");
+
+    // Line 1's command on nas, as the recipe prints it, with the key in place of its `$(…)`.
+    let line = RECIPE_LINES[0];
+    let start = line.find("swoosh share ").expect("line 1 shares");
+    let end = line.find(" > ~/nas.link)").expect("line 1 saves the link");
+    let typed = &line[start..end];
+    assert!(
+        typed.contains(made),
+        "line 1 makes the key in the rescue home: {line}"
+    );
+    let typed = typed.replace(made, &rescue_key.to_string());
+    let cli = crate::Cli::try_parse_from(typed.split_whitespace()).expect("line 1 parses");
+    let Some(crate::Command::Share(share)) = cli.command else {
+        panic!("line 1 is a share: {typed}");
+    };
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    share
+        .run(&nas, &b""[..], &mut out, &mut err)
+        .await
+        .unwrap_or_else(|error| panic!("{typed}: {error:#}"));
+    let printed = String::from_utf8(out).unwrap();
+    let link = swoosh::link::parse(printed.trim()).expect("stdout is the link alone");
+
+    let nas_key = TestNode::seeded(OWN).verify_key();
+    let service: Service = "ssh".parse().unwrap();
+    let from = |key: NodeId| {
+        nauthy::Request::now(Service::clone(&service)).bound_to(key.verify_key().unwrap())
+    };
+    link.cap()
+        .verify_at_root_without_revocation(&from(rescue_key), nas_key)
+        .expect("the link admits the rescue home's key, which lines 2 and 6 dial from");
+    assert!(
+        link.cap()
+            .verify_at_root_without_revocation(&from(node(LAPTOP)), nas_key)
+            .is_err(),
+        "desk's own key is not admitted on it"
+    );
+    assert!(
+        link.narrow(None, Some(Duration::from_secs(60))).is_err(),
+        "the link is sealed"
+    );
+    let expected = (SystemTime::now() + Duration::from_secs(7 * DAY))
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let ends = link
+        .cap()
+        .valid_until()
+        .unwrap()
+        .unwrap()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(ends.abs_diff(expected) <= 5, "it lasts 7d");
+
+    // Line 10's `revoke -` on nas, the link on stdin.
+    let line = RECIPE_LINES[9];
+    assert!(
+        line.contains("swoosh ssh me/nas -- swoosh revoke - < ~/nas.link"),
+        "line 10 revokes the link on nas: {line}"
+    );
+    let tape = Tape::default();
+    let ran = run(
+        &nas,
+        &["-"],
+        printed.as_bytes(),
+        Counting::refusing(),
+        Devices::all(&tape),
+        tape,
+    )
+    .await;
+    assert!(
+        ran.ok().starts_with("revoked the link"),
+        "line 10 runs and says what it did: {}",
+        ran.err
+    );
+    assert!(
+        swoosh::revoked::open(&nas).unwrap().is_revoked(link.cap()),
+        "the rescue link is revoked on nas"
+    );
 }

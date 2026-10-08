@@ -2,27 +2,29 @@ Back to [Commands index](../commands.md).
 
 # <a id="contact"></a>`swoosh contact`
 
-Manage local petnames: name your peers so you never paste a key. Names are yours alone, stored in plain
-TOML beside the identity they belong to. `alice` means whoever you pointed it at, no registry.
+Save another person's key under a name, so you never paste it. Names are yours alone, kept beside this
+machine's key: `alice` means whoever you pointed it at.
 
 <!-- generated: usage from `swoosh contact -h`; option lines curated -->
 ```
 Usage: swoosh contact [OPTIONS] <COMMAND>
-  add <name> <key>       save (or re-point) a name: alice, or alice/laptop for a device
-  signet <petname> <key> record a person's signet root, so --for fleet:<petname> binds their fleet
-  rm <name>              forget a contact or one of its devices
+  add <name> <key>   save a person's root, or one machine of theirs
+  rm <name>          remove a saved person, or one machine of theirs
 ```
 
 **Example.**
-<!-- capture: swoosh contact add desk ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -->
+<!-- capture: swoosh contact add alice/desk ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q -->
 ```console
-$ swoosh contact add desk ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
-added desk -> ed01hcq6balrlxwa
+$ swoosh contact add alice/desk ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q
+added alice/desk -> ed01hcq6balr…
 ```
 
-**Things to know.** One person can have several machines: `contact add alice/laptop <key>` files a key
-under `alice`. `swoosh ping alice` then tries each of alice's machines and takes the first that answers.
-`contact signet` is different: it records a person's *signet* (not a device key), which is what
-`--for fleet:<petname>` needs. `swoosh status` lists your contacts.
+**Things to know.** The name's shape decides what is saved. `alice/laptop` is one machine: `swoosh ping
+alice/laptop` reaches it, and `swoosh ping alice` tries each of alice's machines. `alice` alone saves her
+root, the key that vouches for her machines (typed bare or as `status` prints it, `root:ed01…`): `swoosh
+share ssh alice` makes a link all of them can use, and a root is never dialed. `contact rm` refuses while
+links you shared with that contact are live; `swoosh revoke <name>` ends them. `swoosh status` lists your
+contacts. A saved name or key is never replaced: a different key refuses and names how to free the name.
 
-See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).
+See also [`swoosh share`](share.md), [Commands index](../commands.md) and
+[Common options](../commands.md#common-options).

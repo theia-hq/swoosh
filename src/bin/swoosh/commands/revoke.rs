@@ -247,7 +247,7 @@ impl RevokeCmd {
                 key_links(home, &[key], &short, err).await?;
                 Ok(None)
             }
-            Target::Stdin => Err(Usage("stdin held no swoosh: link.".to_owned()).into()),
+            Target::Stdin => Err(Usage("stdin held no link.".to_owned()).into()),
         }
     }
 
@@ -1001,10 +1001,10 @@ fn read_stdin(stdin: impl Read) -> eyre::Result<Link> {
     stdin
         .take(MAX_STDIN)
         .read_to_string(&mut text)
-        .map_err(|_| Usage("stdin held no swoosh: link.".to_owned()))?;
+        .map_err(|_| Usage("stdin held no link.".to_owned()))?;
     let text = text.trim();
     if !swoosh::link::is_prefixed(text) {
-        return Err(Usage("stdin held no swoosh: link.".to_owned()).into());
+        return Err(Usage("stdin held no link.".to_owned()).into());
     }
     swoosh::link::parse(text).map_err(|error| Usage(format!("stdin: {error}")).into())
 }

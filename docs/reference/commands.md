@@ -42,14 +42,14 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 - <a id="reach"></a>[`swoosh reach`](commands/reach.md): reach any service a peer serves, on stdout or a local port
 - <a id="send"></a>[`swoosh send`](commands/send.md): push a file or directory to a peer
 - <a id="sync"></a>[`swoosh sync`](commands/sync.md): bring your device list up to date with your other devices, both ways
-- <a id="contact"></a>[`swoosh contact`](commands/contact.md): manage local petnames for peers (yours alone, plain TOML)
+- <a id="contact"></a>[`swoosh contact`](commands/contact.md): save or remove another person's key under a name
 - <a id="identity"></a>[`swoosh identity`](commands/identity.md): back up, restore, or protect this machine's key
 - <a id="invite"></a>[`swoosh invite`](commands/invite.md): add one of your devices, or renew it; bare `invite` lists what is due
 - <a id="join"></a>[`swoosh join`](commands/join.md): make this machine one of your devices, from an invite
 - <a id="leave"></a>[`swoosh leave`](commands/leave.md): stop being one of your devices; `--new-key` also gives this machine a new key
 - <a id="revoke"></a>[`swoosh revoke`](commands/revoke.md): take back a link, one of your devices, or everything you shared with a contact; or end a root for good
 - <a id="ssh"></a>[`swoosh ssh`](commands/ssh.md): reach a peer's sshd over the overlay using the system ssh
-- <a id="grant"></a>[`swoosh grant`](commands/grant.md): issue or narrow `swoosh:` capability links
+- <a id="share"></a>[`swoosh share`](commands/share.md): make a link to one service for a person, one of their machines, a key, or anyone
 - <a id="tree"></a>[`swoosh tree`](commands/tree.md): print the command tree read straight from the parser
 
 ## Next

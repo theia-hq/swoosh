@@ -84,4 +84,4 @@ holds until it expires or you revoke it, so keep the expiry short. See
 
 - [Keys](../keys.md#the-one-trade) bound versus delegable, and why.
 - [CI runner](ci-runner.md) a machine credential you can revoke, for automation.
-- [Commands](../reference/commands.md#grant) issue and narrow; [revoke](../reference/commands.md#revoke) takes a link back.
+- [Commands](../reference/commands.md#share) `share` makes a link and shorter copies; [revoke](../reference/commands.md#revoke) takes them back.

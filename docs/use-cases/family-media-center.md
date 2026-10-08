@@ -95,4 +95,4 @@ revoked mum: blocked. Only this machine admitted it.
 
 - [Keys](../keys.md#grant) what a grant and a fleet are.
 - [Contractor access](contractor-access.md) the same idea, one person, timed.
-- [Commands](../reference/commands.md#grant) issue and narrow capability links; [revoke](../reference/commands.md#revoke) takes them back.
+- [Commands](../reference/commands.md#share) `share` makes a link and shorter copies; [revoke](../reference/commands.md#revoke) takes them back.

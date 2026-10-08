@@ -9,8 +9,8 @@
 //!
 //! Today's verbs: `swoosh serve` prints this machine's key and stays reachable; `swoosh ping <peer>`
 //! measures the round-trip time to a key; `swoosh speed <peer>` measures throughput; `swoosh status
-//! <peer>` reports whether the link is direct or relayed; `swoosh contact add alice <key>` saves a
-//! petname so `swoosh ping alice` works; `swoosh tree` prints the command tree. A peer is a raw key or
+//! <peer>` reports whether the link is direct or relayed; `swoosh contact add alice/laptop <key>` saves
+//! a petname so `swoosh ping alice/laptop` works; `swoosh tree` prints the command tree. A peer is a raw key or
 //! a saved petname, interchangeably.
 //!
 //! Each command runs under a key of its own. `serve` must be reachable at one address, so it persists a
@@ -34,8 +34,8 @@ use swoosh::{credential, reaching, transport};
 // The verb modules this binary dispatches to, each its own tree beside the composition root. The
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
-    contact, fetch, grant, invite, join, leave, lock, ping, reach, revoke, root, send, serve,
-    service, speed, ssh, status, stop, sync, tree,
+    contact, fetch, invite, join, leave, lock, ping, reach, revoke, root, send, serve, service,
+    share, speed, ssh, status, stop, sync, tree,
 };
 
 mod commands;
@@ -107,7 +107,7 @@ enum Command {
     Send(send::SendCmd),
     /// Bring your device list up to date with your other devices, both ways.
     Sync(sync::SyncCmd),
-    /// Manage local petnames: add a device, record a person's fleet signet, or remove one.
+    /// Save or remove another person's key under a name.
     #[command(subcommand)]
     Contact(contact::ContactCmd),
     /// set, change or remove the lock on this machine's key
@@ -130,9 +130,8 @@ enum Command {
     Revoke(revoke::RevokeCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(ssh::SshCmd),
-    /// Issue or narrow `swoosh:` capability links.
-    #[command(subcommand)]
-    Grant(grant::GrantCmd),
+    /// Make a link to a service for a person, a device, a key, or anyone
+    Share(share::ShareCmd),
     /// Print this command tree (spec vs binary).
     Tree(tree::TreeCmd),
 }
@@ -282,13 +281,13 @@ impl Command {
             Self::Revoke(cmd) => Verb::Revoke(cmd),
             Self::Ssh(cmd) => Verb::Ssh(cmd),
             Self::Tree(cmd) => Verb::Tree(cmd),
-            Self::Grant(cmd) => Verb::Grant(cmd),
+            Self::Share(cmd) => Verb::Share(cmd),
             Self::Reach(cmd) => Verb::Outward(Outward::Reach(cmd)),
             Self::Send(cmd) => Verb::Outward(Outward::Send(cmd)),
             Self::Sync(cmd) => Verb::Outward(Outward::Sync(cmd)),
             // `stop --at <peer>` reaches a peer's `control.stop`; a bare `stop` stops YOUR OWN node over
             // the local control socket. Split on `--at` here so the bare case runs WITHOUT composing a
-            // transport it would never use, the same local dispatch `ssh`/`grant` take.
+            // transport it would never use, the same local dispatch `ssh`/`share` take.
             Self::Stop(cmd) => match cmd.at {
                 Some(_) => Verb::Outward(Outward::Stop(cmd)),
                 None => Verb::Stop(cmd),
@@ -359,9 +358,9 @@ enum Verb {
     Status(status::StatusCmd),
     /// Prints the command tree; needs no transport and no store.
     Tree(tree::TreeCmd),
-    /// Mints or narrows a `swoosh:` capability link. `share` signs with the persisted key; `attenuate` is
-    /// wholly offline. No leaf binds a transport.
-    Grant(grant::GrantCmd),
+    /// Makes a link with this machine's key, or a shorter copy of a link, wholly offline. Binds no
+    /// transport.
+    Share(share::ShareCmd),
     /// Reaches a peer; binds a transport.
     Outward(Outward),
 }
@@ -568,8 +567,17 @@ async fn run() -> eyre::Result<()> {
         // `serve` via the watched set its gate reads. Need only the home; bind no transport and touch no store.
         Verb::ServiceEnable(cmd) => return cmd.run_enable(&home).await,
         Verb::ServiceDisable(cmd) => return cmd.run_disable(&home).await,
-        // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save.
-        Verb::Contact(cmd) => return cmd.run(&home).await,
+        // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save. A root
+        // key given for a machine is found only once `contact add` runs, and exits 2, as clap's own do.
+        Verb::Contact(cmd) => {
+            return match cmd.run(&home).await {
+                Err(report) => match report.downcast_ref::<contact::add::Usage>() {
+                    Some(usage) => usage_error(&["contact", "add"], &usage.0),
+                    None => Err(report),
+                },
+                done => done,
+            };
+        }
         // The passphrase on this machine's key, and the `root` leaves that need only the home: no store and
         // no transport, so they dispatch here beside the other local verbs.
         Verb::Lock(cmd) => return cmd.run(&home).await,
@@ -630,18 +638,24 @@ async fn run() -> eyre::Result<()> {
                 },
             }
         }
-        // The `grant` group: `share` signs a link with the persisted key; `attenuate` is wholly offline.
-        // No leaf binds a transport, so the group dispatches here beside the local verbs rather than
-        // falling through to the reach path; `issue --for` reads the address book to resolve a device.
-        Verb::Grant(cmd) => {
-            return match cmd {
-                // `issue` reads the address book (to resolve a `--for` petname to a device), so it opens
-                // the store; it binds no transport.
-                grant::GrantCmd::Issue(cmd) => {
-                    let store = ContactsStore::open(&home).await?;
-                    cmd.run(store, &home).await
-                }
-                grant::GrantCmd::Narrow(cmd) => cmd.run(),
+        // `share` signs with this machine's key and reads the address book to resolve who a link is for;
+        // `share <link>` is wholly offline. Neither binds a transport, so it dispatches here beside the
+        // local verbs. A usage error found once it runs (no recipient) exits 2, as clap's own do.
+        Verb::Share(cmd) => {
+            let done = cmd
+                .run(
+                    &home,
+                    std::io::stdin().lock(),
+                    &mut std::io::stdout(),
+                    &mut std::io::stderr(),
+                )
+                .await;
+            return match done {
+                Err(report) => match report.downcast_ref::<share::Usage>() {
+                    Some(usage) => usage_error(&["share"], &usage.0),
+                    None => Err(report),
+                },
+                done => done,
             };
         }
         // A launcher: read the store to resolve the peer, then hand off to the system `ssh` (which runs
@@ -959,9 +973,6 @@ struct Renew<'a> {
 #[path = "bearer_dial_tests.rs"]
 mod bearer_dial_tests;
 #[cfg(test)]
-#[path = "grant_issue_fleet_tests.rs"]
-mod grant_issue_fleet_tests;
-#[cfg(test)]
 #[path = "revoke_by_key_tests.rs"]
 mod revoke_by_key_tests;
 #[cfg(test)]
@@ -978,20 +989,20 @@ mod tests {
 
     use super::*;
 
-    /// The cap verbs live ONLY under `grant`, never as flat top-level commands: `swoosh grant issue`
-    /// resolves, and a bare `swoosh issue` is an unknown command, not a leaf.
+    /// One `share` makes and copies links: it is a top-level verb, and the `grant` group it replaced, with
+    /// its `issue` and `narrow` leaves, resolves nowhere.
     #[test]
-    fn cap_verbs_resolve_under_grant_not_the_top_level() {
-        let cli =
-            Cli::try_parse_from(["swoosh", "grant", "issue", "ssh"]).expect("grant issue parses");
-        assert!(matches!(
-            cli.command,
-            Some(Command::Grant(grant::GrantCmd::Issue(_)))
-        ));
-
-        // The bare verbs are gone from the top level; clap rejects them as unknown subcommands.
-        assert!(Cli::try_parse_from(["swoosh", "issue", "ssh"]).is_err());
-        assert!(Cli::try_parse_from(["swoosh", "narrow", "swoosh:x"]).is_err());
+    fn share_is_the_one_verb_for_links() {
+        let cli = Cli::try_parse_from(["swoosh", "share", "ssh", "anyone"]).expect("share parses");
+        assert!(matches!(cli.command, Some(Command::Share(_))));
+        for argv in [
+            ["swoosh", "grant", "issue", "ssh"].as_slice(),
+            ["swoosh", "grant", "narrow", "swoosh:x"].as_slice(),
+            ["swoosh", "issue", "ssh"].as_slice(),
+            ["swoosh", "narrow", "swoosh:x"].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err(), "{argv:?} resolves");
+        }
     }
 
     /// I.2 (no aliases, one spelling per act): the five retired spellings do not resolve, and the
@@ -1664,7 +1675,7 @@ mod tests {
         assert!(filter_enables(&warn, &PROBE_OTHER_ERROR));
     }
 
-    /// A key nobody can hold is refused where it enters: typed (as a contact's key or signet) with the
+    /// A key nobody can hold is refused where it enters: typed (as a contact's root or device) with the
     /// one line that names the check it failed, and stored (as the pin) as the damaged home, naming the
     /// file, from the read every verb that loads the pin goes through.
     #[tokio::test]
@@ -1673,7 +1684,7 @@ mod tests {
         let line = format!("{key} is not a usable key: carries a torsion component");
         for typed in [
             ["swoosh", "contact", "add", "alice", key.as_str()],
-            ["swoosh", "contact", "signet", "alice", key.as_str()],
+            ["swoosh", "contact", "add", "alice/laptop", key.as_str()],
         ] {
             let error = Cli::try_parse_from(typed).expect_err("a torsioned key is refused");
             assert_eq!(error.exit_code(), 2, "a typed bad key is a usage error");
@@ -1772,7 +1783,7 @@ mod tests {
             vec!["swoosh", "serve", "control.stop"],
             vec!["swoosh", "serve", "--public", "control.stop"],
             vec!["swoosh", "serve", "--public-unsafe", "control.stop"],
-            vec!["swoosh", "grant", "issue", "control.stop"],
+            vec!["swoosh", "share", "control.stop", "anyone"],
             vec!["swoosh", "service", "disable", "control.stop"],
             vec!["swoosh", "service", "enable", "control.stop"],
             vec!["swoosh", "reach", key.as_str(), "control.stop"],
@@ -1805,12 +1816,14 @@ mod tests {
             cmd.public,
             ["web".parse::<nauthy::Service>().expect("a service")]
         );
-        let Some(Command::Grant(grant::GrantCmd::Issue(cmd))) =
-            parsed(&["swoosh", "grant", "issue", "Web"])
+        let Some(Command::Share(share::ShareCmd {
+            what: share::Shared::Service(service),
+            ..
+        })) = parsed(&["swoosh", "share", "Web", "anyone"])
         else {
-            panic!("grant issue parses");
+            panic!("share parses to a service");
         };
-        assert_eq!(cmd.service.as_str(), "web");
+        assert_eq!(service.as_str(), "web");
         let Some(Command::Reach(cmd)) = parsed(&["swoosh", "reach", key.as_str(), "Web"]) else {
             panic!("reach parses");
         };
@@ -1823,10 +1836,7 @@ mod tests {
     fn a_typed_address_refuses_with_the_name_rule() {
         for (argv, bad) in [
             (vec!["swoosh", "ssh", "me/La.ptop"], "La.ptop"),
-            (
-                vec!["swoosh", "grant", "issue", "ssh", "--for", "a.b/x"],
-                "a.b",
-            ),
+            (vec!["swoosh", "share", "ssh", "a.b/x"], "a.b"),
         ] {
             let error = Cli::try_parse_from(&argv).expect_err("a bad name refuses");
             assert_eq!(error.exit_code(), 2, "{argv:?} is a usage error");
