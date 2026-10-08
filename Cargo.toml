@@ -30,23 +30,23 @@ test-support = []
 # locally regardless of the rev; CI (no parent config) resolves the rev from GitHub. All bifrost-* crates
 # live in one repo, so they share one rev. Bump these deliberately each release (see the reproducible-build
 # gate in .github/workflows/release.yml and the lock-regen step in notes/02-DECISIONS.md).
-bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "5ae6634dd835cd57978dd6970fcb0545fc15955c" }
-bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "5ae6634dd835cd57978dd6970fcb0545fc15955c" }
-bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "5ae6634dd835cd57978dd6970fcb0545fc15955c" }
-bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "5ae6634dd835cd57978dd6970fcb0545fc15955c" }
-bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "5ae6634dd835cd57978dd6970fcb0545fc15955c" }
+bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
+bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
+bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
 # The key file store, in its own repo, pinned to the commit that names its key kinds standard and strict
 # and lets a dependent build each touch-id error in its own tests.
 keystore = { git = "https://github.com/theia-hq/keystore", rev = "783c87527663b6465bd735a85cbc84551583a87e" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "a7c82bf58db5d54795b4a3c544da8ca7d2e0a81c" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "f82341f17e1191dba6bd4733a72e4f6cc9728b1b" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "de0b58d72f9a922358bed3b77c0942d50bbefdd3" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "dda3977ec08a86b4c8382026260a882cc225d5e1" }
-measure = { git = "https://github.com/theia-hq/services", rev = "dda3977ec08a86b4c8382026260a882cc225d5e1" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "dda3977ec08a86b4c8382026260a882cc225d5e1", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "dda3977ec08a86b4c8382026260a882cc225d5e1" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "f1a2ef67fdf84e7bb0cde264cdabde3bc14e2fc9" }
+measure = { git = "https://github.com/theia-hq/services", rev = "f1a2ef67fdf84e7bb0cde264cdabde3bc14e2fc9" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "f1a2ef67fdf84e7bb0cde264cdabde3bc14e2fc9", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "f1a2ef67fdf84e7bb0cde264cdabde3bc14e2fc9" }
 
 # The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
 # sending it.
@@ -78,7 +78,7 @@ swoosh = { path = ".", features = ["test-support"] }
 
 # The in-process transport the `gated_measure` proof drives: two mem nodes share a global registry, so a
 # client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "5ae6634dd835cd57978dd6970fcb0545fc15955c" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
 
 # `test-util` gives the control-client deadline test tokio's paused clock, so the 5 s read bound is
 # asserted without a wall-clock wait. Dev-only: the shipped binary never compiles it in.
@@ -99,3 +99,13 @@ unused_must_use = "deny"
 strip = true
 lto = true
 codegen-units = 1
+
+# noq-proto 1.3.0 never bounds how many out-of-order chunks one stream buffers, so a peer can make a
+# node hold gigabytes per connection with gapped stream frames (RUSTSEC-2026-0185 in quinn-proto,
+# which noq forks). n0-computer/noq#828 ports quinn's three fixes; this takes its head, pinned by full
+# hash, until n0 releases it. cargo honours a patch only at the workspace root, so bifrost's and
+# tightbeam's own patches do not reach this build. Drop this entry, and the matching `allow-git` line
+# in deny.toml, the day a noq-proto release carries #828; scripts/fork-watch.sh fails if the patch
+# goes before its row in scripts/fork-watch.txt says ported.
+[patch.crates-io]
+noq-proto = { git = "https://github.com/n0-computer/noq", rev = "d7c3160a7e7b5cb36682eae04e364d3f50e28925" }

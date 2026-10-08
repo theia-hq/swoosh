@@ -1,0 +1,36 @@
+# Security advisories against what this repo locks, apart from ci.yml so it can also run on a
+# schedule: an advisory filed today against a lock nobody touched must still turn the build red.
+# cargo-deny checks the resolved graph against the RustSec database (deny.toml says what is ignored
+# and why); scripts/fork-watch.sh checks the advisories filed against the crates our forks copy,
+# which cargo-deny cannot see (its header says how). A database cargo-deny cannot load is a failure,
+# never a skip.
+name: advisories
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+# Reads the checkout and the public advisory database; writes nothing.
+permissions:
+  contents: read
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # On the runner, not the cargo-deny action's container: swoosh pins a toolchain in
+      # rust-toolchain.toml, which the container cannot honor (ci.yml says the same). Pinned, because
+      # the database now carries CVSS 4.0 scores and an older cargo-deny refuses to load it; 0.20.2
+      # reads them. Move the pin deliberately.
+      - name: install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - name: cargo-deny (advisories)
+        run: cargo deny check advisories
+      - name: fork watch
+        run: sh scripts/fork-watch.sh .
+      - name: fork watch fixture
+        run: sh scripts/tests/fork-watch.sh

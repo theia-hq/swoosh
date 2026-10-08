@@ -1,22 +1,39 @@
-# cargo-deny sources allow-list (Track C, release-robustness-spec.md §2).
+# cargo-deny policy: the sources allow-list (Track C, release-robustness-spec.md §2) and advisories.
 #
 # The hand-rolled scripts/lock-guard.sh owns path-drift, sibling rev, and own-version skew. This
 # owns the complementary SUPPLY-CHAIN question it does not: no crate may resolve from an
 # unexpected git host or registry (a typosquat, a hijacked mirror, an accidental `git = "a-fork"`).
-# Only our own siblings (github.com/theia-hq) and crates.io are allowed by source.
+# Only our own siblings (github.com/theia-hq) and crates.io are allowed by source, plus one pinned
+# upstream: n0-computer/noq, for the noq-proto patch in Cargo.toml that takes the unreleased fix for
+# RUSTSEC-2026-0185. Pinned by full hash there; drop the entry with that patch the day n0 releases it.
 #
-# Scope is deliberately `sources` ONLY for Track C. advisories/bans/licenses are valuable but a
-# separate policy; do not scope-creep this into a full supply-chain gate. Run: cargo deny check sources
+# bans and licenses stay out of scope. Run: cargo deny check sources advisories
 [sources]
 unknown-registry = "deny"
 unknown-git      = "deny"
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
+allow-git        = ["https://github.com/n0-computer/noq"]
 
 # Allow the whole theia-hq GitHub ORG (every sibling: bifrost, nauthy, ...), which is exactly the
 # ratified trust boundary stated above. A bare `allow-git = ["https://github.com/theia-hq"]` does NOT
 # express this: cargo-deny's `allow-git` matches a FULL repository URL, so an org-only prefix matches no
 # source at all (each sibling resolves from `github.com/theia-hq/<repo>`, and cargo-deny warns
 # `unmatched-source`). `allow-org.github` is the org-level match cargo-deny provides for precisely this
-# "our whole org is trusted" case; the trust surface is unchanged (theia-hq org + crates.io only).
+# "our whole org is trusted" case; the trust surface is the theia-hq org, crates.io, and the one noq pin.
 [sources.allow-org]
 github = ["theia-hq"]
+
+# Advisories against the resolved graph, checked on every push, every pull request and daily
+# (.github/workflows/advisories.yml), because an advisory filed against an unchanged lock must still
+# turn the build red. Advisories against the crates our forks copy are scripts/fork-watch.sh's job.
+# Each ignore says why the advisory does not reach us; drop it when that stops being true.
+[advisories]
+yanked = "deny"
+ignore = [
+    # paste is unmaintained, and no fix exists. A build-time proc macro, reached through iroh's
+    # netwatch (netdev, netlink-packet-core), so none of its code runs in a built binary.
+    { id = "RUSTSEC-2024-0436", reason = "unmaintained build-time proc macro, via iroh's netwatch" },
+    # proc-macro-error2 is unmaintained, and no fix exists. A build-time proc macro, reached through
+    # nauthy's biscuit-auth (biscuit-quote), so none of its code runs in a built binary.
+    { id = "RUSTSEC-2026-0173", reason = "unmaintained build-time proc macro, via biscuit-auth's biscuit-quote" },
+]
