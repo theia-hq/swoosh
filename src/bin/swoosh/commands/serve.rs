@@ -43,10 +43,10 @@ use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
-    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, InstanceLock,
-    ProxyScope, RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError, Started, Stop,
-    StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv, bind_renewal,
-    classify_stop, extract_recv_services, refuse_recv_into_home,
+    Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FirstRound,
+    InstanceLock, ProxyScope, RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError,
+    Started, Stop, StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv,
+    bind_renewal, classify_stop, extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -596,11 +596,11 @@ impl ServeCmd {
             CONTROL_SERVICES_SERVICE.parse()?,
             ServiceList::new(catalog.clone()),
         )?;
-        // Wire the live enable/disable oracle and the live cut beside the proven public overlay.
-        let exposer = router
-            .expose()?
-            .with_enabled(enabled.clone())
-            .with_live_cuts(cut);
+        // Wire the live enable/disable oracle and the live cut beside the proven public overlay. The oracle
+        // refuses `control.stop` until this run's first sync round has ended, so a device revoked while
+        // this machine was down cannot stop it again before it learns of the revocation.
+        let (exposer, first_round) = FirstRound::hold(router.expose()?, enabled.clone());
+        let exposer = exposer.with_live_cuts(cut);
         // Prove the transport can carry this gate BEFORE recording or announcing anything.
         exposer
             .prove_security::<T>()
@@ -693,12 +693,14 @@ impl ServeCmd {
             });
         }
 
+        let dial = swoosh::sync::NodeDial::new(node, &home);
+        let fetch = swoosh::renewal::NodeFetch::new(node);
         // Run until a stop, distinguishing a GRACEFUL stop from an ERRORED teardown: a requested stop is
         // SUCCESS (exit 0, so a CI action reads a clean teardown as green); only a genuine error exits
         // non-zero. Beside the run, this node's own exchanges with your devices: they end when the run does.
         let stopped = tokio::select! {
             stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock) => stopped?,
-            () = sync_rounds(node, &home) => unreachable!("the rounds run until the node stops"),
+            () = sync_rounds(&home, &dial, &fetch, first_round) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             // A running `serve` gives service only at its start, so a relay, a resolver or a service
             // changed in `serve.toml` waits for the next one; this says so once per change. A service added
@@ -935,57 +937,74 @@ fn under_brew() -> bool {
         .is_ok_and(|exe| exe.starts_with(prefix))
 }
 
-/// When a `serve` first exchanges with your devices after it starts.
-const FIRST_ROUND: Duration = Duration::from_secs(60);
-
 /// How often a `serve` exchanges with your devices after its first round, give or take a tenth.
 const EVERY_ROUND: Duration = Duration::from_secs(60 * 60);
 
-/// Every `serve`'s own exchanges with your devices: 60 s after start, then hourly with a tenth of jitter
-/// either way. Each round reads the standing, the pin, the standing's badge and `me` afresh, runs only on
-/// a device of a root, and stops at the first device that gave this machine a newer update. When your
-/// devices refuse this machine because its standing has ended or was revoked here, the round picks up its
-/// renewal ([`swoosh::renewal`]) and, on a hit, exchanges again. It never returns; it ends when the run
-/// beside it does.
-async fn sync_rounds<T: Transport, D: Discovery>(node: &Node<T, D>, home: &Home) {
+/// Every `serve`'s own exchanges with your devices: one round at start, then hourly with a tenth of
+/// jitter either way. The first round runs at once so a machine that was down folds a revocation before a
+/// remote stop can reach it, and `first_round` hears when it has ended, whatever it found, which is what
+/// lets `control.stop` in. It never returns; it ends when the run beside it does.
+async fn sync_rounds(
+    home: &Home,
+    dial: &impl swoosh::sync::Dial,
+    fetch: &impl swoosh::renewal::Fetch,
+    first_round: FirstRound,
+) {
     use rand::Rng as _;
 
-    let dial = swoosh::sync::NodeDial::new(node, home);
-    let fetch = swoosh::renewal::NodeFetch::new(node);
-    let mut wait = FIRST_ROUND;
-    loop {
-        tokio::time::sleep(wait).await;
-        let devices = if swoosh::sync::is_device(home).await {
-            swoosh::sync::devices(home, []).await
-        } else {
-            Ok(Vec::new())
-        };
-        match devices {
-            Ok(devices) => {
-                let round = || {
-                    swoosh::sync::round(
-                        &dial,
-                        &devices,
-                        swoosh::sync::Until::Newer,
-                        swoosh::sync::EACH * 4,
-                    )
-                };
-                let replies = round().await;
-                tracing::debug!(asked = replies.len(), "a sync round finished");
-                // Refused for a standing that needs a renewal: pick it up, then exchange again with it.
-                if let PickUp::Took(renewed) =
-                    swoosh::renewal::after_round(home, &fetch, &replies).await
-                {
-                    tracing::debug!(from = %renewed.from, "took a renewal");
-                    let replies = round().await;
-                    tracing::debug!(asked = replies.len(), "a sync round finished");
-                }
-            }
-            Err(error) => tracing::debug!(%error, "no sync round: the devices could not be read"),
-        }
-        let jitter = rand::thread_rng().gen_range(0.9..=1.1);
-        wait = EVERY_ROUND.mul_f64(jitter);
+    // The first round asks every device. Stop at the first that hands over a newer list and a revoked
+    // device asked first ends the round with a list from before its revocation, so the stop opens before
+    // the device holding the revocation is asked.
+    let asked = sync_round(home, dial, fetch, swoosh::sync::Until::Every).await;
+    // The gate stats `revoked` at most once per debounce, so wait one out: any admission after this either
+    // stats afresh or reuses a stat taken after the round's fold was written, and sees a revocation the
+    // round took before the stop opens. Any exchange can fold one, a fork passed on beside the same list
+    // too; a round that asked no one folded nothing, and opens at once.
+    if asked > 0 {
+        tokio::time::sleep(nauthy::STAT_DEBOUNCE).await;
     }
+    first_round.finished();
+    loop {
+        let jitter = rand::thread_rng().gen_range(0.9..=1.1);
+        tokio::time::sleep(EVERY_ROUND.mul_f64(jitter)).await;
+        sync_round(home, dial, fetch, swoosh::sync::Until::Newer).await;
+    }
+}
+
+/// One round with your devices, stopping as `until` says. It reads the standing, the pin, the standing's
+/// badge and `me` afresh, and asks only on a device of a root. When your devices refuse this machine
+/// because its standing has ended or was revoked here, the round picks up its renewal
+/// ([`swoosh::renewal`]) and, on a hit, exchanges again. Every outcome is logged and none is an error: a
+/// device that is not reached now is asked at the next round. How many devices it asked, in both passes.
+async fn sync_round(
+    home: &Home,
+    dial: &impl swoosh::sync::Dial,
+    fetch: &impl swoosh::renewal::Fetch,
+    until: swoosh::sync::Until,
+) -> usize {
+    let devices = if swoosh::sync::is_device(home).await {
+        swoosh::sync::devices(home, []).await
+    } else {
+        Ok(Vec::new())
+    };
+    let devices = match devices {
+        Ok(devices) => devices,
+        Err(error) => {
+            tracing::debug!(%error, "no sync round: the devices could not be read");
+            return 0;
+        }
+    };
+    let round = || swoosh::sync::round(dial, &devices, until, swoosh::sync::EACH * 4);
+    let replies = round().await;
+    tracing::debug!(asked = replies.len(), "a sync round finished");
+    // Refused for a standing that needs a renewal: pick it up, then exchange again with it.
+    let PickUp::Took(renewed) = swoosh::renewal::after_round(home, fetch, &replies).await else {
+        return replies.len();
+    };
+    tracing::debug!(from = %renewed.from, "took a renewal");
+    let again = round().await;
+    tracing::debug!(asked = again.len(), "a sync round finished");
+    replies.len() + again.len()
 }
 
 /// How peers reach this node, for the banner's `how peers reach you` section: whether the bound transport

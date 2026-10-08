@@ -49,6 +49,8 @@ installed `swoosh`):
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/Users/you/Library/Logs/swoosh.log</string>
+  <key>StandardErrorPath</key><string>/Users/you/Library/Logs/swoosh.log</string>
 </dict>
 </plist>
 ```

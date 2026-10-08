@@ -377,6 +377,33 @@ async fn an_unpinned_server_never_asks_for_an_update() {
     assert!(!bare.devices().exists(), "and takes nothing");
 }
 
+/// A device that answers `mine` or `both` with the very list this machine named is out of turn, never a
+/// take. Take it and a stolen device, sending back a copy of the list it was asked about, ends a round
+/// before the device holding the list that revokes it is asked.
+#[tokio::test]
+async fn an_answer_that_sends_back_the_list_named_is_out_of_turn() {
+    for code in [0x01_u8, 0x03] {
+        let desk = device(&format!("replay-{code}"), DESK).await;
+        let held = update(1, vec![], vec![]);
+        holding(&desk, &held).await;
+
+        let (near, mut far) = tokio::io::duplex(64 * 1024);
+        let (near_read, near_write) = tokio::io::split(near);
+        let mut reply = vec![code];
+        reply.extend_from_slice(&u32::try_from(held.len()).unwrap().to_be_bytes());
+        reply.extend_from_slice(&held);
+        far.write_all(&reply).await.unwrap();
+        // Nothing more comes, so a dialer that read the reply as a take ends at the forks, not waiting.
+        far.shutdown().await.unwrap();
+        let dialed = exchange(&desk, near_read, near_write).await;
+
+        assert!(
+            matches!(dialed, Err(ExchangeError::Protocol)),
+            "a copy of the list named is no newer list ({code:#04x}): {dialed:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn an_exchange_with_a_fork_keeps_both_revocation_lists() {
     let desk = device("fork", DESK).await;

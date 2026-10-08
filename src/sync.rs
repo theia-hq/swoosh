@@ -187,7 +187,8 @@ async fn dial_with(
     let mut request = Vec::with_capacity(1 + 8 + 32);
     request.push(EXCHANGE);
     request.extend_from_slice(&number.0.to_be_bytes());
-    request.extend_from_slice(&digest(bytes));
+    let named = digest(bytes);
+    request.extend_from_slice(&named);
     writer.write_all(&request).await?;
     writer.flush().await?;
     // The fork kept before this exchange: one taken in it came from the other device.
@@ -196,7 +197,7 @@ async fn dial_with(
         SAME => {
             let mut theirs = [0_u8; 32];
             reader.read_exact(&mut theirs).await?;
-            if theirs != digest(bytes) {
+            if theirs != named {
                 return Err(ExchangeError::NotHeld);
             }
             if theirs == NONE_YET {
@@ -208,6 +209,12 @@ async fn dial_with(
         }
         code @ (MINE | BOTH) => {
             let theirs = read_update(&mut reader).await?;
+            // Both answers carry another update than the one this machine named. One that sends back the
+            // very update named is out of turn: taken as a take, it would let any device end a round with
+            // a copy of this machine's own list before the device holding a newer one is asked.
+            if digest(&theirs) == named {
+                return Err(ExchangeError::Protocol);
+            }
             if code == BOTH {
                 write_update(&mut writer, bytes).await?;
             }
