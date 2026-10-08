@@ -260,10 +260,11 @@ fn bare_stop_stops_the_resident() {
         String::from_utf8_lossy(&stop.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&stop.stdout).trim_end(),
-        format!("stopped your node (pid {pid})."),
-        "the stop confirms the serving pid, no double-fork"
+        String::from_utf8_lossy(&stop.stderr).trim_end(),
+        format!("Stopped swoosh serve here (pid {pid})."),
+        "the stop confirms the serving pid, no double-fork, on stderr"
     );
+    assert!(stop.stdout.is_empty(), "stdout carries no confirmation");
 
     // The resident exits 0 on the socket stop, prints its local stop line, and unlinks the socket.
     let status = wait_for_exit(&mut child.0, Duration::from_secs(30));

@@ -34,7 +34,7 @@ use bifrost_mdns::{At, Dialable, Expiring, Missing, ScopeClass};
 use clap::Args;
 use eyre::WrapErr as _;
 use nauthy::{Gate, Service};
-use swoosh::contacts::ContactsStore;
+use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::gate::AnchorCut;
 use swoosh::grants::LinksForAnother;
 use swoosh::home::{Home, HomeWrite, ServeLock};
@@ -292,11 +292,11 @@ impl Reaching for ServeCmd {
     }
 
     /// Uniform dispatch: `serve` reads its OWN [`Claim`] and [`ExposeContext`] (attached by the root before
-    /// dispatch), so it ignores every `ReachCtx` field.
+    /// dispatch), and from the `ReachCtx` only the book, which names who stops it over `control.stop`.
     async fn run<T: Transport, D: Discovery>(
         mut self,
         node: &Node<T, D>,
-        _ctx: ReachCtx<'_>,
+        ctx: ReachCtx<'_>,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
@@ -310,13 +310,7 @@ impl Reaching for ServeCmd {
                 "internal: serve reached run without its claim or expose context (composition-root bug)"
             );
         };
-        let ExposeContext {
-            host_seed,
-            gate,
-            cut,
-            home,
-        } = *expose;
-        self.run_serve(node, *claim, host_seed, gate, cut, home)
+        self.run_serve(node, *claim, *expose, Contacts::clone(ctx.contacts))
             .await
     }
 }
@@ -501,15 +495,19 @@ impl ServeCmd {
         self,
         node: &Node<T, D>,
         claim: Claim,
-        host_seed: [u8; 32],
-        gate: Gate,
-        cut: AnchorCut,
-        home: Home,
+        expose: ExposeContext,
+        contacts: Contacts,
     ) -> eyre::Result<()>
     where
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
+        let ExposeContext {
+            host_seed,
+            gate,
+            cut,
+            home,
+        } = expose;
         // The run's one watcher of `<home>/serve.toml`, the one its claim read: the live enable/disable
         // oracle the exposer's per-stream gate consults, so a service turned off is refused live, and
         // turned back on, both with no restart. The status the control socket reports reads the same one.
@@ -577,7 +575,10 @@ impl ServeCmd {
         }
         // The node-lifecycle control verbs are MEMBER-only, not merely gated: tightbeam checks the route's
         // access class after the gate admits and before any `Response::Ok`.
-        router = router.member_service(CONTROL_STOP_SERVICE.parse()?, Stop::new(cancel.clone()))?;
+        router = router.member_service(
+            CONTROL_STOP_SERVICE.parse()?,
+            Stop::new(cancel.clone(), contacts),
+        )?;
         // Declare both open overlays from the operator's raw names. The proof runs at `.expose()` below,
         // before anything is recorded or a banner advertises a service it will not serve.
         router = router

@@ -24,15 +24,17 @@
 //! badge and refuses a non-signet one, which is the load-bearing stranger case for a stop.
 
 use core::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use bifrost::{NoDiscovery, Node, NodeId, Session as _};
 use bifrost_mem::MemTransport;
 use nauthy::Denylist;
+use swoosh::contacts::Contacts;
 use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK, Stop, Stopped};
-use swoosh::testkit::TestRoot;
+use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router};
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// The byte the signet's fixed key is seeded with; its ed25519 public half is the signet the family gate
 /// trusts.
@@ -243,18 +245,115 @@ async fn a_control_stop_slip_is_refused_before_ok_and_the_node_keeps_running() {
         .await;
 }
 
+/// The stopped node says who stopped it, by the key the connection proved: with no name for that key in
+/// its book, the whole key. Any of your devices can stop any other, so this line is the one trail a stop
+/// leaves; print nothing and it is gone.
+#[tokio::test]
+async fn stopped_node_prints_who_stopped_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (member, said) = stopped_by(|_| Contacts::default(), b"").await;
+            assert_eq!(said, vec![format!("Stopped by {member}.")]);
+        })
+        .await;
+}
+
+/// The line's key is the connection's and its name is the stopped node's own: a caller that writes another
+/// device's name on the stream is still named as itself. Print a name from the request and a device could
+/// claim to be me/nas.
+#[tokio::test]
+async fn stopped_by_line_names_the_authenticated_key() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let nas = TestNode::seeded(0x0a).node_id();
+            let (member, said) = stopped_by(
+                |member| {
+                    let mut contacts = Contacts::default();
+                    for (name, key) in [("laptop", member), ("nas", nas)] {
+                        contacts.add("me".parse().unwrap(), Some(name.parse().unwrap()), key);
+                    }
+                    contacts
+                },
+                b"me/nas",
+            )
+            .await;
+            let short: String = member.to_string().chars().take(12).collect();
+            assert_eq!(
+                said,
+                vec![format!("Stopped by me/laptop ({short}\u{2026}).")]
+            );
+        })
+        .await;
+}
+
 /// Assemble a gated exposer serving `control.stop` (and the default reach diagnostics), rooted at the
 /// signet, through the SAME `Stop` handler the product `serve` path injects and with the SAME member-only
 /// declaration `serve` makes. The exposer owns `cancel`; the injected handler holds a clone as the
 /// node-control capability.
 async fn build_exposer(cancel: CancellationToken) -> Exposer {
+    build_exposer_with(Stop::new(cancel, Contacts::default())).await
+}
+
+/// [`build_exposer`] around a `Stop` the caller built, so a test can hand it a book and capture its line.
+async fn build_exposer_with<Say: Fn(&str) + Send + Sync + 'static>(stop: Stop<Say>) -> Exposer {
     let signet = TestRoot::seeded(SIGNET).node_id();
     let gate = tunnel::resolve_gate(Some(signet), empty_denylist().await).unwrap();
     Router::new(gate)
-        .member_service(CONTROL_STOP_SERVICE.parse().unwrap(), Stop::new(cancel))
+        .member_service(CONTROL_STOP_SERVICE.parse().unwrap(), stop)
         .unwrap()
         .expose()
         .unwrap()
+}
+
+/// A member stops a node whose `Stop` names it from the book `book` makes of the member's key, writing
+/// `request` on the control stream first: the member's key, and the lines the stopped node said once its
+/// run has ended.
+async fn stopped_by(
+    book: impl FnOnce(NodeId) -> Contacts,
+    request: &[u8],
+) -> (NodeId, Vec<String>) {
+    let said = Arc::new(Mutex::new(Vec::new()));
+    let host = Node::new(MemTransport::bind(), NoDiscovery);
+    let host_id = host.node_id();
+    let member = Node::new(MemTransport::bind(), NoDiscovery);
+    let member_id = member.node_id();
+    let contacts = book(member_id);
+    let cancel = CancellationToken::new();
+    let stop = Stop::saying(cancel.clone(), contacts, {
+        let said = Arc::clone(&said);
+        move |line: &str| said.lock().unwrap().push(line.to_owned())
+    });
+    let exposer = build_exposer_with(stop).await;
+    let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
+
+    let badge = signet_badge(SIGNET, member_id);
+    let session = Connector::to_node(
+        host_id,
+        CONTROL_STOP_SERVICE.parse().unwrap(),
+        Some(badge.parse().unwrap()),
+    )
+    .open_service(&member)
+    .await
+    .expect("member reaches control.stop");
+    let (mut writer, mut reader) = session
+        .open_bi()
+        .await
+        .expect("a member is admitted at control.stop");
+    // The node never reads the stream, so the write may find it already closed by the stop it asked for.
+    let _ = writer.write_all(request).await;
+    let mut ack = [0u8; 1];
+    reader
+        .read_exact(&mut ack)
+        .await
+        .expect("the node acks the stop");
+    drop(writer);
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .expect("the stop ends the run")
+        .expect("the run task joins")
+        .expect("a graceful stop");
+    let said = said.lock().unwrap().clone();
+    (member_id, said)
 }
 
 /// Mint a membership badge signed by the key `signer` seeds, bound to `bound` (the dialer's proven node id):

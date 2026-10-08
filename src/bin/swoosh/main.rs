@@ -85,7 +85,7 @@ struct Cli {
 enum Command {
     /// Serve services on this machine; peers you admit reach them.
     Serve(serve::ServeCmd),
-    /// Stop a node (stop it serving): your own, or a peer's with `--at`.
+    /// Stop swoosh serve here, or on one of your own devices.
     Stop(stop::StopCmd),
     /// Read, enable, or disable this node's services (`ls`/`enable`/`disable`; `ls --at <peer>` reads a peer).
     #[command(subcommand)]
@@ -225,10 +225,10 @@ reaching_verbs! {
     /// `swoosh send`: push files to a peer's gated `recv:` service. Presents a membership badge (like
     /// `ping`/`speed`), so it rides the reach path under the persisted identity when one exists.
     Send(send::SendCmd),
-    /// `swoosh stop --at <peer>`: reach a peer's gated `control.stop` service and trigger a graceful stop.
-    /// Presents a membership badge (like `ping`/`speed`/`send`), so it rides the reach path under the
-    /// persisted identity when one exists. A bare `stop` (your own node) splits to a local report instead.
-    Stop(stop::StopCmd),
+    /// `swoosh stop me/<name>` for another of your devices, once resolved locally: reach its member-only
+    /// `control.stop` and trigger a graceful stop. Presents this device's membership badge, so it rides the
+    /// reach path under the persisted identity when one exists.
+    Stop(stop::StopDevice),
     /// `swoosh service ls --at <peer>`: reach a peer's gated `control.services` read and print its
     /// `SERVICE  GATE` table. Presents a membership badge (like `stop`), so it rides the reach path under
     /// the persisted identity when one exists. A bare `service ls` (your own node) splits to a local report.
@@ -277,13 +277,9 @@ impl Command {
             Self::Forward(cmd) => Verb::Outward(Outward::Forward(cmd)),
             Self::Send(cmd) => Verb::Outward(Outward::Send(cmd)),
             Self::Sync(cmd) => Verb::Outward(Outward::Sync(cmd)),
-            // `stop --at <peer>` reaches a peer's `control.stop`; a bare `stop` stops YOUR OWN node over
-            // the local control socket. Split on `--at` here so the bare case runs WITHOUT composing a
-            // transport it would never use, the same local dispatch `ssh`/`share` take.
-            Self::Stop(cmd) => match cmd.at {
-                Some(_) => Verb::Outward(Outward::Stop(cmd)),
-                None => Verb::Stop(cmd),
-            },
+            // `stop` resolves its machine against the list of your devices first, with no transport: only
+            // another of your devices goes on to dial.
+            Self::Stop(cmd) => Verb::Stop(cmd),
             // The `service` group: `ls --at <peer>` reaches a peer's `control.services`; bare `ls` reads your
             // own node over the local control socket, and `enable`/`disable` are LOCAL file-writes on
             // `<home>/serve.toml`. Split each here so the local arms never compose a transport they would not use.
@@ -342,8 +338,8 @@ enum Verb {
     /// `swoosh service disable <svc>`: a LOCAL file-write on `<home>/serve.toml` (add a name), no
     /// transport.
     ServiceDisable(service::ServiceToggleCmd),
-    /// A bare `swoosh stop` (no `--at`): stop YOUR OWN node over the local control socket, no transport
-    /// or store. With `--at` it is a reaching verb instead.
+    /// `swoosh stop [me/<name>]`: resolves the machine against the list of your devices with no transport,
+    /// and stops this machine over its control socket; another of your devices goes on as a reaching verb.
     Stop(stop::StopCmd),
     /// A bare `swoosh status` (no peer): this machine, read from its own files; it binds no transport.
     /// With a peer it is a reaching verb instead.
@@ -477,8 +473,10 @@ async fn main() -> std::process::ExitCode {
 }
 
 /// Parse `argv`. A `forward` missing only its local end is refused with [`forward::NO_LOCAL_END`], which says
-/// what `-` means where clap's own required-argument line shows only the metavar. Every other error is
-/// clap's own. Refused here, at parse, so nothing is read, opened or bound first, the home included.
+/// what `-` means where clap's own required-argument line shows only the metavar; a `stop` given more than
+/// one machine is refused with [`stop::ONE_MACHINE`], and one given a link or a path with
+/// [`stop::A_LINK_STOPS_NOTHING`]. Every other error is clap's own. Refused here, at parse, so nothing is
+/// read, opened or bound first, the home included.
 fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
 where
     I: IntoIterator<Item = T>,
@@ -498,6 +496,32 @@ where
                 Err(_) => Err(error),
             }
         }
+        Err(error) if error.kind() == clap::error::ErrorKind::UnknownArgument => {
+            // The model again with `stop` taking any number of plain words: a line it accepts was refused
+            // only for its extra machines. A line it refuses too stays clap's own error.
+            let lenient = Cli::command().mut_subcommand("stop", |stop| {
+                stop.mut_arg("machine", |machine| {
+                    machine
+                        .num_args(1..)
+                        .action(clap::ArgAction::Append)
+                        .value_parser(clap::builder::NonEmptyStringValueParser::new())
+                })
+            });
+            match lenient.try_get_matches_from(&argv) {
+                Ok(_) => Err(usage(&["stop"], stop::ONE_MACHINE)),
+                Err(_) => Err(error),
+            }
+        }
+        // A link or a path where `stop`'s machine goes, refused here with no echo of what was typed, so a
+        // pasted link's token is never printed back.
+        Ok(Cli {
+            command:
+                Some(Command::Stop(stop::StopCmd {
+                    machine: Some(stop::Aim::Link),
+                    ..
+                })),
+            ..
+        }) => Err(usage(&["stop"], stop::A_LINK_STOPS_NOTHING)),
         parsed => parsed,
     }
 }
@@ -581,12 +605,19 @@ async fn run() -> eyre::Result<()> {
         // socket. Run it here, before any transport is composed, the same local dispatch the other
         // transport-free verbs take. With `--at` this verb fell through to the reach path above instead.
         Verb::ServiceLs(cmd) => return cmd.run_local(&home).await,
-        // A bare `swoosh stop` (no `--at`): stop your own node over the control socket, here too, before
-        // any transport is composed. With `--at` it fell through to the reach path above.
-        Verb::Stop(cmd) => return cmd.run_local(&home).await,
         // A bare `swoosh status` (no peer): this machine, from its own files. It never dials; with a
         // peer it is a reach verb.
         Verb::Status(cmd) => return cmd.run_local(&home).await,
+        // `swoosh stop`: every shape the list of your devices refuses exits 2 here, before any transport
+        // is composed, and this machine stops over its control socket. Only another of your devices binds.
+        Verb::Stop(cmd) => match cmd.run_local(&home).await {
+            Ok(Some(device)) => Outward::Stop(device),
+            Ok(None) => return Ok(()),
+            Err(report) => match report.downcast_ref::<stop::Usage>() {
+                Some(usage) => usage_error(&["stop"], &usage.0),
+                None => return Err(report),
+            },
+        },
         // `service enable`/`disable`: LOCAL file-writes on `<home>/serve.toml`, honored live by a running
         // `serve` via the watched set its gate reads. Need only the home; bind no transport and touch no store.
         Verb::ServiceEnable(cmd) => return cmd.run_enable(&home).await,
@@ -1375,22 +1406,21 @@ mod tests {
         swoosh::link::Link::from(link).to_string()
     }
 
-    /// Every DIALING verb takes a unified `<peer>`: a saved petname, a raw key, and a `swoosh:` link all
-    /// parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/`send`/`stop --at`/
-    /// `service ls --at`/`proxy`/`ssh`. `stop` and `service ls` carry the peer on `--at`
-    /// (bare acts on your own node); the rest carry it positionally.
+    /// Every DIALING verb that may reach any machine takes a unified `<peer>`: a saved petname, a raw key,
+    /// and a `swoosh:` link all parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/
+    /// `send`/`service ls --at`/`proxy`/`ssh`. `service ls` carries the peer on `--at` (bare acts on your
+    /// own node); the rest carry it positionally. `stop` takes only your own devices, so it is not here.
     #[test]
     fn every_dialing_verb_takes_a_petname_a_key_and_a_link() {
         let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
         let link = shown_link();
         for peer in ["alice", key.as_str(), link.as_str()] {
-            let cases: [&[&str]; 9] = [
+            let cases: [&[&str]; 8] = [
                 &["swoosh", "ping", peer],
                 &["swoosh", "speed", peer],
                 &["swoosh", "status", peer],
                 &["swoosh", "forward", peer, "web", "5432"],
                 &["swoosh", "send", "afile", peer],
-                &["swoosh", "stop", "--at", peer],
                 &["swoosh", "service", "ls", "--at", peer],
                 &["swoosh", "proxy", peer, "http://example.com/x"],
                 &["swoosh", "ssh", peer],
@@ -1580,7 +1610,6 @@ mod tests {
                 IrohBind::Dialing,
             ),
             (vec!["swoosh", "send", "notes.md", &key], IrohBind::Dialing),
-            (vec!["swoosh", "stop", "--at", &key], IrohBind::Dialing),
             (
                 vec!["swoosh", "service", "ls", "--at", &key],
                 IrohBind::Dialing,
@@ -1632,31 +1661,42 @@ mod tests {
         );
     }
 
-    /// The one control grammar: BARE `stop` splits to the local (own-node) path, `stop --at <peer>`
-    /// to the reach path. The bare form takes NO positional peer (the old `stop <peer>` is retired).
+    /// `stop` resolves its machine before any transport: bare and `me/<name>` both split to the local verb,
+    /// which binds only for another of your devices once the list of your devices names it. `--at` is gone:
+    /// a machine is a positional.
     #[test]
-    fn stop_bare_is_local_and_at_is_the_reach_path() {
-        let key = NodeId::from_ed25519_secret(&[7u8; 32]).to_string();
+    fn stop_resolves_locally_and_takes_no_at() {
+        for argv in [vec!["swoosh", "stop"], vec!["swoosh", "stop", "me/nas"]] {
+            let cli = Cli::try_parse_from(&argv).expect("stop parses");
+            assert!(
+                matches!(cli.command.expect("a command").split(), Verb::Stop(_)),
+                "{argv:?} resolves locally first"
+            );
+        }
+        let error = Cli::try_parse_from(["swoosh", "stop", "--at", "me/nas"])
+            .expect_err("--at is no flag of stop");
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
 
-        // Bare: parses, and splits to the local self-report verb (needs no transport).
-        let bare = Cli::try_parse_from(["swoosh", "stop"]).expect("bare stop parses");
-        assert!(matches!(
-            bare.command.expect("a command").split(),
-            Verb::Stop(_)
-        ));
-
-        // `--at <peer>`: splits to the reach path.
-        let at = Cli::try_parse_from(["swoosh", "stop", "--at", &key]).expect("stop --at parses");
-        assert!(matches!(
-            at.command.expect("a command").split(),
-            Verb::Outward(Outward::Stop(_))
-        ));
-
-        // The retired positional form no longer resolves (pre-1.0 clean break).
-        assert!(
-            Cli::try_parse_from(["swoosh", "stop", &key]).is_err(),
-            "the retired `stop <peer>` positional must not resolve"
-        );
+    /// `stop` takes one machine: a second is a usage error, exit 2, naming the rule, whatever the second
+    /// one is, before the home is read. Accept two and the first one stops.
+    #[test]
+    fn stop_takes_one_machine() {
+        for second in ["me/pi", "./nas.link", "bob"] {
+            let error = parse_from(["swoosh", "stop", "me/nas", second])
+                .expect_err("two machines refuse at parse");
+            assert_eq!(error.exit_code(), 2, "a usage error exits 2");
+            let printed = error.to_string();
+            assert!(
+                printed.starts_with("error: swoosh stop takes one machine\n"),
+                "{printed}"
+            );
+            assert!(printed.contains("Usage: swoosh stop"), "{printed}");
+        }
+        // A line wrong for another reason keeps clap's own error.
+        let other = parse_from(["swoosh", "stop", "me/nas", "--bogus"])
+            .expect_err("an unknown flag refuses");
+        assert!(!other.to_string().contains("takes one machine"), "{other}");
     }
 
     /// The `service` group: `ls` splits bare-local vs `--at`-reach, and `enable`/`disable` are local leaves.

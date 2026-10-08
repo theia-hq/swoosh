@@ -1,6 +1,10 @@
+use nauthy::VerifyKey;
+use tightbeam::identity::AsNodeId as _;
 use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{BoxRead, BoxWrite, CancellationToken, Handler, ServeError, Served};
 use tokio::io::AsyncWriteExt as _;
+
+use crate::contacts::Contacts;
 
 /// The `control.stop` handler swoosh injects: the remote node-lifecycle stop. It holds a CLONE of the
 /// node's teardown token as the node-control CAPABILITY (never a node handle), so when an admitted caller
@@ -20,42 +24,85 @@ use tokio::io::AsyncWriteExt as _;
 /// Adversary gating-review before `control.stop` is trusted on a multi-device fleet; the open question
 /// there is whether the `Admitted` witness can distinguish an owner device from another fleet device.
 ///
+/// Any of your devices may stop any other, so the stopped node says who did, on its own stderr: the
+/// one trail a stop leaves. The key is the one the connection proved ([`Served::peer`]) and the name is
+/// the one this node's own book holds for it; nothing on the line comes from the caller's request,
+/// so a caller cannot claim to be another device.
+///
 /// On admission the handler cancels the token, then writes ONE ack byte so the client can confirm the stop
 /// was actioned (not merely that the dial was admitted): a positive, explicit confirmation, the honest
 /// counterpart to the loud typed refusal a non-admitted caller gets at the gate.
 ///
 /// Public so the `gated_stop` proof drives the SAME handler `serve` injects, not a hand-rolled near-copy,
 /// exactly as the `gated_measure` proof reuses `diagnostics`.
-pub struct Stop {
+pub struct Stop<Say = fn(&str)> {
     cancel: CancellationToken,
+    /// This node's devices and contacts, as `serve` read them: what names the key that stopped it.
+    contacts: Contacts,
+    /// Where the line naming who stopped the node goes: the node's stderr, or a test's capture.
+    say: Say,
 }
 
 impl Stop {
     /// Build the `control.stop` handler holding a CLONE of the node's teardown token as the node-control
     /// capability (never a node handle): an admitted caller REQUESTS the graceful teardown by cancelling it.
-    pub fn new(cancel: CancellationToken) -> Self {
-        Self { cancel }
+    /// `contacts` names who stopped it, on stderr.
+    pub fn new(cancel: CancellationToken, contacts: Contacts) -> Self {
+        Self::saying(cancel, contacts, to_stderr)
     }
 }
 
-impl Handler for Stop {
+impl<Say: Fn(&str) + Send + Sync + 'static> Stop<Say> {
+    /// [`new`](Stop::new), with the line naming who stopped the node handed to `say` instead of stderr.
+    pub fn saying(cancel: CancellationToken, contacts: Contacts, say: Say) -> Self {
+        Self {
+            cancel,
+            contacts,
+            say,
+        }
+    }
+}
+
+impl<Say: Fn(&str) + Send + Sync + 'static> Handler for Stop<Say> {
     // The route is member-only (declared in `serve`) and has no safe public form: the marker keeps an
     // open-gate pairing from ever being built, and the member floor refuses every non-member pre-Ok.
     type Exposure = Never;
 
     async fn serve(
         &self,
-        _served: Served<Self>,
+        served: Served<Self>,
         mut writer: BoxWrite,
         _reader: BoxRead,
     ) -> Result<(), ServeError> {
         self.cancel.cancel();
+        // Said once the stop is requested, so the line states what happened. The caller's stream is never
+        // read: the key is the connection's.
+        (self.say)(&stopped_by(&self.contacts, served.peer()));
         // The ack byte: proof to the client that the stop landed. Written after the cancel so a client
         // reading it knows the teardown was requested, then flushed since the node is about to close.
         writer.write_all(&[STOP_ACK]).await?;
         writer.flush().await?;
         Ok(())
     }
+}
+
+/// The line a node stopped over `control.stop` prints: the name this node holds for the key that stopped it
+/// and its short key, or the whole key when it holds no name for it.
+fn stopped_by(contacts: &Contacts, peer: VerifyKey) -> String {
+    // An admitted peer's key is one the transport proved, so it is always a usable key; the arm keeps the
+    // whole key for one that somehow is not.
+    let Ok(node) = peer.node_id() else {
+        return format!("Stopped by {peer}.");
+    };
+    match contacts.saved_at(&node) {
+        Some(name) => format!("Stopped by {name} ({}).", crate::credential::short(&node)),
+        None => format!("Stopped by {node}."),
+    }
+}
+
+/// Where a serving node says who stopped it.
+fn to_stderr(line: &str) {
+    eprintln!("{line}");
 }
 
 /// The single byte `control.stop` writes to confirm the stop was actioned. Any value works (the client only

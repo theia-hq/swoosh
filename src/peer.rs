@@ -5,7 +5,7 @@
 //! (`ContactRef`, `Candidate`, `Contacts`) rather than squatting in it, and it unifies the two dial-target
 //! types the reach and tunnel families used to keep apart: the multi-device diagnostic verbs
 //! (`ping`/`speed`/`status`/`proxy`) fan a peer out via [`candidates`](Peer::candidates), the single-target
-//! verbs (`forward`/`send`/`stop`/`service`) resolve one via [`connector`](Peer::connector). Both
+//! verbs (`forward`/`send`/`service`) resolve one via [`connector`](Peer::connector). Both
 //! shapes read the SAME three arms, so `alice`, `alice/desk`, a raw key, and a `swoosh:` link all parse in
 //! one place, uniform across every dialing verb.
 
@@ -16,7 +16,7 @@ use bifrost::{KeyError, NodeId, NodeIdParseError};
 use nauthy::{Link, Service};
 use tightbeam::tunnel::Connector;
 
-use crate::contacts::{Candidate, ContactRef, Contacts};
+use crate::contacts::{Candidate, ContactRef, Contacts, DeviceLabel, ME, Petname};
 use crate::credential::LinkExt as _;
 use crate::link::LinkError;
 use crate::names::NameError;
@@ -30,7 +30,7 @@ use crate::names::NameError;
 /// against the contact store just before dialing (deferred because the store loads at startup, not at the
 /// clap boundary). Every dialing verb holds this in its peer slot, so `alice`, `alice/desk`, a raw key, and
 /// a `swoosh:` link all parse in one place, uniform across `ping`/`speed`/`status`/`proxy`/`forward`/
-/// `send`/`stop`/`service`/`ssh`.
+/// `send`/`service`/`ssh`.
 #[derive(Debug, Clone)]
 pub enum Peer {
     /// A saved petname (`alice`, `me/ci`), resolved against the store at dial time. Fan-out capable: a
@@ -86,6 +86,45 @@ impl FromStr for Peer {
 /// Whether `text` is a peer typed as a path: it starts with `./`, `/` or `~/`.
 pub fn is_path(text: &str) -> bool {
     PATH_STARTS.iter().any(|start| text.starts_with(start))
+}
+
+/// One of your own devices, typed `me/<name>`: the one shape a verb that acts only on your own machines
+/// takes. It holds a name and never a key, a link or a contact, so such a verb cannot be pointed at a
+/// machine that is not yours; whether the name is one of yours is read from the list of your devices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnDevice(DeviceLabel);
+
+impl OwnDevice {
+    /// The device `reference` names when it is `me/<name>`; `None` for every other address, `me` alone
+    /// included.
+    pub fn of(reference: &ContactRef) -> Option<Self> {
+        match reference.device() {
+            Some(device) if reference.petname().as_str() == ME => Some(Self(device.clone())),
+            _ => None,
+        }
+    }
+
+    /// The name the list of your devices gives it.
+    pub fn label(&self) -> &DeviceLabel {
+        let Self(label) = self;
+        label
+    }
+
+    /// Its key in the list of your devices this machine holds, or `None` when no device of yours has the
+    /// name.
+    pub fn key(&self, contacts: &Contacts) -> Option<NodeId> {
+        contacts
+            .devices(&Petname::stored(ME).ok()?)?
+            .find(|(label, _)| *label == self.label())
+            .map(|(_, node)| *node)
+    }
+}
+
+impl core::fmt::Display for OwnDevice {
+    /// `me/<name>`, as typed.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{ME}/{}", self.label())
+    }
 }
 
 /// The most a peer file is read for. A link is well under a kilobyte, so a file past this holds something
@@ -293,7 +332,7 @@ impl Peer {
         }
     }
 
-    /// SINGLE-CONNECTOR resolution, for the single-target verbs (`forward`/`send`/`stop`/`service`).
+    /// SINGLE-CONNECTOR resolution, for the single-target verbs (`forward`/`send`/`service`).
     /// The resolver ALWAYS builds via [`Connector::to_node`] with the slot-1/slot-2 the caller resolved;
     /// the [`Capability`](Self::Capability) arm differs ONLY in computing the dial target from the link's
     /// root. It NEVER calls [`Connector::from_link`]: the link's credential arrives as `slot1` from the

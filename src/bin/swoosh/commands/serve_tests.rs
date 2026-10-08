@@ -1650,7 +1650,10 @@ fn bare_serve() -> BTreeSet<String> {
     let exposer = update_route(router)
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
-            Stop::new(CancellationToken::new()),
+            Stop::new(
+                CancellationToken::new(),
+                swoosh::contacts::Contacts::default(),
+            ),
         )
         .expect("control.stop binds")
         .member_service(
@@ -1783,7 +1786,7 @@ fn the_control_socket_adds_no_service() {
     let router = update_route(router)
         .member_service(
             CONTROL_STOP_SERVICE.parse().expect("a name"),
-            Stop::new(cancel),
+            Stop::new(cancel, swoosh::contacts::Contacts::default()),
         )
         .expect("control.stop binds")
         .member_service(
