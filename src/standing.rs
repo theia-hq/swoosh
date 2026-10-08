@@ -410,8 +410,9 @@ fn root_key(path: PathBuf) -> Result<NodeId, StandingError> {
     }
 }
 
-/// The pin, or `None` when there is none. A file that is not exactly one key is damaged.
-async fn read_pin(home: &Home) -> Result<Option<NodeId>, StandingError> {
+/// The pin as its file lies, a revoked one included, or `None` when there is none. A file that is not
+/// exactly one key is damaged.
+pub(crate) async fn read_pin(home: &Home) -> Result<Option<NodeId>, StandingError> {
     let path = home.root_pub();
     let Some(text) = text_of(crate::home::read_trust_file_async(&path).await, &path)? else {
         return Ok(None);

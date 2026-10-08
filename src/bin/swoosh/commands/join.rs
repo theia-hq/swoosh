@@ -192,6 +192,15 @@ impl JoinCmd {
         let home_lock = HomeWrite::take(home).await?;
         refuse_if_admitting(&home_lock, home)?;
         still(&home_lock, home, standing, switching).await?;
+        // A root kept here is a revoked one, which every read takes as none: a revoke stopped after its
+        // latch. It goes with the join, as it goes with a mint, so no later finish of that revoke can find
+        // it beside this root's files.
+        if Standing::revoked_root(home).await?.is_some() {
+            match std::fs::remove_file(home.root_key()) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+                _ => {}
+            }
+        }
         swoosh::joining::join(
             &home_lock,
             home,

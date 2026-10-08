@@ -25,7 +25,7 @@ use tightbeam::identity::AsVerifyKey as _;
 use super::super::invite::invite_tests::{
     Asked, CI, DAY, LAPTOP, NAS, NINETY, OWN, PASS, PHONE, ROOT, Row, Stream, Tape, carrying, copy,
     device_of, due, held, holds, invite, kept, kept_list, key, live, node, now, records, revoked,
-    row_of, scratch, signed, snapshot,
+    root_key_at, row_of, scratch, signed, snapshot,
 };
 use super::{RevokeCmd, Usage};
 
@@ -95,14 +95,20 @@ pub(crate) struct Ran {
     prompts: usize,
     /// Each confirmation asked, as asked.
     confirms: Vec<String>,
+    /// Each line said where the person types, in order.
+    said: Vec<String>,
 }
 
 /// A terminal with a person at it, or none: passphrases from `asked`, and `typed` for a confirmation.
-/// Each confirmation is marked on the tape and kept.
+/// Each confirmation is marked on the tape and kept, and so is each line said on the terminal.
 struct Typing {
     asked: Asked,
     typed: Option<String>,
     confirms: Vec<String>,
+    said: Vec<String>,
+    /// Run once the person has typed the confirmation, before it is answered: a change to the home while
+    /// they typed.
+    then: Option<Box<dyn FnOnce()>>,
 }
 
 impl Typing {
@@ -116,6 +122,8 @@ impl Typing {
             },
             typed: typed.map(str::to_owned),
             confirms: Vec::new(),
+            said: Vec::new(),
+            then: None,
         }
     }
 }
@@ -134,12 +142,17 @@ impl Prompt for Typing {
     }
 
     fn say(&mut self, line: &str) {
+        self.asked.tape.push(&format!("<tty>{line}\n"));
+        self.said.push(line.to_owned());
         self.asked.say(line);
     }
 
     fn confirm(&mut self, question: &str) -> eyre::Result<String> {
         self.asked.tape.push("<confirm>\n");
         self.confirms.push(question.to_owned());
+        if let Some(then) = self.then.take() {
+            then();
+        }
         self.typed
             .clone()
             .ok_or_else(|| eyre::eyre!("no confirmation scripted"))
@@ -208,6 +221,7 @@ async fn run_typing(
         tape,
         prompts: prompt.asked.inner.events(),
         confirms: prompt.confirms,
+        said: prompt.said,
     }
 }
 
@@ -566,7 +580,9 @@ async fn revoke_reports_which_devices_took_it() {
     );
     assert!(
         err.ends_with(
-            "and the links this machine gave it: blocked (only this machine admitted them).\n"
+            "and the links this machine gave it: blocked (only this machine admitted them).\n\
+             me/laptop can never rejoin your devices with its current key.\n\
+             to add laptop again, first run this at its console: swoosh leave --new-key\n"
         ),
         "{err}"
     );
@@ -1077,8 +1093,9 @@ async fn a_revoke_never_leaves_live_a_device_its_own_sync_rekeyed() {
     .await;
     assert_eq!(
         ran.refusal(),
-        "me/laptop is now listed under a key this revoke did not see, so your root did not revoke it",
-        "the refusal names no command: running the revoke again would take the name's new key"
+        "me/laptop is blocked on this machine, not yet on your other devices.\n\
+         me/laptop is now listed under a key this revoke did not see, so your root did not revoke it",
+        "the partway line, then the cause, which names no command: running the revoke again would take the name's new key"
     );
     assert!(!ran.tape.text().contains("<offer>"), "nothing is offered");
     assert!(
@@ -1360,18 +1377,19 @@ async fn status_names_a_device_revoked_here() {
 
 // --- the root form: `revoke root:<key>` ---
 
-/// The ten lines `revoke --help` prints under "To replace your root:", exactly.
+/// The ten lines `revoke --help` prints under "To replace your root:", exactly, indented as clap indents
+/// its own sections.
 const RECIPE_LINES: [&str; 10] = [
-    "desk$   (umask 077; swoosh ssh me/nas -- swoosh share ssh $(swoosh --home ~/.swoosh-rescue status --key) --expires 7d > ~/nas.link)",
-    "desk$   swoosh --home ~/.swoosh-rescue ssh ~/nas.link -- -t swoosh revoke root:ed01OLD…",
-    "desk$   swoosh revoke root:ed01OLD…",
-    "desk$   swoosh invite laptop ed01L…",
-    "desk$   swoosh invite nas ed01NAS… > nas.invite",
-    "desk$   swoosh --home ~/.swoosh-rescue ssh ~/nas.link -- swoosh join < nas.invite",
-    "laptop$ swoosh revoke root:ed01OLD…; swoosh join",
-    "desk$   swoosh invite runner --new-key | gh secret set SWOOSH_INVITE --repo <you>/<repo>",
-    "friend$ swoosh contact add <you> root:ed01NEW…",
-    "desk$   swoosh ssh me/nas -- swoosh revoke - < ~/nas.link; rm -r ~/nas.link ~/.swoosh-rescue",
+    "  desk$   (umask 077; swoosh ssh me/nas -- swoosh share ssh $(swoosh --home ~/.swoosh-rescue leave --new-key) --expires 7d > ~/nas.link)",
+    "  desk$   swoosh --home ~/.swoosh-rescue ssh ~/nas.link -- -t swoosh revoke root:ed01OLD…",
+    "  desk$   swoosh revoke root:ed01OLD…",
+    "  desk$   swoosh invite laptop ed01L…",
+    "  desk$   swoosh invite nas ed01NAS… > nas.invite",
+    "  desk$   swoosh --home ~/.swoosh-rescue ssh ~/nas.link -- swoosh join < nas.invite",
+    "  laptop$ swoosh revoke root:ed01OLD…; swoosh join",
+    "  desk$   swoosh invite runner --new-key | gh secret set SWOOSH_INVITE --repo <you>/<repo>",
+    "  friend$ swoosh contact add <you> root:ed01NEW…",
+    "  desk$   swoosh ssh me/nas -- swoosh revoke - < ~/nas.link; rm -r ~/nas.link ~/.swoosh-rescue",
 ];
 
 /// Whether `home` refuses the root seeded `seed` for good.
@@ -1431,18 +1449,18 @@ async fn revoke_with_a_root_key_takes_the_root_path_behind_the_prefix() {
     let ran = revoke_root(&home, STRANGER, &prefix(STRANGER)).await;
     let err = ran.ok().to_owned();
     let kind = format!(
-        "{} is no root this machine knows. Revoking it keeps this machine from ever trusting it.",
+        "this machine does not know {}, and will never trust it.",
         root_short(STRANGER)
     );
-    assert!(ran.tape.at(&kind) < ran.tape.at("<confirm>"), "{err}");
+    assert!(
+        ran.tape.at(&format!("<tty>{kind}")) < ran.tape.at("<confirm>"),
+        "{err}"
+    );
     assert_eq!(ran.confirms.len(), 1, "the prefix is asked once");
     assert!(latched(&home, STRANGER), "the prefix latched the root");
     assert_eq!(
         err.lines().last().unwrap(),
-        format!(
-            "{} is no root this machine knows. It is refused here for good.",
-            root_short(STRANGER)
-        )
+        format!("revoked {} here for good.", root_short(STRANGER))
     );
     // Typed in any case, the prefix is still the root form.
     let upper = format!("ROOT:{}", node(ALICE_ROOT));
@@ -1496,18 +1514,25 @@ async fn revoke_a_contacts_root_names_revoke_person_before_the_prompt() {
     let given = gave(&home, node(ALICE_ROOT), GrantKind::Fleet).await;
     let ran = revoke_root(&home, ALICE_ROOT, &prefix(ALICE_ROOT)).await;
     let err = ran.ok().to_owned();
-    let before = format!(
-        "{} is alice's root. This refuses it here for good. To stop sharing with alice instead: swoosh \
-         revoke alice",
-        root_short(ALICE_ROOT)
+    assert_eq!(
+        ran.said,
+        [
+            format!(
+                "{} is alice's root; this machine will never trust it again.",
+                root_short(ALICE_ROOT)
+            ),
+            "to stop sharing with alice instead: swoosh revoke alice".to_owned(),
+        ]
     );
-    assert!(ran.tape.at(&before) < ran.tape.at("<confirm>"), "{err}");
     assert!(
-        err.ends_with(&format!(
-            "{} is refused here for good.\n",
-            root_short(ALICE_ROOT)
-        )),
+        ran.tape
+            .at("<tty>to stop sharing with alice instead: swoosh revoke alice")
+            < ran.tape.at("<confirm>"),
         "{err}"
+    );
+    assert_eq!(
+        err,
+        format!("revoked {} here for good.\n", root_short(ALICE_ROOT))
     );
     assert!(latched(&home, ALICE_ROOT));
     assert!(
@@ -1649,19 +1674,19 @@ async fn revoke_a_root_on_the_pin_leaves_after_the_typed_prefix() {
     let home = device("root-pin", &[live(OWN, "desk"), live(LAPTOP, "laptop")]).await;
     let ran = revoke_root(&home, ROOT, &prefix(ROOT)).await;
     let err = ran.ok().to_owned();
-    assert!(
-        err.starts_with(&format!(
-            "this machine is a device of {} (me/desk). It leaves, and can never be its device again.\n",
+    assert_eq!(
+        ran.said,
+        [format!(
+            "this machine is me/desk, a device of {}; it leaves that root and can never join it again.",
             root_short(ROOT)
-        )),
-        "{err}"
+        )]
     );
-    assert!(
-        err.ends_with(&format!(
-            "this machine left {} for good. To join a new root: swoosh join\n",
+    assert_eq!(
+        err,
+        format!(
+            "left {} for good.\nto join a new root: swoosh join\n",
             root_short(ROOT)
-        )),
-        "{err}"
+        )
     );
     assert_eq!(ran.prompts, 0, "a device asks no passphrase");
     assert!(latched(&home, ROOT));
@@ -1720,12 +1745,19 @@ async fn revoke_a_root_on_the_holder_retires_the_root_and_frees_the_home_to_mint
     let ran = revoke_root(&home, ROOT, &prefix(ROOT)).await;
     let err = ran.ok().to_owned();
     assert_eq!(
+        ran.said,
+        [format!(
+            "this machine keeps {}; this deletes it here and ends it for good.",
+            root_short(ROOT)
+        )]
+    );
+    assert_eq!(
         err,
         format!(
-            "this machine keeps {root}; this deletes it here and ends it for good.\n\
-             retired {root}, your root, on this machine. Your next swoosh invite makes a new one.\n\
+            "retired {}, your root, on this machine.\n\
+             to make a new root: swoosh invite <name> <key>\n\
              tell your contacts; each of them runs: swoosh contact add <you> <new root key>\n",
-            root = root_short(ROOT)
+            root_short(ROOT)
         )
     );
     assert_eq!(ran.prompts, 1, "one passphrase");
@@ -1818,7 +1850,10 @@ async fn revoke_a_root_on_a_device_killed_after_the_latch_is_finished_by_running
 
     let ran = revoke_root(&home, ROOT, &prefix(ROOT)).await;
     let err = ran.ok().to_owned();
-    assert!(err.contains("this machine left"), "{err}");
+    assert!(
+        err.starts_with(&format!("left {} for good.", root_short(ROOT))),
+        "{err}"
+    );
     for gone in [home.root_pub(), home.key_cert(), home.devices()] {
         assert!(!gone.exists(), "{} is gone", gone.display());
     }
@@ -1865,7 +1900,7 @@ fn revoke_long_help_prints_the_recipe_exactly() {
         .expect("revoke is a top-level verb")
         .clone();
     let long = revoke.render_long_help().to_string();
-    let lines: Vec<&str> = long.lines().map(str::trim_start).collect();
+    let lines: Vec<&str> = long.lines().collect();
     let heading = lines
         .iter()
         .position(|line| *line == "To replace your root:")
@@ -1920,7 +1955,7 @@ async fn revoke_a_device_without_a_terminal_prints_one_partway_line() {
     assert_eq!(
         ran.refusal(),
         "me/laptop is blocked on this machine, not yet on your other devices; your root's passphrase \
-         needs a terminal (over swoosh ssh, add -t after --): swoosh revoke me/laptop"
+         needs a terminal: over swoosh ssh, add -t after --"
     );
     assert!(ran.err.is_empty(), "no line before the error: {}", ran.err);
     assert!(blocks_key(&home, LAPTOP).await, "the block is written");
@@ -1937,11 +1972,19 @@ async fn revoke_a_device_prints_revoked_after_the_root_commits() {
     .await;
     let ran = revoke(&home, &["me/laptop"]).await;
     let err = ran.ok().to_owned();
-    let first = "revoked me/laptop: blocked here now. This key can never be your device again; laptop will \
-                 need `swoosh leave --new-key` at its console.";
-    assert!(err.starts_with(first), "{err}");
+    let mut lines = err.lines();
+    let reach = lines.next().unwrap();
+    assert!(reach.starts_with("revoked me/laptop: "), "{err}");
+    assert_eq!(
+        lines.collect::<Vec<_>>(),
+        [
+            "me/laptop can never rejoin your devices with its current key.",
+            "to add laptop again, first run this at its console: swoosh leave --new-key",
+        ],
+        "the reach line leads, and the two lines follow it"
+    );
     assert!(
-        ran.tape.at("<prompt>") < ran.tape.at(first),
+        ran.tape.at("<prompt>") < ran.tape.at(reach),
         "the first line follows the root step: {}",
         ran.tape.text()
     );
@@ -1949,4 +1992,245 @@ async fn revoke_a_device_prints_revoked_after_the_root_commits() {
         kept_list(&home).is_revoked_key(&key(LAPTOP)),
         "the root committed its cut"
     );
+}
+
+/// Record a running `serve` in `home`'s `serve.lock`: this process's pid, which is alive.
+fn serving(home: &Home) {
+    std::fs::write(home.serve_lock(), format!("{}\n", std::process::id())).unwrap();
+}
+
+/// The lines a root's revoke prints while `serve` runs, for `root`.
+fn sessions_end(root: &str) -> String {
+    format!(
+        "sessions from devices of {root} end now, yours too if you reached this machine as one.\n\
+         sessions through links this machine made stay open.\n"
+    )
+}
+
+/// A key one of your devices holds, or a contact's device, is never a root: the root form refuses it before
+/// the terminal check and the prompt, naming the form that takes it, and writes nothing. Red when the root
+/// form latches it as a root this machine does not know.
+#[tokio::test]
+async fn revoke_a_root_refuses_a_device_key_and_names_its_form() {
+    let home = scratch("root-device-key");
+    holds(
+        &home,
+        &[live(OWN, "desk"), live(LAPTOP, "laptop")],
+        Vec::new(),
+    )
+    .await;
+    let mut store = ContactsStore::open(&home).await.unwrap();
+    store.contacts_mut().add(
+        "alice".parse().unwrap(),
+        Some("phone".parse().unwrap()),
+        node(PHONE),
+    );
+    store.save(&swoosh::testkit::lock()).unwrap();
+    let before = snapshot(home.dir());
+    for (seed, line) in [
+        (
+            LAPTOP,
+            "that is me/laptop's key, not a root; to revoke the device: swoosh revoke me/laptop",
+        ),
+        (
+            PHONE,
+            "that is alice/phone's key, not a root; to take back the links this machine gave it: swoosh \
+             revoke alice/phone",
+        ),
+    ] {
+        for terminal in [true, false] {
+            let ran = revoke_root_with(
+                &home,
+                seed,
+                Some(&prefix(seed)),
+                Counting::new([PASS]),
+                terminal,
+            )
+            .await;
+            assert_eq!(ran.refusal(), line, "at a terminal: {terminal}");
+            let usage = ran
+                .result
+                .as_ref()
+                .err()
+                .and_then(|error| error.downcast_ref::<Usage>());
+            assert!(usage.is_none(), "exit 1, as the own-key refusal");
+            assert!(ran.confirms.is_empty() && ran.said.is_empty(), "{line}");
+            assert!(snapshot(home.dir()) == before, "nothing was written");
+        }
+    }
+}
+
+/// The lines before the prompt are said where the person types, never on stderr, so a stderr sent elsewhere
+/// never hides what the act ends. Red when they print on stderr.
+#[tokio::test]
+async fn revoke_a_root_says_what_this_machine_is_to_it_where_the_prompt_is() {
+    for (kind, home, seed) in every_kind("root-tty").await {
+        let ran = revoke_root(&home, seed, &prefix(seed)).await;
+        let err = ran.ok().to_owned();
+        assert!(!ran.said.is_empty(), "{kind}");
+        for line in &ran.said {
+            assert!(!err.contains(line.as_str()), "{kind}: {err}");
+            assert!(
+                ran.tape.at(&format!("<tty>{line}")) < ran.tape.at("<confirm>"),
+                "{kind}"
+            );
+        }
+    }
+}
+
+/// A root whose making stopped after `root.key` (no list) or whose restore did (its list beside it) is
+/// retired as a made root: the holder's line, the prefix, its passphrase, the holder's lines, every file
+/// gone. Never the `serve` line, since nothing was admitted under a root never pinned. Red when the half-made
+/// root refuses after the prompt and names the mint, or the `serve` line prints for any holder.
+#[tokio::test]
+async fn revoke_a_half_made_root_retires_it_as_a_made_one() {
+    let minted = scratch("root-half-minted");
+    root_key_at(&minted.root_key());
+    let restored = scratch("root-half-restored");
+    root_key_at(&restored.root_key());
+    held(&restored, &records(1, &[live(OWN, "desk")], Vec::new()));
+    for (what, home) in [("mint", minted), ("restore", restored)] {
+        assert!(
+            matches!(
+                swoosh::standing::Standing::read(&home).await.unwrap(),
+                swoosh::standing::Standing::InterruptedMint { .. }
+            ),
+            "{what}"
+        );
+        serving(&home);
+        let ran = revoke_root(&home, ROOT, &prefix(ROOT)).await;
+        let err = ran.ok().to_owned();
+        assert_eq!(
+            ran.said,
+            [format!(
+                "this machine keeps {}; this deletes it here and ends it for good.",
+                root_short(ROOT)
+            )],
+            "{what}"
+        );
+        assert_eq!(
+            err,
+            format!(
+                "retired {}, your root, on this machine.\n\
+                 to make a new root: swoosh invite <name> <key>\n\
+                 tell your contacts; each of them runs: swoosh contact add <you> <new root key>\n",
+                root_short(ROOT)
+            ),
+            "{what}"
+        );
+        assert_eq!(ran.prompts, 1, "{what}: its passphrase is asked");
+        assert!(latched(&home, ROOT), "{what}");
+        for gone in [home.root_key(), home.devices(), home.root_pub()] {
+            assert!(!gone.exists(), "{what}: {} is gone", gone.display());
+        }
+        assert_eq!(
+            swoosh::standing::Standing::read(&home).await.unwrap(),
+            swoosh::standing::Standing::Unpinned,
+            "{what}"
+        );
+    }
+}
+
+/// While `serve` runs, revoking the root this machine is pinned to says the sessions under it end, and
+/// those through links this machine made do not; a root it was never pinned to, or one a stopped revoke
+/// latched already, prints neither. Red when the lines are dropped, or printed for any kind.
+#[tokio::test]
+async fn revoke_a_root_names_the_sessions_it_ends_while_serve_runs() {
+    let device = device("root-serve", &[live(OWN, "desk"), live(LAPTOP, "laptop")]).await;
+    serving(&device);
+    let ran = revoke_root(&device, ROOT, &prefix(ROOT)).await;
+    assert!(
+        ran.ok().ends_with(&sessions_end(&root_short(ROOT))),
+        "{}",
+        ran.err
+    );
+
+    let unknown = scratch("root-serve-unknown");
+    serving(&unknown);
+    let ran = revoke_root(&unknown, STRANGER, &prefix(STRANGER)).await;
+    assert!(!ran.ok().contains("sessions"), "{}", ran.err);
+
+    let latched_here = scratch("root-serve-latched");
+    holds(&latched_here, &[live(OWN, "desk")], Vec::new()).await;
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &latched_here,
+        [nauthy::Revocation::Key(TestRoot::seeded(ROOT).verify_key())],
+    )
+    .unwrap();
+    serving(&latched_here);
+    let ran = revoke_root(&latched_here, ROOT, &prefix(ROOT)).await;
+    assert!(!ran.ok().contains("sessions"), "{}", ran.err);
+}
+
+/// What this machine is to the root is read again under `home.lock`: a root kept here written while the
+/// person typed stops a revoke that read the root as unknown, before its latch. Red when the re-check is
+/// dropped.
+#[tokio::test]
+async fn revoke_a_root_whose_kind_moved_during_the_prompt_writes_nothing() {
+    let home = scratch("root-kind-moved");
+    let tape = Tape::default();
+    let mut typing = Typing::new(Counting::new([PASS]), true, Some(&prefix(ROOT)), &tape);
+    let key_path = home.root_key();
+    typing.then = Some(Box::new(move || root_key_at(&key_path)));
+    let target = format!("root:{}", node(ROOT));
+    let ran = run_typing(&home, &[&target], b"", typing, Devices::all(&tape), tape).await;
+    assert_eq!(ran.refusal(), swoosh::standing::CHANGED);
+    assert!(!latched(&home, ROOT), "nothing latched");
+}
+
+/// Three wrong passphrases at the root step of `revoke me/<name>` leave the block written, and say so in
+/// one line that names the rerun. Red when the third wrong passphrase prints its own refusal.
+#[tokio::test]
+async fn revoke_a_device_after_three_wrong_passphrases_prints_one_partway_line() {
+    let home = scratch("device-wrong-three");
+    holds(
+        &home,
+        &[live(OWN, "desk"), live(LAPTOP, "laptop")],
+        Vec::new(),
+    )
+    .await;
+    let tape = Tape::default();
+    let wrong = Counting::new([
+        "not it at all, sorry",
+        "nor this one, either",
+        "nor the third one",
+    ]);
+    let ran = run(&home, &["me/laptop"], b"", wrong, Devices::all(&tape), tape).await;
+    assert_eq!(
+        ran.refusal(),
+        "me/laptop is blocked on this machine, not yet on your other devices; to finish, run it again: \
+         swoosh revoke me/laptop"
+    );
+    assert_eq!(ran.prompts, 3, "three tries");
+    assert!(!ran.err.contains("revoked"), "{}", ran.err);
+    assert!(blocks_key(&home, LAPTOP).await, "the block is written");
+}
+
+/// Any other cause the root step stops on prints the partway sentence, then the cause's own line, as one
+/// message: here a copy of your root that cannot be written. Red when the cause prints alone, with nothing
+/// saying the block landed.
+#[tokio::test]
+async fn revoke_a_device_whose_root_step_stops_prints_the_partway_line_then_its_cause() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let rows = [live(OWN, "desk"), live(LAPTOP, "laptop")];
+    let home = device("partway-cause", &rows).await;
+    let copy_dir = dir("partway-cause-copy");
+    copy(&copy_dir, &records(1, &rows, Vec::new()));
+    std::fs::set_permissions(&copy_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let ran = revoke(&home, &["me/laptop", "--root", copy_dir.to_str().unwrap()]).await;
+    std::fs::set_permissions(&copy_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let refusal = ran.refusal();
+    let (first, cause) = refusal.split_once('\n').expect("two lines");
+    assert_eq!(
+        first,
+        "me/laptop is blocked on this machine, not yet on your other devices."
+    );
+    assert!(
+        cause.starts_with("this copy of your root cannot be written ("),
+        "{refusal}"
+    );
+    assert!(!ran.err.contains("revoked"), "{}", ran.err);
+    assert!(blocks_key(&home, LAPTOP).await, "the block is written");
 }
