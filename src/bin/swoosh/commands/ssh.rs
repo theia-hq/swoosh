@@ -120,9 +120,11 @@ impl SshCmd {
         // so known_hosts stays stable per peer.
         let candidates = self.peer.candidates(contacts)?;
         let Some(first) = candidates.into_iter().next() else {
-            // `candidates` never yields an empty success (an unknown name is a clean error), but a match
-            // keeps this total rather than resting on that invariant with an unwrap.
-            eyre::bail!("could not resolve {}: no known device", self.peer);
+            // A person saved by their root alone has no machine to dial: the same words `reach` uses.
+            eyre::bail!(
+                "could not reach {}: it has no machine saved here",
+                self.peer
+            );
         };
         let host = self.peer.to_string();
         let key = first.node.to_string();
