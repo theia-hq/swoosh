@@ -344,7 +344,7 @@ fn what_a_running_serve_cannot_apply_is_named() {
 }
 
 /// A shell added to `serve.toml` under a name whose live links were made for another target is not bound
-/// while `serve` runs (nothing added is), and the line that start would refuse with is what the run logs.
+/// while `serve` runs (nothing added is), and the warning that start will print is what the run prints.
 #[test]
 fn a_live_add_of_sshd_over_other_links_keeps_the_running_set() {
     use crate::grants::{Delegation, GrantKind, GrantRecord, Grants, LinksForAnother};
@@ -374,23 +374,22 @@ fn a_live_add_of_sshd_over_other_links_keeps_the_running_set() {
     let waiting = watcher.waiting();
     assert_eq!(waiting.added, ["ssh"], "ssh waits for the next start");
     assert!(watcher.is_enabled(&service("ping")), "ping is still served");
-    let refused = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.added)
+    let links = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.added)
         .expect("the ledger reads")
-        .expect("that start would refuse the shell");
+        .expect("that start would warn of the shell");
     assert_eq!(
-        refused.warning().to_string(),
-        "the next serve will refuse ssh: it has live links made when it served tcp:localhost:22, and \
-         they would open a shell: serve the shell under another name, or revoke them first (swoosh \
-         status lists them under links you shared)"
+        links.to_string(),
+        "ssh has live links made when it served tcp:localhost:22, and they would open a shell: serve the \
+         shell under another name, or revoke them first (swoosh status lists them under links you shared)"
     );
     assert!(
-        !refused.to_string().contains(&holder),
+        !links.to_string().contains(&holder),
         "no holder's key is printed"
     );
 }
 
 /// A running name retargeted in `serve.toml` waits for the next start like an added one: the watcher names
-/// it, and when that start would refuse it over links made for the old target, the run logs that too.
+/// it, and when that start would warn of links made for the old target, the run prints that too.
 #[test]
 fn a_retarget_of_a_running_name_is_named_and_checked() {
     use crate::grants::{Delegation, GrantKind, GrantRecord, Grants, LinksForAnother};
@@ -426,7 +425,7 @@ fn a_retarget_of_a_running_name_is_named_and_checked() {
         waiting.to_string(),
         "the changed service ssh in serve.toml takes effect the next time serve starts"
     );
-    let refused = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.changed)
+    let links = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.changed)
         .expect("the ledger reads");
-    assert!(refused.is_some(), "that start would refuse the shell");
+    assert!(links.is_some(), "that start would warn of the shell");
 }

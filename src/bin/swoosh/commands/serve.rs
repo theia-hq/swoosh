@@ -344,12 +344,15 @@ impl ServeCmd {
         let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
         let started = Started::of(&self.services, serve_toml.first_read(), home, &cwd)?;
         let mut requested = started.entries();
-        // An engine that must never face an open gate is never bound under a name whose live links were made
-        // for something else, since it would admit them: refused here, before anything binds or is
-        // written, whether named now or resumed. The gate holds the same line for each link it admits.
-        if let Some(refused) = LinksForAnother::in_home(home, requested.iter().map(String::as_str))?
-        {
-            return Err(refused.into());
+        // An engine that must never face an open gate, bound under a name whose live links were made for
+        // something else, is said here, whether named now or resumed. Refusing the start would protect
+        // nothing: the gate refuses each of those links when it is presented, and a refusal could hold a
+        // name for as long as a lost `anyone` link lives. A ledger that cannot be read is not said here
+        // either: the gate logs it when it is built, and admits no link this machine signed until it can.
+        match LinksForAnother::in_home(home, requested.iter().map(String::as_str)) {
+            Ok(Some(links)) => eprintln!("warning: {links}"),
+            Ok(None) => {}
+            Err(error) => tracing::debug!("could not check the services' links: {error:#}"),
         }
         // A receive service never saves into `$HOME`, the home, or above it, whether named now or resumed:
         // refused here, before anything binds or is written.
@@ -425,13 +428,21 @@ impl ServeCmd {
     }
 
     /// What this run binds under each of its names, from the services it starts with (receive services
-    /// included), for its gate to check each link it signed against; nothing when the run was not claimed.
-    pub fn bound_targets(&self) -> BoundTargets {
-        self.claim
-            .as_ref()
-            .map_or_else(BoundTargets::default, |claim| {
-                BoundTargets::of(claim.started.entries().iter().map(String::as_str))
-            })
+    /// included), for its gate to check each link it signed against.
+    ///
+    /// # Errors
+    ///
+    /// The run was not claimed: there is no list to check against, and an empty one would admit every
+    /// link, so this fails closed as [`admit`](Self::admit) does.
+    pub fn bound_targets(&self) -> eyre::Result<BoundTargets> {
+        let Some(claim) = self.claim.as_ref() else {
+            eyre::bail!(
+                "internal: serve builds its gate before it claimed its home (composition-root bug)"
+            );
+        };
+        Ok(BoundTargets::of(
+            claim.started.entries().iter().map(String::as_str),
+        ))
     }
 
     /// Check that this run may admit the devices of `root`, and record it in `serve.lock`, which its claim
@@ -694,13 +705,13 @@ impl ServeCmd {
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             // A running `serve` gives service only at its start, so a relay, a resolver or a service
             // changed in `serve.toml` waits for the next one; this says so once per change. A service added
-            // or retargeted whose live links that start would refuse to bind it over ([`LinksForAnother`]) is
-            // said too, while the running set stays as it is.
+            // or retargeted under a name whose live links were made for something else ([`LinksForAnother`])
+            // gets the line that start will print, while the running set stays as it is.
             () = enabled.watch(|waiting| {
                 eprintln!("warning: {waiting}");
                 let changed: Vec<String> = waiting.added.iter().chain(&waiting.changed).cloned().collect();
                 match LinksForAnother::among_changed(&home, &enabled.held(), &changed) {
-                    Ok(Some(refused)) => eprintln!("warning: {}", refused.warning()),
+                    Ok(Some(links)) => eprintln!("warning: {links}"),
                     Ok(None) => {}
                     Err(error) => tracing::warn!("could not check the added services: {error:#}"),
                 }

@@ -163,15 +163,29 @@ fn append_locked(
 /// Append `line` to the private file at `path`, made `0600` when it is not there, and sync it, so it is on
 /// disk when this returns; a file this append made is durable only once the directory that names it is, so
 /// that is synced too. The caller is the file's one writer at a time.
+///
+/// A file whose last line has no newline (an append cut short by a crash) gets one first, so `line` starts
+/// a line of its own and never joins that tail, which would make both unreadable or read as another row.
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::{Read as _, Seek as _};
+
     let made = !path.exists();
     let mut file = std::fs::OpenOptions::new()
+        .read(true)
         .append(true)
         .create(true)
         .mode(0o600)
         .open(path)?;
     // Reassert 0600 even on a pre-existing file (create's mode fired only on first creation).
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let mut last = *b"\n";
+    if file.metadata()?.len() > 0 {
+        file.seek(std::io::SeekFrom::End(-1))?;
+        file.read_exact(&mut last)?;
+    }
+    if &last != b"\n" {
+        file.write_all(b"\n")?;
+    }
     file.write_all(line.as_bytes())?;
     file.sync_data()?;
     if made && let Some(parent) = path.parent() {
@@ -310,7 +324,7 @@ impl IssuedLedger {
                 Err(_) => tracing::warn!(
                     path = %EscapedPath(path),
                     line = index + 1,
-                    "skipping a malformed line of the used one-use links"
+                    "skipping a line that is not a link id"
                 ),
             }
         }
@@ -553,10 +567,10 @@ impl GrantRecord {
     }
 }
 
-/// A name `serve` will not bind an engine that must never face an open gate under: live links were shared
-/// for it while it served something else (or nothing), and the engine would admit them. Its display is
-/// the refusal line; [`warning`](Self::warning) is the line a running `serve` logs for a change that the
-/// next start will refuse.
+/// A name `serve` binds an engine that must never face an open gate under while live links were shared for
+/// it when it served something else (or nothing). The gate refuses each of those links when it is
+/// presented ([`BoundTargets`]), so this only tells the owner: its display is the line `serve` prints
+/// after `warning: `, at start and for a change to `serve.toml` while it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinksForAnother {
     /// The service name.
@@ -602,12 +616,12 @@ impl LinksForAnother {
 
     /// [`first`](Self::first) over `home`'s ledger and revocations as they stand now. Only an entry that
     /// binds an engine that must never face an open gate is checked, so a `serve` that binds none reads
-    /// neither file and starts as it did, whatever state they are in.
+    /// neither file.
     ///
     /// # Errors
     ///
-    /// The ledger or the revocations could not be read while an entry binds such an engine: the check fails
-    /// closed, so nothing binds.
+    /// The ledger or the revocations could not be read while an entry binds such an engine. Nothing is
+    /// lost by that: the gate admits no link this machine signed while the ledger cannot be read.
     pub fn in_home<'a>(
         home: &crate::home::Home,
         entries: impl IntoIterator<Item = &'a str>,
@@ -631,7 +645,7 @@ impl LinksForAnother {
 
     /// The same check over the services of `held` (a `serve.toml` read while `serve` runs) under `names`:
     /// the ones added, and the ones whose target changed. Neither is bound before the next start, so the
-    /// running set stays either way; this is what that start would refuse, for the run's log.
+    /// running set stays either way; this is what that start would warn of, said now.
     ///
     /// # Errors
     ///
@@ -655,13 +669,7 @@ impl LinksForAnother {
         )
     }
 
-    /// The line a running `serve` logs, after `warning: `, for a change to `serve.toml` its next start will
-    /// refuse: what happens first, then the same reason and fixes as the refusal.
-    pub fn warning(&self) -> impl fmt::Display + '_ {
-        Warning(self)
-    }
-
-    /// The refusal after the name: what the links were made for, what they would reach, and the fixes.
+    /// The line after the name: what the links were made for, what they would reach, and the fixes.
     fn reason(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let targets: Vec<&str> = self
             .targets
@@ -683,8 +691,8 @@ impl LinksForAnother {
 }
 
 /// The name and target of `entry` (`name=target`) when it binds an engine that must never face an open
-/// gate; `None` for any other entry, and for one whose target is no [`ServedTarget`], which `serve`
-/// refuses at bind.
+/// gate; `None` for any other entry, and for one whose target is no [`ServedTarget`], under which the gate
+/// admits no link this machine signed ([`BoundTargets`]).
 fn never_public_entry(entry: &str) -> Option<(&str, ServedTarget)> {
     let (name, target) = entry.split_once('=')?;
     let target: ServedTarget = target.parse().ok()?;
@@ -697,19 +705,6 @@ impl fmt::Display for LinksForAnother {
         self.reason(f)
     }
 }
-
-/// [`LinksForAnother::warning`]'s line.
-struct Warning<'a>(&'a LinksForAnother);
-
-impl fmt::Display for Warning<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self(refused) = self;
-        write!(f, "the next serve will refuse {}: it ", refused.name)?;
-        refused.reason(f)
-    }
-}
-
-impl core::error::Error for LinksForAnother {}
 
 /// How a grant is bound, which fixes its theft-resistance and delegability. An enum, not a stored word, so a
 /// future grant kind forces a decision at every match site rather than reading as one of these.

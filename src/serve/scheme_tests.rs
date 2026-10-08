@@ -60,3 +60,17 @@ fn a_link_is_admitted_only_to_the_target_it_was_made_for() {
     );
     assert!(bound.admits("other", None), "nothing bound under the name");
 }
+
+/// A name bound to a scheme [`Scheme`] does not know (one tightbeam might bind after an upgrade) admits no
+/// link, whatever it was made for: this gate cannot say what that engine may face, so it fails closed.
+#[test]
+fn a_name_bound_to_an_unknown_scheme_admits_no_link() {
+    let target = |text: &str| text.parse::<ServedTarget>().unwrap();
+    let bound = BoundTargets::of(["web=gopher:localhost:70"]);
+
+    assert!(!bound.admits("web", None), "made when web served nothing");
+    assert!(
+        !bound.admits("web", Some(&target("tcp:localhost:70"))),
+        "made for a forward"
+    );
+}

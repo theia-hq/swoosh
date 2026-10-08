@@ -18,6 +18,7 @@ use core::time::Duration;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 
 use bifrost::{Node, NodeId};
@@ -64,6 +65,27 @@ struct Served {
     child: Child,
     key: NodeId,
     addr: SocketAddr,
+    /// Each line it wrote to stderr so far, read on a thread of its own.
+    stderr: Arc<Mutex<Vec<String>>>,
+}
+
+impl Served {
+    /// The first line on its stderr that contains `text`, waiting a bounded time for the reader to catch up.
+    fn stderr_line(&self, text: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let lines = self.stderr.lock().unwrap();
+            if let Some(line) = lines.iter().find(|line| line.contains(text)) {
+                return line.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "serve printed no line with {text:?}: {lines:?}"
+            );
+            drop(lines);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
 }
 
 impl Drop for Served {
@@ -85,9 +107,17 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
         .env_remove("SWOOSH_HOME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("serve spawns");
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let reader = BufReader::new(child.stderr.take().expect("piped stderr"));
+    let lines_read = Arc::clone(&stderr);
+    std::thread::spawn(move || {
+        for line in reader.lines().map_while(Result::ok) {
+            lines_read.lock().unwrap().push(line);
+        }
+    });
     let stdout = child.stdout.take().expect("piped stdout");
     let mut lines = BufReader::new(stdout).lines();
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -110,6 +140,7 @@ fn serve(home: &Path, entries: &[&str]) -> Served {
         child,
         key: key.unwrap(),
         addr: addr.unwrap(),
+        stderr,
     }
 }
 
@@ -466,39 +497,11 @@ fn anyone_link_for(home: &swoosh::home::Home, name: &str, serves: Option<&str>, 
         .unwrap();
 }
 
-/// `serve <entries>` on `home`, as a person runs it, expected to refuse: its exit, stdout and stderr. A
-/// `serve` that is still running after a bounded wait started instead of refusing, so it is killed and the
-/// test fails, rather than waiting on a node that never stops.
-fn serve_once(home: &Path, entries: &[&str]) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
-        .arg("--home")
-        .arg(home)
-        .args(["serve", "--transport", "quirk+noise"])
-        .args(entries)
-        .env("XDG_RUNTIME_DIR", runtime_dir(home))
-        .env_remove("SWOOSH_HOME")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("serve spawns");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while child.try_wait().expect("poll serve").is_none() {
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("serve was still running after 20s: it started instead of refusing");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    child.wait_with_output().expect("serve's output")
-}
-
-/// A shell is never bound under a name whose live links were made for another target, or for nothing: the
-/// start refuses, exit 1, before it binds or saves anything, says what the links were made for, and names
-/// no holder's key.
+/// A shell bound under a name whose live links were made for another target, or for nothing, is warned of
+/// and served: the line says what the links were made for, and names no holder's key.
+#[cfg(feature = "ssh")]
 #[test]
-fn serve_refuses_sshd_under_a_name_with_links_for_another_target() {
+fn serve_warns_of_sshd_under_a_name_with_links_for_another_target() {
     let scratch = Scratch::new("shell-over-links");
     let home = scratch.home();
     let later = SystemTime::now() + Duration::from_secs(3600);
@@ -508,65 +511,75 @@ fn serve_refuses_sshd_under_a_name_with_links_for_another_target() {
     link_for_ssh(&home, None, &carol, 2, later);
     link_for_ssh(&home, Some("sshd:"), &carol, 3, later);
 
-    let output = serve_once(&scratch.0, &["ssh=sshd:"]);
-    assert_eq!(output.status.code(), Some(1), "exit 1");
-    assert!(output.stdout.is_empty(), "no banner: nothing was bound");
+    let served = serve(&scratch.0, &["ssh=sshd:"]);
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr).trim_end(),
-        "error: ssh has live links made when it served tcp:localhost:22 or nothing, and they would open a \
-         shell: serve the shell under another name, or revoke them first (swoosh status lists them under \
+        served.stderr_line("live links"),
+        "warning: ssh has live links made when it served tcp:localhost:22 or nothing, and they would open \
+         a shell: serve the shell under another name, or revoke them first (swoosh status lists them under \
          links you shared)"
     );
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = served.stderr.lock().unwrap().join("\n");
     assert!(
         !stderr.contains(&bob) && !stderr.contains(&carol),
         "no holder's key is printed"
     );
-    assert!(
-        !home.serve_toml().exists(),
-        "a start that refused saves nothing"
-    );
 }
 
-/// A link to anyone made while `ssh` was a forward stops a bare `serve ssh` too, and the refusal names no
-/// command that cannot run as printed: `revoke anyone` is no form.
-#[test]
-fn serve_refuses_a_shell_over_an_anyone_link_and_names_no_revoke_for_it() {
+/// A link to anyone made while `ssh` was a forward does not stop a shell served under `ssh`: the start
+/// warns, naming no command that cannot run as printed (`revoke anyone` is no form), and the gate refuses
+/// the link when it is presented, since it was made for the forward.
+#[cfg(feature = "ssh")]
+#[tokio::test]
+async fn serve_warns_of_a_shell_over_an_anyone_link_and_its_gate_refuses_it() {
     let scratch = Scratch::new("shell-over-anyone");
-    anyone_link_for(&scratch.home(), "ssh", Some("tcp:localhost:22"), 1);
-    let output = serve_once(&scratch.0, &["ssh"]);
-    assert_eq!(output.status.code(), Some(1), "exit 1");
-    assert!(output.stdout.is_empty(), "no banner: nothing was bound");
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    swoosh(&scratch.0, &["leave", "--new-key"]);
+    swoosh::serve_toml::ServeToml::update(&swoosh::testkit::lock(), &scratch.home(), |file| {
+        file.services = vec!["ssh=tcp:localhost:22".to_owned()];
+    })
+    .unwrap();
+    let link = swoosh::link::parse(&swoosh(&scratch.0, &["share", "ssh", "anyone"])).unwrap();
+
+    let served = serve(&scratch.0, &["ssh=sshd:"]);
+    let warning = served.stderr_line("live links");
     assert_eq!(
-        stderr.trim_end(),
-        "error: ssh has live links made when it served tcp:localhost:22, and they would open a shell: \
+        warning,
+        "warning: ssh has live links made when it served tcp:localhost:22, and they would open a shell: \
          serve the shell under another name, or revoke them first (swoosh status lists them under links \
          you shared)"
     );
-    assert!(!stderr.contains("swoosh revoke"), "{stderr}");
+    assert!(!warning.contains("swoosh revoke"), "{warning}");
+
+    let node = dialer(0x49, &served).await;
+    let session = Connector::to_node(served.key, "ssh".parse().unwrap(), Some(link))
+        .open_service(&node)
+        .await
+        .expect("connect");
+    assert!(
+        open(&session).await.is_none(),
+        "a link made for the forward never reaches the shell"
+    );
 }
 
-/// The start check is the gate's line: receiving files under a name whose links to anyone were made while
-/// it served nothing is refused, as a shell is.
+/// The same line for an engine that runs no code: receiving files under a name whose links to anyone were
+/// made while it served nothing is warned of, as a shell is.
 #[test]
-fn serve_refuses_recv_under_a_name_with_anyone_links_for_another_target() {
+fn serve_warns_of_recv_under_a_name_with_anyone_links_for_another_target() {
     let scratch = Scratch::new("recv-over-anyone");
     anyone_link_for(&scratch.home(), "drop", None, 1);
     let dir = std::env::temp_dir().join(format!("sw-anch-recv-drop-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = format!("drop=recv:{}", dir.display());
-    let output = serve_once(&scratch.0, &[&entry]);
+    let served = serve(&scratch.0, &[&entry]);
+    let warning = served.stderr_line("live links");
+    drop(served);
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(output.status.code(), Some(1), "exit 1");
-    assert!(output.stdout.is_empty(), "no banner: nothing was bound");
     let target = format!("recv:{}", dir.display());
     assert_eq!(
-        String::from_utf8_lossy(&output.stderr).trim_end(),
+        warning,
         format!(
-            "error: drop has live links made when it served nothing, and they would reach {target}: serve \
-             {target} under another name, or revoke them first (swoosh status lists them under links you \
-             shared)"
+            "warning: drop has live links made when it served nothing, and they would reach {target}: \
+             serve {target} under another name, or revoke them first (swoosh status lists them under links \
+             you shared)"
         )
     );
 }
@@ -612,20 +625,42 @@ fn a_serve_with_nothing_never_public_starts_over_an_unreadable_ledger() {
     let _served = serve(&scratch.0, &["demo=echo:"]);
 }
 
-/// A `serve` that binds such an engine fails closed over a ledger it cannot read: exit 1, nothing bound,
-/// whether it is a shell or the default `ping` and `speed`.
-#[test]
-fn a_serve_of_a_never_public_engine_refuses_over_an_unreadable_ledger() {
+/// A `serve` that binds such an engine starts over a ledger it cannot read too, whether it is a shell or
+/// the default `ping` and `speed`, and says so; its gate admits no link this machine signed while the
+/// ledger cannot be read, and admits them again once it can.
+#[tokio::test]
+async fn a_serve_of_a_never_public_engine_starts_over_an_unreadable_ledger_and_admits_no_link() {
     let scratch = Scratch::new("ledger-unreadable");
+    swoosh(&scratch.0, &["leave", "--new-key"]);
+    let link = issue(&scratch.0, &["demo", "anyone"]);
+    let (links, kept) = (scratch.home().links(), scratch.0.join("links.kept"));
+    std::fs::rename(&links, &kept).unwrap();
+    std::fs::create_dir(&links).unwrap();
+
+    let served = serve(&scratch.0, &["demo=echo:", "ping"]);
+    served.stderr_line("the grants ledger cannot be read");
+    let node = dialer(0x4a, &served).await;
+    let session = echo_session(&node, &served, link.clone(), None).await;
+    assert!(
+        open(&session).await.is_none(),
+        "no link this machine signed is admitted while the ledger cannot be read"
+    );
+
+    std::fs::remove_dir(&links).unwrap();
+    std::fs::rename(&kept, &links).unwrap();
+    tokio::time::sleep(nauthy::STAT_DEBOUNCE + Duration::from_millis(200)).await;
+    // A dialer of its own: the refusal tore the first one's connection down.
+    let node = dialer(0x4b, &served).await;
+    let session = echo_session(&node, &served, link, None).await;
+    let (mut write, mut read) = open(&session)
+        .await
+        .expect("the link is admitted once the ledger reads again");
+    assert!(echoes(&mut write, &mut read).await, "and served");
+
+    // The default `ping` and `speed` first, since a named start saves its list and a bare one resumes it.
+    let scratch = Scratch::new("ledger-unreadable-default");
     std::fs::create_dir(scratch.home().links()).unwrap();
-    for entries in [&["ssh"][..], &[][..]] {
-        let output = serve_once(&scratch.0, entries);
-        assert_eq!(output.status.code(), Some(1), "{entries:?}: exit 1");
-        assert!(output.stdout.is_empty(), "{entries:?}: nothing was bound");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.starts_with("error: access the grants ledger"),
-            "{entries:?}: {stderr}"
-        );
-    }
+    serve(&scratch.0, &[]).stderr_line("the grants ledger cannot be read");
+    #[cfg(feature = "ssh")]
+    serve(&scratch.0, &["ssh"]).stderr_line("the grants ledger cannot be read");
 }

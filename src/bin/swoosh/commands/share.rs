@@ -11,9 +11,9 @@
 //! An `anyone` link to a service whose engine must never face an open gate (a shell, an engine with no
 //! limits of its own, receiving files) is refused unless `--once` asks for it, and so is one to a target
 //! swoosh does not know. `--once` makes a link for anyone that this machine admits once, that lasts 15
-//! minutes at most, and that is sealed, so it cannot be passed on. Every row records what the service's name served when the link was made, so `serve` admits a
-//! link only to that target, and never binds such an engine under a name whose links were made for
-//! something else.
+//! minutes at most, and that is sealed, so it cannot be passed on. Every row records what the service's name
+//! served when the link was made, so `serve` admits a link only to that target, and warns when it binds
+//! such an engine under a name whose links were made for something else.
 //!
 //! The link form is wholly offline: it reads no key and writes no ledger row, it only adds a shorter end to
 //! the link it was given. A copy can never do more than its source, so it needs no one's leave. The link is
@@ -369,7 +369,7 @@ impl Issue {
             Served::Nothing => None,
             Served::Target(target) => Some(target),
             // Nothing can say what such a target would give anyone, so it gets no link to anyone; a bound
-            // link records nothing for it, and `serve` refuses to bind it anyway.
+            // link records nothing for it, and the gate admits no link to a name bound to it anyway.
             Served::Unknown(target) if matches!(self.who, Recipient::Anyone) => eyre::bail!(
                 "{service} serves {}, which swoosh does not know; share it with a person: swoosh share \
                  {service} <person>",

@@ -518,3 +518,26 @@ fn unreadable_used_links_build_no_gate() {
         "no gate over unreadable used links"
     );
 }
+
+/// A use recorded after a line an earlier append left without its newline (a crash mid-write) starts a
+/// line of its own, so it never joins that tail: after a restart the new use is still spent.
+#[test]
+fn a_use_after_a_torn_line_starts_its_own_line() {
+    use nauthy::IssuedIds as _;
+
+    let row = once_row(6);
+    let home = home_with("once-torn", core::slice::from_ref(&row));
+    std::fs::write(home.links_used(), "0f0f").expect("a used file whose last line was cut short");
+    let ledger = issued_ledger(&home);
+    assert!(ledger.is_issued(&row.root_id), "the first use");
+    drop(ledger);
+    assert_eq!(
+        std::fs::read_to_string(home.links_used()).expect("read the used file"),
+        format!("0f0f\n{}\n", row.root_id.to_hex()),
+        "the use is a line of its own"
+    );
+    assert!(
+        !issued_ledger(&home).is_issued(&row.root_id),
+        "a restart still reads it as spent"
+    );
+}

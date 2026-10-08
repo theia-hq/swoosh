@@ -189,20 +189,21 @@ impl ServedTarget {
 /// was made for, whatever the name was rebound to since.
 #[derive(Debug, Clone, Default)]
 pub struct BoundTargets {
-    /// Each name and its target; `None` for a target no link can record (a control character), which
-    /// admits no link.
+    /// Each name and its target; `None` for a target no link can record (a scheme [`Scheme`] does not
+    /// know, or a control character), which admits no link.
     by_name: HashMap<String, Option<ServedTarget>>,
 }
 
 impl BoundTargets {
     /// The targets `entries` (`name=target`, names folded, as `serve` binds them) bind. An entry with no
-    /// `=` binds no name, and one whose scheme no `serve` binds is refused at bind, so neither is held.
+    /// `=` binds no name, so it is not held. One whose target is no [`ServedTarget`] is held as admitting
+    /// no link: tightbeam may still bind a scheme [`Scheme`] does not know, and a link made for anything
+    /// must never reach an engine this gate cannot judge.
     pub fn of<'a>(entries: impl IntoIterator<Item = &'a str>) -> Self {
         let by_name = entries
             .into_iter()
             .filter_map(|entry| {
                 let (name, target) = entry.split_once('=')?;
-                Scheme::parse(target)?;
                 Some((name.to_owned(), target.parse().ok()))
             })
             .collect();
