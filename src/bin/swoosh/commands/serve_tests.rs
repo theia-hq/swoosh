@@ -3658,10 +3658,11 @@ async fn a_host_that_is_not_your_device_opens_stop_after_its_round() {
 /// A revoked device asked first in the first round cannot open `control.stop` for itself: the round asks
 /// every device, so the one holding the list that revokes it is asked too, and the stop opens only once
 /// the gate reads that revocation. The thief asks for a stop before the round, just before the revoking
-/// list lands, and every 10 ms after, and is refused every time; your other device's stop is admitted
-/// after. End the round at the first newer list and the thief, handing over a list from before its
-/// revocation, opens the stop for itself; open it the moment the round ends and the gate, which last read
-/// `revoked` just before the fold and reads it at most once per debounce, admits the thief.
+/// list lands, every 10 ms from the fold until the hold opens and for three debounces after, and is
+/// refused every time; your other device's stop is admitted after. End the round at the first newer list
+/// and the thief, handing over a list from before its revocation, opens the stop for itself; open it the
+/// moment the round ends and the gate, which last read `revoked` just before the fold and reads it at most
+/// once per debounce, admits the thief.
 #[tokio::test]
 async fn a_device_revoked_on_a_sibling_cannot_stop_this_machine_after_the_first_round() {
     use bifrost::Session as _;
@@ -3699,7 +3700,10 @@ async fn a_device_revoked_on_a_sibling_cannot_stop_this_machine_after_the_first_
                 .expect("control.stop binds")
                 .expose()
                 .expect("the exposer builds");
-            let (exposer, first_round) = FirstRound::hold(exposer, AllEnabled);
+            // The two halves apart, as `FirstRound::hold` wires them, so the test can watch the hold open.
+            let (first_round, held) = FirstRound::hold_stop(AllEnabled);
+            let held = std::sync::Arc::new(held);
+            let exposer = exposer.with_enabled(SharedHold(std::sync::Arc::clone(&held)));
             let run = tokio::task::spawn_local(async move { exposer.run(&host, cancel).await });
             let connector = |node: bifrost::NodeId| {
                 let until = std::time::SystemTime::UNIX_EPOCH
@@ -3737,16 +3741,41 @@ async fn a_device_revoked_on_a_sibling_cannot_stop_this_machine_after_the_first_
                 },
                 asked: AtomicU32::new(0),
             };
+            // Every wait below is on a condition, never on a time a loaded machine might miss: end `asking`
+            // before the round has finished and the select drops the round, and the stop never opens.
             let asking = async {
                 assert_eq!(thief_asks().await, Ok(()), "the hold refuses the thief");
-                let started = tokio::time::Instant::now();
-                while dial.asked.load(Ordering::SeqCst) < 2
-                    && started.elapsed() < Duration::from_secs(1)
-                {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                // No ask while the round runs, so the gate's last read of `revoked` is `before_revoking`'s.
+                tokio::select! {
+                    // A stop open before the revoking list lands is open to the thief: show that first.
+                    () = held.opened() => {
+                        thief_asks().await?;
+                        panic!("the stop opened before the revoking list landed")
+                    }
+                    () = async {
+                        while dial.asked.load(Ordering::SeqCst) < 2 {
+                            tokio::time::sleep(Duration::from_millis(1)).await;
+                        }
+                    } => {}
                 }
-                let folded = tokio::time::Instant::now();
-                while folded.elapsed() < nauthy::STAT_DEBOUNCE * 5 {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+                loop {
+                    thief_asks().await?;
+                    if tokio::time::timeout(Duration::from_millis(10), held.opened())
+                        .await
+                        .is_ok()
+                    {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "the round never opened the stop"
+                    );
+                }
+                // At once and for a few debounces after the hold opens: the window a gate still reading
+                // `revoked` from before the fold would admit the thief in.
+                let opened = tokio::time::Instant::now();
+                while opened.elapsed() < nauthy::STAT_DEBOUNCE * 3 {
                     thief_asks().await?;
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -3766,6 +3795,10 @@ async fn a_device_revoked_on_a_sibling_cannot_stop_this_machine_after_the_first_
                 "the round folded the thief's revocation"
             );
 
+            assert!(
+                held.is_enabled(&CONTROL_STOP_SERVICE.parse().expect("a name")),
+                "the hold stays open once the round is dropped"
+            );
             let (mut writer, mut reader) = connector(sibling.node_id())
                 .open_service(&sibling)
                 .await
@@ -3824,6 +3857,15 @@ impl<F: AsyncFn()> swoosh::sync::Dial for InOrder<F> {
         _bytes: &[u8],
     ) -> Result<swoosh::sync::Answer, swoosh::sync::ExchangeError> {
         Ok(swoosh::sync::Answer::Same)
+    }
+}
+
+/// The first-round hold, shared: the exposer asks it while the test watches it open.
+struct SharedHold(std::sync::Arc<swoosh::serve::StopAfterFirstRound<AllEnabled>>);
+
+impl tightbeam::enabled::EnabledServices for SharedHold {
+    fn is_enabled(&self, service: &nauthy::Service) -> bool {
+        self.0.is_enabled(service)
     }
 }
 

@@ -137,10 +137,10 @@ impl FirstRound {
     }
 
     /// The round's half, and `enabled` with `control.stop` refused until the round has finished: the two
-    /// halves apart, for a caller that watches the oracle itself. A run wires them with [`hold`](Self::hold).
+    /// halves apart, for tests, which watch the oracle themselves. A run wires them with [`hold`](Self::hold).
     pub fn hold_stop<E>(enabled: E) -> (Self, StopAfterFirstRound<E>) {
-        // A watch rather than a bare flag: the gate reads it without waiting on every stream, and a
-        // caller can also wait for the round to end.
+        // A watch rather than a bare flag: the gate reads it without waiting on every stream, and a test
+        // can also wait for the round to end.
         let (finished, open) = watch::channel(false);
         (Self(finished), StopAfterFirstRound { enabled, open })
     }
