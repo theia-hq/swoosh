@@ -22,11 +22,13 @@ use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::reach;
 use swoosh::serve::control_codec::{ControlError, Request, Response};
 use swoosh::serve::{
-    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, DEFAULT_SERVICES, Exchange, ProxyScope,
-    ProxyService, SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry, extract_recv_services,
+    CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, DEFAULT_SERVICES, Exchange, FirstRound,
+    ProxyScope, ProxyService, SYNC_SERVICE, ServiceList, Stop, Stopped, bind_entry,
+    extract_recv_services,
 };
 use swoosh::transport::{MdnsState, Reach, RelayHome, Resolver};
 use swoosh::unbound::Unbound;
+use tightbeam::enabled::{AllEnabled, EnabledServices as _};
 use tightbeam::tunnel::{
     CancellationToken, ManifestEntry, Metering, Posture, RawSource, Router, ServiceCatalog,
     TargetKind,
@@ -3546,4 +3548,142 @@ fn serve_admit_takes_one_root_key() {
         .is_err(),
         "one key, not repeated"
     );
+}
+
+/// The first round with your devices runs as `serve` starts: the round has dialed nas before any time
+/// passed. A first round that waited would leave a restarted machine open to a stop before it learns a
+/// revocation.
+#[tokio::test(start_paused = true)]
+async fn the_first_sync_round_runs_at_start() {
+    let nas = bifrost_mem::MemTransport::bind();
+    let home = home_with_a_sibling("start", bifrost::Transport::node_id(&nas)).await;
+    let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+    let (first_round, _held) = FirstRound::hold_stop(AllEnabled);
+    let started = tokio::time::Instant::now();
+    tokio::select! {
+        () = super::sync_rounds(&node, &home, first_round) => unreachable!("the rounds never end"),
+        dialed = bifrost::Transport::accept(&nas) => {
+            dialed.expect("the round dials nas");
+        }
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the first round dials at start, not after a wait: {:?}",
+        started.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// `control.stop` is refused while the first round waits on a sibling that never answers, and admitted
+/// once the round gives up on it at its bound. Open the stop only on a newer list and a machine whose
+/// devices are all out of reach could never be stopped from another one.
+#[tokio::test(start_paused = true)]
+async fn a_round_that_finds_no_sibling_still_opens_stop() {
+    // Bound, so the dial lands, and never accepting, so nothing answers it.
+    let nas = bifrost_mem::MemTransport::bind();
+    let home = home_with_a_sibling("silent", bifrost::Transport::node_id(&nas)).await;
+    let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+    let (first_round, held) = FirstRound::hold_stop(AllEnabled);
+    let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");
+    let started = tokio::time::Instant::now();
+    let rounds = super::sync_rounds(&node, &home, first_round);
+    tokio::pin!(rounds);
+
+    tokio::select! {
+        () = &mut rounds => unreachable!("the rounds never end"),
+        () = tokio::time::sleep(swoosh::sync::EACH / 2) => {}
+    }
+    assert!(
+        !held.is_enabled(&stop),
+        "control.stop is refused while the round waits on nas"
+    );
+
+    tokio::select! {
+        () = &mut rounds => unreachable!("the rounds never end"),
+        () = held.opened() => {}
+        () = tokio::time::sleep(swoosh::sync::EACH * 4 + Duration::from_secs(1)) => {
+            panic!("a round no sibling answered left control.stop refused")
+        }
+    }
+    assert!(
+        started.elapsed() >= swoosh::sync::EACH,
+        "the round waited out nas's bound: {:?}",
+        started.elapsed()
+    );
+    assert!(held.is_enabled(&stop), "and then admits control.stop");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A machine that is not one of your devices (a `serve --admit` host trusts no root) has no one to ask:
+/// its first round ends at once, and `control.stop` is admitted from then on. Wait for a newer list and
+/// such a host could never be stopped from a device of the root it admits.
+#[tokio::test(start_paused = true)]
+async fn a_host_that_is_not_your_device_opens_stop_after_its_round() {
+    let dir = std::env::temp_dir().join(format!("swoosh-first-round-host-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    swoosh::config::create_store_dir(&dir).expect("the store dir");
+    let home = Home::resolve(Some(dir)).expect("the scratch home resolves");
+    let node = bifrost::Node::new(bifrost_mem::MemTransport::bind(), bifrost::NoDiscovery);
+    let (first_round, held) = FirstRound::hold_stop(AllEnabled);
+    let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");
+    let started = tokio::time::Instant::now();
+    tokio::select! {
+        () = super::sync_rounds(&node, &home, first_round) => unreachable!("the rounds never end"),
+        () = held.opened() => {}
+        () = tokio::time::sleep(swoosh::sync::EACH) => {
+            panic!("a host with no devices to ask left control.stop refused")
+        }
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "a round with no one to ask ends at once: {:?}",
+        started.elapsed()
+    );
+    assert!(held.is_enabled(&stop), "and admits control.stop");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A home for `me/desk`, one of a root's devices, whose list names one other device, `me/nas` at `nas`.
+async fn home_with_a_sibling(tag: &str, nas: bifrost::NodeId) -> Home {
+    use swoosh::roster::{Epoch, RosterDoc};
+    use swoosh::testkit::{STANDING_UNTIL, TestNode, TestRoot};
+    use tightbeam::identity::AsVerifyKey as _;
+
+    let dir = std::env::temp_dir().join(format!("swoosh-first-round-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    swoosh::config::create_store_dir(&dir).expect("the store dir");
+    let home = Home::resolve(Some(dir)).expect("the scratch home resolves");
+    let desk = TestNode::seeded(0x71);
+    let root = TestRoot::seeded(0x72);
+    let mut seed = desk.seed();
+    swoosh::identity::make_machine_dir(&home).expect("the machine dir");
+    keystore::KeyFile::new(home.key())
+        .write(
+            &keystore::Secret::take(&mut seed),
+            keystore::Protection::Plain,
+        )
+        .expect("this machine's key");
+    swoosh::config::write_signet(&swoosh::testkit::lock(), &home, root.node_id()).expect("the pin");
+    let until = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(STANDING_UNTIL);
+    let badge = root.device_badge(desk.node_id(), until).expect("a badge");
+    swoosh::config::write_badge(&swoosh::testkit::lock(), &home, &badge).expect("the badge");
+    let members = [
+        (desk.verify_key(), "desk"),
+        (nas.verify_key().expect("a usable key"), "nas"),
+    ]
+    .into_iter()
+    .map(|(key, label)| {
+        root.member(key, label.parse().expect("a name"))
+            .expect("a member")
+    })
+    .collect();
+    let update = root.sign_update(&RosterDoc::new(Epoch(1), members).expect("a list"));
+    swoosh::roster::fold(
+        &HomeWrite::take(&home).await.expect("home.lock"),
+        &home,
+        &update,
+    )
+    .await
+    .expect("the list folds");
+    home
 }

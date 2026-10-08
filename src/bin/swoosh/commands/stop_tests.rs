@@ -18,8 +18,10 @@ use swoosh::home::Home;
 use swoosh::node_client::ControlClient;
 use swoosh::peer::{OwnDevice, Peer};
 use swoosh::roster::{Epoch, RevokedDevice, RosterDoc};
-use swoosh::serve::{CONTROL_STOP_SERVICE, Resident, Stop, StopKind};
+use swoosh::serve::{CONTROL_STOP_SERVICE, FirstRound, Resident, Stop, StopKind};
+use swoosh::serve_toml::LiveServeToml;
 use swoosh::testkit::{HostilePeer, STANDING_UNTIL, TestNode, TestRoot};
+use tightbeam::enabled::EnabledServices as _;
 use tightbeam::tunnel::{CancellationToken, Router, ServiceCatalog};
 
 use super::{
@@ -400,6 +402,18 @@ struct Running {
 /// Start a [`Running`] resident under a fresh scratch leaf.
 fn resident(tag: &str) -> Running {
     let leaf = scratch(tag);
+    let off = services_off(&leaf);
+    resident_reading(leaf, off)
+}
+
+/// The services off under `leaf`, read live, as `serve` loads them for its gate and its resident.
+fn services_off(leaf: &Path) -> LiveServeToml {
+    LiveServeToml::load(&Home::resolve(Some(leaf.to_path_buf())).expect("a scratch home"))
+        .expect("the services off load")
+}
+
+/// Start a [`Running`] resident under `leaf`, reading the services off from `off`.
+fn resident_reading(leaf: PathBuf, off: LiveServeToml) -> Running {
     let socket = leaf.join("control.sock");
     let listener =
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
@@ -408,10 +422,7 @@ fn resident(tag: &str) -> Running {
         NodeId::from_ed25519_secret(&[9u8; 32]),
         None,
         empty_catalog(),
-        swoosh::serve_toml::LiveServeToml::load(
-            &swoosh::home::Home::resolve(Some(leaf.clone())).expect("a scratch home"),
-        )
-        .expect("the services off load"),
+        off,
         cancel.clone(),
         Arc::default(),
     ));
@@ -458,6 +469,41 @@ async fn bare_stop_through_the_socket_cancels_the_resident() {
         Some(StopKind::Socket),
         "the socket stop is recorded as its own kind, never collapsed into the wire stop"
     );
+    serving
+        .await
+        .expect("the serve task joins")
+        .expect("serve ends Ok");
+
+    let _ = std::fs::remove_dir_all(&leaf);
+}
+
+/// A bare `stop` on the machine stops its `serve` while the first sync round still holds `control.stop`
+/// shut: the hold wraps the oracle the gate asks, as `serve` wires it, and the socket never passes the
+/// gate. Hold the socket too and a machine that cannot reach its devices could not be stopped where it
+/// runs until its first round gave up.
+#[tokio::test]
+async fn bare_stop_is_never_held() {
+    let leaf = scratch("held");
+    let off = services_off(&leaf);
+    let (_first_round, held) = FirstRound::hold_stop(off.clone());
+    let Running {
+        leaf,
+        client,
+        cancel,
+        resident,
+        serving,
+    } = resident_reading(leaf, off);
+    let stop: nauthy::Service = CONTROL_STOP_SERVICE.parse().expect("a name");
+    assert!(
+        !held.is_enabled(&stop),
+        "the first round has not ended, so a remote stop is refused"
+    );
+
+    super::stop_resolved(&client)
+        .await
+        .expect("the bare stop is answered before the first round ends");
+    assert!(cancel.is_cancelled(), "and it stopped the node");
+    assert_eq!(resident.stop_source().first(), Some(StopKind::Socket));
     serving
         .await
         .expect("the serve task joins")

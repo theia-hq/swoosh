@@ -8,7 +8,7 @@
 //!
 //! `control.stop` is one more member-only service, assembled through the SAME `Stop` handler the `swoosh
 //! serve` product path injects (not a hand-rolled near-copy) and declared member-only exactly as `serve`
-//! declares it. Six things are proven:
+//! declares it. Seven things are proven:
 //!
 //! 1. `serve --for` shape: a local timer cancelling the token stops the exposer's `run`, gracefully.
 //! 2. `control.stop`: a MEMBER reaching the member-only service cancels the SAME token the exposer owns, so
@@ -22,6 +22,8 @@
 //! 6. The node stops only once the member has closed its side after the ack, so its teardown cannot drop
 //!    the ack in flight; a member that never closes delays the stop by the bound and no more; and a handler
 //!    dropped in that wait still stops the node.
+//! 7. A member's `control.stop` is refused at the gate until the node's first sync round has ended, and
+//!    the same member stops it once that round has.
 //!
 //! Over `mem` the proven peer is the transport's SYNTHETIC node id, so a membership badge binds to whatever
 //! id the mem transport proves for the dialer (the same accommodation `gated_measure` documents at length):
@@ -36,9 +38,11 @@ use bifrost_mem::MemTransport;
 use nauthy::Denylist;
 use swoosh::contacts::Contacts;
 use swoosh::serve::{
-    ACK_GRACE, CONTROL_STOP_SERVICE, STOP_ACK, Stop, StopKind, StopSource, Stopped, stopped_by,
+    ACK_GRACE, CONTROL_STOP_SERVICE, FirstRound, STOP_ACK, Stop, StopKind, StopSource, Stopped,
+    stopped_by,
 };
 use swoosh::testkit::{TestNode, TestRoot};
+use tightbeam::enabled::AllEnabled;
 use tightbeam::identity::AsVerifyKey as _;
 use tightbeam::tunnel::{self, CancellationToken, Connector, Exposer, Router};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -282,6 +286,83 @@ async fn a_stranger_is_refused_at_control_stop_and_the_node_keeps_running() {
                 .expect("the node stops on our own cancel")
                 .expect("the run task joins")
                 .expect("graceful stop");
+        })
+        .await;
+}
+
+/// A member's `control.stop` is refused at the gate while the node's first sync round runs, with the same
+/// refusal a stranger gets, and the handler never runs; once the round has ended, the same member stops
+/// the node. Admit it at once and a revoked device could stop a restarted machine before it learns of the
+/// revocation, every time it comes back.
+#[tokio::test]
+async fn a_remote_stop_waits_for_the_first_round() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let host = Node::new(MemTransport::bind(), NoDiscovery);
+            let host_id = host.node_id();
+            let cancel = CancellationToken::new();
+            let source = Arc::new(StopSource::new());
+            let (first_round, held) = FirstRound::hold_stop(AllEnabled);
+            let exposer = build_exposer_noting(cancel.clone(), Arc::clone(&source))
+                .await
+                .with_enabled(held);
+            let run = tokio::task::spawn_local({
+                let cancel = cancel.clone();
+                async move { exposer.run(&host, cancel).await }
+            });
+
+            let member = Node::new(MemTransport::bind(), NoDiscovery);
+            let badge = signet_badge(SIGNET, member.node_id());
+            let connector = || {
+                Connector::to_node(
+                    host_id,
+                    CONTROL_STOP_SERVICE.parse().unwrap(),
+                    Some(badge.parse().unwrap()),
+                )
+            };
+
+            let session = connector()
+                .open_service(&member)
+                .await
+                .expect("the base connect lands; the gate refuses per-stream");
+            let refused = session.open_bi().await;
+            assert!(
+                matches!(
+                    refused,
+                    Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted))
+                ),
+                "a member's control.stop is refused before the first round ends: {refused:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            assert!(!run.is_finished(), "a held stop did not stop the node");
+            assert_eq!(source.first(), None, "and the stop handler never ran");
+
+            first_round.finished();
+            let session = connector()
+                .open_service(&member)
+                .await
+                .expect("member reaches control.stop");
+            let (mut writer, mut reader) = session
+                .open_bi()
+                .await
+                .expect("a member is admitted at control.stop once the first round has ended");
+            let mut ack = [0u8; 1];
+            reader
+                .read_exact(&mut ack)
+                .await
+                .expect("the node acks the stop");
+            assert_eq!(ack[0], STOP_ACK);
+            writer.shutdown().await.expect("the member closes its side");
+            tokio::time::timeout(Duration::from_secs(5), run)
+                .await
+                .expect("the stop ends the run")
+                .expect("the run task joins")
+                .expect("a graceful stop");
+            assert_eq!(
+                source.first(),
+                Some(StopKind::Wire(member.node_id().verify_key().unwrap()))
+            );
         })
         .await;
 }

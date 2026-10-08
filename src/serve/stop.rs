@@ -1,15 +1,17 @@
 use core::time::Duration;
 use std::sync::Arc;
 
-use nauthy::VerifyKey;
+use nauthy::{Service, VerifyKey};
+use tightbeam::enabled::EnabledServices;
 use tightbeam::identity::AsNodeId as _;
 use tightbeam::open_policy::Never;
 use tightbeam::tunnel::{BoxRead, BoxWrite, CancellationToken, Handler, ServeError, Served};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::sync::watch;
 
 use crate::contacts::Contacts;
 use crate::peer::OwnDevice;
-use crate::serve::{StopKind, StopSource};
+use crate::serve::{CONTROL_STOP_SERVICE, StopKind, StopSource};
 
 /// The `control.stop` handler swoosh injects: the remote node-lifecycle stop. It holds a CLONE of the
 /// node's teardown token as the node-control CAPABILITY (never a node handle), so when an admitted caller
@@ -99,6 +101,62 @@ impl Handler for Stop {
         // The normal path stops through the guard too, so the note and cancel live in one place.
         drop(stopping);
         acked.map_err(Into::into)
+    }
+}
+
+/// The first sync round of a run, held by the round: [`finished`](Self::finished) opens `control.stop`.
+///
+/// A device that was stopped misses the revocations offered while it was down, and a revoked device that
+/// keeps stopping it would keep it from ever folding its own revocation. So a run takes no remote stop
+/// until its first round with your devices has ended, whatever that round found: a newer list, the same
+/// list, no device answering within the round's bound, or nothing to ask on a machine that is not one of
+/// your devices. A stop that waited for a newer list would leave such a machine never stoppable from
+/// another device. A stop typed on the machine never passes the gate, so it is never held.
+pub struct FirstRound(watch::Sender<bool>);
+
+impl FirstRound {
+    /// The round's half, and `enabled` with `control.stop` refused until the round has finished.
+    pub fn hold_stop<E>(enabled: E) -> (Self, StopAfterFirstRound<E>) {
+        // A watch rather than a bare flag: the gate reads it without waiting on every stream, and a
+        // caller can also wait for the round to end.
+        let (finished, open) = watch::channel(false);
+        (Self(finished), StopAfterFirstRound { enabled, open })
+    }
+
+    /// The first round has ended: `control.stop` is admitted from here on. Taken by value, since a run
+    /// has one first round.
+    pub fn finished(self) {
+        self.0.send_replace(true);
+    }
+}
+
+/// The live enabled oracle with `control.stop` refused until the run's first sync round has ended. The
+/// gate asks it after admission and before any answer, so a held stop is refused exactly as a caller the
+/// gate turned away, and the stop handler never runs. Every other name is the inner oracle's to answer.
+pub struct StopAfterFirstRound<E> {
+    enabled: E,
+    /// Whether the first round has ended, sent once by [`FirstRound::finished`].
+    open: watch::Receiver<bool>,
+}
+
+impl<E> StopAfterFirstRound<E> {
+    /// Wait until the first round has ended; at once when it already has. A round dropped before it
+    /// finished never opens the stop, so this waits on.
+    pub async fn opened(&self) {
+        let mut open = self.open.clone();
+        if open.wait_for(|open| *open).await.is_err() {
+            core::future::pending::<()>().await;
+        }
+    }
+}
+
+impl<E: EnabledServices> EnabledServices for StopAfterFirstRound<E> {
+    fn is_enabled(&self, service: &Service) -> bool {
+        if service.as_str() == CONTROL_STOP_SERVICE && !*self.open.borrow() {
+            tracing::debug!("control.stop refused: the first sync round has not ended");
+            return false;
+        }
+        self.enabled.is_enabled(service)
     }
 }
 
