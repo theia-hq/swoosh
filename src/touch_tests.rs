@@ -1,5 +1,5 @@
 //! How a key file with a `touch-id` lock opens: the gates before any dialog, the fall to the passphrase or
-//! the refusal after one, the bounded wait, and the lines each says. The touch itself is the script's; the
+//! the refusal after one, the wait, and the lines each says. The touch itself is the script's; the
 //! files are the testkit's fixtures, so every lock list and passphrase here is real.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -14,7 +14,7 @@ use keystore::{Health, KeyFile, Method, Stored};
 use super::Touch;
 use super::{
     Lines, Route, SSH_VARIABLES, Stopped, TIMED_OUT, TOUCH_WAIT, TouchAct, TouchHere, Touched,
-    USE_ROOT, Unfinished, bounded, changed, open, over_ssh, route,
+    USE_ROOT, changed, open, over_ssh, route,
 };
 use crate::passphrase::Asked;
 use crate::testkit::Counting;
@@ -121,35 +121,6 @@ fn several_ssh_variables_name_the_first_of_the_list() {
         over_ssh(|_| Some(OsString::from("x"))),
         Some("SSH_CONNECTION")
     );
-}
-
-/// The wait answers as soon as the job does.
-#[test]
-fn a_bounded_wait_answers_with_the_job() {
-    assert!(matches!(bounded(Duration::from_secs(5), || 7), Ok(7)));
-}
-
-/// A job that outlasts the bound is left behind, and the wait ends at the bound. Red when the wait has no
-/// bound.
-#[test]
-fn a_bounded_wait_ends_at_its_bound_and_leaves_the_job() {
-    let started = std::time::Instant::now();
-    let waited = bounded(Duration::from_millis(50), || {
-        std::thread::sleep(Duration::from_secs(2));
-    });
-    assert!(matches!(waited, Err(Unfinished::TimedOut)));
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "{:?}",
-        started.elapsed()
-    );
-}
-
-/// A job that ends with no answer is a failure, never a timeout.
-#[test]
-fn a_job_that_panics_is_no_timeout() {
-    let waited = bounded(Duration::from_secs(5), || -> u8 { panic!("the enclave") });
-    assert!(matches!(waited, Err(Unfinished::Thread(_))));
 }
 
 /// Every act shows one dialog, waited a minute, and the timeout's line says the wait it did. Red when the
@@ -570,9 +541,9 @@ fn the_terminal_touch_reads_a_cancel_as_declined() {
     assert!(matches!(Terminal.touch(open), Touched::Declined));
 }
 
-/// The real enclave: a dialog left untouched for a minute ends the wait as a timeout, with the dialog
-/// abandoned. Run as above and touch nothing on the second dialog; the test then exits, and the dialog must
-/// close within 2 seconds of the exit.
+/// The real enclave: a dialog left untouched for a minute ends the wait as a timeout, through the key
+/// store's own refusal and [`Touched::from`]. Run as above and touch nothing on the second dialog; the
+/// dialog must close by itself at the minute, before the test ends.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "needs a person at this Mac to leave the dialog for a minute"]

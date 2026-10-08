@@ -8,13 +8,14 @@
 //! What follows a touch that is not asked, or does not open, turns on one fact, read from the file's own lock
 //! list: whether it holds a passphrase lock. A file that does opens with it; a file that does not is refused,
 //! with the line that says why. A touch is never asked twice for one key. A timeout never falls to the
-//! passphrase: the dialog may still be up, and nobody touched it for a minute.
+//! passphrase: nobody touched the dialog for a minute, so nobody is there to type one.
 //!
-//! The touch runs on a thread of its own, which owns everything it uses, and the caller waits for it
-//! [`TOUCH_WAIT`]: every act shows one dialog. On a timeout the command ends and the thread is left behind:
-//! the process exiting is what ends it, and a touch on a dialog left up hands its secret to nobody. That is
-//! why the thread is a plain one and never the runtime's: dropping a runtime waits for its blocking tasks,
-//! which would hold the process open until the dialog closed.
+//! The touch runs on the caller's thread, which waits for the key store to answer. Every act shows one
+//! dialog, and the key store closes it itself after [`TOUCH_WAIT`] and answers that no touch came. No clock
+//! runs here: one started before the work that comes ahead of the dialog (a passphrase's KDF, the file's
+//! load and write) would fire first, and the command would end with the dialog still up. So a timeout means
+//! the dialog is closed and nothing was written, a touch in the last instant is acted on, and `home.lock`
+//! holds until the call ends.
 
 use core::time::Duration;
 use std::ffi::OsString;
@@ -231,7 +232,7 @@ pub enum Touched {
         /// Why it stayed.
         why: eyre::Report,
     },
-    /// Nobody touched in time. The dialog may still be up.
+    /// Nobody touched in time: the key store closed the dialog, and nothing was written.
     TimedOut,
 }
 
@@ -258,8 +259,14 @@ impl Touch {
     /// The key store's refusal, the touch's own included, and where the act stopped.
     pub(crate) fn run(self) -> Result<Option<keystore::Secret>, Stopped> {
         let Self { file, reason, act } = self;
-        let touch = Unlock::TouchId { reason };
-        let new = NewLock::TouchId { reason };
+        let touch = Unlock::TouchId {
+            reason,
+            wait: TOUCH_WAIT,
+        };
+        let new = NewLock::TouchId {
+            reason,
+            wait: TOUCH_WAIT,
+        };
         match act {
             // The file is read again here, on this thread: its unlock proves its own header, so the key it
             // returns is the one this file holds now, which `open` checks against the header the caller read.
@@ -273,7 +280,13 @@ impl Touch {
                 })),
             },
             TouchAct::Write(secret) => file
-                .write(&secret, Protection::TouchId { reason })
+                .write(
+                    &secret,
+                    Protection::TouchId {
+                        reason,
+                        wait: TOUCH_WAIT,
+                    },
+                )
                 .map(|()| None)
                 .map_err(Stopped::Touch),
             TouchAct::SealPlain => file
@@ -306,7 +319,9 @@ impl Touch {
 }
 
 /// The key store's answer, as a touch's end. Only the refusals a person can tell apart are named; the rest is
-/// a failure, carried whole, and a write that failed after the new lock went on says so.
+/// a failure, carried whole, and a write that failed after the new lock went on says so. A timeout is named
+/// so it never reads as a failure, which falls to the passphrase: nobody touched for a minute, so nobody is
+/// there to type one.
 impl From<Result<Option<keystore::Secret>, Stopped>> for Touched {
     fn from(answer: Result<Option<keystore::Secret>, Stopped>) -> Self {
         match answer {
@@ -317,6 +332,7 @@ impl From<Result<Option<keystore::Secret>, Stopped>> for Touched {
             },
             Err(Stopped::Touch(keystore::Error::TouchId { source, .. })) => match source {
                 keystore::TouchIdError::Declined(_) => Self::Declined,
+                keystore::TouchIdError::TimedOut(_) => Self::TimedOut,
                 keystore::TouchIdError::NotHere(_) | keystore::TouchIdError::Unavailable => {
                     Self::NotHere
                 }
@@ -327,46 +343,10 @@ impl From<Result<Option<keystore::Secret>, Stopped>> for Touched {
     }
 }
 
-/// Ask for `touch` on a thread of its own and wait [`TOUCH_WAIT`] for it: the product's touch.
+/// Ask for `touch` and wait for the key store's answer: the product's touch. The key store bounds the dialog
+/// at [`TOUCH_WAIT`], so this blocks no longer than the act's own work and one wait.
 pub(crate) fn ask(touch: Touch) -> Touched {
-    match bounded(TOUCH_WAIT, move || touch.run()) {
-        Ok(answer) => Touched::from(answer),
-        Err(Unfinished::TimedOut) => Touched::TimedOut,
-        Err(Unfinished::Thread(why)) => Touched::Failed(why),
-    }
-}
-
-/// Why [`bounded`] has no answer.
-#[derive(Debug)]
-pub(crate) enum Unfinished {
-    /// The bound passed first. The job runs on, and ends with the process.
-    TimedOut,
-    /// The thread could not start, or ended without an answer.
-    Thread(eyre::Report),
-}
-
-/// Run `job` on a thread of its own and wait for its answer up to `bound`. On a timeout the thread is left to
-/// run and its answer is dropped: nothing here can stop a call that blocks in the operating system, so the
-/// caller ends instead.
-pub(crate) fn bounded<T: Send + 'static>(
-    bound: Duration,
-    job: impl FnOnce() -> T + Send + 'static,
-) -> Result<T, Unfinished> {
-    // A channel and not a join: a join cannot be given a deadline, and the receiver dropped on a timeout
-    // makes the thread's late send fail quietly.
-    let (answer, answered) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("touch-id".to_owned())
-        .spawn(move || {
-            let _ = answer.send(job());
-        })
-        .map_err(|why| Unfinished::Thread(eyre::eyre!("could not wait for touch-id: {why}")))?;
-    answered.recv_timeout(bound).map_err(|why| match why {
-        std::sync::mpsc::RecvTimeoutError::Timeout => Unfinished::TimedOut,
-        std::sync::mpsc::RecvTimeoutError::Disconnected => {
-            Unfinished::Thread(eyre::eyre!("touch-id ended without an answer"))
-        }
-    })
+    Touched::from(touch.run())
 }
 
 /// How a key file opens for one act, decided before any dialog.

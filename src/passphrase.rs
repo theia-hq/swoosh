@@ -157,8 +157,8 @@ pub trait Prompt {
         None
     }
 
-    /// Ask for one touch, for `touch`'s act on its file, and wait for it, bounded. The default asks
-    /// nobody, and reads as a lock that does not open here.
+    /// Ask for one touch, for `touch`'s act on its file, and wait for it, bounded by the key store. The
+    /// default asks nobody, and reads as a lock that does not open here.
     fn touch(&mut self, _touch: Touch) -> Touched {
         Touched::NotHere
     }
