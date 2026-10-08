@@ -149,6 +149,124 @@ pub const DEFAULT_SERVICES: [&str; 2] = ["ping=ping:", "speed=speed:"];
 /// `swoosh serve ssh ping` is `ssh=sshd: ping=ping:`.
 const BUILT_IN: [(&str, &str); 3] = [("ping", "ping:"), ("speed", "speed:"), ("ssh", "sshd:")];
 
+/// Every scheme a `serve` entry can name: swoosh's own engines ([`bind_entry`]'s arms, `recv:`, `fetch:`)
+/// and tightbeam's primitives. An enum so that what a scheme's engine may face is one exhaustive match: a
+/// scheme added here must answer [`runs_code`](Self::runs_code) and [`never_public`](Self::never_public)
+/// before it compiles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scheme {
+    /// `ping:`, the latency probe.
+    Ping,
+    /// `speed:`, the throughput test.
+    Speed,
+    /// `sshd:`, a shell on this machine.
+    Sshd,
+    /// `recv:<dir>`, files pushed into a directory.
+    Recv,
+    /// `fetch:<origin>`, requests made from this machine.
+    Fetch,
+    /// `tcp:<host>:<port>`, a forward to a local address.
+    Tcp,
+    /// `unix:<path>`, a forward to a local socket.
+    Unix,
+    /// `file:<path>`, a file's bytes.
+    File,
+    /// `fifo:<path>`, a named pipe's bytes.
+    Fifo,
+    /// `stdin:`, the serving process's stdin.
+    Stdin,
+    /// `echo:`, the reflector.
+    Echo,
+}
+
+impl Scheme {
+    /// Every scheme, for a test that walks them.
+    pub const ALL: [Self; 11] = [
+        Self::Ping,
+        Self::Speed,
+        Self::Sshd,
+        Self::Recv,
+        Self::Fetch,
+        Self::Tcp,
+        Self::Unix,
+        Self::File,
+        Self::Fifo,
+        Self::Stdin,
+        Self::Echo,
+    ];
+
+    /// The scheme as a target spells it, without its `:`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ping => "ping",
+            Self::Speed => "speed",
+            Self::Sshd => "sshd",
+            Self::Recv => RECV_SCHEME,
+            Self::Fetch => FETCH_SCHEME,
+            Self::Tcp => "tcp",
+            Self::Unix => "unix",
+            Self::File => "file",
+            Self::Fifo => "fifo",
+            Self::Stdin => "stdin",
+            Self::Echo => "echo",
+        }
+    }
+
+    /// The scheme `target` (`sshd:`, `tcp:localhost:22`) names, or `None` for one no `serve` binds.
+    pub fn of(target: &str) -> Option<Self> {
+        let (scheme, _) = target.split_once(':')?;
+        Self::ALL.into_iter().find(|known| known.as_str() == scheme)
+    }
+
+    /// Whether the engine runs what a caller sends: a link to it is a way to run code on this machine as
+    /// this user. Not caught here: a `unix:` or `tcp:` forward to a local service that itself runs code (a
+    /// Docker socket); those need the target's own answer, which a forward does not have.
+    pub fn runs_code(self) -> bool {
+        match self {
+            Self::Sshd => true,
+            Self::Ping
+            | Self::Speed
+            | Self::Recv
+            | Self::Fetch
+            | Self::Tcp
+            | Self::Unix
+            | Self::File
+            | Self::Fifo
+            | Self::Stdin
+            | Self::Echo => false,
+        }
+    }
+
+    /// Whether the engine a gated `serve` binds for this scheme, given `argument` (what follows the `:`),
+    /// declares it must never face an open gate (`type Exposure = Never`): it runs code, has no limits of
+    /// its own, or writes this machine's disk. Such an engine is opened to anyone neither by `--public` nor
+    /// by a link to anyone. The shell, the owner-tier `ping` and `speed` (an open one binds the metered
+    /// engine instead), receiving files, and a `fetch:` scoped to no origin (an open relay). A forward and
+    /// the reflector may face anyone; so may a raw stream, which opens only through `--public-unsafe`.
+    pub fn never_public(self, argument: &str) -> bool {
+        match self {
+            Self::Sshd | Self::Ping | Self::Speed | Self::Recv => true,
+            Self::Fetch => argument.is_empty(),
+            Self::Tcp | Self::Unix | Self::Echo | Self::File | Self::Fifo | Self::Stdin => false,
+        }
+    }
+}
+
+/// Whether `target` names an engine that runs code ([`Scheme::runs_code`]). A target no `serve` binds runs
+/// nothing.
+pub fn runs_code(target: &str) -> bool {
+    Scheme::of(target).is_some_and(Scheme::runs_code)
+}
+
+/// Whether `target` names an engine that must never face an open gate ([`Scheme::never_public`]). A target
+/// no `serve` binds is never bound, so it answers `false`.
+pub fn never_public(target: &str) -> bool {
+    target
+        .split_once(':')
+        .and_then(|(_, argument)| Some((Scheme::of(target)?, argument)))
+        .is_some_and(|(scheme, argument)| scheme.never_public(argument))
+}
+
 /// Parse one typed `serve` entry: the name follows the one name rule and is folded, the target passes
 /// through for [`bind_entry`] to read. A typed name is never dotted, so it can never be an internal route
 /// (`control.stop`). A bare `<service>` (no `=`) is a name too, folded the same way, and a built-in one
@@ -503,6 +621,8 @@ const FETCH_SCHEME: &str = "fetch";
 /// fail-closed-by-convention.
 pub struct FetchService {
     name: String,
+    /// The entry's target, `fetch:<origin>`, as [`never_public`] reads it.
+    target: String,
     allow: OriginAllowlist,
 }
 
@@ -562,6 +682,7 @@ impl FetchScope {
             };
             services.push(FetchService {
                 name: name.to_owned(),
+                target: addr.to_owned(),
                 allow,
             });
         }
@@ -588,11 +709,12 @@ impl FetchExposure {
     /// free anonymizing hop). Because each fetch service carries its own scope, this reasons about THIS public
     /// fetch, so a second origin-scoped fetch can no longer mask a bare public one. Refused at build time,
     /// before any banner or accepted stream, mirroring the sshd-cannot-be-public wall. A GATED fetch (not in
-    /// `--public`) stays legal unconstrained: the family gate is the terminator there.
+    /// `--public`) stays legal unconstrained: the family gate is the terminator there. The test is
+    /// [`never_public`], the one `share` asks of a link to anyone.
     pub fn refuse_open_relay(&self, public: &[Service]) -> eyre::Result<()> {
         for service in &self.services {
             if public.iter().any(|name| name.as_str() == service.name)
-                && service.allow.is_unconstrained()
+                && never_public(&service.target)
             {
                 eyre::bail!(
                     "a public fetch service must be origin-scoped \

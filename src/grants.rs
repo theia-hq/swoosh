@@ -6,7 +6,9 @@
 //! ledger that cannot be read admits no such link.
 //!
 //! It is also the issuer's index from holder to that root id, which is what revoking a link by naming its
-//! holder, and `status`, read. It is a who-can-reach-what record, so it is written `0600`, and it lives
+//! holder, and `status`, read. Each row records what its service's name served when the link was made, so
+//! `serve` reads it at start too ([`LinksForAnother`]), and binds no shell under a name whose live links were
+//! made for something else. It is a who-can-reach-what record, so it is written `0600`, and it lives
 //! in the node home beside the identity so one home moves the whole identity and trust unit together.
 //!
 //! Every writer holds `home.lock`. An [`append`](Grants::append) is one `O_APPEND` line and a `sync_data`,
@@ -14,6 +16,7 @@
 //! rewrite (the prune an append runs once enough rows have expired) goes through the home's one write
 //! routine.
 
+use core::fmt;
 use core::num::ParseIntError;
 use core::str::FromStr;
 use core::time::Duration;
@@ -97,6 +100,27 @@ impl Grants {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(LedgerError::Io(error)),
         };
+        Ok(self.records(&text))
+    }
+
+    /// [`load`](Self::load), read on the calling thread, for a check made where nothing can be awaited.
+    ///
+    /// # Errors
+    ///
+    /// The file exists and could not be read.
+    // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
+    #[allow(clippy::std_instead_of_core)]
+    pub fn read(&self) -> Result<Vec<GrantRecord>, LedgerError> {
+        let text = match crate::home::read_trust_file(&self.path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(LedgerError::Io(error)),
+        };
+        Ok(self.records(&text))
+    }
+
+    /// The rows in `text`, each line that does not parse skipped and named on stderr.
+    fn records(&self, text: &str) -> Vec<GrantRecord> {
         let mut records = Vec::new();
         for (index, line) in text.lines().enumerate() {
             let line = line.trim();
@@ -112,7 +136,7 @@ impl Grants {
                 ),
             }
         }
-        Ok(records)
+        records
     }
 }
 
@@ -199,6 +223,12 @@ pub struct IssuedLedger {
 struct LedgerState {
     /// The ids the last successful read found; empty while the file is unreadable.
     ids: HashSet<RevocationId>,
+    /// Which of `ids` are one-use links ([`GrantKind::Once`]).
+    once: HashSet<RevocationId>,
+    /// The one-use links this run has admitted once already. Kept across re-reads, since a link stays
+    /// used whatever the file does, and trimmed to the one-use ids the file still holds, so it never
+    /// outgrows the ledger. Held in memory only: a restarted `serve` starts with none.
+    used: HashSet<RevocationId>,
     /// The stamp of the file the ids came from, `None` before a read or after a failed one.
     stamp: Option<FileStamp>,
     /// When the file was last statted, to debounce the next stat.
@@ -214,6 +244,8 @@ impl IssuedLedger {
             path: home.links(),
             state: Mutex::new(LedgerState {
                 ids: HashSet::new(),
+                once: HashSet::new(),
+                used: HashSet::new(),
                 stamp: None,
                 last_stat: None,
                 readable: None,
@@ -248,16 +280,20 @@ impl IssuedLedger {
         let readable = match read {
             Ok(None) => {
                 state.ids.clear();
+                state.once.clear();
                 state.stamp = None;
                 true
             }
             Ok(Some((text, stamp))) => {
-                state.ids = self.parse(&text);
+                (state.ids, state.once) = self.parse(&text);
+                let once = &state.once;
+                state.used.retain(|id| once.contains(id));
                 state.stamp = stamp;
                 true
             }
             Err(error) => {
                 state.ids.clear();
+                state.once.clear();
                 state.stamp = None;
                 if state.readable != Some(false) {
                     tracing::error!(
@@ -278,9 +314,11 @@ impl IssuedLedger {
         state.readable = Some(readable);
     }
 
-    /// The root ids in `text`, skipping and naming each line that does not parse.
-    fn parse(&self, text: &str) -> HashSet<RevocationId> {
+    /// The root ids in `text`, and which of them are one-use links, skipping and naming each line that
+    /// does not parse.
+    fn parse(&self, text: &str) -> (HashSet<RevocationId>, HashSet<RevocationId>) {
         let mut ids = HashSet::new();
+        let mut once = HashSet::new();
         for (index, line) in text.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() {
@@ -288,6 +326,9 @@ impl IssuedLedger {
             }
             match GrantRecord::from_line(line) {
                 Ok(record) => {
+                    if record.kind == GrantKind::Once {
+                        once.insert(record.root_id.clone());
+                    }
                     ids.insert(record.root_id);
                 }
                 Err(error) => tracing::warn!(
@@ -298,15 +339,26 @@ impl IssuedLedger {
                 ),
             }
         }
-        ids
+        (ids, once)
     }
 }
 
 impl IssuedIds for IssuedLedger {
+    /// Whether this machine recorded issuing the link `id` roots, and, for a one-use link, whether this is
+    /// its first admission. nauthy asks this last, once every other check on the link has passed, so the
+    /// first `true` for a one-use id is its one admission: the id is marked used then, and every later ask
+    /// is `false`, the refusal any unrecorded link gets. The unit is the admission, so each stream that
+    /// presents the link spends it, not each session.
     fn is_issued(&self, id: &RevocationId) -> bool {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         self.refresh(&mut state);
-        state.ids.contains(id)
+        if !state.ids.contains(id) {
+            return false;
+        }
+        if !state.once.contains(id) {
+            return true;
+        }
+        state.used.insert(id.clone())
     }
 }
 
@@ -317,7 +369,10 @@ impl IssuedIds for IssuedLedger {
 pub struct GrantRecord {
     /// The one service the grant reaches (e.g. `ssh`).
     pub target: Service,
-    /// How the grant is bound: device, fleet, or bearer.
+    /// What that service's name served when the grant was made, `None` when it served nothing. `serve`
+    /// reads it, so a name later bound to a shell never inherits a link made for something else.
+    pub serves: Option<ServedTarget>,
+    /// How the grant is bound: device, fleet, bearer, or once.
     pub kind: GrantKind,
     /// Whether the holder may narrow and re-share it: a bound grant is always [`Sealed`](Delegation::Sealed);
     /// a bearer slip is [`Delegable`](Delegation::Delegable) only when issued so.
@@ -340,6 +395,7 @@ impl GrantRecord {
         match (self.kind, self.delegation) {
             (GrantKind::Device, _) => "device-bound",
             (GrantKind::Fleet, _) => "fleet-bound",
+            (GrantKind::Once, _) => "one-use",
             (GrantKind::Bearer, Delegation::Delegable) => "delegable",
             (GrantKind::Bearer, Delegation::Sealed) => "non-delegable",
         }
@@ -351,19 +407,28 @@ impl GrantRecord {
 pub const ANYONE: &str = "-";
 
 /// The tab that separates a record's fields on disk. A record's fields are a validated service name, a
-/// grant-kind word, a holder (a node id or petname, both whitespace-free by construction), a decimal expiry,
-/// and a hex id, none of which can contain a tab, so it delimits unambiguously.
+/// served target (which holds no control character, by [`ServedTarget`]), a grant-kind word, a holder (a
+/// node id or petname, both whitespace-free by construction), a decimal expiry, and a hex id, none of which
+/// can contain a tab, so it delimits unambiguously.
 const FIELD: char = '\t';
 
+/// What the served-target field holds when the name served nothing. Never a target, which always holds a
+/// `:`.
+const SERVED_NOTHING: &str = "-";
+
 impl GrantRecord {
-    /// Serialize to one tab-separated line: kind, delegation, service, holder, expiry (unix seconds), root id
-    /// (hex).
+    /// Serialize to one tab-separated line: kind, delegation, service, served target (or `-`), holder,
+    /// expiry (unix seconds), root id (hex).
     fn to_line(&self) -> String {
         format!(
-            "{kind}{FIELD}{delegation}{FIELD}{target}{FIELD}{holder}{FIELD}{expiry}{FIELD}{root}",
+            "{kind}{FIELD}{delegation}{FIELD}{target}{FIELD}{serves}{FIELD}{holder}{FIELD}{expiry}{FIELD}{root}",
             kind = self.kind.as_str(),
             delegation = self.delegation.as_str(),
             target = self.target.as_str(),
+            serves = self
+                .serves
+                .as_ref()
+                .map_or(SERVED_NOTHING, ServedTarget::as_str),
             holder = self.holder,
             expiry = unix_secs(self.expiry),
             root = self.root_id.to_hex(),
@@ -371,13 +436,21 @@ impl GrantRecord {
     }
 
     /// Parse one line back into a record; a wrong field count, an unknown kind or delegation, a bad service,
-    /// expiry, or id is a typed error, never a silent default.
+    /// served target, expiry, or id is a typed error, never a silent default. A one-use link that reads as
+    /// delegable is malformed: one use cannot be passed on.
     fn from_line(line: &str) -> Result<Self, LedgerError> {
         let mut fields = line.split(FIELD);
         let mut next = || fields.next().ok_or(LedgerError::Malformed);
         let kind = next()?.parse::<GrantKind>()?;
         let delegation = next()?.parse::<Delegation>()?;
+        if kind == GrantKind::Once && delegation == Delegation::Delegable {
+            return Err(LedgerError::Malformed);
+        }
         let target = next()?.parse::<Service>().map_err(LedgerError::Service)?;
+        let serves = match next()? {
+            SERVED_NOTHING => None,
+            served => Some(served.parse::<ServedTarget>()?),
+        };
         let holder = next()?.to_owned();
         let expiry = from_unix_secs(next()?.parse::<u64>().map_err(LedgerError::Expiry)?);
         let root_id = RevocationId::from_hex(next()?).map_err(|_| LedgerError::RootId)?;
@@ -387,6 +460,7 @@ impl GrantRecord {
         }
         Ok(Self {
             target,
+            serves,
             kind,
             delegation,
             holder,
@@ -395,6 +469,177 @@ impl GrantRecord {
         })
     }
 }
+
+/// What a service's name served when a link to it was made: the target of its `serve` entry, `sshd:` or
+/// `tcp:localhost:22`. Parsed, so it always names a scheme (it holds a `:`) and holds no control character,
+/// which keeps it one field of one ledger line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServedTarget(String);
+
+impl ServedTarget {
+    /// The target as its `serve` entry spells it.
+    pub fn as_str(&self) -> &str {
+        let Self(text) = self;
+        text
+    }
+}
+
+impl FromStr for ServedTarget {
+    type Err = LedgerError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if !text.contains(':') || text.chars().any(char::is_control) {
+            return Err(LedgerError::Served(text.to_owned()));
+        }
+        Ok(Self(text.to_owned()))
+    }
+}
+
+impl fmt::Display for ServedTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A name `serve` will not bind a code-running engine under: live links were shared for it while it
+/// served something else (or nothing), and a shell under the name would admit them. Its display is the
+/// refusal line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinksForAnother {
+    /// The service name.
+    name: String,
+    /// What the name served when each of those links was made, `None` for nothing; distinct, in order.
+    targets: Vec<Option<String>>,
+    /// Who each of them was shared with, as the ledger records them; distinct, in order.
+    holders: Vec<String>,
+}
+
+impl LinksForAnother {
+    /// The first of `entries` (`name=target`, as `serve` binds them) that binds a code-running engine under a
+    /// name with a live link in `records` made for another target, or `None` when none does. Live: not past
+    /// its expiry at `now`, and not in `revoked`.
+    pub fn first<'a>(
+        entries: impl IntoIterator<Item = &'a str>,
+        records: &[GrantRecord],
+        revoked: &nauthy::Denylist,
+        now: std::time::SystemTime,
+    ) -> Option<Self> {
+        entries.into_iter().find_map(|entry| {
+            let (name, target) = entry.split_once('=')?;
+            if !crate::serve::runs_code(target) {
+                return None;
+            }
+            let mut found: Option<Self> = None;
+            for record in records.iter().filter(|record| {
+                record.target.as_str() == name
+                    && record.expiry > now
+                    && !revoked.is_revoked_any([&record.root_id])
+                    && record
+                        .serves
+                        .as_ref()
+                        .is_none_or(|served| served.as_str() != target)
+            }) {
+                let found = found.get_or_insert_with(|| Self {
+                    name: name.to_owned(),
+                    targets: Vec::new(),
+                    holders: Vec::new(),
+                });
+                let served = record.serves.as_ref().map(ToString::to_string);
+                if !found.targets.contains(&served) {
+                    found.targets.push(served);
+                }
+                let holder = match record.holder.as_str() {
+                    ANYONE => "anyone".to_owned(),
+                    key => key.to_owned(),
+                };
+                if !found.holders.contains(&holder) {
+                    found.holders.push(holder);
+                }
+            }
+            found
+        })
+    }
+
+    /// [`first`](Self::first) over `home`'s ledger and revocations as they stand now. Only an entry that
+    /// binds a code-running engine is checked, so a `serve` that binds none reads neither file and starts as
+    /// it did, whatever state they are in.
+    ///
+    /// # Errors
+    ///
+    /// The ledger or the revocations could not be read while an entry binds a code-running engine: the
+    /// check fails closed, so nothing binds.
+    pub fn in_home<'a>(
+        home: &crate::home::Home,
+        entries: impl IntoIterator<Item = &'a str>,
+    ) -> eyre::Result<Option<Self>> {
+        let entries: Vec<&str> = entries
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .split_once('=')
+                    .is_some_and(|(_, target)| crate::serve::runs_code(target))
+            })
+            .collect();
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        let records = Grants::at(home.links()).read()?;
+        let revoked = crate::revoked::open(home)?;
+        Ok(Self::first(
+            entries,
+            &records,
+            &revoked,
+            std::time::SystemTime::now(),
+        ))
+    }
+
+    /// The same check over services added to `held` (a `serve.toml` read while `serve` runs) under the names
+    /// `added`. An added service is never bound before the next start, so the running set stays either way;
+    /// this is what that start would refuse, for the run's log.
+    ///
+    /// # Errors
+    ///
+    /// As [`in_home`](Self::in_home); a `held` that lists something that is not a service adds nothing.
+    pub fn among_added(
+        home: &crate::home::Home,
+        held: &crate::serve_toml::ServeToml,
+        added: &[String],
+    ) -> eyre::Result<Option<Self>> {
+        let Ok(started) = crate::serve::Started::bare(held, &home.serve_toml()) else {
+            return Ok(None);
+        };
+        let entries = started.entries();
+        Self::in_home(
+            home,
+            entries.iter().map(String::as_str).filter(|entry| {
+                entry
+                    .split_once('=')
+                    .is_some_and(|(name, _)| added.iter().any(|added| added == name))
+            }),
+        )
+    }
+}
+
+impl core::fmt::Display for LinksForAnother {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let targets: Vec<&str> = self
+            .targets
+            .iter()
+            .map(|target| target.as_deref().unwrap_or("not served"))
+            .collect();
+        write!(
+            f,
+            "links shared for {name} were made when it was {targets}, and a shell under that name would reach \
+             them: revoke them first (swoosh revoke <holder>, for {holders}), or serve the shell under another \
+             name.",
+            name = self.name,
+            targets = targets.join(" or "),
+            holders = self.holders.join(", "),
+        )
+    }
+}
+
+impl core::error::Error for LinksForAnother {}
 
 /// How a grant is bound, which fixes its theft-resistance and delegability. An enum, not a stored word, so a
 /// future grant kind forces a decision at every match site rather than reading as one of these.
@@ -406,6 +651,9 @@ pub enum GrantKind {
     Fleet,
     /// An unbound bearer slip: delegable, short-lived, presentable by anyone holding it.
     Bearer,
+    /// An unbound slip that admits once: sealed, so it cannot be passed on, and refused by the serving
+    /// node after its first admission.
+    Once,
 }
 
 impl GrantKind {
@@ -415,6 +663,7 @@ impl GrantKind {
             Self::Device => "device",
             Self::Fleet => "fleet",
             Self::Bearer => "bearer",
+            Self::Once => "once",
         }
     }
 }
@@ -427,6 +676,7 @@ impl FromStr for GrantKind {
             "device" => Ok(Self::Device),
             "fleet" => Ok(Self::Fleet),
             "bearer" => Ok(Self::Bearer),
+            "once" => Ok(Self::Once),
             other => Err(LedgerError::Kind(other.to_owned())),
         }
     }
@@ -506,7 +756,7 @@ pub enum LedgerError {
     /// A line did not have the expected number of tab-separated fields.
     #[error("grants ledger has a malformed line")]
     Malformed,
-    /// A line named a grant kind that is not `device`, `fleet`, or `bearer`.
+    /// A line named a grant kind that is not `device`, `fleet`, `bearer`, or `once`.
     #[error("grants ledger has an unknown grant kind {0:?}")]
     Kind(String),
     /// A line named a delegation that is not `delegable` or `sealed`.
@@ -515,6 +765,9 @@ pub enum LedgerError {
     /// A line's service field was not a valid service name.
     #[error("grants ledger has an invalid service name")]
     Service(#[source] ServiceParseError),
+    /// A line's served-target field was not a target: no `:`, or a control character.
+    #[error("grants ledger has an invalid served target {0:?}")]
+    Served(String),
     /// A line's expiry field was not a decimal number of seconds.
     #[error("grants ledger has an invalid expiry")]
     Expiry(#[source] ParseIntError),

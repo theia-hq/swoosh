@@ -931,6 +931,7 @@ async fn a_fold_never_revokes_this_machines_own_key() {
             &crate::testkit::lock(),
             &crate::grants::GrantRecord {
                 target: service.clone(),
+                serves: None,
                 kind: crate::grants::GrantKind::Bearer,
                 delegation: crate::grants::Delegation::Delegable,
                 holder: crate::grants::ANYONE.to_owned(),

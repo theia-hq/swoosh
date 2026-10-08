@@ -294,6 +294,7 @@ async fn issue_own_slip(home: &Home) -> nauthy::Link {
             &swoosh::testkit::lock(),
             &GrantRecord {
                 target: service,
+                serves: None,
                 kind: GrantKind::Bearer,
                 delegation: Delegation::Delegable,
                 holder: swoosh::grants::ANYONE.to_owned(),

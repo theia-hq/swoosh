@@ -341,3 +341,47 @@ fn what_a_running_serve_cannot_apply_is_named() {
         "the changed resolver in serve.toml takes effect the next time serve starts"
     );
 }
+
+/// A shell added to `serve.toml` under a name whose live links were made for another target is not bound
+/// while `serve` runs (nothing added is), and the line that start would refuse with is what the run logs.
+#[test]
+fn a_live_add_of_sshd_over_other_links_keeps_the_running_set() {
+    use crate::grants::{Delegation, GrantKind, GrantRecord, Grants, LinksForAnother};
+
+    let scratch = Scratch::new("live-shell");
+    list(&scratch, &["ping=ping:"]);
+    let holder = crate::testkit::TestNode::seeded(0x61).node_id().to_string();
+    Grants::at(scratch.home.links())
+        .append(
+            &crate::testkit::lock(),
+            &GrantRecord {
+                target: service("ssh"),
+                serves: Some("tcp:localhost:22".parse().expect("a target")),
+                kind: GrantKind::Device,
+                delegation: Delegation::Sealed,
+                holder: holder.clone(),
+                root_id: nauthy::RevocationId::from_bytes(vec![0x61]),
+                expiry: std::time::SystemTime::now() + Duration::from_secs(3600),
+            },
+        )
+        .expect("record a link for ssh as a forward");
+    let watcher = LiveServeToml::load(&scratch.home).expect("load");
+    watcher.serving(&bare(&scratch));
+
+    list(&scratch, &["ping=ping:", "ssh"]);
+    past_the_debounce();
+    let waiting = watcher.waiting();
+    assert_eq!(waiting.added, ["ssh"], "ssh waits for the next start");
+    assert!(watcher.is_enabled(&service("ping")), "ping is still served");
+    let refused = LinksForAnother::among_added(&scratch.home, &watcher.held(), &waiting.added)
+        .expect("the ledger reads")
+        .expect("that start would refuse the shell");
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "links shared for ssh were made when it was tcp:localhost:22, and a shell under that name \
+             would reach them: revoke them first (swoosh revoke <holder>, for {holder}), or serve the \
+             shell under another name."
+        )
+    );
+}

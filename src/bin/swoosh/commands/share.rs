@@ -8,6 +8,12 @@
 //! holds the link. A bound link is sealed, since only who it names can use it; an `anyone` link is left open,
 //! so its holder can make a shorter copy.
 //!
+//! An `anyone` link to a service whose engine must never face an open gate (a shell, an engine with no
+//! limits of its own, receiving files) is refused unless `--once` asks for it. `--once` makes a link for
+//! anyone that this machine admits once, that lasts 15 minutes at most, and that is sealed, so it cannot be
+//! passed on. Every row records what the service's name served when the link was made, so `serve` never
+//! binds a shell under a name whose links were made for something else.
+//!
 //! The link form is wholly offline: it reads no key and writes no ledger row, it only adds a shorter end to
 //! the link it was given. A copy can never do more than its source, so it needs no one's leave. The link is
 //! read from a path or stdin as well as typed, so it need never enter argv.
@@ -28,7 +34,7 @@ use clap::Args;
 use nauthy::{Cap, CapError, Link, Service};
 use swoosh::contacts::{ContactRef, Contacts, ContactsStore, ME, Petname};
 use swoosh::escape::EscapedPath;
-use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, Grants};
+use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, Grants, ServedTarget};
 use swoosh::home::{Home, HomeWrite};
 use swoosh::identity::{self, Identity};
 use swoosh::names::NameError;
@@ -51,6 +57,9 @@ pub struct ShareCmd {
     /// Write the link to a new private file and print only the path.
     #[arg(long, value_name = "file")]
     pub save: Option<PathBuf>,
+    /// Make a link to anyone that works once and lasts 15m at most.
+    #[arg(long)]
+    pub once: bool,
 }
 
 /// What `share` was given first: a service to make a link to, or a link to copy.
@@ -86,6 +95,18 @@ const SHORTEST: Duration = Duration::from_secs(60 * 60);
 
 /// The longest `--expires` the service form takes.
 const LONGEST: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+
+/// The life of a `--once` link, and the longest `--expires` it takes.
+const ONCE: Duration = Duration::from_secs(15 * 60);
+
+/// The refusal for `--expires` outside a link's range.
+const EXPIRES_RANGE: &str = "a link's --expires is 1h to 365d";
+
+/// The refusal for `--expires` past a one-use link's life.
+const EXPIRES_ONCE: &str = "a one-use link lasts at most 15m: give --expires 15m or less";
+
+/// The refusal for `--once` with a recipient other than `anyone`, or on a link.
+const ONCE_ANYONE: &str = "--once is only for a link to anyone";
 
 /// The most read from stdin for one link. A link is well under a kilobyte.
 const MAX_STDIN: u64 = 64 * 1024;
@@ -166,6 +187,14 @@ impl Span {
         }
     }
 
+    /// The default life of a `--once` link: `15m`, the most it takes.
+    fn once_life() -> Self {
+        Self {
+            typed: "15m".to_owned(),
+            span: ONCE,
+        }
+    }
+
     /// How long the span is.
     fn duration(&self) -> Duration {
         self.span
@@ -217,6 +246,38 @@ impl fmt::Display for Span {
     }
 }
 
+/// How many times a link from the service form admits: until it ends, or once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Uses {
+    /// Every admission until it ends.
+    UntilItEnds,
+    /// The first admission only (`--once`).
+    Once,
+}
+
+impl Uses {
+    /// The life a link of these uses gets from `--expires`: 1h to 365d, 1h when not given; or, once, 15m
+    /// at most, 15m when not given. A copy is not checked here: its source bounds it.
+    fn life(self, expires: Option<Span>) -> Result<Span, Usage> {
+        match self {
+            Self::UntilItEnds => {
+                let span = expires.unwrap_or_else(Span::default_life);
+                if !(SHORTEST..=LONGEST).contains(&span.duration()) {
+                    return Err(Usage(EXPIRES_RANGE.to_owned()));
+                }
+                Ok(span)
+            }
+            Self::Once => {
+                let span = expires.unwrap_or_else(Span::once_life);
+                if span.duration() > ONCE {
+                    return Err(Usage(EXPIRES_ONCE.to_owned()));
+                }
+                Ok(span)
+            }
+        }
+    }
+}
+
 /// The refusal for a share that names no one, spelled with the service typed.
 fn who_is_it_for(service: &str) -> String {
     format!(
@@ -245,16 +306,21 @@ impl ShareCmd {
                 let Some(who) = self.who else {
                     return Err(Usage(who_is_it_for(service.as_str())).into());
                 };
-                let lifetime = self.expires.unwrap_or_else(Span::default_life);
-                if !(SHORTEST..=LONGEST).contains(&lifetime.duration()) {
-                    return Err(Usage("a link's --expires is 1h to 365d".to_owned()).into());
-                }
+                let uses = match (self.once, &who) {
+                    (false, _) => Uses::UntilItEnds,
+                    (true, Recipient::Anyone) => Uses::Once,
+                    (true, _) => return Err(Usage(ONCE_ANYONE.to_owned()).into()),
+                };
                 let issue = Issue {
                     service,
                     who,
-                    lifetime,
+                    uses,
+                    lifetime: uses.life(self.expires)?,
                 };
                 return issue.run(home, self.save.as_deref(), out, err).await;
+            }
+            Shared::Link(_) | Shared::Stdin if self.once => {
+                return Err(Usage(ONCE_ANYONE.to_owned()).into());
             }
             Shared::Link(link) => link,
             Shared::Stdin => read_stdin(stdin)?,
@@ -280,11 +346,13 @@ impl ShareCmd {
 struct Issue {
     service: Service,
     who: Recipient,
+    uses: Uses,
     lifetime: Span,
 }
 
 impl Issue {
-    /// Resolve who it is for, and what the service is here, before anything is written; then sign, record the
+    /// Resolve what the service is here, and who it is for, before anything is written; refuse an `anyone`
+    /// link to an engine that must never face an open gate unless it works once; then sign, record the
     /// row, and print.
     async fn run(
         self,
@@ -293,32 +361,65 @@ impl Issue {
         out: &mut impl Write,
         err: &mut impl Write,
     ) -> eyre::Result<()> {
+        let serves = serves(&self.service, &ServeToml::read(home)?);
+        let target = serves.as_ref().map(ServedTarget::as_str);
+        let runs_code = target.is_some_and(swoosh::serve::runs_code);
+        if target.is_some_and(swoosh::serve::never_public)
+            && matches!(self.who, Recipient::Anyone)
+            && self.uses == Uses::UntilItEnds
+        {
+            let service = &self.service;
+            let what = if runs_code {
+                "opens a shell on this machine"
+            } else {
+                "is only for people you name"
+            };
+            eyre::bail!(
+                "{service} {what}; share it with a person: swoosh share {service} <person>\nor make a link \
+                 that works once: swoosh share {service} anyone --once"
+            );
+        }
+        let gives = Gives::of(&self.service, serves.as_ref());
         let store = ContactsStore::open(home).await?;
         let bound = self.bind(store.contacts(), home).await?;
-        let gives = Gives::of(&self.service, &ServeToml::read(home)?);
         // A `--save` file is made before the key is read or a row is written, so a directory that takes no
         // new file refuses with no row; any error after this removes it.
         let save = save.map(NewFile::make).transpose()?;
-        let link = self.sign(home, &bound).await?;
+        let link = self.sign(home, &bound, serves).await?;
         let delivered = Delivered::new(&link, save)?;
         let until = Until::from_now(self.lifetime.duration(), Some(&self.lifetime));
-        writeln!(
-            err,
-            "{} {}{}until {until}.",
-            bound.who,
-            gives,
+        // A one-use link to a service that runs no code says so in the grant's own line; a shell's says it
+        // in the lines of its own below.
+        let before_until = if self.uses == Uses::Once && !runs_code {
+            ", once, "
+        } else {
             gives.before_until()
-        )?;
+        };
+        writeln!(err, "{} {gives}{before_until}until {until}.", bound.who)?;
         writeln!(
             err,
             "the link dials this machine: it works while this machine serves {}.",
             self.service
         )?;
-        if matches!(bound.bind, Bind::Anyone) {
-            writeln!(
+        match (bound.bind, self.uses, runs_code) {
+            (Bind::Anyone, Uses::Once, true) => {
+                writeln!(
+                    err,
+                    "anyone holding this link can open a shell on this machine, once, until {until}."
+                )?;
+                writeln!(
+                    err,
+                    "that shell can reach your other devices: send the link privately."
+                )?;
+            }
+            (Bind::Anyone, _, _) => writeln!(
                 err,
                 "anyone holding this link can use it: send it privately."
-            )?;
+            )?,
+            (Bind::Device(_) | Bind::Fleet(_), _, true) => {
+                writeln!(err, "that shell can reach your other devices.")?;
+            }
+            (Bind::Device(_) | Bind::Fleet(_), _, false) => {}
         }
         delivered.print(out)
     }
@@ -327,13 +428,20 @@ impl Issue {
     /// them, never one of their devices, and never your own root: your devices reach this machine already.
     async fn bind(&self, contacts: &Contacts, home: &Home) -> eyre::Result<Bound> {
         Ok(match &self.who {
-            Recipient::Anyone => Bound {
-                bind: Bind::Anyone,
-                kind: GrantKind::Bearer,
-                delegation: Delegation::Delegable,
-                holder: grants::ANYONE.to_owned(),
-                who: ANYONE.to_owned(),
-            },
+            // A one-use link is sealed: a narrowed copy would be a second link to spend.
+            Recipient::Anyone => {
+                let (kind, delegation) = match self.uses {
+                    Uses::UntilItEnds => (GrantKind::Bearer, Delegation::Delegable),
+                    Uses::Once => (GrantKind::Once, Delegation::Sealed),
+                };
+                Bound {
+                    bind: Bind::Anyone,
+                    kind,
+                    delegation,
+                    holder: grants::ANYONE.to_owned(),
+                    who: ANYONE.to_owned(),
+                }
+            }
             Recipient::Person(person) => {
                 let Some(root) = contacts.signet(person).map(|binding| binding.node) else {
                     eyre::bail!(
@@ -371,7 +479,12 @@ impl Issue {
 
     /// Sign the link under this machine's key (made here on first use) and record its row under
     /// `home.lock`, so the link is on disk before it prints and this machine's gate admits it.
-    async fn sign(&self, home: &Home, bound: &Bound) -> eyre::Result<Link> {
+    async fn sign(
+        &self,
+        home: &Home,
+        bound: &Bound,
+        serves: Option<ServedTarget>,
+    ) -> eyre::Result<Link> {
         let secret = identity::resolve(Identity::Persisted, home).await?;
         // A slip bound to this machine's own key would let a copy of that key vouch for any device it
         // likes, so the root of a person is never this machine.
@@ -396,6 +509,7 @@ impl Issue {
             .ok_or_else(|| eyre::eyre!("the link has no id to revoke it by"))?;
         let record = GrantRecord {
             target: Service::clone(&self.service),
+            serves,
             kind: bound.kind,
             delegation: bound.delegation,
             holder: bound.holder.clone(),
@@ -432,8 +546,29 @@ impl Bound {
     }
 }
 
-/// What a link to a service gives, from what a bare `serve` would bind for that name now: its entry in
-/// `serve.toml`, else the built-in form, else nothing known.
+/// What a bare `serve` would bind for `service` now: the target of its entry in `serve.toml`, else the
+/// built-in form's (`ssh` is `sshd:`), else nothing. What a link records it was made for, and what it says it
+/// gives. A target that could not be served (no scheme, or a control character) is nothing.
+fn serves(service: &Service, served: &ServeToml) -> Option<ServedTarget> {
+    let name = service.as_str();
+    served
+        .services
+        .iter()
+        .find_map(|entry| {
+            entry
+                .split_once('=')
+                .filter(|(named, _)| *named == name)
+                .map(|(_, target)| target.to_owned())
+        })
+        .or_else(|| {
+            swoosh::serve::service_entry(name)
+                .ok()
+                .and_then(|entry| entry.split_once('=').map(|(_, target)| target.to_owned()))
+        })
+        .and_then(|target| target.parse().ok())
+}
+
+/// What a link to a service gives, from what its name serves ([`serves`]).
 #[derive(Debug, PartialEq, Eq)]
 enum Gives {
     /// A shell on this machine.
@@ -447,25 +582,10 @@ enum Gives {
 }
 
 impl Gives {
-    /// Read what `service` is here.
-    fn of(service: &Service, served: &ServeToml) -> Self {
+    /// Read what `service` gives, serving `served`.
+    fn of(service: &Service, served: Option<&ServedTarget>) -> Self {
         let name = service.as_str();
-        let entry = served
-            .services
-            .iter()
-            .find_map(|entry| {
-                entry
-                    .split_once('=')
-                    .filter(|(named, _)| *named == name)
-                    .map(|(_, target)| target.to_owned())
-            })
-            .or_else(|| {
-                swoosh::serve::service_entry(name)
-                    .ok()
-                    .and_then(|entry| entry.split_once('=').map(|(_, target)| target.to_owned()))
-            });
-        let Some((scheme, rest)) = entry.as_deref().and_then(|target| target.split_once(':'))
-        else {
+        let Some((scheme, rest)) = served.and_then(|target| target.as_str().split_once(':')) else {
             return Self::Service(name.to_owned());
         };
         match scheme {

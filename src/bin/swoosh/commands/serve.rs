@@ -36,6 +36,7 @@ use eyre::WrapErr as _;
 use nauthy::{Gate, Service};
 use swoosh::contacts::ContactsStore;
 use swoosh::gate::AnchorCut;
+use swoosh::grants::LinksForAnother;
 use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::identity::Identity;
 use swoosh::node_client::{ControlClient, NodeClient as _};
@@ -342,9 +343,15 @@ impl ServeCmd {
         let serve_toml = LiveServeToml::load(home)?;
         let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
         let started = Started::of(&self.services, serve_toml.first_read(), home, &cwd)?;
+        let mut requested = started.entries();
+        // A shell is never bound under a name whose live links were made for something else, since it would
+        // admit them: refused here, before anything binds or is written, whether named now or resumed.
+        if let Some(refused) = LinksForAnother::in_home(home, requested.iter().map(String::as_str))?
+        {
+            return Err(refused.into());
+        }
         // A receive service never saves into `$HOME`, the home, or above it, whether named now or resumed:
         // refused here, before anything binds or is written.
-        let mut requested = started.entries();
         let recv = extract_recv_services(&mut requested, swoosh::home::inbox)?;
         let user_home = std::env::var_os("HOME")
             .filter(|user_home| !user_home.is_empty())
@@ -675,8 +682,17 @@ impl ServeCmd {
             () = sync_rounds(node, &home) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             // A running `serve` gives service only at its start, so a relay, a resolver or a service
-            // changed in `serve.toml` waits for the next one; this says so once per change.
-            () = enabled.watch(|waiting| eprintln!("warning: {waiting}")) => {
+            // changed in `serve.toml` waits for the next one; this says so once per change. A shell added
+            // under a name whose live links were made for something else is one that start will refuse,
+            // so that is said too, while the running set stays as it is.
+            () = enabled.watch(|waiting| {
+                eprintln!("warning: {waiting}");
+                match LinksForAnother::among_added(&home, &enabled.held(), &waiting.added) {
+                    Ok(Some(refused)) => eprintln!("warning: {refused}"),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!("could not check the added services: {error:#}"),
+                }
+            }) => {
                 unreachable!("serve.toml is checked until the node stops")
             }
         };

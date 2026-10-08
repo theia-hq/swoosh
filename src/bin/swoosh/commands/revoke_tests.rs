@@ -294,12 +294,13 @@ async fn gave(home: &Home, holder: NodeId, kind: GrantKind) -> Link {
         GrantKind::Fleet => own
             .fleet_slip(&service, holder.verify_key().unwrap(), until)
             .unwrap(),
-        GrantKind::Device | GrantKind::Bearer => own
+        GrantKind::Device | GrantKind::Bearer | GrantKind::Once => own
             .bound_slip(&service, holder.verify_key().unwrap(), until)
             .unwrap(),
     };
     let record = GrantRecord {
         target: service,
+        serves: None,
         kind,
         delegation: Delegation::Sealed,
         holder: holder.to_string(),

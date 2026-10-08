@@ -105,6 +105,7 @@ async fn share(server: &Scratch, bind: Bind) -> Link {
         .unwrap();
     let record = GrantRecord {
         target: service,
+        serves: None,
         kind,
         delegation: Delegation::Sealed,
         holder,

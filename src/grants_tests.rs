@@ -33,6 +33,7 @@ fn record(
 ) -> GrantRecord {
     GrantRecord {
         target: service_target(service),
+        serves: None,
         kind,
         delegation,
         holder: holder.to_owned(),
@@ -112,37 +113,45 @@ async fn a_corrupt_line_is_skipped_and_the_good_rows_survive() {
 }
 
 /// Each malformed field is its own typed parse error, so a caller (and a warning) can name what is wrong. A
-/// valid reference line is `kind, delegation, service, holder, expiry (secs), root id (hex)`; each case below
+/// valid reference line is `kind, delegation, service, served target, holder, expiry (secs), root id (hex)`; each case below
 /// corrupts exactly one field. `matches!` avoids needing `GrantRecord: Debug` (it holds a non-Debug Service).
 #[test]
 fn each_malformed_field_is_its_own_parse_error() {
-    assert!(GrantRecord::from_line("bearer\tsealed\tssh\t-\t1788400000\tdeadbeef").is_ok());
+    assert!(GrantRecord::from_line("bearer\tsealed\tssh\tsshd:\t-\t1788400000\tdeadbeef").is_ok());
     assert!(matches!(
-        GrantRecord::from_line("nope\tsealed\tssh\t-\t1\tde"),
+        GrantRecord::from_line("nope\tsealed\tssh\t-\t-\t1\tde"),
         Err(LedgerError::Kind(_))
     ));
     assert!(matches!(
-        GrantRecord::from_line("bearer\tmaybe\tssh\t-\t1\tde"),
+        GrantRecord::from_line("bearer\tmaybe\tssh\t-\t-\t1\tde"),
         Err(LedgerError::Delegation(_))
     ));
     assert!(matches!(
-        GrantRecord::from_line("bearer\tsealed\tBAD!!\t-\t1\tde"),
+        GrantRecord::from_line("bearer\tsealed\tBAD!!\t-\t-\t1\tde"),
         Err(LedgerError::Service(_))
     ));
     assert!(matches!(
-        GrantRecord::from_line("bearer\tsealed\tssh\t-\tnotanumber\tde"),
+        GrantRecord::from_line("bearer\tsealed\tssh\t-\t-\tnotanumber\tde"),
         Err(LedgerError::Expiry(_))
     ));
     assert!(matches!(
-        GrantRecord::from_line("bearer\tsealed\tssh\t-\t1\tzz"),
+        GrantRecord::from_line("bearer\tsealed\tssh\t-\t-\t1\tzz"),
         Err(LedgerError::RootId)
+    ));
+    assert!(matches!(
+        GrantRecord::from_line("bearer\tsealed\tssh\tsshd\t-\t1\tde"),
+        Err(LedgerError::Served(_))
+    ));
+    assert!(matches!(
+        GrantRecord::from_line("once\tdelegable\tssh\t-\t-\t1\tde"),
+        Err(LedgerError::Malformed)
     ));
     assert!(matches!(
         GrantRecord::from_line("bearer\tsealed\tssh"),
         Err(LedgerError::Malformed)
     ));
     assert!(matches!(
-        GrantRecord::from_line("bearer\tsealed\tssh\t-\t1\tde\textra"),
+        GrantRecord::from_line("bearer\tsealed\tssh\t-\t-\t1\tde\textra"),
         Err(LedgerError::Malformed)
     ));
 }
@@ -189,6 +198,7 @@ fn issued(writer: u8, index: u8, live: bool) -> GrantRecord {
     };
     GrantRecord {
         target: service_target("ssh"),
+        serves: None,
         kind: GrantKind::Bearer,
         delegation: Delegation::Sealed,
         holder: ANYONE.to_owned(),
@@ -289,6 +299,45 @@ async fn a_prune_drops_only_expired_rows_once_enough_have_expired() {
             .expect("read")
             .contains("not a row"),
         "a line the prune cannot read is kept"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A row keeps what its name served when the link was made, `sshd:` or nothing, and a one-use link's
+/// kind, through the file.
+#[tokio::test]
+async fn a_row_keeps_its_served_target_and_its_one_use() {
+    let (grants, path) = ledger("served");
+    let shell = GrantRecord {
+        serves: Some("sshd:".parse().expect("a target")),
+        ..record(
+            "ssh",
+            GrantKind::Once,
+            Delegation::Sealed,
+            ANYONE,
+            1_788_400_000,
+        )
+    };
+    let nothing = record(
+        "demo",
+        GrantKind::Device,
+        Delegation::Sealed,
+        "ed01beef",
+        1_788_400_001,
+    );
+    for row in [&shell, &nothing] {
+        grants.append(&crate::testkit::lock(), row).expect("append");
+    }
+    let loaded = grants.load().await.expect("load");
+    assert!(
+        loaded.len() == 2 && loaded[0] == shell && loaded[1] == nothing,
+        "both rows come back with every field"
+    );
+    assert!(
+        std::fs::read_to_string(&path)
+            .expect("read")
+            .starts_with("once\tsealed\tssh\tsshd:\t-\t"),
+        "the target is its own field, after the service"
     );
     let _ = std::fs::remove_file(&path);
 }

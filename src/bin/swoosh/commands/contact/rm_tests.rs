@@ -82,6 +82,7 @@ async fn given(home: &Home, holder: NodeId, ends: std::time::SystemTime) -> naut
             &swoosh::testkit::lock(),
             &swoosh::grants::GrantRecord {
                 target: "ssh".parse().expect("a service"),
+                serves: None,
                 kind: swoosh::grants::GrantKind::Device,
                 delegation: swoosh::grants::Delegation::Sealed,
                 holder: holder.to_string(),

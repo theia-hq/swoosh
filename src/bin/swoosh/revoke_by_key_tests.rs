@@ -60,6 +60,7 @@ async fn revoking_by_holder_makes_the_gate_refuse_the_cap() {
     // Record the grant in the mint-log ledger, as `share <service> <key>` does.
     let record = GrantRecord {
         target: service.clone(),
+        serves: None,
         kind: GrantKind::Device,
         delegation: Delegation::Sealed,
         holder: holder.clone(),

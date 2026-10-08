@@ -18,7 +18,7 @@ use core::time::Duration;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use bifrost::{Node, NodeId};
 use bifrost_noise::Noise;
@@ -238,7 +238,7 @@ async fn a_pinless_serve_refuses_a_member_cap_at_its_own_key() {
 async fn a_node_signed_ssh_grant_opens_a_shell() {
     let scratch = Scratch::new("ssh");
     let served = serve(&scratch.0, &["ssh=sshd:"]);
-    let link = issue(&scratch.0, &["ssh", "anyone"]);
+    let link = issue(&scratch.0, &["ssh", "anyone", "--once"]);
     let node = dialer(0x42, &served).await;
 
     let session = Connector::to_node(served.key, "ssh".parse().unwrap(), Some(link))
@@ -388,4 +388,129 @@ fn a_grant_is_on_disk_before_its_link_prints() {
         1,
         "the row was on disk before the print failed"
     );
+}
+
+/// Record in `home`'s ledger a link for `ssh` given to `holder`, made when `ssh` served `serves`, with its
+/// root id from `id`, ending `expiry`.
+fn link_for_ssh(
+    home: &swoosh::home::Home,
+    serves: Option<&str>,
+    holder: &str,
+    id: u8,
+    expiry: SystemTime,
+) -> nauthy::RevocationId {
+    let root_id = nauthy::RevocationId::from_bytes(vec![0x5a, id]);
+    swoosh::grants::Grants::at(home.links())
+        .append(
+            &swoosh::testkit::lock(),
+            &swoosh::grants::GrantRecord {
+                target: "ssh".parse().unwrap(),
+                serves: serves.map(|target| target.parse().unwrap()),
+                kind: swoosh::grants::GrantKind::Device,
+                delegation: swoosh::grants::Delegation::Sealed,
+                holder: holder.to_owned(),
+                root_id: root_id.clone(),
+                expiry,
+            },
+        )
+        .unwrap();
+    root_id
+}
+
+/// `serve <entries>` on `home`, as a person runs it, expected to refuse: its exit, stdout and stderr. A
+/// `serve` that is still running after a bounded wait started instead of refusing, so it is killed and the
+/// test fails, rather than waiting on a node that never stops.
+fn serve_once(home: &Path, entries: &[&str]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+        .arg("--home")
+        .arg(home)
+        .args(["serve", "--transport", "quirk+noise"])
+        .args(entries)
+        .env("XDG_RUNTIME_DIR", runtime_dir(home))
+        .env_remove("SWOOSH_HOME")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("serve spawns");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while child.try_wait().expect("poll serve").is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("serve was still running after 20s: it started instead of refusing");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    child.wait_with_output().expect("serve's output")
+}
+
+/// A shell is never bound under a name whose live links were made for another target, or for nothing: the
+/// start refuses, exit 1, before it binds or saves anything, and names who holds them.
+#[test]
+fn serve_refuses_sshd_under_a_name_with_links_for_another_target() {
+    let scratch = Scratch::new("shell-over-links");
+    let home = scratch.home();
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    let bob = TestRoot::seeded(0x61).node_id().to_string();
+    let carol = TestRoot::seeded(0x62).node_id().to_string();
+    link_for_ssh(&home, Some("tcp:localhost:22"), &bob, 1, later);
+    link_for_ssh(&home, None, &carol, 2, later);
+    link_for_ssh(&home, Some("sshd:"), &carol, 3, later);
+
+    let output = serve_once(&scratch.0, &["ssh=sshd:"]);
+    assert_eq!(output.status.code(), Some(1), "exit 1");
+    assert!(output.stdout.is_empty(), "no banner: nothing was bound");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr).trim_end(),
+        format!(
+            "error: links shared for ssh were made when it was tcp:localhost:22 or not served, and a \
+             shell under that name would reach them: revoke them first (swoosh revoke <holder>, for \
+             {bob}, {carol}), or serve the shell under another name."
+        )
+    );
+    assert!(
+        !home.serve_toml().exists(),
+        "a start that refused saves nothing"
+    );
+}
+
+/// Links made while `ssh` served `sshd:` are the shell's own, so they do not stop it.
+#[cfg(feature = "ssh")]
+#[test]
+fn serve_binds_sshd_when_every_live_link_was_issued_for_sshd() {
+    let scratch = Scratch::new("shell-own-links");
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    let bob = TestRoot::seeded(0x63).node_id().to_string();
+    link_for_ssh(&scratch.home(), Some("sshd:"), &bob, 1, later);
+    let _served = serve(&scratch.0, &["ssh=sshd:"]);
+}
+
+/// Only a live link counts: one past its end, or revoked here, does not stop the shell.
+#[cfg(feature = "ssh")]
+#[test]
+fn an_expired_or_revoked_link_does_not_block_serve() {
+    let scratch = Scratch::new("shell-dead-links");
+    let home = scratch.home();
+    let bob = TestRoot::seeded(0x64).node_id().to_string();
+    let earlier = SystemTime::now() - Duration::from_secs(60);
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    link_for_ssh(&home, Some("tcp:localhost:22"), &bob, 1, earlier);
+    let revoked = link_for_ssh(&home, Some("tcp:localhost:22"), &bob, 2, later);
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Id(revoked)],
+    )
+    .unwrap();
+    let _served = serve(&scratch.0, &["ssh=sshd:"]);
+}
+
+/// The check reads the ledger only for a shell: a `serve` that binds none starts over a ledger it cannot
+/// read, as it did before, and its gate admits no link this machine signed until it can.
+#[test]
+fn a_serve_with_no_shell_starts_over_an_unreadable_ledger() {
+    let scratch = Scratch::new("no-shell-ledger");
+    std::fs::create_dir(scratch.home().links()).unwrap();
+    let _served = serve(&scratch.0, &["demo=echo:"]);
 }

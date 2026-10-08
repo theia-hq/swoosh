@@ -226,6 +226,7 @@ async fn issued_slip(home: &Home) -> Cap {
             &crate::testkit::lock(),
             &GrantRecord {
                 target: service(),
+                serves: None,
                 kind: GrantKind::Bearer,
                 delegation: Delegation::Delegable,
                 holder: crate::grants::ANYONE.to_owned(),
@@ -235,6 +236,50 @@ async fn issued_slip(home: &Home) -> Cap {
         )
         .expect("record the slip");
     slip
+}
+
+/// A one-use link this machine signed, sealed and recorded as [`GrantKind::Once`].
+async fn one_use_slip(home: &Home) -> Cap {
+    let slip = TestNode::seeded(OWN)
+        .slip(&service(), in_an_hour())
+        .expect("mint a slip")
+        .seal()
+        .expect("seal it");
+    Grants::at(home.links())
+        .append(
+            &crate::testkit::lock(),
+            &GrantRecord {
+                target: service(),
+                serves: None,
+                kind: GrantKind::Once,
+                delegation: Delegation::Sealed,
+                holder: crate::grants::ANYONE.to_owned(),
+                root_id: slip.root_revocation_id().expect("a root id"),
+                expiry: in_an_hour(),
+            },
+        )
+        .expect("record the slip");
+    slip
+}
+
+/// A one-use link is admitted once, by its root id: refused after, and still refused once the ledger has
+/// been rewritten and read again, since what a run admitted stays admitted.
+#[tokio::test]
+async fn a_one_use_link_stays_used_when_the_ledger_is_read_again() {
+    let scratch = Scratch::new("once");
+    let once = one_use_slip(&scratch.home).await;
+    let (gate, _cut) = scratch.gate().await;
+    assert!(admits(&gate, &once), "the first admission");
+    assert!(!admits(&gate, &once), "the second is refused");
+
+    let other = issued_slip(&scratch.home).await;
+    past_the_debounce();
+    assert!(admits(&gate, &other), "the ledger was read again");
+    assert!(
+        admits(&gate, &other),
+        "a link that is not one-use admits again"
+    );
+    assert!(!admits(&gate, &once), "the one-use link stays used");
 }
 
 #[tokio::test]
