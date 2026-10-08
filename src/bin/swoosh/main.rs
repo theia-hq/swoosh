@@ -130,9 +130,7 @@ enum Command {
     Revoke(revoke::RevokeCmd),
     /// Reach a peer's sshd over the overlay; runs the system ssh.
     Ssh(ssh::SshCmd),
-    /// Make a link to one service for a person, one of their devices, a key, or `anyone`.
-    ///
-    /// `share <link>` makes a shorter copy.
+    /// Make a link to a service for a person, a device, a key, or anyone
     Share(share::ShareCmd),
     /// Print this command tree (spec vs binary).
     Tree(tree::TreeCmd),
@@ -569,8 +567,17 @@ async fn run() -> eyre::Result<()> {
         // `serve` via the watched set its gate reads. Need only the home; bind no transport and touch no store.
         Verb::ServiceEnable(cmd) => return cmd.run_enable(&home).await,
         Verb::ServiceDisable(cmd) => return cmd.run_disable(&home).await,
-        // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save.
-        Verb::Contact(cmd) => return cmd.run(&home).await,
+        // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save. A root
+        // key given for a machine is found only once `contact add` runs, and exits 2, as clap's own do.
+        Verb::Contact(cmd) => {
+            return match cmd.run(&home).await {
+                Err(report) => match report.downcast_ref::<contact::add::Usage>() {
+                    Some(usage) => usage_error(&["contact", "add"], &usage.0),
+                    None => Err(report),
+                },
+                done => done,
+            };
+        }
         // The passphrase on this machine's key, and the `root` leaves that need only the home: no store and
         // no transport, so they dispatch here beside the other local verbs.
         Verb::Lock(cmd) => return cmd.run(&home).await,

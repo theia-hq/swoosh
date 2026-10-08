@@ -43,5 +43,5 @@ Given the key of a device this machine knows, yours or a contact's, and no root 
 If it stops partway, run it again to finish.
 `swoosh revoke --help` lists the steps to replace your root.
 
-See also [`swoosh leave`](leave.md), [`swoosh grant`](grant.md), [Commands index](../commands.md) and
+See also [`swoosh leave`](leave.md), [`swoosh share`](share.md), [Commands index](../commands.md) and
 [Common options](../commands.md#common-options).

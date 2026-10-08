@@ -466,8 +466,8 @@ impl FromStr for Delegation {
 }
 
 /// A duration as its largest whole unit, `<n>d`/`<n>h`/`<n>m`/`<n>s`. Coarse on purpose: a grant lifetime is
-/// a rough "how much longer", not a stopwatch. Shared by `share` (framing the fresh lifetime) and
-/// `invite` (a device's).
+/// a rough "how much longer", not a stopwatch. `invite` frames a device's life with it; `share` prints the
+/// span as typed instead, since a rounded span misstates what a link gives.
 pub fn humanize(span: Duration) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;

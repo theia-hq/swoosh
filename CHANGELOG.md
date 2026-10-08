@@ -12,8 +12,20 @@ All notable changes to swoosh, newest first.
   first six characters of the key typed back. Where the root is kept, it asks for the root's passphrase
   and deletes the root; on one of its devices, the machine leaves it; anywhere else, this machine never
   trusts it.
+- **`share` makes a link to one service.** `swoosh share <service> <who>` makes one for a person (`bob`:
+  every machine of the root you saved for them), one machine (`bob/laptop`, or a key), or `anyone`. It
+  says on stderr what the link gives and until when, and prints only the link on stdout; `--save <file>`
+  writes it to a new private file instead. `--expires` takes 1h to 365d, default 1h. `swoosh share
+  <link>` makes a copy of a link for `anyone` that ends sooner.
 
 ### Changed
+- **`share` replaces `grant`.** `grant issue` is `share <service> <who>`, and `grant narrow` is
+  `share <link>`. A link for `anyone` can always be copied, so `--delegable` is gone.
+- **`contact add <person> <key>` saves that person's root.** A bare name (`alice`) saves the key that
+  vouches for her machines, which `share` binds a link to; one machine is `contact add alice/laptop
+  <key>`, and only a machine can be reached. `contact signet` is gone.
+- **`contact rm` refuses while links you shared with that contact are live.** It names the fix,
+  `swoosh revoke <name>`.
 - **`revoke me/<name>` prints `revoked` only once your root has revoked the device.** If it cannot
   use your root, it prints an `error:` saying the device is blocked on this machine only and names the
   fix, then exits 1.

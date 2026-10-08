@@ -11,6 +11,9 @@
 //! The link form is wholly offline: it reads no key and writes no ledger row, it only adds a shorter end to
 //! the link it was given. A copy can never do more than its source, so it needs no one's leave. The link is
 //! read from a path or stdin as well as typed, so it need never enter argv.
+//!
+//! Every check that can refuse runs before anything is written, and `--save`'s file is written before any
+//! line that says what the link gives, so a refused save never follows a line that claimed it worked.
 
 use core::fmt;
 use core::time::Duration;
@@ -30,23 +33,20 @@ use swoosh::identity::{self, Identity};
 use swoosh::names::NameError;
 use swoosh::node_signer::{Bind, NodeSigner};
 use swoosh::serve_toml::ServeToml;
-use tightbeam::duration::Lifetime;
 use tightbeam::identity::AsVerifyKey as _;
 
-/// Make a link to one service for a person, one of their devices, a key, or `anyone`.
-///
-/// `share <link>` makes a shorter copy.
+/// Make a link to a service for a person, a device, a key, or anyone
 #[derive(Debug, Args)]
 pub struct ShareCmd {
     /// the service, or a link to copy: swoosh:…, a path, or - for stdin
     #[arg(value_name = "service | link", value_parser = shared)]
     pub what: Shared,
-    /// who it is for: <person>, <person>/<name>, a key, or anyone
-    #[arg(value_name = "who", value_parser = recipient)]
+    /// who it is for
+    #[arg(value_name = "person | person/name | key | anyone", value_parser = recipient)]
     pub who: Option<Recipient>,
     /// How long: `2h`, `90d`.
-    #[arg(long, value_name = "d", value_parser = link_expiry)]
-    pub expires: Option<Duration>,
+    #[arg(long, value_name = "d", value_parser = str::parse::<Span>)]
+    pub expires: Option<Span>,
     /// Write the link to a new private file and print only the path.
     #[arg(long, value_name = "file")]
     pub save: Option<PathBuf>,
@@ -79,20 +79,19 @@ pub enum Recipient {
 /// The recipient that is whoever holds the link: a reserved name, so no contact can be called it.
 const ANYONE: &str = "anyone";
 
-/// The default life of a link from the service form.
-const DEFAULT_EXPIRY: Duration = Duration::from_secs(60 * 60);
-
-/// The shortest `--expires` a link takes.
+/// The shortest `--expires` the service form takes: a link must live long enough to be delivered. A copy has
+/// no floor, since shortening is the whole act and its source bounds it.
 const SHORTEST: Duration = Duration::from_secs(60 * 60);
 
-/// The longest `--expires` a link takes.
+/// The longest `--expires` the service form takes.
 const LONGEST: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 /// The most read from stdin for one link. A link is well under a kilobyte.
 const MAX_STDIN: u64 = 64 * 1024;
 
 /// The refusal for a bound link handed to `share <link>`.
-const BOUND: &str = "this link works only for the device it was made for, so it cannot be passed on: ask its issuer.";
+const BOUND: &str = "this link works only for the person or machine it was made for, so it cannot be passed on: \
+                     ask whoever made it.";
 
 /// The line for your own devices as a recipient: they reach what this machine serves already.
 const YOURS: &str = "your devices already reach it.";
@@ -148,16 +147,73 @@ fn recipient(text: &str) -> Result<Recipient, String> {
     })
 }
 
-/// `--expires`: a span from 1h to 365d.
-fn link_expiry(text: &str) -> Result<Duration, String> {
-    let span = text
-        .parse::<Lifetime>()
-        .map_err(|error| error.to_string())?
-        .duration();
-    if !(SHORTEST..=LONGEST).contains(&span) {
-        return Err("a link's --expires is 1h to 365d".to_owned());
+/// A span as `--expires` takes it and a line prints it back: one or more counts, each with its unit (`d`,
+/// `h`, `m`, `s`), largest first and each unit once (`2h`, `90m`, `1h30m`). It keeps the text typed, so `90m`
+/// prints `90m` and `1h30m` prints `1h30m`: the same span, said the way the person said it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    typed: String,
+    span: Duration,
+}
+
+impl Span {
+    /// The default life of a link from the service form: `1h`.
+    fn default_life() -> Self {
+        Self {
+            typed: "1h".to_owned(),
+            span: SHORTEST,
+        }
     }
-    Ok(span)
+
+    /// How long the span is.
+    fn duration(&self) -> Duration {
+        self.span
+    }
+}
+
+/// The units a span takes, largest first, with their length in seconds.
+const UNITS: [(char, u64); 4] = [('d', 24 * 60 * 60), ('h', 60 * 60), ('m', 60), ('s', 1)];
+
+/// The refusal for text that is not a span.
+const NOT_A_SPAN: &str = "a span is a number and a unit, like 2h, 90d or 1h30m";
+
+impl core::str::FromStr for Span {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let mut secs: u64 = 0;
+        // Each unit is taken at most once and only after a larger one, so the next one is looked for from here.
+        let mut units = UNITS.iter();
+        let mut rest = text;
+        while !rest.is_empty() {
+            let digits = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            let (count, after) = rest.split_at(digits);
+            let mut chars = after.chars();
+            let unit = chars.next().ok_or(NOT_A_SPAN)?;
+            let &(_, each) = units.find(|(name, _)| *name == unit).ok_or(NOT_A_SPAN)?;
+            let count: u64 = count.parse().map_err(|_| NOT_A_SPAN)?;
+            secs = count
+                .checked_mul(each)
+                .and_then(|part| secs.checked_add(part))
+                .ok_or(NOT_A_SPAN)?;
+            rest = chars.as_str();
+        }
+        if secs == 0 {
+            return Err(NOT_A_SPAN.to_owned());
+        }
+        Ok(Self {
+            typed: text.to_owned(),
+            span: Duration::from_secs(secs),
+        })
+    }
+}
+
+impl fmt::Display for Span {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.typed)
+    }
 }
 
 /// The refusal for a share that names no one, spelled with the service typed.
@@ -188,10 +244,14 @@ impl ShareCmd {
                 let Some(who) = self.who else {
                     return Err(Usage(who_is_it_for(service.as_str())).into());
                 };
+                let lifetime = self.expires.unwrap_or_else(Span::default_life);
+                if !(SHORTEST..=LONGEST).contains(&lifetime.duration()) {
+                    return Err(Usage("a link's --expires is 1h to 365d".to_owned()).into());
+                }
                 let issue = Issue {
                     service,
                     who,
-                    lifetime: self.expires.unwrap_or(DEFAULT_EXPIRY),
+                    lifetime,
                 };
                 return issue.run(home, self.save.as_deref(), out, err).await;
             }
@@ -205,7 +265,13 @@ impl ShareCmd {
             )
             .into());
         }
-        copy(&source, self.expires, self.save.as_deref(), out, err)
+        copy(
+            &source,
+            self.expires.as_ref(),
+            self.save.as_deref(),
+            out,
+            err,
+        )
     }
 }
 
@@ -213,7 +279,7 @@ impl ShareCmd {
 struct Issue {
     service: Service,
     who: Recipient,
-    lifetime: Duration,
+    lifetime: Span,
 }
 
 impl Issue {
@@ -229,10 +295,11 @@ impl Issue {
         let store = ContactsStore::open(home).await?;
         let bound = self.bind(store.contacts(), home).await?;
         let gives = Gives::of(&self.service, &ServeToml::read(home)?);
-        // A path `--save` names that holds anything refuses before the key is read or a row is written.
+        // A `--save` path that cannot be a new file refuses before the key is read or a row is written.
         let save = save.map(unused).transpose()?;
         let link = self.sign(home, &bound).await?;
-        let until = Until::from_now(self.lifetime);
+        let delivered = Delivered::new(&link, save)?;
+        let until = Until::from_now(self.lifetime.duration(), Some(&self.lifetime));
         writeln!(
             err,
             "{} {}{}until {until}.",
@@ -251,7 +318,7 @@ impl Issue {
                 "anyone holding this link can use it: send it privately."
             )?;
         }
-        deliver(&link, save, out)
+        delivered.print(out)
     }
 
     /// The bind the recipient names, with what the ledger records for it. A person is the root saved for
@@ -273,6 +340,13 @@ impl Issue {
                 };
                 if swoosh::config::load_signet(home).await? == Some(root) {
                     eyre::bail!("{person} is saved with your own root: {YOURS}");
+                }
+                // This machine's gate refuses every badge under a root it revoked, so a link bound to one
+                // would print and never work.
+                if swoosh::config::is_revoked(home, root)? {
+                    eyre::bail!(
+                        "{person}'s root is revoked here, so a link for {person} would not work"
+                    );
                 }
                 Bound {
                     bind: Bind::Fleet(root.verify_key()?),
@@ -307,11 +381,12 @@ impl Issue {
                 bound.who
             );
         }
-        let expiry = nauthy::Request::expires_in(self.lifetime);
+        let lifetime = self.lifetime.duration();
+        let expiry = nauthy::Request::expires_in(lifetime);
         let link = NodeSigner::from(&secret).mint_slip(
             &self.service,
             bound.bind,
-            self.lifetime,
+            lifetime,
             bound.delegation,
         )?;
         let root_id = Cap::parse(link.as_str())?
@@ -433,10 +508,10 @@ impl fmt::Display for Gives {
 }
 
 /// `share <link>`: a copy of `source` that ends at `expires` from now, or when the source does. A bound
-/// link is sealed, so it refuses: it works only for its own device.
+/// link is sealed, so it refuses: it works only for whoever it was made for.
 fn copy(
     source: &Link,
-    expires: Option<Duration>,
+    expires: Option<&Span>,
     save: Option<&Path>,
     out: &mut impl Write,
     err: &mut impl Write,
@@ -451,41 +526,97 @@ fn copy(
         .ok()
         .filter(|left| !left.is_zero())
         .ok_or_else(|| eyre::eyre!("this link has ended; nothing was copied."))?;
-    let span = expires.map_or(left, |asked| asked.min(left));
+    // A copy ends where `--expires` asked only when that is sooner than its link; otherwise it ends with its
+    // link, and its line says so rather than print a span nobody typed.
+    let asked = expires.filter(|asked| asked.duration() < left);
+    let span = asked.map_or(left, Span::duration);
     let copy = match source.narrow(None, Some(span)) {
         Ok(copy) => copy,
         Err(CapError::Attenuate(_)) => eyre::bail!("{BOUND}"),
         Err(other) => return Err(other.into()),
     };
     let save = save.map(unused).transpose()?;
-    writeln!(err, "the copy works until {}.", Until::from_now(span))?;
+    let delivered = Delivered::new(&copy, save)?;
+    let until = Until::from_now(span, asked);
+    match asked {
+        Some(_) => writeln!(err, "the copy works until {until}.")?,
+        None => writeln!(err, "the copy works until {until}, when its link ends.")?,
+    }
     writeln!(
         err,
         "anyone holding this link can use it: send it privately."
     )?;
-    deliver(&copy, save, out)
+    delivered.print(out)
 }
 
-/// Print the link on `out`, or write it into the `--save` file and print only the path.
-fn deliver(link: &Link, save: Option<&Path>, out: &mut impl Write) -> eyre::Result<()> {
-    let printed = swoosh::link::Link::from(Link::clone(link));
-    match save {
-        Some(path) => {
-            save_new(path, &printed)?;
-            writeln!(out, "{}", EscapedPath(path))?;
+/// A link made and, under `--save`, already in its file: all that is left is to print it, or the path.
+enum Delivered<'a> {
+    /// No `--save`: the link itself goes to stdout.
+    Printed(swoosh::link::Link),
+    /// Written into this new file; only the path goes to stdout.
+    Saved(&'a Path),
+}
+
+impl<'a> Delivered<'a> {
+    /// Write the `--save` file now, before any line says what the link gives, so a file that cannot be made
+    /// refuses with nothing claimed.
+    fn new(link: &Link, save: Option<&'a Path>) -> eyre::Result<Self> {
+        let printed = swoosh::link::Link::from(Link::clone(link));
+        match save {
+            Some(path) => {
+                save_new(path, &printed)?;
+                Ok(Self::Saved(path))
+            }
+            None => Ok(Self::Printed(printed)),
         }
-        None => writeln!(out, "{printed}")?,
     }
-    Ok(())
+
+    /// The one stdout line: the link, or the path it was saved to.
+    fn print(self, out: &mut impl Write) -> eyre::Result<()> {
+        match self {
+            Self::Printed(link) => writeln!(out, "{link}")?,
+            Self::Saved(path) => writeln!(out, "{}", EscapedPath(path))?,
+        }
+        Ok(())
+    }
 }
 
-/// `path`, when it names nothing yet: `--save` writes only a new file, so this refuses before anything is
-/// made or written. A dangling symlink names something too.
+/// `path`, when a new file can be made there: its directory exists and the path names nothing yet. Checked
+/// before the key is read or a row is written; a dangling symlink names something too. Only "not found" is
+/// free: any other answer about the path refuses, in swoosh's words.
+// `core::io::ErrorKind` is still unstable, so the kind checks read from `std`.
+#[allow(clippy::std_instead_of_core)]
 fn unused(path: &Path) -> eyre::Result<&Path> {
-    if path.symlink_metadata().is_ok() {
-        return Err(exists(path));
+    // `x.link` has an empty parent, which is the working directory.
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match dir.metadata() {
+        Ok(found) if found.is_dir() => {}
+        Ok(_) => return Err(cannot_make(path, std::io::ErrorKind::NotADirectory)),
+        Err(error) => return Err(cannot_make(path, error.kind())),
     }
-    Ok(path)
+    match path.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
+        Ok(_) => Err(exists(path)),
+        Err(error) => Err(cannot_make(path, error.kind())),
+    }
+}
+
+/// The refusal for a `--save` file that cannot be made, its cause in plain words: never the system's text.
+// `core::io::ErrorKind` is still unstable, so the kinds read from `std`.
+#[allow(clippy::std_instead_of_core)]
+fn cannot_make(path: &Path, kind: std::io::ErrorKind) -> eyre::Report {
+    let path = EscapedPath(path);
+    let why = match kind {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => "no such directory",
+        std::io::ErrorKind::PermissionDenied => "permission denied",
+        std::io::ErrorKind::ReadOnlyFilesystem => "the disk is read-only",
+        std::io::ErrorKind::StorageFull => "the disk is full",
+        _ => return eyre::eyre!("could not make {path}"),
+    };
+    eyre::eyre!("could not make {path}: {why}")
 }
 
 /// Write the printed form of `link`, the form a person pastes, into a new `0600` file at `path`, and sync
@@ -501,11 +632,17 @@ fn save_new(path: &Path, link: &swoosh::link::Link) -> eyre::Result<()> {
         .open(path)
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::AlreadyExists => exists(path),
-            _ => eyre::Report::new(error).wrap_err(format!("could not make {}", EscapedPath(path))),
+            kind => cannot_make(path, kind),
         })?;
-    writeln!(file, "{link}")?;
-    file.sync_all()?;
-    Ok(())
+    // A write or sync that fails would leave a partial file that holds no link, so it goes; the system's text
+    // stays out of the line.
+    writeln!(file, "{link}")
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            cannot_make(path, error.kind())
+        })
 }
 
 /// The refusal for a `--save` path that is taken.
@@ -522,26 +659,28 @@ fn read_stdin(stdin: impl Read) -> eyre::Result<Link> {
     stdin
         .take(MAX_STDIN)
         .read_to_string(&mut text)
-        .map_err(|_| Usage("stdin held no swoosh: link.".to_owned()))?;
+        .map_err(|_| Usage("stdin held no link.".to_owned()))?;
     let text = text.trim();
     if !swoosh::link::is_prefixed(text) {
-        return Err(Usage("stdin held no swoosh: link.".to_owned()).into());
+        return Err(Usage("stdin held no link.".to_owned()).into());
     }
     swoosh::link::parse(text).map_err(|error| Usage(format!("stdin: {error}")).into())
 }
 
 /// When a link ends, as its line prints it: the local clock time when that is within a day, else the local
-/// date; then the span it was given, in the grammar `--expires` takes.
-struct Until {
+/// date; then, when the person typed it or took the default, the span, as `--expires` takes it.
+struct Until<'a> {
     at: SystemTime,
-    span: Duration,
+    left: Duration,
+    span: Option<&'a Span>,
 }
 
-impl Until {
-    /// `span` from now.
-    fn from_now(span: Duration) -> Self {
+impl<'a> Until<'a> {
+    /// `left` from now, printed with `span` when there is one.
+    fn from_now(left: Duration, span: Option<&'a Span>) -> Self {
         Self {
-            at: SystemTime::now() + span,
+            at: SystemTime::now() + left,
+            left,
             span,
         }
     }
@@ -555,31 +694,51 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-impl fmt::Display for Until {
+impl fmt::Display for Until<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let span = grants::humanize(self.span);
         let secs = self
             .at
             .duration_since(SystemTime::UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
-        let Some(local) = local_time(secs) else {
-            return write!(f, "{} ({span})", swoosh::root::Date(secs));
-        };
-        if self.span <= DAY {
-            write!(f, "{:02}:{:02} ({span})", local.tm_hour, local.tm_min)
-        } else {
-            let month = usize::try_from(local.tm_mon)
-                .ok()
-                .and_then(|month| MONTHS.get(month))
-                .copied()
-                .unwrap_or("?");
-            write!(
-                f,
-                "{} {month} {} ({span})",
-                local.tm_mday,
-                i64::from(local.tm_year) + 1900
-            )
+        match local_time(secs) {
+            Some(local) => End {
+                local: &local,
+                within_a_day: self.left <= DAY,
+            }
+            .fmt(f)?,
+            None => write!(f, "{}", swoosh::root::Date(secs))?,
         }
+        match self.span {
+            Some(span) => write!(f, " ({span})"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A local time as an end prints: `15:04` within a day, `15 Oct 2026` past it. Apart from the clock read, so
+/// its shape is tested on a time made by hand.
+struct End<'a> {
+    local: &'a libc::tm,
+    within_a_day: bool,
+}
+
+impl fmt::Display for End<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let local = self.local;
+        if self.within_a_day {
+            return write!(f, "{:02}:{:02}", local.tm_hour, local.tm_min);
+        }
+        let month = usize::try_from(local.tm_mon)
+            .ok()
+            .and_then(|month| MONTHS.get(month))
+            .copied()
+            .unwrap_or("?");
+        write!(
+            f,
+            "{} {month} {}",
+            local.tm_mday,
+            i64::from(local.tm_year) + 1900
+        )
     }
 }
 

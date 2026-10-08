@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Each `contact` edit holds `<home>/home.lock` from its read of the book to its save, end to end: while
-//! the lock a fold writes the book under is held, the compiled binary's `contact add`, `signet` and `rm`
+//! the lock a fold writes the book under is held, the compiled binary's `contact add` and `rm`
 //! each wait, and once it is released each lands.
 
 use core::time::Duration;

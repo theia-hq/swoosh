@@ -120,6 +120,11 @@ fn resolve_unknown_name_is_a_clean_error_not_an_empty_dial() {
         resolve(&contacts, &target),
         Err(ResolveError::UnknownPetname(petname("ghost")))
     );
+    // A bare person saves a root, which no dial reaches, so the line names the machine form.
+    assert_eq!(
+        ResolveError::UnknownPetname(petname("ghost")).to_string(),
+        "ghost is not saved here: swoosh contact add ghost/<name> <key>"
+    );
 
     let mut contacts = Contacts::default();
     contacts.add(petname("alice"), Some(device("macbook")), node(1));

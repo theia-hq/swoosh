@@ -144,7 +144,8 @@ fn lapsing(scratch: &Scratch) -> Lapsing {
 /// A link to `host`'s echo that lapses [`EXPIRES`] from now, signed under the host's own key with the
 /// ledger row `share` writes for it. `share` makes nothing shorter than an hour, so the link is signed here.
 fn sign_lapsing(host: &Path) -> String {
-    let seed: [u8; 32] = std::fs::read(host.join("machine").join("key"))
+    let home = swoosh::home::Home::resolve(Some(host.to_path_buf())).unwrap();
+    let seed: [u8; 32] = std::fs::read(home.key())
         .unwrap()
         .try_into()
         .expect("a plain key file is its 32 bytes");
@@ -161,7 +162,7 @@ fn sign_lapsing(host: &Path) -> String {
         root_id: cap.root_revocation_id().unwrap(),
         expiry,
     };
-    swoosh::grants::Grants::at(host.join("links"))
+    swoosh::grants::Grants::at(home.links())
         .append(&swoosh::testkit::lock(), &record)
         .unwrap();
     swoosh::link::Link::from(cap.link().unwrap()).to_string()

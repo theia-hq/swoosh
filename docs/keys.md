@@ -74,7 +74,7 @@ machine serves, compare the full signet the two sides printed, out of band. `ado
 badge is bound to the machine's own key before it stores anything.
 
 An invite is **membership**: it admits one device at your whole gate. To open one service instead, to one
-device or a whole fleet, use [`swoosh grant issue`](reference/commands.md#grant).
+machine or to every machine of a person's root, use [`swoosh share`](reference/commands.md#share).
 
 ### Membership
 

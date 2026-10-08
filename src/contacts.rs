@@ -1,7 +1,8 @@
 //! The local, self-sovereign contact store: petnames mapped to peer identities.
 //!
-//! A petname is a name YOU chose for a peer, meaningful only on this box. `swoosh contact add alice
-//! <key>` saves it; then `swoosh ping alice` reaches that key without pasting base32. Nothing here is
+//! A petname is a name YOU chose for a peer, meaningful only on this box. `swoosh contact add alice/laptop
+//! <key>` saves one machine of theirs; then `swoosh ping alice/laptop` reaches that key without pasting
+//! base32, and `swoosh ping alice` tries each machine saved under her. Nothing here is
 //! synced, published, or globally unique: it is your address book, Alice keeps hers. Zooko's triangle
 //! resolved by dropping GLOBAL uniqueness, so a name can be human-meaningful AND secure with no registry.
 //!
@@ -86,8 +87,9 @@ impl core::fmt::Display for Petname {
 pub struct DeviceLabel(String);
 
 impl DeviceLabel {
-    /// The slot a device-less `contact add alice <key>` occupies. Sorts before named devices, so an
-    /// unqualified person resolves to their default device first.
+    /// The slot [`Contacts::add`] fills when it is given no label. `contact add` always names the machine
+    /// (`alice` alone saves her root), so only a book written by hand or by a test holds it. Sorts before
+    /// named devices, so an unqualified person resolves to their default device first.
     pub const DEFAULT: &'static str = "default";
 
     /// The maximum label length in bytes, the name rule's bound.
@@ -330,6 +332,59 @@ impl Contacts {
             .and_then(|person| person.signet.as_ref())
     }
 
+    /// Save `node` at `at`, `contact add`'s one write: a person's root when `at` names no machine
+    /// (`alice`), else that one machine (`alice/laptop`). It never moves a name or a key: a name that holds
+    /// another key refuses ([`Taken::Name`]), since a pasted key must not quietly repoint it and the links
+    /// given to the key it holds would drop out of every by-name tool; and a key saved under any other name,
+    /// as a root or a machine, refuses ([`Taken::Key`]), so one key has one name on this machine and a
+    /// revoke by one name never ends links given by another. Nothing is written on a refusal.
+    pub fn save(&mut self, at: &ContactRef, node: NodeId) -> Result<Saved, Taken> {
+        let held = self
+            .people
+            .get(&at.petname)
+            .and_then(|person| match &at.device {
+                None => person.signet,
+                Some(device) => person.devices.get(device).copied(),
+            });
+        match held {
+            Some(held) if held.node == node => return Ok(Saved::Unchanged),
+            Some(held) => return Err(Taken::Name { held: held.node }),
+            None => {}
+        }
+        if let Some(at) = self.saved_at(&node) {
+            return Err(Taken::Key { at });
+        }
+        let person = self.people.entry(at.petname.clone()).or_default();
+        let binding = Binding { node };
+        match &at.device {
+            None => person.signet = Some(binding),
+            Some(device) => {
+                person.devices.insert(device.clone(), binding);
+            }
+        }
+        Ok(Saved::Created)
+    }
+
+    /// Where `node` is saved in this book, as a person's root (`alice`) or as one machine (`alice/laptop`),
+    /// your own devices under `me` included; `None` when no name holds it.
+    pub fn saved_at(&self, node: &NodeId) -> Option<ContactRef> {
+        self.people.iter().find_map(|(petname, person)| {
+            let device = if person.signet.is_some_and(|root| root.node == *node) {
+                None
+            } else {
+                let (label, _) = person
+                    .devices
+                    .iter()
+                    .find(|(_, binding)| binding.node == *node)?;
+                Some(label.clone())
+            };
+            Some(ContactRef {
+                petname: petname.clone(),
+                device,
+            })
+        })
+    }
+
     /// Insert a signet binding under a petname. For the store codec ONLY, reconstructing a saved signet,
     /// as [`insert_binding`](Self::insert_binding) does for devices.
     pub(crate) fn set_signet_binding(&mut self, petname: Petname, binding: Binding) {
@@ -375,6 +430,32 @@ pub enum Added {
     Replaced(NodeId),
 }
 
+/// What a [`save`](Contacts::save) did: it never replaces, so a key is either new here or already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Saved {
+    /// The key was saved under the name.
+    Created,
+    /// The name held this key already; nothing changed.
+    Unchanged,
+}
+
+/// Why a [`save`](Contacts::save) refused: the name or the key is taken.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum Taken {
+    /// The name holds another key.
+    #[error("the name holds another key, {held}")]
+    Name {
+        /// The key the name holds.
+        held: NodeId,
+    },
+    /// The key is saved under another name.
+    #[error("the key is saved as {at}")]
+    Key {
+        /// Where it is saved: a person for their root, `<person>/<name>` for a machine.
+        at: ContactRef,
+    },
+}
+
 /// The outcome of a [`remove`](Contacts::remove): whether it removed anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Removed {
@@ -399,7 +480,7 @@ impl core::fmt::Display for ContactRef {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ResolveError {
     /// No such petname in this store.
-    #[error("unknown contact '{0}'; add it with `swoosh contact add {0} <key>`")]
+    #[error("{0} is not saved here: swoosh contact add {0}/<name> <key>")]
     UnknownPetname(Petname),
     /// The petname exists but has no device by that label.
     #[error("contact '{petname}' has no device '{device}'; `swoosh status` lists your contacts")]

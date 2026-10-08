@@ -13,18 +13,18 @@ nothing from you but the link itself ([getting started](getting-started.md)).
 
 On the machine that serves:
 
-<!-- capture: swoosh grant issue ping --expires 15m -->
+<!-- manual: the end time and the link differ per run -->
 ```console
-$ swoosh grant issue ping --expires 15m
-issued a bearer grant for `ping`
-  anyone holding the link can use it; expires in 15m.
-  revoke: paste the link to `swoosh revoke <link>`, or let it expire
+$ swoosh share ping anyone
+anyone can use ping on this machine until 15:04 (1h).
+the link dials this machine: it works while this machine serves ping.
+anyone holding this link can use it: send it privately.
 swoosh:ed01hcq6…
 ```
 
 Hand that last line over any channel (chat, a QR code). It names the node, the one service it grants,
-and the authority to reach it. The default life is one hour; `--expires` shortens or extends it. Add
-`--for` to bind the link to one device or a whole fleet, so a stolen copy is useless (see
+and the authority to reach it. The default life is one hour; `--expires` sets it, from 1h to 365d. Name a
+person, one of their machines, or a key instead of `anyone`, and a stolen copy is useless (see
 [the one trade](keys.md#the-one-trade)).
 
 ## 2. Present it
@@ -72,7 +72,7 @@ Error: ed01hcq6balrlxwa: reached, but refused
 ## The limit
 
 A bearer link is a bearer token: whoever holds an unexpired, un-revoked one gets that one service until
-it expires or you revoke it. Keep bearer links short-lived, or bind them with `--for`. A revoke
+it expires or you revoke it. Keep bearer links short-lived, or name who they are for. A revoke
 lands on the next dial, no restart; it does not cut a session already in progress. See
 [revocation](keys.md#revocation).
 
@@ -80,4 +80,4 @@ lands on the next dial, no restart; it does not cut a session already in progres
 
 - [Keys](keys.md#grant) the model: grants, fleets, and the one trade.
 - [Contractor access](use-cases/contractor-access.md) the same loop for ssh, bound to a fleet.
-- [Commands](reference/commands.md#grant) issue and narrow; [revoke](reference/commands.md#revoke) takes a link back.
+- [Commands](reference/commands.md#share) `share` makes a link and shorter copies; [revoke](reference/commands.md#revoke) takes it back.

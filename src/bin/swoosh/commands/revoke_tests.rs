@@ -2442,7 +2442,7 @@ async fn the_recipe_link_is_bound_to_a_rescue_key() {
         "line 10 revokes the link on nas: {line}"
     );
     let tape = Tape::default();
-    run(
+    let ran = run(
         &nas,
         &["-"],
         printed.as_bytes(),
@@ -2450,8 +2450,12 @@ async fn the_recipe_link_is_bound_to_a_rescue_key() {
         Devices::all(&tape),
         tape,
     )
-    .await
-    .ok();
+    .await;
+    assert!(
+        ran.ok().starts_with("revoked the link"),
+        "line 10 runs and says what it did: {}",
+        ran.err
+    );
     assert!(
         swoosh::revoked::open(&nas).unwrap().is_revoked(link.cap()),
         "the rescue link is revoked on nas"

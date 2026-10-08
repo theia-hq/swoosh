@@ -87,10 +87,10 @@ You just did the zero-auth version. Each step from here adds exactly one thing:
   [Reach your own devices](use-cases/reach-your-own-devices.md).
 - **Add a gate.** Drop `--public` and the same services admit only your own devices, refusing strangers.
   See [Keys: the gate](keys.md#the-gate).
-- **Reach by name.** Save a key under a petname once, then use the name everywhere:
-  `swoosh contact add desk <key>`, then `swoosh ping desk`. See [contact](reference/commands.md#contact).
-- **Let other people in.** Issue a `swoosh:` capability link to one service, for one person or their
-  whole fleet, revocable. [Capabilities](capabilities.md) walks the whole loop in a minute.
+- **Reach by name.** Save a machine's key under a name once, then use the name everywhere:
+  `swoosh contact add alice/desk <key>`, then `swoosh ping alice/desk`. See [contact](reference/commands.md#contact).
+- **Let other people in.** `swoosh share` makes a link to one service, for one person, one of their
+  machines, or anyone, until a time you pick. [Capabilities](capabilities.md) walks the whole loop in a minute.
 
 ## Next
 

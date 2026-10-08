@@ -19,7 +19,7 @@ use swoosh::serve_toml::ServeToml;
 use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
 
-use super::{BOUND, ShareCmd, Usage};
+use super::{BOUND, End, ShareCmd, Span, Usage};
 
 /// This machine's key.
 const OWN: u8 = 0x11;
@@ -285,9 +285,10 @@ async fn share_link_copy_defaults_to_the_sources_remaining_time() {
         ends(&source).abs_diff(ends(&copy.link())) <= 2,
         "the copy ends when its source does"
     );
+    let first = copy.err.lines().next().unwrap();
     assert!(
-        copy.err.starts_with("the copy works until "),
-        "{}",
+        first.starts_with("the copy works until ") && first.ends_with(", when its link ends."),
+        "a copy that ends with its link prints no span: {}",
         copy.err
     );
     assert!(
@@ -370,25 +371,97 @@ fn share_with_your_own_devices_refuses() {
     }
 }
 
-#[test]
-fn share_expires_is_one_hour_to_a_year() {
+/// The service form takes 1h to 365d, refused as a usage error (exit 2) with nothing written. The floor is
+/// the service form's alone: a copy takes any span its source has left.
+#[tokio::test]
+async fn share_expires_is_one_hour_to_a_year() {
+    let home = scratch("expires").await;
     for (span, ok) in [
         ("30m", false),
+        ("59m59s", false),
         ("1h", true),
         ("365d", true),
         ("366d", false),
     ] {
-        let parsed = parse(&["ssh", "anyone", "--expires", span]);
-        assert_eq!(parsed.is_ok(), ok, "{span}");
-        if let Err(error) = parsed {
-            assert_eq!(error.exit_code(), 2);
-            assert!(
-                error
-                    .to_string()
-                    .contains("a link's --expires is 1h to 365d"),
-                "{error}"
-            );
+        let ran = share(&home, &["ssh", "anyone", "--expires", span]).await;
+        match &ran.result {
+            Ok(()) => assert!(ok, "{span} is refused"),
+            Err(error) => {
+                assert!(!ok, "{span}: {error:#}");
+                assert_eq!(
+                    error.downcast_ref::<Usage>().map(|usage| usage.0.as_str()),
+                    Some("a link's --expires is 1h to 365d"),
+                    "{span}: exit 2"
+                );
+                assert!(
+                    ran.out.is_empty() && ran.err.is_empty(),
+                    "{span}: nothing prints"
+                );
+            }
         }
+    }
+    assert_eq!(rows(&home).await.len(), 2, "only the two shares made rows");
+
+    let source = share(&home, &["ssh", "anyone"]).await.link();
+    let copy = share(
+        &home,
+        &[&saved(&home, "s.link", &source), "--expires", "30m"],
+    )
+    .await;
+    assert!(
+        ends(&copy.link()) <= from_now(Duration::from_secs(30 * 60)) + 1,
+        "a copy takes a span under an hour"
+    );
+    assert!(
+        copy.err.starts_with("the copy works until "),
+        "{}",
+        copy.err
+    );
+    assert!(
+        copy.err.lines().next().unwrap().ends_with(" (30m)."),
+        "it ends where --expires asked, and says so: {}",
+        copy.err
+    );
+}
+
+/// `--expires` takes one or more counts with units, largest first and each once, and prints back exactly
+/// what was typed: `90m` is `90m`, never rounded to `1h`, and `1h30m` is `1h30m`.
+#[test]
+fn a_span_parses_its_grammar_and_prints_as_typed() {
+    for (text, secs) in [
+        ("90m", 5400),
+        ("1h30m", 5400),
+        ("2h", 7200),
+        ("90d", 90 * 86_400),
+        ("1d2h3m4s", 86_400 + 7200 + 180 + 4),
+    ] {
+        let span: Span = text.parse().unwrap();
+        assert_eq!(span.duration(), Duration::from_secs(secs), "{text}");
+        assert_eq!(span.to_string(), text, "{text} prints as typed");
+    }
+    for text in [
+        "", "h", "90", "1h1h", "30m1h", "1x", "0h", "0h0m", "-1h", "1 h", "1H",
+    ] {
+        assert!(text.parse::<Span>().is_err(), "{text:?} is no span");
+    }
+    let error = parse(&["ssh", "anyone", "--expires", "1.5h"]).expect_err("no span");
+    assert_eq!(error.exit_code(), 2);
+    assert!(
+        error
+            .to_string()
+            .contains("a span is a number and a unit, like 2h, 90d or 1h30m"),
+        "swoosh's own line, no library text: {error}"
+    );
+}
+
+#[tokio::test]
+async fn an_issue_line_prints_the_span_as_typed() {
+    let home = scratch("span").await;
+    for (span, printed) in [("90m", " (90m)."), ("1h30m", " (1h30m)."), ("2d", " (2d).")] {
+        let ran = share(&home, &["ssh", "anyone", "--expires", span]).await;
+        ran.made();
+        let first = ran.err.lines().next().unwrap();
+        assert!(first.ends_with(printed), "{span}: {first}");
     }
 }
 
@@ -488,6 +561,17 @@ async fn every_share_states_what_it_gives() {
         let lines: Vec<&str> = ran.err.lines().collect();
         assert!(lines[0].starts_with(&first), "{args:?}: {}", ran.err);
         assert!(lines[0].ends_with(" (1h)."), "{args:?}: {}", ran.err);
+        // Between them, the end as a clock time: `15:04`.
+        let clock = &lines[0][first.len()..lines[0].len() - " (1h).".len()];
+        assert!(
+            clock.len() == 5
+                && clock.as_bytes()[2] == b':'
+                && clock
+                    .chars()
+                    .enumerate()
+                    .all(|(at, c)| at == 2 || c.is_ascii_digit()),
+            "{args:?}: the end is a clock time: {clock:?}"
+        );
         assert_eq!(
             lines[1..],
             [format!(
@@ -506,12 +590,40 @@ async fn every_share_states_what_it_gives() {
         "{}",
         anyone.err
     );
+    // Past a day, the end is a date: `15 Oct 2026`.
+    let date: Vec<&str> = lines[0]
+        .trim_start_matches("anyone can open a shell on this machine until ")
+        .trim_end_matches(" (7d).")
+        .split(' ')
+        .collect();
+    assert!(
+        matches!(date.as_slice(), [day, month, year]
+            if day.parse::<u8>().is_ok_and(|day| (1..=31).contains(&day))
+                && super::MONTHS.contains(month)
+                && year.len() == 4 && year.parse::<u16>().is_ok()),
+        "the end is a date: {date:?}"
+    );
     assert_eq!(
         lines[2],
         "anyone holding this link can use it: send it privately."
     );
 }
 
+/// A stdout that refuses every write, as a closed pipe does.
+struct Closed;
+
+impl std::io::Write for Closed {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("closed pipe"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The row is on disk before the link prints: with a stdout that refuses the link, the share fails and its
+/// row is there all the same, so a link that did print can always be revoked.
 #[tokio::test]
 async fn a_share_records_its_row_before_the_link_prints() {
     let home = scratch("row").await;
@@ -520,6 +632,98 @@ async fn a_share_records_its_row_before_the_link_prints() {
     assert_eq!(Some(row.root_id), link.cap().root_revocation_id());
     assert_eq!(row.target, "ssh".parse::<Service>().unwrap());
     assert_eq!(row.holder, swoosh::grants::ANYONE);
+
+    let cmd = parse(&["ssh", "anyone"]).unwrap();
+    let mut err = Vec::new();
+    let failed = cmd
+        .run(&home, &b""[..], &mut Closed, &mut err)
+        .await
+        .expect_err("a stdout that refuses the link fails the share");
+    assert!(format!("{failed:#}").contains("closed pipe"), "{failed:#}");
+    assert_eq!(
+        rows(&home).await.len(),
+        2,
+        "the row was written before the print"
+    );
+}
+
+/// A `--save` that cannot make its file refuses before anything is signed or said: no file, no row, no line
+/// on stderr, and swoosh's own words for why, never the system's.
+#[tokio::test]
+async fn a_refused_save_leaves_no_file_and_no_row() {
+    let home = scratch("save-refused").await;
+    let missing = path_in(&home, "no-such-dir").join("l.link");
+    let path = missing.display().to_string();
+    let ran = share(&home, &["ssh", "anyone", "--save", &path]).await;
+    assert_eq!(
+        ran.refusal(),
+        format!("could not make {path}: no such directory")
+    );
+    assert!(!missing.exists(), "no file is made");
+    assert!(
+        ran.out.is_empty() && ran.err.is_empty(),
+        "nothing prints: {}",
+        ran.err
+    );
+    assert!(rows(&home).await.is_empty(), "no row is written");
+
+    let file = path_in(&home, "a-file");
+    std::fs::write(&file, "").unwrap();
+    let under_a_file = file.join("l.link").display().to_string();
+    let ran = share(&home, &["ssh", "anyone", "--save", &under_a_file]).await;
+    assert_eq!(
+        ran.refusal(),
+        format!("could not make {under_a_file}: no such directory")
+    );
+    assert!(rows(&home).await.is_empty(), "no row is written");
+}
+
+/// An end prints as a clock time within a day and as a date past it, from a local time made by hand, so the
+/// shape is checked with no time zone in play.
+#[test]
+fn an_end_prints_a_clock_time_or_a_date() {
+    // SAFETY: `tm` is plain C data, so all-zero is a valid value; the fields read are set below.
+    let mut local: libc::tm = unsafe { core::mem::zeroed() };
+    local.tm_hour = 15;
+    local.tm_min = 4;
+    local.tm_mday = 15;
+    local.tm_mon = 9;
+    local.tm_year = 126;
+    let at = |local: &libc::tm, within_a_day| {
+        End {
+            local,
+            within_a_day,
+        }
+        .to_string()
+    };
+    assert_eq!(at(&local, true), "15:04");
+    assert_eq!(at(&local, false), "15 Oct 2026");
+    local.tm_hour = 9;
+    local.tm_min = 0;
+    assert_eq!(at(&local, true), "09:00", "padded to two digits");
+}
+
+/// A person whose root this machine revoked gets no link: this machine's gate would refuse every badge under
+/// that root, so the link would print and never work.
+#[tokio::test]
+async fn share_to_a_person_whose_root_is_revoked_here_refuses() {
+    let home = scratch("revoked-root").await;
+    with_bob(&home).await;
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(
+            TestRoot::seeded(BOB_ROOT).verify_key(),
+        )],
+    )
+    .unwrap();
+    let ran = share(&home, &["ssh", "bob"]).await;
+    assert_eq!(
+        ran.refusal(),
+        "bob's root is revoked here, so a link for bob would not work"
+    );
+    assert!(ran.out.is_empty() && ran.err.is_empty(), "nothing prints");
+    assert!(rows(&home).await.is_empty(), "no row is written");
 }
 
 /// A key typed as the recipient is one machine: the link it makes is bound to that key alone.

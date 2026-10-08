@@ -22,7 +22,7 @@ pub mod rm;
 /// Save or remove another person's key under a name.
 #[derive(Debug, Subcommand)]
 pub enum ContactCmd {
-    /// Save a person's root key (`alice`), or one machine of theirs (`alice/laptop`).
+    /// Save a person's root, or one machine of theirs
     Add(add::AddCmd),
     /// Remove a contact, or one of its devices (`alice` or `alice/macbook`).
     Rm(rm::RmCmd),

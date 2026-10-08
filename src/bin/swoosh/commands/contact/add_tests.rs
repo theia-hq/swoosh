@@ -30,10 +30,39 @@ async fn home_with_book(tag: &str) -> Home {
 async fn add(home: &Home, name: &str, key: NodeId) -> eyre::Result<()> {
     AddCmd {
         name: super::super::new_contact(name).expect("a valid contact name"),
-        key,
+        key: super::TypedKey { key, root: false },
     }
     .run(home)
     .await
+}
+
+/// `swoosh contact add <args>` on `home`, through the parser the binary uses.
+async fn add_typed(home: &Home, args: &[&str]) -> eyre::Result<()> {
+    match Cli::try_parse_from(["swoosh", "contact", "add"].iter().chain(args).copied())
+        .expect("contact add parses")
+        .command
+    {
+        Some(crate::Command::Contact(super::super::ContactCmd::Add(cmd))) => cmd.run(home).await,
+        other => panic!("contact add parses to contact add, not {other:?}"),
+    }
+}
+
+/// Where `home`'s book saves alice and bob: each one's root, then their machines.
+async fn book(home: &Home) -> Vec<(String, Option<NodeId>, Vec<(String, NodeId)>)> {
+    let store = ContactsStore::open(home).await.expect("open");
+    let contacts = store.contacts();
+    contacts
+        .petnames()
+        .map(|person| {
+            let machines = contacts
+                .devices(person)
+                .expect("a listed person is saved")
+                .map(|(label, key)| (label.as_str().to_owned(), *key))
+                .collect();
+            let root = contacts.signet(person).map(|binding| binding.node);
+            (person.as_str().to_owned(), root, machines)
+        })
+        .collect()
 }
 
 /// `me/` is decided by this person's root, so a typed add under it refuses at parse (exit 2, before the
@@ -208,4 +237,153 @@ fn a_contact_name_may_not_start_with_a_path_character() {
             "{name}: a refused name is a usage error"
         );
     }
+}
+
+/// A name that holds a key never takes another: a different root under a saved person, and a different key
+/// under a saved machine, each refuse (exit 1, not a usage error) and write nothing. The refusal names both
+/// keys whole, so a person can compare them, and the two commands that free the name.
+#[tokio::test]
+async fn contact_add_never_replaces_a_key() {
+    let home = home_with_book("never-replaces").await;
+    let (old, new) = (
+        NodeId::from_ed25519_secret(&[6u8; 32]),
+        NodeId::from_ed25519_secret(&[7u8; 32]),
+    );
+    let (laptop, other) = (
+        NodeId::from_ed25519_secret(&[8u8; 32]),
+        NodeId::from_ed25519_secret(&[9u8; 32]),
+    );
+    add(&home, "bob", old).await.expect("bob's root is saved");
+    add(&home, "bob/laptop", laptop)
+        .await
+        .expect("bob's laptop is saved");
+    let before = book(&home).await;
+
+    let root = add(&home, "bob", new)
+        .await
+        .expect_err("a second root refuses");
+    assert!(root.downcast_ref::<super::Usage>().is_none(), "exit 1");
+    assert_eq!(
+        format!("{root:#}"),
+        format!(
+            "bob's root here is root:{old}, not root:{new}\n  A saved root is never replaced. To save the \
+             new one, end the links you gave bob, then remove bob:\n    swoosh revoke bob\n    swoosh \
+             contact rm bob"
+        )
+    );
+    let machine = add(&home, "bob/laptop", other)
+        .await
+        .expect_err("a second key for a machine refuses");
+    assert_eq!(
+        format!("{machine:#}"),
+        format!(
+            "bob/laptop here is {laptop}, not {other}\n  A saved key is never replaced. To save the new \
+             one, end the links you gave bob/laptop, then remove bob/laptop:\n    swoosh revoke \
+             bob/laptop\n    swoosh contact rm bob/laptop"
+        )
+    );
+    assert_eq!(book(&home).await, before, "nothing is written");
+
+    add(&home, "bob", old)
+        .await
+        .expect("the same root again is no change");
+    add(&home, "bob/laptop", laptop)
+        .await
+        .expect("the same key again is no change");
+    assert_eq!(book(&home).await, before);
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// One key has one name here: a key saved as a person's root or as a machine refuses under any other name,
+/// root or machine, naming where it is saved, and nothing is written.
+#[tokio::test]
+async fn contact_add_refuses_a_key_under_a_second_name() {
+    let home = home_with_book("second-name").await;
+    let root = NodeId::from_ed25519_secret(&[6u8; 32]);
+    let laptop = NodeId::from_ed25519_secret(&[7u8; 32]);
+    add(&home, "bob", root).await.expect("bob's root is saved");
+    add(&home, "bob/laptop", laptop)
+        .await
+        .expect("bob's laptop is saved");
+    let before = book(&home).await;
+
+    for (name, key, line) in [
+        (
+            "carol",
+            root,
+            format!("root:{root} is saved here already, as bob's root"),
+        ),
+        (
+            "carol/desk",
+            root,
+            format!("root:{root} is saved here already, as bob's root"),
+        ),
+        (
+            "bob/desk",
+            root,
+            format!("root:{root} is saved here already, as bob's root"),
+        ),
+        (
+            "carol",
+            laptop,
+            format!("{laptop} is saved here already, as bob/laptop"),
+        ),
+        (
+            "carol/desk",
+            laptop,
+            format!("{laptop} is saved here already, as bob/laptop"),
+        ),
+        (
+            "bob/desk",
+            laptop,
+            format!("{laptop} is saved here already, as bob/laptop"),
+        ),
+    ] {
+        let error = add(&home, name, key)
+            .await
+            .expect_err("a key under a second name refuses");
+        assert!(
+            error.downcast_ref::<super::Usage>().is_none(),
+            "{name}: exit 1"
+        );
+        assert_eq!(format!("{error:#}"), line, "{name}");
+    }
+    assert_eq!(book(&home).await, before, "nothing is written");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A person's root may be typed as `root:` prints it (any case), as `revoke`'s recipe types it; a machine
+/// given a root key is a usage error that names the person's form, and writes nothing.
+#[tokio::test]
+async fn contact_add_takes_a_root_typed_with_its_prefix() {
+    let home = home_with_book("root-prefix").await;
+    let root = NodeId::from_ed25519_secret(&[6u8; 32]);
+    add_typed(&home, &["bob", &format!("root:{root}")])
+        .await
+        .expect("root: is taken off");
+    add_typed(&home, &["bob", &format!("ROOT:{root}")])
+        .await
+        .expect("in any case");
+    assert_eq!(
+        book(&home).await,
+        [("bob".to_owned(), Some(root), Vec::new())]
+    );
+
+    let other = NodeId::from_ed25519_secret(&[7u8; 32]);
+    let error = add_typed(&home, &["carol/laptop", &format!("root:{other}")])
+        .await
+        .expect_err("a machine takes no root");
+    assert_eq!(
+        error.downcast_ref::<super::Usage>().map(|usage| usage.0.as_str()),
+        Some(
+            format!(
+                "root:{other} is a root key, which vouches for all of carol's machines: swoosh contact add \
+                 carol root:{other}"
+            )
+            .as_str()
+        ),
+        "exit 2"
+    );
+    assert_eq!(book(&home).await.len(), 1, "nothing is written");
+    let _ = std::fs::remove_dir_all(home.dir());
 }
