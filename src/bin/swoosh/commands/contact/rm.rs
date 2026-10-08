@@ -12,10 +12,10 @@ use swoosh::contacts::{ContactRef, Contacts, ContactsStore, Removed};
 use swoosh::grants::Grants;
 use swoosh::home::{Home, HomeWrite};
 
-/// Remove a whole contact, or just one device grouped under it.
+/// Remove a saved person, or one machine of theirs
 #[derive(Debug, Args)]
 pub struct RmCmd {
-    /// The contact to remove, `alice` for the whole person or `alice/macbook` for one device.
+    /// `alice` for the person, or `alice/laptop` for one machine of theirs
     #[arg(value_name = "name")]
     pub name: ContactRef,
 }
@@ -52,7 +52,7 @@ impl RmCmd {
 
 /// The keys `name` stands for in the ledger: one machine's key for `<person>/<name>`; for a person, every
 /// machine of theirs and their root. A name this book does not hold stands for none.
-fn holders(contacts: &Contacts, name: &ContactRef) -> Vec<NodeId> {
+pub(super) fn holders(contacts: &Contacts, name: &ContactRef) -> Vec<NodeId> {
     let mut keys: Vec<NodeId> = contacts
         .resolve_candidates(name)
         .map(|candidates| {
@@ -71,7 +71,7 @@ fn holders(contacts: &Contacts, name: &ContactRef) -> Vec<NodeId> {
 }
 
 /// How many links in the ledger were given to one of `keys` and still admit: not ended, not revoked.
-async fn live_links(home: &Home, keys: &[NodeId]) -> eyre::Result<usize> {
+pub(super) async fn live_links(home: &Home, keys: &[NodeId]) -> eyre::Result<usize> {
     if keys.is_empty() {
         return Ok(0);
     }

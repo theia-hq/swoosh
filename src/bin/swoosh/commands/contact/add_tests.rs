@@ -241,7 +241,7 @@ fn a_contact_name_may_not_start_with_a_path_character() {
 
 /// A name that holds a key never takes another: a different root under a saved person, and a different key
 /// under a saved machine, each refuse (exit 1, not a usage error) and write nothing. The refusal names both
-/// keys whole, so a person can compare them, and the two commands that free the name.
+/// keys whole, so a person can compare them, and with no link given to the name, `contact rm` alone frees it.
 #[tokio::test]
 async fn contact_add_never_replaces_a_key() {
     let home = home_with_book("never-replaces").await;
@@ -266,9 +266,8 @@ async fn contact_add_never_replaces_a_key() {
     assert_eq!(
         format!("{root:#}"),
         format!(
-            "bob's root here is root:{old}, not root:{new}\n  A saved root is never replaced. To save the \
-             new one, end the links you gave bob, then remove bob:\n    swoosh revoke bob\n    swoosh \
-             contact rm bob"
+            "bob's root is saved here as root:{old}, not root:{new}\n  a saved root is never replaced; to save \
+             the new one, remove bob:\n    swoosh contact rm bob"
         )
     );
     let machine = add(&home, "bob/laptop", other)
@@ -277,9 +276,8 @@ async fn contact_add_never_replaces_a_key() {
     assert_eq!(
         format!("{machine:#}"),
         format!(
-            "bob/laptop here is {laptop}, not {other}\n  A saved key is never replaced. To save the new \
-             one, end the links you gave bob/laptop, then remove bob/laptop:\n    swoosh revoke \
-             bob/laptop\n    swoosh contact rm bob/laptop"
+            "bob/laptop is saved here as {laptop}, not {other}\n  a saved key is never replaced; to save the \
+             new one, remove bob/laptop:\n    swoosh contact rm bob/laptop"
         )
     );
     assert_eq!(book(&home).await, before, "nothing is written");
@@ -292,6 +290,73 @@ async fn contact_add_never_replaces_a_key() {
         .expect("the same key again is no change");
     assert_eq!(book(&home).await, before);
     let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A live link given to the name puts `revoke` first, since `contact rm` refuses until it is ended: for a
+/// person, a link to their root or to any machine of theirs; for a machine, a link to that machine.
+#[tokio::test]
+async fn a_replace_refusal_names_revoke_while_links_to_the_name_are_live() {
+    let home = home_with_book("replace-live").await;
+    let (old, new) = (
+        NodeId::from_ed25519_secret(&[6u8; 32]),
+        NodeId::from_ed25519_secret(&[7u8; 32]),
+    );
+    let (laptop, other) = (
+        NodeId::from_ed25519_secret(&[8u8; 32]),
+        NodeId::from_ed25519_secret(&[9u8; 32]),
+    );
+    add(&home, "bob", old).await.expect("bob's root is saved");
+    add(&home, "bob/laptop", laptop)
+        .await
+        .expect("bob's laptop is saved");
+    given(&home, laptop).await;
+    let before = book(&home).await;
+
+    let root = add(&home, "bob", new)
+        .await
+        .expect_err("a second root refuses");
+    assert_eq!(
+        format!("{root:#}"),
+        format!(
+            "bob's root is saved here as root:{old}, not root:{new}\n  a saved root is never replaced; to save \
+             the new one, end the links you gave bob, then remove bob:\n    swoosh revoke bob\n    swoosh \
+             contact rm bob"
+        )
+    );
+    let machine = add(&home, "bob/laptop", other)
+        .await
+        .expect_err("a second key for a machine refuses");
+    assert_eq!(
+        format!("{machine:#}"),
+        format!(
+            "bob/laptop is saved here as {laptop}, not {other}\n  a saved key is never replaced; to save the \
+             new one, end the links you gave bob/laptop, then remove bob/laptop:\n    swoosh revoke \
+             bob/laptop\n    swoosh contact rm bob/laptop"
+        )
+    );
+    assert_eq!(book(&home).await, before, "nothing is written");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A link given to `holder` that ends in an hour: the row `share` records.
+async fn given(home: &Home, holder: NodeId) {
+    let ends = std::time::SystemTime::now() + core::time::Duration::from_secs(3600);
+    let link = swoosh::testkit::TestNode::seeded(0x41)
+        .slip(&"ssh".parse().expect("a service"), ends)
+        .expect("a slip");
+    swoosh::grants::Grants::at(home.links())
+        .append(
+            &swoosh::testkit::lock(),
+            &swoosh::grants::GrantRecord {
+                target: "ssh".parse().expect("a service"),
+                kind: swoosh::grants::GrantKind::Device,
+                delegation: swoosh::grants::Delegation::Sealed,
+                holder: holder.to_string(),
+                root_id: link.root_revocation_id().expect("an id"),
+                expiry: ends,
+            },
+        )
+        .expect("append the row");
 }
 
 /// One key has one name here: a key saved as a person's root or as a machine refuses under any other name,

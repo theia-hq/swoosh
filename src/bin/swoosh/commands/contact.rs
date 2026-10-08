@@ -24,7 +24,7 @@ pub mod rm;
 pub enum ContactCmd {
     /// Save a person's root, or one machine of theirs
     Add(add::AddCmd),
-    /// Remove a contact, or one of its devices (`alice` or `alice/macbook`).
+    /// Remove a saved person, or one machine of theirs
     Rm(rm::RmCmd),
 }
 

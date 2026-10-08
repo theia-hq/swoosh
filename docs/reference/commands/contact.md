@@ -8,8 +8,8 @@ machine's key: `alice` means whoever you pointed it at.
 <!-- generated: usage from `swoosh contact -h`; option lines curated -->
 ```
 Usage: swoosh contact [OPTIONS] <COMMAND>
-  add <name> <key>   save a person's root key (alice), or one machine of theirs (alice/laptop)
-  rm <name>          remove a contact, or one of its machines
+  add <name> <key>   save a person's root, or one machine of theirs
+  rm <name>          remove a saved person, or one machine of theirs
 ```
 
 **Example.**
@@ -21,9 +21,10 @@ added alice/desk -> ed01hcq6balr…
 
 **Things to know.** The name's shape decides what is saved. `alice/laptop` is one machine: `swoosh ping
 alice/laptop` reaches it, and `swoosh ping alice` tries each of alice's machines. `alice` alone saves her
-root, the key that vouches for her machines: `swoosh share ssh alice` makes a link all of them can use, and
-a root is never dialed. `contact rm` refuses while links you shared with that contact are live; `swoosh
-revoke <name>` ends them. `swoosh status` lists your contacts.
+root, the key that vouches for her machines (typed bare or as `status` prints it, `root:ed01…`): `swoosh
+share ssh alice` makes a link all of them can use, and a root is never dialed. `contact rm` refuses while
+links you shared with that contact are live; `swoosh revoke <name>` ends them. `swoosh status` lists your
+contacts. A saved name or key is never replaced: a different key refuses and names how to free the name.
 
 See also [`swoosh share`](share.md), [Commands index](../commands.md) and
 [Common options](../commands.md#common-options).

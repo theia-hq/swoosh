@@ -349,6 +349,15 @@ async fn share_to_your_own_root_as_a_person_is_refused() {
         "twin is saved with this machine's own key: your devices already reach it."
     );
     assert!(ran.out.is_empty() && twin.out.is_empty(), "no link prints");
+    // This refusal comes once the key is read, after `--save`'s file was made, so the file goes with it.
+    let file = path_in(&home, "twin.link");
+    let saving = share(
+        &home,
+        &["ssh", "twin", "--save", &file.display().to_string()],
+    )
+    .await;
+    assert_eq!(saving.refusal(), twin.refusal());
+    assert!(!file.exists(), "the file made for the link is removed");
     assert!(rows(&home).await.is_empty(), "no row is written");
 }
 
@@ -676,6 +685,37 @@ async fn a_refused_save_leaves_no_file_and_no_row() {
         format!("could not make {under_a_file}: no such directory")
     );
     assert!(rows(&home).await.is_empty(), "no row is written");
+}
+
+/// A directory that takes no new file refuses `--save` before the key is read or a row is written: the file
+/// is made first, so there is no row for a link nobody holds, no file, and no line. Root writes anywhere, so
+/// the test has nothing to show there and skips.
+#[tokio::test]
+async fn a_save_into_an_unwritable_directory_leaves_no_file_and_no_row() {
+    // SAFETY: `geteuid` reads the process's own id and cannot fail.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let home = scratch("save-unwritable").await;
+    let dir = path_in(&home, "read-only");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let file = dir.join("l.link");
+    let path = file.display().to_string();
+    let ran = share(&home, &["ssh", "anyone", "--save", &path]).await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(
+        ran.refusal(),
+        format!("could not make {path}: permission denied")
+    );
+    assert!(!file.exists(), "no file is made");
+    assert!(
+        ran.out.is_empty() && ran.err.is_empty(),
+        "nothing prints: {}",
+        ran.err
+    );
+    assert!(rows(&home).await.is_empty(), "no row is written");
+    let _ = std::fs::remove_dir_all(home.dir());
 }
 
 /// An end prints as a clock time within a day and as a date past it, from a local time made by hand, so the

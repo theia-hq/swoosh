@@ -7,10 +7,9 @@
 //! may be typed `root:ed01…`, the form `status` and `revoke`'s recipe print it in; a machine takes no `root:`.
 //!
 //! A saved key is never replaced unasked. A name that holds another key refuses, naming both keys and the
-//! way out: the links given to the key it holds are found by that name, so `revoke` and `contact rm` must
-//! run before the name can point elsewhere. A key saved under another name refuses too, so one key has one
-//! name here. (U22c turns the root's refusal into a typed confirmation that also ends the old root's links;
-//! a machine's stays a refusal.)
+//! way out: the links given to the key it holds are found by that name, so while any is live `revoke` must
+//! run before `contact rm` can free the name, and with none live `contact rm` alone frees it. A key saved
+//! under another name refuses too, so one key has one name here.
 
 use bifrost::NodeId;
 use clap::Args;
@@ -77,7 +76,17 @@ impl AddCmd {
         let mut store = ContactsStore::open(home).await?;
         let saved = match store.contacts_mut().save(name, key) {
             Ok(saved) => saved,
-            Err(Taken::Name { held }) => eyre::bail!("{}", replaced(name, held, key)),
+            Err(Taken::Name { held }) => {
+                // The same count `contact rm` refuses on, so `revoke` is named exactly when `rm` needs it.
+                let live = super::rm::live_links(home, &super::rm::holders(store.contacts(), name))
+                    .await?;
+                let way_out = if live > 0 {
+                    WayOut::Revoke
+                } else {
+                    WayOut::Remove
+                };
+                eyre::bail!("{}", replaced(name, held, key, way_out))
+            }
             Err(Taken::Key { at }) => eyre::bail!("{}", second_name(&at, key)),
         };
         if saved == Saved::Created {
@@ -95,21 +104,39 @@ impl AddCmd {
     }
 }
 
+/// What frees a name that holds another key: `contact rm` refuses while links given to it are live, so
+/// then `revoke` runs first; with none live, `contact rm` alone, since a `revoke` would end nothing and fail.
+#[derive(Debug, Clone, Copy)]
+enum WayOut {
+    /// Links given to the name are live: `revoke`, then `contact rm`.
+    Revoke,
+    /// No live link: `contact rm` alone.
+    Remove,
+}
+
 /// The refusal for a name that holds another key: both keys whole, so a person can compare them, and the
-/// two commands that free the name. `revoke` first, since `contact rm` refuses while links to it are live.
-fn replaced(name: &ContactRef, held: NodeId, typed: NodeId) -> String {
-    let (held, typed, what) = match name.device() {
-        None => (format!("root:{held}"), format!("root:{typed}"), "root"),
-        Some(_) => (held.to_string(), typed.to_string(), "key"),
+/// commands that free the name, each alone on its line.
+fn replaced(name: &ContactRef, held: NodeId, typed: NodeId, way_out: WayOut) -> String {
+    let (saved, held, typed, what) = match name.device() {
+        None => (
+            format!("{name}'s root"),
+            format!("root:{held}"),
+            format!("root:{typed}"),
+            "root",
+        ),
+        Some(_) => (name.to_string(), held.to_string(), typed.to_string(), "key"),
     };
-    let saved = match name.device() {
-        None => format!("{name}'s root"),
-        Some(_) => name.to_string(),
-    };
-    format!(
-        "{saved} here is {held}, not {typed}\n  A saved {what} is never replaced. To save the new one, end the \
-         links you gave {name}, then remove {name}:\n    swoosh revoke {name}\n    swoosh contact rm {name}"
-    )
+    let head = format!("{saved} is saved here as {held}, not {typed}");
+    match way_out {
+        WayOut::Revoke => format!(
+            "{head}\n  a saved {what} is never replaced; to save the new one, end the links you gave {name}, \
+             then remove {name}:\n    swoosh revoke {name}\n    swoosh contact rm {name}"
+        ),
+        WayOut::Remove => format!(
+            "{head}\n  a saved {what} is never replaced; to save the new one, remove {name}:\n    swoosh \
+             contact rm {name}"
+        ),
+    }
 }
 
 /// The refusal for a key saved under another name, naming where it is.

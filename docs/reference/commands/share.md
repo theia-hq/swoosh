@@ -7,14 +7,15 @@ link.
 
 <!-- generated: usage from `swoosh share -h`; option lines curated -->
 ```
-Usage: swoosh share [OPTIONS] <service | link> [who]
-  <service> <who>        a link to that service on this machine
-    <person>             every machine of the root you saved for them
-    <person>/<name>      that one machine
-    <key>                the machine with that key
+Usage: swoosh share [OPTIONS] <service | link> [person | person/name | key | anyone]
+  <service> <who>        a link to that service on this machine, for:
+    person               every machine of the root you saved for them
+    person/name          that one machine
+    key                  the machine with that key
     anyone               whoever holds the link
   <link> | <path> | -    a shorter copy of that link, typed, from a file, or on stdin
-  --expires <d>          how long it works, 1h to 365d (default 1h, or the copied link's end)
+  --expires <d>          how long it works, like 2h, 90d or 1h30m: 1h to 365d, default 1h;
+                         a copy takes any span up to its link's end, and ends with it by default
   --save <file>          write the link to a new private file and print only the path
 ```
 

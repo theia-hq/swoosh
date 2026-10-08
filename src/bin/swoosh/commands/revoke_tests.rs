@@ -521,7 +521,7 @@ async fn revoke_dash_reads_a_link_from_stdin() {
         .err()
         .and_then(|error| error.downcast_ref::<Usage>())
         .expect("a root key on stdin is a usage error");
-    assert_eq!(usage.0, "stdin held no swoosh: link.");
+    assert_eq!(usage.0, "stdin held no link.");
 
     let file = dir("stdin-path");
     std::fs::create_dir_all(&file).unwrap();
@@ -1561,7 +1561,7 @@ async fn revoke_reads_only_a_link_from_stdin_or_a_path() {
         .err()
         .and_then(|error| error.downcast_ref::<Usage>())
         .expect("a root key on stdin is a usage error");
-    assert_eq!(usage.0, "stdin held no swoosh: link.");
+    assert_eq!(usage.0, "stdin held no link.");
     assert!(ran.confirms.is_empty(), "nothing is asked");
 
     let file = dir("root-in-a-file");

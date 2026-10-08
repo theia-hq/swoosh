@@ -81,15 +81,15 @@ impl core::fmt::Display for Petname {
 ///
 /// A [`Name`] under the one name rule, never reserved: no device is `me`, `root` or `anyone`. This is the ONE
 /// label type, used both for local contacts and for a member in a [`RosterDoc`](crate::roster::RosterDoc),
-/// so the codec's `u16` length prefix stays total. [`Contacts::add`] with no label uses the
+/// so the codec's `u16` length prefix stays total. A test's `Contacts::add` with no label uses the
 /// [`DEFAULT`](Self::DEFAULT) slot.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DeviceLabel(String);
 
 impl DeviceLabel {
-    /// The slot [`Contacts::add`] fills when it is given no label. `contact add` always names the machine
-    /// (`alice` alone saves her root), so only a book written by hand or by a test holds it. Sorts before
-    /// named devices, so an unqualified person resolves to their default device first.
+    /// The slot a test's `Contacts::add` fills when it is given no label. `contact add` always names the
+    /// machine (`alice` alone saves her root), so only a book written by hand or by a test holds it. Sorts
+    /// before named devices, so an unqualified person resolves to their default device first.
     pub const DEFAULT: &'static str = "default";
 
     /// The maximum label length in bytes, the name rule's bound.
@@ -208,7 +208,9 @@ impl Contacts {
     /// Add or update the identity for a petname's device, returning whether an existing binding was
     /// replaced. Idempotent: re-adding the same name and device just overwrites, so the caller can warn
     /// on a clobber rather than the store silently losing the old key. A device-less add targets the
-    /// [`DEFAULT`](DeviceLabel::DEFAULT) slot.
+    /// [`DEFAULT`](DeviceLabel::DEFAULT) slot. Tests only: it replaces a key, and every product write goes
+    /// through [`save`](Self::save), which never does.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn add(&mut self, petname: Petname, device: Option<DeviceLabel>, node: NodeId) -> Added {
         let device = device.unwrap_or(DeviceLabel(DeviceLabel::DEFAULT.to_owned()));
         let person = self.people.entry(petname).or_default();
@@ -316,6 +318,8 @@ impl Contacts {
     /// Record (or overwrite) a person's SIGNET root, hand-typed. Idempotent, mirroring [`add`](Self::add):
     /// re-setting the same key is a no-op the caller can report; a different key is a [`Replaced`](Added::Replaced)
     /// the caller can warn on rather than silently clobbering a signet the operator may not mean to lose.
+    /// Tests only, as [`add`](Self::add) is.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn set_signet(&mut self, petname: Petname, node: NodeId) -> Added {
         let person = self.people.entry(petname).or_default();
         match person.signet.replace(Binding { node }) {
@@ -419,6 +423,7 @@ impl Contacts {
 }
 
 /// The outcome of an [`add`](Contacts::add): whether it created, replaced, or was a no-op.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Added {
     /// A new device binding was created.

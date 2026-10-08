@@ -62,7 +62,7 @@ pub async fn dial<T: Transport, D: Discovery>(
     target: &Peer,
     bound: &transport::Bound,
 ) -> eyre::Result<Reached<T::Session>> {
-    let candidates = target.candidates(contacts)?;
+    let candidates = candidates(target, contacts)?;
 
     let mut last_error = None;
     for candidate in candidates {
@@ -77,14 +77,19 @@ pub async fn dial<T: Transport, D: Discovery>(
         }
     }
 
-    // Every candidate failed. `candidates` guarantees at least one, so `last_error` is set; carry its
-    // source rather than inventing a message, note the target, and append the fix this transport needs so
-    // the user is told what to do next, not just what went wrong.
-    let reached = match last_error {
-        Some(error) => unreached(target, error),
-        None => eyre::eyre!("could not reach {target}: no known device"),
-    };
-    Err(hint(reached, bound))
+    // Every candidate failed. `candidates` refuses an empty set, so `last_error` is set; carry its source
+    // rather than inventing a message, note the target, and append the fix this transport needs so the
+    // user is told what to do next, not just what went wrong.
+    match last_error {
+        Some(error) => Err(hint(unreached(target, error), bound)),
+        None => Err(no_machine(target)),
+    }
+}
+
+/// The error for a person saved with no machine: nothing here can be dialed, so it carries no transport
+/// [`hint`], which would send the user after an address when the fix is in the book.
+fn no_machine(target: &Peer) -> eyre::Report {
+    eyre::eyre!("could not reach {target}: it has no machine saved here")
 }
 
 /// The error for a target no candidate connected to: the last connect's cause chain under `could not reach
@@ -118,10 +123,15 @@ pub async fn connect<T: Transport, D: Discovery>(
     }
 }
 
-/// Resolve `target` to the ordered [`Candidate`]s a fan-out verb reports each of. A thin pass-through to
-/// [`Peer::candidates`] so a verb resolves without reaching into the peer module directly.
+/// Resolve `target` to the ordered [`Candidate`]s a fan-out verb reports each of, through
+/// [`Peer::candidates`]. A person saved with only a root resolves to none, and that refuses here, before
+/// any dial, so a fan-out over nothing never reads as every machine being unreachable.
 pub fn candidates(target: &Peer, contacts: &Contacts) -> eyre::Result<Vec<Candidate>> {
-    target.candidates(contacts)
+    let candidates = target.candidates(contacts)?;
+    if candidates.is_empty() {
+        return Err(no_machine(target));
+    }
+    Ok(candidates)
 }
 
 /// A reached peer's GATED measure service: the [`ServiceSession`] to run measure over, plus the label of the
@@ -150,7 +160,7 @@ pub async fn dial_service<T: Transport, D: Discovery>(
     membership: Option<Link>,
     bound: &transport::Bound,
 ) -> eyre::Result<Resolved<T::Session>> {
-    let candidates = target.candidates(contacts)?;
+    let candidates = candidates(target, contacts)?;
 
     let mut last_error = None;
     for candidate in candidates {
@@ -173,11 +183,10 @@ pub async fn dial_service<T: Transport, D: Discovery>(
         }
     }
 
-    let reached = match last_error {
-        Some(error) => unreached(target, error),
-        None => eyre::eyre!("could not reach {target}: no known device"),
-    };
-    Err(hint(reached, bound))
+    match last_error {
+        Some(error) => Err(hint(unreached(target, error), bound)),
+        None => Err(no_machine(target)),
+    }
 }
 
 /// Open one named candidate's gated `service` (one of [`PING_SERVICE`] / [`SPEED_SERVICE`]) under the
@@ -535,5 +544,41 @@ mod tests {
             panic!("a dial every device closed is an error");
         };
         assert_eq!(format!("{error:#}"), escaped_unreached(&target));
+    }
+
+    // A person saved with only a root has no machine to dial: the fan-out pass-through, `dial` and
+    // `dial_service` each refuse with the same line, before any dial, and with no transport hint (over quirk
+    // that hint would send the user after an address when the fix is in the book).
+    #[tokio::test]
+    async fn a_person_with_no_machine_saved_is_refused_in_the_books_words() {
+        let mut contacts = Contacts::default();
+        let alice = "alice"
+            .parse::<crate::contacts::ContactRef>()
+            .expect("a contact name");
+        contacts
+            .save(&alice, HostilePeer::node_id())
+            .expect("alice's root is saved");
+        let target = "alice".parse::<Peer>().expect("a petname parses as a Peer");
+        let (node, _) = unreachable();
+        let quirk = bound(transport::Transport::Quirk, false);
+        let line = "could not reach alice: it has no machine saved here";
+
+        let Err(fanout) = candidates(&target, &contacts) else {
+            panic!("a person with no machine has no candidate");
+        };
+        assert_eq!(format!("{fanout:#}"), line);
+        let Err(dialed) = dial(&node, &contacts, &target, &quirk).await else {
+            panic!("a person with no machine is not reached");
+        };
+        assert_eq!(format!("{dialed:#}"), line);
+        let service = PING_SERVICE
+            .parse::<Service>()
+            .expect("ping is a service name");
+        let Err(served) =
+            dial_service(&node, &contacts, &target, &service, None, None, &quirk).await
+        else {
+            panic!("a person with no machine is not reached");
+        };
+        assert_eq!(format!("{served:#}"), line);
     }
 }

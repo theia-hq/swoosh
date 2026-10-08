@@ -5,15 +5,16 @@
 //! `serve` answers at), records the link in the ledger before it prints, and says on stderr what the link
 //! gives. Who it is for decides how it is bound, from the shape of the name: a person (`bob`) is every
 //! machine of the root saved for them, `bob/laptop` or a key is that one machine, and `anyone` is whoever
-//! holds the link. A bound link is sealed, since only its machine can use it; an `anyone` link is left open,
+//! holds the link. A bound link is sealed, since only who it names can use it; an `anyone` link is left open,
 //! so its holder can make a shorter copy.
 //!
 //! The link form is wholly offline: it reads no key and writes no ledger row, it only adds a shorter end to
 //! the link it was given. A copy can never do more than its source, so it needs no one's leave. The link is
 //! read from a path or stdin as well as typed, so it need never enter argv.
 //!
-//! Every check that can refuse runs before anything is written, and `--save`'s file is written before any
-//! line that says what the link gives, so a refused save never follows a line that claimed it worked.
+//! Every check that can refuse runs before anything is written. `--save`'s file is made, empty, before the
+//! key is read or a row is written, and filled before any line says what the link gives, so a file that
+//! cannot be made leaves no row behind, and a refused save never follows a line that claimed it worked.
 
 use core::fmt;
 use core::time::Duration;
@@ -295,8 +296,9 @@ impl Issue {
         let store = ContactsStore::open(home).await?;
         let bound = self.bind(store.contacts(), home).await?;
         let gives = Gives::of(&self.service, &ServeToml::read(home)?);
-        // A `--save` path that cannot be a new file refuses before the key is read or a row is written.
-        let save = save.map(unused).transpose()?;
+        // A `--save` file is made before the key is read or a row is written, so a directory that takes no
+        // new file refuses with no row; any error after this removes it.
+        let save = save.map(NewFile::make).transpose()?;
         let link = self.sign(home, &bound).await?;
         let delivered = Delivered::new(&link, save)?;
         let until = Until::from_now(self.lifetime.duration(), Some(&self.lifetime));
@@ -535,7 +537,7 @@ fn copy(
         Err(CapError::Attenuate(_)) => eyre::bail!("{BOUND}"),
         Err(other) => return Err(other.into()),
     };
-    let save = save.map(unused).transpose()?;
+    let save = save.map(NewFile::make).transpose()?;
     let delivered = Delivered::new(&copy, save)?;
     let until = Until::from_now(span, asked);
     match asked {
@@ -558,15 +560,12 @@ enum Delivered<'a> {
 }
 
 impl<'a> Delivered<'a> {
-    /// Write the `--save` file now, before any line says what the link gives, so a file that cannot be made
-    /// refuses with nothing claimed.
-    fn new(link: &Link, save: Option<&'a Path>) -> eyre::Result<Self> {
+    /// Fill the `--save` file now, before any line says what the link gives, so a file that cannot be
+    /// written refuses with nothing claimed.
+    fn new(link: &Link, save: Option<NewFile<'a>>) -> eyre::Result<Self> {
         let printed = swoosh::link::Link::from(Link::clone(link));
         match save {
-            Some(path) => {
-                save_new(path, &printed)?;
-                Ok(Self::Saved(path))
-            }
+            Some(file) => Ok(Self::Saved(file.fill(&printed)?)),
             None => Ok(Self::Printed(printed)),
         }
     }
@@ -581,26 +580,56 @@ impl<'a> Delivered<'a> {
     }
 }
 
-/// `path`, when a new file can be made there: its directory exists and the path names nothing yet. Checked
-/// before the key is read or a row is written; a dangling symlink names something too. Only "not found" is
-/// free: any other answer about the path refuses, in swoosh's words.
-// `core::io::ErrorKind` is still unstable, so the kind checks read from `std`.
-#[allow(clippy::std_instead_of_core)]
-fn unused(path: &Path) -> eyre::Result<&Path> {
-    // `x.link` has an empty parent, which is the working directory.
-    let dir = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    match dir.metadata() {
-        Ok(found) if found.is_dir() => {}
-        Ok(_) => return Err(cannot_make(path, std::io::ErrorKind::NotADirectory)),
-        Err(error) => return Err(cannot_make(path, error.kind())),
+/// A `--save` file made new and empty, `0600`, before the key is read or a row is written: a directory that
+/// takes no new file then refuses before there is a row for a link nobody holds. Dropped unfilled, on any
+/// error after it was made, it removes the file, so a refusal leaves no empty file behind. A run killed
+/// at the passphrase prompt runs no drop, so that one case leaves the empty file.
+struct NewFile<'a> {
+    path: &'a Path,
+    file: std::fs::File,
+    /// Set once the link is written and synced; until then a drop removes the file.
+    filled: bool,
+}
+
+impl<'a> NewFile<'a> {
+    /// Make the file with an exclusive create, which refuses a path that names anything already, a dangling
+    /// symlink included, and gives every other refusal in swoosh's words.
+    // `core::io::ErrorKind` is still unstable, so the AlreadyExists check reads from `std`.
+    #[allow(clippy::std_instead_of_core)]
+    fn make(path: &'a Path) -> eyre::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| match error.kind() {
+                std::io::ErrorKind::AlreadyExists => exists(path),
+                kind => cannot_make(path, kind),
+            })?;
+        Ok(Self {
+            path,
+            file,
+            filled: false,
+        })
     }
-    match path.symlink_metadata() {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(path),
-        Ok(_) => Err(exists(path)),
-        Err(error) => Err(cannot_make(path, error.kind())),
+
+    /// Write the printed form of `link`, the form a person pastes, and sync it; the path is what is left to
+    /// print. A write or sync that fails drops the file unfilled, which removes it.
+    fn fill(mut self, link: &swoosh::link::Link) -> eyre::Result<&'a Path> {
+        writeln!(self.file, "{link}")
+            .and_then(|()| self.file.sync_all())
+            .map_err(|error| cannot_make(self.path, error.kind()))?;
+        self.filled = true;
+        Ok(self.path)
+    }
+}
+
+impl Drop for NewFile<'_> {
+    fn drop(&mut self) {
+        if !self.filled {
+            // Nothing is left to report to: the error that dropped it is already on its way out.
+            let _ = std::fs::remove_file(self.path);
+        }
     }
 }
 
@@ -617,32 +646,6 @@ fn cannot_make(path: &Path, kind: std::io::ErrorKind) -> eyre::Report {
         _ => return eyre::eyre!("could not make {path}"),
     };
     eyre::eyre!("could not make {path}: {why}")
-}
-
-/// Write the printed form of `link`, the form a person pastes, into a new `0600` file at `path`, and sync
-/// it. Made only once the link exists, so a run stopped at a prompt leaves no empty file behind; the
-/// exclusive create still refuses a file that appeared since [`unused`] looked.
-// `core::io::ErrorKind` is still unstable, so the AlreadyExists check reads from `std`.
-#[allow(clippy::std_instead_of_core)]
-fn save_new(path: &Path, link: &swoosh::link::Link) -> eyre::Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(path)
-        .map_err(|error| match error.kind() {
-            std::io::ErrorKind::AlreadyExists => exists(path),
-            kind => cannot_make(path, kind),
-        })?;
-    // A write or sync that fails would leave a partial file that holds no link, so it goes; the system's text
-    // stays out of the line.
-    writeln!(file, "{link}")
-        .and_then(|()| file.sync_all())
-        .map_err(|error| {
-            drop(file);
-            let _ = std::fs::remove_file(path);
-            cannot_make(path, error.kind())
-        })
 }
 
 /// The refusal for a `--save` path that is taken.
