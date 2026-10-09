@@ -29,9 +29,9 @@ jobs:
       # Run cargo-deny on the runner (not the action's container): swoosh pins a toolchain in
       # rust-toolchain.toml, which the containerized action cannot honor. On the runner, rustup resolves it.
       - name: install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny@0.20.2
       - name: cargo-deny (sources)
         run: cargo deny check sources
   # Check with the oldest toolchain the manifest claims (rust-version), so a dependency or a language
