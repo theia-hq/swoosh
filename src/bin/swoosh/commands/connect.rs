@@ -28,12 +28,14 @@ use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
 use swoosh::escape::escaped_report;
-use swoosh::peer::Peer;
+use swoosh::peer::Machine as PeerMachine;
 use tightbeam::protocol::{Request, Response};
 use tightbeam::tunnel::DialRefused;
 use tokio::io::{self, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
+
+use crate::commands::machine;
 
 /// Where a reached service's bytes go locally: `forward`'s local end, parsed to a closed enum so the
 /// three sinks are disjoint and "two sinks at once" is unrepresentable (no `ArgGroup`, no two-bool trap).
@@ -78,35 +80,38 @@ impl FromStr for To {
     }
 }
 
-/// The ONE connect path, driven by `forward` directly and by `swoosh ssh` through it. Resolve the [`Peer`]
-/// to the node to dial via the shared [`Peer::connector`] (slot 1 the grant, slot 2 a membership badge for
-/// a signet-bound slip's AND), then drive the sink [`To`] names: forward a local port (proving admission,
-/// then printing swoosh's own start lines on stderr), stream stdin/stdout (no banner: ssh owns the tty), or
-/// the reserved unix listener. A refused forward surfaces the host's reason here and exits non-zero,
-/// never a fake banner.
+/// The ONE connect path, driven by `forward` directly and by `swoosh ssh` through it. Dial the resolved
+/// `machine` presenting slot 1 (the grant) and slot 2 (a membership badge for a signet-bound slip's AND),
+/// then drive the sink [`To`] names: forward a local port (proving admission, then printing swoosh's own
+/// start lines on stderr), stream stdin/stdout (no banner: ssh owns the tty), or the reserved unix
+/// listener. A refused forward surfaces the refusal here and exits non-zero, never a fake banner.
 pub async fn connect<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     contacts: &Contacts,
-    peer: &Peer,
+    machine: &PeerMachine,
     service: Service,
     slot1: Option<Link>,
     slot2: Option<Link>,
     to: To,
 ) -> eyre::Result<()> {
-    // The opening frame every stream sends, built from the same slots the connector holds.
+    // The opening frame every stream sends.
     let request = Request {
         service: service.to_string(),
         capability: slot1.as_ref().map(ToString::to_string),
         membership: slot2.as_ref().map(ToString::to_string),
     };
-    let dial = peer.connector(contacts, service, slot1, slot2)?.dial();
+    let dial = machine.key();
+    let refused = Refused {
+        machine,
+        service: &service,
+        slot1: &slot1,
+        slot2: &slot2,
+    };
     match to {
-        To::Port(port) => forward_port(node, Machine::of(contacts, dial), dial, &request, port)
+        To::Port(port) => forward_port(node, Machine::of(contacts, dial), &refused, &request, port)
             .await
-            .map_err(escaped_report),
-        To::Stdout => pipe_stdio(node, dial, &request)
-            .await
-            .map_err(escaped_report),
+            .map_err(escaped),
+        To::Stdout => pipe_stdio(node, &refused, &request).await.map_err(escaped),
         // The path is not echoed: a typed path would read as a missing socket, not a missing feature.
         To::UnixListener(_) => {
             eyre::bail!("a unix:<path> local end is not built yet: use a port, or - for stdout")
@@ -133,6 +138,50 @@ async fn admitted<S: Session>(
     })
 }
 
+/// `error` with any peer text in its chain escaped, except the dial refusal, which carries none and whose
+/// line breaks are its own.
+fn escaped(error: eyre::Report) -> eyre::Report {
+    if error.is::<machine::Refused>() {
+        error
+    } else {
+        escaped_report(error)
+    }
+}
+
+/// What a dial needs to say why it was refused: the machine, the service asked for, and the slots the
+/// refused dial presented, which the follow-up to one of your devices presents again.
+struct Refused<'a> {
+    machine: &'a PeerMachine,
+    service: &'a Service,
+    slot1: &'a Option<Link>,
+    slot2: &'a Option<Link>,
+}
+
+impl Refused<'_> {
+    /// The error a refusal on `session` ends the run with: a `NotAdmitted` is the dial refusal, after one
+    /// of your devices is asked why on the same session; any other refusal keeps the host's own reason.
+    async fn on<S: Session>(&self, session: &S, refusal: Refusal) -> eyre::Report {
+        match refusal {
+            Refusal::NotAdmitted => {
+                let diagnosis = swoosh::reach::diagnose(
+                    session,
+                    self.machine,
+                    self.service,
+                    Option::clone(self.slot1),
+                    Option::clone(self.slot2),
+                )
+                .await;
+                machine::refused(self.machine, self.service, diagnosis)
+            }
+            refusal => DialRefused {
+                dial: self.machine.key(),
+                refusal,
+            }
+            .into(),
+        }
+    }
+}
+
 /// Reach the peer, prove the gate admits this request, bind the local port, say so on stderr naming the
 /// `machine`, then forward each local connection over its own stream until the session ends.
 ///
@@ -143,14 +192,14 @@ async fn admitted<S: Session>(
 async fn forward_port<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     machine: Machine,
-    dial: NodeId,
+    refused: &Refused<'_>,
     request: &Request,
     port: u16,
 ) -> eyre::Result<()> {
-    let session = node.connect(dial).await?;
+    let session = node.connect(refused.machine.key()).await?;
     // The probe stream is dropped once admitted; the host tears its half down.
     if let Err(refusal) = admitted(&session, request).await? {
-        return Err(DialRefused { dial, refusal }.into());
+        return Err(refused.on(&session, refusal).await);
     }
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     eprintln!(
@@ -276,14 +325,16 @@ async fn lost<S: Session>(session: &S) -> eyre::Report {
 /// terminal or under ssh, only returns when the person types again.
 async fn pipe_stdio<T: Transport, D: Discovery>(
     node: &Node<T, D>,
-    dial: NodeId,
+    refused: &Refused<'_>,
     request: &Request,
 ) -> eyre::Result<()> {
     // Held for the whole pump: the stream rides this session, which closes when it drops.
-    let session = node.connect(dial).await?;
-    let (mut writer, mut reader) = admitted(&session, request)
-        .await?
-        .map_err(bifrost::Error::Refused)?;
+    let session = node.connect(refused.machine.key()).await?;
+    let (mut writer, mut reader) = match admitted(&session, request).await? {
+        Ok(halves) => halves,
+        Err(Refusal::NotAdmitted) => return Err(refused.on(&session, Refusal::NotAdmitted).await),
+        Err(refusal) => return Err(bifrost::Error::Refused(refusal).into()),
+    };
     let mut input = stdin_chunks()?;
     let mut output = io::stdout();
     let upstream = async {
@@ -361,14 +412,24 @@ mod tests {
     /// Reach `host`, sinking the bytes into `to`, and return the error the reach fails with.
     async fn failed(host: HostilePeer, to: To) -> eyre::Report {
         let node = bifrost::Node::new(host, bifrost::NoDiscovery);
-        let peer = HostilePeer::node_id()
+        let machine = HostilePeer::node_id()
             .to_string()
-            .parse()
-            .expect("a raw key parses as a Peer");
+            .parse::<swoosh::peer::Peer>()
+            .expect("a raw key parses as a Peer")
+            .machine(&Contacts::default())
+            .expect("a key is one machine");
         let service = "db".parse().expect("db is a service name");
-        connect(&node, &Contacts::default(), &peer, service, None, None, to)
-            .await
-            .expect_err("a refused reach is an error")
+        connect(
+            &node,
+            &Contacts::default(),
+            &machine,
+            service,
+            None,
+            None,
+            to,
+        )
+        .await
+        .expect_err("a refused reach is an error")
     }
 
     // A forward whose gate refuses prints the refusal, and its detail is the peer's text: escaped, on one
@@ -432,6 +493,90 @@ mod tests {
         assert_eq!(
             refused.to_string(),
             "a local end is a port (5432), unix:<path>, or - for stdout"
+        );
+    }
+
+    /// A forward to `typed`, resolved against a book holding your device `me/nas` and bob's `bob/nas`,
+    /// both at the scripted peer's key in turn, whose gate answers `script`.
+    async fn forwarded(
+        typed: &str,
+        script: Vec<swoosh::testkit::Script>,
+    ) -> (eyre::Report, swoosh::testkit::ScriptedPeer) {
+        let key = bifrost::NodeId::from_ed25519_secret(&[0x66; 32]);
+        let mut contacts = Contacts::default();
+        contacts
+            .save(&typed.parse().expect("a machine name"), key)
+            .expect("the name is free");
+        let machine = typed
+            .parse::<swoosh::peer::Peer>()
+            .expect("a peer")
+            .machine(&contacts)
+            .expect("one machine");
+        let peer = swoosh::testkit::ScriptedPeer::new(key, script);
+        let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+        let error = connect(
+            &node,
+            &contacts,
+            &machine,
+            "ssh".parse().expect("a service"),
+            None,
+            None,
+            To::Port(1),
+        )
+        .await
+        .expect_err("a refused forward is an error");
+        (error, peer)
+    }
+
+    // A forward refused by one of your devices asks it why, on the same session, and says what it found:
+    // here the device's list lacks the service, so the line names the form that adds it there.
+    #[tokio::test]
+    async fn a_refused_forward_to_your_device_asks_it_why() {
+        use swoosh::testkit::Script;
+
+        let (error, peer) = forwarded(
+            "me/nas",
+            vec![
+                Script::Refuse(bifrost::Refusal::NotAdmitted),
+                Script::Lists(vec!["ping"]),
+            ],
+        )
+        .await;
+        assert_eq!(
+            format!("{error:#}"),
+            "me/nas does not serve ssh\n  Only nas can add it; on nas, run:\n    swoosh service add ssh"
+        );
+        let asked: Vec<String> = peer
+            .requests()
+            .into_iter()
+            .map(|request| request.service)
+            .collect();
+        assert_eq!(asked, ["ssh", "control.services"]);
+        assert_eq!(
+            peer.dials(),
+            1,
+            "the follow-up rides the refused dial's session"
+        );
+    }
+
+    // A forward refused by anyone else's machine names both causes and asks nothing.
+    #[tokio::test]
+    async fn a_refused_forward_to_a_contact_asks_nothing() {
+        use swoosh::testkit::Script;
+
+        let (error, peer) = forwarded(
+            "bob/nas",
+            vec![Script::Refuse(bifrost::Refusal::NotAdmitted)],
+        )
+        .await;
+        assert_eq!(
+            format!("{error:#}"),
+            "bob/nas refused ssh\n  It does not serve ssh, or its owner has not shared ssh with you."
+        );
+        assert_eq!(
+            peer.requests().len(),
+            1,
+            "nothing is asked of a contact's machine"
         );
     }
 

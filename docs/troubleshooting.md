@@ -35,29 +35,26 @@ Fix one of:
 - Try `--transport quirk+noise` if only one transport shows it, which points at the path rather than the
   node.
 
-## "reached, but refused (not admitted)"
+## "me/nas refused ssh"
 
+<!-- manual: needs one of your devices that refuses ssh -->
 ```
-ed01hcq6balrlxwa via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)
-Error: ed01hcq6balrlxwa: reached, but refused
+error: me/nas refused ssh
 ```
 
-You reached the peer, but its gate turned you away. You are not one of its devices and you presented no
-grant that covers this service. This is the gate working as designed.
+Your own device refused. The line under the error, if there is one, says why: ssh was turned off or removed
+there, nas is busy, or nas does not count this machine as one of your devices. To tell the first two apart, or
+when no line says why, run `swoosh status` on nas.
 
-The same message also covers an unserved service: a node that admits you but does not serve the name you
-asked for refuses with the same words, because the reply cannot tell "not admitted" from "admitted, not
-served". On your own device, `swoosh status me/<name>` lists what it serves.
+## "refused ssh" from someone else's machine
 
-Fix one of:
+<!-- manual: needs another person's machine that refuses ssh -->
+```
+error: bob/nas refused ssh
+```
 
-- If it is your own node, enroll this machine: `swoosh invite add <label>` on the machine that holds your
-  signet, then `swoosh adopt` here.
-- If someone else runs it, ask them for a [capability link](keys.md#grant) and use it where the machine
-  goes: `swoosh ping swoosh:…`.
-- If the service is meant to be public, the owner opens it with `swoosh serve --public <service>`.
-- If it is your own device and `swoosh status me/<name>` does not list the service, add it there:
-  `swoosh service add <service>`.
+bob/nas does not serve `ssh`, or its owner has not shared `ssh` with you. The reply does not say which. Ask its
+owner.
 
 ## "reached, but it does not answer ping for you"
 
@@ -97,10 +94,10 @@ drains. See [revocation](keys.md#revocation).
 - A fleet-bound grant stays usable from any device that person still holds until it expires or you
   revoke it. Keep fleet grants short-lived.
 
-## "a value is required for '--public <svc>'"
+## "a value is required for '--public <service>'"
 
 ```
-error: a value is required for '--public <svc>' but none was supplied
+error: a value is required for '--public <service>' but none was supplied
 ```
 
 Bare `--public` names nothing to open. List the services you want public:

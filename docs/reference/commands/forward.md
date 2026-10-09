@@ -6,8 +6,8 @@ Forward a machine's service to a local port, or to stdout.
 
 <!-- generated: usage from `swoosh forward -h`; option lines curated -->
 ```
-Usage: swoosh forward [OPTIONS] <peer> <service> <port | unix:<path> | ->
-  <peer>                    the machine: a saved name, a key, a swoosh: link, or a file holding one
+Usage: swoosh forward [OPTIONS] <machine> <service> <port | unix:<path> | ->
+  <machine>                 A machine: me/<name>, <person>/<name>, a person, a key, or a link
   <service>                 the service, by the name the machine serves it under
   <port | unix:<path> | ->  where the bytes go: a local port, or - for stdout
 ```

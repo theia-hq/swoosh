@@ -154,9 +154,11 @@ const BUILT_IN: [(&str, &str); 3] = [("ping", "ping:"), ("speed", "speed:"), ("s
 /// Parse one typed `serve` entry: the name follows the one name rule and is folded, the target passes
 /// through for [`bind_entry`] to read. A typed name is never dotted, so it can never be an internal route
 /// (`control.stop`). A bare `<service>` (no `=`) is a name too, folded the same way, and a built-in one
-/// becomes its full form (`ssh` is `ssh=sshd:`). A bare `proxy:<url>` names itself `proxy`, the way
-/// `sshd:` is named `ssh`; any other bare target (`tcp:…`, holding the scheme's `:`) passes through, so the
-/// tunnel grammar teaches the `name=target` shape.
+/// becomes its full form (`ssh` is `ssh=sshd:`). A bare `proxy:<url>` names itself `proxy` and a bare
+/// `recv:<dir>` (or `recv:`, into the inbox) names itself `recv`, the way `sshd:` is named `ssh`: each is
+/// the service a verb dials by default, so the form a refusal teaches is one that runs. Any other bare
+/// target (`tcp:…`, holding the scheme's `:`) passes through, and so does a bare port (`3000`), so the
+/// line that refuses an entry with no name teaches the `name=target` shape.
 ///
 /// A proxy is always served with what it reaches, named or not: an empty origin is an open egress relay
 /// under this machine's address, and a name changes what a service is called, never what it reaches. So
@@ -167,9 +169,15 @@ const BUILT_IN: [(&str, &str); 3] = [("ping", "ping:"), ("speed", "speed:"), ("s
 /// the URL and the refusal names the URL, never a name the person did not type. Every other entry splits
 /// on its first `=`, so a name holding a `:` still meets the name rule.
 pub fn service_entry(entry: &str) -> Result<String, EntryError> {
-    if let Some((Scheme::Proxy, url)) = Scheme::parse(entry) {
-        proxy_origin(Scheme::Proxy.as_str(), url)?;
-        return Ok(format!("{}={entry}", Scheme::Proxy.as_str()));
+    match Scheme::parse(entry) {
+        Some((Scheme::Proxy, url)) => {
+            proxy_origin(Scheme::Proxy.as_str(), url)?;
+            return Ok(format!("{}={entry}", Scheme::Proxy.as_str()));
+        }
+        Some((Scheme::Recv, _)) if !entry.contains('=') => {
+            return Ok(format!("{}={entry}", Scheme::Recv.as_str()));
+        }
+        _ => {}
     }
     if let Some((name, target)) = entry.split_once('=') {
         let name = name.parse::<Name>()?;
@@ -178,7 +186,7 @@ pub fn service_entry(entry: &str) -> Result<String, EntryError> {
         }
         return Ok(format!("{name}={target}"));
     }
-    if entry.contains(':') {
+    if entry.contains(':') || is_port(entry) {
         return Ok(entry.to_owned());
     }
     let name: String = entry.parse::<Name>()?.into();
@@ -195,9 +203,16 @@ pub fn service_entry(entry: &str) -> Result<String, EntryError> {
     )
 }
 
+/// Whether `text` is a port and nothing else: ASCII digits only. A port is never a service's name, so an
+/// entry or a target that is one is refused naming the TCP form it needs.
+pub fn is_port(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// `entry` (as the service-entry parser gives it) the way a person types it: a built-in by its bare name
-/// (`ssh=sshd:` is `ssh`), a proxy named `proxy` by its target (`proxy:<url>`), any other as it is. What a
-/// line that hands an entry back to the person prints, so the command it shows is the shortest that works.
+/// (`ssh=sshd:` is `ssh`), a proxy named `proxy` or a receiver named `recv` by its target (`proxy:<url>`,
+/// `recv:<dir>`), any other as it is. What a line that hands an entry back to the person prints, so the
+/// command it shows is the shortest that works.
 pub fn as_typed(entry: &str) -> &str {
     let Some((name, target)) = entry.split_once('=') else {
         return entry;
@@ -208,14 +223,19 @@ pub fn as_typed(entry: &str) -> &str {
     {
         return name;
     }
-    if name == Scheme::Proxy.as_str() && matches!(Scheme::parse(target), Some((Scheme::Proxy, _))) {
+    let names_itself = [Scheme::Proxy, Scheme::Recv].into_iter().any(|scheme| {
+        name == scheme.as_str()
+            && matches!(Scheme::parse(target), Some((found, _)) if found == scheme)
+    });
+    if names_itself {
         return target;
     }
     entry
 }
 
 /// The shortest entry a person types to serve `name`: a built-in alone (`ssh`), `proxy` with the URL it
-/// needs (`proxy:<url>`), and any other name with a TCP target (`db=tcp:<address>:<port>`), the common case
+/// needs (`proxy:<url>`), `recv` with the directory it saves into (`recv:<dir>`: where files land is the
+/// person's choice), and any other name with a TCP target (`db=tcp:<address>:<port>`), the common case
 /// whole. Only the person can fill the placeholders, so they print as they are.
 pub fn entry_for(name: &str) -> String {
     if BUILT_IN.iter().any(|&(built_in, _)| built_in == name) {
@@ -223,6 +243,9 @@ pub fn entry_for(name: &str) -> String {
     }
     if name == Scheme::Proxy.as_str() {
         return format!("{name}:<url>");
+    }
+    if name == Scheme::Recv.as_str() {
+        return format!("{name}:<dir>");
     }
     format!("{name}=tcp:<address>:<port>")
 }

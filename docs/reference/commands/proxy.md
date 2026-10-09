@@ -6,10 +6,10 @@ Get a local URL that reaches a site through a machine you name.
 
 <!-- generated: usage from `swoosh proxy -h`; option lines curated -->
 ```
-Usage: swoosh proxy [OPTIONS] <peer> <url>
-  <peer>         the machine to go through: a saved name, a key, a swoosh: link, or a file holding one
+Usage: swoosh proxy [OPTIONS] <machine> <url>
+  <machine>      A machine: me/<name>, <person>/<name>, a person, a key, or a link
   <url>          a site, or a file on it; a path on the local URL resolves against it
-  --port <port>  pin the local port (default: any free port)
+  --port <n>     The local port to listen on (default: any free port)
 ```
 
 **Example.** On `nas`: `swoosh serve proxy:https://example.com`. Then, here:

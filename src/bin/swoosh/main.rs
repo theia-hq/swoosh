@@ -27,6 +27,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use swoosh::contacts::{Contacts, ContactsStore};
 use swoosh::home::Home;
 use swoosh::identity::Identity;
+use swoosh::peer::{Machine, Peer};
 use swoosh::reaching::{BindRole, Reaching};
 use swoosh::transport::{MdnsState, PeerHint};
 use swoosh::{credential, reaching, transport};
@@ -574,6 +575,47 @@ fn usage(path: &[&str], message: &str) -> clap::Error {
     command.error(clap::error::ErrorKind::InvalidValue, message)
 }
 
+/// The verb word typed (`ping`), read from `argv` by clap's own model, so a usage error a verb exits with
+/// once it runs prints that verb's usage line.
+fn verb_word(argv: &[std::ffi::OsString]) -> Option<String> {
+    Cli::command()
+        .try_get_matches_from(argv)
+        .ok()?
+        .subcommand_name()
+        .map(str::to_owned)
+}
+
+/// Exit 2 when `reach` gives a reach flag the selected bind would never read, as clap's own usage errors
+/// do, under the usage line of the command at `path`.
+fn unused_reach(path: &[&str], reach: &transport::ReachArgs) {
+    if let Err(unused) = reach.reject_unused_reach() {
+        usage_error(path, &unused.to_string());
+    }
+}
+
+/// The one machine `peer` names in `contacts`, or exit 2 when it is not one machine. A bare person with
+/// one machine saved is announced on stderr, once, before anything is dialed. A machine of a known person
+/// the book does not hold keeps its own line, as an error.
+fn resolve_machine(
+    peer: &Peer,
+    contacts: &Contacts,
+    verb: &str,
+    argv: &[std::ffi::OsString],
+) -> eyre::Result<Machine> {
+    match peer.machine(contacts) {
+        Ok(machine) => {
+            if let Some(line) = commands::machine::picked(&machine) {
+                eprintln!("{line}");
+            }
+            Ok(machine)
+        }
+        Err(error) => match commands::machine::usage(&error, verb, argv, &peer.to_string()) {
+            Some(message) => usage_error(&[verb], &message),
+            None => Err(error.into()),
+        },
+    }
+}
+
 /// The default `RUST_LOG` directive: ERROR everywhere. Activity lines do not ride the log at all (a
 /// serving node renders them itself, and `--quiet` withholds them), so no target needs a raised default,
 /// and a dependency's info events never reach a stock node's stderr.
@@ -601,7 +643,10 @@ async fn run() -> eyre::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = parse_from(std::env::args_os()).unwrap_or_else(|error| error.exit());
+    // Kept whole: a refusal of a mistyped machine hands back this very line with only the machine replaced.
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let cli = parse_from(&argv).unwrap_or_else(|error| error.exit());
+    let verb_word = verb_word(&argv);
 
     // No verb given (a bare `swoosh`, even with `SWOOSH_HOME` set): a mistake, so the help goes to stderr
     // with exit 2, as clap's own `arg_required_else_help` does (stdout stays empty, no `error:` line).
@@ -670,7 +715,7 @@ async fn run() -> eyre::Result<()> {
         // `root restore`: every check, the passphrase and the writes are local and come first; only the
         // exchange that brings the restored root up to date binds a transport, under the key it wrote for.
         Verb::RootRestore(cmd) => {
-            cmd.reach.reject_unused_reach()?;
+            unused_reach(&["root", "restore"], &cmd.reach);
             Outward::RootRestore(Box::new(cmd.run_local(&home).await?))
         }
         // A bare `swoosh invite`: what is due, read from the root's records with no lock and no prompt.
@@ -679,7 +724,7 @@ async fn run() -> eyre::Result<()> {
         // machine that made the invite binds a transport, under the key the join may just have written. A
         // reach flag that exchange would never read is refused first, before the join writes anything.
         Verb::Join(cmd) => {
-            cmd.reach.reject_unused_reach()?;
+            unused_reach(&["join"], &cmd.reach);
             match cmd.run_local(&home).await? {
                 Some(from) => Outward::Join(join::JoinPull {
                     from,
@@ -693,7 +738,7 @@ async fn run() -> eyre::Result<()> {
         // so nothing a bind does can delay or stop them. Only a device's part that your root publishes
         // goes on to bind, to sync and to offer the cut. A root's revoke runs whole here: it dials nobody.
         Verb::Revoke(cmd) => {
-            cmd.reach.reject_unused_reach()?;
+            unused_reach(&["revoke"], &cmd.reach);
             match cmd
                 .block(
                     &home,
@@ -740,13 +785,17 @@ async fn run() -> eyre::Result<()> {
         // not return on success.
         Verb::Ssh(cmd) => {
             let store = ContactsStore::open(&home).await?;
-            return cmd.run(store.contacts(), &home);
+            let machine = resolve_machine(&cmd.peer, store.contacts(), "ssh", &argv)?;
+            return cmd.run(&machine, &home);
         }
         Verb::Outward(outward) => {
             // Before anything is opened or minted: a flag the selected bind would never read is refused
             // here, not after the store is loaded and a key provisioned, so a refused
             // `serve --local --relay` on a fresh home leaves that home exactly as it found it.
-            outward.reach_args().reject_unused_reach()?;
+            unused_reach(
+                &[verb_word.as_deref().unwrap_or_default()],
+                outward.reach_args(),
+            );
             // A `serve` takes its home's lock and control socket before anything is opened or bound, so a
             // second one for the home refuses leaving everything as the running one has it. Its typed
             // services that cannot be one list exit 2 first, as clap's own errors do.
@@ -763,6 +812,19 @@ async fn run() -> eyre::Result<()> {
     // The address book lives in the node home, `<home>/contacts.toml`. A reach verb reads it to resolve a
     // petname in its peer slot.
     let store = ContactsStore::open(&home).await?;
+    // The machine the verb dials resolves here, once: after the book opens and before the key is read, so a
+    // machine that is not one machine exits 2 without a passphrase asked, a pick-up tried or anything bound.
+    let machine = reach
+        .dialed()
+        .map(|peer| {
+            resolve_machine(
+                peer,
+                store.contacts(),
+                verb_word.as_deref().unwrap_or_default(),
+                &argv,
+            )
+        })
+        .transpose()?;
 
     // The verb decides its identity: `serve` persists so it is reachable at one address, a reach-outward
     // verb binds the home's key where one exists (its badge roots there) and a throwaway where none does,
@@ -852,6 +914,7 @@ async fn run() -> eyre::Result<()> {
     // `cmd.run(node, ctx)` per verb, not a per-verb argument-threading match.
     let ctx = reaching::ReachCtx {
         contacts: &contacts,
+        machine: machine.as_ref(),
         bound: &bound,
         present,
         membership,
@@ -956,20 +1019,15 @@ impl IrohBind {
     }
 }
 
-/// The device a dialing verb's peer is, when this machine's list is stale and that peer is one of your
-/// devices: the one to make the stale-list exchange with.
-async fn stale_device(
-    home: &Home,
-    contacts: &Contacts,
-    peer: &swoosh::peer::Peer,
-) -> Option<bifrost::NodeId> {
+/// The device a dialing verb's machine is, when this machine's list is stale and that machine is one of
+/// your devices: the one to make the stale-list exchange with.
+async fn stale_device(home: &Home, machine: &Machine) -> Option<bifrost::NodeId> {
     if !swoosh::sync::is_stale(home).await {
         return None;
     }
-    let device = peer.candidates(contacts).ok()?.into_iter().next()?;
-    swoosh::sync::is_own_device(home, device.node)
+    swoosh::sync::is_own_device(home, machine.key())
         .await
-        .then_some(device.node)
+        .then_some(machine.key())
 }
 
 /// Run a reaching verb, and beside it, from the moment it starts, the stale-list exchange with the device
@@ -987,9 +1045,9 @@ where
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
     // A dial under a throwaway key is none of your devices, so it makes no exchange.
-    let device = match outward.dialed() {
-        Some(peer) if outward.identity() != Identity::Ephemeral => {
-            stale_device(ctx.home, ctx.contacts, peer).await
+    let device = match ctx.machine {
+        Some(machine) if outward.identity() != Identity::Ephemeral => {
+            stale_device(ctx.home, machine).await
         }
         _ => None,
     };
@@ -1052,6 +1110,9 @@ struct Renew<'a> {
 #[cfg(test)]
 #[path = "bearer_dial_tests.rs"]
 mod bearer_dial_tests;
+#[cfg(test)]
+#[path = "machine_args_tests.rs"]
+mod machine_args_tests;
 #[cfg(test)]
 #[path = "revoke_by_key_tests.rs"]
 mod revoke_by_key_tests;

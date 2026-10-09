@@ -1,8 +1,7 @@
 # Transports
 
-swoosh carries most connections three ways, chosen with `--transport`. The key is the same either way, so
-switching transports reaches the same peer. `swoosh ssh` is the one exception: it is iroh-only today
-and takes no `--transport`.
+swoosh has three transports. iroh is the default; set another with `--transport` or `SWOOSH_TRANSPORT`. A
+machine's key is the same on each, so switching transports reaches the same machine. `swoosh ssh` uses iroh only.
 
 ## <a id="iroh"></a>iroh (the default)
 
@@ -115,7 +114,7 @@ iroh when you need NAT traversal.
 
 ## <a id="peer"></a>Advanced: `--peer`, when discovery cannot reach them
 
-`--peer <key>=<addr>` gives a peer's address by hand. You need it only when discovery cannot reach the
+`--peer <key>=<address>` (or `SWOOSH_PEER`) gives a peer's address by hand. You need it only when discovery cannot reach the
 peer: mainly a quirk dial across networks, or a locked-down network where automatic discovery is
 blocked. Take the `direct` line a peer's `serve` printed and pass it back:
 
@@ -128,6 +127,12 @@ $ swoosh ping ed01hcq6… --transport quirk+noise --peer ed01hcq6…=127.0.0.1:5
 
 Over iroh you almost never need this: iroh discovers the peer from its key. If an iroh dial cannot
 reach a peer, the peer is likely offline or discovery is down, not missing an address.
+
+## <a id="variables"></a>Every flag here has a variable
+
+The flags on this page are left out of `--help`. Each can be set once in the environment instead:
+`SWOOSH_TRANSPORT`, `SWOOSH_LOCAL`, `SWOOSH_PEER`, `SWOOSH_RELAY`, `SWOOSH_RESOLVER`. A flag beats its
+variable. `SWOOSH_PEER` takes several `<key>=<address>`, comma-separated.
 
 ## Next
 

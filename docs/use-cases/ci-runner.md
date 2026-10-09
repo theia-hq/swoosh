@@ -71,7 +71,7 @@ On the deploy box, receive pushed files behind the gate:
 
 <!-- manual: long-running serve on the deploy host -->
 ```console
-$ swoosh serve recv=recv:/srv/releases
+$ swoosh serve recv:/srv/releases
 ```
 
 Omit `expires` on the runner's step: the step returns once the node is up, the job advances, and the node

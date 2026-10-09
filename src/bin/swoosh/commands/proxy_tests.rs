@@ -441,36 +441,19 @@ fn printed(local: &Local) -> String {
     )
 }
 
-/// The line the DOWNLOADER reads. A `proxy` request that fails serves an HTTP error body, and
-/// that body is where this verb's refusal is actually read, so that is where the `serve` line the
-/// exit node would need has to land. Driven through the announced-session refusal: this failure never
-/// reached the exit node at all and still carries the line, which is the property being held. The line
-/// is owed to the name this client SENT, never to an answer, so it can never report which refusal came
-/// back.
+/// The line the DOWNLOADER reads when a request fails without a refusal (here one that never reached
+/// the exit node at all) names no service and no command: a failure that was not a refusal says nothing
+/// about what the machine serves, whatever service was asked for.
 #[tokio::test]
-async fn a_failed_request_names_the_serve_line_for_the_defaulted_service() {
+async fn a_failed_request_teaches_no_service() {
     let link = badge();
     let session = Scripted::new(Script::Silent);
-    let (served, defaulted) = exchange(printed, &proxy(&[]), &session, Some(&link)).await;
-    assert!(served.is_err(), "the relay refuses the credential write");
-    assert!(
-        defaulted.contains("swoosh serve proxy:<url>"),
-        "the defaulted service names the line that would bind it: {defaulted}"
-    );
-
-    // A service the operator NAMED is theirs; the client has nothing to teach about it and adds
-    // nothing.
-    let (_, named) = exchange(
-        printed,
-        &proxy(&["--service", "news"]),
-        &session,
-        Some(&link),
-    )
-    .await;
-    assert!(
-        !named.contains("swoosh serve"),
-        "a named service gets no serve line appended: {named}"
-    );
+    for args in [&[][..], &["--service", "news"][..]] {
+        let (served, body) = exchange(printed, &proxy(args), &session, Some(&link)).await;
+        assert!(served.is_err(), "the relay refuses the credential write");
+        assert!(!body.contains("swoosh serve"), "{args:?}: {body}");
+        assert!(!body.contains("service add"), "{args:?}: {body}");
+    }
 }
 
 /// The proxy path bypasses `Connector`, so it carries the checked writer itself: presenting a

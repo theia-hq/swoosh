@@ -90,6 +90,10 @@ async fn ping(home: &Home, peer: &str, dial: &Answering) -> eyre::Result<()> {
         panic!("ping is a reaching verb");
     };
     let contacts = ContactsStore::open(home).await.unwrap().contacts().clone();
+    let machine = swoosh::reaching::Reaching::dialed(&outward)
+        .unwrap()
+        .machine(&contacts)
+        .unwrap();
     let bound = swoosh::transport::Bound {
         transport: swoosh::transport::Transport::Iroh,
         local: false,
@@ -97,6 +101,7 @@ async fn ping(home: &Home, peer: &str, dial: &Answering) -> eyre::Result<()> {
     };
     let ctx = swoosh::reaching::ReachCtx {
         contacts: &contacts,
+        machine: Some(&machine),
         bound: &bound,
         present: None,
         membership: None,

@@ -6,6 +6,9 @@ name is what a dialer asks for, the target is what the bytes come from. A <a id=
 address, not an authority. Two names can point at the same target (`a=sshd: b=sshd:`); each carries its
 own grant, toggle, and posture, and neither is a second service nor a second authority.
 
+`--service <name>` on `ssh`, `send` and `proxy` reaches a service served under another name. It has no
+variable: each verb's default differs.
+
 This page is the catalog: every target you can put after `name=`, what it does, and how it is gated.
 
 ## Available today
@@ -18,7 +21,7 @@ scheme that takes no argument refuses a tail: `ping=ping:80` is an error, not a 
 
 ### `ping:`
 
-Round-trip time probe. A peer runs `swoosh ping <peer>` against it.
+Round-trip time probe. A peer runs `swoosh ping <machine>` against it.
 
 - Posture: family-gated. `--public ping` opens it; the open route binds the metered engine (one ping run
   per caller per second, a 60-second/1 GiB per-stream cap). A family-gated route binds the owner engine
@@ -28,7 +31,7 @@ Round-trip time probe. A peer runs `swoosh ping <peer>` against it.
 
 ### `speed:`
 
-Throughput test. A peer runs `swoosh speed <peer>` against it.
+Throughput test. A peer runs `swoosh speed <machine>` against it.
 
 - Posture: family-gated. `--public speed` opens it; the open route binds the metered engine (one transfer
   at a time, a 64 MiB per-direction and 15-second per-stream cap). A family-gated route binds the owner
@@ -53,8 +56,8 @@ A keyless shell on this machine, run as the serving process's user. Serve it und
 Receive pushed files into a directory.
 
 - Posture: family-gated, no public form.
-- Example: `swoosh serve inbox=recv:/srv/releases`
-- <a id="inbox"></a>With no directory, `inbox=recv:` saves into an inbox:
+- Example: `swoosh serve recv:/srv/releases`
+- <a id="inbox"></a>`recv:` alone saves into an inbox:
   `~/Library/Application Support/swoosh-inbox` on macOS; on Linux `$XDG_DATA_HOME/swoosh/inbox`, or
   `~/.local/share/swoosh/inbox` when that is not set.
 - Refused: your home directory, the swoosh home (its default, or the directory `--home` names), a

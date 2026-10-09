@@ -62,7 +62,11 @@ fn join_refuses_an_unused_reach_flag_before_writing() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "refused: {stderr}");
-    assert!(stderr.contains("--relay has no effect"), "{stderr}");
+    assert_eq!(output.status.code(), Some(2), "a usage error: {stderr}");
+    assert!(
+        stderr.contains("--relay or SWOOSH_RELAY has no effect"),
+        "{stderr}"
+    );
     assert!(!stderr.contains("joined root"), "{stderr}");
     for file in ["key.cert", "root.pub", "invited-by"] {
         assert!(!home.join(file).exists(), "{file} is not written");

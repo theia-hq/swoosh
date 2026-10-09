@@ -6,10 +6,9 @@ Reach a peer's sshd over the overlay; runs the system ssh.
 
 <!-- generated: usage from `swoosh ssh -h`; option lines curated -->
 ```
-Usage: swoosh ssh [OPTIONS] <peer> [-- <ssh args>...]
-  <peer>          a petname, a raw node id, or a swoosh: link
+Usage: swoosh ssh [OPTIONS] <machine> [-- <ssh args>...]
+  <machine>       A machine: me/<name>, <person>/<name>, a person, a key, or a link
   [ssh args]...   forwarded verbatim to ssh, after --
-  --service <name>   the exposed service name to reach [default: ssh]
 ```
 
 **Example.** `swoosh ssh desk -- ls` runs a one-off command; `swoosh ssh desk -- -p 2222` passes ssh

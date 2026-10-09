@@ -15,8 +15,8 @@ use swoosh::home::{Home, HomeWrite};
 /// Remove a saved person, or one machine of theirs
 #[derive(Debug, Args)]
 pub struct RmCmd {
-    /// `alice` for the person, or `alice/laptop` for one machine of theirs
-    #[arg(value_name = "name")]
+    /// A person, or one machine of theirs
+    #[arg(value_name = "person | person/name")]
     pub name: ContactRef,
 }
 

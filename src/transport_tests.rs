@@ -377,31 +377,34 @@ async fn an_unusable_kept_relay_or_resolver_refuses_with_the_file_named() {
 }
 
 /// A bind that reads neither reach flag refuses both BY NAME rather than parsing and ignoring them:
-/// `--local` (no n0 at all) and each quirk spelling (direct-only, no record of its own). The refusal
-/// names the bind as the user spelled it, so the reader can find the flag to drop on their own line.
+/// `--local` (no n0 at all) and each quirk spelling (direct-only, no record of its own). Every flag here is
+/// hidden and read from the environment too, so the refusal names both spellings of the flag and of
+/// `--local`: the person may only ever have set the variable.
 #[test]
 fn a_bind_that_uses_neither_reach_flag_refuses_both_by_name() {
-    for (local, transport, spelling, relay_subject, resolver_subject) in [
+    for (local, transport, spelling, relay_line, resolver_line) in [
         (
             true,
             Transport::default(),
             "--local",
-            "a local bind uses no relay",
-            "a local bind publishes no record",
+            "--relay or SWOOSH_RELAY has no effect with --local or SWOOSH_LOCAL\n  swoosh uses no relay \
+             when it runs on this network only.",
+            "--resolver or SWOOSH_RESOLVER has no effect with --local or SWOOSH_LOCAL\n  swoosh publishes \
+             no record when it runs on this network only.",
         ),
         (
             false,
             Transport::Quirk,
             "--transport quirk",
-            "quirk uses no relay",
-            "quirk publishes no record",
+            "--relay or SWOOSH_RELAY has no effect over quirk\n  quirk uses no relay.",
+            "--resolver or SWOOSH_RESOLVER has no effect over quirk\n  quirk publishes no record.",
         ),
         (
             false,
             Transport::QuirkNoise,
             "--transport quirk+noise",
-            "quirk uses no relay",
-            "quirk publishes no record",
+            "--relay or SWOOSH_RELAY has no effect over quirk\n  quirk uses no relay.",
+            "--resolver or SWOOSH_RESOLVER has no effect over quirk\n  quirk publishes no record.",
         ),
     ] {
         let bind = |relay, resolver| ReachArgs {
@@ -422,10 +425,7 @@ fn a_bind_that_uses_neither_reach_flag_refuses_both_by_name() {
         )
         .reject_unused_reach()
         .expect_err("--relay on a bind that never reads it is refused");
-        assert_eq!(
-            format!("{relay:#}"),
-            format!("--relay has no effect under {spelling}: {relay_subject}; drop one of the two")
-        );
+        assert_eq!(relay.to_string(), relay_line, "{spelling}");
 
         let resolver = bind(
             None,
@@ -437,12 +437,7 @@ fn a_bind_that_uses_neither_reach_flag_refuses_both_by_name() {
         )
         .reject_unused_reach()
         .expect_err("--resolver on a bind that never reads it is refused");
-        assert_eq!(
-            format!("{resolver:#}"),
-            format!(
-                "--resolver has no effect under {spelling}: {resolver_subject}; drop one of the two"
-            )
-        );
+        assert_eq!(resolver.to_string(), resolver_line, "{spelling}");
     }
 
     // An iroh bind is the one that reads both, so it refuses neither.

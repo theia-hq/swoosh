@@ -48,19 +48,19 @@ use std::path::Path;
 
 use clap::Args;
 use nauthy::{Link, Service};
-use swoosh::contacts::Contacts;
 use swoosh::escape::EscapedPath;
 use swoosh::home::Home;
-use swoosh::peer::Peer;
+use swoosh::peer::{Machine, Peer};
 use swoosh::transport;
 use swoosh::unbound::Unbound;
 
+use crate::commands::machine;
+
 /// The exposed service name reached when the user names none: a host's sshd under the default label.
 ///
-/// Taken FROM the table that knows a bare `swoosh serve` does not bind it, so the name this verb
-/// dials and the name a failed dial teaches the `serve` line for are one value. The teaching itself
-/// is attached where the dial actually happens: this launcher `exec`s the system ssh, whose
-/// `ProxyCommand` re-invokes the `forward` bridge, so the refusal is the BRIDGE's to name.
+/// Taken FROM the table that knows a bare `swoosh serve` does not bind it. A refusal is said where the
+/// dial actually happens: this launcher `exec`s the system ssh, whose `ProxyCommand` re-invokes the
+/// `forward` bridge, so the refusal is the BRIDGE's to name.
 const DEFAULT_SERVICE: &str = Unbound::SSH.name();
 
 /// The system binary a launch shells out to: the far sshd is reached by the system `SSH`, whose overlay
@@ -71,14 +71,23 @@ const SSH: &str = "ssh";
 /// Reach a peer's sshd over the overlay; runs the system ssh.
 #[derive(Debug, Args)]
 pub struct SshCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
-    #[arg(value_name = "peer")]
+    #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
     /// The exposed service name to reach on the host.
-    #[arg(long, value_name = "service", default_value = DEFAULT_SERVICE, value_parser = swoosh::names::service)]
+    // Hidden, with no variable: each verb's default differs, so one variable would retarget three verbs.
+    #[arg(long, value_name = "service", default_value = DEFAULT_SERVICE, value_parser = swoosh::names::service, hide = true)]
     pub service: Service,
-    /// direct address hint for the peer, `<key>=<addr>` (repeatable)
-    #[arg(id = "peer-hint", long = "peer", value_name = "key=addr")]
+    /// direct address hint for the peer, `<key>=<address>` (repeatable; the variable takes several, comma-separated)
+    // Hidden and read from `SWOOSH_PEER`, as every verb's `--peer` is. A hint holds no comma, so a comma
+    // separates several.
+    #[arg(
+        id = "peer-hint",
+        long = "peer",
+        value_name = "key=address",
+        env = "SWOOSH_PEER",
+        value_delimiter = ',',
+        hide = true
+    )]
     pub peer_hint: Vec<transport::PeerHint>,
     /// Args forwarded verbatim to the system ssh, after `--`.
     // `last = true` makes `--` the ONLY door into this positional: before it, every token is still
@@ -93,28 +102,17 @@ pub struct SshCmd {
 }
 
 impl SshCmd {
-    /// Resolve the peer to a raw key, then replace this process with the system `ssh` reaching it over the
-    /// overlay. On success swoosh's PID *becomes* ssh (unix); a resolve or PATH failure returns before any
-    /// exec, so a caller prints its clean message and exits non-zero. Prints nothing on the success path.
-    pub fn run(self, contacts: &Contacts, home: &Home) -> eyre::Result<()> {
-        exec_ssh(self.argv(contacts, home)?)
+    /// Replace this process with the system `ssh` reaching `machine`, the one machine the peer resolved
+    /// to, over the overlay. On success swoosh's PID *becomes* ssh (unix); a PATH failure returns before
+    /// any exec, so a caller prints its clean message and exits non-zero.
+    pub fn run(self, machine: &Machine, home: &Home) -> eyre::Result<()> {
+        exec_ssh(self.argv(machine, home)?)
     }
 
-    /// Everything [`run`](Self::run) does before the exec: resolve the peer, prepare the private host-key
-    /// book, and assemble ssh's argv.
-    fn argv(&self, contacts: &Contacts, home: &Home) -> eyre::Result<Vec<String>> {
-        // Resolve in-process, before ssh sees anything: take the first device for a bare petname (as
-        // `speed` does), the exact one for `alice/desk`, a raw key straight through, and a `swoosh:` link's
-        // cap root (its one self-addressed candidate).
-        let candidates = self.peer.candidates(contacts)?;
-        let Some(first) = candidates.into_iter().next() else {
-            // A person saved by their root alone has no machine to dial: the same words `forward` uses.
-            eyre::bail!(
-                "could not reach {}: it has no machine saved here",
-                self.peer
-            );
-        };
-        let key = first.node.to_string();
+    /// Everything [`run`](Self::run) does before the exec: prepare the private host-key book, and
+    /// assemble ssh's argv.
+    fn argv(&self, machine: &Machine, home: &Home) -> eyre::Result<Vec<String>> {
+        let key = machine.key().to_string();
         // A petname is the host as typed; any other peer's host is its key. known_hosts keys on the key
         // via HostKeyAlias, so the host only names the machine in ssh's own lines (and `%h`, and a user's
         // `Host` block). A raw key's or a link's short form ends in `…`, which ssh refuses as a host under a
@@ -451,6 +449,13 @@ mod tests {
         WrapSsh::try_parse_from(argv).expect("ssh args parse").ssh
     }
 
+    /// The launch `cmd` assembles from an empty book, its machine resolved as the composition root
+    /// resolves it.
+    fn argv_of(cmd: &SshCmd, home: &Home) -> eyre::Result<Vec<String>> {
+        let machine = cmd.peer.machine(&swoosh::contacts::Contacts::default())?;
+        cmd.argv(&machine, home)
+    }
+
     /// A real `swoosh:` link (work issues a signet-bound slip for a foreign fleet), so a link-as-peer test
     /// exercises the true parse/self-address path rather than a fake token.
     fn signet_link() -> String {
@@ -594,8 +599,7 @@ mod tests {
         for (part, what) in READ_SPECIALLY {
             let home_dir = dir.join(format!("a{part}b"));
             let home = Home::resolve(Some(home_dir.clone())).expect("resolve");
-            let error = parse_ssh(&["swoosh", KEY])
-                .argv(&Contacts::default(), &home)
+            let error = argv_of(&parse_ssh(&["swoosh", KEY]), &home)
                 .expect_err("the launch refuses")
                 .to_string();
             let named = format!("{:?}", home_dir.display().to_string());
@@ -870,9 +874,7 @@ mod tests {
         let dir = scratch("anyone");
         let home = Home::resolve(Some(dir.join("home"))).expect("resolve");
         let link = anyone_link();
-        let argv = parse_ssh(&["swoosh", &link])
-            .argv(&Contacts::default(), &home)
-            .expect("the launch assembles");
+        let argv = argv_of(&parse_ssh(&["swoosh", &link]), &home).expect("the launch assembles");
         let (parsed, _) = child_forward(&argv, &dir, Path::new("/bin/sh"));
         let forward = bridge(parsed.command);
         assert!(
@@ -894,9 +896,7 @@ mod tests {
         let dir = scratch("bound");
         let home = Home::resolve(Some(dir.join("home"))).expect("resolve");
         let link = signet_link();
-        let argv = parse_ssh(&["swoosh", &link])
-            .argv(&Contacts::default(), &home)
-            .expect("the launch assembles");
+        let argv = argv_of(&parse_ssh(&["swoosh", &link]), &home).expect("the launch assembles");
         let (parsed, _) = child_forward(&argv, &dir, Path::new("/bin/sh"));
         let forward = bridge(parsed.command);
         assert_eq!(
@@ -926,9 +926,7 @@ mod tests {
         let home = Home::resolve(Some(dir.join("home"))).expect("resolve");
 
         let cmd = parse_ssh(&["swoosh", file.to_str().expect("a UTF-8 path")]);
-        let argv = cmd
-            .argv(&Contacts::default(), &home)
-            .expect("the launch assembles");
+        let argv = argv_of(&cmd, &home).expect("the launch assembles");
         let body = link
             .strip_prefix(swoosh::link::PREFIX)
             .expect("a printed link");
@@ -1011,8 +1009,10 @@ mod tests {
                 let home_dir = dir.join(home_name);
                 let home = Home::resolve(Some(home_dir.clone())).expect("resolve");
 
-                let launch = parse_ssh(&["swoosh", file.to_str().expect("a UTF-8 path")])
-                    .argv(&Contacts::default(), &home);
+                let launch = argv_of(
+                    &parse_ssh(&["swoosh", file.to_str().expect("a UTF-8 path")]),
+                    &home,
+                );
                 match launch {
                     // Refused: only a name some shell cannot carry, in one line that names it.
                     Err(error) => {
@@ -1109,7 +1109,7 @@ mod tests {
     fn the_host_is_ascii_for_every_kind_of_peer() {
         let dir = scratch("host");
         let home = Home::resolve(Some(dir.join("home"))).expect("resolve");
-        let mut contacts = Contacts::default();
+        let mut contacts = swoosh::contacts::Contacts::default();
         contacts.add(
             "alice".parse().expect("valid petname"),
             Some("desk".parse().expect("valid device")),
@@ -1129,9 +1129,9 @@ mod tests {
             (file.to_str().expect("a UTF-8 path"), root.as_str()),
         ];
         for (peer, expected) in cases {
-            let argv = parse_ssh(&["swoosh", peer])
-                .argv(&contacts, &home)
-                .expect("the launch assembles");
+            let cmd = parse_ssh(&["swoosh", peer]);
+            let machine = cmd.peer.machine(&contacts).expect("the peer resolves");
+            let argv = cmd.argv(&machine, &home).expect("the launch assembles");
             let alias = argv
                 .iter()
                 .position(|arg| arg.starts_with("HostKeyAlias="))

@@ -1,4 +1,4 @@
-//! `swoosh send <path>... <peer>`: PUSH a file or directory to a peer.
+//! `swoosh send <path>... <machine>`: PUSH a file or directory to a machine.
 //!
 //! The sender-initiates half of file transfer: you dial a waiting receiver (a node serving `recv:`), open
 //! one stream per file, and drive [`transfer::wire`]'s [`Transfer`](transfer::wire::Transfer) directly,
@@ -21,19 +21,19 @@ use eyre::WrapErr as _;
 use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
-use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, EscapedPath, causes, escaped_report};
-use swoosh::peer::Peer;
+use swoosh::peer::{Machine, Peer};
 use swoosh::transport::ReachArgs;
 use swoosh::unbound::Unbound;
 use transfer::wire::{Blob, Transfer};
+
+use crate::commands::machine;
 
 /// The service name a receiver publishes and `swoosh send` reaches: a peer serving `recv:` receives,
 /// `swoosh send` pushes.
 ///
 /// Taken FROM the table that knows a bare `swoosh serve` does not bind it (a receive service's sink
-/// directory is the operator's to name, so there is no default to inherit), so the name this verb
-/// dials and the name a failed push teaches the `serve` line for are one value.
+/// directory is the operator's to name, so there is no default to inherit).
 pub const RECV_SERVICE: &str = Unbound::RECV.name();
 
 /// Files send concurrently over separate streams, capped so one connection is not flooded. Matches iris's
@@ -46,11 +46,11 @@ pub struct SendCmd {
     /// The files or directories to push.
     #[arg(required = true, value_name = "path")]
     pub paths: Vec<PathBuf>,
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
-    #[arg(value_name = "peer")]
+    #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
     /// the peer's file-receiving service
-    #[arg(long, value_name = "service", default_value = RECV_SERVICE, value_parser = swoosh::names::service)]
+    // Hidden, with no variable: each verb's default differs, so one variable would retarget three verbs.
+    #[arg(long, value_name = "service", default_value = RECV_SERVICE, value_parser = swoosh::names::service, hide = true)]
     pub service: Service,
     #[command(flatten)]
     pub reach: ReachArgs,
@@ -87,7 +87,7 @@ impl swoosh::reaching::Reaching for SendCmd {
     }
 
     /// Uniform dispatch: unpack the reach context and run. `send` reads the resolved `present` badge and
-    /// `contacts` (to resolve a petname in its peer slot); it ignores `transport` and `key`.
+    /// the machine resolved before the bind; it ignores `transport` and `key`.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -97,7 +97,10 @@ impl swoosh::reaching::Reaching for SendCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_send(node, ctx.contacts, ctx.present, ctx.membership)
+        let Some(machine) = ctx.machine else {
+            eyre::bail!("internal: `send` ran without its machine resolved (root-dispatch bug)");
+        };
+        self.run_send(node, machine, ctx.present, ctx.membership)
             .await
     }
 }
@@ -106,21 +109,24 @@ impl SendCmd {
     /// Reach the peer's `recv:` service and push every named file over its own gated stream, expanding
     /// directories first. Presents the resolved `present` (this device's membership badge, or the link typed
     /// as the peer) so the receiver's family gate admits each stream. A file that cannot be read is
-    /// skipped and reported; the run ends non-zero if any item failed.
+    /// skipped and reported; the run ends non-zero if any item failed. A stream the receiver refuses
+    /// `NotAdmitted` ends the run with the one dial refusal, never a `skip:` per file.
     async fn run_send<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
-        contacts: &Contacts,
+        machine: &Machine,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, so the verb never threads a slip itself.
-        let service = self.service.clone();
-        let connector = self
-            .peer
-            .connector(contacts, service, present, membership)?;
+        let connector = swoosh::reach::gated(
+            machine.key(),
+            self.service.clone(),
+            Option::clone(&present),
+            Option::clone(&membership),
+        );
         let dial = connector.dial();
         println!("sending to {dial}...");
         // A service-scoped session: each `open_bi` speaks the `recv:` request and presents the badge, so
@@ -150,9 +156,27 @@ impl SendCmd {
             }
         }
         while let Some(result) = sending.next().await {
-            if let Err(error) = result {
-                eprintln!("skip: {error:#}");
-                failures += 1;
+            match result {
+                Ok(()) => {}
+                // The receiver refused this machine the service: no other file would be admitted, so the
+                // run ends here with one refusal, and the files still in flight are dropped.
+                Err(error) if error.is::<NotAdmitted>() => {
+                    drop(sending);
+                    let diagnosis = swoosh::reach::diagnose_over(
+                        node,
+                        machine,
+                        &self.service,
+                        present,
+                        membership,
+                    )
+                    .await;
+                    node.close().await;
+                    return Err(machine::refused(machine, &self.service, diagnosis));
+                }
+                Err(error) => {
+                    eprintln!("skip: {error:#}");
+                    failures += 1;
+                }
             }
             if let Some((name, path)) = pending.next() {
                 sending.push(send_one(&session, name, path));
@@ -161,15 +185,7 @@ impl SendCmd {
 
         node.close().await;
         if failures > 0 {
-            // A push that did not fully land names the `serve` line the receiver would need, when the
-            // service was the default one. Attached HERE, once, to the run's own failure: per file it
-            // would repeat itself once per item, and attaching it only to the items that failed at
-            // the GATE would mean reading the refusals to tell them apart, which is the branch that
-            // turns this client into an oracle. So it is said once and said blind.
-            return Err(Unbound::name_the_entry(
-                eyre::eyre!("{failures} item(s) could not be sent"),
-                self.service.as_str(),
-            ));
+            eyre::bail!("{failures} item(s) could not be sent");
         }
         Ok(())
     }
@@ -185,10 +201,10 @@ async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre:
         Blob::hash(&mut file).await?
     };
 
-    let (send, recv) = session
-        .open_bi()
-        .await
-        .map_err(|error| peer_error(&error))?;
+    let (send, recv) = session.open_bi().await.map_err(|error| match error {
+        bifrost::Error::Refused(bifrost::Refusal::NotAdmitted) => eyre::Report::new(NotAdmitted),
+        error => peer_error(&error),
+    })?;
     let mut source = tokio::fs::File::open(&path)
         .await
         .wrap_err_with(|| format!("open {}", render_path(&path)))?;
@@ -200,6 +216,12 @@ async fn send_one<S: Session>(session: &S, name: String, path: PathBuf) -> eyre:
     println!("sent {} ({} bytes)", Escaped(&name), blob.len());
     Ok(())
 }
+
+/// A stream the receiver refused `NotAdmitted`: the run's one refusal, which ends it rather than skipping
+/// the file.
+#[derive(Debug, thiserror::Error)]
+#[error("the receiver refused the stream")]
+struct NotAdmitted;
 
 /// A failed stream or transfer as the skip line prints it: the cause chain, `outer: inner`, through the
 /// shared escaper. The chain can carry the receiver's text (a refusal detail, the reason it gave for

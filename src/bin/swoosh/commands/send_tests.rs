@@ -129,8 +129,12 @@ async fn a_hostile_connect_failure_prints_escaped() {
         bifrost::NoDiscovery,
     );
 
+    let machine = send
+        .peer
+        .machine(&Contacts::default())
+        .expect("a key is one machine");
     let error = send
-        .run_send(&node, &Contacts::default(), None, None)
+        .run_send(&node, &machine, None, None)
         .await
         .expect_err("a dial the peer closed is an error");
     assert_eq!(

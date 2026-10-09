@@ -8,8 +8,8 @@ machine's key: `alice` means whoever you pointed it at.
 <!-- generated: usage from `swoosh contact -h`; option lines curated -->
 ```
 Usage: swoosh contact [OPTIONS] <COMMAND>
-  add <name> <key>   save a person's root, or one machine of theirs
-  rm <name>          remove a saved person, or one machine of theirs
+  add <person | person/name> <key | root key>   save a person's root, or one machine of theirs
+  rm <person | person/name>                     remove a saved person, or one machine of theirs
 ```
 
 **Example.**

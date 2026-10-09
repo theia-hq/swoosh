@@ -47,8 +47,11 @@ use crate::{badge, config, transport};
 /// the fields it does not use. `serve`'s `ExposeContext` is DELIBERATELY not here: it lives on
 /// the serve command's own type (the CLI's `ServeCmd`), which reads its own, so this context stays uniform.
 pub struct ReachCtx<'a> {
-    /// The address book, to resolve a petname in a verb's peer slot.
+    /// The address book, for a verb that names a machine it reached by the name this home gives it.
     pub contacts: &'a Contacts,
+    /// The one machine the verb's peer resolved to, once, before the key was read
+    /// ([`Peer::machine`](crate::peer::Peer::machine)); `None` for a verb that dials no peer of its own.
+    pub machine: Option<&'a crate::peer::Machine>,
     /// What this run bound: the backend a verb reports, the `--local` bit, and the two reach services.
     /// One value, composed once in the composition root, because a failed dial reads all three: iroh's
     /// own error names none of them, so without this an unreachable resolver of your own reads as "the
