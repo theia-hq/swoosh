@@ -153,6 +153,39 @@ async fn stop_a_bare_word_is_never_a_machine() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A bare word that names a service on this machine's list keeps its refusal and gains the command that
+/// turns that service off here: the person may have meant the service, not a machine.
+#[tokio::test]
+async fn stop_a_service_name_names_service_off() {
+    let (base, home) = device_home("service-word").await;
+    std::fs::write(home.serve_toml(), "services = [\"ssh=sshd:\"]\n").expect("ssh listed");
+    assert_eq!(
+        refused(&home, "ssh").await,
+        "swoosh stop takes one of your machines, like me/desk\n  To turn ssh off here:\n    swoosh \
+         service off ssh"
+    );
+    assert_eq!(
+        refused(&home, "web").await,
+        "swoosh stop takes one of your machines, like me/desk",
+        "a word the list does not hold gains nothing"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A built-in written by hand as its name alone (`ping`) is on the list as a bare `serve` reads it, so the
+/// hint names it too. Read the raw entries and `ping`, which has no `=`, would count as not served.
+#[tokio::test]
+async fn stop_a_hand_written_built_in_names_service_off() {
+    let (base, home) = device_home("service-built-in").await;
+    std::fs::write(home.serve_toml(), "services = [\"ping\"]\n").expect("ping listed by hand");
+    assert_eq!(
+        refused(&home, "ping").await,
+        "swoosh stop takes one of your machines, like me/desk\n  To turn ping off here:\n    swoosh \
+         service off ping"
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// With no list of your devices, every refusal that would show yours says this machine knows none of them,
 /// the bare word's included. Drop the detail from the bare word and it alone prints with nothing under it.
 #[tokio::test]

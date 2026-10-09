@@ -33,7 +33,7 @@ Note: the `<a id>` anchors below preserve the old per-command anchors, so existi
 
 - <a id="serve"></a>[`swoosh serve`](commands/serve.md): be a node, publish named services behind your signet gate
 - <a id="stop"></a>[`swoosh stop`](commands/stop.md): stop swoosh serve here or on one of your own devices
-- <a id="service"></a>[`swoosh service`](commands/service.md): list a peer's menu, or enable/disable a service on your node
+- <a id="service"></a>[`swoosh service`](commands/service.md): add or remove what this machine serves, or turn a service off and on
 - <a id="ping"></a>[`swoosh ping`](commands/ping.md): measure round-trip time to a peer, addressed by key
 - <a id="speed"></a>[`swoosh speed`](commands/speed.md): measure throughput to a peer, addressed by key
 - <a id="status"></a>[`swoosh status`](commands/status.md): show this machine: its key, lock, root, devices, contacts, links and services

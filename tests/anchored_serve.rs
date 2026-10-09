@@ -389,7 +389,7 @@ async fn a_running_serve_admits_a_link_only_to_the_target_it_bound() {
     let served = serve(&scratch.0, &["demo=echo:"]);
     let made_for_echo = issue(&scratch.0, &["demo", "anyone"]);
     swoosh::serve_toml::ServeToml::update(&swoosh::testkit::lock(), &scratch.home(), |file| {
-        file.services = vec!["demo=tcp:localhost:1".to_owned()];
+        file.services = Some(vec!["demo=tcp:localhost:1".to_owned()]);
     })
     .unwrap();
     let made_for_forward = issue(&scratch.0, &["demo", "anyone"]);
@@ -670,7 +670,7 @@ async fn serve_warns_of_a_shell_over_an_anyone_link_and_its_gate_refuses_it() {
     let scratch = Scratch::new("shell-over-anyone");
     swoosh(&scratch.0, &["leave", "--new-key"]);
     swoosh::serve_toml::ServeToml::update(&swoosh::testkit::lock(), &scratch.home(), |file| {
-        file.services = vec!["ssh=tcp:localhost:22".to_owned()];
+        file.services = Some(vec!["ssh=tcp:localhost:22".to_owned()]);
     })
     .unwrap();
     let link = swoosh::link::parse(&swoosh(&scratch.0, &["share", "ssh", "anyone"])).unwrap();

@@ -33,7 +33,7 @@ pub enum SingleError {
         path: PathBuf,
     },
     /// Another `serve` already holds this home's lock: the truth, read off the lock file.
-    #[error("swoosh serve is already running for this home (pid {pid})")]
+    #[error("swoosh serve is already running here (pid {pid})")]
     AlreadyResident {
         /// The pid recorded in the lock file by the holder.
         pid: u32,

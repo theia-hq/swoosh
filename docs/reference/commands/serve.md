@@ -2,13 +2,13 @@ Back to [Commands index](../commands.md).
 
 # <a id="serve"></a>`swoosh serve`
 
-Be a node: publish named services behind your gate. Bare, it serves what this home last served, or `ping`
-and `speed` if it never named any.
+Be a node: publish named services behind your gate. A `serve` that names services sets this
+machine's list; a bare `serve` serves that list, or `ping` and `speed` if no list was ever set.
 
 <!-- generated: usage from `swoosh serve -h`; option lines curated -->
 ```
 Usage: swoosh serve [OPTIONS] [name=target]...
-  [name=target]...       publish services as `name=target` (bare: the last list, else `ping` and `speed`)
+  [name=target]...       publish services as `name=target` (bare: this machine's list, else `ping` and `speed`)
   --public <svc>         open named services to anyone (comma-list, repeatable)
   --public-unsafe <svc>  open named raw-stream services (file:, fifo:, stdin:) to anyone
   --expires <duration>   serve for a bounded time, then stop (30m, 2h, 1d)
@@ -36,8 +36,8 @@ lines are dropped and a line says how many. `--quiet` turns these lines off, and
 them back on.
 A raw-stream service (`file:`, `fifo:`, `stdin:`) has no auth of its own, so `--public` refuses it and
 points at `--public-unsafe`, so name only a file you mean to hand out.
-Every `serve` holds its home's lock and control socket, so `swoosh stop`, `swoosh status` and a bare
-`swoosh service ls` find it, and a second `serve` for the same home refuses; backgrounding is the
+Every `serve` holds its home's lock and control socket, so `swoosh stop` and
+`swoosh status` find it, and a second `serve` for the same home refuses; backgrounding is the
 supervisor's job. On Linux it needs `XDG_RUNTIME_DIR` set to a private directory.
 Only the services are kept for the next bare `serve`: `--public`, `--public-unsafe`,
 `--admit` and `--expires` apply only to the run that types them.

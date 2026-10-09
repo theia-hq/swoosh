@@ -819,7 +819,7 @@ mod tests {
     }
 
     /// B4: the bare-form guard refuses each reach-family flag by name (never silently ignoring it), and
-    /// the defaults pass through: a bare `stop`/`service ls`/`status` binds no transport and seeds no
+    /// the defaults pass through: a bare `stop`/`status` binds no transport and seeds no
     /// discovery, so there is nothing for the trio to do.
     #[test]
     fn bare_reach_flags_are_rejected_by_name() {

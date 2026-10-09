@@ -47,7 +47,7 @@ pub use self::renewal::{Known, Renewal};
 pub use self::roster::Exchange;
 pub use self::scheme::{BoundTargets, NotATarget, Scheme, ServedTarget};
 pub use self::services::ServiceList;
-pub use self::serving::{ServingError, Started};
+pub use self::serving::{Added, EditError, Mistyped, Replaced, ServingError, Started, unnamed};
 pub use self::stop::{ACK_GRACE, FirstRound, STOP_ACK, Stop, StopAfterFirstRound, stopped_by};
 
 /// The node-control service that stops this node: an admitted caller reaching it triggers a graceful
@@ -193,6 +193,38 @@ pub fn service_entry(entry: &str) -> Result<String, EntryError> {
             None => name,
         },
     )
+}
+
+/// `entry` (as the service-entry parser gives it) the way a person types it: a built-in by its bare name
+/// (`ssh=sshd:` is `ssh`), a proxy named `proxy` by its target (`proxy:<url>`), any other as it is. What a
+/// line that hands an entry back to the person prints, so the command it shows is the shortest that works.
+pub fn as_typed(entry: &str) -> &str {
+    let Some((name, target)) = entry.split_once('=') else {
+        return entry;
+    };
+    if BUILT_IN
+        .iter()
+        .any(|&(built_in, full)| built_in == name && full == target)
+    {
+        return name;
+    }
+    if name == Scheme::Proxy.as_str() && matches!(Scheme::parse(target), Some((Scheme::Proxy, _))) {
+        return target;
+    }
+    entry
+}
+
+/// The shortest entry a person types to serve `name`: a built-in alone (`ssh`), `proxy` with the URL it
+/// needs (`proxy:<url>`), and any other name with a TCP target (`db=tcp:<address>:<port>`), the common case
+/// whole. Only the person can fill the placeholders, so they print as they are.
+pub fn entry_for(name: &str) -> String {
+    if BUILT_IN.iter().any(|&(built_in, _)| built_in == name) {
+        return name.to_owned();
+    }
+    if name == Scheme::Proxy.as_str() {
+        return format!("{name}:<url>");
+    }
+    format!("{name}=tcp:<address>:<port>")
 }
 
 /// Hold a proxy's URL to what the engine scopes by: one origin, the scheme, host and port. The engine
@@ -579,10 +611,7 @@ pub fn extract_recv_services(
     for entry in requested.drain(..) {
         // Split off the `name=` prefix; only the ADDR side names a scheme, so the dir is read from there.
         let Some((name, addr)) = entry.split_once('=') else {
-            eyre::bail!(
-                "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
-                 `inbox=recv:/tmp/x`"
-            );
+            return Err(Mistyped::Unnamed(entry).into());
         };
         // A receive service is `recv:` optionally followed by a dir. A non-recv entry passes through
         // unchanged, in order, for the router's own grammar.
@@ -665,10 +694,7 @@ impl ProxyScope {
             // Split off the `name=` prefix; only the ADDR side names a scheme, so the origin is read
             // from there.
             let Some((name, addr)) = entry.split_once('=') else {
-                eyre::bail!(
-                    "`{entry}` names no service. Every serve entry must be `name=target`, e.g. \
-                     `news=proxy:https://news.example`"
-                );
+                return Err(Mistyped::Unnamed(entry).into());
             };
             // A proxy service is `proxy:` optionally followed by an origin. Any other entry passes through
             // unchanged, in order, for the router's own grammar.
