@@ -8,8 +8,9 @@
 //! start reads the same file. So one line fits both: the setting is written either way. An `off` PERSISTS
 //! (fail-closed): a restart keeps it off, and no start clears it for a name already listed.
 //!
-//! Each acts on a name the list holds ([`ServeToml::listed`]), the default included on a home that never
-//! named a list. `on` of a name not listed refuses and names the `service add` that would list it; `off` of
+//! Each acts on a name the list holds, read as a bare `serve` reads it ([`Started::bare`]), the default
+//! included on a home that never named a list; a list that read refuses is refused here too, naming the
+//! file. `on` of a name not listed refuses and names the `service add` that would list it; `off` of
 //! one refuses with no fix, since a name not listed already does not answer. Neither opens a new service:
 //! `on` only takes a name off the `off` list.
 //!
@@ -20,11 +21,14 @@
 //! Two racing toggles cannot lose an edit: the read-modify-write runs under `home.lock`, and the rewrite goes
 //! through the home's one write routine, so a crash mid-write can never leave a torn list.
 
+use std::path::Path;
+
 use clap::Args;
 use nauthy::Service;
 use swoosh::escape::Escaped;
 use swoosh::home::{Home, HomeWrite};
 use swoosh::names::{Name, NameError};
+use swoosh::serve::{ServingError, Started};
 use swoosh::serve_toml::ServeToml;
 
 use super::Usage;
@@ -157,14 +161,17 @@ impl ServiceToggleCmd {
         let service = self.here(way)?;
         let name = service.as_str();
         let home_lock = HomeWrite::take(home).await?;
-        let toggled = ServeToml::try_update(&home_lock, home, |file| toggle(file, name, way))?;
+        let path = home.serve_toml();
+        let toggled =
+            ServeToml::try_update(&home_lock, home, |file| toggle(file, name, way, &path))?;
         drop(home_lock);
         let line = match (toggled, way) {
-            (Err(NotListed), Way::On) => eyre::bail!(
+            (Err(Refused::NotListed), Way::On) => eyre::bail!(
                 "{name} is not listed here; add it: swoosh service add {}",
                 swoosh::serve::entry_for(name)
             ),
-            (Err(NotListed), Way::Off) => eyre::bail!("{name} is not listed here"),
+            (Err(Refused::NotListed), Way::Off) => eyre::bail!("{name} is not listed here"),
+            (Err(Refused::List(error)), _) => return Err(error.into()),
             (Ok(Toggled::Turned), _) => format!("Turned {name} {} here.", way.verb()),
             (Ok(Toggled::Already), _) => format!("{name} is already {}.", way.verb()),
         };
@@ -173,18 +180,25 @@ impl ServiceToggleCmd {
     }
 }
 
-/// The list does not hold the name a toggle was given, so nothing changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct NotListed;
+/// Why a toggle changed nothing.
+#[derive(Debug)]
+enum Refused {
+    /// The list does not hold the name the toggle was given.
+    NotListed,
+    /// The list is one a bare `serve` refuses to start from, so no name on it can be trusted as listed.
+    List(ServingError),
+}
 
-/// Turn `name` `way` in `file`, which holds the list it must be on.
-fn toggle(file: &mut ServeToml, name: &str, way: Way) -> Result<Toggled, NotListed> {
-    let listed = file
-        .listed()
+/// Turn `name` `way` in `file`, the `serve.toml` at `path`, which holds the list it must be on. The list
+/// is read as a bare `serve` reads it, so a hand-written `ping` is listed here as it is served there.
+fn toggle(file: &mut ServeToml, name: &str, way: Way, path: &Path) -> Result<Toggled, Refused> {
+    let listed = Started::bare(file, path)
+        .map_err(Refused::List)?
+        .names()
         .iter()
-        .any(|entry| entry.split_once('=').is_some_and(|(held, _)| held == name));
+        .any(|held| held == name);
     if !listed {
-        return Err(NotListed);
+        return Err(Refused::NotListed);
     }
     let changed = match way {
         Way::On => file.off.remove(name),

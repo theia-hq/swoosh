@@ -627,8 +627,8 @@ impl ServeCmd {
         let home_lock = HomeWrite::take(&home).await?;
         let mut replaced = Replaced::default();
         ServeToml::update(&home_lock, &home, |file| {
-            replaced = started.replaces(file);
-            started.record(file);
+            replaced = started.replaces(file, &home.serve_toml());
+            started.record(file, &home.serve_toml());
             self.reach.keep_reach(file);
         })?;
         drop(home_lock);

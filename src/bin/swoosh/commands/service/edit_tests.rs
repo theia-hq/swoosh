@@ -317,8 +317,7 @@ async fn no_writer_keeps_an_entry_that_is_not_a_service() {
         let before = std::fs::read_to_string(home.serve_toml()).expect("the file");
         let path = home.serve_toml();
         let line = format!(
-            "{} lists {entry} as a service, and it is not one, so serve will not start unless you name its \
-             services",
+            "{} lists {entry}, which is not a service\n  Edit that file to fix or remove the entry.",
             path.display()
         );
         let error = add(&["ssh"]).run(&home).await.expect_err("refused");

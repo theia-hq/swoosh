@@ -2220,7 +2220,7 @@ fn a_hand_edited_list_with_a_non_service_exits_1_naming_the_file() {
         assert_eq!(out.status.code(), Some(1), "{entry}: {stderr}");
         assert!(
             stderr.contains(&format!(
-                "serve.toml lists {entry} as a service, and it is not one"
+                "serve.toml lists {entry}, which is not a service\n  Edit that file to fix or remove the entry."
             )),
             "{entry}: {stderr}"
         );
@@ -2563,6 +2563,28 @@ fn a_named_serve_of_an_off_name_says_it_is_off() {
         ),
         "{stderr}"
     );
+}
+
+/// A built-in written by hand as its name alone (`ping`) is listed, so a named `serve ping` keeps its `off`
+/// row and says it is off. Read the raw entries and `ping`, with no `=`, counts as new: the start drops the
+/// row and serves it on.
+#[test]
+fn a_named_serve_keeps_off_for_a_hand_written_built_in() {
+    let scratch = ProcessScratch::new("named-off-hand");
+    std::fs::write(
+        scratch.home_dir.join("serve.toml"),
+        "off = [\"ping\"]\nservices = [\"ping\"]\n",
+    )
+    .expect("ping listed by hand, off");
+    let named = serve_once(&scratch, &["--local", "--expires", "1s", "ping"]);
+    let stderr = String::from_utf8_lossy(&named.stderr);
+    assert!(named.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("ping is off.\nTo turn it on:\n  swoosh service on ping\n"),
+        "{stderr}"
+    );
+    let file = std::fs::read_to_string(scratch.home_dir.join("serve.toml")).expect("the file");
+    assert!(file.contains("off = [\"ping\"]"), "{file}");
 }
 
 /// Where no private runtime directory resolves, `serve` refuses with the fix before anything is written

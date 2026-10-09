@@ -228,3 +228,45 @@ fn service_on_off_usage_hides_the_machine() {
         "off's --help line"
     );
 }
+
+/// A built-in written by hand as its name alone (`ping`) is listed, as a bare `serve` serves it, so `on`
+/// turns it back on. Read the raw entries and `ping`, with no `=`, is not listed and `on` refuses.
+#[tokio::test]
+async fn service_on_of_a_hand_written_built_in_turns_it_on() {
+    let home = temp_home("on-hand-written");
+    std::fs::write(
+        home.serve_toml(),
+        "off = [\"ping\"]\nservices = [\"ping\"]\n",
+    )
+    .expect("ping listed by hand, off");
+    leaf(&["ping"]).run(&home, Way::On).await.expect("on ping");
+    assert!(off_on_disk(&home).is_empty(), "ping is back on");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A list a bare `serve` refuses is refused by `on` and `off` alike, exit 1, naming the file, and nothing
+/// is written: no name on it can be trusted as listed.
+#[tokio::test]
+async fn service_toggle_refuses_a_list_that_is_not_services() {
+    let home = temp_home("toggle-not-a-service");
+    std::fs::write(home.serve_toml(), "services = [\"ping=ping:\", \"db\"]\n")
+        .expect("a hand-edited list");
+    let before = std::fs::read_to_string(home.serve_toml()).expect("the file");
+    let line = format!(
+        "{} lists db, which is not a service\n  Edit that file to fix or remove the entry.",
+        home.serve_toml().display()
+    );
+    for way in [Way::On, Way::Off] {
+        let error = leaf(&["ping"])
+            .run(&home, way)
+            .await
+            .expect_err("a broken list refuses");
+        assert!(error.downcast_ref::<Usage>().is_none(), "exit 1");
+        assert_eq!(format!("{error:#}"), line);
+    }
+    assert_eq!(
+        std::fs::read_to_string(home.serve_toml()).expect("the file"),
+        before
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}

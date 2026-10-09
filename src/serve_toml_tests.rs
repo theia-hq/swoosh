@@ -285,7 +285,7 @@ fn the_runs_own_write_is_held_at_once() {
     // `serve files=recv:`: what it names, recorded once its routes bound, read straight after.
     let started = crate::serve::Started::Named(vec!["files=recv:".to_owned()]);
     ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
-        started.record(file);
+        started.record(file, &scratch.home.serve_toml());
     })
     .expect("write serve.toml");
     watcher.serving(&started);

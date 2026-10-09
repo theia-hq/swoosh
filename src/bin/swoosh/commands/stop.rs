@@ -244,13 +244,12 @@ impl Yours {
                 .find(|(_, node)| **node == key)
                 .map(|(label, _)| label.clone())
         });
+        // Read as a bare `serve` reads the list, so a hand-written `ping` is served here as it is there; a
+        // list `serve` refuses serves nothing, and the hint stays quiet.
         let served = swoosh::serve_toml::ServeToml::read(home)
-            .map(|file| {
-                file.listed()
-                    .iter()
-                    .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
-                    .collect()
-            })
+            .ok()
+            .and_then(|file| swoosh::serve::Started::bare(&file, &home.serve_toml()).ok())
+            .map(|started| started.names())
             .unwrap_or_default();
         Ok(Self {
             contacts,

@@ -28,10 +28,10 @@ const PATH_SCHEMES: [&str; 4] = ["recv", "unix", "file", "fifo"];
 #[derive(Debug, thiserror::Error)]
 pub enum ServingError {
     /// An entry of the services `<home>/serve.toml` keeps is not a service form, a flag above all: it is
-    /// refused, never spliced into the command line. Which services to serve instead is the person's call,
-    /// so the line names no command.
+    /// refused, never spliced into the command line. Only a hand edit puts it there, and `service rm` would
+    /// refuse the same file, so the line points at the file and names no command.
     #[error(
-        "{} lists {} as a service, and it is not one, so serve will not start unless you name its services",
+        "{} lists {}, which is not a service\n  Edit that file to fix or remove the entry.",
         EscapedPath(path),
         line.escape_debug()
     )]
@@ -166,7 +166,7 @@ pub enum Added {
 /// kept with another target. Empty when the home recorded no list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Replaced {
-    /// The recorded entries the new list drops, as recorded.
+    /// The recorded entries the new list drops, as a bare start reads them.
     pub dropped: Vec<String>,
     /// Each kept name whose target changed: the name, the new target, the old one.
     pub retargeted: Vec<(String, String, String)>,
@@ -273,14 +273,21 @@ impl Started {
     /// "Listed" means two things in this module, on purpose. Here it is only what was recorded: these lines
     /// report undoing something the person named, and on a home that never named a list nothing was, so a
     /// first `serve ssh` says nothing about the default it replaces. [`record`](Self::record),
-    /// [`ServeToml::add`] and [`ServeToml::remove`] count the default as listed instead
-    /// ([`ServeToml::listed`]): a start must fail closed on an `off` row, and an add must never remove.
-    pub fn replaces(&self, kept: &ServeToml) -> Replaced {
-        let (Self::Named(entries), Some(recorded)) = (self, &kept.services) else {
+    /// [`ServeToml::add`] and [`ServeToml::remove`] count the default as listed instead (the list as
+    /// [`bare`](Self::bare) reads it): a start must fail closed on an `off` row, and an add must never
+    /// remove.
+    ///
+    /// The recorded list is read as [`bare`](Self::bare) reads `kept`, the `serve.toml` at `path`, so a
+    /// hand-written `ping` a named start drops is reported like any other entry. A list `bare` refuses
+    /// holds nothing that can be read, so nothing is reported from it.
+    pub fn replaces(&self, kept: &ServeToml, path: &Path) -> Replaced {
+        let (Self::Named(entries), Ok(Self::Resumed(recorded))) = (self, Self::bare(kept, path))
+        else {
             return Replaced::default();
         };
         let mut replaced = Replaced::default();
-        for old in recorded {
+        for old in &recorded {
+            // Every entry `bare` keeps has its name.
             let Some((name, was)) = old.split_once('=') else {
                 continue;
             };
@@ -304,14 +311,20 @@ impl Started {
     /// never widens what this machine serves past its last explicit act. A resumed or default start changes
     /// neither. Applied inside the one [`ServeToml::update`] a start makes once its routes bound, so a start
     /// that fails writes nothing.
-    pub fn record(&self, file: &mut ServeToml) {
+    ///
+    /// What the list held is read as [`bare`](Self::bare) reads `file`, the `serve.toml` at `path`, so a
+    /// hand-written `ping` holds `ping` here as it does for a bare start and every `service` edit. A list
+    /// `bare` refuses holds nothing that can be read, so every `off` row stays: the start fails closed.
+    pub fn record(&self, file: &mut ServeToml, path: &Path) {
         let Self::Named(entries) = self else {
             return;
         };
-        let held: BTreeSet<String> = names(&file.listed()).map(str::to_owned).collect();
-        for name in names(entries) {
-            if !held.contains(name) {
-                file.off.remove(name);
+        if let Ok(held) = Self::bare(file, path).map(|held| held.names()) {
+            let held: BTreeSet<String> = held.into_iter().collect();
+            for name in names(entries) {
+                if !held.contains(name) {
+                    file.off.remove(name);
+                }
             }
         }
         file.services = Some(entries.clone());
@@ -319,19 +332,6 @@ impl Started {
 }
 
 impl ServeToml {
-    /// The entries the list holds, as a bare `serve` would start them: the recorded list, or the default on
-    /// a home that never recorded one. What `service add` and `service rm` edit, and what a start holds its
-    /// names against.
-    pub fn listed(&self) -> Vec<String> {
-        match &self.services {
-            Some(listed) => listed.clone(),
-            None => DEFAULT_SERVICES
-                .iter()
-                .map(|&entry| entry.to_owned())
-                .collect(),
-        }
-    }
-
     /// `service add`: add `entries` (each through the service-entry parser, paths made absolute against
     /// `cwd`) to the list, which is the `serve.toml` at `path`, and say what each one found. All or nothing:
     /// one entry refused changes nothing. It starts from the list as a bare `serve` would start it
