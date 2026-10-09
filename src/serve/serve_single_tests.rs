@@ -697,7 +697,19 @@ fn dropping_the_lock_unlinks_its_own_socket() {
     drop(listener);
     drop(lock);
     assert!(!socket.exists(), "a dropped lock unlinks its own socket");
-    acquire_now(&scratch.home, &scratch.root).expect("and releases the flock");
+    // flock belongs to the open file description, so a child a sibling test forks while the lock is open
+    // shares it until its exec closes the O_CLOEXEC copy. The retake waits on that with a bound: a drop
+    // that never let the flock go still fails here.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match acquire_now(&scratch.home, &scratch.root) {
+            Err(SingleError::AlreadyResident { .. }) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            taken => break taken,
+        }
+    }
+    .expect("and releases the flock");
 }
 
 /// A same-uid swap must not cost the foreign process its file: `release` compares against the path
