@@ -4,8 +4,9 @@
 //! The system ssh accepts the host `swoosh ssh` gives it, for every way a peer is typed.
 //!
 //! The bug (FLAWS F20): a raw key, a link or a link file gave ssh the key's short form as its host, which
-//! ends in `…`, and OpenSSH refuses such a host under a UTF-8 locale (`hostname contains invalid
-//! characters`) before the `ProxyCommand` ever runs. These tests drive the compiled binary with a
+//! ends in `…`, and OpenSSH on macOS refuses such a host under a UTF-8 locale (`hostname contains invalid
+//! characters`) before the `ProxyCommand` ever runs. The `host` line from `ssh -G` is what catches a
+//! regression on any OS. These tests drive the compiled binary with a
 //! stand-in `ssh` first on PATH to record the argv it builds, swap the `ProxyCommand` for `false` so
 //! nothing dials, and hand that argv to the real ssh under a UTF-8 locale: `ssh -G` names the host and
 //! the alias it would use, and `ssh -v` shows ssh got past its host check to the proxy command.
@@ -19,7 +20,7 @@ printf '%s\n' "$@" > "$SWOOSH_TEST_SSH_LOG"
 exit 0
 "#;
 
-/// The locale that shows the bug: ssh's host check reads `…` as invalid only under UTF-8. Both
+/// The locale that shows the bug: on macOS, ssh's host check reads `…` as invalid only under UTF-8. Both
 /// variables, since a CI runner often sets `LC_ALL=C`, which would hide it.
 const UTF8: &str = "en_US.UTF-8";
 
