@@ -31,7 +31,7 @@ because nothing was measured; the path estimate the transport keeps is not a mea
 Fix one of:
 
 - On your own device, check it still serves the name: `swoosh status me/<name>`.
-- Restart the node if the menu is right and the probe still fails.
+- Restart the node if it lists the service and the probe still fails.
 - Try `--transport quirk+noise` if only one transport shows it, which points at the path rather than the
   node.
 

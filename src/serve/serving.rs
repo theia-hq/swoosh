@@ -219,8 +219,8 @@ impl Started {
     ///
     /// # Errors
     ///
-    /// [`ServingError::NotAService`] when `kept` lists something that is not a service form, and
-    /// [`ServingError::Twice`] when it names one service twice: no writer saves such a list, so a file
+    /// [`ServingError::NotAService`] when `kept` lists something that is not a service form (a flag, or an
+    /// entry with no name or no target), and [`ServingError::Twice`] when it names one service twice: no writer saves such a list, so a file
     /// that holds one was changed by hand, and a start refuses it rather than guess which one was meant.
     pub fn bare(kept: &ServeToml, path: &Path) -> Result<Self, ServingError> {
         let Some(listed) = &kept.services else {
@@ -235,7 +235,13 @@ impl Started {
             if line.starts_with('-') {
                 return Err(not_a_service());
             }
-            entries.push(service_entry(line).map_err(|_| not_a_service())?);
+            let entry = service_entry(line).map_err(|_| not_a_service())?;
+            // The parser passes a nameless form through for a typed line to teach (`db`, `tcp:…`); in the
+            // file nothing was typed, so it is the file's fault, never a usage error.
+            if !entry.contains('=') {
+                return Err(not_a_service());
+            }
+            entries.push(entry);
         }
         once(&entries, path)?;
         Ok(Self::Resumed(entries))
@@ -258,11 +264,6 @@ impl Started {
             .iter()
             .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
             .collect()
-    }
-
-    /// Whether this run serves what the home last served, for the banner's "(as last time)".
-    pub fn is_resumed(&self) -> bool {
-        matches!(self, Self::Resumed(_))
     }
 
     /// What this start changes in the list `kept` records: the entries a named list drops, and the names it
@@ -333,14 +334,16 @@ impl ServeToml {
 
     /// `service add`: add `entries` (each through the service-entry parser, paths made absolute against
     /// `cwd`) to the list, which is the `serve.toml` at `path`, and say what each one found. All or nothing:
-    /// one entry refused changes nothing. On a home that never recorded a list, the add starts from the
-    /// default, so what a bare `serve` served stays served. A name already listed is never pointed
-    /// elsewhere, and an add never turns a listed service back on.
+    /// one entry refused changes nothing. It starts from the list as a bare `serve` would start it
+    /// ([`Started::bare`]): the default on a home that never recorded one, so what a bare `serve` served
+    /// stays served, and a list a start would refuse is refused here too, never written on top of. A name
+    /// already listed is never pointed elsewhere, and an add never turns a listed service back on.
     ///
     /// # Errors
     ///
     /// [`EditError`] when an entry has no name, cannot be saved as typed, is given twice, or names a listed
-    /// service with another target, or when the list names one service twice.
+    /// service with another target, or when the list holds an entry that is not a service or names one
+    /// service twice.
     pub fn add(
         &mut self,
         entries: &[String],
@@ -348,8 +351,7 @@ impl ServeToml {
         path: &Path,
     ) -> Result<Vec<Added>, EditError> {
         Mistyped::check(entries).map_err(ServingError::from)?;
-        let mut list = self.listed();
-        once(&list, path)?;
+        let mut list = Started::bare(self, path)?.entries();
         let mut found = Vec::new();
         let mut fresh = Vec::new();
         for entry in entries {
@@ -386,18 +388,18 @@ impl ServeToml {
     }
 
     /// `service rm`: take `names` off the list, and with each its `off` row, which would otherwise outlive
-    /// the service it was for. All or nothing: a name the list does not hold changes nothing. On a home that
-    /// never recorded a list, the remove starts from the default, and an emptied list stays empty.
+    /// the service it was for. All or nothing: a name the list does not hold changes nothing. It starts from
+    /// the list as a bare `serve` would start it, as [`add`](Self::add) does: the default on a home that never
+    /// recorded one. An emptied list stays empty.
     ///
     /// # Errors
     ///
     /// [`EditError::NotListed`] when a name is not on the list, and [`ServingError`] when a name is typed
-    /// twice or the list at `path` names one service twice.
+    /// twice or the list at `path` holds an entry that is not a service or names one service twice.
     pub fn remove(&mut self, names: &[nauthy::Service], path: &Path) -> Result<(), EditError> {
         Mistyped::check_names(names.iter().map(nauthy::Service::as_str))
             .map_err(ServingError::from)?;
-        let mut list = self.listed();
-        once(&list, path)?;
+        let mut list = Started::bare(self, path)?.entries();
         for name in names {
             let name = name.as_str();
             let before = list.len();

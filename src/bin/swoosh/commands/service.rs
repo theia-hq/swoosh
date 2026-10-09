@@ -17,6 +17,7 @@ use std::collections::BTreeSet;
 use clap::Subcommand;
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _};
+use swoosh::serve::Mistyped;
 use swoosh::serve::control_codec::DisabledList;
 
 pub mod edit;
@@ -34,6 +35,19 @@ pub enum ServiceCmd {
     /// Turn a service off here
     #[command(after_long_help = "It stays off across restarts until you run swoosh service on.")]
     Off(toggle::ServiceToggleCmd),
+}
+
+/// A usage error a `service` leaf finds once the line is parsed: exit 2, as clap's own are, before the home
+/// is read. A machine typed to `on` or `off`, a second service to either, an entry with no name, or a name
+/// typed twice.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct Usage(pub String);
+
+impl From<Mistyped> for Usage {
+    fn from(mistyped: Mistyped) -> Self {
+        Self(mistyped.to_string())
+    }
 }
 
 /// What the `serve` running for a home serves, as its control socket answers: the names it bound, internal

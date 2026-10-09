@@ -222,7 +222,7 @@ fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
 
     let (_next, banner, _) = serve(&home, &run, &[]);
     assert!(
-        banner.contains("serving: ping (your devices), speed (your devices) (as last time)\n"),
+        banner.contains("serving: ping (your devices), speed (your devices)\n"),
         "{banner}"
     );
 }

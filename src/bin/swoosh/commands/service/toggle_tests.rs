@@ -138,6 +138,41 @@ fn service_off_with_a_machine_names_the_typed_service() {
     );
 }
 
+/// A second word after the service is a second service, which `on` and `off` never take: refused with the
+/// rule alone, never read as a machine to `ssh` into.
+#[test]
+fn service_off_with_a_second_word_takes_one_service() {
+    for way in [Way::Off, Way::On] {
+        let Err(Usage(refused)) = leaf(&["ssh", "web"]).here(way).cloned() else {
+            panic!("a second service refuses");
+        };
+        assert_eq!(
+            refused,
+            format!("swoosh service {} takes one service", way.verb())
+        );
+    }
+}
+
+/// A machine that is not one of yours (a contact's, or `me/` with no name), in either slot, gets the head
+/// alone: an `ssh` there would reach a machine that is not yours, so no command is named.
+#[test]
+fn service_off_for_a_contact_machine_names_no_fix() {
+    for argv in [
+        &["ssh", "bob/nas"][..],
+        &["bob/nas"][..],
+        &["ssh", "me/"][..],
+        &["me/"][..],
+    ] {
+        let Err(Usage(refused)) = leaf(argv).here(Way::Off).cloned() else {
+            panic!("{argv:?} refuses");
+        };
+        assert_eq!(
+            refused, "swoosh service off acts only on this machine",
+            "{argv:?}"
+        );
+    }
+}
+
 /// A machine-shaped name is a usage error, never a name written to the `off` list.
 #[tokio::test]
 async fn service_off_refuses_a_machine_shaped_name() {

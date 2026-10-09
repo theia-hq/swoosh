@@ -8,7 +8,7 @@ machine's list; a bare `serve` serves that list, or `ping` and `speed` if no lis
 <!-- generated: usage from `swoosh serve -h`; option lines curated -->
 ```
 Usage: swoosh serve [OPTIONS] [name=target]...
-  [name=target]...       publish services as `name=target` (bare: the last list, else `ping` and `speed`)
+  [name=target]...       publish services as `name=target` (bare: this machine's list, else `ping` and `speed`)
   --public <svc>         open named services to anyone (comma-list, repeatable)
   --public-unsafe <svc>  open named raw-stream services (file:, fifo:, stdin:) to anyone
   --expires <duration>   serve for a bounded time, then stop (30m, 2h, 1d)

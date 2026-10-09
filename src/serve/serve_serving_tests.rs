@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{ServingError, Started};
+use super::{Replaced, ServingError, Started};
 use crate::home::Home;
 use crate::serve_toml::ServeToml;
 
@@ -50,7 +50,6 @@ fn first_bare_serve_serves_the_default() {
         Started::of(&[], &kept(&home), &home, Path::new("/")).expect("a fresh home starts");
     assert_eq!(started, Started::Default);
     assert_eq!(started.entries(), ["ping=ping:", "speed=speed:"]);
-    assert!(!started.is_resumed(), "the default is not a resume");
     crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
         started.record(file);
     })
@@ -61,7 +60,7 @@ fn first_bare_serve_serves_the_default() {
     );
 }
 
-/// A named start is recorded, and the next bare start serves exactly that list, marked as a resume.
+/// A named start is recorded, and the next bare start serves exactly that list, as a resume.
 #[test]
 fn a_named_list_is_what_the_next_bare_serve_resumes() {
     let scratch = Scratch::new("resume");
@@ -79,9 +78,9 @@ fn a_named_list_is_what_the_next_bare_serve_resumes() {
     .expect("recorded");
 
     let resumed = Started::of(&[], &kept(&home), &home, Path::new("/")).expect("resumed");
-    assert_eq!(resumed.entries(), ["ssh=sshd:", "ping=ping:"]);
-    assert!(
-        resumed.is_resumed(),
+    assert_eq!(
+        resumed,
+        Started::Resumed(vec!["ssh=sshd:".to_owned(), "ping=ping:".to_owned()]),
         "a bare start after a named one resumes it"
     );
 }
@@ -218,4 +217,45 @@ fn the_record_is_owner_only() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+/// What a named start replaces is read against the recorded list only: an entry it drops, a name it keeps
+/// under another target, and nothing for a name kept as it was. A home that never recorded a list has
+/// nothing to replace, though its default counts as listed elsewhere, and a bare start replaces nothing.
+#[test]
+fn a_named_start_replaces_only_what_was_recorded() {
+    let scratch = Scratch::new("replaces");
+    let home = scratch.home();
+    let start = |entries: &[&str], kept: &ServeToml| {
+        Started::of(&named(entries), kept, &home, Path::new("/")).expect("a start")
+    };
+    let recorded = ServeToml {
+        services: Some(named(&[
+            "ssh",
+            "web=tcp:localhost:3000",
+            "drop=recv:/srv/drop",
+        ])),
+        ..ServeToml::default()
+    };
+    assert_eq!(
+        start(&["ssh", "web=tcp:localhost:4000"], &recorded).replaces(&recorded),
+        Replaced {
+            dropped: vec!["drop=recv:/srv/drop".to_owned()],
+            retargeted: vec![(
+                "web".to_owned(),
+                "tcp:localhost:4000".to_owned(),
+                "tcp:localhost:3000".to_owned(),
+            )],
+        }
+    );
+    assert_eq!(
+        start(&["ssh"], &ServeToml::default()).replaces(&ServeToml::default()),
+        Replaced::default(),
+        "a never-named home's default is not reported as replaced"
+    );
+    assert_eq!(
+        start(&[], &recorded).replaces(&recorded),
+        Replaced::default(),
+        "a bare start replaces nothing"
+    );
 }

@@ -15,7 +15,7 @@
 //!
 //! A machine typed after the service (`[me/<name>]`), or alone in its slot, is parsed so it can be refused
 //! with exit 2, and hidden from usage: these act on this machine only until they can reach another of your
-//! devices.
+//! devices. A second service after the first is refused with exit 2 too: each takes one.
 //!
 //! Two racing toggles cannot lose an edit: the read-modify-write runs under `home.lock`, and the rewrite goes
 //! through the home's one write routine, so a crash mid-write can never leave a torn list.
@@ -24,18 +24,21 @@ use clap::Args;
 use nauthy::Service;
 use swoosh::escape::Escaped;
 use swoosh::home::{Home, HomeWrite};
-use swoosh::names::NameError;
+use swoosh::names::{Name, NameError};
 use swoosh::serve_toml::ServeToml;
+
+use super::Usage;
 
 /// Turn a service on or off; the leaf carries the service, and the subcommand says which way.
 #[derive(Debug, Args)]
 pub struct ServiceToggleCmd {
-    // A name this machine's list holds. No help line: the metavar says it, and the leaf's row says the rest.
+    /// A name on this machine's list
     #[arg(value_name = "service", value_parser = slot)]
     pub service: Slot,
-    // One of your devices: refused until this can act there, so usage does not show it.
-    #[arg(value_name = "me/<name>", hide = true)]
-    pub machine: Option<String>,
+    // One of your devices: refused until this can act there, so usage does not show it. Any text parses, so
+    // a second service reaches its own refusal rather than clap's.
+    #[arg(value_name = "me/<name>", hide = true, value_parser = after)]
+    pub machine: Option<After>,
 }
 
 /// What was typed in the service slot, sorted by shape: a service name, or a machine typed where the service
@@ -57,6 +60,25 @@ fn slot(text: &str) -> Result<Slot, NameError> {
     swoosh::names::service(text).map(Slot::Service)
 }
 
+/// What was typed after the service: a machine (`me/nas`), or a second word, which `on` and `off` never
+/// take. Sorted by the same `/` as [`Slot`], since no name holds one.
+#[derive(Debug, Clone)]
+pub enum After {
+    /// Text shaped like a machine, kept so its refusal can name it.
+    Machine(String),
+    /// Anything else: most likely a second service, as `add` and `rm` take several.
+    Word,
+}
+
+/// The value parser for the machine slot: total, so every text there reaches [`ServiceToggleCmd::here`].
+fn after(text: &str) -> Result<After, core::convert::Infallible> {
+    Ok(if text.contains('/') {
+        After::Machine(text.to_owned())
+    } else {
+        After::Word
+    })
+}
+
 /// Which way a toggle turns its service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Way {
@@ -76,11 +98,6 @@ impl Way {
     }
 }
 
-/// A usage error found once the line is parsed: exit 2, as clap's own are, before anything is read.
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct Usage(pub String);
-
 /// What a toggle found: it turned the service, or the service was already that way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Toggled {
@@ -91,28 +108,40 @@ enum Toggled {
 }
 
 impl ServiceToggleCmd {
-    /// The service to turn, here: refused as a usage error when a machine was typed, in the service slot or
-    /// after it, naming the command to run there. The service as typed is in that command, or the literal
-    /// `<service>` when only a machine was typed.
+    /// The service to turn, here: refused as a usage error when a second word or a machine was typed. A
+    /// second word is a second service, which these never take. A machine, in the service slot or after it,
+    /// acts only here; when it is one of your devices (`me/<name>`) the refusal names the command to run
+    /// there, with the service as typed or the literal `<service>` when only a machine was typed. Any other
+    /// machine (a contact's `bob/nas`, a bare `me/`) gets no command: an `ssh` there would reach a machine
+    /// that is not yours.
     ///
     /// # Errors
     ///
-    /// [`Usage`] when a machine was typed.
+    /// [`Usage`] when a second word or a machine was typed.
     pub fn here(&self, way: Way) -> Result<&Service, Usage> {
+        let verb = way.verb();
         let machine = match (&self.service, &self.machine) {
             (Slot::Service(service), None) => return Ok(service),
-            (Slot::Machine(machine), _) | (Slot::Service(_), Some(machine)) => machine,
+            (Slot::Service(_), Some(After::Word)) => {
+                return Err(Usage(format!("swoosh service {verb} takes one service")));
+            }
+            (Slot::Machine(machine), _) | (Slot::Service(_), Some(After::Machine(machine))) => {
+                machine
+            }
+        };
+        let head = format!("swoosh service {verb} acts only on this machine");
+        let Some(name) = machine
+            .strip_prefix("me/")
+            .and_then(|name| name.parse::<Name>().ok())
+        else {
+            return Err(Usage(head));
         };
         let service = match &self.service {
             Slot::Service(service) => service.as_str(),
             Slot::Machine(_) => "<service>",
         };
-        let verb = way.verb();
-        let name = machine.strip_prefix("me/").unwrap_or(machine);
         Err(Usage(format!(
-            "swoosh service {verb} acts only on this machine\n  To run it on {}:\n    swoosh ssh {} -- \
-             swoosh service {verb} {service}",
-            Escaped(name),
+            "{head}\n  To run it on {name}:\n    swoosh ssh {} -- swoosh service {verb} {service}",
             Escaped(machine)
         )))
     }
@@ -128,43 +157,40 @@ impl ServiceToggleCmd {
         let service = self.here(way)?;
         let name = service.as_str();
         let home_lock = HomeWrite::take(home).await?;
-        let mut toggled = None;
-        ServeToml::update(&home_lock, home, |file| {
-            toggled = Some(toggle(file, name, way));
-        })?;
+        let toggled = ServeToml::try_update(&home_lock, home, |file| toggle(file, name, way))?;
         drop(home_lock);
-        let Some(toggled) = toggled else {
-            eyre::bail!("internal: serve.toml was updated without its change running");
-        };
         let line = match (toggled, way) {
-            (None, Way::On) => eyre::bail!(
+            (Err(NotListed), Way::On) => eyre::bail!(
                 "{name} is not listed here; add it: swoosh service add {}",
                 swoosh::serve::entry_for(name)
             ),
-            (None, Way::Off) => eyre::bail!("{name} is not listed here"),
-            (Some(Toggled::Turned), _) => format!("Turned {name} {} here.", way.verb()),
-            (Some(Toggled::Already), _) => format!("{name} is already {}.", way.verb()),
+            (Err(NotListed), Way::Off) => eyre::bail!("{name} is not listed here"),
+            (Ok(Toggled::Turned), _) => format!("Turned {name} {} here.", way.verb()),
+            (Ok(Toggled::Already), _) => format!("{name} is already {}.", way.verb()),
         };
         eprintln!("{line}");
         Ok(())
     }
 }
 
-/// Turn `name` `way` in `file`, which holds the list it must be on; `None`, and nothing changed, when the
-/// list does not hold it.
-fn toggle(file: &mut ServeToml, name: &str, way: Way) -> Option<Toggled> {
+/// The list does not hold the name a toggle was given, so nothing changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NotListed;
+
+/// Turn `name` `way` in `file`, which holds the list it must be on.
+fn toggle(file: &mut ServeToml, name: &str, way: Way) -> Result<Toggled, NotListed> {
     let listed = file
         .listed()
         .iter()
         .any(|entry| entry.split_once('=').is_some_and(|(held, _)| held == name));
     if !listed {
-        return None;
+        return Err(NotListed);
     }
     let changed = match way {
         Way::On => file.off.remove(name),
         Way::Off => file.off.insert(name.to_owned()),
     };
-    Some(if changed {
+    Ok(if changed {
         Toggled::Turned
     } else {
         Toggled::Already

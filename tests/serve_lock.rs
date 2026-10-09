@@ -139,7 +139,7 @@ fn a_serve_holds_serve_lock_for_its_run() {
     assert!(!second.status.success(), "a second serve refuses: {stderr}");
     assert!(
         stderr.contains(&format!(
-            "swoosh serve is already running for this home (pid {}",
+            "swoosh serve is already running here (pid {}",
             first.0.id()
         )),
         "{stderr}"

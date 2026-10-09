@@ -20,13 +20,12 @@ use swoosh::home::{Home, HomeWrite};
 use swoosh::serve::{Added, EditError, Mistyped, ServingError, as_typed};
 use swoosh::serve_toml::ServeToml;
 
-use super::Running;
+use super::{Running, Usage};
 
 /// Add services to what this machine serves
 #[derive(Debug, Args)]
 pub struct ServiceAddCmd {
-    // In `serve`'s forms (`ssh`, `web=tcp:localhost:3000`). No help line: the metavar and the leaf's row
-    // say it.
+    /// A built-in (ssh, ping, speed, proxy:<url>) or name=target
     #[arg(
         value_name = "service",
         required = true,
@@ -38,15 +37,10 @@ pub struct ServiceAddCmd {
 /// Remove services from what this machine serves
 #[derive(Debug, Args)]
 pub struct ServiceRmCmd {
-    // By name. No help line: the metavar and the leaf's row say it.
+    /// A name on this machine's list
     #[arg(value_name = "service", required = true, value_parser = swoosh::names::service)]
     pub names: Vec<Service>,
 }
-
-/// A usage error found once the line is parsed: exit 2, as clap's own are, before the home is read.
-#[derive(Debug, thiserror::Error)]
-#[error(transparent)]
-pub struct Usage(#[from] pub Mistyped);
 
 impl ServiceAddCmd {
     /// Add the entries to `<home>/serve.toml`'s list under `home.lock`, all or nothing, and say what each
@@ -57,18 +51,14 @@ impl ServiceAddCmd {
     /// [`Usage`] when an entry has no name or one is typed twice; an entry the list refuses; the file
     /// cannot be read or written; the current directory cannot be read.
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
-        Mistyped::check(&self.entries).map_err(Usage)?;
+        Mistyped::check(&self.entries).map_err(Usage::from)?;
         let cwd = std::env::current_dir()?;
         let path = home.serve_toml();
         let home_lock = HomeWrite::take(home).await?;
-        let mut added = None;
-        ServeToml::update(&home_lock, home, |file| {
-            added = Some(file.add(&self.entries, &cwd, &path));
+        let added = ServeToml::try_update(&home_lock, home, |file| {
+            file.add(&self.entries, &cwd, &path)
         })?;
         drop(home_lock);
-        let Some(added) = added else {
-            eyre::bail!("internal: serve.toml was updated without its change running");
-        };
         let added = added.map_err(|error| refused(&error, self.entries.len(), "added"))?;
         // Asked only when a line needs it, after the write: the write never waits on a running node.
         let running = if added.iter().any(|found| matches!(found, Added::Listed(_))) {
@@ -91,17 +81,12 @@ impl ServiceRmCmd {
     /// [`Usage`] when a name is typed twice; a name the list does not hold; the file cannot be read or
     /// written.
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
-        Mistyped::check_names(self.names.iter().map(Service::as_str)).map_err(Usage)?;
+        Mistyped::check_names(self.names.iter().map(Service::as_str)).map_err(Usage::from)?;
         let path = home.serve_toml();
         let home_lock = HomeWrite::take(home).await?;
-        let mut removed = None;
-        ServeToml::update(&home_lock, home, |file| {
-            removed = Some(file.remove(&self.names, &path));
-        })?;
+        let removed =
+            ServeToml::try_update(&home_lock, home, |file| file.remove(&self.names, &path))?;
         drop(home_lock);
-        let Some(removed) = removed else {
-            eyre::bail!("internal: serve.toml was updated without its change running");
-        };
         removed.map_err(|error| refused(&error, self.names.len(), "removed"))?;
         for name in &self.names {
             eprintln!("Removed {name}.");
@@ -130,7 +115,7 @@ fn added_line(found: &Added, running: Option<&Running>) -> String {
 fn refused(error: &EditError, typed: usize, done: &str) -> eyre::Report {
     if let EditError::Serving(ServingError::Mistyped(mistyped)) = error {
         // Checked before the home was read; kept a usage error should the list refuse it after all.
-        return eyre::Report::new(Usage(mistyped.clone()));
+        return eyre::Report::new(Usage::from(mistyped.clone()));
     }
     let text = match error {
         EditError::Retarget { name, held, asked } => format!(

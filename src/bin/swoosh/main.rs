@@ -533,9 +533,9 @@ fn stop_link_unexpected(error: &clap::Error) -> bool {
 }
 
 /// Run a `service` leaf against `home`, exiting 2 on a usage error found once the line is parsed: a machine
-/// typed to `on` or `off`, an entry with no name, or a name typed twice.
+/// or a second service typed to `on` or `off`, an entry with no name, or a name typed twice.
 async fn run_service(cmd: service::ServiceCmd, home: &Home) -> eyre::Result<()> {
-    use service::toggle::{Usage as Machine, Way};
+    use service::toggle::Way;
 
     let (leaf, done) = match cmd {
         service::ServiceCmd::Add(add) => ("add", add.run(home).await),
@@ -546,13 +546,10 @@ async fn run_service(cmd: service::ServiceCmd, home: &Home) -> eyre::Result<()> 
     let Err(report) = done else {
         return Ok(());
     };
-    if let Some(usage) = report.downcast_ref::<service::edit::Usage>() {
-        usage_error(&["service", leaf], &usage.to_string())
+    match report.downcast_ref::<service::Usage>() {
+        Some(service::Usage(usage)) => usage_error(&["service", leaf], usage),
+        None => Err(report),
     }
-    if let Some(usage) = report.downcast_ref::<Machine>() {
-        usage_error(&["service", leaf], &usage.0)
-    }
-    Err(report)
 }
 
 /// Exit as clap does on a usage error of the command at `path` (`["root", "lock"]`): `error: <message>`, its

@@ -305,3 +305,36 @@ async fn no_writer_keeps_a_duplicate_name() {
     );
     let _ = std::fs::remove_dir_all(home.dir());
 }
+
+/// No writer keeps a list holding an entry that is not a service: a file edited to hold a name with no
+/// target, or a target with no name, is refused, exit 1, naming the file, by `add`, `rm` and a bare start
+/// alike, never as a usage error, and the file is left as it is.
+#[tokio::test]
+async fn no_writer_keeps_an_entry_that_is_not_a_service() {
+    for (tag, entry) in [("no-target", "db"), ("no-name", "tcp:localhost:3000")] {
+        let home = temp_home(tag);
+        list(&home, &["web=tcp:localhost:4000", entry]);
+        let before = std::fs::read_to_string(home.serve_toml()).expect("the file");
+        let path = home.serve_toml();
+        let line = format!(
+            "{} lists {entry} as a service, and it is not one, so serve will not start unless you name its \
+             services",
+            path.display()
+        );
+        let error = add(&["ssh"]).run(&home).await.expect_err("refused");
+        assert!(error.downcast_ref::<Usage>().is_none(), "{entry}: exit 1");
+        assert_eq!(format!("{error:#}"), line);
+        let error = rm(&["web"]).run(&home).await.expect_err("refused");
+        assert!(error.downcast_ref::<Usage>().is_none(), "{entry}: exit 1");
+        assert_eq!(format!("{error:#}"), line);
+        let file = ServeToml::read(&home).expect("read");
+        let error = Started::bare(&file, &path).expect_err("a start refuses");
+        assert_eq!(error.to_string(), line);
+        assert_eq!(
+            std::fs::read_to_string(home.serve_toml()).expect("the file"),
+            before,
+            "{entry}: nothing written"
+        );
+        let _ = std::fs::remove_dir_all(home.dir());
+    }
+}

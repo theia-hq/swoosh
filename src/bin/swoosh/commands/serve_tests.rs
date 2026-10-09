@@ -223,7 +223,7 @@ fn the_banner_is_the_key_what_it_serves_and_how_to_stop() {
     let names = ["ping".to_owned(), "speed".to_owned()];
     let banner = render_banner(
         "ed01exampleid",
-        serving_line(&names, &default_manifest(), false).as_deref(),
+        serving_line(&names, &default_manifest()).as_deref(),
         None,
         None,
         "ctrl-c to stop",
@@ -242,7 +242,7 @@ fn the_banner_is_the_key_what_it_serves_and_how_to_stop() {
     );
     let verbose = render_banner(
         "ed01exampleid",
-        serving_line(&names, &default_manifest(), false).as_deref(),
+        serving_line(&names, &default_manifest()).as_deref(),
         Some(&transport),
         None,
         "ctrl-c to stop",
@@ -256,9 +256,9 @@ fn the_banner_is_the_key_what_it_serves_and_how_to_stop() {
 }
 
 /// A service opened with `--public` reads `(anyone)`, the rest `(your devices)`, in the order they were
-/// named; a resumed list says so.
+/// named.
 #[test]
-fn the_serving_line_names_who_reaches_each_service_and_a_resume() {
+fn the_serving_line_names_who_reaches_each_service() {
     let manifest = vec![
         entry_open("logs", TargetKind::RawStream, None),
         entry_gated("ping", TargetKind::Handler, Some(Metering::Unmetered)),
@@ -267,12 +267,8 @@ fn the_serving_line_names_who_reaches_each_service_and_a_resume() {
     ];
     let names = ["ssh", "ping", "speed", "logs"].map(str::to_owned);
     assert_eq!(
-        serving_line(&names, &manifest, false).as_deref(),
+        serving_line(&names, &manifest).as_deref(),
         Some("ssh (your devices), ping (your devices), speed (anyone), logs (anyone)")
-    );
-    assert_eq!(
-        serving_line(&names[..2], &manifest, true).as_deref(),
-        Some("ssh (your devices), ping (your devices) (as last time)")
     );
 }
 
@@ -285,7 +281,7 @@ fn banner_never_lists_an_internal_route() {
         .collect();
     let banner = render_banner(
         "ed01exampleid",
-        serving_line(&names, &default_manifest(), false).as_deref(),
+        serving_line(&names, &default_manifest()).as_deref(),
         None,
         None,
         "ctrl-c to stop",
@@ -2054,6 +2050,21 @@ fn serve_svc_on_a_running_node_names_service_on() {
     );
 }
 
+/// A flag that changes how the node runs comes before an off name: `service on` would leave the flag
+/// unmet and the retry refused again, so the one fix is the stop.
+#[test]
+fn serve_with_a_flag_and_an_off_name_says_stop_first() {
+    let head = "swoosh serve is already running here (pid 4121)\n  It serves ssh, web.";
+    assert_eq!(
+        refusal_against(
+            &["ssh", "web=tcp:localhost:3000", "--public", "web"],
+            &["ssh", "web"],
+            &["ssh"]
+        ),
+        format!("{head}\n  To change how it runs, stop it first:\n    swoosh stop")
+    );
+}
+
 /// Run `swoosh <args>` under `scratch` to its end, with a deadline: a `service` leaf beside a running
 /// `serve`.
 fn swoosh_once(scratch: &ProcessScratch, args: &[&str]) -> std::process::Output {
@@ -2138,7 +2149,8 @@ fn service_on_and_off_ask_no_running_node() {
     running.stop();
 }
 
-/// A typed machine, and an entry with no name or no target, are usage errors: exit 2, with clap's usage.
+/// A typed machine, a second service to `off`, and an entry with no name or no target, are usage errors:
+/// exit 2, with clap's usage.
 #[test]
 fn service_and_serve_usage_errors_exit_2() {
     let scratch = ProcessScratch::new("usage");
@@ -2152,6 +2164,10 @@ fn service_and_serve_usage_errors_exit_2() {
             &["service", "off", "me/nas"][..],
             "error: swoosh service off acts only on this machine\n  To run it on nas:\n    swoosh ssh me/nas \
              -- swoosh service off <service>\n",
+        ),
+        (
+            &["service", "off", "ssh", "web"][..],
+            "error: swoosh service off takes one service\n",
         ),
         (
             &["service", "add", "db"][..],
@@ -2185,6 +2201,31 @@ fn service_and_serve_usage_errors_exit_2() {
         !scratch.home_dir.join("serve.toml").exists(),
         "a usage error writes nothing"
     );
+}
+
+/// A list edited by hand to hold an entry that is not a service stops a bare `serve` with exit 1, naming the
+/// file: nothing was typed, so it is never a usage error, which a service manager would restart on forever
+/// with a usage line about a command line no one wrote.
+#[test]
+fn a_hand_edited_list_with_a_non_service_exits_1_naming_the_file() {
+    let scratch = ProcessScratch::new("not-a-service");
+    for entry in ["db", "tcp:localhost:3000"] {
+        std::fs::write(
+            scratch.home_dir.join("serve.toml"),
+            format!("services = [{entry:?}]\n"),
+        )
+        .expect("a hand-edited list");
+        let out = serve_once(&scratch, &["--local", "--expires", "1s"]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1), "{entry}: {stderr}");
+        assert!(
+            stderr.contains(&format!(
+                "serve.toml lists {entry} as a service, and it is not one"
+            )),
+            "{entry}: {stderr}"
+        );
+        assert!(!stderr.contains("Usage:"), "{entry}: {stderr}");
+    }
 }
 
 /// Naming any service at start makes the typed list the whole list: `ping` and `speed` are not served.
@@ -2255,7 +2296,7 @@ fn a_named_serve_says_what_it_replaced() {
     );
 }
 
-/// A bare `serve` serves the list this home last started with, and says so.
+/// A bare `serve` serves the list this home last started with.
 #[test]
 fn bare_serve_resumes_the_last_named_list() {
     let scratch = ProcessScratch::new("resume");
@@ -2272,7 +2313,7 @@ fn bare_serve_resumes_the_last_named_list() {
     );
     let stdout = resumed.stop();
     assert!(
-        stdout.contains("serving: ssh (your devices), ping (your devices) (as last time)\n"),
+        stdout.contains("serving: ssh (your devices), ping (your devices)\n"),
         "{stdout}"
     );
 }
@@ -2454,7 +2495,7 @@ fn naming_a_new_service_at_start_clears_it_from_off() {
     );
     assert!(
         String::from_utf8_lossy(&bare.stderr)
-            .contains("ping is off; to turn it back on: swoosh service on ping\n"),
+            .contains("ping is off.\nTo turn it on:\n  swoosh service on ping\n"),
         "{}",
         String::from_utf8_lossy(&bare.stderr)
     );
@@ -2496,6 +2537,31 @@ fn a_start_never_clears_off_for_a_listed_name() {
         std::fs::read_to_string(&file).expect("the setting"),
         "off = [\"ping\"]\nservices = [\"ping=ping:\", \"web=echo:\"]\n",
         "ping stays off"
+    );
+}
+
+/// A named start that keeps a listed service off says so, one block per name, before the banner that lists
+/// it: the service refuses every stream, and no other line on screen says why.
+#[test]
+fn a_named_serve_of_an_off_name_says_it_is_off() {
+    let scratch = ProcessScratch::new("named-off");
+    std::fs::write(
+        scratch.home_dir.join("serve.toml"),
+        "off = [\"ping\", \"web\"]\nservices = [\"ping=ping:\", \"web=echo:\"]\n",
+    )
+    .expect("ping and web listed, both off");
+    let named = serve_once(
+        &scratch,
+        &["--local", "--expires", "1s", "web=echo:", "ping"],
+    );
+    let stderr = String::from_utf8_lossy(&named.stderr);
+    assert!(named.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(
+            "web is off.\nTo turn it on:\n  swoosh service on web\nping is off.\nTo turn it on:\n  \
+             swoosh service on ping\n"
+        ),
+        "{stderr}"
     );
 }
 
@@ -3474,7 +3540,7 @@ fn public_unsafe_reads_anyone_in_the_banner() {
         "a file: source resolves to an absolute path: {logs:?}"
     );
     assert_eq!(
-        serving_line(&["logs".to_owned()], &manifest, false).as_deref(),
+        serving_line(&["logs".to_owned()], &manifest).as_deref(),
         Some("logs (anyone)")
     );
 }

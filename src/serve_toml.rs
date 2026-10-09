@@ -130,15 +130,38 @@ impl ServeToml {
         home: &Home,
         change: impl FnOnce(&mut Self),
     ) -> Result<(), ServeTomlError> {
+        Self::try_update(home_lock, home, |file| {
+            change(file);
+            Ok::<_, core::convert::Infallible>(())
+        })
+        .map(|_| ())
+    }
+
+    /// [`update`](Self::update) for a `change` that may refuse: the file is written only when it returns
+    /// `Ok`, so a refusal leaves it as it was whatever `change` set before refusing. All or nothing holds by
+    /// this, never by the order a change mutates in. The outer result is the file's; the inner one is what
+    /// `change` returned.
+    ///
+    /// # Errors
+    ///
+    /// [`ServeTomlError`] when the file cannot be read or written.
+    pub fn try_update<T, E>(
+        home_lock: &HomeWrite,
+        home: &Home,
+        change: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<Result<T, E>, ServeTomlError> {
         let path = home.serve_toml();
         let held = Self::read(home)?;
         let mut next = held.clone();
-        change(&mut next);
-        if next == held {
-            return Ok(());
+        let changed = match change(&mut next) {
+            Ok(changed) => changed,
+            Err(refused) => return Ok(Err(refused)),
+        };
+        if next != held {
+            crate::config::write_private_atomic(home_lock, &path, next.encode().as_bytes())
+                .map_err(|source| ServeTomlError::Io { path, source })?;
         }
-        crate::config::write_private_atomic(home_lock, &path, next.encode().as_bytes())
-            .map_err(|source| ServeTomlError::Io { path, source })
+        Ok(Ok(changed))
     }
 
     /// The file's text: each field that holds something, and nothing else.
