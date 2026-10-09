@@ -2,8 +2,8 @@
 //! services turned off, the relay this machine is reached through and the resolver it publishes to.
 //!
 //! Every writer changes it under `home.lock`, re-reading it first and keeping the fields it does not set:
-//! a `serve` that names its services (once its routes bind), `service on|off`, and `serve --relay` or
-//! `--resolver`. A person is not meant to open it.
+//! a `serve` that names its services (once its routes bind), `service add|rm`, `service on|off`, and `serve
+//! --relay` or `--resolver`. A person is not meant to open it.
 //!
 //! A running `serve` reads the file through one [`LiveServeToml`], from its start to its end: the services
 //! it starts with, the relay and the resolver it binds over, and the services off all come from that one
@@ -53,9 +53,11 @@ const RESOLVER: &str = "resolver";
 /// What `<home>/serve.toml` holds. An absent file holds nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ServeToml {
-    /// The services the last `serve` that named its services gave, paths made absolute, in its order;
-    /// empty when no `serve` named any.
-    pub services: Vec<String>,
+    /// The services a bare `serve` starts, paths made absolute, in order: as the last `serve` that named its
+    /// services gave them, edited since by `service add` and `service rm`. `None` on a home that never
+    /// named any, which serves the default; `Some` and empty once `service rm` took the last one, which
+    /// serves nothing, so the default never returns on its own.
+    pub services: Option<Vec<String>>,
     /// The services turned off.
     pub off: BTreeSet<String>,
     /// The relay this machine is reached through, as `serve --relay` gave it.
@@ -128,15 +130,38 @@ impl ServeToml {
         home: &Home,
         change: impl FnOnce(&mut Self),
     ) -> Result<(), ServeTomlError> {
+        Self::try_update(home_lock, home, |file| {
+            change(file);
+            Ok::<_, core::convert::Infallible>(())
+        })
+        .map(|_| ())
+    }
+
+    /// [`update`](Self::update) for a `change` that may refuse: the file is written only when it returns
+    /// `Ok`, so a refusal leaves it as it was whatever `change` set before refusing. All or nothing holds by
+    /// this, never by the order a change mutates in. The outer result is the file's; the inner one is what
+    /// `change` returned.
+    ///
+    /// # Errors
+    ///
+    /// [`ServeTomlError`] when the file cannot be read or written.
+    pub fn try_update<T, E>(
+        home_lock: &HomeWrite,
+        home: &Home,
+        change: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<Result<T, E>, ServeTomlError> {
         let path = home.serve_toml();
         let held = Self::read(home)?;
         let mut next = held.clone();
-        change(&mut next);
-        if next == held {
-            return Ok(());
+        let changed = match change(&mut next) {
+            Ok(changed) => changed,
+            Err(refused) => return Ok(Err(refused)),
+        };
+        if next != held {
+            crate::config::write_private_atomic(home_lock, &path, next.encode().as_bytes())
+                .map_err(|source| ServeTomlError::Io { path, source })?;
         }
-        crate::config::write_private_atomic(home_lock, &path, next.encode().as_bytes())
-            .map_err(|source| ServeTomlError::Io { path, source })
+        Ok(Ok(changed))
     }
 
     /// The file's text: each field that holds something, and nothing else.
@@ -145,8 +170,8 @@ impl ServeToml {
         let list = |items: &mut dyn Iterator<Item = &String>| {
             toml::Value::Array(items.cloned().map(toml::Value::String).collect())
         };
-        if !self.services.is_empty() {
-            table.insert(SERVICES.to_owned(), list(&mut self.services.iter()));
+        if let Some(services) = &self.services {
+            table.insert(SERVICES.to_owned(), list(&mut services.iter()));
         }
         if !self.off.is_empty() {
             table.insert(OFF.to_owned(), list(&mut self.off.iter()));
@@ -172,7 +197,7 @@ impl ServeToml {
         let mut read = Self::default();
         for (key, value) in table {
             match key.as_str() {
-                SERVICES => read.services = strings(value).ok_or(Undecodable::Damaged)?,
+                SERVICES => read.services = Some(strings(value).ok_or(Undecodable::Damaged)?),
                 OFF => {
                     let off = strings(value).ok_or(Undecodable::Damaged)?;
                     if off
@@ -384,7 +409,7 @@ struct Held {
     /// The file, as the last good read found it.
     file: ServeToml,
     /// The names `file`'s services run, each with its target, as a bare `serve` would start them (the
-    /// default when it lists none). `None` only while the first read lists a service that is not one: a
+    /// default when it never recorded a list). `None` only while the first read lists a service that is not one: a
     /// `serve` that named its services started over such a file, and its own write replaces it.
     running: Option<BTreeMap<String, String>>,
     /// What the run serves, once its routes bound; `None` before, when nothing is refused for leaving
@@ -592,7 +617,7 @@ impl Held {
 
 impl Held {
     /// The names the run serves that the held `services` no longer runs. A name bound by no entry (the
-    /// node's own routes) is never among them, and an emptied list runs the default, never nothing.
+    /// node's own routes) is never among them, and an emptied list runs nothing, so every name it bound is.
     fn removed(&self) -> impl Iterator<Item = String> + '_ {
         self.serving
             .iter()

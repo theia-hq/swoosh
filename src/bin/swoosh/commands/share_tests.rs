@@ -535,11 +535,11 @@ async fn every_share_states_what_it_gives() {
     let home = scratch("gives").await;
     with_bob(&home).await;
     ServeToml::update(&swoosh::testkit::lock(), &home, |toml| {
-        toml.services = vec![
+        toml.services = Some(vec![
             "db=tcp:localhost:5432".to_owned(),
             "sock=unix:/run/db.sock".to_owned(),
             "news=proxy:https://news.example".to_owned(),
-        ];
+        ]);
     })
     .unwrap();
     let key = TestNode::seeded(BOB_LAPTOP).node_id().to_string();
@@ -797,7 +797,7 @@ async fn share_with_a_key_binds_that_one_machine() {
 /// Name `entries` in `home`'s `serve.toml`, as a bare `serve` would start them.
 fn serving(home: &Home, entries: &[&str]) {
     ServeToml::update(&swoosh::testkit::lock(), home, |toml| {
-        toml.services = entries.iter().map(|&entry| entry.to_owned()).collect();
+        toml.services = Some(entries.iter().map(|&entry| entry.to_owned()).collect());
     })
     .unwrap();
 }

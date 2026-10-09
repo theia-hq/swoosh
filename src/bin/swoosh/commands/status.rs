@@ -6,9 +6,13 @@
 //! `--key` prints the key alone.
 //!
 //! With a peer: the single most reassuring thing a p2p tool tells you: am I actually peer to peer, or
-//! bouncing off a relay? For each device the peer resolves to, this dials it, runs a single measure ping
-//! for a live RTT, then reads the session's best-effort [`conn_info`](bifrost::Session::conn_info) for
-//! the path (direct vs relayed) and remote address, and prints one line. The path is read AFTER the probe
+//! bouncing off a relay? For each device the peer resolves to, this dials it, runs one probe for a live
+//! RTT, then reads the session's best-effort [`conn_info`](bifrost::Session::conn_info) for the path
+//! (direct vs relayed) and remote address, and prints one line. The probe is chosen from the peer before
+//! the dial: one of your devices (`me/<name>`) is asked for what it serves over `control.services`, which
+//! every serving node binds and only your devices reach, so one call gives the reach, the round trip and the
+//! list; any other machine (a contact, a key, a link) is asked a measure ping, and `control.services` is
+//! never asked of it. The path is read AFTER the probe
 //! so iroh's hole-punch has the round trip to land: a session that connects relayed and upgrades reports
 //! the upgraded path, not the instant-of-connect one. Over quirk it says direct; over iroh it reports the
 //! current path, which can still be relayed if the upgrade has not completed by then.
@@ -22,14 +26,17 @@ use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
 use clap::Args;
-use measure::{Ping, ProtocolError, Refusal};
+use measure::{Ping, ProtocolError};
 use nauthy::{Link, Service};
-use swoosh::contacts::Contacts;
+use swoosh::contacts::{Contacts, ME};
 use swoosh::escape::{Escaped, causes};
 use swoosh::home::Home;
 use swoosh::peer::Peer;
 use swoosh::reach;
+use swoosh::serve::CONTROL_SERVICES_SERVICE;
 use swoosh::transport::{self, ReachArgs};
+use tightbeam::tunnel;
+use tokio::io::AsyncReadExt as _;
 
 pub mod report;
 
@@ -63,15 +70,16 @@ impl swoosh::reaching::Reaching for StatusCmd {
     /// Dialing, and what it dials as. It reaches a peer and never accepts connections under the
     /// home key, so its bind must not write the key's address record (0.9.0 F1).
     ///
-    /// `status` probes the peer's family-gated `ping` service, so it presents the member badge rooted at
-    /// the dialing key (like `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. A
+    /// `status` probes one of your devices' member-only `control.services` and any other peer's
+    /// family-gated `ping` ([`Probe::of`]), so it presents the member badge rooted at the dialing key (like
+    /// `ping`/`speed`). `Family` fuses the identity to `PersistedIfPresent`. A
     /// self-addressing `swoosh:` link-as-peer is threaded INTO the credential so the ONE resolver owns both
     /// slots.
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(match &self.peer {
-            Some(peer) => swoosh::credential::Credential::dialing(peer, reach::PING_SERVICE),
+            Some(peer) => swoosh::credential::Credential::dialing(peer, Probe::of(peer).service()),
             None => swoosh::credential::Credential::Family { present: None },
         })
     }
@@ -122,7 +130,8 @@ impl StatusCmd {
         // mid-probe ends non-zero rather than exiting clean on a screen full of failures. The fold keeps
         // the FURTHEST outcome, which is what the final error names.
         let mut outcome = reach::Outcome::default();
-        let service: Service = reach::PING_SERVICE.parse()?;
+        let asked = Probe::of(&peer);
+        let service: Service = asked.service().parse()?;
         for candidate in &candidates {
             let line = match reach::connect_service(
                 node,
@@ -133,7 +142,12 @@ impl StatusCmd {
             )
             .await
             {
-                Ok(session) => probe(&session, &candidate.label, bound.transport).await,
+                Ok(session) => match asked {
+                    Probe::Ping => probe(&session, &candidate.label, bound.transport).await,
+                    Probe::Services => {
+                        probe_services(&session, &candidate.label, bound.transport).await
+                    }
+                },
                 Err(_error) => Line::unreachable(&candidate.label, bound.transport.name()),
             };
             outcome = outcome.max(line.outcome());
@@ -159,6 +173,109 @@ impl StatusCmd {
     }
 }
 
+/// What `status` asks a reached device, chosen from the peer before the dial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// One of your devices: `control.services`, for the reach, the round trip and what it serves.
+    Services,
+    /// Any other machine: a measure ping.
+    Ping,
+}
+
+impl Probe {
+    /// The probe for `peer`: `me` or `me/<name>` names your devices, and only those are asked
+    /// `control.services`; a contact, a key or a link is pinged.
+    fn of(peer: &Peer) -> Self {
+        match peer {
+            Peer::Named(reference) if reference.petname().as_str() == ME => Self::Services,
+            _ => Self::Ping,
+        }
+    }
+
+    /// The service this probe dials.
+    fn service(self) -> &'static str {
+        match self {
+            Self::Services => CONTROL_SERVICES_SERVICE,
+            Self::Ping => reach::PING_SERVICE,
+        }
+    }
+}
+
+/// Ask one of your reached devices what it serves: the one `control.services` read gives the round trip
+/// (the request out, the list back, timed here) and the list, and the path is read after it, as
+/// [`probe`]'s is. The node's own dotted routes are left out of the list.
+async fn probe_services<S: Session>(
+    session: &S,
+    label: &str,
+    transport: transport::Transport,
+) -> Line {
+    let asked = tokio::time::Instant::now();
+    let (writer, reader) = match session.open_bi().await {
+        Ok(halves) => halves,
+        Err(bifrost::Error::Refused(refusal)) => {
+            let refused = match refusal {
+                bifrost::Refusal::NotAdmitted => Refused::NotAdmitted(Probe::Services),
+                other => Refused::Other(other.to_string()),
+            };
+            return Line::refused(label.to_owned(), transport.name(), refused);
+        }
+        Err(error) => return Line::failed(label.to_owned(), transport.name(), causes(&error)),
+    };
+    // The read sends nothing; dropping the write half lets the node's reply complete.
+    drop(writer);
+    let catalog = match read_catalog(reader).await {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            return Line::failed(label.to_owned(), transport.name(), format!("{error:#}"));
+        }
+    };
+    let rtt = asked.elapsed();
+    let serving = catalog
+        .entries()
+        .filter(|entry| !entry.name.contains('.'))
+        .map(|entry| entry.name.clone())
+        .collect();
+    Line::reached(
+        label.to_owned(),
+        transport.name(),
+        session.conn_info(),
+        Some(rtt),
+    )
+    .serving(serving)
+}
+
+/// Read a device's catalog blob under the wire's own bound, then decode it.
+///
+/// The untrusted end here is the SERVER, which is the direction we do not usually face: these bytes are a
+/// remote node's, and an unbounded `read_to_end` lets that node grow this client's buffer for as long as it
+/// cares to stream, at 1:1 cost to itself. [`decode`](tunnel::ServiceCatalog::decode)'s own caps cannot
+/// help, because by the time it is called the buffer already holds everything the peer sent. So the bound
+/// goes on the READ, before the first byte lands, and it is the wire's own
+/// [`MAX_CATALOG_BLOB`](tunnel::MAX_CATALOG_BLOB) rather than a number chosen here: the serving end refuses
+/// to encode past the same bound, so one number holds both ends of this wire.
+///
+/// It reads exactly ONE byte past that bound, purely to tell a catalog sitting at the ceiling (legitimate,
+/// and decodes) from a peer still streaming (not). Without that byte an over-cap peer would arrive as a
+/// truncated-blob decode error, which tells an operator that the list is malformed when what actually
+/// happened is that the peer would not stop.
+async fn read_catalog(
+    reader: impl tokio::io::AsyncRead + Unpin,
+) -> eyre::Result<tunnel::ServiceCatalog> {
+    let mut bytes = Vec::new();
+    reader
+        .take(tunnel::MAX_CATALOG_BLOB + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| eyre::eyre!("{}", causes(&error)))?;
+    if bytes.len() as u64 > tunnel::MAX_CATALOG_BLOB {
+        eyre::bail!(
+            "it sent more than a list of services can be, so the read stopped at {} bytes",
+            tunnel::MAX_CATALOG_BLOB
+        );
+    }
+    tunnel::ServiceCatalog::decode(&bytes)
+}
+
 /// Probe one reached session for a live RTT and its path, and render its status line under `label` (the
 /// device as the user named it, so a fan-out reads by device, matching `ping`).
 async fn probe<S: Session>(session: &S, label: &str, transport: transport::Transport) -> Line {
@@ -179,9 +296,15 @@ async fn probe<S: Session>(session: &S, label: &str, transport: transport::Trans
     let report = match probed {
         Ok(report) => report,
         Err(ProtocolError::Refused(refusal)) => {
-            return Line::refused(label.to_owned(), transport.name(), refusal);
+            let refused = match refusal {
+                measure::Refusal::Stream(bifrost::Refusal::NotAdmitted) => {
+                    Refused::NotAdmitted(Probe::Ping)
+                }
+                other => Refused::Other(other.to_string()),
+            };
+            return Line::refused(label.to_owned(), transport.name(), refused);
         }
-        Err(error) => return Line::failed(label.to_owned(), transport.name(), error),
+        Err(error) => return Line::failed(label.to_owned(), transport.name(), causes(&error)),
     };
 
     // Read the path AFTER the probe, not before: the round trip gives iroh's hole-punch a moment to
@@ -215,26 +338,38 @@ struct Line {
 /// healthy path line nor an "unreachable". Making each its own variant is what stops a failure from
 /// rendering as a healthy line with a borrowed transport RTT.
 enum State {
-    /// The device answered the probe: the path after the probe, and the RTT.
+    /// The device answered the probe: the path after the probe, the RTT, and, from one of your devices,
+    /// what it serves.
     Reached {
         info: ConnInfo,
         rtt: Option<Duration>,
+        serving: Option<Vec<String>>,
     },
     /// The device did not answer the dial at all.
     Unreachable,
-    /// The device answered but refused the ping probe (it does not serve ping), carrying the typed refusal.
-    Refused { refusal: Refusal },
+    /// The device answered but refused the probe.
+    Refused { refused: Refused },
     /// The device answered the dial and the probe then failed: the stream never opened, the exchange
-    /// broke, or the peer refused with a code this client cannot read. Carries the typed cause. Its own
-    /// state, not a `Reached` line with the transport's RTT: nothing answered the probe, so there is no
-    /// measurement and no health to report.
-    Failed { error: ProtocolError },
+    /// broke, or the peer refused with a code this client cannot read. Carries the cause chain, as the
+    /// peer's text may be in it. Its own state, not a `Reached` line with the transport's RTT: nothing
+    /// answered the probe, so there is no measurement and no health to report.
+    Failed { cause: String },
     /// The exchange completed and nothing came back. The engine folds a broken exchange into LOSS and
     /// returns a report rather than an error, so this is the shape most mid-probe failures actually take,
     /// and the typed-error arm above catches only the few that escape it. Zero received is zero
     /// measurements, so there is no round trip to report and the transport's own estimate is not one:
     /// borrowing it here is exactly how a broken peer printed a healthy line.
     Unanswered { sent: u32 },
+}
+
+/// Why a reached device refused the probe. Only the access refusal is reworded, and it claims no more than
+/// the reply says; every other refusal (busy, rate-limited, a bad request, a method the service does not
+/// serve) prints the peer's own text.
+enum Refused {
+    /// The gate did not admit this machine to the probe's service.
+    NotAdmitted(Probe),
+    /// Any other refusal, as the peer gave it.
+    Other(String),
 }
 
 impl Line {
@@ -247,8 +382,20 @@ impl Line {
         Self {
             label,
             transport,
-            state: State::Reached { info, rtt },
+            state: State::Reached {
+                info,
+                rtt,
+                serving: None,
+            },
         }
+    }
+
+    /// This reached line with what the device serves appended.
+    fn serving(mut self, names: Vec<String>) -> Self {
+        if let State::Reached { serving, .. } = &mut self.state {
+            *serving = Some(names);
+        }
+        self
     }
 
     fn unreachable(label: &str, transport: &'static str) -> Self {
@@ -259,19 +406,19 @@ impl Line {
         }
     }
 
-    fn refused(label: String, transport: &'static str, refusal: Refusal) -> Self {
+    fn refused(label: String, transport: &'static str, refused: Refused) -> Self {
         Self {
             label,
             transport,
-            state: State::Refused { refusal },
+            state: State::Refused { refused },
         }
     }
 
-    fn failed(label: String, transport: &'static str, error: ProtocolError) -> Self {
+    fn failed(label: String, transport: &'static str, cause: String) -> Self {
         Self {
             label,
             transport,
-            state: State::Failed { error },
+            state: State::Failed { cause },
         }
     }
 
@@ -315,19 +462,25 @@ impl core::fmt::Display for Line {
         match &self.state {
             State::Unreachable => f.write_str("unreachable"),
             // The refusal and the cause chain carry the peer's text, so both print through the escaper.
-            State::Refused { refusal } => {
+            State::Refused {
+                refused: Refused::NotAdmitted(Probe::Services),
+            } => {
+                let device = self.label.strip_prefix("me/").unwrap_or(&self.label);
                 write!(
                     f,
-                    "reached, but refused ({})",
-                    Escaped(&refusal.to_string())
+                    "reached, but {device} does not count this machine as one of your devices"
                 )
             }
-            State::Failed { error } => {
-                write!(
-                    f,
-                    "reached, but the probe failed ({})",
-                    Escaped(&causes(error))
-                )
+            // A refused ping cannot tell "does not serve ping" from "will not admit you", so the line
+            // claims neither.
+            State::Refused {
+                refused: Refused::NotAdmitted(Probe::Ping),
+            } => f.write_str("reached, but it does not answer ping for you"),
+            State::Refused {
+                refused: Refused::Other(text),
+            } => write!(f, "reached, but refused ({})", Escaped(text)),
+            State::Failed { cause } => {
+                write!(f, "reached, but the probe failed ({})", Escaped(cause))
             }
             State::Unanswered { sent } => {
                 write!(
@@ -335,12 +488,21 @@ impl core::fmt::Display for Line {
                     "reached, but the probe went unanswered ({sent} sent, 0 back)"
                 )
             }
-            State::Reached { info, rtt } => {
+            State::Reached { info, rtt, serving } => {
                 write!(f, "path: {}", reach::conn_path(info))?;
                 if let Some(rtt) = rtt {
                     write!(f, ", rtt {:.3} ms", rtt.as_secs_f64() * 1000.0)?;
                 }
-                Ok(())
+                // The names are the device's own, so they print through the escaper.
+                match serving.as_deref() {
+                    None => Ok(()),
+                    Some([]) => f.write_str("; serving: nothing"),
+                    Some(names) => {
+                        let names: Vec<String> =
+                            names.iter().map(|name| Escaped(name).to_string()).collect();
+                        write!(f, "; serving: {}", names.join(", "))
+                    }
+                }
             }
         }
     }
@@ -355,7 +517,7 @@ mod tests {
     use swoosh::home::Home;
     use swoosh::{reach, transport};
 
-    use super::{Line, probe};
+    use super::{Line, Probe, Refused, probe, probe_services};
     use crate::commands::serve::humanize_secs;
 
     /// Serializes scratch names within this test process; the pid keeps two concurrent runs apart.
@@ -622,43 +784,221 @@ mod tests {
         );
     }
 
-    /// B3: a reached-but-refused line says it was REACHED (distinct from `unreachable`) and renders the
-    /// typed refusal descriptively, never echoing a token doubled (`refused (refused)`).
+    /// A session that answers its one stream with `reply`: the bytes of a `control.services` reply, or a
+    /// refusal at the stream's open, as a node's gate gives one.
+    struct ServicesSession {
+        reply: Result<Vec<u8>, bifrost::Refusal>,
+    }
+
+    impl Session for ServicesSession {
+        type Security = bifrost::InProcess;
+        type Write = tokio::io::Sink;
+        /// The reply, written whole and its write end closed, so the read ends where the reply does.
+        type Read = tokio::io::DuplexStream;
+
+        fn peer(&self) -> NodeId {
+            NodeId::from_ed25519_secret(&[5u8; 32])
+        }
+
+        async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+            match &self.reply {
+                Ok(bytes) => {
+                    use tokio::io::AsyncWriteExt as _;
+
+                    let (mut node, read) = tokio::io::duplex(bytes.len().max(1));
+                    node.write_all(bytes)
+                        .await
+                        .map_err(|error| bifrost::Error::Stream(Box::new(error)))?;
+                    Ok((tokio::io::sink(), read))
+                }
+                Err(refusal) => Err(bifrost::Error::Refused(refusal.clone())),
+            }
+        }
+
+        async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+            Err(bifrost::Error::Closed)
+        }
+
+        async fn wait_closed(&self) {}
+
+        /// A double that carries nothing has nothing to end.
+        fn close(&self) {}
+
+        fn path_changes(&self) -> PathChanges {
+            PathChanges::fixed(self.conn_info().path)
+        }
+
+        fn conn_info(&self) -> ConnInfo {
+            ConnInfo {
+                path: Path::Direct,
+                rtt: Some(core::time::Duration::from_millis(12)),
+                remote: None,
+            }
+        }
+    }
+
+    /// The `control.services` reply of a node serving `entries`, its own routes included, as `serve`
+    /// builds it.
+    fn catalog_of(entries: &[&str]) -> Vec<u8> {
+        let gate = nauthy::Gate::rooted(
+            swoosh::testkit::TestRoot::seeded(7).verify_key(),
+            nauthy::Denylist::load(std::env::temp_dir().join("swoosh-status-tests-no-revocations"))
+                .expect("an absent denylist loads empty"),
+        );
+        let mut router = tightbeam::tunnel::Router::new(gate);
+        for entry in entries {
+            router = swoosh::serve::bind_entry(router, entry, [0u8; 32], &[]).expect("binds");
+        }
+        router
+            .catalog(Some(
+                swoosh::serve::CONTROL_SERVICES_SERVICE
+                    .parse()
+                    .expect("a name"),
+            ))
+            .encode()
+            .expect("a catalog encodes")
+    }
+
+    /// A peer typed as text, as the command line parses it.
+    fn peer(text: &str) -> swoosh::peer::Peer {
+        text.parse().expect("a peer")
+    }
+
+    /// `status me/<name>` asks `control.services`, chosen before the dial; a node that serves only one
+    /// service answers it with the round trip and its list, a healthy line.
+    #[tokio::test]
+    async fn status_of_your_device_probes_the_control_route() {
+        assert_eq!(Probe::of(&peer("me/nas")), Probe::Services);
+        assert_eq!(Probe::of(&peer("me")), Probe::Services);
+        assert_eq!(Probe::of(&peer("me/nas")).service(), "control.services");
+        let line = probe_services(
+            &ServicesSession {
+                reply: Ok(catalog_of(&["web=echo:"])),
+            },
+            "me/nas",
+            transport::Transport::Iroh,
+        )
+        .await;
+        assert_eq!(line.outcome(), reach::Outcome::Healthy);
+        let text = line.to_string();
+        assert!(
+            text.starts_with("me/nas via iroh, path: direct, rtt "),
+            "{text}"
+        );
+    }
+
+    /// One of your devices' line ends with what it serves, never the node's own routes, and an empty list
+    /// reads `nothing`.
+    #[tokio::test]
+    async fn status_of_your_device_lists_what_it_serves() {
+        let line = probe_services(
+            &ServicesSession {
+                reply: Ok(catalog_of(&["web=echo:"])),
+            },
+            "me/nas",
+            transport::Transport::Iroh,
+        )
+        .await
+        .to_string();
+        assert!(line.ends_with(" ms; serving: web"), "{line}");
+        assert!(!line.contains("control."), "no internal route: {line}");
+
+        let empty = probe_services(
+            &ServicesSession {
+                reply: Ok(catalog_of(&[])),
+            },
+            "me/nas",
+            transport::Transport::Iroh,
+        )
+        .await
+        .to_string();
+        assert!(empty.ends_with(" ms; serving: nothing"), "{empty}");
+    }
+
+    /// A machine that is not yours (a contact, a key, a link) keeps the ping probe: `control.services` is
+    /// never asked of it.
     #[test]
-    fn a_reached_but_refused_line_is_descriptive_and_not_doubled() {
-        let line = Line::refused(
-            "alice/macbook".to_owned(),
+    fn status_of_a_contact_keeps_the_ping_probe() {
+        let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
+        for text in ["bob", "bob/nas", key.as_str()] {
+            assert_eq!(Probe::of(&peer(text)), Probe::Ping, "{text}");
+        }
+        assert_eq!(Probe::Ping.service(), reach::PING_SERVICE);
+    }
+
+    /// On both probes the access refusal prints its own line and no peer text; every other refusal
+    /// (busy, a bad request, a method refusal) keeps `reached, but refused (<escaped peer text>)`.
+    #[tokio::test]
+    async fn status_keeps_other_refusals_as_today() {
+        let refused = |refusal: bifrost::Refusal| ServicesSession {
+            reply: Err(refusal),
+        };
+        let mine = probe_services(
+            &refused(bifrost::Refusal::NotAdmitted),
+            "me/nas",
+            transport::Transport::Iroh,
+        )
+        .await;
+        assert_eq!(mine.outcome(), reach::Outcome::Refused);
+        assert_eq!(
+            mine.to_string(),
+            "me/nas via iroh: reached, but nas does not count this machine as one of your devices"
+        );
+        let theirs = probe(
+            &refused(bifrost::Refusal::NotAdmitted),
+            "bob/nas",
+            transport::Transport::Iroh,
+        )
+        .await;
+        assert_eq!(
+            theirs.to_string(),
+            "bob/nas via iroh: reached, but it does not answer ping for you"
+        );
+
+        let busy = || bifrost::Refusal::Unavailable {
+            detail: bifrost::RefusalDetail::bounded("busy"),
+        };
+        for line in [
+            probe_services(&refused(busy()), "me/nas", transport::Transport::Iroh).await,
+            probe(&refused(busy()), "bob/nas", transport::Transport::Iroh).await,
+        ] {
+            let line = line.to_string();
+            assert!(
+                line.ends_with(": reached, but refused (unavailable: busy)"),
+                "{line}"
+            );
+        }
+        let method = Line::refused(
+            "bob/nas".to_owned(),
             "iroh",
-            measure::Refusal::Stream(bifrost::Refusal::NotAdmitted),
+            Refused::Other(
+                measure::Refusal::Method {
+                    code: measure::MethodRefusal::WrongMethod,
+                    detail: bifrost::RefusalDetail::bounded("no"),
+                }
+                .to_string(),
+            ),
         )
         .to_string();
-        assert!(
-            line.contains("reached, but refused"),
-            "a refusal is reached-but-refused, distinct from unreachable: {line}"
-        );
-        assert!(
-            !line.contains("refused (refused)"),
-            "the bare token is not doubled: {line}"
-        );
-        assert!(
-            line.contains("not admitted"),
-            "the uniform refusal is rendered as a reason a person can act on: {line}"
-        );
+        assert!(method.contains(": reached, but refused ("), "{method}");
     }
 
     /// A peer's refusal detail holding a carriage return, an ESC CSI sequence and a bidi override prints
     /// as escapes on one line, so a node that refused cannot redraw its line as a healthy path.
-    #[test]
-    fn a_hostile_refusal_prints_escaped() {
-        let line = Line::refused(
-            "alice/macbook".to_owned(),
-            "iroh",
-            measure::Refusal::Stream(bifrost::Refusal::BadRequest {
-                detail: bifrost::RefusalDetail::bounded(
-                    "no\r\u{1b}[2Kalice/macbook via iroh, path: direct\u{202e}",
-                ),
-            }),
+    #[tokio::test]
+    async fn a_hostile_refusal_prints_escaped() {
+        let line = probe(
+            &ServicesSession {
+                reply: Err(bifrost::Refusal::BadRequest {
+                    detail: bifrost::RefusalDetail::bounded(
+                        "no\r\u{1b}[2Kalice/macbook via iroh, path: direct\u{202e}",
+                    ),
+                }),
+            },
+            "alice/macbook",
+            transport::Transport::Iroh,
         )
+        .await
         .to_string();
         assert_eq!(
             line,
