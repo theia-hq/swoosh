@@ -19,13 +19,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
       # On the runner, not the cargo-deny action's container: swoosh pins a toolchain in
       # rust-toolchain.toml, which the container cannot honor (ci.yml says the same). Pinned, because
       # the database now carries CVSS 4.0 scores and an older cargo-deny refuses to load it; 0.20.2
       # reads them. Move the pin deliberately.
       - name: install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2
         with:
           tool: cargo-deny@0.20.2
       - name: cargo-deny (advisories)
