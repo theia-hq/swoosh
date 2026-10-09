@@ -144,7 +144,8 @@ fn resumed_paths_are_absolute() {
     .expect("recorded");
     let recorded = crate::serve_toml::ServeToml::read(&home)
         .expect("the record")
-        .services;
+        .services
+        .unwrap_or_default();
     assert_eq!(
         recorded,
         [

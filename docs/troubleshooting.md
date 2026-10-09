@@ -30,7 +30,7 @@ because nothing was measured; the path estimate the transport keeps is not a mea
 
 Fix one of:
 
-- Check the node is still serving the name: `swoosh service ls --at <peer>`.
+- On your own device, check it still serves the name: `swoosh status me/<name>`.
 - Restart the node if the menu is right and the probe still fails.
 - Try `--transport quirk+noise` if only one transport shows it, which points at the path rather than the
   node.
@@ -47,8 +47,7 @@ grant that covers this service. This is the gate working as designed.
 
 The same message also covers an unserved service: a node that admits you but does not serve the name you
 asked for refuses with the same words, because the reply cannot tell "not admitted" from "admitted, not
-served". Check the menu with `swoosh service ls --at <peer>`: if it lists the menu without your service,
-the node is not serving it.
+served". On your own device, `swoosh status me/<name>` lists what it serves.
 
 Fix one of:
 
@@ -57,8 +56,17 @@ Fix one of:
 - If someone else runs it, ask them for a [capability link](keys.md#grant) and use it where the machine
   goes: `swoosh ping swoosh:…`.
 - If the service is meant to be public, the owner opens it with `swoosh serve --public <service>`.
-- If the menu from `swoosh service ls --at <peer>` is missing the service, the node is not serving it:
-  serve that name on the node, or reach one it does serve.
+- If it is your own device and `swoosh status me/<name>` does not list the service, add it there:
+  `swoosh service add <service>`.
+
+## "reached, but it does not answer ping for you"
+
+```
+bob/nas via iroh: reached, but it does not answer ping for you
+```
+
+`swoosh status` reached the machine, and it refused the probe: it does not serve `ping`, or it does not admit you
+to it. The reply does not say which. Ask its owner to share `ping` with you.
 
 ## "quirk is direct-only: pass --peer"
 
@@ -103,7 +111,7 @@ Bare `--public` names nothing to open. List the services you want public:
 The open `ping` and `speed` routes bind the metered engine: one ping run per caller per second, one
 transfer at a time, and byte plus wall-clock stream caps. An anonymous caller hits those caps rather than
 draining the uplink. Only `--public` the services you are willing to let a stranger use. `swoosh service
-disable <name>` stops serving it to anyone, live, no restart; to keep it for your own devices while
+off <name>` stops serving it to anyone, live, no restart; to keep it for your own devices while
 taking it off the public menu, restart `serve` without the flag.
 
 ## Next

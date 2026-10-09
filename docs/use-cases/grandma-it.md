@@ -57,8 +57,9 @@ serving
 ctrl-c to stop
 ```
 
-Set that `swoosh serve ssh=sshd:` to [run at login](run-at-login.md), so the machine is reachable
-whenever it is on. That is the last thing they ever have to touch.
+That run saved the shell to this machine's list, so a bare `swoosh serve` serves it again. Set
+[`swoosh serve` to run at login](run-at-login.md), so the machine is reachable whenever it is on. That is
+the last thing they ever have to touch.
 
 ## Fix it from home, any time
 

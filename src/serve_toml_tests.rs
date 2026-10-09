@@ -186,7 +186,7 @@ fn the_first_read_stays_what_load_read() {
 /// Write `services` as the file's list, through the writer `serve` uses, keeping every other field.
 fn list(scratch: &Scratch, services: &[&str]) {
     ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
-        file.services = services.iter().map(|&entry| entry.to_owned()).collect();
+        file.services = Some(services.iter().map(|&entry| entry.to_owned()).collect());
     })
     .expect("write serve.toml");
 }
@@ -233,10 +233,10 @@ fn a_service_removed_from_serve_toml_refuses_new_streams() {
     );
 }
 
-/// Guard: an emptied `services` is the default set a bare `serve` starts with, never nothing, so a hand
-/// edit that empties the list does not refuse `ping` and `speed`.
+/// An emptied `services` runs nothing, never the default: `service rm` of the last entry refuses every
+/// service the run bound, at once, and `ping` and `speed` do not come back on their own.
 #[test]
-fn an_emptied_services_keeps_the_default_set() {
+fn an_emptied_services_refuses_every_service_it_served() {
     let scratch = Scratch::new("emptied");
     list(&scratch, &["ping=ping:", "speed=speed:"]);
     let watcher = LiveServeToml::load(&scratch.home).expect("load");
@@ -244,9 +244,9 @@ fn an_emptied_services_keeps_the_default_set() {
 
     list(&scratch, &[]);
     past_the_debounce();
-    assert!(watcher.is_enabled(&service("ping")), "ping still served");
-    assert!(watcher.is_enabled(&service("speed")), "speed still served");
-    assert!(watcher.refused().is_empty());
+    assert!(!watcher.is_enabled(&service("ping")), "ping is refused");
+    assert!(!watcher.is_enabled(&service("speed")), "speed is refused");
+    assert_eq!(watcher.refused(), ["ping", "speed"]);
 }
 
 /// A `services` that lists a service that is not one is a read that keeps what was held, as a damaged file
@@ -262,8 +262,8 @@ fn a_services_entry_that_is_not_a_service_keeps_what_was_held() {
     past_the_debounce();
     assert!(watcher.is_enabled(&service("files")), "still served");
     assert_eq!(
-        watcher.held().services,
-        ["files=recv:"],
+        watcher.held().services.as_deref(),
+        Some(&["files=recv:".to_owned()][..]),
         "the list held is kept"
     );
 }
@@ -278,7 +278,7 @@ fn the_runs_own_write_is_held_at_once() {
     let watcher = LiveServeToml::load(&scratch.home).expect("load");
     past_the_debounce();
     assert!(
-        watcher.held().services == ["ping=ping:"],
+        watcher.held().services.as_deref() == Some(&["ping=ping:".to_owned()][..]),
         "the stat is fresh"
     );
 

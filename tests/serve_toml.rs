@@ -71,7 +71,7 @@ fn a_serve_that_did_not_start_saves_no_relay() {
     assert!(!kept.contains("relay"), "nothing saved: {kept}");
 }
 
-/// A relay `serve.toml` keeps that is not a usable one is damage the file is read with: `service disable`
+/// A relay `serve.toml` keeps that is not a usable one is damage the file is read with: `service off`
 /// refuses on it, naming the key, before it writes anything.
 #[test]
 fn a_bad_relay_in_serve_toml_is_refused_where_the_file_is_read() {
@@ -90,7 +90,7 @@ fn a_bad_relay_in_serve_toml_is_refused_where_the_file_is_read() {
         text.as_bytes(),
     )
     .unwrap();
-    let out = swoosh(&scratch.0, &["service", "disable", "speed"]);
+    let out = swoosh(&scratch.0, &["service", "off", "speed"]);
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),

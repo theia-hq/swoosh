@@ -32,9 +32,10 @@ serving and never asks for a passphrase. The report is on stdout; a line such as
 is on stderr. `swoosh status --key` prints the key alone, for a script. Sections with no row are left out,
 except `serving:`. On a device, `devices:` is your root's list as of the last sync.
 
-With a peer, `status` dials each of its devices and prints one line each: a path and a round-trip time,
-`unreachable`, `reached, but refused (...)`, or `reached, but the probe failed / went unanswered`. Only the
-first is healthy; the last three each exit non-zero. The path is read after the probe, so the same peer can
-read `relayed` on one run and `direct` on the next. [Why a path changes](../../transports.md#iroh).
+With a peer, `status` dials each of its devices and prints one line each. A healthy line has the path and a
+round-trip time, and for one of your own devices ends with what it serves (`; serving: ssh, web`). The rest
+exit non-zero: `unreachable`, a refusal (`reached, but …`), or `reached, but the probe failed / went
+unanswered`. The path is read after the probe, so the same peer can read `relayed` on one run and `direct` on
+the next. [Why a path changes](../../transports.md#iroh).
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

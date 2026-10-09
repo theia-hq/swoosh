@@ -1,12 +1,13 @@
-//! Tests for the `service enable`/`disable` file toggle: the round-trip on the services off in
-//! `<home>/serve.toml`, the sorted rewrite, and idempotency.
+//! Tests for `service on` and `service off` against a home: the write to the `off` list of
+//! `<home>/serve.toml`, the refusals for a name not listed, the machine refusal, and the help.
 
 use std::collections::BTreeSet;
 
+use clap::Parser as _;
 use swoosh::home::Home;
 use swoosh::serve_toml::ServeToml;
 
-use super::ServiceToggleCmd;
+use super::{ServiceToggleCmd, Usage, Way};
 
 /// A fresh, empty home under a unique temp dir, so parallel tests never share a `<home>/serve.toml`.
 fn temp_home(tag: &str) -> Home {
@@ -16,185 +17,179 @@ fn temp_home(tag: &str) -> Home {
     Home::resolve(Some(dir)).expect("resolve the temp home")
 }
 
-/// Change `home`'s `serve.toml` by `change`, under `home.lock`, as `serve` does once its routes bind.
-async fn update(home: &Home, change: impl FnOnce(&mut ServeToml)) {
-    let home_lock = swoosh::home::HomeWrite::take(home).await.unwrap();
-    ServeToml::update(&home_lock, home, change).expect("serve.toml written");
+/// The `on` or `off` leaf as the command line parses it.
+fn leaf(argv: &[&str]) -> ServiceToggleCmd {
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        toggle: ServiceToggleCmd,
+    }
+    let mut line = vec!["x"];
+    line.extend_from_slice(argv);
+    Wrap::try_parse_from(line).expect("the leaf parses").toggle
 }
 
-/// The disabled set currently on disk, read back through the same parse the oracle uses.
-fn disabled_on_disk(home: &Home) -> BTreeSet<String> {
+/// The services turned off, read back through the same parse the gate uses.
+fn off_on_disk(home: &Home) -> BTreeSet<String> {
     ServeToml::read(home).expect("read serve.toml").off
 }
 
-/// A `disable` writes the name into `<home>/serve.toml`; an `enable` takes it back out. The core round-trip.
+/// `off` of a name the list holds writes it, with nothing running, and `on` takes it back out: the
+/// default counts as listed on a home that never named a list. Each says so once, and again is a no-op.
 #[tokio::test]
-async fn disable_then_enable_round_trips() {
-    let home = temp_home("round-trip");
-
-    ServiceToggleCmd {
-        service: "speed".parse().expect("a service"),
-    }
-    .run_disable(&home)
-    .await
-    .expect("disable speed");
-    assert!(
-        disabled_on_disk(&home).contains("speed"),
-        "speed is written to the disabled file"
-    );
-
-    ServiceToggleCmd {
-        service: "speed".parse().expect("a service"),
-    }
-    .run_enable(&home)
-    .await
-    .expect("enable speed");
-    assert!(
-        !disabled_on_disk(&home).contains("speed"),
-        "speed is removed from the disabled file"
-    );
-
-    let _ = std::fs::remove_dir_all(home.dir());
-}
-
-/// Disabling accumulates distinct names and the file is name-sorted (a clean diff, the denylist's shape).
-#[tokio::test]
-async fn disables_accumulate_sorted_and_idempotent() {
-    let home = temp_home("accumulate");
-
-    for name in ["speed", "ping", "speed"] {
-        ServiceToggleCmd {
-            service: name.parse().expect("a service"),
-        }
-        .run_disable(&home)
+async fn service_off_with_nothing_running_writes_the_setting() {
+    let home = temp_home("off-written");
+    leaf(&["ping"])
+        .run(&home, Way::Off)
         .await
-        .expect("disable");
-    }
-
-    let on_disk = disabled_on_disk(&home);
+        .expect("off ping");
+    assert_eq!(off_on_disk(&home), BTreeSet::from(["ping".to_owned()]));
+    leaf(&["ping"])
+        .run(&home, Way::Off)
+        .await
+        .expect("off again is no error");
+    leaf(&["ping"]).run(&home, Way::On).await.expect("on ping");
+    assert!(off_on_disk(&home).is_empty(), "ping is back on");
     assert_eq!(
-        on_disk.iter().cloned().collect::<Vec<_>>(),
-        vec!["ping".to_owned(), "speed".to_owned()],
-        "distinct names only (idempotent), name-sorted"
+        ServeToml::read(&home).expect("read").services,
+        None,
+        "on and off never write the list"
     );
-
-    // The raw file holds the names sorted.
-    let body = std::fs::read_to_string(home.serve_toml()).expect("read raw");
-    assert_eq!(body, "off = [\"ping\", \"speed\"]\n", "sorted");
-
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// Enabling a service that was never disabled is a no-op, not an error (idempotent).
+/// `on` of a name the list does not hold refuses, exit 1, and names the `service add` that lists it: a
+/// built-in alone, `proxy` with its URL. Nothing is written.
 #[tokio::test]
-async fn enable_of_an_untouched_service_is_a_noop() {
-    let home = temp_home("enable-noop");
-    ServiceToggleCmd {
-        service: "ping".parse().expect("a service"),
+async fn service_on_for_a_service_not_listed_names_service_add() {
+    let home = temp_home("on-unlisted");
+    for (name, line) in [
+        (
+            "ssh",
+            "ssh is not listed here; add it: swoosh service add ssh",
+        ),
+        (
+            "proxy",
+            "proxy is not listed here; add it: swoosh service add proxy:<url>",
+        ),
+    ] {
+        let error = leaf(&[name])
+            .run(&home, Way::On)
+            .await
+            .expect_err("a name not listed refuses");
+        assert_eq!(format!("{error:#}"), line);
     }
-    .run_enable(&home)
-    .await
-    .expect("enable a never-disabled service succeeds");
-    assert!(disabled_on_disk(&home).is_empty(), "nothing disabled");
+    assert!(!home.serve_toml().exists(), "nothing written");
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// `serve.toml` is the one file for what `serve` runs: a `serve` that names its services, `service off`,
-/// and `serve --relay --resolver` each land their own field in it and keep every field the others wrote,
-/// and the home holds no file of its own for any of them.
+/// Any other name is shown with a TCP target, the common case whole, never a bare `<target>`.
 #[tokio::test]
-async fn serve_toml_holds_services_off_relay_and_resolver() {
-    use swoosh::serve::Started;
-    use swoosh::transport::{ReachArgs, Transport};
-
-    let home = temp_home("one-file");
-    let read = || ServeToml::read(&home).expect("read serve.toml");
-    let started = Started::of(
-        &["ssh=sshd:".to_owned()],
-        &read(),
-        &home,
-        std::path::Path::new("/"),
-    )
-    .expect("named");
-    update(&home, |file| started.record(file)).await;
-    assert_eq!(read().services, ["ssh=sshd:"]);
-
-    ServiceToggleCmd {
-        service: "speed".parse().expect("a service"),
-    }
-    .run_disable(&home)
-    .await
-    .expect("disable");
-    assert_eq!(read().services, ["ssh=sshd:"], "the services stay");
-    assert_eq!(read().off, BTreeSet::from(["speed".to_owned()]));
-
-    let flags = ReachArgs {
-        transport: Transport::default(),
-        local: false,
-        peer: Vec::new(),
-        relay: Some("https://relay.example".parse().expect("a relay")),
-        resolver: Some("https://dns.example/pkarr".parse().expect("a resolver")),
-    };
-    update(&home, |file| flags.keep_reach(file)).await;
-    let all = read();
-    assert_eq!(all.services, ["ssh=sshd:"], "the services stay");
+async fn service_on_for_an_unknown_name_names_the_tcp_form() {
+    let home = temp_home("on-unknown");
+    let error = leaf(&["db"])
+        .run(&home, Way::On)
+        .await
+        .expect_err("db is not listed");
     assert_eq!(
-        all.off,
-        BTreeSet::from(["speed".to_owned()]),
-        "so do the off"
+        format!("{error:#}"),
+        "db is not listed here; add it: swoosh service add db=tcp:<address>:<port>"
     );
-    assert_eq!(
-        all.relay.map(|url| url.to_string()).as_deref(),
-        Some("https://relay.example/")
-    );
-    assert_eq!(
-        all.resolver.map(|url| url.to_string()).as_deref(),
-        Some("https://dns.example/pkarr")
-    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
 
-    ServiceToggleCmd {
-        service: "speed".parse().expect("a service"),
-    }
-    .run_enable(&home)
-    .await
-    .expect("enable");
-    let all = read();
-    assert!(all.off.is_empty(), "speed is back on");
+/// `off` of a name the list does not hold refuses, exit 1, with no fix: it already does not answer, and
+/// the name typed shows a typo.
+#[tokio::test]
+async fn service_off_for_a_service_not_listed_names_no_fix() {
+    let home = temp_home("off-unlisted");
+    let error = leaf(&["db"])
+        .run(&home, Way::Off)
+        .await
+        .expect_err("db is not listed");
+    assert_eq!(format!("{error:#}"), "db is not listed here");
     assert!(
-        all.services.len() == 1 && all.relay.is_some() && all.resolver.is_some(),
-        "and the rest stay: {all:?}"
+        error.downcast_ref::<Usage>().is_none(),
+        "exit 1, not a usage error"
     );
-
-    for gone in ["serving", "disabled", "relay", "resolver"] {
-        assert!(!home.dir().join(gone).exists(), "no {gone} file");
-    }
+    assert!(!home.serve_toml().exists(), "nothing written");
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// `service --help` lists `enable` and `disable` on rows of at most 100 columns, and names no home file:
-/// a person is never meant to open `serve.toml`.
+/// A machine typed after the service refuses with the service as typed in the command to run there; a
+/// machine alone in the service slot shows the literal `<service>`.
 #[test]
-fn enable_and_disable_help_rows_fit_and_name_no_file() {
+fn service_off_with_a_machine_names_the_typed_service() {
+    let Err(Usage(typed)) = leaf(&["ssh", "me/nas"]).here(Way::Off).cloned() else {
+        panic!("a machine refuses");
+    };
+    assert_eq!(
+        typed,
+        "swoosh service off acts only on this machine\n  To run it on nas:\n    swoosh ssh me/nas -- \
+         swoosh service off ssh"
+    );
+    let Err(Usage(alone)) = leaf(&["me/nas"]).here(Way::On).cloned() else {
+        panic!("a machine alone refuses");
+    };
+    assert_eq!(
+        alone,
+        "swoosh service on acts only on this machine\n  To run it on nas:\n    swoosh ssh me/nas -- \
+         swoosh service on <service>"
+    );
+}
+
+/// A machine-shaped name is a usage error, never a name written to the `off` list.
+#[tokio::test]
+async fn service_off_refuses_a_machine_shaped_name() {
+    let home = temp_home("off-machine");
+    for argv in [&["me/nas"][..], &["ssh", "me/nas"][..]] {
+        let error = leaf(argv)
+            .run(&home, Way::Off)
+            .await
+            .expect_err("a machine refuses");
+        assert!(error.downcast_ref::<Usage>().is_some(), "exit 2: {error:#}");
+    }
+    assert!(!home.serve_toml().exists(), "nothing written");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// `service on -h` and `service off -h` show no machine until one can be acted on, and `service -h` has
+/// a row for each leaf.
+#[test]
+fn service_on_off_usage_hides_the_machine() {
     use clap::CommandFactory as _;
 
     let mut cli = crate::Cli::command();
-    let help = cli
+    cli.build();
+    let group = cli
         .find_subcommand_mut("service")
-        .expect("service is a top-level verb")
-        .render_help()
-        .to_string();
-    for verb in ["enable", "disable"] {
-        let row = help
-            .lines()
-            .find(|line| line.trim_start().starts_with(verb))
-            .unwrap_or_else(|| panic!("a {verb} row: {help}"));
-        assert!(
-            row.chars().count() <= 100,
-            "{verb}'s row is too wide: {row}"
-        );
-        assert!(
-            !row.contains("serve.toml"),
-            "{verb}'s row names a file: {row}"
-        );
+        .expect("service is a top-level verb");
+    let rows = group.render_help().to_string();
+    for row in [
+        "Add services to what this machine serves",
+        "Remove services from what this machine serves",
+        "Turn a service on here",
+        "Turn a service off here",
+    ] {
+        assert!(rows.contains(row), "a {row:?} row: {rows}");
     }
+    for verb in ["on", "off"] {
+        let leaf = group.find_subcommand_mut(verb).expect("a leaf");
+        for help in [
+            leaf.render_help().to_string(),
+            leaf.render_long_help().to_string(),
+        ] {
+            assert!(
+                !help.contains("me/<name>"),
+                "{verb} shows the machine: {help}"
+            );
+        }
+    }
+    let off = group.find_subcommand_mut("off").expect("off");
+    assert!(
+        off.render_long_help()
+            .to_string()
+            .contains("It stays off across restarts until you run swoosh service on."),
+        "off's --help line"
+    );
 }

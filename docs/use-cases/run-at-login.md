@@ -2,11 +2,16 @@
 
 A machine that should be reachable whenever it is on (a home server, a media box, a relative's desktop)
 is unreachable after every reboot until someone starts `swoosh serve` again. Point the OS service manager
-at that same `serve` line, and it starts at login and restarts on its own.
+at a bare `swoosh serve`, and it starts at login and restarts on its own.
 
-Everything below runs on the machine that should stay reachable. The examples serve a
-[gated](../keys.md#the-gate) shell; swap in the `serve` line that machine should run
-([serve](../reference/commands/serve.md) covers every service form).
+Everything below runs on the machine that should stay reachable. A bare `swoosh serve` serves this
+machine's saved list of services, so add what it should serve first. The examples serve a
+[gated](../keys.md#the-gate) shell ([serve](../reference/commands/serve.md) covers every service form):
+
+<!-- manual: runs on the machine that stays reachable, not here -->
+```console
+$ swoosh service add ssh
+```
 
 ## On Linux: a systemd user service
 
@@ -16,7 +21,7 @@ Save the unit as `~/.config/systemd/user/swoosh.service`:
 [Unit]
 Description=swoosh node
 [Service]
-ExecStart=%h/.local/bin/swoosh serve ssh=sshd:
+ExecStart=%h/.local/bin/swoosh serve
 Restart=always
 [Install]
 WantedBy=default.target
@@ -45,7 +50,6 @@ installed `swoosh`):
   <array>
     <string>/Users/you/.local/bin/swoosh</string>
     <string>serve</string>
-    <string>ssh=sshd:</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -68,6 +72,8 @@ The service manager keeps the node up: it starts it at login or boot and restart
 exits, so after `kill` or `swoosh stop` it starts again. Disable it for good with
 `systemctl --user disable --now swoosh` (Linux) or
 `launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.theia.swoosh.plist` (macOS).
+A service added with `swoosh service add` is served from the next start, so follow it with `swoosh stop`;
+the manager starts `swoosh serve` again with the new list.
 
 ## Next
 

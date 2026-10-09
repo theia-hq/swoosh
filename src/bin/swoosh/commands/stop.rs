@@ -144,19 +144,26 @@ impl Aim {
             }
             Self::Me => Err(Usage(format!("which machine?\n  {}", yours.listed()))),
             Self::Word(word) => {
-                if yours.names(&word) {
-                    Err(Usage(format!(
+                let Usage(refusal) = if yours.names(&word) {
+                    Usage(format!(
                         "swoosh stop takes one of your machines: swoosh stop {ME}/{word}"
-                    )))
+                    ))
                 } else if yours.contacts.devices(&word).is_some()
                     || yours.contacts.signet(&word).is_some()
                 {
-                    Err(Usage(format!(
+                    Usage(format!(
                         "you can stop only your own machines; {word} is a contact"
-                    )))
+                    ))
                 } else {
-                    Err(yours.takes_one())
-                }
+                    yours.takes_one()
+                };
+                // A word this machine serves may be a service the person meant to stop: name the act that
+                // does that here.
+                Err(Usage(if yours.serves(&word) {
+                    format!("{refusal}\n  To turn {word} off here:\n    swoosh service off {word}")
+                } else {
+                    refusal
+                }))
             }
             Self::NotAName => Err(yours.takes_one()),
             Self::Theirs(reference) => {
@@ -198,7 +205,7 @@ enum Target {
 }
 
 /// What a machine argument is resolved against: the list of your devices this home holds, the name it gives
-/// this machine, and the names it lists as revoked.
+/// this machine, the names it lists as revoked, and the services this machine's list holds.
 struct Yours {
     /// The book, `me` derived from the list of your devices.
     contacts: Contacts,
@@ -206,6 +213,9 @@ struct Yours {
     own: Option<DeviceLabel>,
     /// The names of the devices the list revokes.
     revoked: Vec<DeviceLabel>,
+    /// The names this machine's list of services holds, for a refusal to say how to turn one off; empty
+    /// when `serve.toml` does not read, which only loses that line.
+    served: Vec<String>,
 }
 
 impl Yours {
@@ -234,11 +244,25 @@ impl Yours {
                 .find(|(_, node)| **node == key)
                 .map(|(label, _)| label.clone())
         });
+        let served = swoosh::serve_toml::ServeToml::read(home)
+            .map(|file| {
+                file.listed()
+                    .iter()
+                    .filter_map(|entry| entry.split_once('=').map(|(name, _)| name.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Self {
             contacts,
             own,
             revoked,
+            served,
         })
+    }
+
+    /// Whether `word` names a service this machine's list holds.
+    fn serves(&self, word: &Petname) -> bool {
+        self.served.iter().any(|name| name == word.as_str())
     }
 
     /// Your devices and their keys, in label order.

@@ -223,7 +223,7 @@ fn the_banner_is_the_key_what_it_serves_and_how_to_stop() {
     let names = ["ping".to_owned(), "speed".to_owned()];
     let banner = render_banner(
         "ed01exampleid",
-        &serving_line(&names, &default_manifest(), false),
+        serving_line(&names, &default_manifest(), false).as_deref(),
         None,
         None,
         "ctrl-c to stop",
@@ -242,7 +242,7 @@ fn the_banner_is_the_key_what_it_serves_and_how_to_stop() {
     );
     let verbose = render_banner(
         "ed01exampleid",
-        &serving_line(&names, &default_manifest(), false),
+        serving_line(&names, &default_manifest(), false).as_deref(),
         Some(&transport),
         None,
         "ctrl-c to stop",
@@ -267,12 +267,12 @@ fn the_serving_line_names_who_reaches_each_service_and_a_resume() {
     ];
     let names = ["ssh", "ping", "speed", "logs"].map(str::to_owned);
     assert_eq!(
-        serving_line(&names, &manifest, false),
-        "ssh (your devices), ping (your devices), speed (anyone), logs (anyone)"
+        serving_line(&names, &manifest, false).as_deref(),
+        Some("ssh (your devices), ping (your devices), speed (anyone), logs (anyone)")
     );
     assert_eq!(
-        serving_line(&names[..2], &manifest, true),
-        "ssh (your devices), ping (your devices) (as last time)"
+        serving_line(&names[..2], &manifest, true).as_deref(),
+        Some("ssh (your devices), ping (your devices) (as last time)")
     );
 }
 
@@ -285,7 +285,7 @@ fn banner_never_lists_an_internal_route() {
         .collect();
     let banner = render_banner(
         "ed01exampleid",
-        &serving_line(&names, &default_manifest(), false),
+        serving_line(&names, &default_manifest(), false).as_deref(),
         None,
         None,
         "ctrl-c to stop",
@@ -345,7 +345,7 @@ fn banner_names_the_service_manager_line_when_not_supervised() {
     // The line rides the banner before how to stop.
     let banner = render_banner(
         "ed01exampleid",
-        "ping (your devices)",
+        Some("ping (your devices)"),
         None,
         Some(systemd),
         "ctrl-c to stop",
@@ -1894,6 +1894,23 @@ impl Running {
         )
     }
 
+    /// The services it has off, read over the control socket; `None` when it does not answer or cannot
+    /// read its own list.
+    fn off(&self) -> Option<Vec<String>> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let reply = runtime.block_on(control_round_trip(&self.socket, Request::Services));
+        let Ok(Response::Catalog(menu)) = reply else {
+            return None;
+        };
+        match menu.disabled {
+            swoosh::serve::control_codec::DisabledList::Known(names) => Some(names),
+            swoosh::serve::control_codec::DisabledList::Unknown(_) => None,
+        }
+    }
+
     /// Stop it over its socket and wait for a clean exit; what it printed.
     fn stop(mut self) -> String {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1922,41 +1939,29 @@ fn serve_once(scratch: &ProcessScratch, args: &[&str]) -> std::process::Output {
 }
 
 /// One `serve` per home: a second one refuses, exit 1, with the running one's pid and what it serves,
-/// then the one fix that fits what it asked for, in order: a service the running one serves is turned on
-/// with `service on`, a flag that changes how it runs needs a stop, and anything else needs its own home.
+/// then the one fix that fits what it asked for, in order: a flag that changes how it runs needs a stop,
+/// and a service the running one does not serve is added with `service add`. A typed service it serves
+/// and has on, or nothing typed, needs no fix.
 #[test]
 fn a_second_serve_for_one_home_refuses_and_names_the_fix() {
     let scratch = ProcessScratch::new("second");
     let running = Running::start(&scratch, &["--local", "--quiet", "ping", "speed"]);
     let pid = running.child.0.id();
     let head = format!(
-        "swoosh serve is already running for this home (pid {pid}, serving ping, speed).\n"
+        "error: swoosh serve is already running here (pid {pid})\n  It serves ping, speed.\n"
     );
+    let stop = "  To change how it runs, stop it first:\n    swoosh stop\n";
     for (args, fix) in [
-        (&["ping"][..], "To turn ping on: swoosh service on ping"),
+        (&["ping"][..], ""),
+        (&["ping", "--expires", "1h"][..], stop),
+        (&["--expires", "1h"][..], stop),
+        (&["--local"][..], stop),
+        (&["ssh", "--public", "ping"][..], stop),
+        (&[][..], ""),
+        (&["ssh"][..], "  To add ssh:\n    swoosh service add ssh\n"),
         (
-            &["ping", "--expires", "1h"][..],
-            "To turn ping on: swoosh service on ping",
-        ),
-        (
-            &["--expires", "1h"][..],
-            "Stop it first to change how it runs: swoosh stop",
-        ),
-        (
-            &["--local"][..],
-            "Stop it first to change how it runs: swoosh stop",
-        ),
-        (
-            &["ssh", "--public", "ping"][..],
-            "Stop it first to change how it runs: swoosh stop",
-        ),
-        (
-            &[][..],
-            "A second one needs its own: swoosh --home <dir> serve …",
-        ),
-        (
-            &["ssh"][..],
-            "A second one needs its own: swoosh --home <dir> serve …",
+            &["ssh", "web=tcp:localhost:3000", "ping"][..],
+            "  To add them:\n    swoosh service add ssh web=tcp:localhost:3000\n",
         ),
     ] {
         let second = serve_once(&scratch, args);
@@ -1967,7 +1972,7 @@ fn a_second_serve_for_one_home_refuses_and_names_the_fix() {
             "a second serve {args:?} refuses: {stderr}"
         );
         assert!(
-            stderr.contains(&format!("{head}{fix}\n")),
+            stderr.ends_with(&format!("{head}{fix}")),
             "serve {args:?} names the running one and then `{fix}`: {stderr}"
         );
     }
@@ -1977,6 +1982,277 @@ fn a_second_serve_for_one_home_refuses_and_names_the_fix() {
         "the running serve is untouched"
     );
     running.stop();
+}
+
+/// The refusal for `serve <args>` against a running node that serves `serves` and has `off` off.
+fn refusal_against(args: &[&str], serves: &[&str], off: &[&str]) -> String {
+    use clap::Parser as _;
+
+    let mut argv = vec!["swoosh", "serve"];
+    argv.extend_from_slice(args);
+    let Some(crate::Command::Serve(cmd)) = crate::Cli::try_parse_from(argv)
+        .expect("serve parses")
+        .command
+    else {
+        panic!("serve parses to the serve verb");
+    };
+    let running = crate::commands::service::Running {
+        serves: serves.iter().map(|&name| name.to_owned()).collect(),
+        off: Some(off.iter().map(|&name| name.to_owned()).collect()),
+    };
+    cmd.running_refusal(4121, Some(&running))
+}
+
+/// A `serve` naming a service the running node does not serve names the `service add` that lists it,
+/// every new entry in one command, as typed; never "A second one needs its own".
+#[test]
+fn serve_on_a_running_node_names_service_add() {
+    let head = "swoosh serve is already running here (pid 4121)\n  It serves ssh, ping, speed.";
+    assert_eq!(
+        refusal_against(&["web=tcp:localhost:3000"], &["ssh", "ping", "speed"], &[]),
+        format!("{head}\n  To add web:\n    swoosh service add web=tcp:localhost:3000")
+    );
+    assert_eq!(
+        refusal_against(
+            &[
+                "web=tcp:localhost:3000",
+                "proxy:https://news.example",
+                "ssh"
+            ],
+            &["ssh", "ping", "speed"],
+            &[]
+        ),
+        format!(
+            "{head}\n  To add them:\n    swoosh service add web=tcp:localhost:3000 proxy:https://news.example"
+        )
+    );
+    // Nothing bound: no `It serves` line.
+    assert_eq!(
+        refusal_against(&["web=tcp:localhost:3000"], &[], &[]),
+        "swoosh serve is already running here (pid 4121)\n  To add web:\n    swoosh service add \
+         web=tcp:localhost:3000"
+    );
+    assert!(
+        !refusal_against(&["web=tcp:localhost:3000"], &["ssh"], &[]).contains("its own"),
+        "the second-home fix is gone"
+    );
+}
+
+/// A `serve` naming a service the running node serves and has off names `service on`; one it has on gets
+/// no fix line.
+#[test]
+fn serve_svc_on_a_running_node_names_service_on() {
+    let head = "swoosh serve is already running here (pid 4121)\n  It serves ssh, ping, speed.";
+    assert_eq!(
+        refusal_against(&["ssh"], &["ssh", "ping", "speed"], &["ssh"]),
+        format!("{head}\n  To turn ssh on:\n    swoosh service on ssh")
+    );
+    assert_eq!(
+        refusal_against(&["ssh"], &["ssh", "ping", "speed"], &[]),
+        head,
+        "a name it serves and has on needs no fix"
+    );
+}
+
+/// Run `swoosh <args>` under `scratch` to its end, with a deadline: a `service` leaf beside a running
+/// `serve`.
+fn swoosh_once(scratch: &ProcessScratch, args: &[&str]) -> std::process::Output {
+    let mut command = Command::new(swoosh_binary());
+    command
+        .arg("--home")
+        .arg(&scratch.home_dir)
+        .args(args)
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME");
+    run_binary_with_deadline(&mut command, Duration::from_secs(60))
+}
+
+/// Poll `running` until its `off` list is `want`, or panic after a bound: the gate reads `serve.toml` live,
+/// so the change lands with no restart.
+fn wait_for_off(running: &Running, want: &[&str]) {
+    let want: Vec<String> = want.iter().map(|&name| name.to_owned()).collect();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let off = running.off();
+        if off.as_ref() == Some(&want) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "off is {off:?}, never {want:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// `service off` turns a started service off live: the running `serve` refuses it with no restart.
+#[test]
+fn service_off_turns_a_started_service_off_live() {
+    let scratch = ProcessScratch::new("off-live");
+    let running = Running::start(&scratch, &["--local", "--quiet", "web=echo:"]);
+    let off = swoosh_once(&scratch, &["service", "off", "web"]);
+    assert_eq!(off.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&off.stderr),
+        "Turned web off here.\n"
+    );
+    wait_for_off(&running, &["web"]);
+    running.stop();
+}
+
+/// `service on` turns it back on live.
+#[test]
+fn service_on_turns_it_back_on_live() {
+    let scratch = ProcessScratch::new("on-live");
+    std::fs::write(
+        scratch.home_dir.join("serve.toml"),
+        "off = [\"web\"]\nservices = [\"web=echo:\"]\n",
+    )
+    .expect("web listed and off");
+    let running = Running::start(&scratch, &["--local", "--quiet"]);
+    wait_for_off(&running, &["web"]);
+    let on = swoosh_once(&scratch, &["service", "on", "web"]);
+    assert_eq!(on.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&on.stderr), "Turned web on here.\n");
+    wait_for_off(&running, &[]);
+    running.stop();
+}
+
+/// `on` and `off` never ask the running node: a service added after start, which the running one did not
+/// bind, is turned off and on by writing the file, each exit 0 with its one line.
+#[test]
+fn service_on_and_off_ask_no_running_node() {
+    let scratch = ProcessScratch::new("no-ask");
+    let running = Running::start(&scratch, &["--local", "--quiet", "web=echo:"]);
+    let added = swoosh_once(&scratch, &["service", "add", "db=tcp:localhost:1"]);
+    assert_eq!(added.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&added.stderr),
+        "Added db; it is served when swoosh serve next starts.\n"
+    );
+    for (verb, line) in [
+        ("off", "Turned db off here.\n"),
+        ("on", "Turned db on here.\n"),
+    ] {
+        let out = swoosh_once(&scratch, &["service", verb, "db"]);
+        assert_eq!(out.status.code(), Some(0), "{verb}");
+        assert_eq!(String::from_utf8_lossy(&out.stderr), line);
+    }
+    running.stop();
+}
+
+/// A typed machine, and an entry with no name or no target, are usage errors: exit 2, with clap's usage.
+#[test]
+fn service_and_serve_usage_errors_exit_2() {
+    let scratch = ProcessScratch::new("usage");
+    for (args, head) in [
+        (
+            &["service", "off", "ssh", "me/nas"][..],
+            "error: swoosh service off acts only on this machine\n  To run it on nas:\n    swoosh ssh me/nas \
+             -- swoosh service off ssh\n",
+        ),
+        (
+            &["service", "off", "me/nas"][..],
+            "error: swoosh service off acts only on this machine\n  To run it on nas:\n    swoosh ssh me/nas \
+             -- swoosh service off <service>\n",
+        ),
+        (
+            &["service", "add", "db"][..],
+            "error: db needs a target, like db=tcp:<address>:<port>\n",
+        ),
+        (
+            &[
+                "service",
+                "add",
+                "web=tcp:localhost:1",
+                "web=tcp:localhost:2",
+            ][..],
+            "error: web is named twice; each service needs its own name\n",
+        ),
+        (
+            &["serve", "--local", "tcp:localhost:3000"][..],
+            "error: tcp:localhost:3000 needs a name, like web=tcp:localhost:3000\n",
+        ),
+        (
+            &["serve", "--local", "db"][..],
+            "error: db needs a target, like db=tcp:<address>:<port>\n",
+        ),
+    ] {
+        let out = swoosh_once(&scratch, args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.starts_with(head), "{args:?}: {stderr}");
+        assert!(stderr.contains("Usage: swoosh "), "{args:?}: {stderr}");
+    }
+    assert!(
+        !scratch.home_dir.join("serve.toml").exists(),
+        "a usage error writes nothing"
+    );
+}
+
+/// Naming any service at start makes the typed list the whole list: `ping` and `speed` are not served.
+#[test]
+fn naming_a_service_drops_ping_and_speed() {
+    let scratch = ProcessScratch::new("named-only");
+    let running = Running::start(&scratch, &["--local", "--quiet", "web=echo:"]);
+    let names: Vec<String> = running
+        .catalog()
+        .expect("it answers")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, ["web"]);
+    running.stop();
+}
+
+/// A list emptied by `service rm` starts a bare `serve` that binds no service, answers its own routes (its
+/// socket answers, so `stop` and `status` reach it), and says how to add one; the starter never returns.
+#[test]
+fn an_emptied_list_does_not_bring_the_starter_back() {
+    let scratch = ProcessScratch::new("emptied");
+    std::fs::write(scratch.home_dir.join("serve.toml"), "services = []\n").expect("an empty list");
+    let running = Running::start(&scratch, &["--local"]);
+    assert_eq!(
+        running.catalog(),
+        Some(Vec::new()),
+        "no service, ping and speed included"
+    );
+    let printed = running.stop();
+    assert!(
+        printed.contains("Serving nothing.\nTo add a service:\n  swoosh service add <service>\n"),
+        "{printed}"
+    );
+}
+
+/// What a named `serve` replaced, said before its banner: one block for every entry it no longer serves,
+/// with one `service add` bringing them all back as typed, then a line per kept name pointed elsewhere.
+#[test]
+fn a_named_serve_says_what_it_replaced() {
+    use swoosh::serve::Replaced;
+
+    assert_eq!(super::replaced_lines(&Replaced::default()), None);
+    let one = Replaced {
+        dropped: vec!["drop=recv:/Users/m/Drop".to_owned()],
+        retargeted: Vec::new(),
+    };
+    assert_eq!(
+        super::replaced_lines(&one).as_deref(),
+        Some(
+            "No longer serving drop.\nTo add it back:\n  swoosh service add drop=recv:/Users/m/Drop\n"
+        )
+    );
+    let several = Replaced {
+        dropped: vec!["ping=ping:".to_owned(), "speed=speed:".to_owned()],
+        retargeted: vec![(
+            "web".to_owned(),
+            "tcp:localhost:4000".to_owned(),
+            "tcp:localhost:3000".to_owned(),
+        )],
+    };
+    assert_eq!(
+        super::replaced_lines(&several).as_deref(),
+        Some(
+            "No longer serving ping, speed.\nTo add them back:\n  swoosh service add ping speed\nweb now \
+             serves tcp:localhost:4000 instead of tcp:localhost:3000.\n"
+        )
+    );
 }
 
 /// A bare `serve` serves the list this home last started with, and says so.
@@ -2148,22 +2424,28 @@ fn a_killed_serve_leaves_status_serving_nothing() {
     assert_eq!(status_serving(&scratch), None, "nothing runs");
 }
 
-/// A service named at start is served even if it was turned off before, and a bare `serve` says which of
-/// its services are off rather than turning them on.
+/// A service a start adds to the list is served even if it was turned off before, and a bare `serve` says
+/// which of its services are off rather than turning them on.
 #[test]
-fn naming_a_service_at_start_clears_it_from_disabled() {
-    let scratch = ProcessScratch::new("disabled");
-    let disabled = scratch.home_dir.join("serve.toml");
-    std::fs::write(&disabled, "off = [\"ping\", \"speed\"]\n").expect("two services turned off");
+fn naming_a_new_service_at_start_clears_it_from_off() {
+    let scratch = ProcessScratch::new("new-off");
+    let file = scratch.home_dir.join("serve.toml");
+    std::fs::write(&file, "off = [\"web\", \"speed\"]\n").expect("two services turned off");
 
-    Running::start(&scratch, &["--local", "--quiet", "ping"]).stop();
+    let running = Running::start(&scratch, &["--local", "--quiet", "web=echo:"]);
     assert_eq!(
-        std::fs::read_to_string(&disabled).expect("the setting"),
-        "off = [\"speed\"]\nservices = [\"ping=ping:\"]\n",
-        "naming ping at start turns it back on, and leaves speed off"
+        running.off().as_deref(),
+        Some(&["speed".to_owned()][..]),
+        "web is admitted from this start"
+    );
+    running.stop();
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the setting"),
+        "off = [\"speed\"]\nservices = [\"web=echo:\"]\n",
+        "naming web, which the list did not hold, turns it back on, and leaves speed off"
     );
 
-    std::fs::write(&disabled, "off = [\"ping\"]\n").expect("ping turned off again");
+    std::fs::write(&file, "off = [\"ping\"]\n").expect("ping turned off again");
     let bare = serve_once(&scratch, &["--local", "--quiet", "--expires", "1s"]);
     assert!(
         bare.status.success(),
@@ -2172,14 +2454,48 @@ fn naming_a_service_at_start_clears_it_from_disabled() {
     );
     assert!(
         String::from_utf8_lossy(&bare.stderr)
-            .contains("ping is off; to turn it back on: swoosh service enable ping\n"),
+            .contains("ping is off; to turn it back on: swoosh service on ping\n"),
         "{}",
         String::from_utf8_lossy(&bare.stderr)
     );
     assert_eq!(
-        std::fs::read_to_string(&disabled).expect("the setting"),
+        std::fs::read_to_string(&file).expect("the setting"),
         "off = [\"ping\"]\n",
         "a bare serve leaves the setting as it is"
+    );
+}
+
+/// A start never widens exposure: naming a service the list already holds, turned off, leaves it off, so
+/// a restart by a service manager (after any of your devices stopped it) never undoes an off typed here.
+/// The default counts as listed on a home that never named a list.
+#[test]
+fn a_start_never_clears_off_for_a_listed_name() {
+    let scratch = ProcessScratch::new("listed-off");
+    let file = scratch.home_dir.join("serve.toml");
+    std::fs::write(&file, "off = [\"web\"]\nservices = [\"web=echo:\"]\n")
+        .expect("web listed, off");
+    let running = Running::start(&scratch, &["--local", "--quiet", "web=echo:"]);
+    assert_eq!(
+        running.off().as_deref(),
+        Some(&["web".to_owned()][..]),
+        "web stays off"
+    );
+    running.stop();
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the setting"),
+        "off = [\"web\"]\nservices = [\"web=echo:\"]\n",
+        "the off row is kept"
+    );
+
+    // A home that never named a list holds the default: `ping` off stays off when a start names it.
+    let fresh = ProcessScratch::new("default-off");
+    let file = fresh.home_dir.join("serve.toml");
+    std::fs::write(&file, "off = [\"ping\"]\n").expect("ping off");
+    Running::start(&fresh, &["--local", "--quiet", "ping", "web=echo:"]).stop();
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the setting"),
+        "off = [\"ping\"]\nservices = [\"ping=ping:\", \"web=echo:\"]\n",
+        "ping stays off"
     );
 }
 
@@ -2858,8 +3174,8 @@ fn named_proxy_origins_de_merge_into_per_service_instances() {
     );
 }
 
-/// An entry with no `=` that reaches the de-merge names no service and is refused with the `name=target`
-/// teaching error. A typed bare `proxy:<url>` never gets here unnamed ([`a_bare_proxy_url_names_itself_proxy`]);
+/// An entry with no `=` that reaches the de-merge names no service and is refused with the line that
+/// fills in a name, the one `serve` and `service add` print. A typed bare `proxy:<url>` never gets here unnamed ([`a_bare_proxy_url_names_itself_proxy`]);
 /// this is the de-merge's own guard, for an entry from anywhere else.
 #[test]
 fn bare_proxy_is_refused_with_the_name_addr_teaching_error() {
@@ -2867,10 +3183,7 @@ fn bare_proxy_is_refused_with_the_name_addr_teaching_error() {
     let Err(error) = ProxyScope::extract(&mut requested) else {
         panic!("a bare `proxy:` should be refused, not served");
     };
-    assert!(
-        error.to_string().contains("name=target"),
-        "the refusal teaches the grammar: {error}"
-    );
+    assert_eq!(error.to_string(), "proxy: needs a name, like web=proxy:");
 }
 
 /// Non-proxy services pass through in order, and only proxy is de-merged out, so extraction is scoped to proxy
@@ -2998,18 +3311,15 @@ fn named_recv_dirs_de_merge_into_per_service_instances() {
     );
 }
 
-/// A bare `recv:` (no `=`, no name) names no service and is refused with the `name=target` teaching
-/// error: only `name=recv:<dir>` is spelled.
+/// A bare `recv:` (no `=`, no name) names no service and is refused with the line that fills in a name:
+/// only `name=recv:<dir>` is spelled.
 #[test]
 fn bare_recv_is_refused_with_the_name_addr_teaching_error() {
     let mut requested = vec!["recv:".to_owned()];
     let Err(error) = extract_recv_services(&mut requested, no_inbox) else {
         panic!("a bare `recv:` should be refused, not served");
     };
-    assert!(
-        error.to_string().contains("name=target"),
-        "the refusal teaches the grammar: {error}"
-    );
+    assert_eq!(error.to_string(), "recv: needs a name, like web=recv:");
 }
 
 /// Non-recv services pass through in order, and only recv is de-merged out, so extraction is scoped to recv
@@ -3164,8 +3474,8 @@ fn public_unsafe_reads_anyone_in_the_banner() {
         "a file: source resolves to an absolute path: {logs:?}"
     );
     assert_eq!(
-        serving_line(&["logs".to_owned()], &manifest, false),
-        "logs (anyone)"
+        serving_line(&["logs".to_owned()], &manifest, false).as_deref(),
+        Some("logs (anyone)")
     );
 }
 

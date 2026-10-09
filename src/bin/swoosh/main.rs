@@ -91,7 +91,7 @@ enum Command {
     Serve(serve::ServeCmd),
     /// Stop swoosh serve here or on one of your own devices
     Stop(stop::StopCmd),
-    /// Read, enable, or disable this node's services (`ls`/`enable`/`disable`; `ls --at <peer>` reads a peer).
+    /// Change what this machine serves
     #[command(subcommand)]
     Service(service::ServiceCmd),
     /// Measure the round-trip time to a peer, addressed by a petname or their public key.
@@ -233,10 +233,6 @@ reaching_verbs! {
     /// `control.stop` and trigger a graceful stop. Presents this device's membership badge, so it rides the
     /// reach path under the persisted identity when one exists.
     Stop(stop::StopDevice),
-    /// `swoosh service ls --at <peer>`: reach a peer's gated `control.services` read and print its
-    /// `SERVICE  GATE` table. Presents a membership badge (like `stop`), so it rides the reach path under
-    /// the persisted identity when one exists. A bare `service ls` (your own node) splits to a local report.
-    Service(service::ServiceLsCmd),
     /// `swoosh sync`: exchange with every live device of your root. Presents this machine's standing and
     /// binds its own key, so each device's gate admits it as one of your devices.
     Sync(sync::SyncCmd),
@@ -284,17 +280,9 @@ impl Command {
             // `stop` resolves its machine against the list of your devices first, with no transport: only
             // another of your devices goes on to dial.
             Self::Stop(cmd) => Verb::Stop(cmd),
-            // The `service` group: `ls --at <peer>` reaches a peer's `control.services`; bare `ls` reads your
-            // own node over the local control socket, and `enable`/`disable` are LOCAL file-writes on
-            // `<home>/serve.toml`. Split each here so the local arms never compose a transport they would not use.
-            Self::Service(cmd) => match cmd {
-                service::ServiceCmd::Ls(ls) => match ls.at {
-                    Some(_) => Verb::Outward(Outward::Service(*ls)),
-                    None => Verb::ServiceLs(*ls),
-                },
-                service::ServiceCmd::Enable(toggle) => Verb::ServiceEnable(toggle),
-                service::ServiceCmd::Disable(toggle) => Verb::ServiceDisable(toggle),
-            },
+            // The `service` group: every leaf is a LOCAL file-write on `<home>/serve.toml`, so none composes a
+            // transport.
+            Self::Service(cmd) => Verb::Service(cmd),
             Self::Serve(cmd) => Verb::Outward(Outward::Serve(cmd)),
             Self::Ping(cmd) => Verb::Outward(Outward::Ping(cmd)),
             Self::Speed(cmd) => Verb::Outward(Outward::Speed(cmd)),
@@ -333,15 +321,8 @@ enum Verb {
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
     Ssh(ssh::SshCmd),
-    /// A bare `swoosh service ls` (no `--at`): read YOUR OWN node's live menu over the local control
-    /// socket, no transport or store. With `--at` it is a reaching verb instead.
-    ServiceLs(service::ServiceLsCmd),
-    /// `swoosh service enable <svc>`: a LOCAL file-write on `<home>/serve.toml` (remove a name), no
-    /// transport.
-    ServiceEnable(service::ServiceToggleCmd),
-    /// `swoosh service disable <svc>`: a LOCAL file-write on `<home>/serve.toml` (add a name), no
-    /// transport.
-    ServiceDisable(service::ServiceToggleCmd),
+    /// `swoosh service add|rm|on|off`: a LOCAL file-write on `<home>/serve.toml`, no transport.
+    Service(service::ServiceCmd),
     /// `swoosh stop [me/<name>]`: resolves the machine against the list of your devices with no transport,
     /// and stops this machine over its control socket; another of your devices goes on as a reaching verb.
     Stop(stop::StopCmd),
@@ -551,6 +532,29 @@ fn stop_link_unexpected(error: &clap::Error) -> bool {
         && matches!(stop::Aim::parse(unexpected), Ok(stop::Aim::Link))
 }
 
+/// Run a `service` leaf against `home`, exiting 2 on a usage error found once the line is parsed: a machine
+/// typed to `on` or `off`, an entry with no name, or a name typed twice.
+async fn run_service(cmd: service::ServiceCmd, home: &Home) -> eyre::Result<()> {
+    use service::toggle::{Usage as Machine, Way};
+
+    let (leaf, done) = match cmd {
+        service::ServiceCmd::Add(add) => ("add", add.run(home).await),
+        service::ServiceCmd::Rm(rm) => ("rm", rm.run(home).await),
+        service::ServiceCmd::On(on) => ("on", on.run(home, Way::On).await),
+        service::ServiceCmd::Off(off) => ("off", off.run(home, Way::Off).await),
+    };
+    let Err(report) = done else {
+        return Ok(());
+    };
+    if let Some(usage) = report.downcast_ref::<service::edit::Usage>() {
+        usage_error(&["service", leaf], &usage.to_string())
+    }
+    if let Some(usage) = report.downcast_ref::<Machine>() {
+        usage_error(&["service", leaf], &usage.0)
+    }
+    Err(report)
+}
+
 /// Exit as clap does on a usage error of the command at `path` (`["root", "lock"]`): `error: <message>`, its
 /// usage line, and exit 2. For a usage error found only once the verb runs, such as stdin that held no link.
 fn usage_error(path: &[&str], message: &str) -> ! {
@@ -626,10 +630,6 @@ async fn run() -> eyre::Result<()> {
     // book. A reaching verb falls through to bind a transport below.
     let reach = match verb {
         Verb::Tree(cmd) => return cmd.run(&Cli::command()),
-        // A bare `swoosh service ls` (no `--at`): read your own node's live table over the local control
-        // socket. Run it here, before any transport is composed, the same local dispatch the other
-        // transport-free verbs take. With `--at` this verb fell through to the reach path above instead.
-        Verb::ServiceLs(cmd) => return cmd.run_local(&home).await,
         // A bare `swoosh status` (no peer): this machine, from its own files. It never dials; with a
         // peer it is a reach verb.
         Verb::Status(cmd) => return cmd.run_local(&home).await,
@@ -643,10 +643,10 @@ async fn run() -> eyre::Result<()> {
                 None => return Err(report),
             },
         },
-        // `service enable`/`disable`: LOCAL file-writes on `<home>/serve.toml`, honored live by a running
-        // `serve` via the watched set its gate reads. Need only the home; bind no transport and touch no store.
-        Verb::ServiceEnable(cmd) => return cmd.run_enable(&home).await,
-        Verb::ServiceDisable(cmd) => return cmd.run_disable(&home).await,
+        // `service add|rm|on|off`: LOCAL file-writes on `<home>/serve.toml`; `on` and `off` are honored live
+        // by a running `serve` via the watched set its gate reads. Need only the home; bind no transport and
+        // touch no store. A machine typed to `on` or `off`, or a name typed twice, exits 2 here.
+        Verb::Service(cmd) => return run_service(cmd, &home).await,
         // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save. A root
         // key given for a machine is found only once `contact add` runs, and exits 2, as clap's own do.
         Verb::Contact(cmd) => {
@@ -751,8 +751,15 @@ async fn run() -> eyre::Result<()> {
             // `serve --local --relay` on a fresh home leaves that home exactly as it found it.
             outward.reach_args().reject_unused_reach()?;
             // A `serve` takes its home's lock and control socket before anything is opened or bound, so a
-            // second one for the home refuses leaving everything as the running one has it.
-            outward.claim(&home).await?
+            // second one for the home refuses leaving everything as the running one has it. Its typed
+            // services that cannot be one list exit 2 first, as clap's own errors do.
+            match outward.claim(&home).await {
+                Ok(claimed) => claimed,
+                Err(report) => match report.downcast_ref::<swoosh::serve::Mistyped>() {
+                    Some(mistyped) => usage_error(&["serve"], &mistyped.to_string()),
+                    None => return Err(report),
+                },
+            }
         }
     };
 
@@ -1089,6 +1096,9 @@ mod tests {
         for argv in [
             vec!["swoosh", "id"],
             vec!["swoosh", "service", "list"],
+            vec!["swoosh", "service", "ls"],
+            vec!["swoosh", "service", "enable", "ssh"],
+            vec!["swoosh", "service", "disable", "ssh"],
             vec!["swoosh", "grant", "list"],
             vec!["swoosh", "contact", "list"],
             vec!["swoosh", "contact", "remove"],
@@ -1101,7 +1111,7 @@ mod tests {
         for argv in [
             vec!["swoosh", "status"],
             vec!["swoosh", "status", "--key"],
-            vec!["swoosh", "service", "ls"],
+            vec!["swoosh", "service", "rm", "ssh"],
             vec!["swoosh", "contact", "rm", "alice"],
         ] {
             assert!(
@@ -1326,6 +1336,47 @@ mod tests {
         }
     }
 
+    /// No verb takes `--at` or `--on`: a machine is a positional. Walked over the real command tree, hidden
+    /// flags included, so a verb added later with either flag fails here, and every `--help` is read too.
+    #[test]
+    fn no_verb_has_a_machine_flag() {
+        fn walk(command: &clap::Command, path: &str, found: &mut Vec<String>) {
+            for arg in command.get_arguments() {
+                if let Some(long) = arg.get_long().filter(|long| ["at", "on"].contains(long)) {
+                    found.push(format!("{path} --{long}"));
+                }
+            }
+            for sub in command.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), found);
+            }
+        }
+        let mut found = Vec::new();
+        let mut root = Cli::command();
+        root.build();
+        walk(&root, "swoosh", &mut found);
+        assert!(
+            found.is_empty(),
+            "verbs that take a machine flag: {found:?}"
+        );
+        fn helps(command: &mut clap::Command, path: &str, found: &mut Vec<String>) {
+            let help = command.render_long_help().to_string();
+            for flag in ["--at ", "--on "] {
+                if help.contains(flag) {
+                    found.push(format!("{path} names {flag}"));
+                }
+            }
+            for sub in command.get_subcommands_mut() {
+                let path = format!("{path} {}", sub.get_name());
+                helps(sub, &path, found);
+            }
+        }
+        helps(&mut root, "swoosh", &mut found);
+        assert!(
+            found.is_empty(),
+            "help that names a machine flag: {found:?}"
+        );
+    }
+
     /// A `serve` asked for its gate before it claimed its home has no list of what it binds to check each
     /// link against, so it builds no gate rather than one that admits every link.
     #[tokio::test]
@@ -1433,20 +1484,18 @@ mod tests {
 
     /// Every DIALING verb that may reach any machine takes a unified `<peer>`: a saved petname, a raw key,
     /// and a `swoosh:` link all parse in its peer slot, uniform across `ping`/`speed`/`status`/`forward`/
-    /// `send`/`service ls --at`/`proxy`/`ssh`. `service ls` carries the peer on `--at` (bare acts on your
-    /// own node); the rest carry it positionally. `stop` takes only your own devices, so it is not here.
+    /// `send`/`proxy`/`ssh`, each positionally. `stop` takes only your own devices, so it is not here.
     #[test]
     fn every_dialing_verb_takes_a_petname_a_key_and_a_link() {
         let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
         let link = shown_link();
         for peer in ["alice", key.as_str(), link.as_str()] {
-            let cases: [&[&str]; 8] = [
+            let cases: [&[&str]; 7] = [
                 &["swoosh", "ping", peer],
                 &["swoosh", "speed", peer],
                 &["swoosh", "status", peer],
                 &["swoosh", "forward", peer, "web", "5432"],
                 &["swoosh", "send", "afile", peer],
-                &["swoosh", "service", "ls", "--at", peer],
                 &["swoosh", "proxy", peer, "http://example.com/x"],
                 &["swoosh", "ssh", peer],
             ];
@@ -1635,10 +1684,6 @@ mod tests {
                 IrohBind::Dialing,
             ),
             (vec!["swoosh", "send", "notes.md", &key], IrohBind::Dialing),
-            (
-                vec!["swoosh", "service", "ls", "--at", &key],
-                IrohBind::Dialing,
-            ),
             (vec!["swoosh", "sync"], IrohBind::Dialing),
         ];
 
@@ -1724,49 +1769,36 @@ mod tests {
         assert!(!other.to_string().contains("takes one machine"), "{other}");
     }
 
-    /// The `service` group: `ls` splits bare-local vs `--at`-reach, and `enable`/`disable` are local leaves.
-    /// The old flat `service --at <peer>` (a leaf, not a group) is retired.
+    /// The `service` group: `add`, `rm`, `on` and `off` are local leaves, each split to the one local verb
+    /// with no transport. `ls`, `enable`, `disable` and the flat `service --at <peer>` are gone, and no leaf
+    /// takes `--at`.
     #[test]
-    fn service_group_splits_ls_enable_disable() {
+    fn service_group_is_add_rm_on_off() {
+        for argv in [
+            ["swoosh", "service", "add", "ssh"].as_slice(),
+            ["swoosh", "service", "add", "ssh", "web=tcp:localhost:3000"].as_slice(),
+            ["swoosh", "service", "rm", "ssh", "web"].as_slice(),
+            ["swoosh", "service", "on", "ssh"].as_slice(),
+            ["swoosh", "service", "off", "ssh"].as_slice(),
+            ["swoosh", "service", "off", "ssh", "me/nas"].as_slice(),
+            ["swoosh", "service", "off", "me/nas"].as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+            assert!(
+                matches!(cli.command.expect("a command").split(), Verb::Service(_)),
+                "{argv:?} is a local verb"
+            );
+        }
         let key = NodeId::from_ed25519_secret(&[6u8; 32]).to_string();
-
-        let bare_ls = Cli::try_parse_from(["swoosh", "service", "ls"]).expect("service ls parses");
-        assert!(matches!(
-            bare_ls.command.expect("a command").split(),
-            Verb::ServiceLs(_)
-        ));
-
-        let at_ls = Cli::try_parse_from(["swoosh", "service", "ls", "--at", &key])
-            .expect("service ls --at parses");
-        assert!(matches!(
-            at_ls.command.expect("a command").split(),
-            Verb::Outward(Outward::Service(_))
-        ));
-
-        let enable = Cli::try_parse_from(["swoosh", "service", "enable", "speed"])
-            .expect("service enable parses");
-        assert!(matches!(
-            enable.command.expect("a command").split(),
-            Verb::ServiceEnable(_)
-        ));
-
-        let disable = Cli::try_parse_from(["swoosh", "service", "disable", "speed"])
-            .expect("service disable parses");
-        assert!(matches!(
-            disable.command.expect("a command").split(),
-            Verb::ServiceDisable(_)
-        ));
-
-        // The retired flat leaf form no longer resolves: `service` is a group now, so a bare `--at` with no
-        // subcommand is a parse error, and `enable`/`disable` never take `--at` (you never toggle a peer).
-        assert!(
-            Cli::try_parse_from(["swoosh", "service", "--at", &key]).is_err(),
-            "the retired flat `service --at` must not resolve; it is `service ls --at` now"
-        );
-        assert!(
-            Cli::try_parse_from(["swoosh", "service", "disable", "speed", "--at", &key]).is_err(),
-            "`disable` never takes `--at`: you never remotely toggle a peer's service"
-        );
+        for argv in [
+            ["swoosh", "service", "--at", &key].as_slice(),
+            ["swoosh", "service", "add"].as_slice(),
+            ["swoosh", "service", "rm"].as_slice(),
+            ["swoosh", "service", "on"].as_slice(),
+            ["swoosh", "service", "off", "ssh", "--at", &key].as_slice(),
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err(), "{argv:?} resolves");
+        }
     }
 
     /// A synthetic callsite backing the probe metadata below. The filter's static target directives
@@ -1956,8 +1988,10 @@ mod tests {
             vec!["swoosh", "serve", "--public", "control.stop"],
             vec!["swoosh", "serve", "--public-unsafe", "control.stop"],
             vec!["swoosh", "share", "control.stop", "anyone"],
-            vec!["swoosh", "service", "disable", "control.stop"],
-            vec!["swoosh", "service", "enable", "control.stop"],
+            vec!["swoosh", "service", "off", "control.stop"],
+            vec!["swoosh", "service", "on", "control.stop"],
+            vec!["swoosh", "service", "rm", "control.stop"],
+            vec!["swoosh", "service", "add", "control.stop"],
             vec!["swoosh", "forward", key.as_str(), "control.stop", "-"],
             vec!["swoosh", "ssh", key.as_str(), "--service", "control.stop"],
             vec![
