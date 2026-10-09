@@ -195,7 +195,7 @@ fn a_bare_person_with_several_machines_refuses_and_lists_them() {
 #[test]
 fn a_bare_person_with_no_machines_refuses_and_names_contact_add() {
     let scratch = Scratch::new("none");
-    save(&scratch, "alice", &key(3));
+    save(&scratch, "alice", &format!("root:{}", key(3)));
     let out = swoosh(&scratch, &["send", "/etc/hosts", "alice"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{stderr}");
@@ -484,4 +484,250 @@ fn swoosh_peer_takes_several_hints() {
     ] {
         assert!(line.contains(&format!("--peer '{hint}'")), "{hint}: {line}");
     }
+}
+
+/// A root's key, typed as `root:` prints it: never a machine.
+fn a_root(seed: u8) -> String {
+    format!("root:{}", swoosh::testkit::TestRoot::seeded(seed).node_id())
+}
+
+/// Every argument that takes a machine refuses a root's key with exit 2, before the key is read or anything
+/// binds (a `serve.toml` that cannot be read stops any bind, and none is reached), and never prints the key
+/// back. `revoke` is not among them: there a root's key is its root form.
+#[test]
+fn every_machine_argument_refuses_a_root_key() {
+    let scratch = Scratch::new("root-everywhere");
+    std::fs::create_dir_all(scratch.home.join("serve.toml")).unwrap();
+    let root = a_root(0x31);
+    let key_text = root.trim_start_matches("root:").to_owned();
+    for (args, head) in [
+        (
+            vec!["ssh", root.as_str()],
+            "error: that is a root key, not a machine's key",
+        ),
+        (
+            vec!["ping", root.as_str()],
+            "error: that is a root key, not a machine's key",
+        ),
+        (
+            vec!["speed", root.as_str()],
+            "error: that is a root key, not a machine's key",
+        ),
+        (
+            vec!["send", "/etc/hosts", root.as_str()],
+            "error: that is a root key, not a machine's key",
+        ),
+        (
+            vec!["forward", root.as_str(), "ssh", "-"],
+            "error: that is a root key, not a machine's key",
+        ),
+        (
+            vec!["proxy", root.as_str(), "https://example.com"],
+            "error: that is a root key, not a machine's key",
+        ),
+        (
+            vec!["status", root.as_str()],
+            "error: that is a root key, not a machine's key",
+        ),
+        (
+            vec!["stop", root.as_str()],
+            "error: that is a root key, not a machine's key",
+        ),
+        (
+            vec!["service", "off", "ssh", root.as_str()],
+            "error: swoosh service off acts only on this machine",
+        ),
+        (
+            vec!["service", "on", root.as_str()],
+            "error: swoosh service on acts only on this machine",
+        ),
+        (
+            vec!["invite", "laptop", root.as_str()],
+            "error: that is a root key, not a machine's key\n  swoosh invite takes a machine's key. On that \
+             machine, this prints it:\n    swoosh join\n",
+        ),
+    ] {
+        let out = swoosh(&scratch, &args);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.starts_with(head), "{args:?}: {stderr}");
+        assert!(
+            !stderr.contains(&key_text),
+            "{args:?}: the key is never echoed: {stderr}"
+        );
+        assert!(
+            !stderr.contains("serve.toml"),
+            "{args:?}: nothing binds: {stderr}"
+        );
+        assert!(out.stdout.is_empty(), "{args:?}: nothing dialed");
+    }
+}
+
+/// `ssh` to a root's key refuses, exit 2, before ssh runs: the fix is the same command with a machine in the
+/// root's place.
+#[test]
+fn a_root_key_is_never_a_machine() {
+    let scratch = Scratch::new("root-ssh");
+    let root = a_root(0x32);
+    let out = swoosh(&scratch, &["ssh", &root]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    let home = scratch.home.display().to_string();
+    assert!(
+        stderr.starts_with(&format!(
+            "error: that is a root key, not a machine's key; name one of its machines:\n  swoosh --home {home} \
+             ssh <person>/<name>\n"
+        )),
+        "{stderr}"
+    );
+    assert!(out.stdout.is_empty());
+}
+
+/// A refusal never prints the root's key: an unknown root names no one; a saved person's root lists their
+/// machines; your own root lists yours. None prints a `<person>` the reader would have to fill in for a root
+/// swoosh knows.
+#[test]
+fn a_root_refusal_never_echoes_the_key() {
+    let scratch = Scratch::new("root-echo");
+    let alice = a_root(0x33);
+    save(&scratch, "alice", &alice);
+    save(&scratch, "alice/laptop", &key(1));
+    save(&scratch, "alice/nas", &key(2));
+    let out = swoosh(&scratch, &["ping", &alice]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with(
+            "error: that is alice's root key, not a machine's key\n  alice's: alice/laptop, alice/nas.\n"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains(alice.trim_start_matches("root:")),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("<person>"), "{stderr}");
+
+    let bob = a_root(0x34);
+    save(&scratch, "bob", &bob);
+    let out = swoosh(&scratch, &["ping", &bob]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with(
+            "error: that is bob's root key, not a machine's key\n  To reach bob, save one of bob's machines:\n    \
+             swoosh contact add bob/<name> <key>\n"
+        ),
+        "{stderr}"
+    );
+
+    let unknown = a_root(0x35);
+    let out = swoosh(&scratch, &["ping", &unknown]);
+    let stderr = text(&out.stderr);
+    assert!(
+        !stderr.contains(unknown.trim_start_matches("root:")),
+        "{stderr}"
+    );
+
+    yours(&scratch);
+    let out = swoosh(&scratch, &["ping", &a_root(0x71)]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with(
+            "error: that is your root key, not a machine's key\n  Yours: me/desk, me/nas.\n"
+        ),
+        "{stderr}"
+    );
+}
+
+/// `stop` takes only your machines, so a root's key gets its own list: yours.
+#[test]
+fn stop_refuses_a_root_with_its_own_list() {
+    let scratch = Scratch::new("root-stop");
+    yours(&scratch);
+    for (root, head) in [
+        (
+            a_root(0x71),
+            "error: that is your root key, not a machine's key\n",
+        ),
+        (
+            a_root(0x36),
+            "error: that is a root key, not a machine's key\n",
+        ),
+    ] {
+        let out = swoosh(&scratch, &["stop", &root]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{stderr}");
+        assert!(
+            stderr.starts_with(&format!("{head}  Yours: me/desk, me/nas.\n")),
+            "{stderr}"
+        );
+        assert!(
+            !stderr.contains(root.trim_start_matches("root:")),
+            "{stderr}"
+        );
+    }
+}
+
+/// A root's key typed bare, when this book saves it as a root, refuses as `root:` does: exit 2, before
+/// anything binds, the person's machines listed and the key never echoed. Your own root alike. A bare key
+/// the book does not know stays a machine.
+#[test]
+fn a_bare_key_saved_as_a_root_is_never_a_machine() {
+    let scratch = Scratch::new("root-bare");
+    std::fs::create_dir_all(scratch.home.join("serve.toml")).unwrap();
+    let alice = a_root(0x37);
+    let bare = alice.trim_start_matches("root:").to_owned();
+    save(&scratch, "alice", &alice);
+    save(&scratch, "alice/laptop", &key(1));
+    yours(&scratch);
+    let mine = a_root(0x71).trim_start_matches("root:").to_owned();
+    for (key, head) in [
+        (
+            bare.as_str(),
+            "error: that is alice's root key, not a machine's key\n  alice's: alice/laptop.\n",
+        ),
+        (
+            mine.as_str(),
+            "error: that is your root key, not a machine's key\n  Yours: me/desk, me/nas.\n",
+        ),
+    ] {
+        for args in [
+            vec!["ping", key],
+            vec!["ssh", key],
+            vec!["status", key],
+            vec!["speed", key],
+        ] {
+            let out = swoosh(&scratch, &args);
+            let stderr = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+            assert!(stderr.starts_with(head), "{args:?}: {stderr}");
+            assert!(
+                !stderr.contains(key),
+                "{args:?}: the key is never echoed: {stderr}"
+            );
+            assert!(
+                !stderr.contains("serve.toml"),
+                "{args:?}: nothing binds: {stderr}"
+            );
+            assert!(out.stdout.is_empty(), "{args:?}: nothing dialed");
+        }
+    }
+}
+
+/// `root:` followed by text that spells no key is a broken root key, never a name: clap's frame shows what
+/// was typed, once, and says so.
+#[test]
+fn a_broken_root_key_is_not_a_name() {
+    let scratch = Scratch::new("root-broken");
+    let out = swoosh(&scratch, &["ping", "root:ed01notakey"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with(
+            "error: invalid value 'root:ed01notakey' for '<machine>': not a root key\n"
+        ),
+        "{stderr}"
+    );
 }

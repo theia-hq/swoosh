@@ -29,6 +29,7 @@ use measure::{Ping, ProtocolError};
 use nauthy::{Link, Service};
 use swoosh::escape::{Escaped, causes};
 use swoosh::home::Home;
+use swoosh::learn::Admitted;
 use swoosh::peer::{Kind, Machine, Peer};
 use swoosh::reach;
 use swoosh::serve::CONTROL_SERVICES_SERVICE;
@@ -92,14 +93,22 @@ impl swoosh::reaching::Reaching for StatusCmd {
         ctx: swoosh::reaching::ReachCtx<'_>,
     ) -> eyre::Result<()>
     where
+        T::Session: 'static,
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
         let Some(machine) = ctx.machine else {
             eyre::bail!("internal: `status` ran without its machine resolved (root-dispatch bug)");
         };
-        self.run_status(node, machine, ctx.bound, ctx.present, ctx.membership)
-            .await
+        self.run_status(
+            node,
+            machine,
+            ctx.bound,
+            ctx.present,
+            ctx.membership,
+            ctx.admitted,
+        )
+        .await
     }
 }
 
@@ -113,7 +122,11 @@ impl StatusCmd {
         bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
-    ) -> eyre::Result<()> {
+        admitted: Admitted,
+    ) -> eyre::Result<()>
+    where
+        T::Session: 'static,
+    {
         //
         // A bare `status` splits to `run_local` in the root BEFORE any transport is composed, so a
         // missing peer here is a root-dispatch bug, not a user error.
@@ -132,15 +145,20 @@ impl StatusCmd {
             match reach::dial_service(node, machine, &peer, &service, present, membership, bound)
                 .await
             {
-                Ok(session) => match asked {
-                    Probe::Ping => probe(&session, &label, bound.transport).await,
-                    Probe::Services => probe_services(&session, &label, bound.transport).await,
-                },
+                // Its first admitted stream tells the composition root it may ask which root vouches for
+                // the machine.
+                Ok((session, connector)) => {
+                    let session = admitted.watch(session, connector);
+                    match asked {
+                        Probe::Ping => probe(&session, &label, bound.transport).await,
+                        Probe::Services => probe_services(&session, &label, bound.transport).await,
+                    }
+                }
                 Err(_error) => Line::unreachable(&label, bound.transport.name()),
             };
         println!("{line}");
 
-        node.close().await;
+        // The composition root closes the node once anything still running beside the verb has ended.
         line.outcome().into_result(&peer, bound)
     }
 
@@ -862,9 +880,16 @@ mod tests {
             local: false,
             reach: transport::Reach::default(),
         };
-        cmd.run_status(&node, &machine, &bound, None, None)
-            .await
-            .expect("your device answers what it serves");
+        cmd.run_status(
+            &node,
+            &machine,
+            &bound,
+            None,
+            None,
+            swoosh::learn::Admitted::unheard(),
+        )
+        .await
+        .expect("your device answers what it serves");
         let asked: Vec<String> = peer
             .requests()
             .into_iter()

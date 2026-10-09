@@ -120,7 +120,14 @@ async fn a_refused_speed_to_your_device_names_the_cause() {
         reach: transport::Reach::default(),
     };
     let error = cmd
-        .run_speed(&node, &machine, &bound, None, None)
+        .run_speed(
+            &node,
+            &machine,
+            &bound,
+            None,
+            None,
+            swoosh::learn::Admitted::unheard(),
+        )
         .await
         .expect_err("a refused speed test exits non-zero");
     assert_eq!(

@@ -8,6 +8,10 @@
 //!
 //! Your own devices, `me`, are not in the file: each open derives them from `<home>/devices`, verified
 //! under `<home>/root.pub`, and a save writes everything but them.
+//!
+//! A person's table may also hold, under keys outside the name rule, where a learned root came from and
+//! the root each device last showed. Every key in the file is bare: the `root:` a line prints is never
+//! stored.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -16,7 +20,7 @@ use std::path::PathBuf;
 use bifrost::NodeIdParseError;
 use tightbeam::identity::AsVerifyKey as _;
 
-use super::{Binding, Contacts, DeviceLabel, ME, Petname};
+use super::{Binding, Contacts, DeviceLabel, ME, Petname, SavedRoot, Source};
 use crate::home::{Home, HomeWrite};
 use crate::names::NameError;
 use crate::roster::RosterDoc;
@@ -51,14 +55,11 @@ impl ContactsStore {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Contacts::default(),
             Err(error) => return Err(StoreError::Read(error)),
         };
-        let devices = match crate::config::load_signet(home).await {
-            Ok(Some(pin)) => pin
-                .verify_key()
-                .ok()
-                .and_then(|pin| crate::roster::held(home, pin)),
-            Ok(None) | Err(_) => None,
-        };
-        contacts.derive_me(devices.as_ref());
+        let pin = crate::config::load_signet(home).await.ok().flatten();
+        let devices = pin
+            .and_then(|pin| pin.verify_key().ok())
+            .and_then(|pin| crate::roster::held(home, pin));
+        contacts.derive_me(devices.as_ref(), pin);
         Ok(Self {
             path,
             contacts,
@@ -104,6 +105,15 @@ impl ContactsStore {
 /// device's is. The `_` puts it outside the name rule, so no device label can ever collide with it.
 const SIGNET_KEY: &str = "signet_root";
 
+/// The per-person key naming the device a learned root came from, present only for a learned root. Its value
+/// is the device's label. Outside the name rule, as [`SIGNET_KEY`] is.
+const LEARNED_KEY: &str = "signet_learned_from";
+
+/// The per-person key holding, for each device that presented one, the root it last presented: a table of
+/// device label to key string. Kept here only, never served or synced. Outside the name rule, as
+/// [`SIGNET_KEY`] is.
+const SEEN_KEY: &str = "seen_roots";
+
 /// The on-disk shape: a top-level table whose keys are petnames, each mapping to a table of device label
 /// to key string, plus the person's [`SIGNET_KEY`]. A separate wire type so no serde derive touches the
 /// domain, and the string keys/values are exactly what a human reads and edits.
@@ -117,24 +127,64 @@ fn decode(text: &str) -> Result<Contacts, StoreError> {
     for (key, value) in wire {
         let petname = Petname::stored(&key)?;
         let group = value.as_table().ok_or(StoreError::BadEntry)?;
+        // The reserved keys hold the person's root, where it came from, and what each device last showed,
+        // not devices; they are read apart so none reaches the device parser (which would refuse it: `_` is
+        // outside the name rule).
+        let mut seen = match group.get(SEEN_KEY) {
+            Some(value) => decode_seen(value)?,
+            None => BTreeMap::new(),
+        };
+        let learned = group
+            .get(LEARNED_KEY)
+            .map(|value| value.as_str().ok_or(StoreError::BadEntry))
+            .transpose()?
+            .map(DeviceLabel::stored)
+            .transpose()?;
+        match (group.get(SIGNET_KEY), learned) {
+            (Some(value), learned) => {
+                let source = learned.map_or(Source::Explicit, Source::Learned);
+                let root = SavedRoot {
+                    node: decode_key(value)?,
+                    source,
+                };
+                contacts.set_signet_binding(petname.clone(), root);
+            }
+            // A mark with no root to mark is no state the book writes.
+            (None, Some(_)) => return Err(StoreError::BadEntry),
+            (None, None) => {}
+        }
         for (label, value) in group {
-            // The reserved signet key holds the person's signet root, not a device; dispatch on it first so
-            // it never reaches the device parser (which would refuse it: `_` is outside the name rule).
-            if label == SIGNET_KEY {
-                contacts.set_signet_binding(petname.clone(), decode_binding(value)?);
+            if [SIGNET_KEY, LEARNED_KEY, SEEN_KEY].contains(&label.as_str()) {
                 continue;
             }
             let device = DeviceLabel::stored(label)?;
-            contacts.insert_binding(petname.clone(), device, decode_binding(value)?);
+            let binding = Binding {
+                node: decode_key(value)?,
+                seen_root: seen.remove(&device),
+            };
+            contacts.insert_binding(petname.clone(), device, binding);
+        }
+        // A root seen by a device the book does not hold is no state the book writes.
+        if !seen.is_empty() {
+            return Err(StoreError::BadEntry);
         }
     }
     Ok(contacts)
 }
 
-/// Parse one wire value, a key string, into a [`Binding`].
-fn decode_binding(value: &toml::Value) -> Result<Binding, StoreError> {
+/// Parse one wire value, a key string, into its key.
+fn decode_key(value: &toml::Value) -> Result<bifrost::NodeId, StoreError> {
     let key = value.as_str().ok_or(StoreError::BadEntry)?;
-    Ok(Binding { node: key.parse()? })
+    Ok(key.parse()?)
+}
+
+/// Parse a person's [`SEEN_KEY`] table: device label to the root it last showed.
+fn decode_seen(value: &toml::Value) -> Result<BTreeMap<DeviceLabel, bifrost::NodeId>, StoreError> {
+    let table = value.as_table().ok_or(StoreError::BadEntry)?;
+    table
+        .iter()
+        .map(|(label, value)| Ok((DeviceLabel::stored(label)?, decode_key(value)?)))
+        .collect()
 }
 
 /// Render the domain address book as a contacts TOML document, every person but `me`.
@@ -151,8 +201,29 @@ fn encode(contacts: &Contacts) -> Result<String, StoreError> {
         // (devices + signet) stays one `[alice]` block; a person with a signet but no devices still writes a
         // block, so a signet-only contact round-trips. The key can never collide with a device label (it is
         // not a name), so this insert never clobbers one.
-        if let Some(binding) = contacts.signet(petname) {
-            group.insert(SIGNET_KEY.to_owned(), key_value(&binding.node));
+        if let Some(root) = contacts.signet(petname) {
+            group.insert(SIGNET_KEY.to_owned(), key_value(&root.node));
+            if let Source::Learned(from) = &root.source {
+                group.insert(
+                    LEARNED_KEY.to_owned(),
+                    toml::Value::String(from.as_str().to_owned()),
+                );
+            }
+        }
+        // Each root a device showed, by the device's label, as a bare key: the `root:` a line prints is
+        // never stored.
+        let seen: toml::value::Table = contacts
+            .devices(petname)
+            .into_iter()
+            .flatten()
+            .filter_map(|(label, _)| {
+                contacts
+                    .seen_root(petname, label)
+                    .map(|root| (label.as_str().to_owned(), key_value(&root)))
+            })
+            .collect();
+        if !seen.is_empty() {
+            group.insert(SEEN_KEY.to_owned(), toml::Value::Table(seen));
         }
         // Skip a person with neither devices nor a signet: an empty table is nothing to persist.
         if group.is_empty() {

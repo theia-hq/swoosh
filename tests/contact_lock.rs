@@ -52,7 +52,8 @@ fn a_contact_edit_waits_for_home_lock() {
     let scratch =
         Scratch(std::env::temp_dir().join(format!("sw-contact-lock-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&scratch.0);
-    let key = bifrost::NodeId::from_ed25519_secret(&[6u8; 32]).to_string();
+    // A person is saved with a root, typed as `root:` prints it.
+    let key = format!("root:{}", bifrost::NodeId::from_ed25519_secret(&[6u8; 32]));
 
     // The same edit on a home nobody locks finishes by itself. It also pays the first start of a freshly
     // built binary, which on some systems takes seconds, so the timed edits below measure only the wait.

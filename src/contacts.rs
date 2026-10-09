@@ -10,7 +10,9 @@
 //! devices are truly one person, that is HD-identity work sequenced for later). Address a specific device
 //! (`alice/macbook`) for that exact key, or the person (`alice`) for the ordered set of their devices, so
 //! a reach verb can try each until one connects. A person's root is kept beside their devices, never
-//! among them: `contact add alice <key>` saves it, `contact add alice/macbook <key>` saves a device.
+//! among them: `contact add alice root:<key>` saves it, `contact add alice/macbook <key>` saves a device.
+//! A root can also be learned from one of a person's saved devices, and is then marked with the device it
+//! came from ([`Source::Learned`]).
 //!
 //! The store persists in the node home as `<home>/contacts.toml` (the same directory the identity key
 //! and the trust files live in, [`Home::contacts`](crate::home::Home::contacts)), a plain TOML table of
@@ -143,6 +145,14 @@ impl ContactRef {
     pub fn device(&self) -> Option<&DeviceLabel> {
         self.device.as_ref()
     }
+
+    /// The whole person `petname`, naming no device.
+    pub fn person(petname: Petname) -> Self {
+        Self {
+            petname,
+            device: None,
+        }
+    }
 }
 
 impl FromStr for ContactRef {
@@ -162,11 +172,45 @@ impl FromStr for ContactRef {
     }
 }
 
-/// One device binding: its node identity.
+/// One device binding: its node identity, and the root this machine last saw vouch for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Binding {
     /// The device's node identity.
     pub node: NodeId,
+    /// The root the device last presented when this machine asked who vouches for it: kept on this machine
+    /// only, never served or synced, so a root it keeps presenting is said once, and a new one again.
+    pub seen_root: Option<NodeId>,
+}
+
+impl Binding {
+    /// A device just saved: its key, with no root seen yet.
+    fn new(node: NodeId) -> Self {
+        Self {
+            node,
+            seen_root: None,
+        }
+    }
+}
+
+/// A person's saved root: its key, and how it came to be saved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedRoot {
+    /// The root's key.
+    pub node: NodeId,
+    /// Typed by the person, or learned from one of the person's devices.
+    pub source: Source,
+}
+
+/// How a person's root came to be saved here: the mark a learned root carries until an explicit save
+/// replaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// Saved by an explicit act: a root key typed into `contact add`.
+    Explicit,
+    /// Learned from the person's device under this label, when it presented a standing the root signed
+    /// and the person here said yes. Only as trustworthy as whoever holds that device's key, so it is kept
+    /// and shown.
+    Learned(DeviceLabel),
 }
 
 /// One person in the address book: their device bindings plus, optionally, their SIGNET root.
@@ -180,8 +224,8 @@ pub struct Binding {
 struct Person {
     /// This person's device identities, label -> binding, in label order (unchanged from the old value type).
     devices: BTreeMap<DeviceLabel, Binding>,
-    /// This person's signet root, if recorded. `None` until hand-added.
-    signet: Option<Binding>,
+    /// This person's signet root, if recorded. `None` until saved.
+    signet: Option<SavedRoot>,
 }
 
 impl Person {
@@ -202,6 +246,9 @@ impl Person {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Contacts {
     people: BTreeMap<Petname, Person>,
+    /// The root this machine trusts, when it trusts one: your own root, which no person here is saved
+    /// under, read beside `me` so a root key typed where a machine goes can be named yours.
+    yours: Option<NodeId>,
 }
 
 impl Contacts {
@@ -214,7 +261,7 @@ impl Contacts {
     pub fn add(&mut self, petname: Petname, device: Option<DeviceLabel>, node: NodeId) -> Added {
         let device = device.unwrap_or(DeviceLabel(DeviceLabel::DEFAULT.to_owned()));
         let person = self.people.entry(petname).or_default();
-        match person.devices.insert(device, Binding { node }) {
+        match person.devices.insert(device, Binding::new(node)) {
             Some(previous) if previous.node == node => Added::Unchanged,
             Some(previous) => Added::Replaced(previous.node),
             None => Added::Created,
@@ -287,11 +334,13 @@ impl Contacts {
     }
 
     /// Lay `me` down as the devices of `devices`, the list of your devices this machine holds, verified
-    /// under its root, replacing whatever `me` held; with no list, `me` names nothing. The one writer of
-    /// `me`: no hand-typed binding lives there, and the book never saves it.
-    pub(crate) fn derive_me(&mut self, devices: Option<&RosterDoc>) {
+    /// under `root`, the root this machine trusts, replacing whatever `me` held; with no list, `me` names
+    /// nothing. The one writer of `me` and of [`your_root`](Self::your_root): no hand-typed binding lives
+    /// there, and the book never saves either.
+    pub(crate) fn derive_me(&mut self, devices: Option<&RosterDoc>, root: Option<NodeId>) {
         let me = Petname(ME.to_owned());
         self.people.remove(&me);
+        self.yours = root;
         let Some(devices) = devices else {
             return;
         };
@@ -304,7 +353,7 @@ impl Contacts {
             };
             person
                 .devices
-                .insert(member.label.clone(), Binding { node });
+                .insert(member.label.clone(), Binding::new(node));
         }
         if !person.is_empty() {
             self.people.insert(me, person);
@@ -332,18 +381,110 @@ impl Contacts {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_signet(&mut self, petname: Petname, node: NodeId) -> Added {
         let person = self.people.entry(petname).or_default();
-        match person.signet.replace(Binding { node }) {
+        let saved = SavedRoot {
+            node,
+            source: Source::Explicit,
+        };
+        match person.signet.replace(saved) {
             Some(prev) if prev.node == node => Added::Unchanged,
             Some(prev) => Added::Replaced(prev.node),
             None => Added::Created,
         }
     }
 
-    /// A person's recorded signet binding, or `None` if none is on file.
-    pub fn signet(&self, petname: &Petname) -> Option<&Binding> {
+    /// A person's saved root, or `None` if none is on file.
+    pub fn signet(&self, petname: &Petname) -> Option<&SavedRoot> {
         self.people
             .get(petname)
             .and_then(|person| person.signet.as_ref())
+    }
+
+    /// The root this machine trusts, your own: never a person's here, read with `me`.
+    pub fn your_root(&self) -> Option<NodeId> {
+        self.yours
+    }
+
+    /// The person `root` is saved for, when one is.
+    pub fn saved_root(&self, root: NodeId) -> Option<&Petname> {
+        self.people
+            .iter()
+            .find(|(_, person)| {
+                person
+                    .signet
+                    .as_ref()
+                    .is_some_and(|saved| saved.node == root)
+            })
+            .map(|(petname, _)| petname)
+    }
+
+    /// The root the machine `<person>/<device>` last presented here, if it was asked.
+    pub fn seen_root(&self, person: &Petname, device: &DeviceLabel) -> Option<NodeId> {
+        self.people
+            .get(person)
+            .and_then(|saved| saved.devices.get(device))
+            .and_then(|binding| binding.seen_root)
+    }
+
+    /// Remember `root` as the one `<person>/<device>` presented, so it is said once: a no-op for a machine
+    /// no longer saved.
+    pub fn see_root(&mut self, person: &Petname, device: &DeviceLabel, root: NodeId) {
+        if let Some(binding) = self
+            .people
+            .get_mut(person)
+            .and_then(|saved| saved.devices.get_mut(device))
+        {
+            binding.seen_root = Some(root);
+        }
+    }
+
+    /// Save `root` as `person`'s, learned from their machine `from`: only into an empty slot, and only for a
+    /// key no name here holds, so a learned root never replaces a saved one and one key keeps one name.
+    pub fn learn(
+        &mut self,
+        person: &Petname,
+        root: NodeId,
+        from: DeviceLabel,
+    ) -> Result<(), Taken> {
+        if let Some(held) = self.signet(person) {
+            return Err(Taken::Name { held: held.node });
+        }
+        if let Some(at) = self.saved_at(&root) {
+            return Err(Taken::Key { at });
+        }
+        self.people.entry(person.clone()).or_default().signet = Some(SavedRoot {
+            node: root,
+            source: Source::Learned(from),
+        });
+        Ok(())
+    }
+
+    /// Replace `person`'s saved root with `root`, saved explicitly; the root it held is returned. Refuses a
+    /// key any name here holds, the person's own old root aside, so one key keeps one name. `None` when the
+    /// person has no root saved: there is nothing to replace.
+    pub fn replace_root(
+        &mut self,
+        person: &Petname,
+        root: NodeId,
+    ) -> Result<Option<NodeId>, Taken> {
+        match self.saved_at(&root) {
+            Some(at) if at.device.is_some() || at.petname != *person => {
+                return Err(Taken::Key { at });
+            }
+            _ => {}
+        }
+        let Some(saved) = self
+            .people
+            .get_mut(person)
+            .and_then(|saved| saved.signet.as_mut())
+        else {
+            return Ok(None);
+        };
+        let old = saved.node;
+        *saved = SavedRoot {
+            node: root,
+            source: Source::Explicit,
+        };
+        Ok(Some(old))
     }
 
     /// Save `node` at `at`, `contact add`'s one write: a person's root when `at` names no machine
@@ -353,27 +494,41 @@ impl Contacts {
     /// as a root or a machine, refuses ([`Taken::Key`]), so one key has one name on this machine and a
     /// revoke by one name never ends links given by another. Nothing is written on a refusal.
     pub fn save(&mut self, at: &ContactRef, node: NodeId) -> Result<Saved, Taken> {
-        let held = self
-            .people
-            .get(&at.petname)
-            .and_then(|person| match &at.device {
-                None => person.signet,
-                Some(device) => person.devices.get(device).copied(),
-            });
-        match held {
-            Some(held) if held.node == node => return Ok(Saved::Unchanged),
-            Some(held) => return Err(Taken::Name { held: held.node }),
-            None => {}
+        let person = self.people.get_mut(&at.petname);
+        match (person, &at.device) {
+            (Some(person), None) => match &mut person.signet {
+                // The same root saved explicitly replaces the learned mark: the person said it is theirs.
+                Some(saved) if saved.node == node => {
+                    return Ok(
+                        match core::mem::replace(&mut saved.source, Source::Explicit) {
+                            Source::Explicit => Saved::Unchanged,
+                            Source::Learned(_) => Saved::Unlearned,
+                        },
+                    );
+                }
+                Some(saved) => return Err(Taken::Name { held: saved.node }),
+                None => {}
+            },
+            (Some(person), Some(device)) => match person.devices.get(device) {
+                Some(held) if held.node == node => return Ok(Saved::Unchanged),
+                Some(held) => return Err(Taken::Name { held: held.node }),
+                None => {}
+            },
+            (None, _) => {}
         }
         if let Some(at) = self.saved_at(&node) {
             return Err(Taken::Key { at });
         }
         let person = self.people.entry(at.petname.clone()).or_default();
-        let binding = Binding { node };
         match &at.device {
-            None => person.signet = Some(binding),
+            None => {
+                person.signet = Some(SavedRoot {
+                    node,
+                    source: Source::Explicit,
+                });
+            }
             Some(device) => {
-                person.devices.insert(device.clone(), binding);
+                person.devices.insert(device.clone(), Binding::new(node));
             }
         }
         Ok(Saved::Created)
@@ -383,7 +538,11 @@ impl Contacts {
     /// your own devices under `me` included; `None` when no name holds it.
     pub fn saved_at(&self, node: &NodeId) -> Option<ContactRef> {
         self.people.iter().find_map(|(petname, person)| {
-            let device = if person.signet.is_some_and(|root| root.node == *node) {
+            let device = if person
+                .signet
+                .as_ref()
+                .is_some_and(|root| root.node == *node)
+            {
                 None
             } else {
                 let (label, _) = person
@@ -399,10 +558,10 @@ impl Contacts {
         })
     }
 
-    /// Insert a signet binding under a petname. For the store codec ONLY, reconstructing a saved signet,
-    /// as [`insert_binding`](Self::insert_binding) does for devices.
-    pub(crate) fn set_signet_binding(&mut self, petname: Petname, binding: Binding) {
-        self.people.entry(petname).or_default().signet = Some(binding);
+    /// Insert a saved root under a petname. For the store codec ONLY, reconstructing a saved signet, as
+    /// [`insert_binding`](Self::insert_binding) does for devices.
+    pub(crate) fn set_signet_binding(&mut self, petname: Petname, root: SavedRoot) {
+        self.people.entry(petname).or_default().signet = Some(root);
     }
 
     /// Remove a whole petname (all its devices and signet) or, with a device, just that one device. Returns
@@ -452,6 +611,9 @@ pub enum Saved {
     Created,
     /// The name held this key already; nothing changed.
     Unchanged,
+    /// The name held this root already, learned from a device; it is now saved explicitly, and the mark
+    /// is gone.
+    Unlearned,
 }
 
 /// Why a [`save`](Contacts::save) refused: the name or the key is taken.

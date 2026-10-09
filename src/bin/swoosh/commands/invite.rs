@@ -66,6 +66,11 @@ pub struct InviteCmd {
     pub reach: ReachArgs,
 }
 
+/// The refusal for a root's key typed where the device's key goes, at parse and with no echo of the key:
+/// an invite is for one machine, and `join` on that machine prints its key.
+pub const ROOT_IS_NO_MACHINE: &str = "that is a root key, not a machine's key\n  swoosh invite takes a \
+                                      machine's key. On that machine, this prints it:\n    swoosh join";
+
 /// The first positional: a name under the one name rule, and never text that is a key. A key typed where
 /// the name goes is refused, naming the form that takes it.
 fn device_name(text: &str) -> Result<DeviceLabel, String> {

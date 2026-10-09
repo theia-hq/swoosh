@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use bifrost::NodeId;
 use keystore::{Health, KeyFile, Method, Stored};
 use nauthy::{Denylist, VerifyKey};
-use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME};
+use swoosh::contacts::{Contacts, ContactsStore, DeviceLabel, ME, Source};
 use swoosh::credential::short;
 use swoosh::escape::EscapedPath;
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
@@ -21,6 +21,7 @@ use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::{Date, Root, RootPlace};
+use swoosh::root_key::RootKey;
 use swoosh::roster::{Member, RevokedDevice};
 use swoosh::serve::control_codec::{ControlError, DisabledList, ServiceMenu};
 use swoosh::standing::{Standing, StandingError};
@@ -651,8 +652,9 @@ fn serving(menu: &ServiceMenu) -> Result<String, String> {
         .catalog
         .entries()
         .map(|entry| entry.name.as_str())
-        // The node's own routes (`control.*`) are no service a person started, so none is listed.
-        .filter(|name| !name.starts_with("control."))
+        // The node's own routes (`control.*`, `lookup.*`) are dotted, as no service a person starts can be,
+        // so none is listed.
+        .filter(|name| !name.contains('.'))
         .filter(|name| !off.iter().any(|off| off == name))
         .collect();
     Ok(match on.as_slice() {
@@ -705,15 +707,21 @@ fn invite_ends(row: &Member, now: u64) -> Option<String> {
 }
 
 /// `contacts:`: each person with their root, and each device saved by hand. Your own devices are under
-/// `devices:`, never here.
+/// `devices:`, never here. A row's kind is the key's own shape (`root:` or a machine's bare key), so no
+/// column repeats it.
 fn contacts_section(contacts: &Contacts) -> Section {
     let mut rows = Vec::new();
     for person in contacts.petnames().filter(|person| person.as_str() != ME) {
         if let Some(root) = contacts.signet(person) {
+            // A learned root is only as trustworthy as the device it came from, so the row names it.
+            let learned = match &root.source {
+                Source::Learned(device) => format!("learned from {person}/{device}"),
+                Source::Explicit => String::new(),
+            };
             rows.push([
                 person.to_string(),
-                format!("root:{}", short(&root.node)),
-                "root".to_owned(),
+                RootKey::from(root.node).short(),
+                learned,
                 String::new(),
             ]);
         }
@@ -723,7 +731,7 @@ fn contacts_section(contacts: &Contacts) -> Section {
             } else {
                 format!("{person}/{label}")
             };
-            rows.push([name, short(&key), "device".to_owned(), String::new()]);
+            rows.push([name, short(&key), String::new(), String::new()]);
         }
     }
     Section {

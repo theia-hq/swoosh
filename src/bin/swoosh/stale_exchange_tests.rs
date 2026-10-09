@@ -106,11 +106,13 @@ async fn ping(home: &Home, peer: &str, dial: &Answering) -> eyre::Result<()> {
         present: None,
         membership: None,
         home,
+        admitted: swoosh::learn::Admitted::unheard(),
     };
     let node = Node::new(MemTransport::bind(), NoDiscovery);
-    let result = tokio::time::timeout(Duration::from_secs(30), run_verb(outward, &node, ctx, dial))
-        .await
-        .expect("the verb ends");
+    let (result, _shown) =
+        tokio::time::timeout(Duration::from_secs(30), run_verb(outward, &node, ctx, dial))
+            .await
+            .expect("the verb ends");
     node.close().await;
     result
 }

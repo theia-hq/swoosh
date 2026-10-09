@@ -22,6 +22,7 @@ use crate::names::{Name, NameError};
 
 mod activity;
 mod control;
+mod lookup;
 mod renewal;
 mod resident;
 mod roster;
@@ -43,6 +44,9 @@ pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_singl
 // `sshh`, `transfer`) are consumed from the services repo, so the names resolve to those crates.
 pub use transfer::Recv;
 
+#[cfg(test)]
+pub(crate) use self::lookup::answer as lookup_answer;
+pub use self::lookup::{Devices, Lookup};
 pub use self::renewal::{Known, Renewal};
 pub use self::roster::Exchange;
 pub use self::scheme::{BoundTargets, NotATarget, Scheme, ServedTarget};
@@ -81,6 +85,13 @@ pub const SYNC_SERVICE: &str = "control.sync";
 /// standing on it ([`crate::renewal`]), with no token read. Like the update route it is bound by the node,
 /// never named in a `serve` entry, never printed, and dotted, so no name a person types can be it.
 pub const RENEWAL_SERVICE: &str = "control.renewal";
+
+/// The root route: every `serve` binds it, proven-only, and hands a peer this machine saves as one machine
+/// of a person this machine's own standing, which names the root that vouches for it ([`Lookup`]). Its
+/// group answers other roots' devices, so it is a sibling of the family-only `control` group, never in it.
+/// Like the pick-up route it is bound by the node, never named in a `serve` entry, and dotted, so no name a
+/// person types can be it.
+pub const LOOKUP_ROOT_SERVICE: &str = "lookup.root";
 
 /// WHY a `serve` run stopped, for a GRACEFUL stop: an enum, not a bool, so a new stop reason forces a
 /// decision at every match site (STYLE: prefer enums to bools). Every arm is a SUCCESS: an owner asked the
@@ -141,6 +152,23 @@ pub async fn bind_renewal(
         move |key| knows.knows(key),
     )?;
     Ok((router, known))
+}
+
+/// Bind the root route ([`LOOKUP_ROOT_SERVICE`]) on `router`, proven-only, answering from `home`. The keys it
+/// answers are read once here into the returned [`Devices`]; the caller keeps them fresh with
+/// [`Devices::watch`] for as long as it serves.
+pub async fn bind_lookup(
+    router: Router,
+    home: &crate::home::Home,
+) -> eyre::Result<(Router, Devices)> {
+    let devices = Devices::load(home).await;
+    let knows = devices.clone();
+    let router = router.proven_service(
+        LOOKUP_ROOT_SERVICE.parse()?,
+        Lookup::new(home.clone()),
+        move |key| knows.knows(key),
+    )?;
+    Ok((router, devices))
 }
 
 /// The services a `serve` with nothing named and nothing to resume serves: the two diagnostics, each its

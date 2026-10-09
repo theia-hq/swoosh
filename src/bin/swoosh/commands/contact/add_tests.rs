@@ -1,8 +1,11 @@
 use bifrost::NodeId;
 use clap::Parser as _;
+use keystore::Passphrase;
 use swoosh::contacts::{ContactRef, ContactsStore};
 use swoosh::home::Home;
 use swoosh::names::NameError;
+use swoosh::passphrase::{Asked, Choice, Prompt};
+use swoosh::root_key::RootKey;
 
 use super::AddCmd;
 use crate::Cli;
@@ -27,23 +30,101 @@ async fn home_with_book(tag: &str) -> Home {
     home
 }
 
+/// `contact add <name> <key>` with the key in the kind the name wants: a root for a person, a machine's
+/// key for `<person>/<name>`. No terminal, so a replace refuses.
 async fn add(home: &Home, name: &str, key: NodeId) -> eyre::Result<()> {
-    AddCmd {
-        name: super::super::new_contact(name).expect("a valid contact name"),
-        key: super::TypedKey { key, root: false },
-    }
-    .run(home)
-    .await
+    let name = super::super::new_contact(name).expect("a valid contact name");
+    let key = match name.device() {
+        None => super::TypedKey::Root(RootKey::from(key)),
+        Some(_) => super::TypedKey::Machine(key),
+    };
+    AddCmd { name, key }
+        .run(home, &mut Person::away(), &mut Vec::new())
+        .await
 }
 
-/// `swoosh contact add <args>` on `home`, through the parser the binary uses.
+/// `swoosh contact add <args>` on `home`, through the parser the binary uses, with nobody at a terminal.
 async fn add_typed(home: &Home, args: &[&str]) -> eyre::Result<()> {
+    add_at(home, args, &mut Person::away(), &mut Vec::new()).await
+}
+
+/// `swoosh contact add <args>` on `home`, through the parser the binary uses, asking `person` and
+/// printing on `err`.
+async fn add_at(
+    home: &Home,
+    args: &[&str],
+    person: &mut Person,
+    err: &mut Vec<u8>,
+) -> eyre::Result<()> {
     match Cli::try_parse_from(["swoosh", "contact", "add"].iter().chain(args).copied())
         .expect("contact add parses")
         .command
     {
-        Some(crate::Command::Contact(super::super::ContactCmd::Add(cmd))) => cmd.run(home).await,
+        Some(crate::Command::Contact(super::super::ContactCmd::Add(cmd))) => {
+            cmd.run(home, person, err).await
+        }
         other => panic!("contact add parses to contact add, not {other:?}"),
+    }
+}
+
+/// A person at a terminal who types `typed` at a confirmation, or nobody at one. What was said there, and
+/// each question asked, are kept.
+pub(crate) struct Person {
+    terminal: bool,
+    typed: Option<String>,
+    /// A file written while the person types, as another command would: its path and its bytes.
+    meanwhile: Option<(std::path::PathBuf, Vec<u8>)>,
+    pub(crate) said: Vec<String>,
+    pub(crate) asked: Vec<String>,
+}
+
+impl Person {
+    /// Nobody at a terminal.
+    pub(crate) fn away() -> Self {
+        Self {
+            terminal: false,
+            typed: None,
+            meanwhile: None,
+            said: Vec::new(),
+            asked: Vec::new(),
+        }
+    }
+
+    /// At a terminal, typing `typed` at any question.
+    pub(crate) fn typing(typed: &str) -> Self {
+        Self {
+            terminal: true,
+            typed: Some(typed.to_owned()),
+            ..Self::away()
+        }
+    }
+}
+
+impl Prompt for Person {
+    fn terminal(&self) -> bool {
+        self.terminal
+    }
+
+    fn unlock(&mut self, _asked: Asked<'_>) -> eyre::Result<Passphrase> {
+        eyre::bail!("no passphrase is asked here")
+    }
+
+    fn choose(&mut self, _asked: Asked<'_>) -> eyre::Result<Choice> {
+        eyre::bail!("no passphrase is chosen here")
+    }
+
+    fn say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn confirm(&mut self, question: &str) -> eyre::Result<String> {
+        self.asked.push(question.to_owned());
+        if let Some((path, bytes)) = self.meanwhile.take() {
+            std::fs::write(path, bytes).expect("the file is written meanwhile");
+        }
+        self.typed
+            .clone()
+            .ok_or_else(|| eyre::eyre!("nobody is at a terminal to answer"))
     }
 }
 
@@ -259,15 +340,16 @@ async fn contact_add_never_replaces_a_key() {
         .expect("bob's laptop is saved");
     let before = book(&home).await;
 
+    // A root over a saved one is a replace, which needs a terminal: with none it refuses, naming the command.
     let root = add(&home, "bob", new)
         .await
-        .expect_err("a second root refuses");
+        .expect_err("a second root refuses with no terminal");
     assert!(root.downcast_ref::<super::Usage>().is_none(), "exit 1");
     assert_eq!(
         format!("{root:#}"),
         format!(
-            "bob's root is saved here as root:{old}, not root:{new}\n  a saved root is never replaced; to save \
-             the new one, remove bob:\n    swoosh contact rm bob"
+            "replacing bob's root needs a terminal\n  Run this at a terminal:\n    swoosh contact add bob \
+             root:{new}"
         )
     );
     let machine = add(&home, "bob/laptop", other)
@@ -292,15 +374,11 @@ async fn contact_add_never_replaces_a_key() {
     let _ = std::fs::remove_dir_all(home.dir());
 }
 
-/// A live link given to the name puts `revoke` first, since `contact rm` refuses until it is ended: for a
-/// person, a link to their root or to any machine of theirs; for a machine, a link to that machine.
+/// A live link given to a machine's name puts `revoke` first, since `contact rm` refuses until it is ended.
 #[tokio::test]
 async fn a_replace_refusal_names_revoke_while_links_to_the_name_are_live() {
     let home = home_with_book("replace-live").await;
-    let (old, new) = (
-        NodeId::from_ed25519_secret(&[6u8; 32]),
-        NodeId::from_ed25519_secret(&[7u8; 32]),
-    );
+    let old = NodeId::from_ed25519_secret(&[6u8; 32]);
     let (laptop, other) = (
         NodeId::from_ed25519_secret(&[8u8; 32]),
         NodeId::from_ed25519_secret(&[9u8; 32]),
@@ -312,17 +390,6 @@ async fn a_replace_refusal_names_revoke_while_links_to_the_name_are_live() {
     given(&home, laptop).await;
     let before = book(&home).await;
 
-    let root = add(&home, "bob", new)
-        .await
-        .expect_err("a second root refuses");
-    assert_eq!(
-        format!("{root:#}"),
-        format!(
-            "bob's root is saved here as root:{old}, not root:{new}\n  a saved root is never replaced; to save \
-             the new one, end the links you gave bob, then remove bob:\n    swoosh revoke bob\n    swoosh \
-             contact rm bob"
-        )
-    );
     let machine = add(&home, "bob/laptop", other)
         .await
         .expect_err("a second key for a machine refuses");
@@ -377,17 +444,17 @@ async fn contact_add_refuses_a_key_under_a_second_name() {
         (
             "carol",
             root,
-            format!("root:{root} is saved here already, as bob's root"),
+            "that root is already saved as bob".to_owned(),
         ),
         (
             "carol/desk",
             root,
-            format!("root:{root} is saved here already, as bob's root"),
+            "that root is already saved as bob".to_owned(),
         ),
         (
             "bob/desk",
             root,
-            format!("root:{root} is saved here already, as bob's root"),
+            "that root is already saved as bob".to_owned(),
         ),
         (
             "carol",
@@ -443,13 +510,375 @@ async fn contact_add_takes_a_root_typed_with_its_prefix() {
         error.downcast_ref::<super::Usage>().map(|usage| usage.0.as_str()),
         Some(
             format!(
-                "root:{other} is a root key, which vouches for all of carol's machines: swoosh contact add \
-                 carol root:{other}"
+                "that is a root key, not a machine's key\n  To save it as carol's root:\n    swoosh contact \
+                 add carol root:{other}"
             )
             .as_str()
         ),
         "exit 2"
     );
     assert_eq!(book(&home).await.len(), 1, "nothing is written");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A name never holds a `:`, so `root:` can never read as a name (the one name rule, unchanged here).
+#[test]
+fn a_petname_cannot_hold_a_colon() {
+    for name in ["a:b", "alice/a:b", "root:alice"] {
+        let error = parse_add(name).expect_err("a name with a colon refuses");
+        assert_eq!(error.exit_code(), 2, "{name}");
+        assert!(
+            error.to_string().contains("is not a name"),
+            "{name}: {error}"
+        );
+    }
+}
+
+/// The bare-key refusal for a person: exit 2, through the usage path, and nothing is written.
+#[tokio::test]
+async fn contact_add_person_refuses_a_machine_key() {
+    let home = home_with_book("person-machine-key").await;
+    let key = NodeId::from_ed25519_secret(&[6u8; 32]);
+    let error = add_typed(&home, &["alice", &key.to_string()])
+        .await
+        .expect_err("a person takes no machine's key");
+    assert!(error.downcast_ref::<super::Usage>().is_some(), "exit 2");
+    assert!(book(&home).await.is_empty(), "nothing is written");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// The bare-key refusal names where a person's root is and the form that saves it (`root:`), then the
+/// form that saves the key as one machine instead, the key typed whole.
+#[tokio::test]
+async fn contact_add_person_names_the_root_line() {
+    let home = home_with_book("person-root-line").await;
+    let key = NodeId::from_ed25519_secret(&[6u8; 32]);
+    let error = add_typed(&home, &["alice", &key.to_string()])
+        .await
+        .expect_err("a person takes no machine's key");
+    assert_eq!(
+        error
+            .downcast_ref::<super::Usage>()
+            .map(|usage| usage.0.clone()),
+        Some(format!(
+            "saving alice takes a root key, not a machine's key\n  alice's swoosh status shows it as the key \
+             under \"your root\".\n  To save alice:\n    swoosh contact add alice root:<key>\n  To save this \
+             key as one of alice's machines instead:\n    swoosh contact add alice/<name> {key}"
+        ))
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A root's key under a machine's name: exit 2, naming the form that saves it as the person's root, and
+/// nothing is written.
+#[tokio::test]
+async fn contact_add_device_refuses_a_root_key() {
+    let home = home_with_book("device-root-key").await;
+    let root = NodeId::from_ed25519_secret(&[6u8; 32]);
+    let error = add_typed(&home, &["alice/laptop", &format!("root:{root}")])
+        .await
+        .expect_err("a machine takes no root key");
+    assert_eq!(
+        error
+            .downcast_ref::<super::Usage>()
+            .map(|usage| usage.0.clone()),
+        Some(format!(
+            "that is a root key, not a machine's key\n  To save it as alice's root:\n    swoosh contact add \
+             alice root:{root}"
+        ))
+    );
+    assert!(book(&home).await.is_empty(), "nothing is written");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A root learned from alice's laptop.
+async fn learned(home: &Home, root: NodeId) {
+    let mut store = ContactsStore::open(home).await.expect("open");
+    store.contacts_mut().add(
+        "alice".parse().unwrap(),
+        Some("laptop".parse().unwrap()),
+        laptop(),
+    );
+    store
+        .contacts_mut()
+        .learn(&"alice".parse().unwrap(), root, "laptop".parse().unwrap())
+        .expect("an empty slot");
+    store.save(&swoosh::testkit::lock()).expect("save");
+}
+
+/// Alice's laptop's key.
+fn laptop() -> NodeId {
+    NodeId::from_ed25519_secret(&[8u8; 32])
+}
+
+/// Alice's root's source, as the book holds it.
+async fn source(home: &Home) -> Option<swoosh::contacts::Source> {
+    ContactsStore::open(home)
+        .await
+        .expect("open")
+        .contacts()
+        .signet(&"alice".parse().unwrap())
+        .map(|saved| saved.source.clone())
+}
+
+/// The same root typed explicitly replaces the learned mark, and says it saved; typed again it says it is
+/// already saved.
+#[tokio::test]
+async fn an_explicit_save_replaces_learned() {
+    let home = home_with_book("explicit-replaces-learned").await;
+    let root = NodeId::from_ed25519_secret(&[6u8; 32]);
+    learned(&home, root).await;
+    assert_eq!(
+        source(&home).await,
+        Some(swoosh::contacts::Source::Learned("laptop".parse().unwrap()))
+    );
+    let mut err = Vec::new();
+    add_at(
+        &home,
+        &["alice", &format!("root:{root}")],
+        &mut Person::away(),
+        &mut err,
+    )
+    .await
+    .expect("the same root saves");
+    assert_eq!(String::from_utf8_lossy(&err), "Saved alice's root.\n");
+    assert_eq!(
+        source(&home).await,
+        Some(swoosh::contacts::Source::Explicit)
+    );
+
+    let mut err = Vec::new();
+    add_at(
+        &home,
+        &["alice", &format!("root:{root}")],
+        &mut Person::away(),
+        &mut err,
+    )
+    .await
+    .expect("the same root again");
+    assert_eq!(
+        String::from_utf8_lossy(&err),
+        "alice's root is already saved.\n"
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A link for `service` this machine gave `holder`, bound as `kind`, ending in an hour: its id.
+async fn shared(
+    home: &Home,
+    holder: NodeId,
+    kind: swoosh::grants::GrantKind,
+    service: &str,
+) -> nauthy::RevocationId {
+    let ends = std::time::SystemTime::now() + core::time::Duration::from_secs(3600);
+    let link = swoosh::testkit::TestNode::seeded(0x41)
+        .slip(&service.parse().expect("a service"), ends)
+        .expect("a slip");
+    let id = link.root_revocation_id().expect("an id");
+    swoosh::grants::Grants::at(home.links())
+        .append(
+            &swoosh::testkit::lock(),
+            &swoosh::grants::GrantRecord {
+                target: service.parse().expect("a service"),
+                serves: None,
+                kind,
+                delegation: swoosh::grants::Delegation::Sealed,
+                holder: holder.to_string(),
+                root_id: id.clone(),
+                expiry: ends,
+            },
+        )
+        .expect("append the row");
+    id
+}
+
+/// Whether `home` refuses the link with `id`.
+fn refused(home: &Home, id: &nauthy::RevocationId) -> bool {
+    swoosh::revoked::open(home)
+        .expect("the revocations read")
+        .is_revoked_any([id])
+}
+
+/// Alice's root R, a link given to R and one given to alice/laptop's key.
+async fn alice_with_links(tag: &str) -> (Home, NodeId, nauthy::RevocationId, nauthy::RevocationId) {
+    let home = home_with_book(tag).await;
+    let old = NodeId::from_ed25519_secret(&[6u8; 32]);
+    add(&home, "alice", old).await.expect("alice's root");
+    add(&home, "alice/laptop", laptop())
+        .await
+        .expect("alice's laptop");
+    let to_root = shared(&home, old, swoosh::grants::GrantKind::Fleet, "ssh").await;
+    let to_laptop = shared(&home, laptop(), swoosh::grants::GrantKind::Device, "web").await;
+    (home, old, to_root, to_laptop)
+}
+
+/// The token for a root: the 8 characters after its `ed01`.
+fn token(root: NodeId) -> String {
+    root.to_string().chars().skip(4).take(8).collect()
+}
+
+/// After the typed token, a new root replaces the old one, the links given to the old root end, the links
+/// given to one of alice's machines do not, and the result screen names what ended and how to share again.
+#[tokio::test]
+async fn replacing_a_root_revokes_the_links_to_the_old_one() {
+    let (home, old, to_root, to_laptop) = alice_with_links("replace").await;
+    let new = NodeId::from_ed25519_secret(&[7u8; 32]);
+    let mut person = Person::typing(&token(new));
+    let mut err = Vec::new();
+    add_at(
+        &home,
+        &["alice", &format!("root:{new}")],
+        &mut person,
+        &mut err,
+    )
+    .await
+    .expect("the replace goes ahead");
+
+    assert!(refused(&home, &to_root), "the old root's link ends");
+    assert!(!refused(&home, &to_laptop), "a machine's link stays");
+    let store = ContactsStore::open(&home).await.expect("open");
+    assert_eq!(
+        store
+            .contacts()
+            .signet(&"alice".parse().unwrap())
+            .map(|saved| saved.node),
+        Some(new)
+    );
+    let id: String = to_root.to_hex().chars().take(8).collect();
+    let row = format!("  ssh              {id}");
+    assert_eq!(
+        person.said,
+        [
+            "alice's root here:".to_owned(),
+            format!("  root:{old}"),
+            "The new root:".to_owned(),
+            format!("  root:{new}"),
+            "Replacing it will end these links you gave alice:".to_owned(),
+            row.clone(),
+        ]
+    );
+    assert_eq!(
+        person.asked,
+        [format!("Type {} to replace alice's root:", token(new))]
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&err),
+        format!(
+            "Replaced alice's root.\n\nlinks ended\n{row}\n\nTo share again:\n  swoosh share ssh alice\n"
+        )
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A new root saved under another name while the person typed the token refuses before anything is written:
+/// the old root stays, and so do its links.
+#[tokio::test]
+async fn a_replace_that_loses_its_root_to_another_name_writes_nothing() {
+    let (home, old, to_root, _) = alice_with_links("replace-race").await;
+    let new = NodeId::from_ed25519_secret(&[7u8; 32]);
+    // The book as it reads once `contact add bob root:<new>` ran, put back until the person types.
+    let before = std::fs::read(home.contacts()).expect("the book reads");
+    add(&home, "bob", new).await.expect("bob's root");
+    let raced = std::fs::read(home.contacts()).expect("the book reads");
+    std::fs::write(home.contacts(), before).expect("the book is put back");
+    let mut person = Person {
+        meanwhile: Some((home.contacts(), raced)),
+        ..Person::typing(&token(new))
+    };
+
+    let error = add_at(
+        &home,
+        &["alice", &format!("root:{new}")],
+        &mut person,
+        &mut Vec::new(),
+    )
+    .await
+    .expect_err("the root is bob's now");
+    assert_eq!(error.to_string(), "that root is already saved as bob");
+    assert!(!refused(&home, &to_root), "the old root's links stay open");
+    let store = ContactsStore::open(&home).await.expect("open");
+    assert_eq!(
+        store
+            .contacts()
+            .signet(&"alice".parse().unwrap())
+            .map(|saved| saved.node),
+        Some(old)
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A wrong token, a learned root or a typed one alike: exit 1, the old root kept, and its links still open.
+#[tokio::test]
+async fn replacing_a_root_needs_the_typed_prefix() {
+    let (home, old, to_root, _) = alice_with_links("replace-wrong").await;
+    let new = NodeId::from_ed25519_secret(&[7u8; 32]);
+    let before = book(&home).await;
+    for typed in [
+        String::new(),
+        "x".to_owned(),
+        token(old),
+        format!("ed01{}", token(new)),
+    ] {
+        let error = add_at(
+            &home,
+            &["alice", &format!("root:{new}")],
+            &mut Person::typing(&typed),
+            &mut Vec::new(),
+        )
+        .await
+        .expect_err("a wrong token refuses");
+        assert!(
+            error.downcast_ref::<super::Usage>().is_none(),
+            "{typed:?}: exit 1"
+        );
+        assert_eq!(
+            format!("{error:#}"),
+            "that did not match; nothing was changed",
+            "{typed:?}"
+        );
+    }
+    assert_eq!(book(&home).await, before, "the old root is kept");
+    assert!(!refused(&home, &to_root), "its links still admit");
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// With nobody at a terminal a replace refuses, exit 1, naming the command to run at one, and writes
+/// nothing, whether the saved root was typed or learned.
+#[tokio::test]
+async fn replacing_a_root_with_no_terminal_refuses() {
+    let (home, _, to_root, _) = alice_with_links("replace-headless").await;
+    let new = NodeId::from_ed25519_secret(&[7u8; 32]);
+    let before = book(&home).await;
+    let error = add_at(
+        &home,
+        &["alice", &format!("root:{new}")],
+        &mut Person::away(),
+        &mut Vec::new(),
+    )
+    .await
+    .expect_err("no terminal refuses");
+    assert!(error.downcast_ref::<super::Usage>().is_none(), "exit 1");
+    assert_eq!(
+        format!("{error:#}"),
+        format!(
+            "replacing alice's root needs a terminal\n  Run this at a terminal:\n    swoosh contact add \
+             alice root:{new}"
+        )
+    );
+    assert_eq!(book(&home).await, before, "nothing is written");
+    assert!(!refused(&home, &to_root));
+
+    let home = home_with_book("replace-headless-learned").await;
+    learned(&home, NodeId::from_ed25519_secret(&[6u8; 32])).await;
+    let before = book(&home).await;
+    let _refused = add_at(
+        &home,
+        &["alice", &format!("root:{new}")],
+        &mut Person::away(),
+        &mut Vec::new(),
+    )
+    .await
+    .expect_err("a learned root asks too");
+    assert_eq!(book(&home).await, before, "nothing is written");
     let _ = std::fs::remove_dir_all(home.dir());
 }
