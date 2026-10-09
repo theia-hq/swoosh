@@ -40,6 +40,7 @@ use swoosh::home::{Home, HomeWrite};
 use swoosh::identity::{self, Identity};
 use swoosh::names::NameError;
 use swoosh::node_signer::{Bind, NodeSigner};
+use swoosh::root_key::RootKey;
 use swoosh::serve::{Scheme, ServedTarget, Started};
 use swoosh::serve_toml::ServeToml;
 use tightbeam::identity::AsVerifyKey as _;
@@ -51,7 +52,7 @@ pub struct ShareCmd {
     #[arg(value_name = "service | link", value_parser = shared)]
     pub what: Shared,
     /// who it is for
-    #[arg(value_name = "person | person/name | key | anyone", value_parser = recipient)]
+    #[arg(value_name = "person | person/name | key | root key | anyone", value_parser = recipient)]
     pub who: Option<Recipient>,
     /// How long: `2h`, `90d`.
     #[arg(long, value_name = "d", value_parser = str::parse::<Span>)]
@@ -86,6 +87,8 @@ pub enum Recipient {
     Device(ContactRef),
     /// A key: that one machine.
     Key(NodeId),
+    /// A root's key, typed `root:ed01…`: every machine that root vouches for.
+    Root(RootKey),
 }
 
 /// The recipient that is whoever holds the link: a reserved name, so no contact can be called it.
@@ -144,11 +147,19 @@ fn shared(text: &str) -> Result<Shared, String> {
         .map_err(|error| error.to_string())
 }
 
-/// The second positional: `anyone`, a key, `<person>` or `<person>/<name>`. Empty text names nobody, and
+/// The second positional: `anyone`, a key, a root's key, `<person>` or `<person>/<name>`. The shape keeps
+/// its kind: a root's key (`root:ed01…`) is every machine of that root, a bare key one machine. Empty text
+/// names nobody, and
 /// `me` or `me/<name>` is refused: your devices reach this machine without a link.
 fn recipient(text: &str) -> Result<Recipient, String> {
     if text.trim().is_empty() {
         return Err(who_is_it_for("<service>"));
+    }
+    if swoosh::root_key::is_prefixed(text) {
+        return text
+            .parse::<RootKey>()
+            .map(Recipient::Root)
+            .map_err(|error| error.to_string());
     }
     match swoosh::peer::raw_key(text) {
         Ok(Some(key)) => return Ok(Recipient::Key(key)),
@@ -406,7 +417,12 @@ impl Issue {
             Uses::Once => ", once, ",
             Uses::UntilItEnds => gives.before_until(),
         };
-        writeln!(err, "{} {gives}{before_until}until {until}.", bound.who)?;
+        match &bound.subject {
+            Subject::Named(who) => writeln!(err, "{who} {gives}{before_until}until {until}.")?,
+            Subject::Unsaved { who, key } => {
+                writeln!(err, "{who} {gives}{before_until}until {until}:\n  {key}")?;
+            }
+        }
         writeln!(
             err,
             "the link dials this machine: it works while this machine serves {service}."
@@ -443,41 +459,55 @@ impl Issue {
                     kind,
                     delegation,
                     holder: grants::ANYONE.to_owned(),
+                    subject: Subject::Named(ANYONE.to_owned()),
                     who: ANYONE.to_owned(),
                 }
             }
             Recipient::Person(person) => {
-                let Some(root) = contacts.signet(person).map(|binding| binding.node) else {
+                let Some(root) = contacts.signet(person).map(|saved| saved.node) else {
                     eyre::bail!(
                         "{person} has no root saved here: swoosh contact add {person} <root key>"
                     );
                 };
-                if swoosh::config::load_signet(home).await? == Some(root) {
-                    eyre::bail!("{person} is saved with your own root: {YOURS}");
-                }
-                // This machine's gate refuses every badge under a root it revoked, so a link bound to one
-                // would print and never work.
-                if swoosh::config::is_revoked(home, root)? {
-                    eyre::bail!(
-                        "{person}'s root is revoked here, so a link for {person} would not work"
-                    );
-                }
-                Bound {
-                    bind: Bind::Fleet(root.verify_key()?),
-                    kind: GrantKind::Fleet,
-                    delegation: Delegation::Sealed,
-                    holder: root.to_string(),
-                    who: person.to_string(),
-                }
+                Bound::fleet(home, root, &person.to_string()).await?
             }
+            // A root saved for a person is that person, by name; any other root is named by its key.
+            Recipient::Root(root) => match contacts.saved_root(root.key()) {
+                Some(person) => Bound::fleet(home, root.key(), &person.to_string()).await?,
+                None => {
+                    if swoosh::config::load_signet(home).await? == Some(root.key()) {
+                        eyre::bail!("{YOURS}");
+                    }
+                    if swoosh::config::is_revoked(home, root.key())? {
+                        eyre::bail!("{root} is revoked here, so a link for it would not work");
+                    }
+                    Bound {
+                        subject: Subject::Unsaved {
+                            who: "Every machine of this root",
+                            key: root.to_string(),
+                        },
+                        ..Bound::fleet(home, root.key(), &root.to_string()).await?
+                    }
+                }
+            },
             Recipient::Device(device) => {
                 let node = match contacts.resolve_candidates(device)?.as_slice() {
                     [one] => one.node,
                     _ => eyre::bail!("{device} names more than one device; name exactly one"),
                 };
-                Bound::machine(node, device.to_string())?
+                Bound::machine(node, Subject::Named(device.to_string()))?
             }
-            Recipient::Key(key) => Bound::machine(*key, key.to_string())?,
+            // A key is one machine: its name here when the book saves it as one, else the key itself.
+            Recipient::Key(key) => {
+                let subject = match contacts.saved_at(key) {
+                    Some(name) if name.device().is_some() => Subject::Named(name.to_string()),
+                    _ => Subject::Unsaved {
+                        who: "The machine with this key",
+                        key: key.to_string(),
+                    },
+                };
+                Bound::machine(*key, subject)?
+            }
         })
     }
 
@@ -533,19 +563,56 @@ struct Bound {
     delegation: Delegation,
     /// The ledger's holder: the resolved key, so `revoke` finds the row by name or by key.
     holder: String,
-    /// The recipient as a line names it.
+    /// Who the line that says what the link gives starts with.
+    subject: Subject,
+    /// The recipient as a refusal names it.
     who: String,
+}
+
+/// Who the line that says what a link gives starts with: a name, or, for a key no name here holds, a
+/// phrase with the whole key alone on the line under it, so it can be compared.
+enum Subject {
+    /// A name or phrase that says it all: `alice/laptop`, `All of alice's machines`, `anyone`.
+    Named(String),
+    /// A key no name here holds: the phrase, then the key.
+    Unsaved {
+        /// The phrase the line starts with.
+        who: &'static str,
+        /// The key, whole, in the form it was typed (`ed01…` or `root:ed01…`).
+        key: String,
+    },
 }
 
 impl Bound {
     /// One machine, by its key: a sealed link only that machine can use.
-    fn machine(node: NodeId, who: String) -> eyre::Result<Self> {
+    fn machine(node: NodeId, subject: Subject) -> eyre::Result<Self> {
         Ok(Self {
             bind: Bind::Device(node.verify_key()?),
             kind: GrantKind::Device,
             delegation: Delegation::Sealed,
             holder: node.to_string(),
-            who,
+            subject,
+            who: node.to_string(),
+        })
+    }
+
+    /// Every machine of `root`, named `who` in a refusal: a sealed link any device that root vouches for can
+    /// use. Never your own root, whose devices reach this machine already, and never a root revoked here,
+    /// whose badges this machine's gate refuses, so the link would print and never work.
+    async fn fleet(home: &Home, root: NodeId, who: &str) -> eyre::Result<Self> {
+        if swoosh::config::load_signet(home).await? == Some(root) {
+            eyre::bail!("{who} is saved with your own root: {YOURS}");
+        }
+        if swoosh::config::is_revoked(home, root)? {
+            eyre::bail!("{who}'s root is revoked here, so a link for {who} would not work");
+        }
+        Ok(Self {
+            bind: Bind::Fleet(root.verify_key()?),
+            kind: GrantKind::Fleet,
+            delegation: Delegation::Sealed,
+            holder: root.to_string(),
+            subject: Subject::Named(format!("All of {who}'s machines")),
+            who: who.to_owned(),
         })
     }
 }

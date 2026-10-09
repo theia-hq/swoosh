@@ -67,20 +67,21 @@ pub async fn answer(
     peer: VerifyKey,
     mut writer: impl AsyncWrite + Unpin,
 ) -> io::Result<()> {
-    let reply = match standing_for(home, peer, SystemTime::now()).await {
-        Ok(standing) => hit(&standing),
-        Err(miss) => {
-            tracing::debug!(?miss, "the pick-up route missed");
-            vec![MISS]
-        }
-    };
-    writer.write_all(&reply).await?;
+    let standing = standing_for(home, peer, SystemTime::now())
+        .await
+        .inspect_err(|miss| tracing::debug!(?miss, "the pick-up route missed"))
+        .ok();
+    writer.write_all(&reply(standing.as_ref())).await?;
     writer.shutdown().await
 }
 
-/// The hit's bytes: the status byte, the length, the standing. A standing longer than any update carries
-/// is a miss, though no verified update holds one.
-fn hit(standing: &Link) -> Vec<u8> {
+/// One answer's bytes, the format both proven-only routes speak (this one and `lookup.root`): on a hit the
+/// status byte, the length, the standing; else the one miss byte. A standing longer than any update
+/// carries is a miss, though no verified update holds one.
+pub(crate) fn reply(standing: Option<&Link>) -> Vec<u8> {
+    let Some(standing) = standing else {
+        return vec![MISS];
+    };
     let text = standing.as_str().as_bytes();
     let Ok(length) = u16::try_from(text.len()) else {
         return vec![MISS];
@@ -181,7 +182,8 @@ impl<T: Transport, D: Discovery> Fetch for NodeFetch<'_, T, D> {
     }
 }
 
-/// Read the route's one answer: the standing on a hit, `None` on a miss.
+/// Read the route's one answer: the standing on a hit, `None` on a miss. Both proven-only routes answer
+/// in this format ([`reply`]).
 pub async fn read_answer(mut reader: impl AsyncRead + Unpin) -> Result<Option<Link>, FetchError> {
     match reader.read_u8().await? {
         MISS => Ok(None),

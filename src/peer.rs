@@ -1,5 +1,6 @@
 //! A peer to dial, as typed: a saved name, a raw key, or a self-addressing `swoosh:` link, typed as itself
-//! or as a path to a file holding it, and the one [`Machine`] it resolves to.
+//! or as a path to a file holding it, and the one [`Machine`] it resolves to. A root's key (`root:ed01…`)
+//! parses too, only so it is refused as what it is: a root is never a machine.
 //!
 //! A "peer to dial" is a higher-level concept than the address book, so it composes the contacts domain
 //! (`ContactRef`, `Contacts`) rather than squatting in it. Every verb that reaches a machine holds a
@@ -16,6 +17,7 @@ use crate::contacts::{ContactRef, Contacts, DeviceLabel, ME, Petname};
 use crate::credential::LinkExt as _;
 use crate::link::LinkError;
 use crate::names::NameError;
+use crate::root_key::RootKey;
 
 /// A peer a dialing verb reaches, before resolution: three arms, tried in a fixed order at the clap
 /// boundary.
@@ -44,6 +46,9 @@ pub enum Peer {
         /// to another process hands on this path, so the link never enters that process's argv.
         file: Option<PathBuf>,
     },
+    /// A root's key, typed `root:ed01…`. Never dialed: [`Peer::machine`] refuses it, naming whose root it
+    /// is when the book knows, so a root never passes for one of the machines it vouches for.
+    Root(RootKey),
 }
 
 /// What a peer typed as a path starts with. No name starts with `.`, `/` or `~`, so a path never shadows a
@@ -54,7 +59,8 @@ impl FromStr for Peer {
     type Err = PeerParseError;
 
     /// A `swoosh:` link first (the self-addressing capability form, parse-validated here so a malformed link
-    /// fails fast at the boundary), then a raw base32 node id (always valid, never a petname, since petnames
+    /// fails fast at the boundary), then a root's key (`root:ed01…`, held only to be refused by name), then a
+    /// raw base32 node id (always valid, never a petname, since petnames
     /// are additive), else a saved petname address (validated here, resolved against the store at dial time).
     /// A bare link (`ed01….x`) is none of these: no name holds a dot, so it refuses naming the prefix.
     /// Before all of them, text starting `./`, `/` or `~/` is a file holding a link (see [`read_file`]).
@@ -66,6 +72,14 @@ impl FromStr for Peer {
                 link: crate::link::parse(text)?,
                 file: None,
             })
+        } else if crate::root_key::is_prefixed(text) {
+            // Only a whole root key is a root: anything else after the prefix is the name rule's to refuse,
+            // as it always was (no name holds a `:`).
+            match text.parse::<RootKey>() {
+                Ok(root) => Ok(Self::Root(root)),
+                Err(crate::root_key::RootKeyError::Unusable(unusable)) => Err(unusable.into()),
+                Err(_) => Ok(Self::Named(text.parse::<ContactRef>()?)),
+            }
         } else {
             if let Some(node) = raw_key(text)? {
                 return Ok(Self::Raw(node));
@@ -334,6 +348,9 @@ impl Peer {
                 })
             }
             Self::Named(reference) => named(contacts, reference),
+            Self::Root(root) => Err(MachineError::Root {
+                whose: Whose::of(contacts, *root),
+            }),
         }
     }
 
@@ -419,6 +436,48 @@ fn named(contacts: &Contacts, reference: &ContactRef) -> Result<Machine, Machine
             person: person.clone(),
             machines: several.iter().map(|(label, _)| (*label).clone()).collect(),
         }),
+    }
+}
+
+/// Whose a root key typed where a machine goes is, as far as this book knows: what its refusal names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Whose {
+    /// Your own root: the refusal lists your devices.
+    Yours {
+        /// Your devices, in name order.
+        devices: Vec<OwnDevice>,
+    },
+    /// A person's saved root: the refusal lists their machines, or says none is saved.
+    Person {
+        /// The person it is saved for.
+        person: Petname,
+        /// Their machines' names, in name order.
+        machines: Vec<DeviceLabel>,
+    },
+    /// No root this book knows: the refusal can only say to name a machine.
+    Unknown,
+}
+
+impl Whose {
+    /// Whose `root` is in `contacts`.
+    pub fn of(contacts: &Contacts, root: RootKey) -> Self {
+        if contacts.your_root() == Some(root.key()) {
+            return Self::Yours {
+                devices: yours(contacts),
+            };
+        }
+        match contacts.saved_root(root.key()) {
+            Some(person) => Self::Person {
+                person: person.clone(),
+                machines: contacts
+                    .devices(person)
+                    .into_iter()
+                    .flatten()
+                    .map(|(label, _)| label.clone())
+                    .collect(),
+            },
+            None => Self::Unknown,
+        }
     }
 }
 
@@ -558,6 +617,12 @@ pub enum MachineError {
     /// A link whose machine is no usable key.
     #[error(transparent)]
     Link(KeyError),
+    /// A root's key, which vouches for machines and is none of them.
+    #[error("that is a root key, not a machine's key")]
+    Root {
+        /// Whose root it is, as far as this book knows.
+        whose: Whose,
+    },
 }
 
 impl core::fmt::Display for Peer {
@@ -568,6 +633,7 @@ impl core::fmt::Display for Peer {
             Self::Named(reference) => reference.fmt(f),
             Self::Raw(node) => f.write_str(&crate::credential::short(node)),
             Self::Capability { link, .. } => f.write_str(&link.short()),
+            Self::Root(root) => f.write_str(&root.short()),
         }
     }
 }

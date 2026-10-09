@@ -37,6 +37,7 @@ use swoosh::contacts::{ContactRef, Contacts, ContactsStore, DeviceLabel, ME, Pet
 use swoosh::home::Home;
 use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
 use swoosh::peer::{OwnDevice, Peer};
+use swoosh::root_key::RootKey;
 use swoosh::roster::RosterDoc;
 use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK};
 use swoosh::transport::{BareReachFlag, ReachArgs};
@@ -88,6 +89,8 @@ pub enum Aim {
     Theirs(ContactRef),
     /// A key, which a person names by its name.
     Key(NodeId),
+    /// A root's key (`root:ed01…`), which vouches for machines and is none of them. Never echoed.
+    Root(RootKey),
     /// A `swoosh:` link or a path, which carries no right to stop a machine. Never opened or parsed, so
     /// the refusal neither reads a file nor prints the link's token back.
     Link,
@@ -103,6 +106,9 @@ impl Aim {
     pub fn parse(text: &str) -> Result<Self, core::convert::Infallible> {
         if text.contains('.') || swoosh::peer::is_path(text) || swoosh::link::is_prefixed(text) {
             return Ok(Self::Link);
+        }
+        if let Ok(root) = text.parse::<RootKey>() {
+            return Ok(Self::Root(root));
         }
         let Ok(key) = swoosh::peer::raw_key(text) else {
             return Ok(Self::NotAName);
@@ -180,6 +186,18 @@ impl Aim {
                 ))
             }
             Self::Link => Err(Usage(A_LINK_STOPS_NOTHING.to_owned())),
+            // `stop` takes only your machines, so the refusal lists them, whosever root it is.
+            Self::Root(root) => {
+                let whose = if yours.contacts.your_root() == Some(root.key()) {
+                    "your root key"
+                } else {
+                    "a root key"
+                };
+                Err(Usage(format!(
+                    "that is {whose}, not a machine's key\n  {}",
+                    yours.listed()
+                )))
+            }
             // Looked up among your devices only: the book may also hold the key under a contact's name.
             Self::Key(key) => Err(Usage(match yours.mine().find(|(_, node)| *node == key) {
                 Some((device, _)) => format!("name the machine: swoosh stop {device}"),

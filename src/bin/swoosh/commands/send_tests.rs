@@ -134,7 +134,13 @@ async fn a_hostile_connect_failure_prints_escaped() {
         .machine(&Contacts::default())
         .expect("a key is one machine");
     let error = send
-        .run_send(&node, &machine, None, None)
+        .run_send(
+            &node,
+            &machine,
+            None,
+            None,
+            swoosh::learn::Admitted::unheard(),
+        )
         .await
         .expect_err("a dial the peer closed is an error");
     assert_eq!(
@@ -178,7 +184,13 @@ async fn a_refused_send_to_your_device_ends_with_one_refusal() {
     );
     let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
     let error = cmd
-        .run_send(&node, &machine, None, None)
+        .run_send(
+            &node,
+            &machine,
+            None,
+            None,
+            swoosh::learn::Admitted::unheard(),
+        )
         .await
         .expect_err("a refused send exits non-zero");
     let _ = std::fs::remove_dir_all(&base);

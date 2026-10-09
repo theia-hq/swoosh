@@ -246,9 +246,9 @@ async fn revoke_root_with(
     run_typing(home, &[&target], b"", typing, dial, tape).await
 }
 
-/// The first six characters of the key seeded `seed`: what a person types to revoke it as a root.
+/// The 8 characters after `ed01` of the key seeded `seed`: what a person types to revoke it as a root.
 pub(crate) fn prefix(seed: u8) -> String {
-    node(seed).to_string().chars().take(6).collect()
+    node(seed).to_string().chars().skip(4).take(8).collect()
 }
 
 /// A root key in prose: `root:` and the short key.
@@ -1467,7 +1467,7 @@ async fn revoke_with_a_root_key_takes_the_root_path_behind_the_prefix() {
     let upper = format!("ROOT:{}", node(ALICE_ROOT));
     assert!(matches!(
         parse(&[&upper]).unwrap().target,
-        super::Target::Root(root) if root == node(ALICE_ROOT)
+        super::Target::Root(root) if root.key() == node(ALICE_ROOT)
     ));
 }
 
@@ -1499,13 +1499,15 @@ async fn revoke_a_root_prompt_names_the_act() {
     let home = scratch("root-prompt");
     let ran = revoke_root(&home, STRANGER, &prefix(STRANGER)).await;
     let _ = ran.ok();
+    let token = prefix(STRANGER);
     assert_eq!(
         ran.confirms,
-        [format!(
-            "Type {} to revoke this root for good:",
-            prefix(STRANGER)
-        )]
+        [format!("Type {token} to revoke this root for good:")]
     );
+    // The token is the 8 after the tag every key shares, so it checks the key, never `ed01`.
+    assert_eq!(token.chars().count(), 8);
+    assert!(!token.starts_with("ed01"), "{token}");
+    assert!(node(STRANGER).to_string()[4..].starts_with(&token));
 }
 
 #[tokio::test]

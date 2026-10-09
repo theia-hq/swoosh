@@ -19,7 +19,7 @@
 //! `root:<key>` is the one form that ends something everywhere, so it is the one form that asks first: only
 //! from argv (a link read from stdin or a file is never a root), never a key one of your devices or a
 //! contact's holds, only at a terminal, and only once the person has read what this machine is to that root
-//! and typed the key's first six characters. Then, by what this machine is to it: where the root is kept,
+//! and typed the 8 characters after the key's `ed01` ([`token`]). Then, by what this machine is to it: where the root is kept,
 //! its passphrase, and the root and every file it vouched for go ([`swoosh::root::retire`]); on its device,
 //! the device files and the pin go; for a contact's root, the links given to it are revoked. Each latches the
 //! key into `revoked` first, so a crash leaves files rooted at a revoked key, which every read takes as
@@ -37,11 +37,14 @@ use swoosh::home::{Home, HomeWrite};
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::reach_report::{Reach, What};
 use swoosh::root::{Root, RootError, RootPlace, RootVerb};
+use swoosh::root_key::{RootKey, RootKeyError};
 use swoosh::roster::Epoch;
 use swoosh::standing::{Standing, StandingError};
 use swoosh::sync::{Answer, Dial, ExchangeError, NodeDial};
 use swoosh::transport::ReachArgs;
 use tightbeam::identity::AsVerifyKey as _;
+
+use crate::commands::token;
 
 /// The most bytes of stdin read for one link: far above any link, far below anything that costs a read.
 const MAX_STDIN: u64 = 64 * 1024;
@@ -79,7 +82,7 @@ pub enum Target {
     /// A key.
     Key(NodeId),
     /// `root:<key>`: a root, typed in argv and nowhere else.
-    Root(NodeId),
+    Root(RootKey),
 }
 
 /// The steps to replace your root, printed by `revoke --help` and never by `-h`: the one verb whose long
@@ -102,9 +105,6 @@ const RECIPE: &str = concat!(
     "  desk$   swoosh ssh me/nas -- swoosh revoke - < ~/nas.link; rm -r ~/nas.link ~/.swoosh-rescue",
 );
 
-/// The prefix that types a root, ASCII case aside.
-const ROOT_PREFIX: &str = "root:";
-
 /// The refusal when a root's revoke has no terminal to ask at: before anything is read, or when the
 /// confirmation finds it gone.
 const ROOT_NEEDS_TERMINAL: &str =
@@ -118,17 +118,13 @@ fn target(text: &str) -> Result<Target, String> {
     if text == "-" {
         return Ok(Target::Stdin);
     }
-    if let Some(rest) = text
-        .get(..ROOT_PREFIX.len())
-        .filter(|prefix| prefix.eq_ignore_ascii_case(ROOT_PREFIX))
-        .and_then(|_| text.get(ROOT_PREFIX.len()..))
-    {
-        return match swoosh::peer::raw_key(rest) {
-            Ok(Some(key)) => Ok(Target::Root(key)),
-            Ok(None) => Err(format!(
+    if swoosh::root_key::is_prefixed(text) {
+        return match text.parse::<RootKey>() {
+            Ok(root) => Ok(Target::Root(root)),
+            Err(RootKeyError::Unusable(unusable)) => Err(unusable.to_string()),
+            Err(RootKeyError::NotAKey(_) | RootKeyError::NoPrefix) => Err(format!(
                 "{text} is not a root key; to see yours: swoosh status"
             )),
-            Err(unusable) => Err(unusable.to_string()),
         };
     }
     if swoosh::peer::is_path(text) {
@@ -215,8 +211,8 @@ impl RevokeCmd {
             other => other.clone(),
         };
         match target {
-            Target::Root(key) => {
-                self.revoke_root(home, key, prompt, dial, err).await?;
+            Target::Root(root) => {
+                self.revoke_root(home, root, prompt, dial, err).await?;
                 Ok(None)
             }
             Target::Link(link) => self.link(home, &link, err).await,
@@ -257,7 +253,7 @@ impl RevokeCmd {
     async fn revoke_root(
         &self,
         home: &Home,
-        key: NodeId,
+        typed: RootKey,
         prompt: &mut impl Prompt,
         dial: &impl Dial,
         err: &mut impl Write,
@@ -268,6 +264,7 @@ impl RevokeCmd {
             )
             .into());
         }
+        let key = typed.key();
         if own_key(home)?.is_some_and(|own| key.verify_key().is_ok_and(|key| key == own)) {
             eyre::bail!("that is this machine's key, not a root.");
         }
@@ -282,22 +279,20 @@ impl RevokeCmd {
         if !prompt.terminal() {
             eyre::bail!("{ROOT_NEEDS_TERMINAL}");
         }
-        let root = format!("root:{}", swoosh::credential::short(&key));
+        let root = typed.short();
         // Where the prompt is, so a stderr sent elsewhere never leaves the person typing blind.
         for line in kind.before(&root) {
             prompt.say(&line);
         }
-        let prefix: String = key.to_string().chars().take(PREFIX).collect();
-        let typed = prompt
-            .confirm(&format!("Type {prefix} to revoke this root for good:"))
+        let answer = token::ask(prompt, typed, "revoke this root for good")
             // A terminal gone since the check is the missing terminal; a read or write that failed on an
             // open one prints its own cause.
             .map_err(|cause| match cause.downcast_ref::<std::io::Error>() {
                 Some(_) => cause,
                 None => eyre::eyre!("{ROOT_NEEDS_TERMINAL}"),
             })?;
-        if typed.trim() != prefix {
-            eyre::bail!("that was not {prefix}; nothing was revoked.");
+        if answer == token::Typed::Other {
+            eyre::bail!("that was not {}; nothing was revoked.", typed.token());
         }
 
         match &kind {
@@ -569,9 +564,6 @@ impl RevokeCmd {
         Ok(source)
     }
 }
-
-/// How many characters of a root's key the person types to revoke it.
-const PREFIX: usize = 6;
 
 /// What this machine is to a root a `revoke root:<key>` names, read from its files as they lie. A root a
 /// revoke latched and did not finish still reads as what it was, so running the revoke again finishes it.

@@ -20,6 +20,7 @@ use measure::{
 };
 use nauthy::{Link, Service};
 use swoosh::escape::{Escaped, causes};
+use swoosh::learn::Admitted;
 use swoosh::peer::{Machine, Peer};
 use swoosh::reach;
 use swoosh::transport::{self, ReachArgs};
@@ -100,8 +101,15 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         let Some(machine) = ctx.machine else {
             eyre::bail!("internal: `speed` ran without its machine resolved (root-dispatch bug)");
         };
-        self.run_speed(node, machine, ctx.bound, ctx.present, ctx.membership)
-            .await
+        self.run_speed(
+            node,
+            machine,
+            ctx.bound,
+            ctx.present,
+            ctx.membership,
+            ctx.admitted,
+        )
+        .await
     }
 }
 
@@ -115,6 +123,7 @@ impl SpeedCmd {
         bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
+        admitted: Admitted,
     ) -> eyre::Result<()> {
         let mode = self.mode();
         let limit = self.limit();
@@ -132,6 +141,8 @@ impl SpeedCmd {
             bound,
         )
         .await?;
+        // Its first admitted stream tells the composition root it may ask which root vouches for the machine.
+        let session = admitted.watch(session);
         let label = machine.label();
         println!(
             "speed test to {label} via {} ({})",
@@ -166,26 +177,20 @@ impl SpeedCmd {
             Err(ProtocolError::Refused(Refusal::Stream(bifrost::Refusal::NotAdmitted))) => {
                 let diagnosis =
                     reach::diagnose_over(node, machine, &service, present, membership).await;
-                node.close().await;
                 return Err(machine::refused(machine, &service, diagnosis));
             }
             Err(ProtocolError::Refused(refusal)) => {
-                node.close().await;
                 let line = refusal_line(&label, &refusal);
                 eyre::bail!("{line}");
             }
             Err(error) => {
-                node.close().await;
                 eyre::bail!("{}", failed_line(&error));
             }
         };
 
-        // Read the settled path now: the transfer gave hole-punching time to land, and we must read
-        // before the transport closes.
+        // Read the settled path now: the transfer gave hole-punching time to land. The composition root
+        // closes the node once anything still running beside the verb has ended.
         let path = reach::conn_path(&session.conn_info()).to_string();
-
-        // Drain and close the transport so the last frames land and iroh shuts down cleanly.
-        node.close().await;
         println!("path: {path}");
         print_totals(&report);
         Ok(())

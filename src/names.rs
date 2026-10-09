@@ -5,7 +5,8 @@
 //! nothing else is allowed: a name can never hold the invite's `.` separator, a path's `/` or `~`, a
 //! marker's `:`, or whitespace. Internal routes are dotted (`control.stop`), so no typed name can be one.
 //!
-//! Three names are reserved and are never a person or a device: `me`, `root` and `anyone`.
+//! Five names are reserved and are never a person or a device: `me`, `root` and `anyone`, and the two
+//! internal route groups, `control` and `lookup`.
 
 use core::str::FromStr;
 
@@ -20,7 +21,7 @@ impl Name {
     pub const MAX_LEN: usize = 63;
 
     /// The names that are never a person or a device.
-    pub const RESERVED: [&'static str; 3] = ["me", "root", "anyone"];
+    pub const RESERVED: [&'static str; 5] = ["me", "root", "anyone", "control", "lookup"];
 
     /// The name, for display and lookup.
     pub fn as_str(&self) -> &str {
@@ -101,7 +102,7 @@ pub enum NameError {
     /// character that is not a letter or digit.
     #[error("{0} is not a name: a name uses a-z, 0-9 and -, and starts with a letter or digit.")]
     NotAName(String),
-    /// The name is `me`, `root` or `anyone`, which never name a person or a device.
+    /// The name is one of the [`RESERVED`](Name::RESERVED), which never name a person or a device.
     #[error("{0} is reserved: pick another name")]
     Reserved(String),
 }

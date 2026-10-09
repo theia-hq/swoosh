@@ -45,7 +45,8 @@ use swoosh::serve::{
     Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FirstRound,
     InstanceLock, ProxyScope, RecvService, Replaced, Resident, SYNC_SERVICE, ServiceList,
     SingleError, Started, Stop, StopKind, StopSource, Stopped, acquire_single, bind_entry,
-    bind_recv, bind_renewal, classify_stop, extract_recv_services, refuse_recv_into_home,
+    bind_lookup, bind_recv, bind_renewal, classify_stop, extract_recv_services,
+    refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -205,10 +206,16 @@ pub struct ExposeContext {
     pub home: Home,
 }
 
-/// `--admit`'s root key, typed `root:ed01…`.
+/// `--admit`'s root key, typed `root:ed01…` and only so: a bare key is a machine's, and admitting one
+/// machine's devices means nothing.
 fn admitted_root(text: &str) -> Result<NodeId, String> {
-    swoosh::peer::parse_key(text.strip_prefix("root:").unwrap_or(text))
-        .map_err(|error| error.to_string())
+    match text.parse::<swoosh::root_key::RootKey>() {
+        Ok(root) => Ok(root.key()),
+        Err(swoosh::root_key::RootKeyError::NoPrefix) => {
+            Err("--admit takes a root key, not a machine's key".to_owned())
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// Check that this machine may admit the devices of `root` for this run, and record it in `serve.lock`
@@ -575,6 +582,10 @@ impl ServeCmd {
         // reach the handler: a key the update lists live.
         let (bound, known) = bind_renewal(router, &home).await?;
         router = bound;
+        // The root route, proven-only: a peer this home saves as one machine of a person asks it which
+        // root vouches for this machine. Every other key misses before it takes a slot.
+        let (bound, saved) = bind_lookup(router, &home).await?;
+        router = bound;
         for scoped in proxy.services() {
             // One engine handler per proxy service, holding ONLY its own origin scope. Every scope names an
             // origin (`ProxyScope::extract` refuses one that does not), so each is the OPT-IN engine, which
@@ -727,6 +738,7 @@ impl ServeCmd {
             stopped = run_until_stopped(exposer, node, cancel, resident, listener, lock) => stopped?,
             () = sync_rounds(&home, &dial, &fetch, first_round) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
+            () = saved.watch() => unreachable!("the root route's keys are read until the node stops"),
             // A running `serve` gives service only at its start, so a relay, a resolver or a service
             // changed in `serve.toml` waits for the next one; this says so once per change. A service added
             // or retargeted under a name whose live links were made for something else ([`LinksForAnother`])

@@ -8,7 +8,7 @@ use std::time::SystemTime;
 
 use bifrost::NodeId;
 use clap::Args;
-use swoosh::contacts::{ContactRef, Contacts, ContactsStore, Removed};
+use swoosh::contacts::{ContactRef, Contacts, ContactsStore, Removed, Source};
 use swoosh::grants::Grants;
 use swoosh::home::{Home, HomeWrite};
 
@@ -35,14 +35,23 @@ impl RmCmd {
                 "links you shared with {name} are live ({live}): revoke them first: swoosh revoke {name}"
             );
         }
-        let removed = store
-            .contacts_mut()
-            .remove(self.name.petname(), self.name.device());
+        // A root learned from this very machine stays saved once it goes, and is said to.
+        let person = self.name.petname();
+        let learned = self.name.device().is_some_and(|device| {
+            store
+                .contacts()
+                .signet(person)
+                .is_some_and(|root| root.source == Source::Learned(device.clone()))
+        });
+        let removed = store.contacts_mut().remove(person, self.name.device());
 
         match removed {
             Removed::Removed => {
-                println!("removed {}", self.name);
                 store.save(&home_lock)?;
+                println!("removed {}", self.name);
+                if learned {
+                    println!("{person}'s root, learned from {}, stays saved.", self.name);
+                }
             }
             Removed::Absent => println!("no such contact {}; nothing to remove", self.name),
         }

@@ -19,6 +19,7 @@ use futures::StreamExt as _;
 use measure::{Ping, PingReport, Probe, ProtocolError, Refusal};
 use nauthy::{Link, Service};
 use swoosh::escape::{Escaped, causes};
+use swoosh::learn::Admitted;
 use swoosh::peer::{Machine, Peer};
 use swoosh::reach;
 use swoosh::transport::{self, ReachArgs};
@@ -88,8 +89,15 @@ impl swoosh::reaching::Reaching for PingCmd {
         let Some(machine) = ctx.machine else {
             eyre::bail!("internal: `ping` ran without its machine resolved (root-dispatch bug)");
         };
-        self.run_ping(node, machine, ctx.bound, ctx.present, ctx.membership)
-            .await
+        self.run_ping(
+            node,
+            machine,
+            ctx.bound,
+            ctx.present,
+            ctx.membership,
+            ctx.admitted,
+        )
+        .await
     }
 }
 
@@ -104,6 +112,7 @@ impl PingCmd {
         bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
+        admitted: Admitted,
     ) -> eyre::Result<()> {
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver: slot 1 (`present`) is
         // the link typed as the peer or the member badge, slot 2 (`membership`) is a fleet badge only for a
@@ -126,10 +135,11 @@ impl PingCmd {
         )
         .await
         {
-            Ok(session) => session,
+            // Its first admitted probe stream tells the composition root it may ask which root vouches for
+            // the machine.
+            Ok(session) => admitted.watch(session),
             Err(_error) => {
                 println!("{label} via {name}: unreachable");
-                node.close().await;
                 return reach::Outcome::Unreachable.into_result(&self.peer, bound);
             }
         };
@@ -159,7 +169,6 @@ impl PingCmd {
             Err(ProtocolError::Refused(Refusal::Stream(bifrost::Refusal::NotAdmitted))) => {
                 let diagnosis =
                     reach::diagnose_over(node, machine, &service, present, membership).await;
-                node.close().await;
                 return Err(machine::refused(machine, &service, diagnosis));
             }
             // The node was REACHED but refused this probe some other way: a distinct line that says so (not
@@ -177,8 +186,8 @@ impl PingCmd {
             }
         };
 
-        // Drain and close the transport so the last frames land and iroh shuts down cleanly.
-        node.close().await;
+        // The composition root closes the node once anything still running beside the verb has ended, so
+        // the last frames land and iroh shuts down cleanly.
         outcome.into_result(&self.peer, bound)
     }
 }
@@ -316,7 +325,14 @@ mod tests {
             reach: transport::Reach::default(),
         };
         let error = cmd
-            .run_ping(&node, &machine, &bound, None, None)
+            .run_ping(
+                &node,
+                &machine,
+                &bound,
+                None,
+                None,
+                swoosh::learn::Admitted::unheard(),
+            )
             .await
             .expect_err("a refused ping exits non-zero");
         assert_eq!(
