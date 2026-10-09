@@ -57,8 +57,8 @@ Either way the next dial is refused, with no restart:
 <!-- manual: needs a revoked link -->
 ```console
 $ swoosh ping swoosh:ed01hcq6…
-ed01hcq6balrlxwa via iroh: reached, but refused (not admitted: no member badge or capability for this service was accepted)
-Error: ed01hcq6balrlxwa: reached, but refused
+error: the link's machine refused ping
+  It does not serve ping, or it does not accept this link.
 ```
 
 ## The limit

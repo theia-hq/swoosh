@@ -7,8 +7,8 @@ how you reach one.
 
 <!-- generated: usage from `swoosh status -h`; option lines curated -->
 ```
-Usage: swoosh status [OPTIONS] [peer]
-  [peer]   a petname, a raw node id, or a swoosh: link
+Usage: swoosh status [OPTIONS] [machine]
+  [machine]  A machine: me/<name>, <person>/<name>, a person, a key, or a link
   --key    print this machine's key and nothing else
 ```
 
@@ -32,10 +32,10 @@ serving and never asks for a passphrase. The report is on stdout; a line such as
 is on stderr. `swoosh status --key` prints the key alone, for a script. Sections with no row are left out,
 except `serving:`. On a device, `devices:` is your root's list as of the last sync.
 
-With a peer, `status` dials each of its devices and prints one line each. A healthy line has the path and a
-round-trip time, and for one of your own devices ends with what it serves (`; serving: ssh, web`). The rest
-exit non-zero: `unreachable`, a refusal (`reached, but …`), or `reached, but the probe failed / went
-unanswered`. The path is read after the probe, so the same peer can read `relayed` on one run and `direct` on
-the next. [Why a path changes](../../transports.md#iroh).
+With a machine, `status` dials it and prints one line. A healthy line has the path and a round-trip time, and
+for one of your own devices ends with what it serves (`; serving: ssh, web`). Otherwise `status` exits non-zero
+and the line reads `unreachable`, a refusal (`reached, but …`), or `reached, but the probe failed / went
+unanswered`. The path is read after the probe, so one machine can show `relayed` on one run and `direct` on the
+next. [Why a path changes](../../transports.md#iroh).
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

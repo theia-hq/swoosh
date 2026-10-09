@@ -82,3 +82,55 @@ fn a_hostile_failure_cause_prints_escaped() {
         "no raw byte of the peer's reaches the line: {printed:?}"
     );
 }
+
+/// `speed` to one of your devices that refuses it prints the dial refusal once, as the error, after asking
+/// the device why over a second connection to it: never the generic refusal line.
+#[tokio::test]
+async fn a_refused_speed_to_your_device_names_the_cause() {
+    use clap::Parser as _;
+    use swoosh::testkit::{Script, ScriptedPeer};
+    use swoosh::transport;
+
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        speed: super::SpeedCmd,
+    }
+
+    let key = bifrost::NodeId::from_ed25519_secret(&[0x69; 32]);
+    let mut contacts = swoosh::contacts::Contacts::default();
+    contacts
+        .save(&"me/nas".parse().expect("a device"), key)
+        .expect("the name is free");
+    let cmd = Wrap::try_parse_from(["x", "me/nas"])
+        .expect("speed parses")
+        .speed;
+    let machine = cmd.peer.machine(&contacts).expect("one machine");
+    let peer = ScriptedPeer::new(
+        key,
+        [
+            Script::Refuse(bifrost::Refusal::NotAdmitted),
+            Script::Lists(vec!["ping"]),
+        ],
+    );
+    let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+    let bound = transport::Bound {
+        transport: transport::Transport::Iroh,
+        local: false,
+        reach: transport::Reach::default(),
+    };
+    let error = cmd
+        .run_speed(&node, &machine, &bound, None, None)
+        .await
+        .expect_err("a refused speed test exits non-zero");
+    assert_eq!(
+        format!("{error:#}"),
+        "me/nas does not serve speed\n  Only nas can add it; on nas, run:\n    swoosh service add speed"
+    );
+    let asked: Vec<String> = peer
+        .requests()
+        .into_iter()
+        .map(|request| request.service)
+        .collect();
+    assert_eq!(asked, ["speed", "control.services"]);
+}

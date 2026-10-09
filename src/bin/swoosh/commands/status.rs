@@ -1,12 +1,12 @@
-//! `swoosh status [<peer>]`: what this machine is, or dial a peer and report the connection path,
+//! `swoosh status [<machine>]`: what this machine is, or dial a machine and report the connection path,
 //! Tailscale `status` shaped.
 //!
 //! BARE (`status`, no peer) reads this machine's own files and never dials: its key, its lock, its
 //! root, its devices, its contacts, the links it shared, and what a running `serve` serves ([`report`]).
 //! `--key` prints the key alone.
 //!
-//! With a peer: the single most reassuring thing a p2p tool tells you: am I actually peer to peer, or
-//! bouncing off a relay? For each device the peer resolves to, this dials it, runs one probe for a live
+//! With a machine: the single most reassuring thing a p2p tool tells you: am I actually peer to peer, or
+//! bouncing off a relay? This dials the one machine the argument resolves to, runs one probe for a live
 //! RTT, then reads the session's best-effort [`conn_info`](bifrost::Session::conn_info) for the path
 //! (direct vs relayed) and remote address, and prints one line. The probe is chosen from the peer before
 //! the dial: one of your devices (`me/<name>`) is asked for what it serves over `control.services`, which
@@ -17,10 +17,9 @@
 //! the upgraded path, not the instant-of-connect one. Over quirk it says direct; over iroh it reports the
 //! current path, which can still be relayed if the upgrade has not completed by then.
 //!
-//! A person (`alice`) fans out to ALL her devices, one status line each, since "how do I reach alice,
-//! across her devices" is exactly the diagnostic; `alice/macbook` reports the one. The peer form is
-//! one-shot: each named device is dialed in turn. Listing the whole tailnet of active sessions
-//! (Tailscale's full `status`) needs a long-lived node holding those sessions; that is future work.
+//! A bare person (`alice`) reports their one saved machine, and several refuse before anything binds;
+//! `alice/macbook` reports that one. Listing the whole tailnet of active sessions (Tailscale's full
+//! `status`) needs a long-lived node holding those sessions; that is future work.
 
 use core::time::Duration;
 
@@ -28,23 +27,21 @@ use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
 use clap::Args;
 use measure::{Ping, ProtocolError};
 use nauthy::{Link, Service};
-use swoosh::contacts::{Contacts, ME};
 use swoosh::escape::{Escaped, causes};
 use swoosh::home::Home;
-use swoosh::peer::Peer;
+use swoosh::peer::{Kind, Machine, Peer};
 use swoosh::reach;
 use swoosh::serve::CONTROL_SERVICES_SERVICE;
 use swoosh::transport::{self, ReachArgs};
-use tightbeam::tunnel;
-use tokio::io::AsyncReadExt as _;
+
+use crate::commands::machine;
 
 pub mod report;
 
 /// Show this machine: its key, lock, root, devices, contacts, links and services.
 #[derive(Debug, Args)]
 pub struct StatusCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
-    #[arg(value_name = "peer")]
+    #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Option<Peer>,
     /// Print this machine's key and nothing else.
     #[arg(long, conflicts_with = "peer")]
@@ -77,9 +74,12 @@ impl swoosh::reaching::Reaching for StatusCmd {
     /// slots.
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
+    /// The service is read only for a link typed as the peer, and a link's machine is always
+    /// [`Kind::Link`], which is pinged: so `ping` is the service here, before the machine resolves, and
+    /// the probe itself is picked from the resolved kind.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(match &self.peer {
-            Some(peer) => swoosh::credential::Credential::dialing(peer, Probe::of(peer).service()),
+            Some(peer) => swoosh::credential::Credential::dialing(peer, reach::PING_SERVICE),
             None => swoosh::credential::Credential::Family { present: None },
         })
     }
@@ -95,19 +95,21 @@ impl swoosh::reaching::Reaching for StatusCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_status(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
+        let Some(machine) = ctx.machine else {
+            eyre::bail!("internal: `status` ran without its machine resolved (root-dispatch bug)");
+        };
+        self.run_status(node, machine, ctx.bound, ctx.present, ctx.membership)
             .await
     }
 }
 
 impl StatusCmd {
-    /// Resolve the target to its devices, and for each dial, probe the path and a single RTT, and print a
-    /// status line. Reports every device (a person fans out); an unreachable one prints an honest line
-    /// rather than aborting the rest.
+    /// Dial the machine, probe the path and a single RTT, and print its status line. An unreachable
+    /// machine prints an honest line, and only an answered probe exits green.
     async fn run_status<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
-        contacts: &Contacts,
+        machine: &Machine,
         bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
@@ -120,50 +122,32 @@ impl StatusCmd {
                 "internal: `status` reached the reach path without a peer (root-dispatch bug)"
             );
         };
-        let candidates = reach::candidates(&peer, contacts)?;
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, so the verb never threads a slip itself.
-
-        // Report each device, folding how far each one got: the exit code is green only if some device
-        // actually answered the probe, so a fan-out where every device was unreachable, refused, or broke
-        // mid-probe ends non-zero rather than exiting clean on a screen full of failures. The fold keeps
-        // the FURTHEST outcome, which is what the final error names.
-        let mut outcome = reach::Outcome::default();
-        let asked = Probe::of(&peer);
+        let asked = Probe::of(machine.kind());
         let service: Service = asked.service().parse()?;
-        for candidate in &candidates {
-            let line = match reach::connect_service(
-                node,
-                candidate,
-                &service,
-                Option::clone(&present),
-                Option::clone(&membership),
-            )
-            .await
+        let label = machine.label();
+        let line =
+            match reach::dial_service(node, machine, &peer, &service, present, membership, bound)
+                .await
             {
                 Ok(session) => match asked {
-                    Probe::Ping => probe(&session, &candidate.label, bound.transport).await,
-                    Probe::Services => {
-                        probe_services(&session, &candidate.label, bound.transport).await
-                    }
+                    Probe::Ping => probe(&session, &label, bound.transport).await,
+                    Probe::Services => probe_services(&session, &label, bound.transport).await,
                 },
-                Err(_error) => Line::unreachable(&candidate.label, bound.transport.name()),
+                Err(_error) => Line::unreachable(&label, bound.transport.name()),
             };
-            outcome = outcome.max(line.outcome());
-            println!("{line}");
-        }
+        println!("{line}");
 
         node.close().await;
-        reach::fanout_outcome(outcome, &peer, bound)
+        line.outcome().into_result(&peer, bound)
     }
 
     /// The bare (no-peer) path: this machine, from its own files. Runs BEFORE any transport is composed
     /// (dispatched locally in the root), so a bare `swoosh status` never binds an endpoint and never dials.
+    /// A reach flag typed on it is refused in the root, which alone can tell it from its variable.
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
-        // The reach trio binds a transport and seeds discovery for a PEER; a bare `status` binds
-        // neither, so the flags are refused by name rather than silently ignored (I.3, B4).
-        swoosh::reaching::reject_bare_reach(&self.reach)?;
         let print = if self.key {
             report::Print::Key
         } else {
@@ -173,7 +157,7 @@ impl StatusCmd {
     }
 }
 
-/// What `status` asks a reached device, chosen from the peer before the dial.
+/// What `status` asks a reached device, chosen from the resolved machine's kind before the dial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Probe {
     /// One of your devices: `control.services`, for the reach, the round trip and what it serves.
@@ -183,12 +167,13 @@ enum Probe {
 }
 
 impl Probe {
-    /// The probe for `peer`: `me` or `me/<name>` names your devices, and only those are asked
-    /// `control.services`; a contact, a key or a link is pinged.
-    fn of(peer: &Peer) -> Self {
-        match peer {
-            Peer::Named(reference) if reference.petname().as_str() == ME => Self::Services,
-            _ => Self::Ping,
+    /// The probe for a machine of `kind`: only your devices are asked `control.services`, however they
+    /// were typed (a name or a key), since the kind is read from the book; a contact's machine, a key no
+    /// name holds, or a link is pinged.
+    fn of(kind: Kind) -> Self {
+        match kind {
+            Kind::Yours => Self::Services,
+            Kind::Link | Kind::Contact | Kind::Key => Self::Ping,
         }
     }
 
@@ -223,7 +208,7 @@ async fn probe_services<S: Session>(
     };
     // The read sends nothing; dropping the write half lets the node's reply complete.
     drop(writer);
-    let catalog = match read_catalog(reader).await {
+    let catalog = match reach::read_catalog(reader).await {
         Ok(catalog) => catalog,
         Err(error) => {
             return Line::failed(label.to_owned(), transport.name(), format!("{error:#}"));
@@ -244,40 +229,8 @@ async fn probe_services<S: Session>(
     .serving(serving)
 }
 
-/// Read a device's catalog blob under the wire's own bound, then decode it.
-///
-/// The untrusted end here is the SERVER, which is the direction we do not usually face: these bytes are a
-/// remote node's, and an unbounded `read_to_end` lets that node grow this client's buffer for as long as it
-/// cares to stream, at 1:1 cost to itself. [`decode`](tunnel::ServiceCatalog::decode)'s own caps cannot
-/// help, because by the time it is called the buffer already holds everything the peer sent. So the bound
-/// goes on the READ, before the first byte lands, and it is the wire's own
-/// [`MAX_CATALOG_BLOB`](tunnel::MAX_CATALOG_BLOB) rather than a number chosen here: the serving end refuses
-/// to encode past the same bound, so one number holds both ends of this wire.
-///
-/// It reads exactly ONE byte past that bound, purely to tell a catalog sitting at the ceiling (legitimate,
-/// and decodes) from a peer still streaming (not). Without that byte an over-cap peer would arrive as a
-/// truncated-blob decode error, which tells an operator that the list is malformed when what actually
-/// happened is that the peer would not stop.
-async fn read_catalog(
-    reader: impl tokio::io::AsyncRead + Unpin,
-) -> eyre::Result<tunnel::ServiceCatalog> {
-    let mut bytes = Vec::new();
-    reader
-        .take(tunnel::MAX_CATALOG_BLOB + 1)
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|error| eyre::eyre!("{}", causes(&error)))?;
-    if bytes.len() as u64 > tunnel::MAX_CATALOG_BLOB {
-        eyre::bail!(
-            "it sent more than a list of services can be, so the read stopped at {} bytes",
-            tunnel::MAX_CATALOG_BLOB
-        );
-    }
-    tunnel::ServiceCatalog::decode(&bytes)
-}
-
 /// Probe one reached session for a live RTT and its path, and render its status line under `label` (the
-/// device as the user named it, so a fan-out reads by device, matching `ping`).
+/// machine as the user named it, matching `ping`).
 async fn probe<S: Session>(session: &S, label: &str, transport: transport::Transport) -> Line {
     // A single measure ping for a fresh, honest RTT. Some transports (quirk) carry no rtt estimator, so
     // conn_info().rtt is None there; one probe measures the round trip the same way over any of them.
@@ -430,7 +383,7 @@ impl Line {
         }
     }
 
-    /// How far this device got, for the fan-out's exit code and final error. Exhaustive on purpose: a new
+    /// How far this device got, for the exit code and final error. Exhaustive on purpose: a new
     /// [`State`] cannot compile until it names its rank, so no device state can drift into the green the
     /// way an unset `any_healthy` flag once let it.
     fn outcome(&self) -> reach::Outcome {
@@ -510,18 +463,13 @@ impl core::fmt::Display for Line {
 
 #[cfg(test)]
 mod tests {
-    use core::sync::atomic::{AtomicU32, Ordering};
-
     use bifrost::{ConnInfo, NodeId, Path, PathChanges, Session};
     use clap::Parser as _;
-    use swoosh::home::Home;
+    use swoosh::peer::Kind;
     use swoosh::{reach, transport};
 
     use super::{Line, Probe, Refused, probe, probe_services};
     use crate::commands::serve::humanize_secs;
-
-    /// Serializes scratch names within this test process; the pid keeps two concurrent runs apart.
-    static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 
     /// Uptimes and idle ages render as the coarsest two units, so a status reads at a glance. The
     /// formatter is shared with the serve banner (`humanize_secs`), so this pins the shape once.
@@ -532,44 +480,6 @@ mod tests {
         assert_eq!(humanize_secs(90), "1m 30s");
         assert_eq!(humanize_secs(2 * 3600 + 14 * 60), "2h 14m");
         assert_eq!(humanize_secs(3 * 86_400 + 5 * 3600), "3d 5h");
-    }
-
-    /// A bare `status` reaches no peer, so the reach trio (`--transport`/`--local`/`--peer`) has nothing
-    /// to bind or find: each is refused by name, never silently ignored (I.3, B4).
-    #[tokio::test]
-    async fn bare_status_rejects_the_reach_flags() {
-        #[derive(clap::Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            status: super::StatusCmd,
-        }
-
-        let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-        let base =
-            std::env::temp_dir().join(format!("sw4-status-reach-{}-{seq}", std::process::id()));
-        std::fs::create_dir_all(base.join("home")).expect("scratch home");
-        let home = Home::resolve(Some(base.join("home"))).expect("the scratch home resolves");
-        let hint = format!("{}=127.0.0.1:9000", NodeId::from_ed25519_secret(&[5u8; 32]));
-        let cases: [(&[&str], &str); 3] = [
-            (&["x", "--transport", "quirk"], "--transport"),
-            (&["x", "--local"], "--local"),
-            (&["x", "--peer", &hint], "--peer"),
-        ];
-        for (argv, flag) in cases {
-            let status = Wrap::try_parse_from(argv)
-                .expect("the reach flag parses")
-                .status;
-            let error = status
-                .run_local(&home)
-                .await
-                .expect_err("no peer, no effect: the flag must refuse, never be ignored");
-            assert_eq!(
-                format!("{error:#}"),
-                format!("{flag} only applies when reaching a peer; drop it or name one")
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A session that answered the dial and then broke: the handshake landed, so it reports a live direct
@@ -697,14 +607,14 @@ mod tests {
             "an unanswered probe is not healthy: {text}"
         );
         assert!(
-            reach::fanout_outcome(line.outcome(), &"alice", &bound()).is_err(),
-            "a fan-out of unanswered probes exits non-zero: {text}"
+            line.outcome().into_result(&"alice", &bound()).is_err(),
+            "an unanswered probe exits non-zero: {text}"
         );
     }
 
     /// A probe that fails after the dial is REACHED-but-broken, never a healthy line: it must not borrow
     /// the transport's own path RTT and render `direct to <addr>, rtt ...` for an exchange that never
-    /// answered, and it must not hold a fan-out's exit code green. Without its own state this printed a
+    /// answered, and it must not hold the exit code green. Without its own state this printed a
     /// perfect status line for a peer that had just died.
     #[tokio::test]
     async fn a_probe_that_failed_after_the_dial_is_never_a_healthy_line() {
@@ -733,12 +643,12 @@ mod tests {
             "a failed probe is its own outcome: {text}"
         );
         assert!(
-            reach::fanout_outcome(line.outcome(), &"alice", &bound()).is_err(),
-            "a fan-out of failed probes exits non-zero: {text}"
+            line.outcome().into_result(&"alice", &bound()).is_err(),
+            "a failed probe exits non-zero: {text}"
         );
     }
 
-    /// The bind every fan-out-outcome assertion here is made under: the default iroh reach, so no
+    /// The bind every outcome assertion here is made under: the default iroh reach, so no
     /// transport remedy line joins the message.
     fn bound() -> transport::Bound {
         transport::Bound {
@@ -859,18 +769,12 @@ mod tests {
             .expect("a catalog encodes")
     }
 
-    /// A peer typed as text, as the command line parses it.
-    fn peer(text: &str) -> swoosh::peer::Peer {
-        text.parse().expect("a peer")
-    }
-
     /// `status me/<name>` asks `control.services`, chosen before the dial; a node that serves only one
     /// service answers it with the round trip and its list, a healthy line.
     #[tokio::test]
     async fn status_of_your_device_probes_the_control_route() {
-        assert_eq!(Probe::of(&peer("me/nas")), Probe::Services);
-        assert_eq!(Probe::of(&peer("me")), Probe::Services);
-        assert_eq!(Probe::of(&peer("me/nas")).service(), "control.services");
+        assert_eq!(Probe::of(Kind::Yours), Probe::Services);
+        assert_eq!(Probe::of(Kind::Yours).service(), "control.services");
         let line = probe_services(
             &ServicesSession {
                 reply: Ok(catalog_of(&["web=echo:"])),
@@ -919,11 +823,54 @@ mod tests {
     /// never asked of it.
     #[test]
     fn status_of_a_contact_keeps_the_ping_probe() {
-        let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
-        for text in ["bob", "bob/nas", key.as_str()] {
-            assert_eq!(Probe::of(&peer(text)), Probe::Ping, "{text}");
+        for kind in [Kind::Contact, Kind::Key, Kind::Link] {
+            assert_eq!(Probe::of(kind), Probe::Ping, "{kind:?}");
         }
         assert_eq!(Probe::Ping.service(), reach::PING_SERVICE);
+    }
+
+    /// One of your devices typed by its key is asked what it serves, as `status me/<name>` is: the probe
+    /// is picked from the kind the book gives the key, never from the form typed.
+    #[tokio::test]
+    async fn status_of_your_devices_key_lists_what_it_serves() {
+        use swoosh::testkit::{Script, ScriptedPeer};
+
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            status: super::StatusCmd,
+        }
+
+        let key = NodeId::from_ed25519_secret(&[0x68; 32]);
+        let mut contacts = swoosh::contacts::Contacts::default();
+        contacts
+            .save(&"me/nas".parse().expect("a device"), key)
+            .expect("the name is free");
+        let cmd = Wrap::try_parse_from(["x", &key.to_string()])
+            .expect("status parses")
+            .status;
+        let machine = cmd
+            .peer
+            .as_ref()
+            .expect("a machine typed")
+            .machine(&contacts)
+            .expect("one machine");
+        let peer = ScriptedPeer::new(key, [Script::Lists(vec!["web"])]);
+        let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+        let bound = transport::Bound {
+            transport: transport::Transport::Iroh,
+            local: false,
+            reach: transport::Reach::default(),
+        };
+        cmd.run_status(&node, &machine, &bound, None, None)
+            .await
+            .expect("your device answers what it serves");
+        let asked: Vec<String> = peer
+            .requests()
+            .into_iter()
+            .map(|request| request.service)
+            .collect();
+        assert_eq!(asked, ["control.services"]);
     }
 
     /// On both probes the access refusal prints its own line and no peer text; every other refusal

@@ -185,9 +185,8 @@ async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey
         .unwrap()
         .into_slots();
     let peer = outward.dialed().expect("forward names its peer");
-    let connector = peer
-        .connector(&Contacts::default(), SERVICE.parse().unwrap(), slot1, slot2)
-        .unwrap();
+    let machine = peer.machine(&Contacts::default()).unwrap();
+    let connector = swoosh::reach::gated(machine.key(), SERVICE.parse().unwrap(), slot1, slot2);
 
     let cancel = CancellationToken::new();
     let serving = exposer.run(&host, cancel.clone());

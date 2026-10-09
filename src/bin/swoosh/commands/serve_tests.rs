@@ -1689,7 +1689,7 @@ fn a_bare_serve_binds_exactly_ping_speed_the_control_routes_and_the_update_route
             "a bare serve must not bind `{}`: a peer that wants to offer it types `swoosh serve {}`, \
              and typing it IS the consent",
             unbound.name(),
-            unbound.entry(),
+            swoosh::serve::entry_for(unbound.name()),
         );
     }
 
@@ -2200,6 +2200,102 @@ fn service_and_serve_usage_errors_exit_2() {
     assert!(
         !scratch.home_dir.join("serve.toml").exists(),
         "a usage error writes nothing"
+    );
+}
+
+/// A port alone is never a service's name: `serve 3000` and `service add 3000` refuse naming the name and
+/// the TCP form the port stands for, and `app=3000` the target it needs, exit 2 at every entry site and
+/// before anything is bound.
+#[test]
+fn serve_a_bare_port_refuses_and_names_a_service_name() {
+    let scratch = ProcessScratch::new("bare-port");
+    for (args, head) in [
+        (
+            &["serve", "--local", "3000"][..],
+            "error: 3000 needs a name, like web=tcp:localhost:3000\n",
+        ),
+        (
+            &["service", "add", "3000"][..],
+            "error: 3000 needs a name, like web=tcp:localhost:3000\n",
+        ),
+        (
+            &["serve", "--local", "app=3000"][..],
+            "error: app=3000 needs a target, like app=tcp:localhost:3000\n",
+        ),
+        (
+            &["service", "add", "app=3000"][..],
+            "error: app=3000 needs a target, like app=tcp:localhost:3000\n",
+        ),
+    ] {
+        let out = swoosh_once(&scratch, args);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+        assert!(stderr.starts_with(head), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}: nothing served");
+    }
+    assert!(
+        !scratch.home_dir.join("serve.toml").exists(),
+        "a usage error writes nothing"
+    );
+}
+
+/// `recv:<dir>` names itself `recv`, as `proxy:<url>` names itself `proxy`, so the form a refused dial
+/// teaches runs as typed; `recv:` alone does too, and saves into the inbox.
+#[test]
+fn recv_with_a_dir_names_itself_recv() {
+    let scratch = ProcessScratch::new("recv-name");
+    let out = swoosh_once(&scratch, &["service", "add", "recv:/tmp/x"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let listed = std::fs::read_to_string(scratch.home_dir.join("serve.toml")).expect("the list");
+    assert!(listed.contains("\"recv=recv:/tmp/x\""), "{listed}");
+    assert_eq!(
+        swoosh::serve::service_entry("recv:").expect("recv: alone parses"),
+        "recv=recv:"
+    );
+    assert_eq!(swoosh::serve::as_typed("recv=recv:/tmp/x"), "recv:/tmp/x");
+}
+
+/// `--quiet`, set by `SWOOSH_QUIET` as the hidden flag is, withholds stdout: no banner and no key on it.
+/// The same run without it prints the key there, so the empty stdout is the gate's doing.
+#[test]
+fn quiet_serve_prints_no_banner_and_no_activity() {
+    let scratch = ProcessScratch::new("quiet");
+    let run = |quiet: bool| {
+        let mut command = Command::new(swoosh_binary());
+        command
+            .arg("--home")
+            .arg(&scratch.home_dir)
+            .args(["serve", "--local", "--expires", "1s", "ping"])
+            .env("XDG_RUNTIME_DIR", &scratch.xdg)
+            .env_remove("SWOOSH_HOME")
+            .env_remove("SWOOSH_QUIET");
+        if quiet {
+            command.env("SWOOSH_QUIET", "1");
+        }
+        run_binary_with_deadline(&mut command, Duration::from_secs(60))
+    };
+    let loud = run(false);
+    assert!(
+        loud.status.success(),
+        "{}",
+        String::from_utf8_lossy(&loud.stderr)
+    );
+    let key = String::from_utf8_lossy(&loud.stdout).into_owned();
+    assert!(key.contains("ed01"), "a plain serve prints its key: {key}");
+    let quiet = run(true);
+    assert!(
+        quiet.status.success(),
+        "{}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+    assert!(
+        quiet.stdout.is_empty(),
+        "a quiet serve prints nothing on stdout: {}",
+        String::from_utf8_lossy(&quiet.stdout)
     );
 }
 
@@ -3399,8 +3495,8 @@ fn named_recv_dirs_de_merge_into_per_service_instances() {
     );
 }
 
-/// A bare `recv:` (no `=`, no name) names no service and is refused with the line that fills in a name:
-/// only `name=recv:<dir>` is spelled.
+/// An unnamed `recv:` that reaches the extraction without the service-entry parser (which names it `recv`)
+/// is refused with the line that fills in a name, never served under no name.
 #[test]
 fn bare_recv_is_refused_with_the_name_addr_teaching_error() {
     let mut requested = vec!["recv:".to_owned()];

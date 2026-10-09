@@ -15,7 +15,6 @@
 //! are n0's unless an operator names their own, so resolving which pair THIS run binds over (the flags,
 //! else the files `serve` wrote in the home, else n0's) lives here too, at the same seam.
 
-use core::fmt;
 use core::net::SocketAddr;
 use core::str::FromStr;
 use std::net::ToSocketAddrs;
@@ -36,6 +35,9 @@ use crate::serve_toml::ServeToml;
 /// so `contact add/ls/rm` (which bind no transport and dial nobody) are never offered a flag that would
 /// do nothing there. `--home` stays a root global, since it names the node home the address book AND
 /// the bound key both live in, meaningful to both families.
+///
+/// No flow needs any of them, so all five are left out of `--help`; each is read from its `SWOOSH_<FLAG>`
+/// too, so it can be set once for a shell, and a flag beats its variable.
 #[derive(Debug, Args)]
 pub struct ReachArgs {
     /// which backend to bind
@@ -43,26 +45,42 @@ pub struct ReachArgs {
         long,
         value_enum,
         default_value_t,
-        value_name = "iroh|quirk|quirk+noise"
+        value_name = "iroh|quirk|quirk+noise",
+        env = "SWOOSH_TRANSPORT",
+        hide = true
     )]
     pub transport: Transport,
     /// no internet discovery or relays: local mDNS or a direct --peer hint
-    #[arg(long)]
+    // A flag set from its variable reads as clap reads a flag: `0`, `false`, `no`, `off` or empty is off,
+    // anything else on.
+    #[arg(
+        long,
+        env = "SWOOSH_LOCAL",
+        hide = true,
+        value_parser = clap::builder::FalseyValueParser::new()
+    )]
     pub local: bool,
-    /// direct address hint for a peer, `<key>=<addr>` (repeatable)
-    // The clap id is `peer-hint`, not `peer`: this frees the id `peer` for the positional `<peer>` slot
-    // every dialing verb now names, so a verb hosts both this `--peer` HINT and a positional peer without a
-    // clap id collision. The flag NAME stays `--peer` (no user-facing change).
-    #[arg(id = "peer-hint", long = "peer", value_name = "key=addr")]
+    /// direct address hint for a peer, `<key>=<address>` (repeatable; the variable takes several, comma-separated)
+    // The clap id is `peer-hint`, not `peer`: this frees the id `peer` for the positional machine slot every
+    // dialing verb names, so a verb hosts both this `--peer` HINT and a positional machine without a clap id
+    // collision. A hint holds no comma (a key, `=`, a host and a port), so a comma separates several.
+    #[arg(
+        id = "peer-hint",
+        long = "peer",
+        value_name = "key=address",
+        env = "SWOOSH_PEER",
+        value_delimiter = ',',
+        hide = true
+    )]
     pub peer: Vec<PeerHint>,
     /// the relay peers reach this node through (per node)
     // A `RelayUrl`, not a `String`: clap parses the URL here at the edge, so a bad one is a parse error
     // naming the fault (`only https is accepted, not http: ...`) before any bind, and everything
     // downstream holds a URL that is valid by construction.
-    #[arg(long, value_name = "url")]
+    #[arg(long, value_name = "url", env = "SWOOSH_RELAY", hide = true)]
     pub relay: Option<RelayUrl>,
     /// where address records are published and read (fleet-wide)
-    #[arg(long, value_name = "url")]
+    #[arg(long, value_name = "url", env = "SWOOSH_RESOLVER", hide = true)]
     pub resolver: Option<ResolverUrl>,
 }
 
@@ -116,22 +134,26 @@ impl ReachArgs {
     /// either flag on those binds names a server the run would never touch. Refusing says which flag and
     /// which bind disagree; accepting would leave an operator believing their own relay was in play when
     /// the run went somewhere else entirely.
-    pub fn reject_unused_reach(&self) -> eyre::Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// [`UnusedReachFlag`] for the first of the two flags the selected bind would never read: a usage
+    /// error, which the caller exits 2 with.
+    pub fn reject_unused_reach(&self) -> Result<(), UnusedReachFlag> {
         let Some(bind) = self.unused_reach_bind() else {
             return Ok(());
         };
         if self.relay.is_some() {
-            eyre::bail!(
-                "--relay has no effect under {bind}: {subject} uses no relay; drop one of the two",
-                subject = bind.subject(),
-            );
+            return Err(UnusedReachFlag {
+                flag: ReachFlag::Relay,
+                bind,
+            });
         }
         if self.resolver.is_some() {
-            eyre::bail!(
-                "--resolver has no effect under {bind}: {subject} publishes no record; drop one of \
-                 the two",
-                subject = bind.subject(),
-            );
+            return Err(UnusedReachFlag {
+                flag: ReachFlag::Resolver,
+                bind,
+            });
         }
         Ok(())
     }
@@ -153,6 +175,80 @@ impl ReachArgs {
             Transport::QuirkNoise => Some(UnusedReach::QuirkNoise),
         }
     }
+
+    /// The first reach flag TYPED on the command line `matches` holds, for a form that reaches no machine
+    /// (`status`, `stop` here). Only the typed flag counts: a variable is a shell's standing setting, set
+    /// once for every verb it runs, so a bare form ignores it rather than refusing a shell that set one.
+    /// `matches` is the verb's own, the one this struct is flattened into: an id it does not define panics
+    /// in clap's debug builds.
+    pub fn typed_bare(matches: &clap::ArgMatches) -> Option<BareReachFlag> {
+        // The ids and long names are read from this struct's own clap model, so a sixth flag joins the
+        // check without a list to keep beside it.
+        let model = <Self as Args>::augment_args(clap::Command::new("reach"));
+        model
+            .get_arguments()
+            .filter(|arg| {
+                matches.value_source(arg.get_id().as_str())
+                    == Some(clap::parser::ValueSource::CommandLine)
+            })
+            .find_map(|arg| {
+                arg.get_long()
+                    .map(|long| BareReachFlag(format!("--{long}")))
+            })
+    }
+}
+
+/// A reach flag typed on a form that reaches no machine: a usage error. It names the flag alone, since only
+/// a typed flag is one.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0} has no effect without a machine")]
+pub struct BareReachFlag(String);
+
+/// A reach flag given to a bind that would never read it: a usage error. The flags are hidden and read
+/// from the environment too, so the line names both spellings of each side: the person may only ever have
+/// set the variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("{} has no effect {}\n  {}", flag.spelled(), bind.clause(), flag.because(*bind))]
+pub struct UnusedReachFlag {
+    /// The flag given.
+    pub flag: ReachFlag,
+    /// The bind that does not read it.
+    pub bind: UnusedReach,
+}
+
+/// The two reach flags only a non-local iroh bind reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReachFlag {
+    /// `--relay`, the relay this node offers.
+    Relay,
+    /// `--resolver`, where address records are published and read.
+    Resolver,
+}
+
+impl ReachFlag {
+    /// Both spellings of the flag.
+    fn spelled(self) -> &'static str {
+        match self {
+            Self::Relay => "--relay or SWOOSH_RELAY",
+            Self::Resolver => "--resolver or SWOOSH_RESOLVER",
+        }
+    }
+
+    /// Why `bind` has no use for the flag.
+    fn because(self, bind: UnusedReach) -> &'static str {
+        match (self, bind) {
+            (Self::Relay, UnusedReach::Local) => {
+                "swoosh uses no relay when it runs on this network only."
+            }
+            (Self::Resolver, UnusedReach::Local) => {
+                "swoosh publishes no record when it runs on this network only."
+            }
+            (Self::Relay, UnusedReach::Quirk | UnusedReach::QuirkNoise) => "quirk uses no relay.",
+            (Self::Resolver, UnusedReach::Quirk | UnusedReach::QuirkNoise) => {
+                "quirk publishes no record."
+            }
+        }
+    }
 }
 
 /// A bind that reads neither reach flag, named as the user spelled it so a refusal points at a flag they
@@ -169,23 +265,12 @@ pub enum UnusedReach {
 }
 
 impl UnusedReach {
-    /// The subject of the refusal's middle clause (`quirk uses no relay`), so the line reads as prose
-    /// about the thing that was bound rather than naming a flag twice.
-    fn subject(self) -> &'static str {
+    /// The clause naming the bind, both spellings for `--local`; `quirk` covers bare and sealed quirk,
+    /// however it was set.
+    fn clause(self) -> &'static str {
         match self {
-            Self::Local => "a local bind",
-            Self::Quirk | Self::QuirkNoise => "quirk",
-        }
-    }
-}
-
-impl fmt::Display for UnusedReach {
-    /// How the bind was SPELLED on the command line, which is what the refusal has to name.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Local => f.write_str("--local"),
-            Self::Quirk => f.write_str("--transport quirk"),
-            Self::QuirkNoise => f.write_str("--transport quirk+noise"),
+            Self::Local => "with --local or SWOOSH_LOCAL",
+            Self::Quirk | Self::QuirkNoise => "over quirk",
         }
     }
 }

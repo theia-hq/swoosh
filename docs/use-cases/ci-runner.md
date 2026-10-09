@@ -71,21 +71,21 @@ On the deploy box, receive pushed files behind the gate:
 
 <!-- manual: long-running serve on the deploy host -->
 ```console
-$ swoosh serve recv=recv:/srv/releases
+$ swoosh serve recv:/srv/releases
 ```
 
 Omit `expires` on the runner's step: the step returns once the node is up, the job advances, and the node
 keeps serving in the background until the job ends. Push the artifact to the deploy box by name, the
 runner's membership admits it:
 
-<!-- capture: swoosh send app.tar deploybox -->
+<!-- capture: swoosh send app.tar me/deploybox -->
 ```console
-$ swoosh send app.tar deploybox
+$ swoosh send app.tar me/deploybox
 sending to ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
 sent app.tar (204800 bytes)
 ```
 
-To ssh into the deploy box instead, serve `ssh=sshd:` there and run `swoosh ssh deploybox -- <command>`
+To ssh into the deploy box instead, serve `ssh` there and run `swoosh ssh me/deploybox -- <command>`
 from the job.
 
 ## Cut the runner off

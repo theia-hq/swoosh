@@ -8,6 +8,7 @@ pub mod invite;
 pub mod join;
 pub mod leave;
 pub mod lock;
+pub mod machine;
 pub mod ping;
 pub mod proxy;
 pub mod revoke;

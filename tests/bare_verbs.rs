@@ -202,9 +202,9 @@ fn bare_stop_stops_the_resident() {
         "the serving line names what the resident serves: {status_out}"
     );
 
-    // A bare reach flag is refused by name too (I.3, B4): the trio binds a transport and seeds discovery
-    // for a peer, and a bare verb reaches none, so each is a loud error, never a silent no-op. The
-    // resident stays untouched (the later real stop still finds it).
+    // A reach flag typed on a bare verb is a usage error naming the flag: it binds a transport and finds
+    // a machine, and a bare verb reaches none, so it is never a silent no-op. The resident stays untouched
+    // (the later real stop still finds it).
     let hint = format!(
         "{}=127.0.0.1:9000",
         swoosh::identity::Secret::ephemeral().node_id()
@@ -219,19 +219,33 @@ fn bare_stop_stops_the_resident() {
     ];
     for (args, flag) in reach_cases {
         let refused = swoosh(&scratch, args);
-        assert!(
-            !refused.status.success(),
-            "bare {args:?} with {flag} exits non-zero"
-        );
         assert_eq!(
-            String::from_utf8_lossy(&refused.stderr).trim_end(),
-            format!("error: {flag} only applies when reaching a peer; drop it or name one"),
-            "the refusal names the ignored flag: {args:?}"
+            refused.status.code(),
+            Some(2),
+            "bare {args:?} with {flag} is a usage error"
+        );
+        assert!(
+            String::from_utf8_lossy(&refused.stderr)
+                .starts_with(&format!("error: {flag} has no effect without a machine\n")),
+            "the refusal names the typed flag: {args:?}: {}",
+            String::from_utf8_lossy(&refused.stderr)
         );
     }
 
-    // Bare `stop` stops it, naming the pid the resident recorded in its lock.
-    let stop = swoosh(&scratch, &["stop"]);
+    // Bare `stop` stops it, naming the pid the resident recorded in its lock. The shell has every reach
+    // variable set: a bare form ignores them, so the stop still runs.
+    let stop = Command::new(env!("CARGO_BIN_EXE_swoosh"))
+        .args(["--home", scratch.home_dir.to_str().expect("utf-8 home")])
+        .arg("stop")
+        .env("XDG_RUNTIME_DIR", &scratch.xdg)
+        .env_remove("SWOOSH_HOME")
+        .env("SWOOSH_TRANSPORT", "quirk")
+        .env("SWOOSH_LOCAL", "1")
+        .env("SWOOSH_PEER", &hint)
+        .env("SWOOSH_RELAY", "https://relay.example")
+        .env("SWOOSH_RESOLVER", "https://dns.example/pkarr")
+        .output()
+        .expect("the swoosh binary runs");
     assert!(
         stop.status.success(),
         "bare stop exits 0: {}",

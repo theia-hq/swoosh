@@ -6,34 +6,36 @@ name is what a dialer asks for, the target is what the bytes come from. A <a id=
 address, not an authority. Two names can point at the same target (`a=sshd: b=sshd:`); each carries its
 own grant, toggle, and posture, and neither is a second service nor a second authority.
 
-This page is the catalog: every target you can put after `name=`, what it does, and how it is gated.
+`--service <service>` on `ssh`, `send` and `proxy` reaches a service served under another name. It has no
+variable: each verb's default differs.
+
+This page is the catalog: every target you can serve, what it does, and how it is gated.
 
 ## Available today
 
-Bare `swoosh serve` publishes `ping=ping: speed=speed:`, gated. Every entry after the verb must be
-`name=target`; a bare `ping` or `ping:` is refused with a message naming that form. Every target carries a
-scheme, including a TCP forward (`tcp:<host>:<port>`), so a scheme nothing serves is refused by name and a
-scheme that takes no argument refuses a tail: `ping=ping:80` is an error, not a forward to a host called
-`ping`. [`swoosh serve`](commands/serve.md) has the flags.
+A bare `swoosh serve` serves this machine's saved list of services ([`swoosh service`](commands/service.md)),
+or `ping` and `speed` if no list was ever saved. [`swoosh serve`](commands/serve.md) lists every form an
+entry takes, and its flags. A scheme that takes no argument refuses one: `ping=ping:80` is an error, not a
+forward to a host called `ping`.
 
 ### `ping:`
 
-Round-trip time probe. A peer runs `swoosh ping <peer>` against it.
+Round-trip time probe. A peer runs `swoosh ping <machine>` against it.
 
 - Posture: family-gated. `--public ping` opens it; the open route binds the metered engine (one ping run
   per caller per second, a 60-second/1 GiB per-stream cap). A family-gated route binds the owner engine
   instead, uncapped.
-- Example: `swoosh serve ping=ping:`
+- Example: `swoosh serve ping`
 - Limits: [measure](https://github.com/theia-hq/services/blob/main/crates/measure/README.md).
 
 ### `speed:`
 
-Throughput test. A peer runs `swoosh speed <peer>` against it.
+Throughput test. A peer runs `swoosh speed <machine>` against it.
 
 - Posture: family-gated. `--public speed` opens it; the open route binds the metered engine (one transfer
   at a time, a 64 MiB per-direction and 15-second per-stream cap). A family-gated route binds the owner
   engine instead, uncapped.
-- Example: `swoosh serve speed=speed:`
+- Example: `swoosh serve speed`
 - Limits: [measure](https://github.com/theia-hq/services/blob/main/crates/measure/README.md).
 
 ### `sshd:`
@@ -42,7 +44,7 @@ A keyless shell on this machine, run as the serving process's user. Serve it und
 `ssh`, the name `swoosh ssh` requests by default.
 
 - Posture: family-gated, and no public form: `--public ssh` is refused by name at startup.
-- Example: `swoosh serve ssh=sshd:`
+- Example: `swoosh serve ssh`
 - To front an existing sshd instead, use a forward: `swoosh serve ssh=tcp:127.0.0.1:22` keeps SSH's own
   auth.
 - Turning it off or removing it leaves an open shell running: see [service](commands/service.md).
@@ -53,8 +55,8 @@ A keyless shell on this machine, run as the serving process's user. Serve it und
 Receive pushed files into a directory.
 
 - Posture: family-gated, no public form.
-- Example: `swoosh serve inbox=recv:/srv/releases`
-- <a id="inbox"></a>With no directory, `inbox=recv:` saves into an inbox:
+- Example: `swoosh serve recv:/srv/releases`
+- <a id="inbox"></a>`recv:` alone saves into an inbox:
   `~/Library/Application Support/swoosh-inbox` on macOS; on Linux `$XDG_DATA_HOME/swoosh/inbox`, or
   `~/.local/share/swoosh/inbox` when that is not set.
 - Refused: your home directory, the swoosh home (its default, or the directory `--home` names), a

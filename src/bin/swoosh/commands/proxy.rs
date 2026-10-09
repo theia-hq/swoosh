@@ -1,4 +1,4 @@
-//! `swoosh proxy <peer> <url>`: mint a local http URL whose requests leave from a machine you name.
+//! `swoosh proxy <machine> <url>`: mint a local http URL whose requests leave from a machine you name.
 //!
 //! A URL-minting reverse proxy: a downloader (xget, curl) pulls from the local listener; each request
 //! rides one bifrost stream to a cap-gated `proxy:` service on that machine; it performs the origin HTTP
@@ -23,23 +23,24 @@ use futures::StreamExt as _;
 use futures::stream::FuturesUnordered;
 use nauthy::{Link, Service};
 use swoosh::contacts::Contacts;
-use swoosh::peer::Peer;
-use swoosh::reach::{self, Reached};
+use swoosh::escape::escaped_report;
+use swoosh::peer::{Machine, Peer};
+use swoosh::reach;
 use swoosh::transport::{self, ReachArgs};
 use swoosh::unbound::Unbound;
 use tightbeam::protocol::{Request, Response};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::commands::connect::{ACCEPT_RETRY, MAX_PIPES, Machine, press_ctrl_c};
+use crate::commands::connect::{self, ACCEPT_RETRY, MAX_PIPES, press_ctrl_c};
+use crate::commands::machine;
 
 /// Mint a local URL that reaches an origin through a machine you name (your own exit, over the overlay).
 #[derive(Debug, Args)]
 pub struct ProxyCmd {
-    /// the machine to go through: a petname (`usa`, `alice/box`), a raw node id, or a `swoosh:` link
     // Positional and first, like every verb's machine: the machine is never optional, and a flag that
     // is never optional is a positional.
-    #[arg(value_name = "peer")]
+    #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
     /// The origin URL to reach (path and query on the local URL resolve against it).
     // Parsed here, so a URL that does not parse is a usage error before anything is dialed, and each
@@ -48,13 +49,12 @@ pub struct ProxyCmd {
     pub url: url::Url,
     /// which served service to reach
     // The default is taken FROM the table that knows a bare `swoosh serve` does not bind it (an
-    // unscoped relay egresses under the exit node's own IP, so there is no default to inherit), so
-    // the name this verb dials and the name a failed request teaches the `serve` line for are one
-    // value.
-    #[arg(long, value_name = "service", default_value = Unbound::PROXY.name(), value_parser = swoosh::names::service)]
+    // unscoped relay egresses under the exit node's own IP, so there is no default to inherit). Hidden,
+    // with no variable: each verb's default differs, so one variable would retarget three verbs.
+    #[arg(long, value_name = "service", default_value = Unbound::PROXY.name(), value_parser = swoosh::names::service, hide = true)]
     pub service: Service,
-    /// Pin the local listener port (default: an OS-assigned free port).
-    #[arg(long, value_name = "port")]
+    /// The local port to listen on (default: any free port)
+    #[arg(long, value_name = "n")]
     pub port: Option<u16>,
     #[command(flatten)]
     pub reach: ReachArgs,
@@ -104,8 +104,18 @@ impl swoosh::reaching::Reaching for ProxyCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_proxy(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
-            .await
+        let Some(machine) = ctx.machine else {
+            eyre::bail!("internal: `proxy` ran without its machine resolved (root-dispatch bug)");
+        };
+        self.run_proxy(
+            node,
+            ctx.contacts,
+            machine,
+            ctx.bound,
+            ctx.present,
+            ctx.membership,
+        )
+        .await
     }
 }
 
@@ -115,8 +125,9 @@ impl swoosh::reaching::Reaching for ProxyCmd {
 pub const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl ProxyCmd {
-    /// Dial the exit node, bind a loopback listener, print the local URL, and serve each request over its
-    /// own bifrost stream until Ctrl-C.
+    /// Dial the exit node, prove it admits this machine to the service, bind a loopback listener, print the
+    /// local URL, and serve each request over its own bifrost stream until Ctrl-C. A machine that refuses
+    /// the service refuses here, once, before any URL is printed.
     ///
     /// `present` is the ALREADY-RESOLVED badge from the composition root: the member badge rooted at the
     /// dialing key by default (so the owner reaching their OWN gated exit node admits), the link typed as
@@ -128,18 +139,37 @@ impl ProxyCmd {
         self,
         node: &Node<T, D>,
         contacts: &Contacts,
+        machine: &Machine,
         bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
-        let Reached { session, .. } = reach::dial(node, contacts, &self.peer, bound).await?;
+        let session = reach::dial(node, machine, &self.peer, bound).await?;
+        // Admission is proven on one stream before the URL prints, so a refusal is one line and a
+        // non-zero exit rather than a URL that answers every request with a 403. The stream is dropped
+        // once admitted; the machine tears its half down.
+        let connector = reach::gated(
+            machine.key(),
+            self.service.clone(),
+            Option::clone(&present),
+            Option::clone(&membership),
+        );
+        match connector.open_on(&session).await {
+            Ok(_admitted) => {}
+            Err(bifrost::Error::Refused(bifrost::Refusal::NotAdmitted)) => {
+                let diagnosis =
+                    reach::diagnose(&session, machine, &self.service, present, membership).await;
+                return Err(machine::refused(machine, &self.service, diagnosis));
+            }
+            Err(error) => return Err(escaped_report(error.into())),
+        }
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, self.port.unwrap_or(0))).await?;
         let local = Local::new(listener.local_addr()?);
         println!("{local}");
         eprintln!(
             "Proxying {} through {}.",
             self.url,
-            Machine::of(contacts, session.peer())
+            connect::Machine::of(contacts, session.peer())
         );
         press_ctrl_c();
         accept_each(listener, MAX_PIPES, |tcp| {
@@ -178,7 +208,7 @@ impl ProxyCmd {
                 let _ = respond_error(
                     &mut tcp,
                     Status::BadGateway,
-                    &self.body(format!("proxy failed: {error:#}")),
+                    &format!("proxy failed: {error:#}"),
                 )
                 .await;
             }
@@ -260,12 +290,7 @@ impl ProxyCmd {
                     Status::BadGateway
                 }
             };
-            return respond_error(
-                tcp,
-                status,
-                &self.body(format!("proxy service refused: {refusal}")),
-            )
-            .await;
+            return respond_error(tcp, status, &format!("proxy service refused: {refusal}")).await;
         }
 
         FetchRequest {
@@ -292,22 +317,6 @@ impl ProxyCmd {
             }
         }
         Ok(())
-    }
-
-    /// The body of a failure this proxy serves, with the `serve` line the exit node would need when
-    /// the service was the DEFAULT one. A downloader's 403 is where this verb's refusal is actually
-    /// read, so it is where the line has to land.
-    ///
-    /// Built from the service name THIS client requested and nothing else, and applied to every
-    /// failure body alike: the refusal that came back picks the STATUS (an authorization failure is a
-    /// 403, a bad day at the node or origin is a 502, which a downloader can already see), and it
-    /// picks no part of this. A sentence that appeared on one refusal and not another would leak the
-    /// distinction the uniform wire refusal exists to withhold.
-    fn body(&self, failure: String) -> String {
-        match Unbound::dialed(self.service.as_str()) {
-            Some(unbound) => format!("{failure}: {}", unbound.teaching()),
-            None => failure,
-        }
     }
 }
 

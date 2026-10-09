@@ -7,9 +7,8 @@
 //!
 //! The machine is only ever `me/<name>`, a name in the list of your devices. Every other shape (a bare word,
 //! `me` alone, a contact, a key, a link, a path, two machines) is a usage error, exit 2, before any transport
-//! binds: a path or a link at parse, the rest once the list of your devices is read. A bare person resolves
-//! to that person's first device when dialed, so handing anything but a device of yours to the dial would
-//! stop a machine nobody named. Your own name stops this machine locally, as bare `stop` does.
+//! binds: a path or a link at parse, the rest once the list of your devices is read, so only a device of
+//! yours ever reaches the dial. Your own name stops this machine locally, as bare `stop` does.
 //!
 //! `control.stop` is MEMBER-only, not merely family-gated: the node admits a whole-node membership badge
 //! (your own devices), and refuses a delegated slip at the route's member floor with the same uniform
@@ -40,7 +39,7 @@ use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
 use swoosh::peer::{OwnDevice, Peer};
 use swoosh::roster::RosterDoc;
 use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK};
-use swoosh::transport::ReachArgs;
+use swoosh::transport::{BareReachFlag, ReachArgs};
 use tightbeam::tunnel::Connector;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -280,12 +279,8 @@ impl Yours {
 
     /// The detail line that lists your devices, or says this machine knows none of them.
     fn listed(&self) -> String {
-        let devices: Vec<String> = self.mine().map(|(device, _)| device.to_string()).collect();
-        if devices.is_empty() {
-            KNOWS_NONE.to_owned()
-        } else {
-            format!("Yours: {}.", devices.join(", "))
-        }
+        let devices: Vec<OwnDevice> = self.mine().map(|(device, _)| device).collect();
+        listed(&devices)
     }
 
     /// The refusal for a word that names nothing of yours: the shape a machine takes, shown by your first
@@ -295,6 +290,17 @@ impl Yours {
             Some((example, _)) => format!("swoosh stop takes one of your machines, like {example}"),
             None => format!("swoosh stop takes one of your machines\n  {KNOWS_NONE}"),
         })
+    }
+}
+
+/// The detail line under a refusal that lists `devices`, your devices, or says this machine knows none of
+/// them: the one listing every verb's `which machine?` prints.
+pub fn listed(devices: &[OwnDevice]) -> String {
+    if devices.is_empty() {
+        KNOWS_NONE.to_owned()
+    } else {
+        let names: Vec<String> = devices.iter().map(ToString::to_string).collect();
+        format!("Yours: {}.", names.join(", "))
     }
 }
 
@@ -308,22 +314,32 @@ impl StopCmd {
     /// Everything before a dial: resolve the machine against the list of your devices, then either stop this
     /// machine over its control socket (bare, or your own name) and return `None`, or return the device to
     /// stop over its `control.stop`. Runs before any transport is composed, so a refused shape binds nothing.
-    pub async fn run_local(self, home: &Home) -> eyre::Result<Option<StopDevice>> {
+    /// `typed` is a reach flag typed on the command line, which stopping this machine refuses.
+    pub async fn run_local(
+        self,
+        home: &Home,
+        typed: Option<BareReachFlag>,
+    ) -> eyre::Result<Option<StopDevice>> {
         let target = match self.machine {
             None => Target::Here,
             Some(aim) => aim.resolve(&Yours::read(home).await?)?,
         };
         match target {
             Target::Here => {
-                // The reach trio binds a transport and seeds discovery for a PEER; stopping this machine binds
-                // neither, so the flags are refused by name rather than silently ignored (I.3, B4).
-                swoosh::reaching::reject_bare_reach(&self.reach)?;
+                // The reach flags bind a transport and find a machine; stopping this machine does neither,
+                // so a typed one is a usage error rather than silently ignored. A variable is the shell's
+                // standing setting, read by the verbs that reach, so it is ignored here.
+                if let Some(flag) = typed {
+                    return Err(Usage(flag.to_string()).into());
+                }
                 let client = ControlClient::resolve(home).map_err(control_error_report)?;
                 eprintln!("{}", stop_resolved(&client).await?);
                 Ok(None)
             }
             Target::Device { device, node } => {
-                self.reach.reject_unused_reach()?;
+                self.reach
+                    .reject_unused_reach()
+                    .map_err(|unused| Usage(unused.to_string()))?;
                 Ok(Some(StopDevice {
                     peer: Peer::Raw(node),
                     device,

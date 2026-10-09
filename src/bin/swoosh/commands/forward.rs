@@ -1,4 +1,4 @@
-//! `swoosh forward <peer> <service> <port | unix:<path> | ->`: the generic dial. Bind a machine's served
+//! `swoosh forward <machine> <service> <port | unix:<path> | ->`: the generic dial. Bind a machine's served
 //! service to a local port, stream it to stdout, or (reserved) a local unix listener.
 //!
 //! The MAIN ROAD. Most services get no verb of their own: a client that only moves bytes between the
@@ -23,12 +23,12 @@ use swoosh::peer::Peer;
 use swoosh::transport::ReachArgs;
 
 use crate::commands::connect::{To, connect};
+use crate::commands::machine;
 
 /// A machine's served service, forwarded to the local end it names.
 #[derive(Debug, Args)]
 pub struct ForwardCmd {
-    /// the machine to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
-    #[arg(value_name = "peer")]
+    #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
     /// the served service to reach, under the name the host bound it
     #[arg(value_name = "service", value_parser = swoosh::names::service)]
@@ -85,7 +85,7 @@ impl swoosh::reaching::Reaching for ForwardCmd {
 
     /// Drive the local end: bind a local port and forward each connection, stream to stdout, or the
     /// reserved unix listener, all over the overlay. It reads the resolved `present` badge and `membership`
-    /// badge from `ctx`, plus `contacts` to resolve a petname in its peer slot, the same way `ping`/`send` do.
+    /// badge from `ctx`, and the machine resolved before the bind, the same way `ping`/`send` do.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -99,10 +99,13 @@ impl swoosh::reaching::Reaching for ForwardCmd {
         // hand-rolled slot 1 here could only re-derive what `resolve` already computed, and the hand-rolled
         // one silently dropped slot 2 (the resolver is the only code that computes it), which is what
         // capped this dial at bearer slips.
+        let Some(machine) = ctx.machine else {
+            eyre::bail!("internal: `forward` ran without its machine resolved (root-dispatch bug)");
+        };
         connect(
             node,
             ctx.contacts,
-            &self.peer,
+            machine,
             self.service,
             ctx.present,
             ctx.membership,

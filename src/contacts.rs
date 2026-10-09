@@ -173,7 +173,7 @@ pub struct Binding {
 ///
 /// A signet is the key a person's fleet roots at (the root that vouches for their devices); it is NOT a
 /// device, so it lives in its own at-most-one slot, never in `devices`. Keeping it out of `devices` keeps
-/// it out of reach fan-out ([`resolve_candidates`](Contacts::resolve_candidates)) and out of `status`'s
+/// it out of resolution ([`resolve_candidates`](Contacts::resolve_candidates)) and out of `status`'s
 /// device columns: you never dial a signet, you BIND a link to it (`share <service> <petname>`).
 /// Modeling it as a distinct `Option` makes "a person has zero-or-one signet" the only representable shape.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -254,10 +254,10 @@ impl Contacts {
     /// resolved from.
     ///
     /// A specific device (`alice/macbook`) resolves to exactly that one key. A bare person (`alice`)
-    /// resolves to ALL their devices in label order, so a verb can dial each until one connects (v1
-    /// first-reachable-wins) or fan out over all of them. An unknown name or device yields the error,
-    /// never an empty success, so a reach verb never silently dials nothing. The labels let a fan-out
-    /// verb (`ping`, `status`) report per device by name, not by an opaque key.
+    /// resolves to ALL their devices in label order, for a caller that acts on every one of them (a
+    /// verb that dials resolves one machine through [`Peer::machine`](crate::peer::Peer::machine)
+    /// instead). An unknown name or device yields the error, never an empty success. The labels name
+    /// each device rather than an opaque key.
     pub fn resolve_candidates(&self, target: &ContactRef) -> Result<Vec<Candidate>, ResolveError> {
         let person = self
             .people
@@ -509,9 +509,8 @@ pub enum ResolveError {
 
 /// One resolved peer to try: the identity to dial and the label to print for it.
 ///
-/// A reach verb dials the [`node`](Self::node) and reports the [`label`](Self::label) (`alice/macbook`,
-/// or a raw key's short form), so a fan-out over a person's devices names each device rather than a bare
-/// key. Carried through resolution because the label is lost once a `ContactRef` becomes a `NodeId`.
+/// A caller acts on the [`node`](Self::node) and reports the [`label`](Self::label) (`alice/macbook`),
+/// so a person's devices are named each rather than by a bare key. Carried through resolution because the label is lost once a `ContactRef` becomes a `NodeId`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     /// The peer's identity, dialed verbatim.

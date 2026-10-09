@@ -8,8 +8,8 @@ machine's key: `alice` means whoever you pointed it at.
 <!-- generated: usage from `swoosh contact -h`; option lines curated -->
 ```
 Usage: swoosh contact [OPTIONS] <COMMAND>
-  add <name> <key>   save a person's root, or one machine of theirs
-  rm <name>          remove a saved person, or one machine of theirs
+  add <person | person/name> <key | root key>   save a person's root, or one machine of theirs
+  rm <person | person/name>                     remove a saved person, or one machine of theirs
 ```
 
 **Example.**
@@ -20,7 +20,7 @@ added alice/desk -> ed01hcq6balr…
 ```
 
 **Things to know.** The name's shape decides what is saved. `alice/laptop` is one machine: `swoosh ping
-alice/laptop` reaches it, and `swoosh ping alice` tries each of alice's machines. `alice` alone saves her
+alice/laptop` reaches it, and so does `swoosh ping alice` while it is the only machine of hers saved. `alice` alone saves her
 root, the key that vouches for her machines (typed bare or as `status` prints it, `root:ed01…`): `swoosh
 share ssh alice` makes a link all of them can use, and a root is never dialed. `contact rm` refuses while
 links you shared with that contact are live; `swoosh revoke <name>` ends them. `swoosh status` lists your

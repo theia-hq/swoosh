@@ -29,7 +29,7 @@ Hand them the `swoosh:` link. On the build box, serve the shell gated:
 
 <!-- manual: long-running serve -->
 ```console
-$ swoosh serve ssh=sshd:
+$ swoosh serve ssh
 ```
 
 ## What the contractor does

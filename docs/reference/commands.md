@@ -15,13 +15,8 @@ These apply to most commands and are omitted from the per-command signatures bel
   `~/Library/Application Support/swoosh` on macOS, `$XDG_STATE_HOME/swoosh` or `~/.local/state/swoosh` on
   Linux. Backups leave `machine/` out, because a copy of the key would act as this machine: on macOS
   Time Machine skips it, and on Linux it holds a `CACHEDIR.TAG`, which tools such as restic and borg skip.
-- `--transport <iroh|quirk|quirk+noise>` which backend to bind. See [transports](../transports.md).
-- `--peer <key=addr>` a direct address hint, for when discovery cannot reach a peer (mainly quirk). See
-  [transports](../transports.md#quirk).
-- `--relay <url>` the relay peers reach this node through (per node). See
-  [run the relay and the resolver yourself](../transports.md#self-run).
-- `--resolver <url>` where address records are published and read (fleet-wide). See
-  [run the relay and the resolver yourself](../transports.md#self-run).
+- `<machine>` is `me/<name>` (one of yours), `<person>/<name>`, a key (`ed01…`), a `swoosh:` link, or a path to
+  a file holding one. A person alone works when only one of their machines is saved; with several, name one.
 
 ## Commands
 

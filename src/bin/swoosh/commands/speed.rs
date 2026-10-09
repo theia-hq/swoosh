@@ -2,9 +2,8 @@
 //! a time (`--up` or `--down`, default down) or both at once (`--bidir`), bounded by time (`-t`) or
 //! bytes (`-n`, default `-t 5`).
 //!
-//! One target, unlike `ping`/`status`: a speed test saturates a link, so fanning out over a person's
-//! devices would just contend for the one uplink and have no single number to report. A bare person
-//! (`alice`) dials her first reachable device; `alice/macbook` picks the one. Throughput prints OVER
+//! One machine: `alice/macbook` picks that one, and a bare person dials their one saved machine (several
+//! refuse before anything binds). Throughput prints OVER
 //! TIME: a line per interval as it runs, then the per-direction totals. The connection path (direct vs
 //! relayed, the same source `status` reads) is reported after the transfer, since the run is the window
 //! in which a relayed iroh link may hole-punch up to direct: a slow number then reads as "it relayed",
@@ -20,11 +19,12 @@ use measure::{
     Throughput,
 };
 use nauthy::{Link, Service};
-use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, causes};
-use swoosh::peer::Peer;
-use swoosh::reach::{self, Resolved};
+use swoosh::peer::{Machine, Peer};
+use swoosh::reach;
 use swoosh::transport::{self, ReachArgs};
+
+use crate::commands::machine;
 
 /// How often a running speed test prints its current rate. One second matches iperf's default report
 /// interval and reads as a live, once-a-second heartbeat without flooding the terminal.
@@ -35,8 +35,7 @@ const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 #[command(group = ArgGroup::new("way").args(["up", "down", "bidir"]))]
 #[command(group = ArgGroup::new("bound").args(["secs", "bytes"]))]
 pub struct SpeedCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
-    #[arg(value_name = "peer")]
+    #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
     /// Measure the upload direction (this node sends).
     #[arg(long)]
@@ -47,8 +46,8 @@ pub struct SpeedCmd {
     /// Measure upload and download at once, full-duplex on one stream. Works over quirk too.
     #[arg(long)]
     pub bidir: bool,
-    /// Run for this many seconds. Defaults to 5 when no bound is given.
-    #[arg(short = 't', long, value_name = "seconds")]
+    /// How long to run, in seconds (5 unless -n is given)
+    #[arg(short = 't', long, value_name = "s")]
     pub secs: Option<f64>,
     /// Transfer this many bytes instead of running for a fixed time.
     #[arg(short = 'n', long, value_name = "bytes")]
@@ -87,8 +86,8 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         ))
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `speed` reads `contacts`, the `transport`
-    /// label, and the resolved `present` badge; it ignores `key`.
+    /// Uniform dispatch: unpack the reach context and run. `speed` reads the resolved machine, the
+    /// `transport` label, and the resolved `present` badge.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -98,18 +97,21 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_speed(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
+        let Some(machine) = ctx.machine else {
+            eyre::bail!("internal: `speed` ran without its machine resolved (root-dispatch bug)");
+        };
+        self.run_speed(node, machine, ctx.bound, ctx.present, ctx.membership)
             .await
     }
 }
 
 impl SpeedCmd {
-    /// Dial the first reachable device, run the transfer while a ticker prints the rate each interval,
+    /// Dial the machine, run the transfer while a ticker prints the rate each interval,
     /// then report the settled connection path and the per-direction totals.
     async fn run_speed<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
-        contacts: &Contacts,
+        machine: &Machine,
         bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
@@ -120,10 +122,17 @@ impl SpeedCmd {
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, so the verb never threads a slip itself.
         let service: Service = reach::SPEED_SERVICE.parse()?;
-        let Resolved { session, label } = reach::dial_service(
-            node, contacts, &self.peer, &service, present, membership, bound,
+        let session = reach::dial_service(
+            node,
+            machine,
+            &self.peer,
+            &service,
+            Option::clone(&present),
+            Option::clone(&membership),
+            bound,
         )
         .await?;
+        let label = machine.label();
         println!(
             "speed test to {label} via {} ({})",
             bound.transport.name(),
@@ -152,6 +161,14 @@ impl SpeedCmd {
         // itself was refused.
         let report = match outcome {
             Ok(report) => report,
+            // The machine refused this machine the service: the dial refusal, once. One of your devices is
+            // asked why first, over a second connection, since the gated session opens nothing but `speed`.
+            Err(ProtocolError::Refused(Refusal::Stream(bifrost::Refusal::NotAdmitted))) => {
+                let diagnosis =
+                    reach::diagnose_over(node, machine, &service, present, membership).await;
+                node.close().await;
+                return Err(machine::refused(machine, &service, diagnosis));
+            }
             Err(ProtocolError::Refused(refusal)) => {
                 node.close().await;
                 let line = refusal_line(&label, &refusal);

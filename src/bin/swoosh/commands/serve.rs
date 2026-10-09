@@ -58,64 +58,70 @@ use crate::commands::service::Running;
 /// Be a node: publish these services behind your gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// publish services as `name=target` (bare: this machine's list, else `ping` and `speed`)
-    // The long form lists every target scheme, both halves: the five engines swoosh serves and the six
-    // forms the tunnel grammar routes. A refusal from either half points here, so this list is the one a
-    // mistyped scheme is sent to and it has to be complete.
+    /// Serve exactly these, saved as this machine's list
+    // The long form lists every form both halves take: the services swoosh serves under their own names,
+    // and the targets served under a name the person gives. A refusal from either half points here, so this
+    // list is the one a mistyped form is sent to and it has to be complete.
     #[arg(
-        value_name = "name=target",
+        value_name = "service",
         value_parser = swoosh::serve::service_entry,
-        long_help = "publish services as `name=target` (bare: this machine's list, else `ping` and `speed`)\n\
+        long_help = "Serve exactly these, saved as this machine's list\n\
+                     With none named, it serves that list, or ping and speed if no list was ever saved.\n\
                      \n\
-                     Every target carries a scheme. swoosh serves:\n\
-                     \x20 ping:            round-trip probe\n\
-                     \x20 speed:           throughput test\n\
-                     \x20 sshd:            a shell, keyless (the node's gate is the auth)\n\
-                     \x20 proxy:<url>      requests to one site, made from this machine\n\
-                     \x20 recv:<dir>       files pushed into <dir>\n\
+                     Built in, served under their own names:\n\
+                     \x20 ssh                     a shell on this machine\n\
+                     \x20 ping                    round-trip probe\n\
+                     \x20 speed                   throughput test\n\
+                     \x20 proxy:<url>             requests to one site, made from this machine\n\
+                     \x20 recv:<dir>              files sent here, saved in <dir>, else the inbox\n\
                      \n\
-                     and it forwards or streams:\n\
-                     \x20 tcp:<host>:<port>  a local TCP service\n\
-                     \x20 unix:<path>        a local Unix socket\n\
-                     \x20 file:<path>        an existing file's bytes\n\
-                     \x20 fifo:<path>        a named pipe, live\n\
-                     \x20 stdin:             this process's own stdin\n\
-                     \x20 echo:              reflects whatever is sent\n\
-                     \n\
-                     `ping:`, `speed:` and `sshd:` take no argument, and neither do `stdin:` and `echo:`. \
-                     A live single-writer source (`stdin:`, `fifo:`) may be suffixed `+lossy` to fan \
-                     out to many readers at once, dropping bytes for one that falls behind."
+                     Under a name you give (web=tcp:localhost:3000):\n\
+                     \x20 tcp:<address>:<port>    a TCP service this machine reaches\n\
+                     \x20 unix:<path>             a Unix socket on this machine\n\
+                     \x20 file:<path>             a file's bytes\n\
+                     \x20 fifo:<path>             a named pipe, live\n\
+                     \x20 stdin:                  this process's stdin\n\
+                     \x20 echo:                   sends back whatever it receives"
     )]
     pub services: Vec<String>,
-    /// open named services to anyone (comma-list, repeatable)
+    /// Open these services to anyone (comma-separated, repeatable)
     #[arg(
         long,
-        value_name = "svc",
+        value_name = "service",
         value_delimiter = ',',
         value_parser = swoosh::names::service,
-        long_help = "A keyless shell is refused; a raw stream goes to `--public-unsafe`."
+        long_help = "Open these services to anyone (comma-separated, repeatable)\n\
+                     ssh and recv never open to anyone; a raw stream needs --public-unsafe."
     )]
     pub public: Vec<Service>,
-    /// open named raw-stream services (file:, fifo:, stdin:) to anyone
+    /// Open these raw-stream services (file:, fifo:, stdin:) to anyone
     // A raw stream opens only through this flag, and only when named: no bang suffix, no whole-node form.
     #[arg(
         long,
-        value_name = "svc",
+        value_name = "service",
         value_delimiter = ',',
         value_parser = swoosh::names::service,
-        long_help = "A raw stream has no auth of its own; `--public` refuses it and points here."
+        long_help = "Open these raw-stream services (file:, fifo:, stdin:) to anyone\n\
+                     A raw stream gives its bytes to whoever connects; --public refuses it and points here."
     )]
     pub public_unsafe: Vec<Service>,
     /// suppress the readiness banner and activity lines
-    #[arg(long)]
+    // Hidden and read from `SWOOSH_QUIET`: no flow needs it, and a supervisor or an action sets it once.
+    // It withholds stdout and the activity lines only; refusals, warnings and `Stopped by` still print.
+    #[arg(
+        long,
+        env = "SWOOSH_QUIET",
+        hide = true,
+        value_parser = clap::builder::FalseyValueParser::new()
+    )]
     pub quiet: bool,
     /// Also print how peers reach this machine, under the banner.
     #[arg(long, hide = true, env = "SWOOSH_VERBOSE")]
     pub verbose: bool,
-    /// serve for a bounded time, then stop (`30m`, `2h`, `1d`)
-    #[arg(long, value_name = "duration")]
+    /// Serve for this long, then stop (30m, 2h, 1d)
+    #[arg(long, value_name = "d")]
     pub expires: Option<Lifetime>,
-    /// For this run, let in the devices of another root without joining it (CI).
+    /// For this run, let in the devices of another root without joining it (CI)
     #[arg(long, value_name = "root key", value_parser = admitted_root)]
     pub admit: Option<NodeId>,
     #[command(flatten)]
@@ -752,8 +758,9 @@ impl ServeCmd {
             eprintln!("{}", swoosh::serve::stopped_by(&contacts, key));
         }
         // The teardown line is best-effort: a piped consumer may have already closed stdout by the time
-        // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic.
-        {
+        // the node stops, so a broken-pipe write must NOT turn a clean stop into a panic. It is stdout, so
+        // `--quiet` withholds it with the banner.
+        if !self.quiet {
             use std::io::Write as _;
             let _ = writeln!(std::io::stdout(), "{}", stopped.message());
         }

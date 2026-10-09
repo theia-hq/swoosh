@@ -1,10 +1,9 @@
-//! `swoosh ping <peer>`: reach a peer by petname or public key and report round-trip time, `ping(8)`
-//! shaped.
+//! `swoosh ping <machine>`: reach one machine by name or key and report round-trip time, `ping(8)` shaped.
 //!
-//! ping is a diagnostic, so a person (`alice`) fans out to ALL her devices and reports each: how do I
-//! reach alice, across every device she has? `alice/macbook` pings the one. Each device's block names
-//! the device, then its `path:` (`direct` or `relayed through <relay>`, the same words `status` prints) so
-//! a slow RTT reads as "it relayed", not a mystery, then the `ping(8)` counts/loss and RTT distribution.
+//! One machine, always: `alice/macbook` pings that one, and a bare person pings their one saved machine
+//! (several refuse before anything binds). The block names the machine, then its `path:` (`direct` or
+//! `relayed through <relay>`, the same words `status` prints) so a slow RTT reads as "it relayed", not a
+//! mystery, then the `ping(8)` counts/loss and RTT distribution.
 //!
 //! With `-v`, it prints a line per probe as each one lands (like `tailscale ping`), and a `path:` line for
 //! the path in force when the probes start and again each time the transport selects another, from the
@@ -19,23 +18,23 @@ use clap::Args;
 use futures::StreamExt as _;
 use measure::{Ping, PingReport, Probe, ProtocolError, Refusal};
 use nauthy::{Link, Service};
-use swoosh::contacts::Contacts;
 use swoosh::escape::{Escaped, causes};
-use swoosh::peer::Peer;
+use swoosh::peer::{Machine, Peer};
 use swoosh::reach;
 use swoosh::transport::{self, ReachArgs};
+
+use crate::commands::machine;
 
 /// Measure the round-trip time to a peer, addressed by a petname or their public key.
 #[derive(Debug, Args)]
 pub struct PingCmd {
-    /// the peer to reach: a petname (`alice`, `alice/desk`), a raw node id, or a `swoosh:` link
-    #[arg(value_name = "peer")]
+    #[arg(value_name = "machine", help = machine::HELP)]
     pub peer: Peer,
     /// how many probes to send
-    #[arg(short = 'c', long, value_name = "count", default_value_t = 4)]
+    #[arg(short = 'c', long, value_name = "n", default_value_t = 4)]
     pub count: u32,
     /// seconds between probes
-    #[arg(short = 'i', long, value_name = "seconds", default_value_t = 1.0)]
+    #[arg(short = 'i', long, value_name = "s", default_value_t = 1.0)]
     pub interval: f64,
     /// print a line per probe, and one when the path changes
     #[arg(short = 'v', long)]
@@ -75,8 +74,8 @@ impl swoosh::reaching::Reaching for PingCmd {
         ))
     }
 
-    /// Uniform dispatch: unpack the reach context and run. `ping` reads `contacts` (fan-out), the
-    /// `transport` label, and the resolved `present` badge; it ignores `key`.
+    /// Uniform dispatch: unpack the reach context and run. `ping` reads the resolved machine, the
+    /// `transport` label, and the resolved `present` badge.
     async fn run<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
@@ -86,24 +85,26 @@ impl swoosh::reaching::Reaching for PingCmd {
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
-        self.run_ping(node, ctx.contacts, ctx.bound, ctx.present, ctx.membership)
+        let Some(machine) = ctx.machine else {
+            eyre::bail!("internal: `ping` ran without its machine resolved (root-dispatch bug)");
+        };
+        self.run_ping(node, machine, ctx.bound, ctx.present, ctx.membership)
             .await
     }
 }
 
 impl PingCmd {
-    /// Resolve the target to its devices, and for each dial, probe, and print its path and RTT summary.
-    /// Reports every device (a person fans out); an unreachable one prints an honest line and the run
-    /// continues, ending non-zero only if no device answered at all.
+    /// Dial the machine, probe it, and print its path and RTT summary. A machine that refuses the probe
+    /// `NotAdmitted` prints the dial refusal on stderr instead (one of your devices is asked why); any
+    /// other outcome prints its line, and only an answered probe exits green.
     async fn run_ping<T: Transport, D: Discovery>(
         self,
         node: &Node<T, D>,
-        contacts: &Contacts,
+        machine: &Machine,
         bound: &transport::Bound,
         present: Option<Link>,
         membership: Option<Link>,
     ) -> eyre::Result<()> {
-        let candidates = reach::candidates(&self.peer, contacts)?;
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver: slot 1 (`present`) is
         // the link typed as the peer or the member badge, slot 2 (`membership`) is a fleet badge only for a
         // signet-bound slip. The verb never threads a slip itself, so it cannot desync the two.
@@ -111,86 +112,74 @@ impl PingCmd {
             count: self.count,
             interval: Duration::from_secs_f64(self.interval),
         };
-
-        // Fold how far each device got, so a fan-out where every device was unreachable OR refused ends
-        // non-zero. A refused device answered the dial but does not serve ping, so it prints a distinct
-        // line and does not hold the exit code green: a refusal is never rendered as `100% loss`.
-        let mut outcome = reach::Outcome::default();
+        let label = machine.label();
+        let name = bound.transport.name();
         let service: Service = reach::PING_SERVICE.parse()?;
-        for candidate in &candidates {
-            match reach::connect_service(
-                node,
-                candidate,
-                &service,
-                Option::clone(&present),
-                Option::clone(&membership),
-            )
-            .await
-            {
-                Ok(session) => {
-                    // With `-v`, print a line per probe as it lands, and a path line for the path in force
-                    // and each change the session reports, so the moment a relayed link flips to direct
-                    // is visible live. The observer borrows the session read-only, alongside the run's own
-                    // read-only borrow.
-                    let report = if self.verbose {
-                        let label = &candidate.label;
-                        let name = bound.transport.name();
-                        let probes = plan.observing(&session, |probe| {
-                            println!("{}", probe_line(label, name, probe));
-                        });
-                        watching(session.path_changes(), probes, |path| {
-                            println!("{}", path_line(label, name, path));
-                        })
-                        .await
-                    } else {
-                        plan.run(&session).await
-                    };
-                    match report {
-                        Ok(report) => {
-                            outcome = outcome.max(reach::Outcome::Healthy);
-                            let path = reach::conn_path(&session.conn_info()).to_string();
-                            print_device(&candidate.label, bound.transport.name(), &path, &report);
-                        }
-                        // The node was REACHED but refused this probe: a distinct line that says so (not a
-                        // healthy device with 100% loss, and NOT "unreachable"), rendering the typed refusal
-                        // so a gate refusal reads descriptively and is never doubled (`refused (refused)`).
-                        // The run continues to the next device.
-                        Err(ProtocolError::Refused(refusal)) => {
-                            outcome = outcome.max(reach::Outcome::Refused);
-                            println!(
-                                "{}",
-                                refused_line(&candidate.label, bound.transport.name(), &refusal)
-                            );
-                        }
-                        // The node was REACHED and the exchange then broke. One broken device used to
-                        // abort the whole run with its error, so the devices after it were never tried and
-                        // the operator learned nothing about them: a fan-out that gives up on the first
-                        // bad peer answers a narrower question than the one asked. It is a line now, like
-                        // a refusal and like an unreachable, and the run continues. The full cause chain
-                        // is rendered because the outer half of a stream failure is routinely the useless
-                        // half.
-                        Err(error) => {
-                            outcome = outcome.max(reach::Outcome::Failed);
-                            println!(
-                                "{}",
-                                failed_line(&candidate.label, bound.transport.name(), &error)
-                            );
-                        }
-                    }
-                }
-                Err(_error) => {
-                    println!(
-                        "{} via {}: unreachable",
-                        candidate.label,
-                        bound.transport.name()
-                    );
-                }
+        let session = match reach::dial_service(
+            node,
+            machine,
+            &self.peer,
+            &service,
+            Option::clone(&present),
+            Option::clone(&membership),
+            bound,
+        )
+        .await
+        {
+            Ok(session) => session,
+            Err(_error) => {
+                println!("{label} via {name}: unreachable");
+                node.close().await;
+                return reach::Outcome::Unreachable.into_result(&self.peer, bound);
             }
-        }
+        };
+        // With `-v`, print a line per probe as it lands, and a path line for the path in force and each
+        // change the session reports, so the moment a relayed link flips to direct is visible live. The
+        // observer borrows the session read-only, alongside the run's own read-only borrow.
+        let report = if self.verbose {
+            let probes = plan.observing(&session, |probe| {
+                println!("{}", probe_line(&label, name, probe));
+            });
+            watching(session.path_changes(), probes, |path| {
+                println!("{}", path_line(&label, name, path));
+            })
+            .await
+        } else {
+            plan.run(&session).await
+        };
+        let outcome = match report {
+            Ok(report) => {
+                let path = reach::conn_path(&session.conn_info()).to_string();
+                print_device(&label, name, &path, &report);
+                reach::Outcome::Healthy
+            }
+            // The machine refused this machine the service: the dial refusal, on stderr, once. One of your
+            // devices is asked why first, over a second connection, since the gated session opens nothing
+            // but `ping`.
+            Err(ProtocolError::Refused(Refusal::Stream(bifrost::Refusal::NotAdmitted))) => {
+                let diagnosis =
+                    reach::diagnose_over(node, machine, &service, present, membership).await;
+                node.close().await;
+                return Err(machine::refused(machine, &service, diagnosis));
+            }
+            // The node was REACHED but refused this probe some other way: a distinct line that says so (not
+            // a healthy machine with 100% loss, and NOT "unreachable"), rendering the typed refusal so a
+            // refusal reads descriptively and is never doubled (`refused (refused)`).
+            Err(ProtocolError::Refused(refusal)) => {
+                println!("{}", refused_line(&label, name, &refusal));
+                reach::Outcome::Refused
+            }
+            // The node was REACHED and the exchange then broke. The full cause chain is rendered because
+            // the outer half of a stream failure is routinely the useless half.
+            Err(error) => {
+                println!("{}", failed_line(&label, name, &error));
+                reach::Outcome::Failed
+            }
+        };
 
         // Drain and close the transport so the last frames land and iroh shuts down cleanly.
         node.close().await;
-        reach::fanout_outcome(outcome, &self.peer, bound)
+        outcome.into_result(&self.peer, bound)
     }
 }
 
@@ -290,6 +279,58 @@ mod tests {
     use super::*;
 
     const RTT: Option<Duration> = Some(Duration::from_millis(24));
+
+    /// `ping` to one of your devices that refuses it prints the dial refusal once, as the error, after
+    /// asking the device why over a second connection to it; nothing reaches stdout.
+    #[tokio::test]
+    async fn a_refused_ping_to_your_device_names_the_cause() {
+        use clap::Parser as _;
+        use swoosh::testkit::{Script, ScriptedPeer};
+
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            ping: PingCmd,
+        }
+
+        let key = bifrost::NodeId::from_ed25519_secret(&[0x67; 32]);
+        let mut contacts = swoosh::contacts::Contacts::default();
+        contacts
+            .save(&"me/nas".parse().expect("a device"), key)
+            .expect("the name is free");
+        let cmd = Wrap::try_parse_from(["x", "me/nas"])
+            .expect("ping parses")
+            .ping;
+        let machine = cmd.peer.machine(&contacts).expect("one machine");
+        let peer = ScriptedPeer::new(
+            key,
+            [
+                Script::Refuse(bifrost::Refusal::NotAdmitted),
+                Script::Lists(vec!["ping"]),
+            ],
+        );
+        let node = Node::new(peer.clone(), bifrost::NoDiscovery);
+        let bound = transport::Bound {
+            transport: transport::Transport::Iroh,
+            local: false,
+            reach: transport::Reach::default(),
+        };
+        let error = cmd
+            .run_ping(&node, &machine, &bound, None, None)
+            .await
+            .expect_err("a refused ping exits non-zero");
+        assert_eq!(
+            format!("{error:#}"),
+            "me/nas refused ping\n  ping was turned off or removed on nas, or nas is too busy to take it \
+             now.\n  On nas, run this to see which:\n    swoosh status"
+        );
+        let asked: Vec<String> = peer
+            .requests()
+            .into_iter()
+            .map(|request| request.service)
+            .collect();
+        assert_eq!(asked, ["ping", "control.services"]);
+    }
 
     /// How long a test lets `watching` run before calling it hung: a run that waits on a stream that never
     /// ends fails here instead of hanging the suite.

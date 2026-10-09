@@ -85,6 +85,65 @@ fn keyed(home: &Path) -> NodeId {
     TestNode::seeded(0x11).node_id()
 }
 
+/// A bare `status` reaches no machine. A reach variable is a shell's standing setting, so bare `status`
+/// ignores each one and runs; the same flag typed on it does nothing there, so it exits 2 naming the flag.
+#[test]
+fn bare_status_ignores_the_reach_variables_and_refuses_the_typed_flags() {
+    let scratch = Scratch::new("reach");
+    keyed(&scratch.home());
+    let hint = format!("{}=127.0.0.1:9000", TestNode::seeded(0x22).node_id());
+    let set: [(&str, &str, &[&str]); 5] = [
+        ("SWOOSH_TRANSPORT", "quirk", &["--transport", "quirk"]),
+        ("SWOOSH_LOCAL", "1", &["--local"]),
+        ("SWOOSH_PEER", &hint, &["--peer", &hint]),
+        (
+            "SWOOSH_RELAY",
+            "https://relay.example",
+            &["--relay", "https://relay.example"],
+        ),
+        (
+            "SWOOSH_RESOLVER",
+            "https://dns.example/pkarr",
+            &["--resolver", "https://dns.example/pkarr"],
+        ),
+    ];
+    for (variable, value, typed) in set {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_swoosh"));
+        let out = command
+            .arg("--home")
+            .arg(scratch.home())
+            .arg("status")
+            .env_remove("SWOOSH_HOME")
+            .env(variable, value)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{variable} set: {}",
+            text(&out.stderr)
+        );
+
+        let mut args = vec!["status"];
+        args.extend_from_slice(typed);
+        let out = swoosh(&scratch.home(), &args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{typed:?}: {}",
+            text(&out.stderr)
+        );
+        assert!(
+            text(&out.stderr).starts_with(&format!(
+                "error: {} has no effect without a machine\n",
+                typed[0]
+            )),
+            "{typed:?}: {}",
+            text(&out.stderr)
+        );
+    }
+}
+
 /// Bare `status` succeeds with no `serve` running and nobody to dial.
 #[test]
 fn status_never_dials_and_runs_with_no_node() {

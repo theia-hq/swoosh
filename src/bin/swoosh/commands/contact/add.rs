@@ -19,11 +19,11 @@ use swoosh::home::{Home, HomeWrite};
 /// Save a person's root, or one machine of theirs
 #[derive(Debug, Args)]
 pub struct AddCmd {
-    /// `alice` for a person, or `alice/laptop` for one machine of theirs
-    #[arg(value_name = "name", value_parser = super::new_contact)]
+    /// A person, or one machine of theirs
+    #[arg(value_name = "person | person/name", value_parser = super::new_contact)]
     pub name: ContactRef,
-    /// the person's root key, or that machine's key
-    #[arg(value_name = "key", value_parser = typed_key)]
+    /// A person's root key, or that one machine's key
+    #[arg(value_name = "key | root key", value_parser = typed_key)]
     pub key: TypedKey,
 }
 

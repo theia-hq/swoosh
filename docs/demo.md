@@ -187,8 +187,8 @@ which the server's signet has never trusted, so the gate turns it away:
 <!-- capture: scripts/demo.sh stranger-refused -->
 ```console
 $ swoosh ping $SERVER --transport quirk+noise --peer $SERVER=127.0.0.1:63254 -c 3 -i 0.2
-ed01jsmbbj7p3sjv via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)
-Error: ed01jsmbbj7p3sjv: reached, but refused
+error: that machine refused ping
+  It does not serve ping, or its owner has not shared ping with you.
 ```
 
 Exit status 1. The member is in; the stranger is out. The script runs the same check over iroh when n0

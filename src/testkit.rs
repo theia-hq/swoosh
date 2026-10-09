@@ -715,6 +715,178 @@ impl bifrost::Session for HostilePeer {
     }
 }
 
+/// What a [`ScriptedPeer`]'s gate does with one stream it is asked to open, in the order the streams open.
+#[derive(Debug, Clone)]
+pub enum Script {
+    /// Read the request, then refuse it.
+    Refuse(bifrost::Refusal),
+    /// Read the request, admit it, then send a list of services naming these, and end the stream.
+    Lists(Vec<&'static str>),
+    /// Read the request and never answer, holding the stream open.
+    Silent,
+}
+
+/// A peer whose gate follows a script, one [`Script`] per stream, recording every request it reads: the
+/// double a test drives a refused dial and its follow-up with, to see what each stream asked and
+/// presented. Dials always land; a stream past the end of the script is refused `NotAdmitted`.
+#[derive(Debug, Clone)]
+pub struct ScriptedPeer {
+    key: NodeId,
+    state: std::sync::Arc<std::sync::Mutex<Scripted>>,
+}
+
+/// What a [`ScriptedPeer`] has left to answer, and what it has read.
+#[derive(Debug, Default)]
+struct Scripted {
+    script: VecDeque<Script>,
+    requests: Vec<tightbeam::protocol::Request>,
+    dials: u32,
+}
+
+impl ScriptedPeer {
+    /// A peer at `key` whose gate answers `script`, stream by stream.
+    pub fn new(key: NodeId, script: impl IntoIterator<Item = Script>) -> Self {
+        Self {
+            key,
+            state: std::sync::Arc::new(std::sync::Mutex::new(Scripted {
+                script: script.into_iter().collect(),
+                ..Scripted::default()
+            })),
+        }
+    }
+
+    /// Every request its gate has read, in order.
+    pub fn requests(&self) -> Vec<tightbeam::protocol::Request> {
+        self.lock().requests.clone()
+    }
+
+    /// How many times it was dialed.
+    pub fn dials(&self) -> u32 {
+        self.lock().dials
+    }
+
+    /// The shared state. A poisoned lock means a test thread panicked holding it; its state is still the
+    /// record of what happened, so it is read anyway.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Scripted> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A list of services naming `names`, in the catalog's wire form: a count, then each name
+    /// length-prefixed with its posture (gated).
+    fn catalog(names: &[&str]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&u32::try_from(names.len()).unwrap_or(u32::MAX).to_be_bytes());
+        for name in names {
+            bytes.extend_from_slice(&u16::try_from(name.len()).unwrap_or(u16::MAX).to_be_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    /// The gate's side of one stream: read the request, record it, then answer as `script` says.
+    async fn gate(
+        self,
+        script: Script,
+        mut from: tokio::io::DuplexStream,
+        mut to: tokio::io::DuplexStream,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let Ok(request) = tightbeam::protocol::Request::read(&mut from).await else {
+            return Ok(());
+        };
+        self.lock().requests.push(request);
+        match script {
+            Script::Refuse(refusal) => {
+                tightbeam::protocol::Response::Refused(refusal)
+                    .write(&mut to)
+                    .await
+            }
+            Script::Lists(names) => {
+                tightbeam::protocol::Response::Ok.write(&mut to).await?;
+                to.write_all(&Self::catalog(&names)).await?;
+                to.shutdown().await
+            }
+            Script::Silent => {
+                core::future::pending::<()>().await;
+                Ok(())
+            }
+        }
+    }
+}
+
+impl bifrost::Transport for ScriptedPeer {
+    type Security = bifrost::InProcess;
+    type Session = Self;
+
+    fn node_id(&self) -> NodeId {
+        self.key
+    }
+
+    fn local_addr(&self) -> bifrost::Addr {
+        bifrost::Addr::from_node(self.key)
+    }
+
+    fn bound_sockets(&self) -> Vec<core::net::SocketAddr> {
+        Vec::new()
+    }
+
+    async fn connect(&self, _addr: bifrost::Addr) -> Result<Self, bifrost::Error> {
+        self.lock().dials += 1;
+        Ok(self.clone())
+    }
+
+    async fn accept(&self) -> Result<Self, bifrost::Error> {
+        Err(bifrost::Error::Closed)
+    }
+
+    async fn close(&self) {}
+}
+
+impl bifrost::Session for ScriptedPeer {
+    type Security = bifrost::InProcess;
+    type Write = tokio::io::DuplexStream;
+    type Read = tokio::io::DuplexStream;
+
+    fn peer(&self) -> NodeId {
+        self.key
+    }
+
+    async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+        let script = self
+            .lock()
+            .script
+            .pop_front()
+            .unwrap_or(Script::Refuse(bifrost::Refusal::NotAdmitted));
+        let (write, from) = tokio::io::duplex(64 * 1024);
+        let (to, read) = tokio::io::duplex(64 * 1024);
+        let gate = self.clone();
+        tokio::spawn(async move {
+            if let Err(error) = gate.gate(script, from, to).await {
+                tracing::debug!(%error, "the scripted gate's stream ended");
+            }
+        });
+        Ok((write, read))
+    }
+
+    async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
+        Err(bifrost::Error::Closed)
+    }
+
+    async fn wait_closed(&self) {}
+
+    /// A double that carries nothing has nothing to end.
+    fn close(&self) {}
+
+    /// No transport under it, so no path.
+    fn path_changes(&self) -> bifrost::PathChanges {
+        bifrost::PathChanges::fixed(bifrost::Path::Unknown)
+    }
+}
+
 #[cfg(test)]
 #[path = "testkit_tests.rs"]
 mod tests;

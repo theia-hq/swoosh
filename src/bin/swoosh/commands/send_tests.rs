@@ -129,12 +129,67 @@ async fn a_hostile_connect_failure_prints_escaped() {
         bifrost::NoDiscovery,
     );
 
+    let machine = send
+        .peer
+        .machine(&Contacts::default())
+        .expect("a key is one machine");
     let error = send
-        .run_send(&node, &Contacts::default(), None, None)
+        .run_send(&node, &machine, None, None)
         .await
         .expect_err("a dial the peer closed is an error");
     assert_eq!(
         format!("{error:#}"),
         r"connect to peer: closed by peer: no\r\u{1b}[2Ksent hosts (1 bytes)\u{202e}"
     );
+}
+
+/// A send one of your devices refuses ends with the one dial refusal, after asking the device why: never a
+/// `skip:` for the file and an item count.
+#[tokio::test]
+async fn a_refused_send_to_your_device_ends_with_one_refusal() {
+    use swoosh::testkit::{Script, ScriptedPeer};
+
+    let base = std::env::temp_dir().join(format!("swoosh-send-refused-{}", std::process::id()));
+    std::fs::create_dir_all(&base).expect("a scratch dir");
+    let file = base.join("notes.txt");
+    std::fs::write(&file, b"hello").expect("the file is written");
+
+    let key = bifrost::NodeId::from_ed25519_secret(&[0x6a; 32]);
+    let mut contacts = Contacts::default();
+    contacts
+        .save(&"me/nas".parse().expect("a device"), key)
+        .expect("the name is free");
+    #[derive(clap::Parser)]
+    struct Wrap {
+        #[command(flatten)]
+        send: SendCmd,
+    }
+
+    let cmd = Wrap::try_parse_from(["x", file.to_str().expect("a utf-8 path"), "me/nas"])
+        .expect("send parses")
+        .send;
+    let machine = cmd.peer.machine(&contacts).expect("one machine");
+    let peer = ScriptedPeer::new(
+        key,
+        [
+            Script::Refuse(bifrost::Refusal::NotAdmitted),
+            Script::Lists(vec!["ping"]),
+        ],
+    );
+    let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+    let error = cmd
+        .run_send(&node, &machine, None, None)
+        .await
+        .expect_err("a refused send exits non-zero");
+    let _ = std::fs::remove_dir_all(&base);
+    assert_eq!(
+        format!("{error:#}"),
+        "me/nas does not serve recv\n  Only nas can add it; on nas, run:\n    swoosh service add recv:<dir>"
+    );
+    let asked: Vec<String> = peer
+        .requests()
+        .into_iter()
+        .map(|request| request.service)
+        .collect();
+    assert_eq!(asked, ["recv", "control.services"]);
 }

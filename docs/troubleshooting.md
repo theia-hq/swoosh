@@ -35,29 +35,26 @@ Fix one of:
 - Try `--transport quirk+noise` if only one transport shows it, which points at the path rather than the
   node.
 
-## "reached, but refused (not admitted)"
+## "me/nas refused ssh"
 
+<!-- manual: needs one of your devices that refuses ssh -->
 ```
-ed01hcq6balrlxwa via quirk+noise: reached, but refused (not admitted: no member badge or capability for this service was accepted)
-Error: ed01hcq6balrlxwa: reached, but refused
+error: me/nas refused ssh
 ```
 
-You reached the peer, but its gate turned you away. You are not one of its devices and you presented no
-grant that covers this service. This is the gate working as designed.
+Your own device refused. The line under the error, if there is one, says why: ssh was turned off or removed
+there, nas is busy, or nas does not count this machine as one of your devices. To tell the first two apart, or
+when no line says why, run `swoosh status` on nas.
 
-The same message also covers an unserved service: a node that admits you but does not serve the name you
-asked for refuses with the same words, because the reply cannot tell "not admitted" from "admitted, not
-served". On your own device, `swoosh status me/<name>` lists what it serves.
+## "refused ssh" from someone else's machine
 
-Fix one of:
+<!-- manual: needs another person's machine that refuses ssh -->
+```
+error: bob/nas refused ssh
+```
 
-- If it is your own node, enroll this machine: `swoosh invite add <label>` on the machine that holds your
-  signet, then `swoosh adopt` here.
-- If someone else runs it, ask them for a [capability link](keys.md#grant) and use it where the machine
-  goes: `swoosh ping swoosh:…`.
-- If the service is meant to be public, the owner opens it with `swoosh serve --public <service>`.
-- If it is your own device and `swoosh status me/<name>` does not list the service, add it there:
-  `swoosh service add <service>`.
+bob/nas does not serve `ssh`, or its owner has not shared `ssh` with you. The reply does not say which. Ask its
+owner.
 
 ## "reached, but it does not answer ping for you"
 
@@ -68,22 +65,30 @@ bob/nas via iroh: reached, but it does not answer ping for you
 `swoosh status` reached the machine, and it refused the probe: it does not serve `ping`, or it does not admit you
 to it. The reply does not say which. Ask its owner to share `ping` with you.
 
-## "quirk is direct-only: pass --peer"
+## "could not reach" over quirk or with `--local`
 
+<!-- manual: needs a quirk dial with no address -->
 ```
-Error: quirk is direct-only: pass --peer <key>=<addr> (the line the peer's `swoosh serve`
-printed), or use --transport iroh: could not reach <key>
+error: could not reach me/nas
+  quirk finds no machine by itself.
+  Give its address with --peer <key>=<address>, or add --transport iroh.
 ```
 
-Over quirk, either spelling, there is no discovery, so swoosh needs the peer's address. Either pass it
-with `--peer <key>=<addr>` (the `direct` line the peer's `serve` printed), or use `--transport iroh`,
-which discovers the peer from its key. See [transports](transports.md#quirk).
+With `--local`, the lines under the error start `With --local or SWOOSH_LOCAL, swoosh looks on this network
+only.` and end with how to turn it off. Either way, the address `--peer` takes is the `direct` line the
+machine's `serve` printed ([transports](transports.md#peer)).
 
-## An iroh dial cannot reach the peer
+## "could not reach" over iroh
 
-Over iroh you do not pass an address, so an unreachable dial usually means the peer is offline or
-discovery is down, not a missing hint. Check that the peer's `swoosh serve` is running, and that both
-sides can reach the internet. `swoosh status <peer>` reports the path once a link is up.
+<!-- manual: needs an offline machine -->
+```
+error: could not reach me/nas
+```
+
+Over iroh you give no address, so this usually means the machine is offline or discovery is down. Check
+that its `swoosh serve` is running and that both sides can reach the internet. If you run your own
+resolver, a line under the error names it (`resolver asked: <url>`); check that it is up
+and that the machine publishes to the same one.
 
 ## A revoke did not take effect
 
@@ -97,10 +102,10 @@ drains. See [revocation](keys.md#revocation).
 - A fleet-bound grant stays usable from any device that person still holds until it expires or you
   revoke it. Keep fleet grants short-lived.
 
-## "a value is required for '--public <svc>'"
+## "a value is required for '--public <service>'"
 
 ```
-error: a value is required for '--public <svc>' but none was supplied
+error: a value is required for '--public <service>' but none was supplied
 ```
 
 Bare `--public` names nothing to open. List the services you want public:

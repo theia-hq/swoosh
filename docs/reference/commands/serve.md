@@ -7,33 +7,43 @@ machine's list; a bare `serve` serves that list, or `ping` and `speed` if no lis
 
 <!-- generated: usage from `swoosh serve -h`; option lines curated -->
 ```
-Usage: swoosh serve [OPTIONS] [name=target]...
-  [name=target]...       publish services as `name=target` (bare: this machine's list, else `ping` and `speed`)
-  --public <svc>         open named services to anyone (comma-list, repeatable)
-  --public-unsafe <svc>  open named raw-stream services (file:, fifo:, stdin:) to anyone
-  --expires <duration>   serve for a bounded time, then stop (30m, 2h, 1d)
-  --quiet                suppress the readiness banner and activity lines
-  --admit <root key>     For this run, let in the devices of another root without joining it (CI).
+Usage: swoosh serve [OPTIONS] [service]...
+  [service]...               Serve exactly these, saved as this machine's list
+  --public <service>         Open these services to anyone (comma-separated, repeatable)
+  --public-unsafe <service>  Open these raw-stream services (file:, fifo:, stdin:) to anyone
+  --expires <d>              Serve for this long, then stop (30m, 2h, 1d)
+  --admit <root key>         For this run, let in the devices of another root without joining it (CI)
 ```
 
-**Example.** `swoosh serve ssh=sshd: tv=tcp:127.0.0.1:8096` publishes a shell and a local TCP service, both
-gated to your signet.
+**Example.** `swoosh serve ssh tv=tcp:127.0.0.1:8096` publishes a shell and a local TCP service.
 
-**Things to know.** A service form is `name=target`: `ping=ping:` / `speed=speed:` (built-in diagnostics),
-`ssh=sshd:` (a keyless shell), `inbox=recv:<dir>` (receive pushed files into `<dir>`; with no `<dir>`, into
-[an inbox](../services.md#inbox)), `news=proxy:<url>` (requests to that site, made from this machine), or
-`web=tcp:<host>:<port>` (front any local TCP service). `ssh`, `ping` and `speed` may be named alone
-(`swoosh serve ssh ping`) and `proxy:<url>` names itself `proxy`; every other entry must be `name=target` and
-every target carries a scheme: a bare name or a bare `ping:` is refused
-with a message naming this form, a scheme nothing serves is refused by name,
-and a scheme that takes no argument refuses a tail (`ping=ping:80` is an error, not a forward).
-`control.stop` and `control.services` are always served, and member-only.
+**Things to know.**
+
+```
+Built in, served under their own names:
+  ssh                     a shell on this machine
+  ping                    round-trip probe
+  speed                   throughput test
+  proxy:<url>             requests to one site, made from this machine
+  recv:<dir>              files sent here, saved in <dir>, else the inbox
+
+Under a name you give (web=tcp:localhost:3000):
+  tcp:<address>:<port>    a TCP service this machine reaches
+  unix:<path>             a Unix socket on this machine
+  file:<path>             a file's bytes
+  fifo:<path>             a named pipe, live
+  stdin:                  this process's stdin
+  echo:                   sends back whatever it receives
+```
+
+[Services](../services.md) has the rest.
 Each file a receive service lands prints one line on stderr, such as
 `inbox: received notes.txt (1500 bytes) from ed01uyi7g54bpea45hafea4gohlnay5bs23p3ck4z4g24dvcpeldkczq`.
 The key after `from` is the machine that sent the file.
 The sender chooses the name, so control characters in it are shown escaped. If stderr falls behind, some
-lines are dropped and a line says how many. `--quiet` turns these lines off, and `RUST_LOG` cannot turn
-them back on.
+lines are dropped and a line says how many.
+`--quiet` (or `SWOOSH_QUIET`) prints no banner, no per-file lines and no `node stopped` line; refusals,
+warnings and the `Stopped by` line still print.
 A raw-stream service (`file:`, `fifo:`, `stdin:`) has no auth of its own, so `--public` refuses it and
 points at `--public-unsafe`, so name only a file you mean to hand out.
 Every `serve` holds its home's lock and control socket, so `swoosh stop` and

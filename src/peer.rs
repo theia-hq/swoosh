@@ -1,40 +1,36 @@
-//! A peer to dial, as typed: a saved petname, a raw key, or a self-addressing `swoosh:` link, typed as
-//! itself or as a path to a file holding it.
+//! A peer to dial, as typed: a saved name, a raw key, or a self-addressing `swoosh:` link, typed as itself
+//! or as a path to a file holding it, and the one [`Machine`] it resolves to.
 //!
 //! A "peer to dial" is a higher-level concept than the address book, so it composes the contacts domain
-//! (`ContactRef`, `Candidate`, `Contacts`) rather than squatting in it, and it unifies the two dial-target
-//! types the reach and tunnel families used to keep apart: the multi-device diagnostic verbs
-//! (`ping`/`speed`/`status`/`proxy`) fan a peer out via [`candidates`](Peer::candidates), the single-target
-//! verbs (`forward`/`send`/`service`) resolve one via [`connector`](Peer::connector). Both
-//! shapes read the SAME three arms, so `alice`, `alice/desk`, a raw key, and a `swoosh:` link all parse in
-//! one place, uniform across every verb that may reach any machine.
+//! (`ContactRef`, `Contacts`) rather than squatting in it. Every verb that reaches a machine holds a
+//! [`Peer`] and resolves it once, through [`Peer::machine`], to exactly one machine or a typed refusal:
+//! `alice`, `alice/desk`, a raw key and a `swoosh:` link all parse in one place and resolve in one place.
 
 use core::str::FromStr;
 use std::path::{Path, PathBuf};
 
 use bifrost::{KeyError, NodeId, NodeIdParseError};
-use nauthy::{Link, Service};
-use tightbeam::tunnel::Connector;
+use nauthy::Link;
 
-use crate::contacts::{Candidate, ContactRef, Contacts, DeviceLabel, ME};
+use crate::contacts::{ContactRef, Contacts, DeviceLabel, ME, Petname};
 use crate::credential::LinkExt as _;
 use crate::link::LinkError;
 use crate::names::NameError;
 
-/// A peer a dialing verb reaches, before resolution. Replaces BOTH the reach family's old `Target` and the
-/// tunnel family's old `Dial`: one type, three arms, tried in a fixed order at the clap boundary.
+/// A peer a dialing verb reaches, before resolution: three arms, tried in a fixed order at the clap
+/// boundary.
 ///
 /// A path (`./`, `/`, `~/`) is read first, as a file holding a link, so the link never enters argv. A
 /// `swoosh:` link supersedes the identity path (it self-addresses: it names the node to dial AND carries
-/// the credential); else a raw base32 node id is dialed verbatim; else the text is a saved petname resolved
-/// against the contact store just before dialing (deferred because the store loads at startup, not at the
-/// clap boundary). Every dialing verb holds this in its peer slot, so `alice`, `alice/desk`, a raw key, and
+/// the credential); else a raw base32 node id is dialed verbatim; else the text is a saved name, resolved
+/// against the contact store once it opens (deferred because the store loads at startup, not at the clap
+/// boundary). Every dialing verb holds this in its peer slot, so `alice`, `alice/desk`, a raw key, and
 /// a `swoosh:` link all parse in one place, uniform across `ping`/`speed`/`status`/`proxy`/`forward`/
 /// `send`/`service`/`ssh`.
 #[derive(Debug, Clone)]
 pub enum Peer {
-    /// A saved petname (`alice`, `me/ci`), resolved against the store at dial time. Fan-out capable: a
-    /// bare person resolves to all their devices in label order.
+    /// A saved name (`alice`, `me/ci`), resolved against the store before the key is read. A bare person
+    /// is one machine only when exactly one of theirs is saved.
     Named(ContactRef),
     /// A literal node id, dialed verbatim with no store lookup.
     Raw(NodeId),
@@ -316,62 +312,29 @@ pub enum PeerParseError {
 }
 
 impl Peer {
-    /// FAN-OUT resolution, for the multi-device verbs (`ping`/`speed`/`status`/`proxy`). A [`Named`](Self::Named)
-    /// person resolves to ALL devices in label order; [`Raw`](Self::Raw) to one; a [`Capability`](Self::Capability)
-    /// link to exactly one (the cap's root node it self-addresses), so a link degenerates to a single
-    /// candidate exactly as `Raw` does. An unknown name surfaces the contact resolver's clean error, never a
-    /// silent empty dial.
+    /// The one machine this peer names, resolved against `contacts` once, before the key is read or
+    /// anything binds: a usage error never touches a secret or the network, and the book cannot change
+    /// between the parse and the dial.
     ///
-    /// `eyre::Result` rather than the contact resolver's typed `ResolveError`: the store's own resolve
-    /// failure is the only error here, and folding it into a peer-level type would buy a caller nothing.
-    /// Every caller resolves in an eyre context already.
-    pub fn candidates(&self, contacts: &Contacts) -> eyre::Result<Vec<Candidate>> {
+    /// A bare person is never guessed at: one machine saved is that machine, several or none refuse, and
+    /// so do `me` alone and a bare word that is one of your device names (a bare word is a person; `me/` is
+    /// the only prefix for yours). The kind is read from where this book saves the resolved key, never
+    /// from the form typed, so a key typed bare and the name it is saved under resolve alike; a link
+    /// typed as the machine is always [`Kind::Link`], since a refusal could be the link's.
+    pub fn machine(&self, contacts: &Contacts) -> Result<Machine, MachineError> {
         match self {
-            Self::Named(reference) => Ok(contacts.resolve_candidates(reference)?),
-            Self::Raw(node) => Ok(vec![Candidate {
-                label: crate::credential::short(node),
-                node: *node,
-            }]),
-            Self::Capability { link, .. } => Ok(vec![Candidate {
-                label: link.short(),
-                node: link.dial_node()?,
-            }]),
-        }
-    }
-
-    /// SINGLE-CONNECTOR resolution, for the single-target verbs (`forward`/`send`/`service`).
-    /// The resolver ALWAYS builds via [`Connector::to_node`] with the slot-1/slot-2 the caller resolved;
-    /// the [`Capability`](Self::Capability) arm differs ONLY in computing the dial target from the link's
-    /// root. It NEVER calls [`Connector::from_link`]: the link's credential arrives as `slot1` from the
-    /// ONE resolver (the peer's link is folded into the credential), so slot 1 and slot 2 stay owned by
-    /// [`resolve`](crate::reaching::resolve) for every arm. A bare person resolves to the FIRST device in
-    /// label order (these verbs dial one node); an unknown petname is a loud error here.
-    pub fn connector(
-        &self,
-        contacts: &Contacts,
-        service: Service,
-        slot1: Option<Link>,
-        slot2: Option<Link>,
-    ) -> eyre::Result<Connector> {
-        let dial = match self {
-            Self::Raw(id) => *id,
-            Self::Capability { link, .. } => link.dial_node()?,
-            Self::Named(reference) => {
-                contacts
-                    .resolve_candidates(reference)?
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| eyre::eyre!("contact '{reference}' has no device to reach"))?
-                    .node
+            Self::Raw(key) => Ok(Machine::saved(contacts, *key)),
+            Self::Capability { link, .. } => {
+                let key = link.dial_node().map_err(MachineError::Link)?;
+                Ok(Machine {
+                    key,
+                    name: contacts.saved_at(&key),
+                    kind: Kind::Link,
+                    picked: None,
+                })
             }
-        };
-        let connector = Connector::to_node(dial, service, slot1);
-        // Slot 2: a badge under the foreign fleet a signet-bound slip in slot 1 names. A no-op for a plain
-        // dial (the host admits on slot 1 and never consults slot 2).
-        Ok(match slot2 {
-            Some(badge) => connector.with_membership(badge),
-            None => connector,
-        })
+            Self::Named(reference) => named(contacts, reference),
+        }
     }
 
     /// The credential this peer self-supplies when it is a self-addressing link, else `None`. A `swoosh:`
@@ -393,6 +356,210 @@ impl Peer {
     }
 }
 
+/// A typed name as one machine: a machine of theirs, one of your devices, or a bare person, refused
+/// unless exactly one of their machines is saved.
+fn named(contacts: &Contacts, reference: &ContactRef) -> Result<Machine, MachineError> {
+    let person = reference.petname();
+    if let Some(device) = reference.device() {
+        // `me/<name>` that is none of yours lists yours, with or without a list here: `me/` is saved by your
+        // root, never by `contact add`, so no fix line names a save.
+        if person.as_str() == ME {
+            return match contacts.mine().find(|(label, _)| *label == device) {
+                Some((_, key)) => Ok(Machine::saved(contacts, *key)),
+                None => Err(MachineError::NotYours {
+                    device: OwnDevice::from(device.clone()),
+                    yours: yours(contacts),
+                }),
+            };
+        }
+        let Some(machines) = contacts.devices(person) else {
+            return Err(MachineError::NotSaved {
+                person: person.clone(),
+            });
+        };
+        let machines: Vec<(&DeviceLabel, &NodeId)> = machines.collect();
+        return match machines.iter().find(|(label, _)| *label == device) {
+            Some((_, key)) => Ok(Machine::saved(contacts, **key)),
+            None => Err(MachineError::NotTheirs {
+                person: person.clone(),
+                device: device.clone(),
+                machines: machines.iter().map(|(label, _)| (*label).clone()).collect(),
+            }),
+        };
+    }
+    if person.as_str() == ME {
+        return Err(MachineError::WhichOfYours {
+            yours: yours(contacts),
+        });
+    }
+    let Some(devices) = contacts.devices(person) else {
+        // No person by that name. One of your devices typed without `me/` is named for what it is.
+        return Err(
+            match yours(contacts)
+                .into_iter()
+                .find(|device| device.label().as_str() == person.as_str())
+            {
+                Some(device) => MachineError::YourDevice { device },
+                None => MachineError::NotSaved {
+                    person: person.clone(),
+                },
+            },
+        );
+    };
+    let machines: Vec<(&DeviceLabel, &NodeId)> = devices.collect();
+    match machines.as_slice() {
+        [] => Err(MachineError::NoneSaved {
+            person: person.clone(),
+        }),
+        [(_, key)] => Ok(Machine {
+            picked: Some(person.clone()),
+            ..Machine::saved(contacts, **key)
+        }),
+        several => Err(MachineError::Several {
+            person: person.clone(),
+            machines: several.iter().map(|(label, _)| (*label).clone()).collect(),
+        }),
+    }
+}
+
+/// Your devices, in name order, as `me/<name>`.
+fn yours(contacts: &Contacts) -> Vec<OwnDevice> {
+    contacts
+        .mine()
+        .map(|(label, _)| OwnDevice::from(label.clone()))
+        .collect()
+}
+
+/// The one machine a verb's argument names, resolved before the key is read: its key, the name this home
+/// gives it, and what kind of machine it is, which picks the line a refusal from it prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Machine {
+    key: NodeId,
+    name: Option<ContactRef>,
+    kind: Kind,
+    picked: Option<Petname>,
+}
+
+impl Machine {
+    /// `key` as this book saves it: its name, and the kind that name makes it.
+    fn saved(contacts: &Contacts, key: NodeId) -> Self {
+        let name = contacts.saved_at(&key);
+        let kind = match &name {
+            Some(name) if name.petname().as_str() == ME => Kind::Yours,
+            Some(_) => Kind::Contact,
+            None => Kind::Key,
+        };
+        Self {
+            key,
+            name,
+            kind,
+            picked: None,
+        }
+    }
+
+    /// The key to dial.
+    pub fn key(&self) -> NodeId {
+        self.key
+    }
+
+    /// The name this home gives the key (`me/nas`, `alice/laptop`), or `None` when no name holds it.
+    pub fn name(&self) -> Option<&ContactRef> {
+        self.name.as_ref()
+    }
+
+    /// How a line of output labels it: its name here, else its key's short form.
+    pub fn label(&self) -> String {
+        match &self.name {
+            Some(name) => name.to_string(),
+            None => crate::credential::short(&self.key),
+        }
+    }
+
+    /// What kind of machine it is.
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// The person typed bare, when they have exactly one machine saved and this is it: the verb says which
+    /// machine it dialed, since the person typed none.
+    pub fn picked(&self) -> Option<&Petname> {
+        self.picked.as_ref()
+    }
+}
+
+/// What kind of machine a verb dials: the fact a refusal's line is picked by. Read from this home's book
+/// for the key dialed, so two forms of one machine are one kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// One of your devices (`me/<name>`): it answers you `control.services`, which tells a refusal's cause.
+    Yours,
+    /// Typed as a link: the refusal may be the link's.
+    Link,
+    /// A machine this book saves under a contact's name.
+    Contact,
+    /// A key no name here holds.
+    Key,
+}
+
+/// Why a verb's argument is not one machine. Each is a usage error, found before the key is read; the bin
+/// renders the words.
+#[derive(Debug, thiserror::Error)]
+pub enum MachineError {
+    /// A bare person with more than one machine saved.
+    #[error("which machine?")]
+    Several {
+        /// The person typed.
+        person: Petname,
+        /// Their machines' names, in name order.
+        machines: Vec<DeviceLabel>,
+    },
+    /// A person saved with no machine.
+    #[error("none of {person}'s machines is saved here")]
+    NoneSaved {
+        /// The person typed.
+        person: Petname,
+    },
+    /// A word that names no person here and none of your devices.
+    #[error("{person} is not saved here")]
+    NotSaved {
+        /// The word typed.
+        person: Petname,
+    },
+    /// `me` alone, which names none of your devices in particular.
+    #[error("which machine?")]
+    WhichOfYours {
+        /// Your devices, in name order.
+        yours: Vec<OwnDevice>,
+    },
+    /// A bare word that is no person here but is one of your device names.
+    #[error("name the machine: {device}")]
+    YourDevice {
+        /// The device it names.
+        device: OwnDevice,
+    },
+    /// `me/<name>` that names none of your devices.
+    #[error("you have no machine {device}")]
+    NotYours {
+        /// The device typed.
+        device: OwnDevice,
+        /// Your devices, in name order.
+        yours: Vec<OwnDevice>,
+    },
+    /// `<person>/<name>` for a person saved here with no machine by that name.
+    #[error("{person} has no machine {device}")]
+    NotTheirs {
+        /// The person typed.
+        person: Petname,
+        /// The machine name typed.
+        device: DeviceLabel,
+        /// Their machines' names, in name order.
+        machines: Vec<DeviceLabel>,
+    },
+    /// A link whose machine is no usable key.
+    #[error(transparent)]
+    Link(KeyError),
+}
+
 impl core::fmt::Display for Peer {
     /// The peer as the user would recognize it: the name for a petname, the short key for a raw id, the
     /// link's short form (the cap root's short id) for a capability link.
@@ -406,324 +573,5 @@ impl core::fmt::Display for Peer {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::path::Path;
-
-    use bifrost::NodeId;
-    use nauthy::Link;
-
-    use super::Peer;
-    use crate::contacts::{Contacts, Petname};
-    use crate::credential::LinkExt as _;
-    use crate::link::LinkError;
-
-    /// A distinct node id for a test, derived from a fixed seed so it is stable and comparable.
-    fn node(seed: u8) -> NodeId {
-        NodeId::from_ed25519_secret(&[seed; 32])
-    }
-
-    /// A real signet-bound `swoosh:` link (work issues it for a foreign fleet), so a test can assert a
-    /// `Capability` peer self-addresses to the cap ROOT and folds its slip into the credential.
-    fn signet_link() -> String {
-        let slip = crate::testkit::TestNode::seeded(1)
-            .fleet_slip(
-                &"ssh".parse().expect("valid service"),
-                crate::testkit::TestRoot::seeded(2).verify_key(),
-                nauthy::Request::expires_in(core::time::Duration::from_secs(3600)),
-            )
-            .expect("mint a signet-bound slip");
-        crate::link::Link::from(slip).to_string()
-    }
-
-    /// `me/ci` parses as a `Named` peer (not a raw key, not a link), then `connector` resolves it through
-    /// the contact store to the saved key. A raw key parses `Raw` and needs no store; an unknown petname is
-    /// a loud `connector` error, never a silent nothing.
-    #[test]
-    fn a_petname_peer_resolves_through_contacts_to_the_saved_key() {
-        let ci = node(7);
-        let mut contacts = Contacts::default();
-        contacts.add(
-            "me".parse::<Petname>().expect("valid petname"),
-            Some("ci".parse().expect("valid device")),
-            ci,
-        );
-
-        let peer = "me/ci".parse::<Peer>().expect("a petname parses as a Peer");
-        assert!(
-            matches!(peer, Peer::Named(_)),
-            "a saved-contact address parses as a petname to resolve, not a raw key"
-        );
-        let connector = peer
-            .connector(&contacts, "control.stop".parse().unwrap(), None, None)
-            .expect("a known petname resolves to a connector");
-        assert_eq!(
-            connector.dial(),
-            ci,
-            "the petname must dial the key it was saved under"
-        );
-
-        let raw = node(9);
-        let peer = raw.to_string().parse::<Peer>().expect("a raw key parses");
-        assert!(
-            matches!(peer, Peer::Raw(_)),
-            "a raw base32 key is a Raw peer"
-        );
-        assert_eq!(
-            peer.connector(&contacts, "control.stop".parse().unwrap(), None, None)
-                .expect("a raw key needs no store")
-                .dial(),
-            raw,
-        );
-
-        let ghost = "ghost".parse::<Peer>().expect("a name parses as a Peer");
-        assert!(
-            ghost
-                .connector(&contacts, "control.stop".parse().unwrap(), None, None)
-                .is_err(),
-            "an unknown petname is a loud resolve error, not a silent nothing"
-        );
-    }
-
-    /// A base32 key is `Raw`, never `Named`: petnames are additive, so a literal key always wins the parse
-    /// order and never needs a store lookup.
-    #[test]
-    fn a_raw_key_parses_before_a_petname() {
-        let raw = node(11);
-        let peer = raw.to_string().parse::<Peer>().expect("a raw key parses");
-        assert!(
-            matches!(peer, Peer::Raw(_)),
-            "a base32 key parses as Raw, never as a petname to resolve"
-        );
-    }
-
-    /// A pasted `swoosh:<link>` parses as a `Capability` peer, and BOTH resolution shapes self-address to the
-    /// cap root (`dial_node`): `candidates` yields exactly one candidate at that node, and `connector` dials
-    /// it, so a link degenerates to a single target uniform with a raw key.
-    #[test]
-    fn a_pasted_swoosh_link_parses_as_a_peer() {
-        let link = signet_link();
-        let peer = link.parse::<Peer>().expect("a swoosh: link parses");
-        let root = match &peer {
-            Peer::Capability { link, .. } => link.dial_node().expect("a link root is a key"),
-            _ => panic!("a swoosh: link parses as a Capability peer"),
-        };
-
-        let contacts = Contacts::default();
-        let candidates = peer
-            .candidates(&contacts)
-            .expect("a link resolves to one candidate with no store");
-        assert_eq!(
-            candidates.len(),
-            1,
-            "a link degenerates to a single candidate"
-        );
-        assert_eq!(
-            candidates[0].node, root,
-            "the one candidate is the cap root"
-        );
-
-        let connector = peer
-            .connector(&contacts, "ssh".parse().unwrap(), None, None)
-            .expect("a link needs no store to build a connector");
-        assert_eq!(connector.dial(), root, "the connector dials the cap root");
-    }
-
-    /// A malformed `swoosh:` link is a `PeerParseError::Capability` at the boundary, not deferred to a
-    /// petname lookup that would miss: the parse fails fast where the user typed it.
-    #[test]
-    fn parse_rejects_a_malformed_link_at_the_boundary() {
-        let error = "swoosh:not-a-real-link".parse::<Peer>();
-        assert!(
-            matches!(
-                error,
-                Err(super::PeerParseError::Capability(LinkError::Link(_)))
-            ),
-            "a bad swoosh: link is a Capability parse error, not a petname to resolve: {error:?}"
-        );
-    }
-
-    /// A bare link typed where a peer goes (`ed01….x`) is not a name and not a key: it refuses with the
-    /// line that names the prefix, whatever follows the dot.
-    #[test]
-    fn a_bare_link_is_refused_with_the_prefix_hint() {
-        let bare = crate::link::parse(&signet_link()).expect("a link");
-        for text in [bare.as_str().to_owned(), format!("{}.x", node(3))] {
-            let error = text.parse::<Peer>().expect_err("a bare link is refused");
-            assert!(
-                matches!(error, super::PeerParseError::Capability(LinkError::Prefix)),
-                "{text}: {error:?}"
-            );
-            assert_eq!(
-                error.to_string(),
-                "this looks like a link; a link starts with `swoosh:`"
-            );
-        }
-    }
-
-    /// A peer typed as a path reads the link its file holds, one trailing newline trimmed, and keeps the
-    /// path; a file holding anything else refuses naming the path as typed.
-    #[test]
-    fn a_path_peer_reads_its_link_from_the_file() {
-        let dir = std::env::temp_dir().join(format!("swoosh-peer-path-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let link = signet_link();
-        let kept = dir.join("nas.link");
-        std::fs::write(&kept, format!("{link}\n")).expect("write");
-        let typed = kept.to_str().expect("a UTF-8 path");
-        let peer = typed.parse::<Peer>().expect("a path holding a link parses");
-        assert_eq!(peer.file(), Some(kept.as_path()));
-        assert_eq!(
-            peer.self_present()
-                .map(|held| crate::link::Link::from(held).to_string()),
-            Some(link),
-        );
-
-        let empty = dir.join("empty");
-        std::fs::write(&empty, "alice\n").expect("write");
-        let typed = empty.to_str().expect("a UTF-8 path");
-        let error = typed
-            .parse::<Peer>()
-            .expect_err("a file with no link refuses");
-        assert_eq!(error.to_string(), format!("{typed} holds no swoosh: link."));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A path that cannot be read refuses with the reason, so a missing file, a directory, and a device
-    /// each say which they are instead of sharing one line.
-    #[test]
-    fn an_unreadable_peer_path_says_why() {
-        let dir = std::env::temp_dir().join(format!("swoosh-peer-why-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let missing = dir.join("nope");
-        let missing = missing.to_str().expect("a UTF-8 path");
-        assert_eq!(
-            missing
-                .parse::<Peer>()
-                .expect_err("a missing file refuses")
-                .to_string(),
-            format!("could not read {missing}: no such file or directory"),
-        );
-        let folder = dir.to_str().expect("a UTF-8 path");
-        assert_eq!(
-            folder
-                .parse::<Peer>()
-                .expect_err("a directory refuses")
-                .to_string(),
-            format!("{folder} is not a file; name the file that holds the swoosh: link"),
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Only a regular file is read, and only so far: a device refuses before any read (so `/dev/zero`
-    /// cannot fill memory, nor a FIFO wait on a writer), and a regular file larger than any link refuses
-    /// without being read whole.
-    #[test]
-    fn a_peer_path_reads_only_a_small_regular_file() {
-        assert_eq!(
-            "/dev/null"
-                .parse::<Peer>()
-                .expect_err("a device refuses")
-                .to_string(),
-            "/dev/null is not a file; name the file that holds the swoosh: link",
-        );
-        let dir = std::env::temp_dir().join(format!("swoosh-peer-big-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let big = dir.join("big.link");
-        let padded = format!("{}{}", signet_link(), "a".repeat(128 * 1024));
-        std::fs::write(&big, padded).expect("write");
-        let typed = big.to_str().expect("a UTF-8 path");
-        assert_eq!(
-            typed
-                .parse::<Peer>()
-                .expect_err("a huge file refuses")
-                .to_string(),
-            format!("{typed} is too large to hold one swoosh: link"),
-        );
-        // A FIFO with no writer refuses at once: it is opened without waiting, then refused by its type.
-        let fifo = dir.join("fifo.link");
-        let named = std::ffi::CString::new(fifo.to_str().expect("a UTF-8 path")).expect("no NUL");
-        // SAFETY: `named` is a valid NUL-terminated path that outlives the call.
-        assert_eq!(unsafe { libc::mkfifo(named.as_ptr(), 0o600) }, 0, "mkfifo");
-        let typed = fifo.to_str().expect("a UTF-8 path");
-        assert_eq!(
-            typed
-                .parse::<Peer>()
-                .expect_err("a FIFO refuses")
-                .to_string(),
-            format!("{typed} is not a file; name the file that holds the swoosh: link"),
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A file holding a `swoosh:` link that does not parse names the file in its refusal.
-    #[test]
-    fn a_bad_link_in_a_file_names_the_file() {
-        let dir = std::env::temp_dir().join(format!("swoosh-peer-bad-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("mkdir");
-        let bad = dir.join("bad.link");
-        std::fs::write(&bad, "swoosh:notalink\n").expect("write");
-        let typed = bad.to_str().expect("a UTF-8 path");
-        assert_eq!(
-            typed
-                .parse::<Peer>()
-                .expect_err("a bad link refuses")
-                .to_string(),
-            format!("{typed}: not a valid link"),
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `~/` joins onto `HOME`; an unset or empty `HOME` refuses naming the full path as the fix, rather
-    /// than an empty one reading `~/x` as `x` in the working directory.
-    #[test]
-    fn a_tilde_path_needs_a_non_empty_home() {
-        assert_eq!(
-            super::expand("~/nas.link", Some("/home/me".into())).expect("expands"),
-            Path::new("/home/me/nas.link"),
-        );
-        for home in [None, Some(std::ffi::OsString::new())] {
-            assert_eq!(
-                super::expand("~/nas.link", home)
-                    .expect_err("no home refuses")
-                    .to_string(),
-                "HOME is not set, so ~/ has nowhere to point; type the file's full path",
-            );
-        }
-    }
-
-    /// A `Capability` peer's `connector` builds via `to_node` with the slots the resolver handed it, never
-    /// via `from_link` (which would ignore them and set slot 1 = the link). The observable proof here: it
-    /// dials the cap root while ACCEPTING an externally-supplied slot 1, which the `from_link` shape has no
-    /// parameter for, so slot ownership stayed with `reaching::resolve`. The slot CONTENT is asserted at the
-    /// resolver (`reaching` tests), since a `Connector`'s presented slots are private.
-    #[test]
-    fn connector_uses_the_resolved_slots_not_from_link() {
-        let link = signet_link();
-        let peer = link.parse::<Peer>().expect("a link peer");
-        let root = match &peer {
-            Peer::Capability { link, .. } => link.dial_node().expect("a link root is a key"),
-            _ => panic!("a swoosh: link parses as a Capability peer"),
-        };
-        // The two slots come from the resolver, not from the peer link: distinct valid links prove the
-        // connector took them rather than deriving slot 1 from the link itself.
-        let slot1: Link = crate::link::parse(&signet_link()).expect("a valid slot-1 link");
-        let slot2: Link = crate::link::parse(&signet_link()).expect("a valid slot-2 link");
-        let connector = peer
-            .connector(
-                &Contacts::default(),
-                "ssh".parse().unwrap(),
-                Some(slot1),
-                Some(slot2),
-            )
-            .expect("a link builds a connector from explicit resolver slots");
-        assert_eq!(
-            connector.dial(),
-            root,
-            "the Capability arm dials the cap root via to_node, taking the resolver's slots"
-        );
-    }
-}
+#[path = "peer_tests.rs"]
+mod tests;

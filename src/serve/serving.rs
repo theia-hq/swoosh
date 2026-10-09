@@ -83,10 +83,13 @@ pub enum Mistyped {
     #[error("{} is named twice; each service needs its own name", Escaped(.0))]
     Twice(String),
     /// An entry with no name, which the list cannot be keyed by: a target with none (`tcp:localhost:3000`),
-    /// or a word that is no service swoosh knows (`db`) and so needs a target. The example fills the
-    /// missing half, so the line serves `serve` and `service add` alike and names neither.
+    /// a port alone (`3000`), or a word that is no service swoosh knows (`db`) and so needs a target. The
+    /// example fills the missing half, so the line serves `serve` and `service add` alike and names neither.
     #[error("{}", unnamed(.0))]
     Unnamed(String),
+    /// A name given a port where its target goes (`app=3000`): a port alone names no way to reach it.
+    #[error("{} needs a target, like {}=tcp:localhost:{}", Escaped(.0), Escaped(.1), .2)]
+    PortTarget(String, String, String),
 }
 
 impl Mistyped {
@@ -95,11 +98,19 @@ impl Mistyped {
     ///
     /// # Errors
     ///
-    /// [`Mistyped::Unnamed`] for the first entry with no name, else [`Mistyped::Twice`] for the first name
-    /// typed twice.
+    /// [`Mistyped::Unnamed`] for the first entry with no name, else [`Mistyped::PortTarget`] for the first
+    /// whose target is a port alone, else [`Mistyped::Twice`] for the first name typed twice.
     pub fn check(entries: &[String]) -> Result<(), Self> {
         if let Some(entry) = entries.iter().find(|entry| !entry.contains('=')) {
             return Err(Self::Unnamed(entry.clone()));
+        }
+        let port_target = entries.iter().find_map(|entry| {
+            let (name, target) = entry.split_once('=')?;
+            super::is_port(target)
+                .then(|| Self::PortTarget(entry.clone(), name.to_owned(), target.to_owned()))
+        });
+        if let Some(refusal) = port_target {
+            return Err(refusal);
         }
         Self::check_names(names(entries))
     }
@@ -117,11 +128,14 @@ impl Mistyped {
     }
 }
 
-/// The line for an entry with no name: one holding a `:` is a target missing its name, any other a name
-/// missing its target. The entry was typed, so it prints through the escaper.
+/// The line for an entry with no name: a port alone needs a name and the TCP target it stands for, one
+/// holding a `:` is a target missing its name, any other a name missing its target. The entry was typed,
+/// so it prints through the escaper.
 pub fn unnamed(entry: &str) -> String {
     let shown = Escaped(entry);
-    if entry.contains(':') {
+    if super::is_port(entry) {
+        format!("{shown} needs a name, like web=tcp:localhost:{shown}")
+    } else if entry.contains(':') {
         format!("{shown} needs a name, like web={shown}")
     } else {
         format!("{shown} needs a target, like {shown}=tcp:<address>:<port>")
