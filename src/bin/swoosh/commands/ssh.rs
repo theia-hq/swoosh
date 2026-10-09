@@ -15,8 +15,9 @@
 //! only this file can type.
 //!
 //! The peer resolves in-process, BEFORE ssh runs, through the same [`Peer`]/contact-store lookup
-//! `ping`/`speed` use, so `alice/desk` is fine here (ssh never sees the `/`; it sees only the resolved
-//! key in the `ProxyCommand` and a stable placeholder host). A `swoosh:` link is a peer too: it
+//! `ping`/`speed` use, so `alice/desk` is fine here: the `ProxyCommand` carries the resolved key, and ssh's
+//! host is the petname as typed (`/` passes ssh's host check) or, for any other peer, the full key of the
+//! machine dialed, so the host is always ASCII. A `swoosh:` link is a peer too: it
 //! self-addresses to its cap root and is handed on as the peer it is, so the bridge presents it. A link
 //! is given only where the machine goes, never beside it. Everything after `--` is forwarded
 //! to ssh verbatim (a remote command, `-p`, `-i`), so swoosh interprets nothing the user means for ssh.
@@ -104,8 +105,7 @@ impl SshCmd {
     fn argv(&self, contacts: &Contacts, home: &Home) -> eyre::Result<Vec<String>> {
         // Resolve in-process, before ssh sees anything: take the first device for a bare petname (as
         // `speed` does), the exact one for `alice/desk`, a raw key straight through, and a `swoosh:` link's
-        // cap root (its one self-addressed candidate). The peer as typed is kept for the placeholder host,
-        // so known_hosts stays stable per peer.
+        // cap root (its one self-addressed candidate).
         let candidates = self.peer.candidates(contacts)?;
         let Some(first) = candidates.into_iter().next() else {
             // A person saved by their root alone has no machine to dial: the same words `forward` uses.
@@ -114,8 +114,15 @@ impl SshCmd {
                 self.peer
             );
         };
-        let host = self.peer.to_string();
         let key = first.node.to_string();
+        // A petname is the host as typed; any other peer's host is its key. known_hosts keys on the key
+        // via HostKeyAlias, so the host only names the machine in ssh's own lines (and `%h`, and a user's
+        // `Host` block). A raw key's or a link's short form ends in `…`, which ssh refuses as a host under a
+        // UTF-8 locale; a link or its file path would put a credential or a file name in ssh's lines.
+        let host = match &self.peer {
+            Peer::Named(reference) => reference.to_string(),
+            Peer::Raw(_) | Peer::Capability { .. } => String::clone(&key),
+        };
 
         let proxy = self_invocation()?;
         // Thread the effective --home into the ProxyCommand so the re-invoked `forward` dials under the
@@ -175,12 +182,12 @@ impl SshCmd {
     }
 }
 
-/// The `ssh` argv for a resolved peer: the `ProxyCommand` bridge, the private host-key pinning options, a
-/// stable placeholder `host`, then the passthrough `args` verbatim.
+/// The `ssh` argv for a resolved peer: the `ProxyCommand` bridge, the private host-key pinning options, the
+/// `host` ssh names the machine by, then the passthrough `args` verbatim.
 ///
 /// Pure so it is unit-testable (the `exec` itself is not): given the quoted `proxy` (this binary's own
 /// path, see [`self_invocation`]), the `target` the bridge dials (the resolved key, or a link peer quoted,
-/// or a peer file's quoted absolute path), the resolved `key`, the `service`, the placeholder `host`, the
+/// or a peer file's quoted absolute path), the resolved `key`, the `service`, the `host`, the
 /// private `known_hosts` path, the quoted `home`, the quoted direct-address `hints`, and the user's
 /// trailing ssh `args`, it assembles the exact argv [`exec_ssh`] hands to `ssh`. The `ProxyCommand` value
 /// is `<self> forward <target> <service> - [--home <dir>] [--peer <key>=<addr>]...`:
@@ -191,10 +198,10 @@ impl SshCmd {
 ///
 /// The four host-key options (see the module docs) come BEFORE the passthrough args: ssh honors the first
 /// occurrence of an option, so swoosh's intent wins over a user's trailing `-o`. `HostKeyAlias` keys the
-/// pin on the node id, not the mutable placeholder host; the `UserKnownHostsFile` path is double-quoted so
-/// an install dir with a space stays one filename to ssh.
+/// pin on the node id, not the host (a petname may be renamed); the `UserKnownHostsFile` path is
+/// double-quoted so an install dir with a space stays one filename to ssh.
 // ssh's argv has this many genuinely distinct, independent inputs (the proxy bridge, the target, the
-// resolved identity, the service, the host placeholder, the known_hosts path, the home, the address hints,
+// resolved identity, the service, the host, the known_hosts path, the home, the address hints,
 // and the passthrough args); bundling them into a struct would only rename the same fields without making any
 // illegal state unrepresentable, so keep the flat signature of a pure argv-assembler.
 #[allow(clippy::too_many_arguments)]
@@ -767,9 +774,9 @@ mod tests {
     }
 
     #[test]
-    fn argv_pins_on_the_node_id_not_the_placeholder_host() {
+    fn argv_pins_on_the_node_id_not_the_host() {
         // The known_hosts pin is keyed on the node id via HostKeyAlias, so a petname rename never orphans
-        // it. The placeholder host is the mutable petname; the alias is the immutable key.
+        // it. The host is the mutable petname; the alias is the immutable key.
         let argv = ssh_argv(
             PROXY,
             KEY,
@@ -1093,6 +1100,50 @@ mod tests {
             1,
             "the --peer address hint parses under its own id alongside the positional peer"
         );
+    }
+
+    /// The host ssh is given, for every way a peer is typed: a petname as typed, anything else the full
+    /// key of the machine dialed. Every byte is printable ASCII, so ssh's host check passes in any locale
+    /// (a short key's `…` failed it under UTF-8), and a link or its file path never becomes the host.
+    #[test]
+    fn the_host_is_ascii_for_every_kind_of_peer() {
+        let dir = scratch("host");
+        let home = Home::resolve(Some(dir.join("home"))).expect("resolve");
+        let mut contacts = Contacts::default();
+        contacts.add(
+            "alice".parse().expect("valid petname"),
+            Some("desk".parse().expect("valid device")),
+            KEY.parse().expect("a key"),
+        );
+        // A link's machine is its root, worked out here from the seed that minted it, not by the code under
+        // test.
+        let root = swoosh::testkit::TestNode::seeded(1).node_id().to_string();
+        let link = signet_link();
+        let file = dir.join("nas \u{e9}.link");
+        std::fs::write(&file, format!("{link}\n")).expect("write the link file");
+        let cases = [
+            ("alice", "alice"),
+            ("alice/desk", "alice/desk"),
+            (KEY, KEY),
+            (link.as_str(), root.as_str()),
+            (file.to_str().expect("a UTF-8 path"), root.as_str()),
+        ];
+        for (peer, expected) in cases {
+            let argv = parse_ssh(&["swoosh", peer])
+                .argv(&contacts, &home)
+                .expect("the launch assembles");
+            let alias = argv
+                .iter()
+                .position(|arg| arg.starts_with("HostKeyAlias="))
+                .expect("the alias is set");
+            let host = &argv[alias + 1];
+            assert_eq!(host, expected, "the host for {peer}");
+            assert!(
+                host.bytes().all(|byte| byte.is_ascii_graphic()),
+                "the host for {peer} is printable ASCII: {host:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
