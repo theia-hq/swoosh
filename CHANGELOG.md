@@ -39,6 +39,9 @@ All notable changes to swoosh, newest first.
   refused, so only a client given the URL can use it.
 - **`--present` is gone.** Give a link, or a file holding one, where the machine goes:
   `swoosh ssh swoosh:…` or `swoosh ssh ./nas.link`.
+- **`swoosh ssh` to a key or a link gives ssh the full key of the machine it dials as the host.** ssh's own
+  lines, such as `Connection to <key> closed.`, `%h`, and `Host` blocks in your ssh config get the full key,
+  where they got its first 16 characters. A petname still reaches ssh as typed.
 - **`serve` warns when a shell, `ping`, `speed` or a receive service has live links made for something
   else, and those links are refused when used.** A link made for one target is
   refused by any other. Adding one to `serve.toml` while `serve` runs prints the same warning and leaves
