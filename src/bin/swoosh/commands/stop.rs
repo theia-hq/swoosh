@@ -39,7 +39,7 @@ use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
 use swoosh::peer::{OwnDevice, Peer};
 use swoosh::roster::RosterDoc;
 use swoosh::serve::{CONTROL_STOP_SERVICE, STOP_ACK};
-use swoosh::transport::ReachArgs;
+use swoosh::transport::{BareReachFlag, ReachArgs};
 use tightbeam::tunnel::Connector;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -314,16 +314,24 @@ impl StopCmd {
     /// Everything before a dial: resolve the machine against the list of your devices, then either stop this
     /// machine over its control socket (bare, or your own name) and return `None`, or return the device to
     /// stop over its `control.stop`. Runs before any transport is composed, so a refused shape binds nothing.
-    pub async fn run_local(self, home: &Home) -> eyre::Result<Option<StopDevice>> {
+    /// `typed` is a reach flag typed on the command line, which stopping this machine refuses.
+    pub async fn run_local(
+        self,
+        home: &Home,
+        typed: Option<BareReachFlag>,
+    ) -> eyre::Result<Option<StopDevice>> {
         let target = match self.machine {
             None => Target::Here,
             Some(aim) => aim.resolve(&Yours::read(home).await?)?,
         };
         match target {
             Target::Here => {
-                // The reach trio binds a transport and seeds discovery for a PEER; stopping this machine binds
-                // neither, so the flags are refused by name rather than silently ignored (I.3, B4).
-                swoosh::reaching::reject_bare_reach(&self.reach)?;
+                // The reach flags bind a transport and find a machine; stopping this machine does neither,
+                // so a typed one is a usage error rather than silently ignored. A variable is the shell's
+                // standing setting, read by the verbs that reach, so it is ignored here.
+                if let Some(flag) = typed {
+                    return Err(Usage(flag.to_string()).into());
+                }
                 let client = ControlClient::resolve(home).map_err(control_error_report)?;
                 eprintln!("{}", stop_resolved(&client).await?);
                 Ok(None)

@@ -14,7 +14,7 @@ Publish the box's services behind its own gate:
 
 <!-- live-run: the announced LAN address is this host's, one line each; 192.168.x.x stands in for yours -->
 ```console
-$ swoosh serve ssh=sshd: tv=tcp:127.0.0.1:8096
+$ swoosh serve ssh tv=tcp:127.0.0.1:8096
 swoosh ready
 
     ed01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq

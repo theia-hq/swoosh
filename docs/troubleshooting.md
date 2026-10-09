@@ -68,19 +68,19 @@ to it. The reply does not say which. Ask its owner to share `ping` with you.
 ## "quirk is direct-only: pass --peer"
 
 ```
-Error: quirk is direct-only: pass --peer <key>=<addr> (the line the peer's `swoosh serve`
+Error: quirk is direct-only: pass --peer <key>=<address> (the line the peer's `swoosh serve`
 printed), or use --transport iroh: could not reach <key>
 ```
 
 Over quirk, either spelling, there is no discovery, so swoosh needs the peer's address. Either pass it
-with `--peer <key>=<addr>` (the `direct` line the peer's `serve` printed), or use `--transport iroh`,
+with `--peer <key>=<address>` (the `direct` line the peer's `serve` printed), or use `--transport iroh`,
 which discovers the peer from its key. See [transports](transports.md#quirk).
 
 ## An iroh dial cannot reach the peer
 
 Over iroh you do not pass an address, so an unreachable dial usually means the peer is offline or
 discovery is down, not a missing hint. Check that the peer's `swoosh serve` is running, and that both
-sides can reach the internet. `swoosh status <peer>` reports the path once a link is up.
+sides can reach the internet. `swoosh status <machine>` reports the path once a link is up.
 
 ## A revoke did not take effect
 

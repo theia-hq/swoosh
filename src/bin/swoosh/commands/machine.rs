@@ -27,10 +27,9 @@ pub fn picked(machine: &Machine) -> Option<String> {
     Some(format!("{person} is {name}."))
 }
 
-/// The usage error `error` exits 2 with, or `None` for the two that are not usage errors (a machine of a
-/// known person the book does not hold, in the book's own words, and a link with no usable key), which
-/// the caller reports as it always did. `argv` is the command line as typed and `typed` the machine as
-/// typed, for the one refusal whose fix is that line with only the machine replaced.
+/// The usage error `error` exits 2 with, or `None` for a link with no usable key, which is not a usage
+/// error and which the caller reports as it always did. `argv` is the command line as typed and `typed`
+/// the machine as typed, for the one refusal whose fix is that line with only the machine replaced.
 pub fn usage(error: &MachineError, verb: &str, argv: &[OsString], typed: &str) -> Option<String> {
     Some(match error {
         MachineError::Several { person, machines } => {
@@ -42,10 +41,39 @@ pub fn usage(error: &MachineError, verb: &str, argv: &[OsString], typed: &str) -
         }
         MachineError::NoneSaved { person } => format!(
             "none of {person}'s machines is saved here\n{}",
-            save_one(person.as_str())
+            save_one(person.as_str(), "<name>")
         ),
         MachineError::NotSaved { person } => {
-            format!("{person} is not saved here\n{}", save_one(person.as_str()))
+            format!(
+                "{person} is not saved here\n{}",
+                save_one(person.as_str(), "<name>")
+            )
+        }
+        // The lines `stop` prints for the same machine, so every verb refuses it alike.
+        MachineError::NotYours { device, yours } => {
+            format!("you have no machine {device}\n  {}", stop::listed(yours))
+        }
+        MachineError::NotTheirs {
+            person,
+            device,
+            machines,
+        } if machines.is_empty() => format!(
+            "{person} has no machine {device}\n{}",
+            save_one(person.as_str(), device.as_str())
+        ),
+        MachineError::NotTheirs {
+            person,
+            device,
+            machines,
+        } => {
+            let listed: Vec<String> = machines
+                .iter()
+                .map(|label| format!("{person}/{label}"))
+                .collect();
+            format!(
+                "{person} has no machine {device}\n  {person}'s: {}.",
+                listed.join(", ")
+            )
         }
         MachineError::WhichOfYours { yours } => {
             format!("which machine?\n  {}", stop::listed(yours))
@@ -54,15 +82,16 @@ pub fn usage(error: &MachineError, verb: &str, argv: &[OsString], typed: &str) -
             "name the machine:\n  {}",
             retyped(argv, verb, typed, &device.to_string())
         ),
-        MachineError::Unknown(_) | MachineError::Link(_) => return None,
+        MachineError::Link(_) => return None,
     })
 }
 
 /// The detail under a refusal for a person with no machine saved: save one, with the command whose
-/// placeholders only the reader can fill.
-fn save_one(person: &str) -> String {
+/// placeholders only the reader can fill. `machine` is the machine's name when one was typed, else the
+/// `<name>` placeholder.
+fn save_one(person: &str, machine: &str) -> String {
     format!(
-        "  To reach {person}, save one of {person}'s machines:\n    swoosh contact add {person}/<name> <key>"
+        "  To reach {person}, save one of {person}'s machines:\n    swoosh contact add {person}/{machine} <key>"
     )
 }
 

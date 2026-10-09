@@ -575,14 +575,22 @@ fn usage(path: &[&str], message: &str) -> clap::Error {
     command.error(clap::error::ErrorKind::InvalidValue, message)
 }
 
-/// The verb word typed (`ping`), read from `argv` by clap's own model, so a usage error a verb exits with
-/// once it runs prints that verb's usage line.
-fn verb_word(argv: &[std::ffi::OsString]) -> Option<String> {
-    Cli::command()
-        .try_get_matches_from(argv)
-        .ok()?
-        .subcommand_name()
-        .map(str::to_owned)
+/// The verb word typed (`ping`) and the reach flag typed on it, if any, read from `argv` by clap's own model:
+/// the word so a usage error a verb exits with once it runs prints that verb's usage line, and the flag
+/// because only clap's matches can tell a typed flag from its variable.
+fn typed(argv: &[std::ffi::OsString]) -> (Option<String>, Option<transport::BareReachFlag>) {
+    let Ok(matches) = Cli::command().try_get_matches_from(argv) else {
+        return (None, None);
+    };
+    let Some((verb, sub)) = matches.subcommand() else {
+        return (None, None);
+    };
+    // Only the forms that may reach no machine ask; every other verb's matches may not hold these ids.
+    let bare = match verb {
+        "status" | "stop" => transport::ReachArgs::typed_bare(sub),
+        _ => None,
+    };
+    (Some(verb.to_owned()), bare)
 }
 
 /// Exit 2 when `reach` gives a reach flag the selected bind would never read, as clap's own usage errors
@@ -594,8 +602,8 @@ fn unused_reach(path: &[&str], reach: &transport::ReachArgs) {
 }
 
 /// The one machine `peer` names in `contacts`, or exit 2 when it is not one machine. A bare person with
-/// one machine saved is announced on stderr, once, before anything is dialed. A machine of a known person
-/// the book does not hold keeps its own line, as an error.
+/// one machine saved is announced on stderr, once, before anything is dialed. A link with no usable key is
+/// an error, not a usage error.
 fn resolve_machine(
     peer: &Peer,
     contacts: &Contacts,
@@ -646,7 +654,7 @@ async fn run() -> eyre::Result<()> {
     // Kept whole: a refusal of a mistyped machine hands back this very line with only the machine replaced.
     let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let cli = parse_from(&argv).unwrap_or_else(|error| error.exit());
-    let verb_word = verb_word(&argv);
+    let (verb_word, typed_reach) = typed(&argv);
 
     // No verb given (a bare `swoosh`, even with `SWOOSH_HOME` set): a mistake, so the help goes to stderr
     // with exit 2, as clap's own `arg_required_else_help` does (stdout stays empty, no `error:` line).
@@ -673,11 +681,16 @@ async fn run() -> eyre::Result<()> {
     let reach = match verb {
         Verb::Tree(cmd) => return cmd.run(&Cli::command()),
         // A bare `swoosh status` (no peer): this machine, from its own files. It never dials; with a
-        // peer it is a reach verb.
-        Verb::Status(cmd) => return cmd.run_local(&home).await,
+        // peer it is a reach verb. A reach flag typed on it exits 2; one set in the environment is ignored.
+        Verb::Status(cmd) => {
+            if let Some(flag) = typed_reach {
+                usage_error(&["status"], &flag.to_string());
+            }
+            return cmd.run_local(&home).await;
+        }
         // `swoosh stop`: every shape the list of your devices refuses exits 2 here, before any transport
         // is composed, and this machine stops over its control socket. Only another of your devices binds.
-        Verb::Stop(cmd) => match cmd.run_local(&home).await {
+        Verb::Stop(cmd) => match cmd.run_local(&home, typed_reach).await {
             Ok(Some(device)) => Outward::Stop(device),
             Ok(None) => return Ok(()),
             Err(report) => match report.downcast_ref::<stop::Usage>() {

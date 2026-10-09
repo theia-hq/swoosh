@@ -21,6 +21,7 @@ use swoosh::roster::{Epoch, RevokedDevice, RosterDoc};
 use swoosh::serve::{CONTROL_STOP_SERVICE, FirstRound, Resident, Stop, StopKind};
 use swoosh::serve_toml::LiveServeToml;
 use swoosh::testkit::{HostilePeer, STANDING_UNTIL, TestNode, TestRoot};
+use swoosh::transport::ReachArgs;
 use tightbeam::enabled::EnabledServices as _;
 use tightbeam::tunnel::{CancellationToken, Router, ServiceCatalog};
 
@@ -364,7 +365,7 @@ async fn bare_stop_without_resident_is_teaching() {
     let home = home_in(&base);
 
     let error = bare_stop()
-        .run_local(&home)
+        .run_local(&home, None)
         .await
         .expect_err("no resident must refuse, never a silent success");
     assert_eq!(
@@ -392,10 +393,12 @@ fn parsed(argv: &[&str]) -> StopCmd {
     Wrap::try_parse_from(argv).expect("stop parses").stop
 }
 
-/// A bare `stop` reaches no peer, so the reach trio (`--transport`/`--local`/`--peer`) has nothing to
-/// bind or find: each is refused by name, never silently ignored (I.3, B4).
+/// A bare `stop` reaches no machine, so a reach flag typed on it is a usage error naming the flag, never
+/// silently ignored. Read from clap's matches as the root reads them: only a typed flag counts.
 #[tokio::test]
-async fn bare_stop_rejects_the_reach_flags() {
+async fn bare_stop_refuses_a_typed_reach_flag() {
+    use clap::{Args as _, FromArgMatches as _};
+
     let base = scratch("reach");
     let home = home_in(&base);
     let hint = format!("{}=127.0.0.1:9000", NodeId::from_ed25519_secret(&[5u8; 32]));
@@ -405,14 +408,19 @@ async fn bare_stop_rejects_the_reach_flags() {
         (&["x", "--peer", &hint], "--peer"),
     ];
     for (argv, flag) in cases {
-        let error = parsed(argv)
-            .run_local(&home)
+        let matches = StopCmd::augment_args(clap::Command::new("x"))
+            .try_get_matches_from(argv)
+            .expect("stop parses");
+        let typed = ReachArgs::typed_bare(&matches);
+        let error = StopCmd::from_arg_matches(&matches)
+            .expect("stop parses")
+            .run_local(&home, typed)
             .await
-            .expect_err("no peer, no effect: the flag must refuse, never be ignored");
-        assert_eq!(
-            format!("{error:#}"),
-            format!("{flag} only applies when reaching a peer; drop it or name one")
-        );
+            .expect_err("no machine, no effect: the flag must refuse, never be ignored");
+        let Some(Usage(line)) = error.downcast_ref::<Usage>() else {
+            panic!("a typed reach flag is a usage error: {error:#}");
+        };
+        assert_eq!(line, &format!("{flag} has no effect without a machine"));
     }
 
     let _ = std::fs::remove_dir_all(&base);

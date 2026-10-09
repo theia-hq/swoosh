@@ -38,7 +38,7 @@ serving.
 
 <!-- live-run: the announced LAN address is this host's, one line each; 192.168.x.x stands in for yours -->
 ```console
-$ swoosh serve ssh=sshd:
+$ swoosh serve ssh
 swoosh ready
 
     ed01lezchywdg2izx5bvyaka433iqzg4oxbt7j2aoxp7tjtyq2a7jjqq

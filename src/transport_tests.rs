@@ -472,3 +472,36 @@ async fn a_serve_toml_that_cannot_be_read_refuses_with_the_file_named() {
         format!("could not use {}", home.serve_toml().display())
     );
 }
+
+/// A form that reaches no machine refuses a reach flag typed on it, by name, and reads its defaults as
+/// nothing typed. Only the command line counts: the variables are held through the real binary
+/// (`tests/bare_verbs.rs`), since setting one here would race every other test in the process.
+#[test]
+fn a_typed_reach_flag_is_found_by_its_typed_name() {
+    let model = <ReachArgs as clap::Args>::augment_args(clap::Command::new("x"));
+    let typed = |argv: &[&str]| {
+        let matches = model
+            .clone()
+            .try_get_matches_from(argv)
+            .expect("the reach flags parse");
+        ReachArgs::typed_bare(&matches).map(|flag| flag.to_string())
+    };
+    assert_eq!(typed(&["x"]), None, "the defaults are nothing typed");
+    let hint = format!("{}=127.0.0.1:9000", NodeId::from_ed25519_secret(&[5u8; 32]));
+    for (argv, flag) in [
+        (vec!["x", "--transport", "quirk"], "--transport"),
+        (vec!["x", "--local"], "--local"),
+        (vec!["x", "--peer", hint.as_str()], "--peer"),
+        (vec!["x", "--relay", "https://relay.example"], "--relay"),
+        (
+            vec!["x", "--resolver", "https://dns.example/pkarr"],
+            "--resolver",
+        ),
+    ] {
+        assert_eq!(
+            typed(&argv).as_deref(),
+            Some(format!("{flag} has no effect without a machine").as_str()),
+            "{argv:?}"
+        );
+    }
+}

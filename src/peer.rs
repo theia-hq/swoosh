@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use bifrost::{KeyError, NodeId, NodeIdParseError};
 use nauthy::Link;
 
-use crate::contacts::{ContactRef, Contacts, DeviceLabel, ME, Petname, ResolveError};
+use crate::contacts::{ContactRef, Contacts, DeviceLabel, ME, Petname};
 use crate::credential::LinkExt as _;
 use crate::link::LinkError;
 use crate::names::NameError;
@@ -361,22 +361,30 @@ impl Peer {
 fn named(contacts: &Contacts, reference: &ContactRef) -> Result<Machine, MachineError> {
     let person = reference.petname();
     if let Some(device) = reference.device() {
-        let Some(mut machines) = contacts.devices(person) else {
-            // `me/<name>` with no list of your devices names no person to save; its own line stays.
-            return Err(if person.as_str() == ME {
-                MachineError::Unknown(ResolveError::UnknownPetname(person.clone()))
-            } else {
-                MachineError::NotSaved {
-                    person: person.clone(),
-                }
+        // `me/<name>` that is none of yours lists yours, with or without a list here: `me/` is saved by your
+        // root, never by `contact add`, so no fix line names a save.
+        if person.as_str() == ME {
+            return match contacts.mine().find(|(label, _)| *label == device) {
+                Some((_, key)) => Ok(Machine::saved(contacts, *key)),
+                None => Err(MachineError::NotYours {
+                    device: OwnDevice::from(device.clone()),
+                    yours: yours(contacts),
+                }),
+            };
+        }
+        let Some(machines) = contacts.devices(person) else {
+            return Err(MachineError::NotSaved {
+                person: person.clone(),
             });
         };
-        return match machines.find(|(label, _)| *label == device) {
-            Some((_, key)) => Ok(Machine::saved(contacts, *key)),
-            None => Err(MachineError::Unknown(ResolveError::UnknownDevice {
-                petname: person.clone(),
+        let machines: Vec<(&DeviceLabel, &NodeId)> = machines.collect();
+        return match machines.iter().find(|(label, _)| *label == device) {
+            Some((_, key)) => Ok(Machine::saved(contacts, **key)),
+            None => Err(MachineError::NotTheirs {
+                person: person.clone(),
                 device: device.clone(),
-            })),
+                machines: machines.iter().map(|(label, _)| (*label).clone()).collect(),
+            }),
         };
     }
     if person.as_str() == ME {
@@ -529,9 +537,24 @@ pub enum MachineError {
         /// The device it names.
         device: OwnDevice,
     },
-    /// A machine of a known person that this book does not hold, in the book's own words.
-    #[error(transparent)]
-    Unknown(ResolveError),
+    /// `me/<name>` that names none of your devices.
+    #[error("you have no machine {device}")]
+    NotYours {
+        /// The device typed.
+        device: OwnDevice,
+        /// Your devices, in name order.
+        yours: Vec<OwnDevice>,
+    },
+    /// `<person>/<name>` for a person saved here with no machine by that name.
+    #[error("{person} has no machine {device}")]
+    NotTheirs {
+        /// The person typed.
+        person: Petname,
+        /// The machine name typed.
+        device: DeviceLabel,
+        /// Their machines' names, in name order.
+        machines: Vec<DeviceLabel>,
+    },
     /// A link whose machine is no usable key.
     #[error(transparent)]
     Link(KeyError),

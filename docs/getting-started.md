@@ -6,10 +6,7 @@ another machine, done. Auth, names, and sharing come after, each a small additio
 
 You will need two machines (your laptop and a desktop, a home box, or a cheap VPS).
 
-> **Only one machine?** Run both ends on it over `quirk+noise`: start `swoosh serve --transport
-> quirk+noise` in one terminal, then reach it from another with `swoosh ping <key> --transport
-> quirk+noise --peer <key>=<addr>`, using the key and the `direct` address `serve` prints. See
-> [transports](transports.md#quirk).
+> **Only one machine?** Run both ends on it over `quirk+noise`; [transports](transports.md#quirk) shows how.
 
 ## 1. Install
 

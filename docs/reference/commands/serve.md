@@ -15,7 +15,7 @@ Usage: swoosh serve [OPTIONS] [service]...
   --admit <root key>         For this run, let in the devices of another root without joining it (CI)
 ```
 
-**Example.** `swoosh serve ssh=sshd: tv=tcp:127.0.0.1:8096` publishes a shell and a local TCP service, both
+**Example.** `swoosh serve ssh tv=tcp:127.0.0.1:8096` publishes a shell and a local TCP service, both
 gated to your signet.
 
 **Things to know.**
@@ -42,8 +42,7 @@ Each file a receive service lands prints one line on stderr, such as
 `inbox: received notes.txt (1500 bytes) from ed01uyi7g54bpea45hafea4gohlnay5bs23p3ck4z4g24dvcpeldkczq`.
 The key after `from` is the machine that sent the file.
 The sender chooses the name, so control characters in it are shown escaped. If stderr falls behind, some
-lines are dropped and a line says how many. `--quiet` turns these lines off, and `RUST_LOG` cannot turn
-them back on.
+lines are dropped and a line says how many.
 `--quiet` (or `SWOOSH_QUIET`) prints no banner and no per-file lines; refusals and warnings still print.
 A raw-stream service (`file:`, `fifo:`, `stdin:`) has no auth of its own, so `--public` refuses it and
 points at `--public-unsafe`, so name only a file you mean to hand out.

@@ -13,7 +13,7 @@ Usage: swoosh ping [OPTIONS] <machine>
   -v, --verbose     print a line per probe, and one when the path changes
 ```
 
-**Example.** `swoosh ping desk -v -c 4` prints `<device> via iroh, path: <path>` first, then a
+**Example.** `swoosh ping me/desk -v -c 4` prints `<device> via iroh, path: <path>` first, then a
 line per probe, and the path line again if the path changes mid-run: over iroh a session that starts
 `relayed through <relay>` prints `direct` when a hole punch lands.
 [Why a path changes](../../transports.md#iroh).

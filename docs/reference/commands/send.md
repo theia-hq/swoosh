@@ -12,9 +12,9 @@ Usage: swoosh send [OPTIONS] <path>... <machine>
 ```
 
 **Example.**
-<!-- capture: swoosh send app.tar deploybox -->
+<!-- capture: swoosh send app.tar me/deploybox -->
 ```console
-$ swoosh send app.tar deploybox
+$ swoosh send app.tar me/deploybox
 sending to ed01hcq6balrlxwadoj6w5kuws7teeydqwewgekucw2duevh72yu6k2q...
 sent app.tar (204800 bytes)
 ```

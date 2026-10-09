@@ -15,7 +15,7 @@ fn bound(transport: transport::Transport, local: bool) -> transport::Bound {
 
 // A refused probe is a REFUSAL, never dressed as an addressing problem: the node was reached, so the
 // error says so and carries NO quirk `--peer`/discovery hint (the bug: a refused stranger over quirk
-// used to print `reached, but refused` and THEN `could not reach ... quirk is direct-only ...`).
+// used to print `reached, but refused` and THEN `could not reach`, with the `--peer` remedy).
 #[test]
 fn a_reached_but_refused_probe_is_a_refusal_without_the_reach_hint() {
     let err = Outcome::Refused
@@ -24,37 +24,40 @@ fn a_reached_but_refused_probe_is_a_refusal_without_the_reach_hint() {
     let msg = format!("{err:#}");
     assert!(msg.contains("reached, but refused"), "{msg}");
     assert!(!msg.contains("could not reach"), "{msg}");
-    assert!(!msg.contains("quirk is direct-only"), "{msg}");
+    assert!(!msg.contains("--peer"), "{msg}");
 }
 
-// An unreachable probe DOES carry the transport's reach hint: over quirk, the `--peer` remedy.
+// An unreachable probe DOES carry the transport's reach hint: over quirk, the `--peer` remedy, under the
+// fact it explains. Each spelling of quirk carries the same lines.
 #[test]
 fn an_all_unreachable_probe_carries_the_quirk_reach_hint() {
-    let err = Outcome::Unreachable
-        .into_result(&"alice", &bound(transport::Transport::Quirk, false))
-        .expect_err("all-unreachable is non-zero");
-    let msg = format!("{err:#}");
-    assert!(msg.contains("could not reach alice"), "{msg}");
-    assert!(msg.contains("quirk is direct-only"), "{msg}");
+    for transport in [
+        transport::Transport::Quirk,
+        transport::Transport::QuirkNoise,
+    ] {
+        let err = Outcome::Unreachable
+            .into_result(&"alice", &bound(transport, false))
+            .expect_err("all-unreachable is non-zero");
+        assert_eq!(
+            format!("{err:#}"),
+            "could not reach alice\n  quirk finds no machine by itself.\n  Give its address with --peer \
+             <key>=<address>, or add --transport iroh."
+        );
+    }
 }
 
-// Under `--local` the remedy names the flag as the cause: the internet fallback is what the flag
-// removed, so the quirk text's "use --transport iroh" escape would be false advice there.
+// Under `--local` the remedy names the setting as the cause, both its spellings, since only the variable
+// may be set: the internet fallback is what it removed, so "add --transport iroh" would be false advice.
 #[test]
 fn an_all_unreachable_local_probe_names_the_flag_as_the_cause() {
     for transport in [transport::Transport::Iroh, transport::Transport::QuirkNoise] {
         let err = Outcome::Unreachable
             .into_result(&"alice", &bound(transport, true))
             .expect_err("all-unreachable is non-zero");
-        let msg = format!("{err:#}");
-        assert!(msg.contains("could not reach alice"), "{msg}");
-        assert!(
-            msg.contains("--local"),
-            "the flag is named as the cause: {msg}"
-        );
-        assert!(
-            !msg.contains("use --transport iroh"),
-            "under --local, iroh is still local: {msg}"
+        assert_eq!(
+            format!("{err:#}"),
+            "could not reach alice\n  With --local or SWOOSH_LOCAL, swoosh looks on this network only.\n  \
+             Give its address with --peer <key>=<address>, or drop --local and unset SWOOSH_LOCAL."
         );
     }
 }
@@ -85,7 +88,7 @@ fn an_all_unreachable_iroh_probe_names_the_resolver_it_asked() {
     let msg = format!("{err:#}");
     assert_eq!(
         msg,
-        "resolver asked: https://dns.example/pkarr: could not reach alice"
+        "could not reach alice\n  resolver asked: https://dns.example/pkarr"
     );
 }
 
@@ -110,7 +113,7 @@ fn a_failed_probe_probe_is_non_zero_and_says_the_probe_failed() {
     let msg = format!("{err:#}");
     assert!(msg.contains("reached, but the probe failed"), "{msg}");
     assert!(!msg.contains("could not reach"), "{msg}");
-    assert!(!msg.contains("quirk is direct-only"), "{msg}");
+    assert!(!msg.contains("--peer"), "{msg}");
 }
 
 // Only a probe that answered exits green: every other outcome is an error.

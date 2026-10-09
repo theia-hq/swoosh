@@ -256,6 +256,44 @@ fn me_alone_prints_stops_lines() {
     );
 }
 
+/// A machine name that is none of a known person's, yours included, is `stop`'s two lines and exit 2: with
+/// no list of your devices here, `ssh me/nas` and `ping me/nas` say this machine knows none, and never
+/// name `contact add`, which refuses `me/`.
+#[test]
+fn an_unknown_machine_name_prints_stops_lines() {
+    let scratch = Scratch::new("unknown");
+    for verb in ["ssh", "ping"] {
+        let out = swoosh(&scratch, &[verb, "me/nas"]);
+        let stderr = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(2), "{verb}: {stderr}");
+        assert!(
+            stderr.starts_with(
+                "error: you have no machine me/nas\n  This machine knows none of your devices.\n"
+            ),
+            "{verb}: {stderr}"
+        );
+        assert!(!stderr.contains("contact add"), "{verb}: {stderr}");
+    }
+    yours(&scratch);
+    save(&scratch, "alice/laptop", &key(1));
+    let out = swoosh(&scratch, &["ping", "me/box"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr)
+            .starts_with("error: you have no machine me/box\n  Yours: me/desk, me/nas.\n"),
+        "{}",
+        text(&out.stderr)
+    );
+    let out = swoosh(&scratch, &["ping", "alice/box"]);
+    assert_eq!(out.status.code(), Some(2), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr)
+            .starts_with("error: alice has no machine box\n  alice's: alice/laptop.\n"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
 /// A bare word that is no contact but one of your device names hands back the line typed, with only the
 /// machine replaced by `me/<name>`.
 #[test]

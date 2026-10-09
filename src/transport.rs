@@ -175,7 +175,34 @@ impl ReachArgs {
             Transport::QuirkNoise => Some(UnusedReach::QuirkNoise),
         }
     }
+
+    /// The first reach flag TYPED on the command line `matches` holds, for a form that reaches no machine
+    /// (`status`, `stop` here). Only the typed flag counts: a variable is a shell's standing setting, set
+    /// once for every verb it runs, so a bare form ignores it rather than refusing a shell that set one.
+    /// `matches` is the verb's own, the one this struct is flattened into: an id it does not define panics
+    /// in clap's debug builds.
+    pub fn typed_bare(matches: &clap::ArgMatches) -> Option<BareReachFlag> {
+        // The ids and long names are read from this struct's own clap model, so a sixth flag joins the
+        // check without a list to keep beside it.
+        let model = <Self as Args>::augment_args(clap::Command::new("reach"));
+        model
+            .get_arguments()
+            .filter(|arg| {
+                matches.value_source(arg.get_id().as_str())
+                    == Some(clap::parser::ValueSource::CommandLine)
+            })
+            .find_map(|arg| {
+                arg.get_long()
+                    .map(|long| BareReachFlag(format!("--{long}")))
+            })
+    }
 }
+
+/// A reach flag typed on a form that reaches no machine: a usage error. It names the flag alone, since only
+/// a typed flag is one.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0} has no effect without a machine")]
+pub struct BareReachFlag(String);
 
 /// A reach flag given to a bind that would never read it: a usage error. The flags are hidden and read
 /// from the environment too, so the line names both spellings of each side: the person may only ever have

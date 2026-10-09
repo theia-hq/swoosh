@@ -27,10 +27,9 @@ use bifrost::{ConnInfo, Discovery, Node, Session, Transport};
 use clap::Args;
 use measure::{Ping, ProtocolError};
 use nauthy::{Link, Service};
-use swoosh::contacts::ME;
 use swoosh::escape::{Escaped, causes};
 use swoosh::home::Home;
-use swoosh::peer::{Machine, Peer};
+use swoosh::peer::{Kind, Machine, Peer};
 use swoosh::reach;
 use swoosh::serve::CONTROL_SERVICES_SERVICE;
 use swoosh::transport::{self, ReachArgs};
@@ -75,9 +74,12 @@ impl swoosh::reaching::Reaching for StatusCmd {
     /// slots.
     ///
     /// An `anyone` link typed as the peer presents alone, under a throwaway key (`Credential::dialing`).
+    /// The service is read only for a link typed as the peer, and a link's machine is always
+    /// [`Kind::Link`], which is pinged: so `ping` is the service here, before the machine resolves, and
+    /// the probe itself is picked from the resolved kind.
     fn bind_role(&self) -> swoosh::reaching::BindRole {
         swoosh::reaching::BindRole::Dialing(match &self.peer {
-            Some(peer) => swoosh::credential::Credential::dialing(peer, Probe::of(peer).service()),
+            Some(peer) => swoosh::credential::Credential::dialing(peer, reach::PING_SERVICE),
             None => swoosh::credential::Credential::Family { present: None },
         })
     }
@@ -123,7 +125,7 @@ impl StatusCmd {
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, so the verb never threads a slip itself.
-        let asked = Probe::of(&peer);
+        let asked = Probe::of(machine.kind());
         let service: Service = asked.service().parse()?;
         let label = machine.label();
         let line =
@@ -144,10 +146,8 @@ impl StatusCmd {
 
     /// The bare (no-peer) path: this machine, from its own files. Runs BEFORE any transport is composed
     /// (dispatched locally in the root), so a bare `swoosh status` never binds an endpoint and never dials.
+    /// A reach flag typed on it is refused in the root, which alone can tell it from its variable.
     pub async fn run_local(self, home: &Home) -> eyre::Result<()> {
-        // The reach trio binds a transport and seeds discovery for a PEER; a bare `status` binds
-        // neither, so the flags are refused by name rather than silently ignored (I.3, B4).
-        swoosh::reaching::reject_bare_reach(&self.reach)?;
         let print = if self.key {
             report::Print::Key
         } else {
@@ -157,7 +157,7 @@ impl StatusCmd {
     }
 }
 
-/// What `status` asks a reached device, chosen from the peer before the dial.
+/// What `status` asks a reached device, chosen from the resolved machine's kind before the dial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Probe {
     /// One of your devices: `control.services`, for the reach, the round trip and what it serves.
@@ -167,12 +167,13 @@ enum Probe {
 }
 
 impl Probe {
-    /// The probe for `peer`: `me` or `me/<name>` names your devices, and only those are asked
-    /// `control.services`; a contact, a key or a link is pinged.
-    fn of(peer: &Peer) -> Self {
-        match peer {
-            Peer::Named(reference) if reference.petname().as_str() == ME => Self::Services,
-            _ => Self::Ping,
+    /// The probe for a machine of `kind`: only your devices are asked `control.services`, however they
+    /// were typed (a name or a key), since the kind is read from the book; a contact's machine, a key no
+    /// name holds, or a link is pinged.
+    fn of(kind: Kind) -> Self {
+        match kind {
+            Kind::Yours => Self::Services,
+            Kind::Link | Kind::Contact | Kind::Key => Self::Ping,
         }
     }
 
@@ -462,18 +463,13 @@ impl core::fmt::Display for Line {
 
 #[cfg(test)]
 mod tests {
-    use core::sync::atomic::{AtomicU32, Ordering};
-
     use bifrost::{ConnInfo, NodeId, Path, PathChanges, Session};
     use clap::Parser as _;
-    use swoosh::home::Home;
+    use swoosh::peer::Kind;
     use swoosh::{reach, transport};
 
     use super::{Line, Probe, Refused, probe, probe_services};
     use crate::commands::serve::humanize_secs;
-
-    /// Serializes scratch names within this test process; the pid keeps two concurrent runs apart.
-    static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 
     /// Uptimes and idle ages render as the coarsest two units, so a status reads at a glance. The
     /// formatter is shared with the serve banner (`humanize_secs`), so this pins the shape once.
@@ -484,44 +480,6 @@ mod tests {
         assert_eq!(humanize_secs(90), "1m 30s");
         assert_eq!(humanize_secs(2 * 3600 + 14 * 60), "2h 14m");
         assert_eq!(humanize_secs(3 * 86_400 + 5 * 3600), "3d 5h");
-    }
-
-    /// A bare `status` reaches no peer, so the reach trio (`--transport`/`--local`/`--peer`) has nothing
-    /// to bind or find: each is refused by name, never silently ignored (I.3, B4).
-    #[tokio::test]
-    async fn bare_status_rejects_the_reach_flags() {
-        #[derive(clap::Parser)]
-        struct Wrap {
-            #[command(flatten)]
-            status: super::StatusCmd,
-        }
-
-        let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
-        let base =
-            std::env::temp_dir().join(format!("sw4-status-reach-{}-{seq}", std::process::id()));
-        std::fs::create_dir_all(base.join("home")).expect("scratch home");
-        let home = Home::resolve(Some(base.join("home"))).expect("the scratch home resolves");
-        let hint = format!("{}=127.0.0.1:9000", NodeId::from_ed25519_secret(&[5u8; 32]));
-        let cases: [(&[&str], &str); 3] = [
-            (&["x", "--transport", "quirk"], "--transport"),
-            (&["x", "--local"], "--local"),
-            (&["x", "--peer", &hint], "--peer"),
-        ];
-        for (argv, flag) in cases {
-            let status = Wrap::try_parse_from(argv)
-                .expect("the reach flag parses")
-                .status;
-            let error = status
-                .run_local(&home)
-                .await
-                .expect_err("no peer, no effect: the flag must refuse, never be ignored");
-            assert_eq!(
-                format!("{error:#}"),
-                format!("{flag} only applies when reaching a peer; drop it or name one")
-            );
-        }
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// A session that answered the dial and then broke: the handshake landed, so it reports a live direct
@@ -811,18 +769,12 @@ mod tests {
             .expect("a catalog encodes")
     }
 
-    /// A peer typed as text, as the command line parses it.
-    fn peer(text: &str) -> swoosh::peer::Peer {
-        text.parse().expect("a peer")
-    }
-
     /// `status me/<name>` asks `control.services`, chosen before the dial; a node that serves only one
     /// service answers it with the round trip and its list, a healthy line.
     #[tokio::test]
     async fn status_of_your_device_probes_the_control_route() {
-        assert_eq!(Probe::of(&peer("me/nas")), Probe::Services);
-        assert_eq!(Probe::of(&peer("me")), Probe::Services);
-        assert_eq!(Probe::of(&peer("me/nas")).service(), "control.services");
+        assert_eq!(Probe::of(Kind::Yours), Probe::Services);
+        assert_eq!(Probe::of(Kind::Yours).service(), "control.services");
         let line = probe_services(
             &ServicesSession {
                 reply: Ok(catalog_of(&["web=echo:"])),
@@ -871,11 +823,54 @@ mod tests {
     /// never asked of it.
     #[test]
     fn status_of_a_contact_keeps_the_ping_probe() {
-        let key = NodeId::from_ed25519_secret(&[8u8; 32]).to_string();
-        for text in ["bob", "bob/nas", key.as_str()] {
-            assert_eq!(Probe::of(&peer(text)), Probe::Ping, "{text}");
+        for kind in [Kind::Contact, Kind::Key, Kind::Link] {
+            assert_eq!(Probe::of(kind), Probe::Ping, "{kind:?}");
         }
         assert_eq!(Probe::Ping.service(), reach::PING_SERVICE);
+    }
+
+    /// One of your devices typed by its key is asked what it serves, as `status me/<name>` is: the probe
+    /// is picked from the kind the book gives the key, never from the form typed.
+    #[tokio::test]
+    async fn status_of_your_devices_key_lists_what_it_serves() {
+        use swoosh::testkit::{Script, ScriptedPeer};
+
+        #[derive(clap::Parser)]
+        struct Wrap {
+            #[command(flatten)]
+            status: super::StatusCmd,
+        }
+
+        let key = NodeId::from_ed25519_secret(&[0x68; 32]);
+        let mut contacts = swoosh::contacts::Contacts::default();
+        contacts
+            .save(&"me/nas".parse().expect("a device"), key)
+            .expect("the name is free");
+        let cmd = Wrap::try_parse_from(["x", &key.to_string()])
+            .expect("status parses")
+            .status;
+        let machine = cmd
+            .peer
+            .as_ref()
+            .expect("a machine typed")
+            .machine(&contacts)
+            .expect("one machine");
+        let peer = ScriptedPeer::new(key, [Script::Lists(vec!["web"])]);
+        let node = bifrost::Node::new(peer.clone(), bifrost::NoDiscovery);
+        let bound = transport::Bound {
+            transport: transport::Transport::Iroh,
+            local: false,
+            reach: transport::Reach::default(),
+        };
+        cmd.run_status(&node, &machine, &bound, None, None)
+            .await
+            .expect("your device answers what it serves");
+        let asked: Vec<String> = peer
+            .requests()
+            .into_iter()
+            .map(|request| request.service)
+            .collect();
+        assert_eq!(asked, ["control.services"]);
     }
 
     /// On both probes the access refusal prints its own line and no peer text; every other refusal

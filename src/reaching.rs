@@ -359,30 +359,6 @@ pub async fn renew_before_dial<W: std::io::Write>(
     }
 }
 
-/// Reject the reach-family flags on a BARE (local) invocation: `--transport`, `--local`, `--peer`,
-/// `--relay`, and `--resolver` choose how a PEER is bound and found, and a bare `status`/`stop`/`service
-/// ls` reaches no peer (it queries the local resident over the control socket). The bare arms return
-/// before the composition root reads these flags, so without this guard they parsed and were silently
-/// ignored (I.3 forbids a flag with no effect). One home for the teaching line, called by each bare arm.
-pub fn reject_bare_reach(reach: &transport::ReachArgs) -> eyre::Result<()> {
-    if reach.transport != transport::Transport::default() {
-        eyre::bail!("--transport only applies when reaching a peer; drop it or name one");
-    }
-    if reach.local {
-        eyre::bail!("--local only applies when reaching a peer; drop it or name one");
-    }
-    if !reach.peer.is_empty() {
-        eyre::bail!("--peer only applies when reaching a peer; drop it or name one");
-    }
-    if reach.relay.is_some() {
-        eyre::bail!("--relay only applies when reaching a peer; drop it or name one");
-    }
-    if reach.resolver.is_some() {
-        eyre::bail!("--resolver only applies when reaching a peer; drop it or name one");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use nauthy::Link;
@@ -390,18 +366,6 @@ mod tests {
     use super::*;
     use crate::peer::Peer;
     use crate::testkit::{TestNode, TestRoot};
-
-    /// The parsed reach-family defaults: what clap hands a bare verb that named none of the flags. Each
-    /// case below overrides exactly the one flag it is about, so a new flag joins the guard in one line.
-    fn defaults() -> transport::ReachArgs {
-        transport::ReachArgs {
-            transport: transport::Transport::default(),
-            local: false,
-            peer: Vec::new(),
-            relay: None,
-            resolver: None,
-        }
-    }
 
     /// An UNPROVISIONED home for a resolver test: no stored badge and no signet, so its standing is
     /// `Unpinned` and a plain dial presents nothing.
@@ -819,72 +783,5 @@ mod tests {
             warned.is_empty(),
             "nothing is warned about a credential this dial does not carry"
         );
-    }
-
-    /// B4: the bare-form guard refuses each reach-family flag by name (never silently ignoring it), and
-    /// the defaults pass through: a bare `stop`/`status` binds no transport and seeds no
-    /// discovery, so there is nothing for the trio to do.
-    #[test]
-    fn bare_reach_flags_are_rejected_by_name() {
-        assert!(
-            reject_bare_reach(&defaults()).is_ok(),
-            "the parsed defaults have nothing to refuse"
-        );
-
-        let hint = format!(
-            "{}=127.0.0.1:9000",
-            crate::identity::Secret::ephemeral().node_id()
-        )
-        .parse::<transport::PeerHint>()
-        .expect("a valid peer hint");
-        let cases = [
-            (
-                transport::ReachArgs {
-                    transport: transport::Transport::Quirk,
-                    ..defaults()
-                },
-                "--transport",
-            ),
-            (
-                transport::ReachArgs {
-                    local: true,
-                    ..defaults()
-                },
-                "--local",
-            ),
-            (
-                transport::ReachArgs {
-                    peer: vec![hint],
-                    ..defaults()
-                },
-                "--peer",
-            ),
-            (
-                transport::ReachArgs {
-                    relay: Some("https://relay.example".parse().expect("a valid relay url")),
-                    ..defaults()
-                },
-                "--relay",
-            ),
-            (
-                transport::ReachArgs {
-                    resolver: Some(
-                        "https://dns.example/pkarr"
-                            .parse()
-                            .expect("a valid resolver url"),
-                    ),
-                    ..defaults()
-                },
-                "--resolver",
-            ),
-        ];
-        for (reach, flag) in cases {
-            let error = reject_bare_reach(&reach)
-                .expect_err("a flag with no effect on a bare form must refuse");
-            assert_eq!(
-                format!("{error:#}"),
-                format!("{flag} only applies when reaching a peer; drop it or name one")
-            );
-        }
     }
 }

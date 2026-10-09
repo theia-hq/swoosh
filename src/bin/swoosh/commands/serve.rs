@@ -121,7 +121,7 @@ pub struct ServeCmd {
     /// Serve for this long, then stop (30m, 2h, 1d)
     #[arg(long, value_name = "d")]
     pub expires: Option<Lifetime>,
-    /// For this run, let in the devices of another root without joining it (CI).
+    /// For this run, let in the devices of another root without joining it (CI)
     #[arg(long, value_name = "root key", value_parser = admitted_root)]
     pub admit: Option<NodeId>,
     #[command(flatten)]

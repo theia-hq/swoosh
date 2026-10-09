@@ -95,7 +95,7 @@ is no public IP or port to expose:
 $ swoosh ssh desk
 ```
 
-The desktop offers its shell once with `swoosh serve ssh=sshd:` (a keyless shell, gated to your signet)
+The desktop offers its shell once with `swoosh serve ssh` (a keyless shell, gated to your signet)
 or points at an existing sshd with `swoosh serve ssh=tcp:127.0.0.1:22`.
 
 ## The limit

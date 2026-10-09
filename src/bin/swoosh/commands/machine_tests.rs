@@ -251,3 +251,50 @@ fn a_bare_person_refuses_in_its_own_words() {
         "which machine?\n  This machine knows none of your devices."
     );
 }
+
+// A machine name that is none of a known person's prints `stop`'s lines: the person's machines, or the
+// save that would add this one; yours, or that this machine knows none of them, and never a save, since
+// `me/` is your root's to name.
+#[test]
+fn an_unknown_machine_name_refuses_in_stops_shape() {
+    let mut contacts = book();
+    contacts
+        .save(
+            &"bob/laptop".parse().expect("a machine"),
+            NodeId::from_ed25519_secret(&[0x64; 32]),
+        )
+        .expect("the name is free");
+    contacts
+        .save(
+            &"carol".parse().expect("a person"),
+            NodeId::from_ed25519_secret(&[0x65; 32]),
+        )
+        .expect("the name is free");
+    assert_eq!(
+        refusal(&contacts, "ping", &["swoosh", "ping", "bob/box"], "bob/box"),
+        "bob has no machine box\n  bob's: bob/laptop, bob/nas."
+    );
+    assert_eq!(
+        refusal(
+            &contacts,
+            "ping",
+            &["swoosh", "ping", "carol/box"],
+            "carol/box"
+        ),
+        "carol has no machine box\n  To reach carol, save one of carol's machines:\n    swoosh contact add \
+         carol/box <key>"
+    );
+    assert_eq!(
+        refusal(&contacts, "ping", &["swoosh", "ping", "me/box"], "me/box"),
+        "you have no machine me/box\n  Yours: me/nas."
+    );
+    assert_eq!(
+        refusal(
+            &Contacts::default(),
+            "ssh",
+            &["swoosh", "ssh", "me/nas"],
+            "me/nas"
+        ),
+        "you have no machine me/nas\n  This machine knows none of your devices."
+    );
+}

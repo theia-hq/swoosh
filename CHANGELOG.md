@@ -22,6 +22,19 @@ All notable changes to swoosh, newest first.
   15 minutes at most, and cannot be copied.
 
 ### Changed
+- **Every command that dials takes one machine.** It can be `me/<name>`, `<person>/<name>`, a key, a `swoosh:`
+  link, or a file holding a link. A bare name of one of your devices (`desk`) is refused, with the command to
+  type instead (`swoosh ping me/desk`). A person alone (`alice`) works when one of their machines is saved,
+  and swoosh says which on stderr (`alice is alice/laptop.`). With several saved, it lists them and stops:
+  `ping`, `speed`, `status` and `proxy` no longer dial every machine of a person. A refused dial names the
+  machine and the service (`error: me/nas refused ssh`); for one of your own devices it also says why, when
+  it can tell, and what to run there.
+- **`--transport`, `--local`, `--peer`, `--relay` and `--resolver` are no longer listed in `--help`.** They
+  work as before, and each can now be set in the environment: `SWOOSH_TRANSPORT`, `SWOOSH_LOCAL`,
+  `SWOOSH_PEER`, `SWOOSH_RELAY`, `SWOOSH_RESOLVER`. A flag beats its variable. `serve --quiet` (or
+  `SWOOSH_QUIET`), and `--service` on `ssh`, `send` and `proxy`, are hidden too.
+- **`swoosh serve recv:<dir>` serves `recv`.** That is the name `send` dials, so `send` needs no
+  `--service`. `recv:` alone saves into the inbox.
 - **`stop` takes one of your own devices.** `swoosh stop` stops swoosh serve here; `swoosh stop me/<name>`
   stops it on one of your devices, and that machine prints which device stopped it. A contact's machine, a
   key or a link is refused. `--at` is gone.

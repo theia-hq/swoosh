@@ -276,39 +276,41 @@ pub async fn read_catalog(
     tunnel::ServiceCatalog::decode(&bytes)
 }
 
-/// Append the fix the bound transport and bind mode need to a reach failure, so the error names what to
-/// do next.
+/// Put the fact the bound transport and bind mode explain under a reach failure, and the fix under that,
+/// so the error says what happened first and what to do next.
 ///
 /// Shared by [`dial`] and the probe verbs so a `could not reach` over quirk always carries the same
-/// remedy. `bound.local` is the `--local`
-/// bit: under it the n0/relay fallback is gone, so the remedy names the flag as the cause instead of
-/// advising a transport switch the flag has already made moot.
+/// remedy. A cause the person may have set names both its spellings, since they may only ever have set
+/// the variable, and so does a remedy that removes one; a remedy that adds a flag names the flag alone,
+/// since a flag beats its variable.
 pub fn hint(error: eyre::Report, bound: &transport::Bound) -> eyre::Report {
-    match (bound.transport, bound.local) {
-        // `--local` removes internet discovery and relays, so "use --transport iroh" would be false
-        // advice (iroh under the flag is still local). Name the flag as the cause, the hand-fed route
-        // that remains, and the way back to the default bind.
-        (_, true) => error.wrap_err(
-            "bound local-only (--local): reach is local mDNS or a direct hint; pass --peer <key>=<addr> \
-             (the line the peer's `swoosh serve` printed), or drop --local",
-        ),
-        // quirk is direct-only with no discovery, so an unreachable peer is almost always a missing or
-        // wrong address hint. Name the exact flag (mirroring the exemplary unknown-contact error) and the
-        // one-flag escape to a self-discovering transport. The sealed spelling reaches the same way, so it
-        // carries the same remedy.
-        (transport::Transport::Quirk | transport::Transport::QuirkNoise, false) => error.wrap_err(
-            "quirk is direct-only: pass --peer <key>=<addr> (the line the peer's `swoosh serve` printed), or use --transport iroh",
-        ),
+    let detail = match (bound.transport, bound.local) {
+        // `--local` removes internet discovery and relays, so "add --transport iroh" would be false
+        // advice (iroh under it is still local). Name the setting as the cause, the hand-fed address that
+        // remains, and the way back to the default bind.
+        (_, true) => "With --local or SWOOSH_LOCAL, swoosh looks on this network only.\n  Give its address \
+                      with --peer <key>=<address>, or drop --local and unset SWOOSH_LOCAL."
+            .to_owned(),
+        // quirk is direct-only with no discovery, so an unreachable machine is almost always a missing or
+        // wrong address. Name the flag that gives one and the one-flag escape to a self-discovering
+        // transport. The sealed spelling reaches the same way, so it carries the same remedy.
+        (transport::Transport::Quirk | transport::Transport::QuirkNoise, false) => {
+            "quirk finds no machine by itself.\n  Give its address with --peer <key>=<address>, or add \
+             --transport iroh."
+                .to_owned()
+        }
         // An iroh dial over n0's resolver needs no extra line: n0 is the default everyone reads about.
         // A dial through the operator's own does, because iroh's error does not name it, so a resolver
-        // that is down or empty reads as "the peer is offline" with nothing to check. Only the RESOLVER
-        // is named: this node's own relay is not on the path to the peer, since a dial runs through
-        // whatever relay the PEER's record names, so naming it would point at the wrong server.
+        // that is down or empty reads as "the machine is offline" with nothing to check. Only the
+        // RESOLVER is named: this node's own relay is not on the path to the machine, since a dial runs
+        // through whatever relay the machine's record names, so naming it would point at the wrong server.
         (transport::Transport::Iroh, false) => match &bound.reach.resolver {
-            transport::Resolver::N0 => error,
-            transport::Resolver::Custom(url) => error.wrap_err(format!("resolver asked: {url}")),
+            transport::Resolver::N0 => return error,
+            transport::Resolver::Custom(url) => format!("resolver asked: {url}"),
         },
-    }
+    };
+    // One message rather than a wrapped chain: a wrap prints first, and the fact leads.
+    eyre::eyre!("{error:#}\n  {detail}")
 }
 
 /// How far a probe of one machine got, ordered by exactly that: no answer, an answer that refused, an
@@ -338,10 +340,9 @@ impl Outcome {
     ///
     /// Non-zero unless the machine answered the probe, and the failing shapes carry DIFFERENT errors so a
     /// failure that was REACHED is never dressed as an addressing problem: an unreachable machine carries
-    /// the transport's reach [`hint`] (over quirk, the `--peer` remedy; under `--local`, the flag named as
-    /// the cause), while a refusal or a broken probe says which it was and carries none, so a refused
-    /// stranger over quirk never sees "quirk is direct-only: pass --peer ..." after it already reached the
-    /// node.
+    /// the transport's reach [`hint`] (over quirk, the `--peer` remedy; under `--local`, the setting named
+    /// as the cause), while a refusal or a broken probe says which it was and carries none, so a refused
+    /// stranger over quirk never sees the `--peer` remedy after it already reached the node.
     pub fn into_result(
         self,
         target: &impl core::fmt::Display,

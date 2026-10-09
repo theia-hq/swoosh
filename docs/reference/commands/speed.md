@@ -14,7 +14,7 @@ Usage: swoosh speed [OPTIONS] <machine>
   -n, --bytes <N>        transfer a fixed number of bytes instead
 ```
 
-**Example.** `swoosh speed desk --bidir -t 5` measures upload and download at once.
+**Example.** `swoosh speed me/desk --bidir -t 5` measures upload and download at once.
 
 **Things to know.** `--bidir` works over `quirk+noise` too. Numbers over iroh depend on the live path
 (direct vs relayed) and are not comparable to a local `quirk+noise` run. A `--public` speed route

@@ -114,9 +114,9 @@ iroh when you need NAT traversal.
 
 ## <a id="peer"></a>Advanced: `--peer`, when discovery cannot reach them
 
-`--peer <key>=<address>` (or `SWOOSH_PEER`) gives a peer's address by hand. You need it only when discovery cannot reach the
-peer: mainly a quirk dial across networks, or a locked-down network where automatic discovery is
-blocked. Take the `direct` line a peer's `serve` printed and pass it back:
+`--peer <key>=<address>` (or `SWOOSH_PEER`) gives a peer's address by hand. You need it only when
+discovery cannot reach the peer: mainly a quirk dial across networks, or a locked-down network where
+automatic discovery is blocked. Take the `direct` line a peer's `serve` printed and pass it back:
 
 <!-- manual: needs a direct peer and its address -->
 ```console
@@ -127,6 +127,11 @@ $ swoosh ping ed01hcq6… --transport quirk+noise --peer ed01hcq6…=127.0.0.1:5
 
 Over iroh you almost never need this: iroh discovers the peer from its key. If an iroh dial cannot
 reach a peer, the peer is likely offline or discovery is down, not missing an address.
+
+## <a id="local"></a>`--local`: this network only
+
+`--local` uses no relay and publishes no record: swoosh finds a machine on this network by mDNS, or at
+the address `--peer` gives.
 
 ## <a id="variables"></a>Every flag here has a variable
 
