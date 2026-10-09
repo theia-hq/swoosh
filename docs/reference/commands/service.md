@@ -2,34 +2,28 @@ Back to [Commands index](../commands.md).
 
 # <a id="service"></a>`swoosh service`
 
-List, enable, or disable a node's services: read a peer's menu as a `SERVICE  GATE` table, or toggle a
-service on your own node.
+Change what this machine serves: add or remove a service, or turn one off and back on.
 
 <!-- generated: usage from `swoosh service -h`; option lines curated -->
 ```
 Usage: swoosh service [OPTIONS] <COMMAND>
-  ls [--at <peer>]     list the served menu; a petname, a raw node id, or a swoosh: link
-  enable <service>     re-enable a disabled service
-  disable <service>    disable a service
+  add <service>...   Add services to what this machine serves
+  rm <service>...    Remove services from what this machine serves
+  on <service>       Turn a service on here
+  off <service>      Turn a service off here
 ```
 
 **Example.**
-<!-- capture: swoosh service ls --at desk -->
+<!-- capture: swoosh service add web=tcp:localhost:3000 -->
 ```console
-$ swoosh service ls --at desk
-SERVICE           GATE
-control.services  gated
-control.stop      gated
-ping              gated
-speed             gated
+$ swoosh service add web=tcp:localhost:3000
+Added web; it is served when swoosh serve next starts.
 ```
 
-**Things to know.** The `GATE` column reads `gated` or `open`. `open` is anyone, unauthenticated, through
-either public opt-in (`--public` or `--public-unsafe`; the serve banner names which). `gated` is behind
-the gate; `control.*` rows are member-only, stricter than `gated`. `enable` and `disable` change your
-own node only, and a running `serve` honors the change on the next connection, with no restart. A name is an
-address, not an authority ([Services](../services.md#names)): `disable` and `enable` act on the name you
-pass, so a target served under two names must be disabled under both. `--at` applies to `ls` only. A bare
-`ls` reads your own node, which needs a running `serve`.
+**Things to know.** `add` and `rm` change this machine's list, which a bare `swoosh serve` serves; `add` takes
+`serve`'s forms ([Services](../services.md)). A running `serve` serves an added service from its next start and
+stops serving a removed one at once. `off` and `on` turn a listed service off and back on, live, and `off` holds across
+restarts. None of them ends a session already open: `swoosh stop` or a [revoke](revoke.md) does. They act on
+this machine only; for another of your machines, run them there: `swoosh ssh me/nas -- swoosh service off ssh`.
 
 See also [Commands index](../commands.md) and [Common options](../commands.md#common-options).

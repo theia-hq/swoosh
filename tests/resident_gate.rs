@@ -343,7 +343,7 @@ async fn a_read_error_keeps_the_held_settings() {
                 .await
                 .expect("take home.lock");
             ServeToml::update(&home_lock, &scratch.home, |file| {
-                file.services = vec![format!("{GATED}=echo:")];
+                file.services = Some(vec![format!("{GATED}=echo:")]);
                 file.off.insert(GATED.to_owned());
                 file.relay = Some("https://relay.example".parse().expect("a relay"));
                 file.resolver = Some("https://dns.example/pkarr".parse().expect("a resolver"));

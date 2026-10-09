@@ -25,6 +25,12 @@ All notable changes to swoosh, newest first.
 - **`stop` takes one of your own devices.** `swoosh stop` stops swoosh serve here; `swoosh stop me/<name>`
   stops it on one of your devices, and that machine prints which device stopped it. A contact's machine, a
   key or a link is refused. `--at` is gone.
+- **`service add`, `rm`, `on` and `off` replace `service ls`, `enable` and `disable`.** `swoosh service add
+  <service>…` and `swoosh service rm <service>…` change this machine's list of services, which a bare
+  `swoosh serve` serves. A removed service stops answering at once; an added one is served from the next
+  time `serve` starts. `swoosh service on <service>` and `swoosh service off <service>` turn a listed service
+  on or off at once, and one turned off stays off across restarts. All four act on this machine only.
+  `swoosh status me/<name>` ends its line with what that device serves: `; serving: ssh, web`.
 - **`serve` syncs your device list as it starts, then once an hour.** Until that first sync ends, it refuses a
   stop from another device.
 - **`forward` replaces `reach`, and `proxy` replaces `fetch`.** `swoosh forward <machine> <service> <port | ->`
@@ -39,6 +45,9 @@ All notable changes to swoosh, newest first.
   refused, so only a client given the URL can use it.
 - **`--present` is gone.** Give a link, or a file holding one, where the machine goes:
   `swoosh ssh swoosh:…` or `swoosh ssh ./nas.link`.
+- **`swoosh ssh` to a key or a link gives ssh the full key of the machine it dials as the host.** ssh's own
+  lines, such as `Connection to <key> closed.`, `%h`, and `Host` blocks in your ssh config get the full key,
+  where they got its first 16 characters. A petname still reaches ssh as typed.
 - **`serve` warns when a shell, `ping`, `speed` or a receive service has live links made for something
   else, and those links are refused when used.** A link made for one target is
   refused by any other. Adding one to `serve.toml` while `serve` runs prints the same warning and leaves

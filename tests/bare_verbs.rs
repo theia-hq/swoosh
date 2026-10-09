@@ -4,8 +4,8 @@
 //! S4 end-to-end: the bare control verbs against a real `serve` child.
 //!
 //! One child-process run proves the whole bare-verb seam: spawn the compiled binary as a
-//! foreground resident under a scratch home, wait for its readiness banner, drive `service ls`,
-//! `status`, and `stop` over the real control socket, then assert the resident's clean exit, the
+//! foreground resident under a scratch home, wait for its readiness banner, drive `status` and `stop`
+//! over the real control socket, then assert the resident's clean exit, the
 //! unlinked socket, and the runtime leaf gone with it. Only the exact spawned pid is ever signalled.
 
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -127,7 +127,7 @@ fn drain(
     })
 }
 
-/// The full bare-verb loop against one real resident: banner, `service ls`, `status`, `stop`, the
+/// The full bare-verb loop against one real resident: banner, `status`, `stop`, the
 /// resident's clean local exit, the unlinked socket, and the post-stop teaching error. A stop through any other path would leave the resident running and fail the exit wait.
 #[test]
 fn bare_stop_stops_the_resident() {
@@ -183,25 +183,6 @@ fn bare_stop_stops_the_resident() {
     }
     assert!(socket.exists(), "the resident binds its control socket");
 
-    // Bare `service ls` reads the live menu over the socket, with the disabled-state column.
-    let ls = swoosh(&scratch, &["service", "ls"]);
-    let ls_out = String::from_utf8_lossy(&ls.stdout).into_owned();
-    assert!(
-        ls.status.success(),
-        "bare service ls exits 0: {}\n{ls_out}",
-        String::from_utf8_lossy(&ls.stderr)
-    );
-    assert!(
-        ls_out.contains("SERVICE") && ls_out.contains("STATE"),
-        "{ls_out}"
-    );
-    assert!(
-        ls_out
-            .lines()
-            .any(|line| line.starts_with("ping") && line.contains("on")),
-        "the live table marks a served service on: {ls_out}"
-    );
-
     // Bare `status` reads what the running resident serves over the same local socket, and dials nobody.
     let status = swoosh(&scratch, &["status"]);
     let status_out = String::from_utf8_lossy(&status.stdout).into_owned();
@@ -228,16 +209,13 @@ fn bare_stop_stops_the_resident() {
         "{}=127.0.0.1:9000",
         swoosh::identity::Secret::ephemeral().node_id()
     );
-    let reach_cases: [(&[&str], &str); 9] = [
+    let reach_cases: [(&[&str], &str); 6] = [
         (&["stop", "--transport", "quirk"], "--transport"),
         (&["stop", "--local"], "--local"),
         (&["stop", "--peer", &hint], "--peer"),
         (&["status", "--transport", "quirk"], "--transport"),
         (&["status", "--local"], "--local"),
         (&["status", "--peer", &hint], "--peer"),
-        (&["service", "ls", "--transport", "quirk"], "--transport"),
-        (&["service", "ls", "--local"], "--local"),
-        (&["service", "ls", "--peer", &hint], "--peer"),
     ];
     for (args, flag) in reach_cases {
         let refused = swoosh(&scratch, args);

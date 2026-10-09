@@ -39,14 +39,13 @@ use swoosh::gate::AnchorCut;
 use swoosh::grants::LinksForAnother;
 use swoosh::home::{Home, HomeWrite, ServeLock};
 use swoosh::identity::Identity;
-use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
     Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FirstRound,
-    InstanceLock, ProxyScope, RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError,
-    Started, Stop, StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_recv,
-    bind_renewal, classify_stop, extract_recv_services, refuse_recv_into_home,
+    InstanceLock, ProxyScope, RecvService, Replaced, Resident, SYNC_SERVICE, ServiceList,
+    SingleError, Started, Stop, StopKind, StopSource, Stopped, acquire_single, bind_entry,
+    bind_recv, bind_renewal, classify_stop, extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -54,17 +53,19 @@ use swoosh::transport::{MdnsState, Reach, ReachArgs, RelayHome, Resolver};
 use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{CancellationToken, Exposer, ManifestEntry, Posture, Router};
 
+use crate::commands::service::Running;
+
 /// Be a node: publish these services behind your gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// publish services as `name=target` (bare: the last list, else `ping` and `speed`)
+    /// publish services as `name=target` (bare: this machine's list, else `ping` and `speed`)
     // The long form lists every target scheme, both halves: the five engines swoosh serves and the six
     // forms the tunnel grammar routes. A refusal from either half points here, so this list is the one a
     // mistyped scheme is sent to and it has to be complete.
     #[arg(
         value_name = "name=target",
         value_parser = swoosh::serve::service_entry,
-        long_help = "publish services as `name=target` (bare: the last list, else `ping` and `speed`)\n\
+        long_help = "publish services as `name=target` (bare: this machine's list, else `ping` and `speed`)\n\
                      \n\
                      Every target carries a scheme. swoosh serves:\n\
                      \x20 ping:            round-trip probe\n\
@@ -327,12 +328,15 @@ impl ServeCmd {
     /// `serve` for the home refuses here with the running one's pid and the fix, and so does a machine with
     /// no private runtime directory or one whose path a socket cannot hold.
     pub async fn claim(mut self, home: &Home) -> eyre::Result<Self> {
+        // Typed services that cannot be one list are a usage error: refused before the lock, so it reads
+        // the same whether or not a `serve` runs here.
+        swoosh::serve::Mistyped::check(&self.services)?;
         let root = swoosh::home::runtime_root()?;
         let (lock, listener) = match acquire_single(home, &root).await {
             Ok(held) => held,
             Err(SingleError::AlreadyResident { pid }) => {
-                let serving = running_services(home).await;
-                eyre::bail!("{}", self.running_refusal(pid, serving.as_deref()));
+                let running = Running::ask(home).await;
+                eyre::bail!("{}", self.running_refusal(pid, running.as_ref()));
             }
             Err(other) => return Err(eyre::Report::new(other)),
         };
@@ -372,31 +376,50 @@ impl ServeCmd {
         Ok(self)
     }
 
-    /// The refusal a `serve` prints when one already runs for its home: which one, then the one fix that
-    /// fits what this run asked for, in order. A service it named that the running one serves is turned on
-    /// with `service on`; a flag that changes how the node runs needs a stop first; anything else is a
-    /// second node, which needs a home of its own.
-    fn running_refusal(&self, pid: u32, serving: Option<&[String]>) -> String {
-        let head = match serving {
-            Some(names) if !names.is_empty() => format!(
-                "swoosh serve is already running for this home (pid {pid}, serving {}).",
-                names.join(", ")
-            ),
-            _ => format!("swoosh serve is already running for this home (pid {pid})."),
-        };
-        let started = self
+    /// The refusal a `serve` prints when one already runs for its home: which one and what it serves, then
+    /// the one fix that fits what this run asked for, in order. A flag that changes how the node runs needs a
+    /// stop first, and only a new run meets it, so it comes before the rest: the rerun's start then names any
+    /// service it keeps off. A name it typed that the running one serves and has off is turned on with
+    /// `service on`; typed entries the running one does not serve are added with one `service add`, served
+    /// from its next start. Typed names it serves and has on, or nothing typed, need no fix: the `It serves` line answers.
+    fn running_refusal(&self, pid: u32, running: Option<&Running>) -> String {
+        let mut out = format!("swoosh serve is already running here (pid {pid})");
+        let serves = running
+            .map(|running| running.serves.as_slice())
+            .unwrap_or_default();
+        if !serves.is_empty() {
+            out.push_str(&format!("\n  It serves {}.", serves.join(", ")));
+        }
+        let named = |entry: &String| entry.split_once('=').map(|(name, _)| name.to_owned());
+        let off = self
             .services
             .iter()
-            .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
-            .find(|name| serving.is_some_and(|names| names.iter().any(|served| served == name)));
-        let fix = match started {
-            Some(name) => format!("To turn {name} on: swoosh service on {name}"),
-            None if self.sets_how_it_runs() => {
-                "Stop it first to change how it runs: swoosh stop".to_owned()
-            }
-            None => "A second one needs its own: swoosh --home <dir> serve …".to_owned(),
-        };
-        format!("{head}\n{fix}")
+            .filter_map(named)
+            .find(|name| running.is_some_and(|running| running.has_off(name)));
+        let new: Vec<(String, &str)> = self
+            .services
+            .iter()
+            .filter_map(|entry| Some((named(entry)?, swoosh::serve::as_typed(entry))))
+            .filter(|(name, _)| !serves.contains(name))
+            .collect();
+        if self.sets_how_it_runs() {
+            out.push_str("\n  To change how it runs, stop it first:\n    swoosh stop");
+        } else if let Some(name) = off {
+            out.push_str(&format!(
+                "\n  To turn {name} on:\n    swoosh service on {name}"
+            ));
+        } else if !new.is_empty() {
+            let typed: Vec<&str> = new.iter().map(|(_, typed)| *typed).collect();
+            let which = match new.as_slice() {
+                [(name, _)] => name.as_str(),
+                _ => "them",
+            };
+            out.push_str(&format!(
+                "\n  To add {which}:\n    swoosh service add {}",
+                typed.join(" ")
+            ));
+        }
+        out
     }
 
     /// Whether this run set a flag that changes how the node runs rather than what it serves: exposure,
@@ -475,20 +498,6 @@ impl ServeCmd {
         self.bound_reach = Box::new(bound_reach);
         self
     }
-}
-
-/// The names the `serve` already running for `home` serves, read over its control socket, internal
-/// routes left out; `None` when it does not answer.
-async fn running_services(home: &Home) -> Option<Vec<String>> {
-    let client = ControlClient::resolve(home).ok()?;
-    let menu = client.services().await.ok()?;
-    Some(
-        menu.catalog
-            .entries()
-            .filter(|entry| !entry.name.starts_with("control."))
-            .map(|entry| entry.name.clone())
-            .collect(),
-    )
 }
 
 impl ServeCmd {
@@ -609,23 +618,33 @@ impl ServeCmd {
             )?;
 
         // The routes bound: only now does this run save what it was told, in one write: a named list for the
-        // next bare `serve`, with the services it names turned back on, and the relay and resolver it was
-        // pointed at. A `serve` that did not start saves nothing. A bare `serve` saves no list, and says
-        // which of its services are off.
+        // next bare `serve`, with the services it adds to the list turned back on, and the relay and
+        // resolver it was pointed at. A `serve` that did not start saves nothing. A bare `serve` saves no
+        // list.
+        //
+        // What a named list replaces is read from the file as this write found it, and said on stderr before
+        // the banner: an entry it no longer serves, and a kept name it points elsewhere.
         let home_lock = HomeWrite::take(&home).await?;
+        let mut replaced = Replaced::default();
         ServeToml::update(&home_lock, &home, |file| {
-            started.record(file);
+            replaced = started.replaces(file, &home.serve_toml());
+            started.record(file, &home.serve_toml());
             self.reach.keep_reach(file);
         })?;
         drop(home_lock);
+        if let Some(lines) = replaced_lines(&replaced) {
+            eprint!("{lines}");
+        }
         // From here the watcher holds what this run serves: a service later dropped from `services` is
         // refused, and a change the run cannot apply is named.
         enabled.serving(&started);
-        if !matches!(started, Started::Named(_)) {
-            let off = enabled.off();
-            for name in names.iter().filter(|name| off.contains(*name)) {
-                eprintln!("{name} is off; to turn it back on: swoosh service enable {name}");
-            }
+        // Every start names the services it binds and has off, a named one too: a start never turns back
+        // on a name the list already held, so `serve ssh` over an off ssh binds it and refuses every
+        // stream, and the banner below lists it. Read after the record write, which the watcher holds at
+        // once, so a name this start just turned back on is not named here.
+        let off = enabled.off();
+        for name in names.iter().filter(|name| off.contains(*name)) {
+            eprint!("{}", off_lines(name));
         }
 
         // ONE expansion of this bind, read by both the control socket's status address and the transport
@@ -674,7 +693,7 @@ impl ServeCmd {
                 "{}",
                 render_banner(
                     &addr.node.to_string(),
-                    &serving_line(&names, &manifest, started.is_resumed()),
+                    serving_line(&names, &manifest).as_deref(),
                     transport.as_deref(),
                     keeper,
                     &stop_line,
@@ -812,11 +831,12 @@ where
     Ok(stopped)
 }
 
-/// The `serving:` line's body: each served name in the order it was given, with who reaches it, and
-/// " (as last time)" when the list was resumed. A name the run opened to anyone says so, which is how a
-/// `--public` typed on a bare `serve` shows on screen. An internal `control.*` route is never listed.
-fn serving_line(names: &[String], manifest: &[ManifestEntry], resumed: bool) -> String {
-    let mut line = names
+/// The `serving:` line's body: each served name in the order it was given, with who reaches it. A name the
+/// run opened to anyone says so, which is how a `--public` typed on a bare `serve` shows on screen. An
+/// internal `control.*` route is never listed. `None` when the run serves nothing, from a list emptied by
+/// `service rm`.
+fn serving_line(names: &[String], manifest: &[ManifestEntry]) -> Option<String> {
+    let line = names
         .iter()
         .filter(|name| !name.starts_with("control."))
         .map(|name| {
@@ -828,22 +848,65 @@ fn serving_line(names: &[String], manifest: &[ManifestEntry], resumed: bool) -> 
         })
         .collect::<Vec<_>>()
         .join(", ");
-    if resumed {
-        line.push_str(" (as last time)");
-    }
-    line
+    (!line.is_empty()).then_some(line)
 }
 
-/// The banner, as ONE string printed once: this machine's key, what it serves, the transport block under
+/// The block a start prints for one service it binds and has off, before its banner: the service refuses
+/// every stream until it is turned on, so the banner's `serving:` line is never the only word on it. One
+/// block per name, since `service on` takes one service.
+fn off_lines(name: &str) -> String {
+    format!("{name} is off.\nTo turn it on:\n  swoosh service on {name}\n")
+}
+
+/// What a named `serve` changed in the list it replaced, as the lines said before its banner: the entries
+/// it no longer serves, in one block with one `service add` that brings them all back, then each kept name
+/// it points elsewhere. `None` when it changed neither.
+fn replaced_lines(replaced: &Replaced) -> Option<String> {
+    let mut out = String::new();
+    let dropped: Vec<(&str, &str)> = replaced
+        .dropped
+        .iter()
+        .map(|entry| {
+            let name = entry
+                .split_once('=')
+                .map_or(entry.as_str(), |(name, _)| name);
+            (name, swoosh::serve::as_typed(entry))
+        })
+        .collect();
+    if !dropped.is_empty() {
+        let names: Vec<&str> = dropped.iter().map(|(name, _)| *name).collect();
+        let typed: Vec<&str> = dropped.iter().map(|(_, typed)| *typed).collect();
+        let which = if dropped.len() == 1 { "it" } else { "them" };
+        out.push_str(&format!(
+            "No longer serving {}.\nTo add {which} back:\n  swoosh service add {}\n",
+            names.join(", "),
+            typed.join(" ")
+        ));
+    }
+    for (name, now, was) in &replaced.retargeted {
+        out.push_str(&format!("{name} now serves {now} instead of {was}.\n"));
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The banner, as ONE string printed once: this machine's key, what it serves (or how to add a service, when
+/// it serves nothing), the transport block under
 /// `--verbose`, the service-manager line where one applies, and how to stop.
 fn render_banner(
     key: &str,
-    serving: &str,
+    serving: Option<&str>,
     transport: Option<&str>,
     keeper: Option<&str>,
     stop_line: &str,
 ) -> String {
-    let mut out = format!("key: {key}\nserving: {serving}\n");
+    let mut out = format!("key: {key}\n");
+    match serving {
+        Some(serving) => out.push_str(&format!("serving: {serving}\n")),
+        // An emptied list: the node runs and answers its own routes, and the person is told how to fill it.
+        None => {
+            out.push_str("Serving nothing.\nTo add a service:\n  swoosh service add <service>\n")
+        }
+    }
     if let Some(transport) = transport {
         out.push('\n');
         out.push_str(transport);

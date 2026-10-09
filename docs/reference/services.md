@@ -45,6 +45,7 @@ A keyless shell on this machine, run as the serving process's user. Serve it und
 - Example: `swoosh serve ssh=sshd:`
 - To front an existing sshd instead, use a forward: `swoosh serve ssh=tcp:127.0.0.1:22` keeps SSH's own
   auth.
+- Turning it off or removing it leaves an open shell running: see [service](commands/service.md).
 - Limits: [sshh](https://github.com/theia-hq/services/blob/main/crates/sshh/README.md).
 
 ### `recv:<dir>`
@@ -118,8 +119,8 @@ served, whatever else you name.
 
 - Posture: member-only, stricter than gated. A stranger is refused at the gate, and a `swoosh:` grant
   naming one is refused at the route, so only your own devices can stop or inspect a node.
-- Client: `swoosh stop me/<name>` and `swoosh service ls --at <peer>`.
-- Limits: [stop](commands/stop.md) and [service](commands/service.md).
+- Client: `swoosh stop me/<name>` and `swoosh status me/<name>`.
+- Limits: [stop](commands/stop.md) and [status](commands/status.md).
 
 ## Posture
 

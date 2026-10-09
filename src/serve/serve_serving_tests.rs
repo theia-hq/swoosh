@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{ServingError, Started};
+use super::{Replaced, ServingError, Started};
 use crate::home::Home;
 use crate::serve_toml::ServeToml;
 
@@ -50,9 +50,8 @@ fn first_bare_serve_serves_the_default() {
         Started::of(&[], &kept(&home), &home, Path::new("/")).expect("a fresh home starts");
     assert_eq!(started, Started::Default);
     assert_eq!(started.entries(), ["ping=ping:", "speed=speed:"]);
-    assert!(!started.is_resumed(), "the default is not a resume");
     crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
-        started.record(file);
+        started.record(file, &home.serve_toml());
     })
     .expect("recording the default is a no-op");
     assert!(
@@ -61,7 +60,7 @@ fn first_bare_serve_serves_the_default() {
     );
 }
 
-/// A named start is recorded, and the next bare start serves exactly that list, marked as a resume.
+/// A named start is recorded, and the next bare start serves exactly that list, as a resume.
 #[test]
 fn a_named_list_is_what_the_next_bare_serve_resumes() {
     let scratch = Scratch::new("resume");
@@ -74,16 +73,39 @@ fn a_named_list_is_what_the_next_bare_serve_resumes() {
     )
     .expect("named");
     crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
-        started.record(file);
+        started.record(file, &home.serve_toml());
     })
     .expect("recorded");
 
     let resumed = Started::of(&[], &kept(&home), &home, Path::new("/")).expect("resumed");
-    assert_eq!(resumed.entries(), ["ssh=sshd:", "ping=ping:"]);
-    assert!(
-        resumed.is_resumed(),
+    assert_eq!(
+        resumed,
+        Started::Resumed(vec!["ssh=sshd:".to_owned(), "ping=ping:".to_owned()]),
         "a bare start after a named one resumes it"
     );
+}
+
+/// A named start holds what the list held as a bare start reads it: a built-in written by hand as its name
+/// alone (`ping`) was listed, so a start naming it keeps its `off` row. Read the raw entries and `ping`, with
+/// no `=`, counts as new, and the start turns it back on (L7 fails open). A list a bare start refuses holds
+/// nothing that can be read, so every `off` row stays.
+#[test]
+fn a_named_start_keeps_off_for_a_hand_written_built_in() {
+    let path = Path::new("/home/serve.toml");
+    let started = Started::Named(vec!["ping=ping:".to_owned()]);
+    for (listed, why) in [
+        ("ping", "a hand-written built-in is listed"),
+        ("db", "a list a start refuses fails closed"),
+    ] {
+        let mut file = ServeToml {
+            services: Some(vec![listed.to_owned()]),
+            off: ["ping".to_owned()].into(),
+            ..ServeToml::default()
+        };
+        started.record(&mut file, path);
+        assert!(file.off.contains("ping"), "{why}");
+        assert_eq!(file.services, Some(vec!["ping=ping:".to_owned()]), "{why}");
+    }
 }
 
 /// Every entry of the record goes through the service-entry parser, never the flag parser: an entry that
@@ -105,10 +127,10 @@ fn resumed_list_is_parsed_as_services_never_flags() {
         assert_eq!(
             error.to_string(),
             format!(
-                "{} lists {line} as a service, and it is not one, so serve will not start unless you name its services",
+                "{} lists {line}, which is not a service\n  Edit that file to fix or remove the entry.",
                 home.serve_toml().display()
             ),
-            "the refusal says what it saw and names no command: which services to serve is the person's call"
+            "the refusal says what it saw and points at the file, naming no command"
         );
     }
 }
@@ -139,12 +161,13 @@ fn resumed_paths_are_absolute() {
     )
     .expect("named");
     crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
-        started.record(file);
+        started.record(file, &home.serve_toml());
     })
     .expect("recorded");
     let recorded = crate::serve_toml::ServeToml::read(&home)
         .expect("the record")
-        .services;
+        .services
+        .unwrap_or_default();
     assert_eq!(
         recorded,
         [
@@ -209,7 +232,7 @@ fn the_record_is_owner_only() {
     let started =
         Started::of(&named(&["ping"]), &kept(&home), &home, Path::new("/")).expect("named");
     crate::serve_toml::ServeToml::update(&crate::testkit::lock(), &home, |file| {
-        started.record(file);
+        started.record(file, &home.serve_toml());
     })
     .expect("recorded");
     let mode = std::fs::metadata(home.serve_toml())
@@ -217,4 +240,60 @@ fn the_record_is_owner_only() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+/// What a named start replaces is read against the recorded list only: an entry it drops, a name it keeps
+/// under another target, and nothing for a name kept as it was. A home that never recorded a list has
+/// nothing to replace, though its default counts as listed elsewhere, and a bare start replaces nothing.
+#[test]
+fn a_named_start_replaces_only_what_was_recorded() {
+    let scratch = Scratch::new("replaces");
+    let home = scratch.home();
+    let start = |entries: &[&str], kept: &ServeToml| {
+        Started::of(&named(entries), kept, &home, Path::new("/")).expect("a start")
+    };
+    let recorded = ServeToml {
+        services: Some(named(&[
+            "ssh",
+            "web=tcp:localhost:3000",
+            "drop=recv:/srv/drop",
+        ])),
+        ..ServeToml::default()
+    };
+    assert_eq!(
+        start(&["ssh", "web=tcp:localhost:4000"], &recorded)
+            .replaces(&recorded, &home.serve_toml()),
+        Replaced {
+            dropped: vec!["drop=recv:/srv/drop".to_owned()],
+            retargeted: vec![(
+                "web".to_owned(),
+                "tcp:localhost:4000".to_owned(),
+                "tcp:localhost:3000".to_owned(),
+            )],
+        }
+    );
+    assert_eq!(
+        start(&["ssh"], &ServeToml::default()).replaces(&ServeToml::default(), &home.serve_toml()),
+        Replaced::default(),
+        "a never-named home's default is not reported as replaced"
+    );
+    assert_eq!(
+        start(&[], &recorded).replaces(&recorded, &home.serve_toml()),
+        Replaced::default(),
+        "a bare start replaces nothing"
+    );
+    // A built-in written by hand as its name alone is read as a bare start reads it, so dropping it is
+    // reported. Read the raw entries and `ping`, with no `=`, is skipped and its drop goes unsaid.
+    let by_hand = ServeToml {
+        services: Some(vec!["ping".to_owned(), "ssh".to_owned()]),
+        ..ServeToml::default()
+    };
+    assert_eq!(
+        start(&["ssh"], &by_hand).replaces(&by_hand, &home.serve_toml()),
+        Replaced {
+            dropped: vec!["ping=ping:".to_owned()],
+            retargeted: vec![],
+        },
+        "a hand-written built-in a named start drops is reported"
+    );
 }
