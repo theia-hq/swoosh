@@ -71,6 +71,10 @@ All notable changes to swoosh, newest first.
 - **A push could replace a file in the receiving directory, or write outside it through a symlink.**
   A pushed file now lands only as a new file inside that directory.
   A name already taken there is refused, and `send` prints a `skip` line and exits non-zero.
+- **Another machine could make swoosh run out of memory on iroh, its default transport.** The machine sent
+  data out of order, and swoosh held it without limit (RUSTSEC-2026-0185). Any machine that knew your
+  machine's key could do it, and so could a machine you connected to. swoosh now drops a connection that sends
+  data with too many gaps, and a machine can leave at most 16 MiB of unread data per connection.
 
 ## v0.14.1
 

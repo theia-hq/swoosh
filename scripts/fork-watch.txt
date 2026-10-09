@@ -1,0 +1,13 @@
+# The forks this repo locks and every advisory filed against the crate each one forks, with how the
+# fork stands against it. Checked by scripts/fork-watch.sh (its header gives the rules); a new
+# upstream advisory fails CI until a row says it was read against the fork.
+#
+# fork             upstream      advisory           status  version read, or lock source pinned
+noq-proto          quinn-proto   RUSTSEC-2023-0063  ported  1.3.0
+noq-proto          quinn-proto   RUSTSEC-2024-0373  ported  1.3.0
+noq-proto          quinn-proto   RUSTSEC-2026-0037  ported  1.3.0
+# Fixed by n0-computer/noq#828, not yet in a noq-proto release; Cargo.toml patches it in. When a
+# release carries it (read it to know), drop the patch and mark this row ported at that version.
+noq-proto          quinn-proto   RUSTSEC-2026-0185  pinned git+https://github.com/n0-computer/noq?rev=d7c3160a7e7b5cb36682eae04e364d3f50e28925#d7c3160a7e7b5cb36682eae04e364d3f50e28925
+noq                quinn         RUSTSEC-2021-0035  ported  1.3.0
+noq-udp            quinn-udp     -
