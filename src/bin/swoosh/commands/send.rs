@@ -95,6 +95,7 @@ impl swoosh::reaching::Reaching for SendCmd {
         ctx: swoosh::reaching::ReachCtx<'_>,
     ) -> eyre::Result<()>
     where
+        T::Session: 'static,
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
@@ -119,7 +120,10 @@ impl SendCmd {
         present: Option<Link>,
         membership: Option<Link>,
         admitted: Admitted,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<()>
+    where
+        T::Session: 'static,
+    {
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, so the verb never threads a slip itself.
@@ -134,10 +138,13 @@ impl SendCmd {
         // A service-scoped session: each `open_bi` speaks the `recv:` request and presents the badge, so
         // every per-file stream is admitted by the receiver's gate on its own merits. The connect chain can
         // carry the peer's text (the reason it gave for closing), so it prints through the escaper.
-        let session = connector.open_service(node).await.map_err(escaped_report)?;
+        let session = node
+            .connect(dial)
+            .await
+            .map_err(|error| escaped_report(eyre::Report::new(error)))?;
         // Its first admitted file stream tells the composition root it may ask which root vouches for the
         // machine.
-        let session = admitted.watch(session);
+        let session = admitted.watch(session, connector);
 
         // Expand directories, then pipeline up to MAX_INFLIGHT files over concurrent streams.
         let mut files = Vec::new();

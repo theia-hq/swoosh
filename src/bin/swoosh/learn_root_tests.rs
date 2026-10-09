@@ -6,15 +6,18 @@
 //! stand-in that counts every stream it is asked on, and answers, or never does.
 //!
 //! Over `mem` a machine's key is the transport's own, so each home here saves the machine under the key the
-//! transport gave it, and its standing is bound to that key.
+//! transport gave it, and its standing is bound to that key. The question rides the verb's own session, so
+//! the machine accepts one session per dial: over `quirk`, which holds one connection per address pair, a
+//! second one would cut the verb's.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use bifrost::{NoDiscovery, Node, NodeId};
-use bifrost_mem::MemTransport;
+use bifrost::{Addr, Discovery, InProcess, NoDiscovery, Node, NodeId, StaticDiscovery, Transport};
+use bifrost_mem::{MemSession, MemTransport};
+use bifrost_noise::Noise;
 use clap::Parser as _;
 use keystore::{KeyFile, Protection};
 use nauthy::{Denylist, Link};
@@ -30,7 +33,7 @@ use tightbeam::tunnel::{
 };
 use tokio::io::AsyncWriteExt as _;
 
-use crate::commands::learning::Asking;
+use crate::commands::learning::{self, Asking};
 use crate::{Cli, Outward, Verb, run_verb};
 
 /// Alice's root, which vouches for the machine dialed.
@@ -82,10 +85,86 @@ impl Handler for Lookup {
     }
 }
 
-/// A machine serving `ping` to anyone and the stand-in root route, under alice's root, until `cancel`:
-/// its key, and the count of root questions.
+/// A `mem` transport that counts the sessions it accepts.
+struct Counted {
+    inner: MemTransport,
+    accepted: Arc<AtomicU32>,
+}
+
+impl Transport for Counted {
+    type Security = InProcess;
+    type Session = MemSession;
+
+    fn node_id(&self) -> NodeId {
+        self.inner.node_id()
+    }
+
+    fn local_addr(&self) -> Addr {
+        self.inner.local_addr()
+    }
+
+    fn bound_sockets(&self) -> Vec<core::net::SocketAddr> {
+        self.inner.bound_sockets()
+    }
+
+    async fn connect(&self, addr: Addr) -> Result<Self::Session, bifrost::Error> {
+        self.inner.connect(addr).await
+    }
+
+    async fn connect_with_updates(
+        &self,
+        addr: Addr,
+        updates: bifrost::HintStream,
+    ) -> Result<Self::Session, bifrost::Error> {
+        self.inner.connect_with_updates(addr, updates).await
+    }
+
+    async fn accept(&self) -> Result<Self::Session, bifrost::Error> {
+        let session = self.inner.accept().await?;
+        self.accepted.fetch_add(1, Ordering::SeqCst);
+        Ok(session)
+    }
+
+    async fn close(&self) {
+        self.inner.close().await;
+    }
+}
+
+/// A `mem` machine that counts the sessions it accepts: the node, and the count.
+fn counted() -> (Node<Counted, NoDiscovery>, Arc<AtomicU32>) {
+    let accepted = Arc::new(AtomicU32::new(0));
+    let transport = Counted {
+        inner: MemTransport::bind(),
+        accepted: Arc::clone(&accepted),
+    };
+    (Node::new(transport, NoDiscovery), accepted)
+}
+
+/// A `quirk+noise` endpoint on loopback under `seed`'s key.
+async fn quirk_noise(seed: u8) -> Noise<bifrost_quirk::Endpoint> {
+    let seed = TestNode::seeded(seed).seed();
+    let endpoint = bifrost_quirk::Endpoint::bind_with_secret(&seed)
+        .await
+        .unwrap();
+    Noise::new(endpoint, &seed).unwrap()
+}
+
+/// A machine serving `ping` to anyone and the stand-in root route over `mem`, under alice's root, until
+/// `cancel`: its key, and the count of root questions.
 fn machine(answers: Answers, cancel: CancellationToken) -> (NodeId, Arc<AtomicU32>) {
-    let host = Node::new(MemTransport::bind(), NoDiscovery);
+    machine_on(
+        Node::new(MemTransport::bind(), NoDiscovery),
+        answers,
+        cancel,
+    )
+}
+
+/// [`machine`], on `host`.
+fn machine_on<T: Transport + 'static, D: Discovery + 'static>(
+    host: Node<T, D>,
+    answers: Answers,
+    cancel: CancellationToken,
+) -> (NodeId, Arc<AtomicU32>) {
     let key = host.node_id();
     let standing = TestRoot::seeded(ALICE_ROOT)
         .device_badge(key, SystemTime::now() + Duration::from_secs(3600))
@@ -189,8 +268,22 @@ struct Pinged {
     told: String,
 }
 
-/// Run `swoosh ping -c 1 <peer>` as the composition root runs it, from `home`, with nobody at a terminal.
+/// Run `swoosh ping -c 1 <peer>` as the composition root runs it, from `home` over `mem`, with nobody at a
+/// terminal.
 async fn ping(home: &Home, peer: &str) -> Pinged {
+    let node = Node::new(MemTransport::bind(), NoDiscovery);
+    let pinged = ping_on(&node, home, peer).await;
+    node.close().await;
+    pinged
+}
+
+/// [`ping`], from `node`.
+async fn ping_on<T: Transport, D: Discovery>(node: &Node<T, D>, home: &Home, peer: &str) -> Pinged
+where
+    T::Session: 'static,
+    <T::Session as bifrost::Session>::Write: Send + 'static,
+    <T::Session as bifrost::Session>::Read: Send + 'static,
+{
     let Some(command) = Cli::try_parse_from(["swoosh", "ping", "-c", "1", peer])
         .unwrap()
         .command
@@ -219,25 +312,26 @@ async fn ping(home: &Home, peer: &str) -> Pinged {
         home,
         admitted: swoosh::learn::Admitted::unheard(),
     };
-    let node = Node::new(MemTransport::bind(), NoDiscovery);
     let mut told = Vec::new();
     let started = Instant::now();
-    let result = tokio::time::timeout(
+    let (result, shown) = tokio::time::timeout(
         Duration::from_secs(30),
-        run_verb(
-            outward,
-            &node,
-            ctx,
-            &Answering::with(Answer::Same),
-            Asking::NoTerminal,
-            &mut Counting::refusing(),
-            &mut told,
-        ),
+        run_verb(outward, node, ctx, &Answering::with(Answer::Same)),
     )
     .await
     .expect("the verb ends");
     let took = started.elapsed();
-    node.close().await;
+    // Told as the composition root tells it, once the verb is done.
+    if let Some(shown) = shown {
+        learning::tell(
+            home,
+            &shown,
+            Asking::NoTerminal,
+            &mut Counting::refusing(),
+            &mut told,
+        )
+        .await;
+    }
     result.expect("the machine answers the ping");
     Pinged {
         took,
@@ -268,11 +362,17 @@ fn on_a_big_stack<F: core::future::Future<Output = ()> + 'static>(body: fn() -> 
 fn a_dial_of_a_saved_machine_asks_its_root_once() {
     on_a_big_stack(|| async {
         let cancel = CancellationToken::new();
-        let (key, asked) = machine(Answers::Standing, cancel.clone());
+        let (host, accepted) = counted();
+        let (key, asked) = machine_on(host, Answers::Standing, cancel.clone());
         let home = desk("asks");
         alice_laptop(&home, key).await;
         let pinged = ping(&home, "alice/laptop").await;
         assert_eq!(asked.load(Ordering::SeqCst), 1, "one question");
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            1,
+            "the question rides the ping's own session"
+        );
         let root = TestRoot::seeded(ALICE_ROOT).node_id();
         assert_eq!(
             pinged.told,
@@ -284,7 +384,31 @@ fn a_dial_of_a_saved_machine_asks_its_root_once() {
         // Said once: the same root from the same machine is not said again.
         let again = ping(&home, "alice/laptop").await;
         assert_eq!(asked.load(Ordering::SeqCst), 2, "asked on every dial");
+        assert_eq!(accepted.load(Ordering::SeqCst), 2, "one session per dial");
         assert_eq!(again.told, "", "said once per new root");
+        cancel.cancel();
+    });
+}
+
+/// Over `quirk+noise`, whose endpoint holds one connection per address pair, the question rides the ping's
+/// own session: the ping is answered and the machine is asked once. A question on a connection of its own
+/// would replace the ping's, and the ping would fail.
+#[test]
+fn a_dial_over_quirk_asks_its_root_on_the_verb_s_own_session() {
+    on_a_big_stack(|| async {
+        let cancel = CancellationToken::new();
+        let host = Node::new(quirk_noise(0x84).await, NoDiscovery);
+        let hints = host.local_addr().hints;
+        let (key, asked) = machine_on(host, Answers::Standing, cancel.clone());
+        let home = desk("quirk");
+        alice_laptop(&home, key).await;
+        let mut discovery = StaticDiscovery::new();
+        discovery.insert(key, hints);
+        let node = Node::new(quirk_noise(DESK).await, discovery);
+        let pinged = ping_on(&node, &home, "alice/laptop").await;
+        node.close().await;
+        assert_eq!(asked.load(Ordering::SeqCst), 1, "one question");
+        assert!(pinged.told.contains("root:"), "{}", pinged.told);
         cancel.cancel();
     });
 }
@@ -378,7 +502,7 @@ fn ssh_never_asks_to_learn_a_root() {
 }
 
 /// The root route is `lookup.root`: every `serve`'s catalog names it, and it is dotted, so no typed service
-/// name is it; `lookup` and `control` are reserved names, so no person or machine is one.
+/// name is it; `lookup` and `control` are reserved names, so no person, machine or service is one.
 #[tokio::test]
 async fn the_root_route_is_lookup_root() {
     assert_eq!(swoosh::serve::LOOKUP_ROOT_SERVICE, "lookup.root");
@@ -405,6 +529,8 @@ async fn the_root_route_is_lookup_root() {
     for argv in [
         vec!["swoosh", "serve", "lookup.root=tcp:localhost:1"],
         vec!["swoosh", "serve", "--public", "lookup.root"],
+        vec!["swoosh", "serve", "--public", "lookup"],
+        vec!["swoosh", "service", "off", "lookup"],
         vec!["swoosh", "share", "lookup.root", "anyone"],
         vec!["swoosh", "contact", "add", "lookup", root.as_str()],
         vec!["swoosh", "contact", "add", "control", root.as_str()],

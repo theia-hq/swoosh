@@ -93,6 +93,7 @@ impl swoosh::reaching::Reaching for StatusCmd {
         ctx: swoosh::reaching::ReachCtx<'_>,
     ) -> eyre::Result<()>
     where
+        T::Session: 'static,
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
@@ -122,7 +123,10 @@ impl StatusCmd {
         present: Option<Link>,
         membership: Option<Link>,
         admitted: Admitted,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<()>
+    where
+        T::Session: 'static,
+    {
         //
         // A bare `status` splits to `run_local` in the root BEFORE any transport is composed, so a
         // missing peer here is a root-dispatch bug, not a user error.
@@ -143,8 +147,8 @@ impl StatusCmd {
             {
                 // Its first admitted stream tells the composition root it may ask which root vouches for
                 // the machine.
-                Ok(session) => {
-                    let session = admitted.watch(session);
+                Ok((session, connector)) => {
+                    let session = admitted.watch(session, connector);
                     match asked {
                         Probe::Ping => probe(&session, &label, bound.transport).await,
                         Probe::Services => probe_services(&session, &label, bound.transport).await,

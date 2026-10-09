@@ -27,6 +27,8 @@ const DESK: u8 = 0x94;
 /// A person at a terminal who answers every question with `typed`, or nobody at one.
 struct Person {
     typed: Option<String>,
+    /// A file written while the person reads the question, as another command would: its path and bytes.
+    meanwhile: Option<(std::path::PathBuf, Vec<u8>)>,
     said: Vec<String>,
     asked: Vec<String>,
 }
@@ -35,6 +37,7 @@ impl Person {
     fn typing(typed: &str) -> Self {
         Self {
             typed: Some(typed.to_owned()),
+            meanwhile: None,
             said: Vec::new(),
             asked: Vec::new(),
         }
@@ -60,6 +63,9 @@ impl Prompt for Person {
 
     fn confirm(&mut self, question: &str) -> eyre::Result<String> {
         self.asked.push(question.to_owned());
+        if let Some((path, bytes)) = self.meanwhile.take() {
+            std::fs::write(path, bytes).unwrap();
+        }
         self.typed
             .clone()
             .ok_or_else(|| eyre::eyre!("nobody is at a terminal to answer"))
@@ -177,6 +183,47 @@ async fn the_learning_prompt_saves_only_on_yes() {
         assert_eq!(String::from_utf8(err).unwrap(), "Saved alice's root.\n");
         let _ = std::fs::remove_dir_all(home.dir());
     }
+}
+
+/// A "y" given after another root was saved for the person meanwhile saves nothing, and says so, naming the
+/// root saved now.
+#[tokio::test]
+async fn a_yes_that_loses_the_slot_says_so() {
+    let alice = root(ALICE_ROOT);
+    let other = root(OTHER_ROOT);
+    let home = desk("lost", None).await;
+    // The book as it reads once another command saved alice's root, put back until the person answers.
+    let before = std::fs::read(home.contacts()).unwrap();
+    let mut store = ContactsStore::open(&home).await.unwrap();
+    store
+        .contacts_mut()
+        .set_signet("alice".parse().unwrap(), other.key());
+    store.save(&swoosh::testkit::lock()).unwrap();
+    let raced = std::fs::read(home.contacts()).unwrap();
+    std::fs::write(home.contacts(), before).unwrap();
+    let mut person = Person {
+        meanwhile: Some((home.contacts(), raced)),
+        ..Person::typing("y")
+    };
+    let mut err = Vec::new();
+    tell(
+        &home,
+        &showing(alice),
+        Asking::Terminal,
+        &mut person,
+        &mut err,
+    )
+    .await;
+    assert_eq!(
+        alices(&home).await,
+        Some((other.key(), Source::Explicit)),
+        "the root saved meanwhile stays"
+    );
+    assert_eq!(
+        String::from_utf8(err).unwrap(),
+        format!("Not saved: alice's root was saved meanwhile:\n  {other}\n")
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
 }
 
 /// A saved person whose machine shows another root gets the warning, never the question, and the saved root

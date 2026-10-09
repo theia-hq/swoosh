@@ -72,6 +72,8 @@ async fn add_at(
 pub(crate) struct Person {
     terminal: bool,
     typed: Option<String>,
+    /// A file written while the person types, as another command would: its path and its bytes.
+    meanwhile: Option<(std::path::PathBuf, Vec<u8>)>,
     pub(crate) said: Vec<String>,
     pub(crate) asked: Vec<String>,
 }
@@ -82,6 +84,7 @@ impl Person {
         Self {
             terminal: false,
             typed: None,
+            meanwhile: None,
             said: Vec::new(),
             asked: Vec::new(),
         }
@@ -116,6 +119,9 @@ impl Prompt for Person {
 
     fn confirm(&mut self, question: &str) -> eyre::Result<String> {
         self.asked.push(question.to_owned());
+        if let Some((path, bytes)) = self.meanwhile.take() {
+            std::fs::write(path, bytes).expect("the file is written meanwhile");
+        }
         self.typed
             .clone()
             .ok_or_else(|| eyre::eyre!("nobody is at a terminal to answer"))
@@ -760,6 +766,43 @@ async fn replacing_a_root_revokes_the_links_to_the_old_one() {
         format!(
             "Replaced alice's root.\n\nlinks ended\n{row}\n\nTo share again:\n  swoosh share ssh alice\n"
         )
+    );
+    let _ = std::fs::remove_dir_all(home.dir());
+}
+
+/// A new root saved under another name while the person typed the token refuses before anything is written:
+/// the old root stays, and so do its links.
+#[tokio::test]
+async fn a_replace_that_loses_its_root_to_another_name_writes_nothing() {
+    let (home, old, to_root, _) = alice_with_links("replace-race").await;
+    let new = NodeId::from_ed25519_secret(&[7u8; 32]);
+    // The book as it reads once `contact add bob root:<new>` ran, put back until the person types.
+    let before = std::fs::read(home.contacts()).expect("the book reads");
+    add(&home, "bob", new).await.expect("bob's root");
+    let raced = std::fs::read(home.contacts()).expect("the book reads");
+    std::fs::write(home.contacts(), before).expect("the book is put back");
+    let mut person = Person {
+        meanwhile: Some((home.contacts(), raced)),
+        ..Person::typing(&token(new))
+    };
+
+    let error = add_at(
+        &home,
+        &["alice", &format!("root:{new}")],
+        &mut person,
+        &mut Vec::new(),
+    )
+    .await
+    .expect_err("the root is bob's now");
+    assert_eq!(error.to_string(), "that root is already saved as bob");
+    assert!(!refused(&home, &to_root), "the old root's links stay open");
+    let store = ContactsStore::open(&home).await.expect("open");
+    assert_eq!(
+        store
+            .contacts()
+            .signet(&"alice".parse().unwrap())
+            .map(|saved| saved.node),
+        Some(old)
     );
     let _ = std::fs::remove_dir_all(home.dir());
 }

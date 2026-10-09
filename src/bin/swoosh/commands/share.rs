@@ -479,7 +479,7 @@ impl Issue {
                         eyre::bail!("{YOURS}");
                     }
                     if swoosh::config::is_revoked(home, root.key())? {
-                        eyre::bail!("{root} is revoked here, so a link for it would not work");
+                        eyre::bail!("that root is revoked here, so a link for it would not work");
                     }
                     Bound {
                         subject: Subject::Unsaved {

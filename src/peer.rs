@@ -73,12 +73,18 @@ impl FromStr for Peer {
                 file: None,
             })
         } else if crate::root_key::is_prefixed(text) {
-            // Only a whole root key is a root: anything else after the prefix is the name rule's to refuse,
-            // as it always was (no name holds a `:`).
+            // Only a whole root key is a root, and text after the prefix that spells no key is a broken root
+            // key, never a name (no name holds a `:`).
             match text.parse::<RootKey>() {
                 Ok(root) => Ok(Self::Root(root)),
                 Err(crate::root_key::RootKeyError::Unusable(unusable)) => Err(unusable.into()),
-                Err(_) => Ok(Self::Named(text.parse::<ContactRef>()?)),
+                Err(crate::root_key::RootKeyError::NotAKey(error)) => {
+                    Err(PeerParseError::NotARootKey(error))
+                }
+                // Unreachable after `is_prefixed`, and a name would refuse it all the same.
+                Err(crate::root_key::RootKeyError::NoPrefix) => {
+                    Ok(Self::Named(text.parse::<ContactRef>()?))
+                }
             }
         } else {
             if let Some(node) = raw_key(text)? {
@@ -286,6 +292,10 @@ pub enum PeerParseError {
     /// The text spells a key, but not one anyone can hold.
     #[error(transparent)]
     Key(#[from] UnusableKey),
+    /// The text starts `root:`, and what follows spells no key. Said without the text, which the parser's
+    /// frame already shows.
+    #[error("not a root key")]
+    NotARootKey(#[source] NodeIdParseError),
     /// The text is a path, and the file it names holds no link.
     #[error("{path} holds no swoosh: link.")]
     NoLink {
@@ -334,10 +344,15 @@ impl Peer {
     /// so do `me` alone and a bare word that is one of your device names (a bare word is a person; `me/` is
     /// the only prefix for yours). The kind is read from where this book saves the resolved key, never
     /// from the form typed, so a key typed bare and the name it is saved under resolve alike; a link
-    /// typed as the machine is always [`Kind::Link`], since a refusal could be the link's.
+    /// typed as the machine is always [`Kind::Link`], since a refusal could be the link's. A key typed bare
+    /// that this book saves as a root, yours or a person's, is refused as a root typed `root:` is: a root
+    /// never passes for a machine. A key it does not know stays a machine, since nothing here can tell.
     pub fn machine(&self, contacts: &Contacts) -> Result<Machine, MachineError> {
         match self {
-            Self::Raw(key) => Ok(Machine::saved(contacts, *key)),
+            Self::Raw(key) => match Whose::of(contacts, RootKey::from(*key)) {
+                Whose::Unknown => Ok(Machine::saved(contacts, *key)),
+                whose => Err(MachineError::Root { whose }),
+            },
             Self::Capability { link, .. } => {
                 let key = link.dial_node().map_err(MachineError::Link)?;
                 Ok(Machine {

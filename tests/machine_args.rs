@@ -543,8 +543,8 @@ fn every_machine_argument_refuses_a_root_key() {
         ),
         (
             vec!["invite", "laptop", root.as_str()],
-            "error: that is a root key, not a machine's key\n  swoosh invite takes a machine's key, which \
-             swoosh key prints on that machine.",
+            "error: that is a root key, not a machine's key\n  swoosh invite takes a machine's key. On that \
+             machine, this prints it:\n    swoosh join\n",
         ),
     ] {
         let out = swoosh(&scratch, &args);
@@ -668,4 +668,66 @@ fn stop_refuses_a_root_with_its_own_list() {
             "{stderr}"
         );
     }
+}
+
+/// A root's key typed bare, when this book saves it as a root, refuses as `root:` does: exit 2, before
+/// anything binds, the person's machines listed and the key never echoed. Your own root alike. A bare key
+/// the book does not know stays a machine.
+#[test]
+fn a_bare_key_saved_as_a_root_is_never_a_machine() {
+    let scratch = Scratch::new("root-bare");
+    std::fs::create_dir_all(scratch.home.join("serve.toml")).unwrap();
+    let alice = a_root(0x37);
+    let bare = alice.trim_start_matches("root:").to_owned();
+    save(&scratch, "alice", &alice);
+    save(&scratch, "alice/laptop", &key(1));
+    yours(&scratch);
+    let mine = a_root(0x71).trim_start_matches("root:").to_owned();
+    for (key, head) in [
+        (
+            bare.as_str(),
+            "error: that is alice's root key, not a machine's key\n  alice's: alice/laptop.\n",
+        ),
+        (
+            mine.as_str(),
+            "error: that is your root key, not a machine's key\n  Yours: me/desk, me/nas.\n",
+        ),
+    ] {
+        for args in [
+            vec!["ping", key],
+            vec!["ssh", key],
+            vec!["status", key],
+            vec!["speed", key],
+        ] {
+            let out = swoosh(&scratch, &args);
+            let stderr = text(&out.stderr);
+            assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+            assert!(stderr.starts_with(head), "{args:?}: {stderr}");
+            assert!(
+                !stderr.contains(key),
+                "{args:?}: the key is never echoed: {stderr}"
+            );
+            assert!(
+                !stderr.contains("serve.toml"),
+                "{args:?}: nothing binds: {stderr}"
+            );
+            assert!(out.stdout.is_empty(), "{args:?}: nothing dialed");
+        }
+    }
+}
+
+/// `root:` followed by text that spells no key is a broken root key, never a name: clap's frame shows what
+/// was typed, once, and says so.
+#[test]
+fn a_broken_root_key_is_not_a_name() {
+    let scratch = Scratch::new("root-broken");
+    let out = swoosh(&scratch, &["ping", "root:ed01notakey"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.starts_with(
+            "error: invalid value 'root:ed01notakey' for '<machine>': not a root key\n"
+        ),
+        "{stderr}"
+    );
 }

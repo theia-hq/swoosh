@@ -95,6 +95,7 @@ impl swoosh::reaching::Reaching for SpeedCmd {
         ctx: swoosh::reaching::ReachCtx<'_>,
     ) -> eyre::Result<()>
     where
+        T::Session: 'static,
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
@@ -124,14 +125,17 @@ impl SpeedCmd {
         present: Option<Link>,
         membership: Option<Link>,
         admitted: Admitted,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<()>
+    where
+        T::Session: 'static,
+    {
         let mode = self.mode();
         let limit = self.limit();
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver (link-or-badge in
         // slot 1, a fleet badge in slot 2 only for a signet-bound slip); the fold in `bind_role()` routed a
         // link-as-peer through that same resolver, so the verb never threads a slip itself.
         let service: Service = reach::SPEED_SERVICE.parse()?;
-        let session = reach::dial_service(
+        let (session, connector) = reach::dial_service(
             node,
             machine,
             &self.peer,
@@ -142,7 +146,7 @@ impl SpeedCmd {
         )
         .await?;
         // Its first admitted stream tells the composition root it may ask which root vouches for the machine.
-        let session = admitted.watch(session);
+        let session = admitted.watch(session, connector);
         let label = machine.label();
         println!(
             "speed test to {label} via {} ({})",

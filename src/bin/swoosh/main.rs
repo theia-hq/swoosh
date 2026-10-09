@@ -206,6 +206,7 @@ macro_rules! reaching_verbs {
                 ctx: reaching::ReachCtx<'_>,
             ) -> eyre::Result<()>
             where
+                T::Session: 'static,
                 <T::Session as bifrost::Session>::Write: Send + 'static,
                 <T::Session as bifrost::Session>::Read: Send + 'static,
             {
@@ -485,7 +486,8 @@ async fn main() -> std::process::ExitCode {
 /// what `-` means where clap's own required-argument line shows only the metavar; a `stop` given more than
 /// one machine is refused with [`stop::ONE_MACHINE`], and one given a link or a path with
 /// [`stop::A_LINK_STOPS_NOTHING`]; an `invite` given a root's key for the device's is refused with
-/// [`invite::ROOT_IS_NO_MACHINE`]. Every other error is clap's own. Refused here, at parse, so nothing is
+/// [`invite::ROOT_IS_NO_MACHINE`], and a `serve --admit` given a machine's key with
+/// [`serve::ADMIT_TAKES_A_ROOT`]. Every other error is clap's own. Refused here, at parse, so nothing is
 /// read, opened or bound first, the home included.
 fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
 where
@@ -526,6 +528,14 @@ where
                 }
                 Err(_) => Err(error),
             }
+        }
+        // A machine's key typed to `serve --admit`, refused here rather than in clap's frame, which would
+        // echo the key.
+        Err(error)
+            if core::error::Error::source(&error)
+                .is_some_and(|cause| cause.is::<serve::MachineAdmitted>()) =>
+        {
+            Err(usage(&["serve"], serve::ADMIT_TAKES_A_ROOT))
         }
         // A root's key where `invite`'s machine key goes, refused here, before anything binds, with no echo
         // of the key.
@@ -1092,23 +1102,20 @@ async fn stale_device(home: &Home, machine: &Machine) -> Option<bifrost::NodeId>
 /// closes. It is never printed; a failure logs at debug.
 ///
 /// Beside it too, once the verb's first stream is admitted and never ahead of it, a verb that may teach a
-/// root asks the machine which root vouches for it ([`swoosh::learn`]), within [`swoosh::learn::DEADLINE`]
-/// of asking: a machine that never answers is dropped silently. What it showed is told after the verb's
-/// own output, at `prompt` when `asking` says a person is there, else on `err`.
+/// root asks the machine which root vouches for it ([`swoosh::learn`]), on the verb's own session and
+/// within [`swoosh::learn::DEADLINE`] of asking: a machine that never answers is dropped silently. What it
+/// showed comes back beside the verb's result, to be told once the node is closed.
 async fn run_verb<T: Transport, D: Discovery>(
     outward: Outward,
     node: &Node<T, D>,
     mut ctx: reaching::ReachCtx<'_>,
     dial: &impl swoosh::sync::Dial,
-    asking: learning::Asking,
-    prompt: &mut impl swoosh::passphrase::Prompt,
-    err: &mut impl std::io::Write,
-) -> eyre::Result<()>
+) -> (eyre::Result<()>, Option<swoosh::learn::Shown>)
 where
+    T::Session: 'static,
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
-    let home = ctx.home;
     // A dial under a throwaway key is none of your devices, so it makes no exchange.
     let device = match ctx.machine {
         Some(machine) if outward.identity() != Identity::Ephemeral => {
@@ -1130,14 +1137,15 @@ where
             return None;
         };
         // Unsent when the verb ended with no stream admitted: then nothing is asked.
-        heard.await.ok()?;
-        tokio::time::timeout(swoosh::learn::DEADLINE, swoosh::learn::ask(node, asked))
+        let question = heard.await.ok()?;
+        let standing = tokio::time::timeout(swoosh::learn::DEADLINE, question)
             .await
             .ok()
-            .flatten()
+            .flatten()?;
+        asked.taught(&standing)
     };
     let verb = async { tokio::join!(outward.run(node, ctx), lookup) };
-    let (result, shown) = match device {
+    match device {
         None => verb.await,
         Some(device) => {
             let exchange = swoosh::sync::once(dial, device);
@@ -1148,11 +1156,7 @@ where
                 done = &mut verb => done,
             }
         }
-    };
-    if let Some(shown) = shown {
-        learning::tell(home, &shown, asking, prompt, err).await;
     }
-    result
 }
 
 /// Run a reaching verb against the bound node, then CLOSE the node on the way out on EVERY path (a clean
@@ -1161,6 +1165,9 @@ where
 /// without an awaited close, so a verb that binds iroh must close it before the node drops (quirk's close is
 /// a no-op). One owner of teardown, so no verb re-implements it; `serve`'s own graceful-drain still returns
 /// first, and this is the single close that follows it.
+///
+/// A root the machine showed is told after the close: a question at the terminal can wait on the person
+/// for as long as they take, and nothing is held open meanwhile.
 async fn run_and_close<T: Transport, D: Discovery>(
     outward: Outward,
     node: &Node<T, D>,
@@ -1168,31 +1175,34 @@ async fn run_and_close<T: Transport, D: Discovery>(
     renew: Option<Renew<'_>>,
 ) -> eyre::Result<()>
 where
+    T::Session: 'static,
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
     let home = ctx.home;
-    let result = async {
+    let (result, shown) = async {
         if let Some(renew) = renew {
             let fetch = swoosh::renewal::NodeFetch::new(node);
             reaching::renew_before_dial(home, &fetch, &mut std::io::stderr()).await;
-            (ctx.present, ctx.membership) = reaching::resolve(renew.credential, renew.secret, home)
-                .await?
-                .into_slots();
+            match reaching::resolve(renew.credential, renew.secret, home).await {
+                Ok(resolved) => (ctx.present, ctx.membership) = resolved.into_slots(),
+                Err(error) => return (Err(error), None),
+            }
         }
-        run_verb(
-            outward,
-            node,
-            ctx,
-            &swoosh::sync::NodeDial::new(node, home),
+        run_verb(outward, node, ctx, &swoosh::sync::NodeDial::new(node, home)).await
+    }
+    .await;
+    node.close().await;
+    if let Some(shown) = shown {
+        learning::tell(
+            home,
+            &shown,
             learning::Asking::here(),
             &mut swoosh::passphrase::Terminal,
             &mut std::io::stderr(),
         )
-        .await
+        .await;
     }
-    .await;
-    node.close().await;
     result
 }
 

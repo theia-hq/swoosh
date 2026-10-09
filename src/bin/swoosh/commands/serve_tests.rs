@@ -4053,23 +4053,24 @@ fn serve_admit_takes_one_root_key() {
     );
 }
 
-/// `--admit` with a bare key, a machine's, refuses at parse in clap's frame, exit 2: admitting one machine's
-/// devices means nothing.
+/// `--admit` with a bare key, a machine's, refuses at parse, exit 2, and never prints the key back: admitting
+/// one machine's devices means nothing.
 #[test]
 fn admit_refuses_a_machine_key() {
-    use clap::Parser as _;
-
     let key = swoosh::testkit::TestNode::seeded(0x21)
         .node_id()
         .to_string();
-    let error = super::super::super::Cli::try_parse_from(["swoosh", "serve", "--admit", &key])
+    let error = crate::parse_from(["swoosh", "serve", "--admit", &key])
         .expect_err("a machine's key refuses");
     assert_eq!(error.exit_code(), 2);
+    let printed = error.to_string();
     assert!(
-        error
-            .to_string()
-            .contains("--admit takes a root key, not a machine's key"),
-        "{error}"
+        printed.starts_with("error: --admit takes a root key, not a machine's key\n"),
+        "{printed}"
+    );
+    assert!(
+        !printed.contains(&key),
+        "the key is never echoed: {printed}"
     );
 }
 

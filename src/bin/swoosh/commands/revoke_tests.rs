@@ -737,10 +737,18 @@ async fn revoke_a_bare_key_that_is_a_root_takes_back_only_links() {
         blocks(&home, &alice).await,
         "the link given to that key is revoked"
     );
+    // The link was given to the key as a root, so the result names that half too.
     assert!(
         err.contains(&format!(
-            "{} is also alice's root. This took back only the links given to that key. To end a root: \
-             swoosh revoke --help",
+            "revoked the links given to {} and to root:{}: blocked.",
+            short(ALICE_ROOT),
+            short(ALICE_ROOT)
+        )),
+        "{err}"
+    );
+    assert!(
+        err.contains(&format!(
+            "{} is also alice's root. This did not end the root. To end a root: swoosh revoke --help",
             short(ALICE_ROOT)
         )),
         "{err}"

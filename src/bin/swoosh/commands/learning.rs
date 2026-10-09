@@ -6,9 +6,11 @@
 
 use std::io::Write;
 
+use swoosh::contacts::Taken;
 use swoosh::home::Home;
 use swoosh::learn::{Found, Shown};
 use swoosh::passphrase::Prompt;
+use swoosh::root_key::RootKey;
 
 /// Whether a person can be asked: stdin and stderr are both terminals. Read once, in the composition root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +74,7 @@ pub async fn tell_each(
             Ok(store) => Found::of(store.contacts(), one) == Found::Quiet,
             Err(error) => {
                 tracing::debug!(%error, "the book could not be read to tell a root");
-                return;
+                continue;
             }
         };
         if quiet {
@@ -119,8 +121,18 @@ async fn told(
                     .iter()
                     .any(|yes| answer.trim().eq_ignore_ascii_case(yes));
                 if yes {
-                    if swoosh::learn::save(home, shown).await? {
-                        writeln!(err, "Saved {person}'s root.")?;
+                    match swoosh::learn::save(home, shown).await? {
+                        Ok(()) => writeln!(err, "Saved {person}'s root.")?,
+                        // Another command saved a root for them, or this one under another name, while
+                        // the person read the question.
+                        Err(Taken::Name { held }) => writeln!(
+                            err,
+                            "Not saved: {person}'s root was saved meanwhile:\n  {}",
+                            RootKey::from(held)
+                        )?,
+                        Err(Taken::Key { at }) => {
+                            writeln!(err, "Not saved: that root is saved here already, as {at}.")?
+                        }
                     }
                     return Ok(());
                 }

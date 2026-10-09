@@ -83,6 +83,7 @@ impl swoosh::reaching::Reaching for PingCmd {
         ctx: swoosh::reaching::ReachCtx<'_>,
     ) -> eyre::Result<()>
     where
+        T::Session: 'static,
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static,
     {
@@ -113,7 +114,10 @@ impl PingCmd {
         present: Option<Link>,
         membership: Option<Link>,
         admitted: Admitted,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<()>
+    where
+        T::Session: 'static,
+    {
         // Slots 1 and 2 are ALREADY resolved by the composition root's ONE resolver: slot 1 (`present`) is
         // the link typed as the peer or the member badge, slot 2 (`membership`) is a fleet badge only for a
         // signet-bound slip. The verb never threads a slip itself, so it cannot desync the two.
@@ -137,7 +141,7 @@ impl PingCmd {
         {
             // Its first admitted probe stream tells the composition root it may ask which root vouches for
             // the machine.
-            Ok(session) => admitted.watch(session),
+            Ok((session, connector)) => admitted.watch(session, connector),
             Err(_error) => {
                 println!("{label} via {name}: unreachable");
                 return reach::Outcome::Unreachable.into_result(&self.peer, bound);

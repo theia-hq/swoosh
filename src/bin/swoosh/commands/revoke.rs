@@ -32,7 +32,7 @@ use bifrost::{Discovery, Node, NodeId, Session, Transport};
 use clap::Args;
 use nauthy::{Link, Revocation, RevocationId, VerifyKey};
 use swoosh::contacts::{ContactRef, ContactsStore, DeviceLabel, ME, Petname, ResolveError};
-use swoosh::grants::Grants;
+use swoosh::grants::{GrantKind, GrantRecord, Grants};
 use swoosh::home::{Home, HomeWrite};
 use swoosh::passphrase::{Prompt, Terminal};
 use swoosh::reach_report::{Reach, What};
@@ -893,7 +893,8 @@ fn unknown(error: ResolveError) -> eyre::Report {
     }
 }
 
-/// A key, or a contact's device: every link given to it, then what else the key is here.
+/// A key, or a contact's device: every link given to it, then what else the key is here. A key typed bare
+/// also ends the links given to it as a root (`share <service> root:<key>`), and the result names both.
 async fn key_links(
     home: &Home,
     keys: &[NodeId],
@@ -902,9 +903,16 @@ async fn key_links(
 ) -> eyre::Result<()> {
     let holders: Vec<String> = keys.iter().map(ToString::to_string).collect();
     let home_lock = HomeWrite::take(home).await?;
-    let given = given_to(home, &holders).await?;
+    let given = given(home, &holders).await?;
     let revoked = given.len();
-    swoosh::revoked::add(&home_lock, home, given.into_iter().map(Revocation::Id))?;
+    let rooted = given.iter().any(|record| record.kind == GrantKind::Fleet);
+    swoosh::revoked::add(
+        &home_lock,
+        home,
+        given
+            .into_iter()
+            .map(|record| Revocation::Id(record.root_id)),
+    )?;
     let mut trailing = Vec::new();
     for key in keys {
         trailing.extend(also(home, *key).await?);
@@ -916,11 +924,14 @@ async fn key_links(
         lines.extend(trailing);
         eyre::bail!("{}", lines.join("\n"));
     }
-    writeln!(
-        err,
-        "{}",
-        Reach::Complete.line(&What::Revoked(what.to_owned()))
-    )?;
+    let what = match (rooted, keys) {
+        (true, [key]) => format!(
+            "the links given to {what} and to {}",
+            RootKey::from(*key).short()
+        ),
+        _ => what.to_owned(),
+    };
+    writeln!(err, "{}", Reach::Complete.line(&What::Revoked(what)))?;
     for line in trailing {
         writeln!(err, "{line}")?;
     }
@@ -962,8 +973,7 @@ async fn also(home: &Home, key: NodeId) -> eyre::Result<Vec<String>> {
     }
     for root in roots {
         lines.push(format!(
-            "{short} is also {root}. This took back only the links given to that key. To end a root: \
-             swoosh revoke --help"
+            "{short} is also {root}. This did not end the root. To end a root: swoosh revoke --help"
         ));
     }
     Ok(lines)
@@ -971,11 +981,19 @@ async fn also(home: &Home, key: NodeId) -> eyre::Result<Vec<String>> {
 
 /// The root id of every link this machine's ledger records as given to one of `holders`, one per link.
 async fn given_to(home: &Home, holders: &[String]) -> eyre::Result<Vec<RevocationId>> {
+    Ok(given(home, holders)
+        .await?
+        .into_iter()
+        .map(|record| record.root_id)
+        .collect())
+}
+
+/// Every link this machine's ledger records as given to one of `holders`.
+async fn given(home: &Home, holders: &[String]) -> eyre::Result<Vec<GrantRecord>> {
     let records = Grants::at(home.links()).load().await?;
     Ok(records
-        .iter()
+        .into_iter()
         .filter(|record| holders.contains(&record.holder))
-        .map(|record| RevocationId::clone(&record.root_id))
         .collect())
 }
 

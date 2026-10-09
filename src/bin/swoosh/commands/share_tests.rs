@@ -770,6 +770,25 @@ async fn share_to_a_person_whose_root_is_revoked_here_refuses() {
     assert!(rows(&home).await.is_empty(), "no row is written");
 }
 
+/// A root this machine revoked and has no name for gets no link either, and the refusal never prints its key.
+#[tokio::test]
+async fn share_to_a_revoked_unsaved_root_refuses_without_its_key() {
+    let home = scratch("revoked-unsaved-root").await;
+    let root = TestRoot::seeded(BOB_ROOT);
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(root.verify_key())],
+    )
+    .unwrap();
+    let ran = share(&home, &["ssh", &format!("root:{}", root.node_id())]).await;
+    assert_eq!(
+        ran.refusal(),
+        "that root is revoked here, so a link for it would not work"
+    );
+    assert!(rows(&home).await.is_empty(), "no row is written");
+}
+
 /// A key typed as the recipient is one machine: the link it makes is bound to that key alone.
 #[tokio::test]
 async fn share_with_a_key_binds_that_one_machine() {

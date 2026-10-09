@@ -10,7 +10,7 @@ use keystore::{KeyFile, Protection};
 
 use super::{Asked, Found, Shown, save, vouching};
 use crate::config;
-use crate::contacts::{ContactsStore, Source};
+use crate::contacts::{ContactsStore, Source, Taken};
 use crate::home::Home;
 use crate::root_key::RootKey;
 use crate::testkit::{TestNode, TestRoot};
@@ -110,7 +110,10 @@ async fn a_learned_root_is_marked_with_the_device_it_came_from() {
         asked: laptop(),
         root: root(ALICE_ROOT),
     };
-    assert!(save(&home, &shown).await.unwrap(), "an empty slot fills");
+    assert!(
+        save(&home, &shown).await.unwrap().is_ok(),
+        "an empty slot fills"
+    );
     let store = ContactsStore::open(&home).await.unwrap();
     let alice = "alice".parse().unwrap();
     let saved = store
@@ -148,7 +151,10 @@ async fn a_learned_root_fills_only_an_empty_slot() {
             saved: root(ALICE_ROOT)
         }
     );
-    assert!(!save(&home, &other).await.unwrap(), "nothing is replaced");
+    assert!(
+        matches!(save(&home, &other).await.unwrap(), Err(Taken::Name { .. })),
+        "nothing is replaced"
+    );
     let store = ContactsStore::open(&home).await.unwrap();
     assert_eq!(
         store
@@ -170,7 +176,7 @@ async fn root_prefix_never_reaches_disk_or_wire() {
         asked: laptop(),
         root: root(ALICE_ROOT),
     };
-    assert!(save(&home, &shown).await.unwrap());
+    assert!(save(&home, &shown).await.unwrap().is_ok());
     let text = std::fs::read_to_string(home.contacts()).unwrap();
     assert!(!text.to_ascii_lowercase().contains("root:"), "{text}");
     assert!(

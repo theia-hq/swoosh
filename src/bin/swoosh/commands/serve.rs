@@ -206,15 +206,22 @@ pub struct ExposeContext {
     pub home: Home,
 }
 
+/// The refusal for a machine's key typed to `--admit`, through the usage frame so the key is not echoed.
+pub const ADMIT_TAKES_A_ROOT: &str = "--admit takes a root key, not a machine's key";
+
+/// A key with no `root:` typed to `--admit`: a machine's, which the parse refuses with
+/// [`ADMIT_TAKES_A_ROOT`] instead of clap's frame, which would echo the key.
+#[derive(Debug, thiserror::Error)]
+#[error("{ADMIT_TAKES_A_ROOT}")]
+pub struct MachineAdmitted;
+
 /// `--admit`'s root key, typed `root:ed01…` and only so: a bare key is a machine's, and admitting one
 /// machine's devices means nothing.
-fn admitted_root(text: &str) -> Result<NodeId, String> {
+fn admitted_root(text: &str) -> Result<NodeId, Box<dyn core::error::Error + Send + Sync>> {
     match text.parse::<swoosh::root_key::RootKey>() {
         Ok(root) => Ok(root.key()),
-        Err(swoosh::root_key::RootKeyError::NoPrefix) => {
-            Err("--admit takes a root key, not a machine's key".to_owned())
-        }
-        Err(error) => Err(error.to_string()),
+        Err(swoosh::root_key::RootKeyError::NoPrefix) => Err(Box::new(MachineAdmitted)),
+        Err(error) => Err(error.into()),
     }
 }
 

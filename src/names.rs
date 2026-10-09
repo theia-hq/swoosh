@@ -6,7 +6,7 @@
 //! marker's `:`, or whitespace. Internal routes are dotted (`control.stop`), so no typed name can be one.
 //!
 //! Five names are reserved and are never a person or a device: `me`, `root` and `anyone`, and the two
-//! internal route groups, `control` and `lookup`.
+//! internal route groups, `control` and `lookup`, which are never a typed service either.
 
 use core::str::FromStr;
 
@@ -56,9 +56,13 @@ impl Name {
 
 /// Parse a service name a person typed (`serve --public <service>`, `share <service>`, `reach <peer>
 /// <service>`, ...): the one name rule, folded, as the [`Service`] the router and the grant carry. A dotted
-/// internal route (`control.stop`) is never a name, so it can never be typed.
+/// internal route (`control.stop`) is never a name, so it can never be typed; nor is a group of them
+/// (`control`, `lookup`), which is no service of its own.
 pub fn service(text: &str) -> Result<Service, NameError> {
     let name: Name = text.parse()?;
+    if ["control", "lookup"].contains(&name.as_str()) {
+        return Err(NameError::Reserved(name.into()));
+    }
     // Every name is a service (the service alphabet is wider); the fallback keeps this total without a
     // panic path.
     name.as_str()

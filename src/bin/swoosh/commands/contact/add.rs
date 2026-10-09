@@ -178,9 +178,10 @@ async fn add_root(
 }
 
 /// Replace `person`'s saved root `old` with `new`: only at a terminal, once both roots and the links it ends
-/// are shown and `new`'s token is typed. Then, under `home.lock`, this machine's live links bound to `old`
-/// are revoked and `new` is saved; a crash between the two leaves the old root saved with its links already
-/// ended, never the new root saved with the old root's links still open. Nothing is written on a refusal.
+/// are shown and `new`'s token is typed. Then, under `home.lock`, every refusal is checked on the book in
+/// memory first, so nothing is written on a refusal; only then are this machine's live links bound to `old`
+/// revoked, and `new` saved. A crash between the two writes leaves the old root saved with its links
+/// already ended, never the new root saved with the old root's links still open.
 async fn replace(
     home: &Home,
     person: &Petname,
@@ -226,6 +227,12 @@ async fn replace(
     if store.contacts().signet(person).map(|saved| saved.node) != Some(old.key()) {
         eyre::bail!("{}", swoosh::standing::CHANGED);
     }
+    // In memory only: a key saved meanwhile under another name refuses here, before anything is written.
+    match store.contacts_mut().replace_root(person, new.key()) {
+        Ok(_) => {}
+        Err(Taken::Key { at }) => eyre::bail!("{}", second_name(&at, new.key())),
+        Err(Taken::Name { .. }) => eyre::bail!("{}", swoosh::standing::CHANGED),
+    }
     let ended = live_links(home, old.key()).await?;
     swoosh::revoked::add(
         &home_lock,
@@ -234,11 +241,6 @@ async fn replace(
             .iter()
             .map(|link| Revocation::Id(link.root_id.clone())),
     )?;
-    match store.contacts_mut().replace_root(person, new.key()) {
-        Ok(_) => {}
-        Err(Taken::Key { at }) => eyre::bail!("{}", second_name(&at, new.key())),
-        Err(Taken::Name { .. }) => eyre::bail!("{}", swoosh::standing::CHANGED),
-    }
     store.save(&home_lock)?;
     drop(home_lock);
 

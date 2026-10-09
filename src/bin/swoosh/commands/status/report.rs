@@ -707,7 +707,8 @@ fn invite_ends(row: &Member, now: u64) -> Option<String> {
 }
 
 /// `contacts:`: each person with their root, and each device saved by hand. Your own devices are under
-/// `devices:`, never here.
+/// `devices:`, never here. A row's kind is the key's own shape (`root:` or a machine's bare key), so no
+/// column repeats it.
 fn contacts_section(contacts: &Contacts) -> Section {
     let mut rows = Vec::new();
     for person in contacts.petnames().filter(|person| person.as_str() != ME) {
@@ -720,8 +721,8 @@ fn contacts_section(contacts: &Contacts) -> Section {
             rows.push([
                 person.to_string(),
                 RootKey::from(root.node).short(),
-                "root".to_owned(),
                 learned,
+                String::new(),
             ]);
         }
         for (label, key) in contacts.devices(person).into_iter().flatten() {
@@ -730,7 +731,7 @@ fn contacts_section(contacts: &Contacts) -> Section {
             } else {
                 format!("{person}/{label}")
             };
-            rows.push([name, short(&key), "device".to_owned(), String::new()]);
+            rows.push([name, short(&key), String::new(), String::new()]);
         }
     }
     Section {

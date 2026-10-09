@@ -48,12 +48,12 @@ impl RmCmd {
         match removed {
             Removed::Removed => {
                 store.save(&home_lock)?;
-                println!("removed {}", self.name);
+                eprintln!("removed {}", self.name);
                 if learned {
-                    println!("{person}'s root, learned from {}, stays saved.", self.name);
+                    eprintln!("{person}'s root, learned from {}, stays saved.", self.name);
                 }
             }
-            Removed::Absent => println!("no such contact {}; nothing to remove", self.name),
+            Removed::Absent => eprintln!("no such contact {}; nothing to remove", self.name),
         }
         Ok(())
     }

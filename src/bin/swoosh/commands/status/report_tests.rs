@@ -1397,6 +1397,7 @@ async fn a_touch_id_only_key_beside_a_root_is_nagged() {
 }
 
 /// A learned root's row in `contacts` names the machine it was learned from; a typed root's says nothing more.
+/// No row carries a kind word: the key's shape says it.
 #[test]
 fn status_marks_a_learned_root() {
     let mut contacts = swoosh::contacts::Contacts::default();
@@ -1421,13 +1422,23 @@ fn status_marks_a_learned_root() {
         &[
             "alice".to_owned(),
             format!("root:{}", swoosh::credential::short(&learned)),
-            "root".to_owned(),
             "learned from alice/laptop".to_owned(),
+            String::new(),
         ]
+    );
+    assert_eq!(
+        rows[1],
+        &[
+            "alice/laptop".to_owned(),
+            swoosh::credential::short(&TestNode::seeded(LAPTOP).node_id()),
+            String::new(),
+            String::new(),
+        ],
+        "a machine's row is its name and key"
     );
     let bob = rows
         .iter()
         .find(|row| row[0] == "bob")
         .expect("bob's root is listed");
-    assert_eq!(bob[3], "", "a typed root carries no mark");
+    assert_eq!(bob[2..], ["", ""], "a typed root carries no mark");
 }

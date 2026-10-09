@@ -3,28 +3,30 @@
 //! A root cannot be computed from a machine's key. But when `alice/laptop` was saved with a key alice gave
 //! you, the transport proves that key when the machine answers, and the standing it hands over proves
 //! which root vouches for it: a root that vouches for that key, only as trustworthy as whoever holds it.
-//! A dial asks once its first stream is admitted, on the root route ([`LOOKUP_ROOT_SERVICE`]), and only for
-//! a machine saved as one of a person's other than yours; `sync` asks every such machine of a person with
-//! no root saved. The answer teaches nothing unless the standing verifies under the root it names, is bound
-//! to the key dialed, and outlives now.
+//! A dial asks once its first stream is admitted, on the root route ([`LOOKUP_ROOT_SERVICE`]) of the
+//! session it dialed, and only for a machine saved as one of a person's other than yours; `sync` asks every
+//! such machine of a person with no root saved. The answer teaches nothing unless the standing verifies
+//! under the root it names, is bound to the key dialed, and outlives now.
 //!
 //! What was learned is never followed on its own: an empty slot is offered to the person, who says yes or
 //! no; a root that differs from the one saved is a conflict to warn about, never a replace. Each machine
 //! remembers the root it last showed (its `seen_root`, kept on this machine only), so the offer and the
 //! warning come once per new root, not once per dial. The words are the binary's.
 
+use core::cell::Cell;
 use core::time::Duration;
-use std::sync::{Mutex, PoisonError};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use bifrost::{ConnInfo, Discovery, Node, NodeId, PathChanges, Session, Transport};
 use futures::StreamExt as _;
+use futures::future::LocalBoxFuture;
 use nauthy::{Link, Service};
 use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use tightbeam::tunnel::Connector;
 use tokio::sync::oneshot;
 
-use crate::contacts::{Contacts, ContactsStore, DeviceLabel, ME, Petname};
+use crate::contacts::{Contacts, ContactsStore, DeviceLabel, ME, Petname, Taken};
 use crate::home::{Home, HomeWrite};
 use crate::peer::{Kind, Machine};
 use crate::renewal::FetchError;
@@ -53,6 +55,16 @@ pub struct Asked {
 }
 
 impl Asked {
+    /// What `standing`, the machine's answer, teaches about it: the root it names, when it vouches for this
+    /// machine now ([`vouching`]).
+    pub fn taught(&self, standing: &Link) -> Option<Shown> {
+        let root = vouching(standing, self.key, SystemTime::now())?;
+        Some(Shown {
+            asked: self.clone(),
+            root,
+        })
+    }
+
     /// The machine a dial asks about, when it is a person's saved machine and not yours: a key no name
     /// holds, a link, one of your devices, and a key saved only as a root are never asked.
     pub fn of(machine: &Machine) -> Option<Self> {
@@ -116,10 +128,11 @@ impl Found {
     }
 }
 
-/// Ask `asked`'s machine which root vouches for it, over a connection of its own on `node`, the same
-/// endpoint the verb dialed from: the root its standing names, when the standing verifies. `None` on a
-/// miss, a failure, or a standing that teaches nothing; never an error, since nothing the verb did
-/// depends on it.
+/// Ask `asked`'s machine which root vouches for it, over a connection of its own on `node`: the root its
+/// standing names, when the standing verifies. For `sync`, which holds no other session to the machine; a
+/// dial asks on its own session instead ([`Admitted`]), since an endpoint may hold one connection per peer
+/// and a second would replace the verb's. `None` on a miss, a failure, or a standing that teaches nothing;
+/// never an error, since nothing else depends on it.
 pub async fn ask<T: Transport, D: Discovery>(node: &Node<T, D>, asked: &Asked) -> Option<Shown> {
     let session = match node.connect(asked.key).await {
         Ok(session) => session,
@@ -128,18 +141,19 @@ pub async fn ask<T: Transport, D: Discovery>(node: &Node<T, D>, asked: &Asked) -
             return None;
         }
     };
-    let standing = match ask_on(&session, asked.key).await {
-        Ok(standing) => standing?,
+    let standing = answer(&session).await?;
+    asked.taught(&standing)
+}
+
+/// The standing `session`'s peer hands over on its root route, or `None` on a miss or a failure, logged.
+async fn answer<S: Session>(session: &S) -> Option<Link> {
+    match ask_on(session, session.peer()).await {
+        Ok(standing) => standing,
         Err(error) => {
             tracing::debug!(%error, "the root lookup failed");
-            return None;
+            None
         }
-    };
-    let root = vouching(&standing, asked.key, SystemTime::now())?;
-    Some(Shown {
-        asked: asked.clone(),
-        root,
-    })
+    }
 }
 
 /// Open the root route on `session` to `key`, presenting nothing, and read its one answer: the standing on
@@ -235,34 +249,46 @@ pub async fn remember(home: &Home, shown: &Shown) -> eyre::Result<()> {
 }
 
 /// Save `shown`'s root as its person's, learned from its machine, and remember it as shown, under
-/// `home.lock`. `false`, with nothing saved but the memory, when the slot filled meanwhile or another name
-/// took the key.
+/// `home.lock`. When the slot filled meanwhile or another name took the key, nothing is saved but the
+/// memory, and the inner refusal says which.
 ///
 /// # Errors
 ///
 /// The book could not be read or written.
-pub async fn save(home: &Home, shown: &Shown) -> eyre::Result<bool> {
+pub async fn save(home: &Home, shown: &Shown) -> eyre::Result<Result<(), Taken>> {
     let home_lock = HomeWrite::take(home).await?;
     let mut store = ContactsStore::open(home).await?;
     let Shown { asked, root } = shown;
     let contacts = store.contacts_mut();
-    let saved = contacts
-        .learn(&asked.person, root.key(), asked.device.clone())
-        .is_ok();
+    let saved = contacts.learn(&asked.person, root.key(), asked.device.clone());
     contacts.see_root(&asked.person, &asked.device, root.key());
     store.save(&home_lock)?;
     Ok(saved)
 }
 
-/// The signal a dial's first admitted stream gives: the moment the root question may start, alongside the
-/// verb and never ahead of it. Dropped unsent when the verb ends with no stream admitted, so whoever waits
-/// on it stops waiting.
-#[derive(Debug, Default)]
-pub struct Admitted(Option<oneshot::Sender<()>>);
+/// The root question a dial's first admitted stream hands over: the machine's standing, asked on the
+/// session the verb dialed, which it holds open until it ends. Its answer is read with [`Asked::taught`].
+pub type Question = LocalBoxFuture<'static, Option<Link>>;
+
+/// The signal a dial's first admitted stream gives: the question to ask beside the verb, from that moment
+/// and never ahead of it. Dropped unsent when the verb ends with no stream admitted, so whoever waits on it
+/// stops waiting.
+#[derive(Default)]
+pub struct Admitted(Option<oneshot::Sender<Question>>);
+
+// By hand: a question is a future, which has no `Debug` of its own.
+impl core::fmt::Debug for Admitted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let Self(signal) = self;
+        f.debug_struct("Admitted")
+            .field("heard", &signal.is_some())
+            .finish()
+    }
+}
 
 impl Admitted {
     /// A signal and the end that hears it.
-    pub fn new() -> (Self, oneshot::Receiver<()>) {
+    pub fn new() -> (Self, oneshot::Receiver<Question>) {
         let (tx, rx) = oneshot::channel();
         (Self(Some(tx)), rx)
     }
@@ -272,27 +298,33 @@ impl Admitted {
         Self(None)
     }
 
-    /// `session`, giving this signal the first time one of its streams opens admitted.
-    pub fn watch<S: Session>(self, session: S) -> Watched<S> {
+    /// `session`, gated through `connector` on every stream it opens, giving this signal the first time one
+    /// is admitted.
+    pub fn watch<S: Session + 'static>(self, session: S, connector: Connector) -> Watched<S> {
         let Self(signal) = self;
         Watched {
-            session,
-            signal: Mutex::new(signal),
+            session: Rc::new(session),
+            connector,
+            signal: Cell::new(signal),
         }
     }
 }
 
-/// A session that says when its first stream was admitted ([`Admitted::watch`]): otherwise the session it
-/// wraps, unchanged.
-#[derive(Debug)]
+/// A dialed session whose every stream is gated through one service request, as a service session's is,
+/// and that hands over the root question when its first stream is admitted ([`Admitted::watch`]).
+///
+/// The question rides this same session, and holds it (an `Rc`, since a dial runs on one task) so it stays
+/// open until the question ends, past the verb if it must: an endpoint may hold one connection per peer,
+/// so a connection of its own would replace the verb's.
 pub struct Watched<S> {
-    session: S,
-    // A `Mutex`, since a stream opens through `&self` and the signal is given once, by whichever open
-    // admits first; it is held only to take the sender.
-    signal: Mutex<Option<oneshot::Sender<()>>>,
+    session: Rc<S>,
+    connector: Connector,
+    // A `Cell`: a stream opens through `&self`, and the sender is taken once, by whichever open admits
+    // first. Never shared across threads, since the session is not.
+    signal: Cell<Option<oneshot::Sender<Question>>>,
 }
 
-impl<S: Session> Session for Watched<S> {
+impl<S: Session + 'static> Session for Watched<S> {
     type Security = S::Security;
     type Write = S::Write;
     type Read = S::Read;
@@ -301,24 +333,22 @@ impl<S: Session> Session for Watched<S> {
         self.session.peer()
     }
 
-    /// A gated session's stream returns only once the host admitted it, so the first that returns is the
-    /// signal.
+    /// A stream returns only once the host admitted it, so the first that returns is the signal.
     async fn open_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
-        let halves = self.session.open_bi().await?;
-        let signal = self
-            .signal
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(signal) = signal {
+        let halves = self.connector.open_on(&*self.session).await?;
+        if let Some(signal) = self.signal.take() {
+            let held = Rc::clone(&self.session);
             // Nobody listening any more is no failure of the verb's.
-            let _ = signal.send(());
+            let _ = signal.send(Box::pin(async move { answer(&*held).await }));
         }
         Ok(halves)
     }
 
     async fn accept_bi(&self) -> Result<(Self::Write, Self::Read), bifrost::Error> {
-        self.session.accept_bi().await
+        // A service client never accepts peer-opened streams; refusing keeps the view total.
+        Err(bifrost::Error::Stream(
+            "a service-scoped session does not accept inbound streams".into(),
+        ))
     }
 
     async fn wait_closed(&self) {
