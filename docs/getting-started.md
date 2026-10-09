@@ -6,8 +6,6 @@ another machine, done. Auth, names, and sharing come after, each a small additio
 
 You will need two machines (your laptop and a desktop, a home box, or a cheap VPS).
 
-> **Only one machine?** Run both ends on it over `quirk+noise`; [transports](transports.md#quirk) shows how.
-
 ## 1. Install
 
 <!-- manual: installs a released binary over the network -->

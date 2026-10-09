@@ -65,22 +65,30 @@ bob/nas via iroh: reached, but it does not answer ping for you
 `swoosh status` reached the machine, and it refused the probe: it does not serve `ping`, or it does not admit you
 to it. The reply does not say which. Ask its owner to share `ping` with you.
 
-## "quirk is direct-only: pass --peer"
+## "could not reach" over quirk or with `--local`
 
+<!-- manual: needs a quirk dial with no address -->
 ```
-Error: quirk is direct-only: pass --peer <key>=<address> (the line the peer's `swoosh serve`
-printed), or use --transport iroh: could not reach <key>
+error: could not reach me/nas
+  quirk finds no machine by itself.
+  Give its address with --peer <key>=<address>, or add --transport iroh.
 ```
 
-Over quirk, either spelling, there is no discovery, so swoosh needs the peer's address. Either pass it
-with `--peer <key>=<address>` (the `direct` line the peer's `serve` printed), or use `--transport iroh`,
-which discovers the peer from its key. See [transports](transports.md#quirk).
+With `--local`, the lines under the error start `With --local or SWOOSH_LOCAL, swoosh looks on this network
+only.` and end with how to turn it off. Either way, the address `--peer` takes is the `direct` line the
+machine's `serve` printed ([transports](transports.md#peer)).
 
-## An iroh dial cannot reach the peer
+## "could not reach" over iroh
 
-Over iroh you do not pass an address, so an unreachable dial usually means the peer is offline or
-discovery is down, not a missing hint. Check that the peer's `swoosh serve` is running, and that both
-sides can reach the internet. `swoosh status <machine>` reports the path once a link is up.
+<!-- manual: needs an offline machine -->
+```
+error: could not reach me/nas
+```
+
+Over iroh you give no address, so this usually means the machine is offline or discovery is down. Check
+that its `swoosh serve` is running and that both sides can reach the internet. If you run your own
+resolver, a line under the error names it (`resolver asked: <url>`); check that it is up
+and that the machine publishes to the same one.
 
 ## A revoke did not take effect
 
