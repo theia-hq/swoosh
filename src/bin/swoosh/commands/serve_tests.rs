@@ -3760,12 +3760,20 @@ fn quiet_builds_no_activity_renderer_and_a_plain_serve_does() {
         from: sender,
     });
     drop(activity);
+    // `writeln!` writes the line and its newline in separate writes, so wait for the newline, not for the
+    // first byte. The bytes are copied out before the assert, so a failing assert holds no guard and
+    // poisons no lock under the renderer.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while out.0.lock().expect("the capture lock").is_empty() && Instant::now() < deadline {
+    let written = loop {
+        let written =
+            String::from_utf8_lossy(&out.0.lock().expect("the capture lock")).into_owned();
+        if written.ends_with('\n') || Instant::now() >= deadline {
+            break written;
+        }
         std::thread::sleep(Duration::from_millis(5));
-    }
+    };
     assert_eq!(
-        String::from_utf8_lossy(&out.0.lock().expect("the capture lock")),
+        written,
         format!("recv: received notes.txt (5 bytes) from {sender}\n"),
         "a plain serve's renderer carries the line"
     );

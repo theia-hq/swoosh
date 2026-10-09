@@ -453,13 +453,25 @@ async fn leave_new_key_on_a_device_leaves_and_keeps_the_old_key_and_links_aside(
 
 #[tokio::test]
 async fn leave_new_key_whose_passphrase_is_not_chosen_writes_nothing() {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
     // Two passphrases that do not match, and nobody at a terminal: either way the new key's passphrase is
     // never chosen, and the machine is still its root's device with its old key.
     for no_terminal in [false, true] {
         let home = scratch_with("new-key-unchosen", true);
         device(&home, now() + 90 * DAY).await;
-        // A home that has served has its lock files already.
-        drop(swoosh::testkit::serving(&home, None));
+        // A home that has served has its lock files already, emptied. Written rather than taken and
+        // dropped: a child a sibling test forks while a taken lock is open shares its flock past the drop,
+        // and `leave --new-key` takes `serve.lock` without waiting.
+        for lock in [home.home_lock(), home.serve_lock()] {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .mode(0o600)
+                .open(lock)
+                .unwrap();
+        }
         let before = snapshot(home.dir());
         let ran = if no_terminal {
             leave_asking(&home, &["--new-key"], &mut NoTerminal).await

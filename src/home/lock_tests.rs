@@ -54,7 +54,19 @@ async fn serve_lock_has_one_holder_and_records_it() {
     drop(held);
     assert_eq!(ServeLock::admitting(&home_lock, &home).unwrap(), None);
     assert_eq!(ServeLock::recorded(&home), super::Recorded::default());
-    let again = ServeLock::take(&home_lock, &home);
+    // flock belongs to the open file description, so a child a sibling test forks while `held` is open
+    // shares the lock until its exec closes the O_CLOEXEC copy. A drop inside that window leaves the lock
+    // held for a moment by no one this test owns, so the later take waits on a condition with a bound: a
+    // drop that never let the lock go still fails here.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let again = loop {
+        match ServeLock::take(&home_lock, &home) {
+            Err(ServeLockError::Held) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            taken => break taken,
+        }
+    };
     assert!(again.is_ok(), "a later serve takes it: {again:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
