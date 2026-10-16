@@ -2965,7 +2965,7 @@ dependencies = [
 [[package]]
 name = "noq-proto"
 version = "1.3.0"
-source = "git+https://github.com/n0-computer/noq?rev=d7c3160a7e7b5cb36682eae04e364d3f50e28925#d7c3160a7e7b5cb36682eae04e364d3f50e28925"
+source = "git+https://github.com/theia-hq/noq?rev=fda50f43b779082da3fc010515dfc0262eeba330#fda50f43b779082da3fc010515dfc0262eeba330"
 dependencies = [
  "aes-gcm 0.10.3",
  "bytes",
@@ -4138,9 +4138,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",

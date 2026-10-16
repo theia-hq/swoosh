@@ -31,8 +31,7 @@ machine runs `swoosh leave --new-key` at its console to be invited back. A stole
 other machines (`swoosh stop me/<name>`) until they learn it is revoked.
 
 **Ending a root.** `swoosh revoke root:<key>` cannot be undone, so it runs only at a terminal. It says
-what this machine is to that root, then asks you to type the key's first six characters
-(`Type ed01… to revoke this root for good:`). Then:
+what this machine is to that root, then asks you to type the 8 characters after the key's `ed01`. Then:
 
 - where the root is kept, it asks for the root's passphrase, then deletes the root from this machine;
   your next `swoosh invite` makes a new one;

@@ -561,8 +561,8 @@ async fn contact_add_person_names_the_root_line() {
             .downcast_ref::<super::Usage>()
             .map(|usage| usage.0.clone()),
         Some(format!(
-            "saving alice takes a root key, not a machine's key\n  alice's swoosh status shows it as the key \
-             under \"your root\".\n  To save alice:\n    swoosh contact add alice root:<key>\n  To save this \
+            "saving alice takes a root key, not a machine's key\n  alice's swoosh status shows it on the line that starts \
+             root:.\n  To save alice:\n    swoosh contact add alice root:<key>\n  To save this \
              key as one of alice's machines instead:\n    swoosh contact add alice/<name> {key}"
         ))
     );

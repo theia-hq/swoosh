@@ -20,11 +20,13 @@ added alice/desk -> ed01hcq6balr…
 ```
 
 **Things to know.** The name's shape decides what is saved. `alice/laptop` is one machine: `swoosh ping
-alice/laptop` reaches it, and so does `swoosh ping alice` while it is the only machine of hers saved. `alice` alone saves her
-root, the key that vouches for her machines (typed bare or as `status` prints it, `root:ed01…`): `swoosh
-share ssh alice` makes a link all of them can use, and a root is never dialed. `contact rm` refuses while
+alice/laptop` reaches it, and so does `swoosh ping alice` while it is the only machine of hers saved. `alice`
+alone saves her root, typed `root:ed01…`: the line that starts `root:` in her `swoosh status`. `swoosh share
+ssh alice` makes a link her machines can use; a root is never dialed. swoosh can also learn her root from
+one of her machines you saved, and asks before saving it. `contact rm` refuses while
 links you shared with that contact are live; `swoosh revoke <name>` ends them. `swoosh status` lists your
-contacts. A saved name or key is never replaced: a different key refuses and names how to free the name.
+contacts. Replacing a person's saved root needs a terminal: you type the code shown, and the links you
+gave the old root end. A saved machine's key is never replaced; a different key names how to free the name.
 
 See also [`swoosh share`](share.md), [Commands index](../commands.md) and
 [Common options](../commands.md#common-options).

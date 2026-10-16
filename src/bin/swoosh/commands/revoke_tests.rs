@@ -1668,12 +1668,7 @@ fn revoke_a_root_refuses_a_name() {
     for typed in ["root:bob", "ROOT:bob", "root:me/laptop", "root:"] {
         let error = parse(&[typed]).expect_err("a root takes a key, never a name");
         assert_eq!(error.exit_code(), 2, "{typed}");
-        assert!(
-            error.to_string().contains(&format!(
-                "{typed} is not a root key; to see yours: swoosh status"
-            )),
-            "{error}"
-        );
+        assert!(error.to_string().contains("not a root key"), "{error}");
     }
     let error = parse(&["root"]).expect_err("`root` alone is the reserved name");
     assert_eq!(error.exit_code(), 2);

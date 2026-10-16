@@ -100,12 +100,9 @@ strip = true
 lto = true
 codegen-units = 1
 
-# noq-proto 1.3.0 never bounds how many out-of-order chunks one stream buffers, so a peer can make a
-# node hold gigabytes per connection with gapped stream frames (RUSTSEC-2026-0185 in quinn-proto,
-# which noq forks). n0-computer/noq#828 ports quinn's three fixes; this takes its head, pinned by full
-# hash, until n0 releases it. cargo honours a patch only at the workspace root, so bifrost's and
-# tightbeam's own patches do not reach this build. Drop this entry, and the matching `allow-git` line
-# in deny.toml, the day a noq-proto release carries #828; scripts/fork-watch.sh fails if the patch
-# goes before its row in scripts/fork-watch.txt says ported.
+# Use the pinned NoQ source for the advisory fixes recorded in scripts/fork-watch.txt.
+# Cargo applies this patch at the workspace root.
+# Before replacing it with a release, check every source-bound advisory row against that release.
+# Update the rows and deny.toml source exception with the patch.
 [patch.crates-io]
-noq-proto = { git = "https://github.com/n0-computer/noq", rev = "d7c3160a7e7b5cb36682eae04e364d3f50e28925" }
+noq-proto = { git = "https://github.com/theia-hq/noq", rev = "fda50f43b779082da3fc010515dfc0262eeba330" }

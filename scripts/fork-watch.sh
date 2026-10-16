@@ -12,14 +12,18 @@
 #
 #   <fork> <upstream> <advisory-id> ported <fork version>
 #   <fork> <upstream> <advisory-id> pinned <lock source>
+#   <fork> <upstream> <advisory-id> not-affected <git lock source>
 #   <fork> <upstream> -
 #
 # `ported`: the fix is in the fork's code at <fork version>, checked by reading that version. The
 # reading holds for that version only, so a lock that moves the fork to another version fails until
 # each row is read again and its version recorded. `pinned`: the fix is not in a release of the fork
-# yet, and the lock takes it from <lock source> (the exact `source =` string in Cargo.lock). A `-` row
-# names a fork whose upstream has no advisory today. A `#` that starts a line or follows a space
-# starts a comment (a lock source carries one of its own).
+# yet, and the lock takes it from <lock source> (the exact `source =` string in Cargo.lock).
+# `not-affected`: the reviewed source lacks the affected implementation. Its exact git lock source
+# must end in a full 40-hex commit hash and match every lock entry for the fork. Add an adjacent
+# comment linking the official advisory and source evidence; the script cannot prove that evidence.
+# A `-` row names a fork whose upstream has no advisory today. A `#` that starts a line or follows a
+# space starts a comment (a lock source carries one of its own).
 #
 # THE FORKS. FORKS below names every fork of an advisory-bearing crate we know of. Each one in the
 # lock must have rows, so deleting a fork's rows is a failure rather than a quiet exit from the watch.
@@ -27,7 +31,8 @@
 # IT FAILS when:
 #   (a) an advisory filed against an upstream in the list has no row for the fork,
 #   (b) a `pinned` row's fork resolves from any source but the recorded one (the patch was dropped
-#       or moved without a look at whether the release it moved to carries the fix),
+#       or moved without a look at whether the release it moved to carries the fix), or a
+#       `not-affected` row's fork resolves from a source other than the reviewed one,
 #   (c) a fork in the list is not in Cargo.lock (a stale row),
 #   (d) a row is malformed, or the list has no rows,
 #   (e) a row names an advisory the database does not file against its upstream (a misspelled
@@ -78,7 +83,10 @@ fi
 lock_entries() {
   awk -v want="$1" '
     function flush() { if (inpkg && name == want) print ver " " (src == "" ? "none" : src) }
-    /^\[/ { flush(); inpkg = ($0 == "[[package]]"); name = ""; ver = ""; src = ""; next }
+    /^[[:space:]]*\[/ {
+      flush(); inpkg = ($0 ~ /^[[:space:]]*\[\[[[:space:]]*package[[:space:]]*\]\][[:space:]]*(#.*)?$/)
+      name = ""; ver = ""; src = ""; next
+    }
     inpkg && /^name = / { name = $3; gsub(/"/, "", name) }
     inpkg && /^version = / { ver = $3; gsub(/"/, "", ver) }
     inpkg && /^source = / { src = $3; gsub(/"/, "", src) }
@@ -94,6 +102,9 @@ printf '%s\n' "$rows" | while read -r fork upstream id status value extra; do
   case "$id:$status" in
     -:) ;;
     RUSTSEC-*:ported | RUSTSEC-*:pinned) [ -n "$value" ] && [ -z "$extra" ] || exit 1 ;;
+    RUSTSEC-*:not-affected)
+      [ -n "$value" ] && [ -z "$extra" ] &&
+        printf '%s\n' "$value" | LC_ALL=C grep -Eq '^git\+[^#[:space:]]+#[0-9a-fA-F]{40}$' || exit 1 ;;
     *) exit 1 ;;
   esac
 done || bad "a row of $LIST is malformed; see the header of scripts/fork-watch.sh for the shape"
@@ -114,8 +125,8 @@ printf '%s\n' "$forks" | {
       if ! printf '%s\n' "$rows" | awk -v f="$fork" -v u="$upstream" -v i="$id" \
         '$1 == f && $2 == u && $3 == i { found = 1 } END { exit !found }'; then
         echo "fork-watch: $id is filed against $upstream and $fork has no row for it; read the fix" \
-          "against $fork's locked code and add a row (ported at that version, or pinned to the" \
-          "source carrying it)" >&2
+          "against $fork's locked code and add a ported, pinned, or not-affected row; see the" \
+          "header of scripts/fork-watch.sh for the required evidence and shape" >&2
         fail=1
       fi
     done
@@ -136,8 +147,10 @@ printf '%s\n' "$rows" | awk '$3 ~ /^RUSTSEC-/ { print $1 " " $2 " " $3 }' | {
   exit "$fail"
 } || fail=1
 
-# (b) each pin still holds, and (f) each reading still matches the locked version.
-printf '%s\n' "$rows" | awk '$4 == "pinned" || $4 == "ported" { print $1 " " $3 " " $4 " " $5 }' | {
+# (b) each source-bound row still holds, and (f) each ported reading matches the locked version.
+printf '%s\n' "$rows" | awk '$4 == "pinned" || $4 == "not-affected" || $4 == "ported" {
+  print $1 " " $3 " " $4 " " $5
+}' | {
   fail=0
   while read -r fork id status value; do
     entries=$(lock_entries "$fork")
@@ -149,6 +162,10 @@ printf '%s\n' "$rows" | awk '$4 == "pinned" || $4 == "ported" { print $1 " " $3 
           echo "fork-watch: $fork resolves from $source, but $id is pinned to $value; read the" \
             "fork at the version it moved to against $id, and record that version in a ported" \
             "row only if the fix is there, else restore the pin" >&2
+          fail=1
+        elif [ "$status" = not-affected ] && [ "$source" != "$value" ]; then
+          echo "fork-watch: $fork resolves from $source, but $id was reviewed as not-affected at" \
+            "$value; review the locked source against $id and update the row and evidence" >&2
           fail=1
         elif [ "$status" = ported ] && [ "$version" != "$value" ]; then
           echo "fork-watch: $fork is $version in the lock, but $id was read against $value; read" \
@@ -173,4 +190,4 @@ done
 if [ "$fail" -ne 0 ]; then
   exit 1
 fi
-echo "fork-watch: OK -- every upstream advisory has a row for its fork, every pin holds, and every reading matches the locked version."
+echo "fork-watch: OK -- every upstream advisory has a row for its fork, every source-bound row matches the lock, and every ported reading matches the locked version."

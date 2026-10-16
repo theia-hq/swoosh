@@ -92,7 +92,7 @@ impl AddCmd {
                 let person = name.petname();
                 Err(Usage(format!(
                     "saving {person} takes a root key, not a machine's key\n  {person}'s swoosh status shows \
-                     it as the key under \"your root\".\n  To save {person}:\n    swoosh contact add {person} \
+                     it on the line that starts root:.\n  To save {person}:\n    swoosh contact add {person} \
                      root:<key>\n  To save this key as one of {person}'s machines instead:\n    swoosh contact \
                      add {person}/<name> {key}"
                 ))

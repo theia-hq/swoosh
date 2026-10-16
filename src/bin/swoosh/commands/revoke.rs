@@ -122,9 +122,9 @@ fn target(text: &str) -> Result<Target, String> {
         return match text.parse::<RootKey>() {
             Ok(root) => Ok(Target::Root(root)),
             Err(RootKeyError::Unusable(unusable)) => Err(unusable.to_string()),
-            Err(RootKeyError::NotAKey(_) | RootKeyError::NoPrefix) => Err(format!(
-                "{text} is not a root key; to see yours: swoosh status"
-            )),
+            Err(RootKeyError::NotAKey(_) | RootKeyError::NoPrefix) => {
+                Err("not a root key".to_owned())
+            }
         };
     }
     if swoosh::peer::is_path(text) {
