@@ -30,23 +30,23 @@ test-support = []
 # locally regardless of the rev; CI (no parent config) resolves the rev from GitHub. All bifrost-* crates
 # live in one repo, so they share one rev. Bump these deliberately each release (see the reproducible-build
 # gate in .github/workflows/release.yml and the lock-regen step in notes/02-DECISIONS.md).
-bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
-bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
-bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
-bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
-bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
+bifrost = { git = "https://github.com/theia-hq/bifrost", rev = "88d097439e4b41d5c03d6ffa79c7aa51a658887b" }
+bifrost-iroh = { git = "https://github.com/theia-hq/bifrost", rev = "88d097439e4b41d5c03d6ffa79c7aa51a658887b" }
+bifrost-mdns = { git = "https://github.com/theia-hq/bifrost", rev = "88d097439e4b41d5c03d6ffa79c7aa51a658887b" }
+bifrost-noise = { git = "https://github.com/theia-hq/bifrost", rev = "88d097439e4b41d5c03d6ffa79c7aa51a658887b" }
+bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "88d097439e4b41d5c03d6ffa79c7aa51a658887b" }
 # The key file store, in its own repo, pinned to the commit that names its key kinds standard and strict
 # and lets a dependent build each touch-id error in its own tests.
 keystore = { git = "https://github.com/theia-hq/keystore", rev = "783c87527663b6465bd735a85cbc84551583a87e" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "a7c82bf58db5d54795b4a3c544da8ca7d2e0a81c" }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "de0b58d72f9a922358bed3b77c0942d50bbefdd3" }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "8730733fc3a1dab0e7c35519336aade5ea76fde1" }
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "f1a2ef67fdf84e7bb0cde264cdabde3bc14e2fc9" }
-measure = { git = "https://github.com/theia-hq/services", rev = "f1a2ef67fdf84e7bb0cde264cdabde3bc14e2fc9" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "f1a2ef67fdf84e7bb0cde264cdabde3bc14e2fc9", optional = true }
-transfer = { git = "https://github.com/theia-hq/services", rev = "f1a2ef67fdf84e7bb0cde264cdabde3bc14e2fc9" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "a288daac953c9d843a3930618b6d31398a2d9efa" }
+measure = { git = "https://github.com/theia-hq/services", rev = "a288daac953c9d843a3930618b6d31398a2d9efa" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "a288daac953c9d843a3930618b6d31398a2d9efa", optional = true }
+transfer = { git = "https://github.com/theia-hq/services", rev = "a288daac953c9d843a3930618b6d31398a2d9efa" }
 
 # The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
 # sending it.
@@ -78,7 +78,10 @@ swoosh = { path = ".", features = ["test-support"] }
 
 # The in-process transport the `gated_measure` proof drives: two mem nodes share a global registry, so a
 # client reaches the exposer by NodeId with no sockets, deterministically and in milliseconds.
-bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "3d1f79e84c7d8480896ef2d83120867de53a3726" }
+bifrost-mem = { git = "https://github.com/theia-hq/bifrost", rev = "88d097439e4b41d5c03d6ffa79c7aa51a658887b" }
+
+noq = { version = "1.3", default-features = false, features = ["rustls"] }
+rustls = { version = "0.23", default-features = false }
 
 # `test-util` gives the control-client deadline test tokio's paused clock, so the 5 s read bound is
 # asserted without a wall-clock wait. Dev-only: the shipped binary never compiles it in.
