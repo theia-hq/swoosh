@@ -550,21 +550,22 @@ async fn every_share_states_what_it_gives() {
         ),
         (
             vec!["db", "bob"],
-            "bob can reach db (localhost:5432 on this machine) until ".to_owned(),
+            "All of bob's machines can reach db (localhost:5432 on this machine) until ".to_owned(),
         ),
         (
             vec!["sock", "bob"],
-            "bob can reach sock (/run/db.sock on this machine) until ".to_owned(),
+            "All of bob's machines can reach sock (/run/db.sock on this machine) until ".to_owned(),
         ),
         (
             vec!["news", "bob"],
-            "bob can reach, through this machine, anything this machine can reach at \
+            "All of bob's machines can reach, through this machine, anything this machine can reach at \
              https://news.example, until "
                 .to_owned(),
         ),
+        // A key saved as a machine is named by its name.
         (
             vec!["ping", key.as_str()],
-            format!("{key} can use ping on this machine until "),
+            "bob/laptop can use ping on this machine until ".to_owned(),
         ),
     ] {
         let ran = share(&home, &args).await;
@@ -766,6 +767,25 @@ async fn share_to_a_person_whose_root_is_revoked_here_refuses() {
         "bob's root is revoked here, so a link for bob would not work"
     );
     assert!(ran.out.is_empty() && ran.err.is_empty(), "nothing prints");
+    assert!(rows(&home).await.is_empty(), "no row is written");
+}
+
+/// A root this machine revoked and has no name for gets no link either, and the refusal never prints its key.
+#[tokio::test]
+async fn share_to_a_revoked_unsaved_root_refuses_without_its_key() {
+    let home = scratch("revoked-unsaved-root").await;
+    let root = TestRoot::seeded(BOB_ROOT);
+    swoosh::revoked::add(
+        &swoosh::testkit::lock(),
+        &home,
+        [nauthy::Revocation::Key(root.verify_key())],
+    )
+    .unwrap();
+    let ran = share(&home, &["ssh", &format!("root:{}", root.node_id())]).await;
+    assert_eq!(
+        ran.refusal(),
+        "that root is revoked here, so a link for it would not work"
+    );
     assert!(rows(&home).await.is_empty(), "no row is written");
 }
 
@@ -1128,4 +1148,110 @@ async fn a_name_not_served_records_no_target() {
     share(&home, &["demo", "bob/laptop"]).await.made();
     let [row] = rows(&home).await.try_into().ok().unwrap();
     assert!(row.serves.is_none(), "nothing is recorded for demo");
+}
+
+/// The recipient keeps the kind its shape says: `root:ed01…` is a root, every machine of it; a bare key is one
+/// machine. The link each makes, and the row each records, follow that kind.
+#[tokio::test]
+async fn share_keeps_the_kind_it_parsed() {
+    let root = TestRoot::seeded(BOB_ROOT).node_id();
+    let typed = format!("root:{root}");
+    assert!(matches!(
+        parse(&["db", &typed]).unwrap().who,
+        Some(super::Recipient::Root(parsed)) if parsed.key() == root
+    ));
+    assert!(matches!(
+        parse(&["db", &root.to_string()]).unwrap().who,
+        Some(super::Recipient::Key(parsed)) if parsed == root
+    ));
+
+    let home = scratch("kind").await;
+    serving(&home, &["db=tcp:localhost:5432"]);
+    share(&home, &["db", &typed]).await.made();
+    share(&home, &["db", &root.to_string()]).await.made();
+    let kinds: Vec<GrantKind> = rows(&home).await.iter().map(|row| row.kind).collect();
+    assert_eq!(kinds, [GrantKind::Fleet, GrantKind::Device]);
+}
+
+/// A link for a root's key admits a device that root vouches for, presenting its badge, and no device of
+/// another root. Its line says it is for every machine of that root, the root alone under it; once the root is
+/// saved for a person, the line names the person.
+#[tokio::test]
+async fn share_to_a_root_key_binds_every_machine_of_that_root() {
+    let home = scratch("root-key").await;
+    serving(&home, &["db=tcp:localhost:5432"]);
+    let root = TestRoot::seeded(BOB_ROOT);
+    let typed = format!("root:{}", root.node_id());
+    let ran = share(&home, &["db", &typed]).await;
+    let link = ran.link();
+    let lines: Vec<&str> = ran.err.lines().collect();
+    assert!(
+        lines[0].starts_with(
+            "Every machine of this root can reach db (localhost:5432 on this machine) until "
+        ) && lines[0].ends_with(" (1h):"),
+        "{}",
+        ran.err
+    );
+    assert_eq!(lines[1], format!("  {typed}"));
+    let [row] = rows(&home).await.try_into().ok().unwrap();
+    assert_eq!(
+        row.holder,
+        root.node_id().to_string(),
+        "the row holds the bare key"
+    );
+
+    let gate = gate(&home, &["db=tcp:localhost:5432"]).await;
+    let until = SystemTime::now() + Duration::from_secs(3600);
+    let device = TestNode::seeded(0x23);
+    let badge = root.member_badge(device.verify_key(), until).unwrap();
+    assert!(matches!(
+        gate.admit_foreign(
+            ProvenPeer::from_handshake(device.verify_key()),
+            link.cap(),
+            &badge,
+            &"db".parse::<Service>().unwrap(),
+        ),
+        Decision::Admit
+    ));
+    let stranger = TestRoot::seeded(0x24)
+        .member_badge(device.verify_key(), until)
+        .unwrap();
+    assert!(!matches!(
+        gate.admit_foreign(
+            ProvenPeer::from_handshake(device.verify_key()),
+            link.cap(),
+            &stranger,
+            &"db".parse::<Service>().unwrap(),
+        ),
+        Decision::Admit
+    ));
+
+    with_bob(&home).await;
+    let named = share(&home, &["db", &typed]).await;
+    assert!(
+        named.err.starts_with(
+            "All of bob's machines can reach db (localhost:5432 on this machine) until "
+        ),
+        "{}",
+        named.err
+    );
+}
+
+/// A key no name here holds is said whole, alone under the line, so it can be compared.
+#[tokio::test]
+async fn a_share_to_an_unsaved_key_says_the_key_whole() {
+    let home = scratch("unsaved-key").await;
+    serving(&home, &["db=tcp:localhost:5432"]);
+    let key = TestNode::seeded(0x25).node_id();
+    let ran = share(&home, &["db", &key.to_string()]).await;
+    ran.made();
+    let lines: Vec<&str> = ran.err.lines().collect();
+    assert!(
+        lines[0].starts_with(
+            "The machine with this key can reach db (localhost:5432 on this machine) until "
+        ) && lines[0].ends_with(" (1h):"),
+        "{}",
+        ran.err
+    );
+    assert_eq!(lines[1], format!("  {key}"));
 }

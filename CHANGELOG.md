@@ -9,7 +9,7 @@ All notable changes to swoosh, newest first.
   Mac opens it; `swoosh root lock touch-id` adds the same lock beside your root's passphrase. `status`
   says whether each lock opens here.
 - **`revoke root:<key>` ends a root for good on the machine it runs on.** It needs a terminal and the
-  first six characters of the key typed back. Where the root is kept, it asks for the root's passphrase
+  8 characters after the key's `ed01` typed back. Where the root is kept, it asks for the root's passphrase
   and deletes the root; on one of its devices, the machine leaves it; anywhere else, this machine never
   trusts it.
 - **`share` makes a link to one service.** `swoosh share <service> <who>` makes one for a person (`bob`:
@@ -67,12 +67,11 @@ All notable changes to swoosh, newest first.
   the running services as they are.
 - **`share` replaces `grant`.** `grant issue` is `share <service> <who>`, and `grant narrow` is
   `share <link>`. A link for `anyone` can always be copied, so `--delegable` is gone.
-- **`contact add <person> <key>` saves that person's root.** A bare name (`alice`) saves the key that
-  vouches for her machines, which `share` binds a link to; one machine is `contact add alice/laptop
-  <key>`, and only a machine can be reached. `contact signet` is gone. A root may be typed as `status`
-  prints it, `root:ed01…`.
-- **`contact add` never replaces a saved key.** A different key under a saved name refuses, naming both
-  keys and the two commands that free the name; one key cannot be saved under two names.
+- **Root keys take the form `root:ed01…`.** `contact add <person>`, `serve --admit`, `share` and `revoke`
+  take a root in that form; a root is refused as a machine. `contact add alice/laptop <key>` saves one
+  machine. swoosh can learn a contact's root from their machines you saved and asks before saving it.
+  Replacing a saved root needs a code typed at a terminal and ends the links you gave the old root.
+  A saved machine's key is never replaced; one key cannot be saved under two names. `contact signet` is gone.
 - **`contact rm` refuses while links you shared with that contact are live.** It names the fix,
   `swoosh revoke <name>`.
 - **`revoke me/<name>` prints `revoked` only once your root has revoked the device.** If it cannot

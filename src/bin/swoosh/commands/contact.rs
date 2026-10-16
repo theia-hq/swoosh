@@ -11,10 +11,13 @@
 //! `me/` is not edited here: it lists this person's own devices, and their root decides it. `add` and
 //! `rm` refuse it and write nothing.
 
+use std::io::Write;
+
 use clap::Subcommand;
 use swoosh::contacts::ContactRef;
 use swoosh::home::Home;
 use swoosh::names::NameError;
+use swoosh::passphrase::Prompt;
 
 pub mod add;
 pub mod rm;
@@ -29,10 +32,16 @@ pub enum ContactCmd {
 }
 
 impl ContactCmd {
-    /// Run the selected contact verb against `home`'s book.
-    pub async fn run(self, home: &Home) -> eyre::Result<()> {
+    /// Run the selected contact verb against `home`'s book. Replacing a person's root asks at `prompt`, and
+    /// its lines go to `err`.
+    pub async fn run(
+        self,
+        home: &Home,
+        prompt: &mut impl Prompt,
+        err: &mut impl Write,
+    ) -> eyre::Result<()> {
         match self {
-            Self::Add(cmd) => cmd.run(home).await,
+            Self::Add(cmd) => cmd.run(home, prompt, err).await,
             Self::Rm(cmd) => cmd.run(home).await,
         }
     }

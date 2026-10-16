@@ -119,7 +119,8 @@ impl SshCmd {
         // UTF-8 locale; a link or its file path would put a credential or a file name in ssh's lines.
         let host = match &self.peer {
             Peer::Named(reference) => reference.to_string(),
-            Peer::Raw(_) | Peer::Capability { .. } => String::clone(&key),
+            // A root never resolves to a machine, so it never reaches here; its host would be the key.
+            Peer::Raw(_) | Peer::Capability { .. } | Peer::Root(_) => String::clone(&key),
         };
 
         let proxy = self_invocation()?;

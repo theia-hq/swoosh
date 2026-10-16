@@ -465,7 +465,7 @@ async fn a_fleet_bob_ssh_session_outlives_ten_sweeps() {
     let bob = TestRoot::seeded(0x52);
     swoosh(
         &scratch.0,
-        &["contact", "add", "bob", &bob.node_id().to_string()],
+        &["contact", "add", "bob", &format!("root:{}", bob.node_id())],
     );
     let link = issue(&scratch.0, &["demo", "bob"]);
     let node = dialer(0x45, &served).await;

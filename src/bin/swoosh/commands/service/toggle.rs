@@ -55,10 +55,10 @@ pub enum Slot {
     Machine(String),
 }
 
-/// The value parser: a `/` makes a machine, anything else meets the service name rule, so a dotted internal
-/// route (`control.stop`) is still refused at parse.
+/// The value parser: a `/` or a root's `root:` makes a machine, anything else meets the service name rule,
+/// so a dotted internal route (`control.stop`) is still refused at parse.
 fn slot(text: &str) -> Result<Slot, NameError> {
-    if text.contains('/') {
+    if is_machine(text) {
         return Ok(Slot::Machine(text.to_owned()));
     }
     swoosh::names::service(text).map(Slot::Service)
@@ -76,11 +76,17 @@ pub enum After {
 
 /// The value parser for the machine slot: total, so every text there reaches [`ServiceToggleCmd::here`].
 fn after(text: &str) -> Result<After, core::convert::Infallible> {
-    Ok(if text.contains('/') {
+    Ok(if is_machine(text) {
         After::Machine(text.to_owned())
     } else {
         After::Word
     })
+}
+
+/// Whether `text` is shaped like a machine: it holds a `/`, or it is a root's key (`root:ed01…`), which these
+/// refuse as any machine is refused, by the head alone, so the key is never printed back.
+fn is_machine(text: &str) -> bool {
+    text.contains('/') || swoosh::root_key::is_prefixed(text)
 }
 
 /// Which way a toggle turns its service.

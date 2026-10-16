@@ -3,8 +3,9 @@
 //!
 //! A verb resolves its peer to exactly one machine before anything binds ([`Peer::machine`]), so every
 //! reach here dials one key. [`dial`] connects for a verb that drives the raw session; [`dial_service`]
-//! connects for one whose every stream is gated through one service request. Both bound the attempt with
-//! [`DIAL_TIMEOUT`], so a wedged machine reads as unreachable rather than as a hang.
+//! connects for one whose every stream is gated through one service request, handing back the connector
+//! beside the session. Both bound the attempt with [`DIAL_TIMEOUT`], so a wedged machine reads as
+//! unreachable rather than as a hang.
 //!
 //! [`Peer::machine`]: crate::peer::Peer::machine
 
@@ -12,7 +13,7 @@ use core::time::Duration;
 
 use bifrost::{ConnInfo, Discovery, Node, NodeId, Path, Session, Transport};
 use nauthy::{Link, Service};
-use tightbeam::tunnel::{self, Connector, ServiceSession};
+use tightbeam::tunnel::{self, Connector};
 use tokio::io::AsyncReadExt as _;
 
 use crate::escape::{Escaped, causes, escaped_report};
@@ -51,9 +52,11 @@ pub async fn dial<T: Transport, D: Discovery>(
         .map_err(|error| hint(unreached(target, error), bound))
 }
 
-/// Connect to `machine`'s gated `service`, presenting `present` (the caller's membership badge or a link)
-/// and, for a signet-bound slip, `membership` in slot 2. The service handshake rides each stream later
-/// (the gate is per stream), so this bounds only reaching the machine, as [`dial`] does.
+/// Connect to `machine` for its gated `service`: the session and the connector every stream on it opens
+/// through, presenting `present` (the caller's membership badge or a link) and, for a signet-bound slip,
+/// `membership` in slot 2. The service handshake rides each stream later (the gate is per stream), so this
+/// bounds only reaching the machine, as [`dial`] does. The session is returned raw, so a second service
+/// can ride it beside the first.
 pub async fn dial_service<T: Transport, D: Discovery>(
     node: &Node<T, D>,
     machine: &Machine,
@@ -62,10 +65,10 @@ pub async fn dial_service<T: Transport, D: Discovery>(
     present: Option<Link>,
     membership: Option<Link>,
     bound: &transport::Bound,
-) -> eyre::Result<ServiceSession<T::Session>> {
-    connect_service(node, machine.key(), service, present, membership)
-        .await
-        .map_err(|error| hint(unreached(target, error), bound))
+) -> eyre::Result<(T::Session, Connector)> {
+    let session = dial(node, machine, target, bound).await?;
+    let connector = gated(machine.key(), Service::clone(service), present, membership);
+    Ok((session, connector))
 }
 
 /// The error for a machine the dial did not reach: the connect's cause chain under `could not reach
@@ -85,30 +88,6 @@ async fn connect<T: Transport, D: Discovery>(
         Ok(Err(error)) => {
             tracing::debug!(peer = %key, %error, "machine unreachable");
             Err(eyre::Report::new(error))
-        }
-        Err(_elapsed) => {
-            tracing::debug!(peer = %key, timeout = ?DIAL_TIMEOUT, "machine did not answer in time");
-            Err(eyre::eyre!(
-                "timed out after {DIAL_TIMEOUT:?} with no response"
-            ))
-        }
-    }
-}
-
-/// Open `key`'s gated `service` under the [`DIAL_TIMEOUT`], presenting `present` and `membership`.
-async fn connect_service<T: Transport, D: Discovery>(
-    node: &Node<T, D>,
-    key: NodeId,
-    service: &Service,
-    present: Option<Link>,
-    membership: Option<Link>,
-) -> eyre::Result<ServiceSession<T::Session>> {
-    let connector = gated(key, Service::clone(service), present, membership);
-    match tokio::time::timeout(DIAL_TIMEOUT, connector.open_service(node)).await {
-        Ok(Ok(session)) => Ok(session),
-        Ok(Err(error)) => {
-            tracing::debug!(peer = %key, %error, "machine unreachable");
-            Err(error)
         }
         Err(_elapsed) => {
             tracing::debug!(peer = %key, timeout = ?DIAL_TIMEOUT, "machine did not answer in time");

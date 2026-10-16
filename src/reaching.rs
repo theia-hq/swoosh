@@ -70,6 +70,10 @@ pub struct ReachCtx<'a> {
     /// The node home, for a verb that opens its OWN store (`fleet` writes contacts; a write, unlike the
     /// read-only `contacts` the reach verbs share) or reads a trust file (its signet).
     pub home: &'a Home,
+    /// The signal a verb that may teach a root gives when its first stream is admitted
+    /// ([`Admitted::watch`](crate::learn::Admitted::watch) on its session): the question, on that session,
+    /// of which root vouches for the machine, for the composition root to ask. Unheard for every other verb.
+    pub admitted: crate::learn::Admitted,
 }
 
 /// A verb that reaches a peer over a transport, stating how it authenticates and how it runs.
@@ -121,6 +125,7 @@ pub trait Reaching {
     ) -> impl Future<Output = eyre::Result<()>>
     where
         Self: Sized,
+        T::Session: 'static,
         <T::Session as Session>::Write: Send + 'static,
         <T::Session as Session>::Read: Send + 'static;
 }

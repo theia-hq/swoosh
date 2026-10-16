@@ -35,8 +35,8 @@ use swoosh::{credential, reaching, transport};
 // The verb modules this binary dispatches to, each its own tree beside the composition root. The
 // library (`swoosh::`) keeps only the node engine and the domain modules the verbs drive.
 use crate::commands::{
-    contact, forward, invite, join, leave, lock, ping, proxy, revoke, root, send, serve, service,
-    share, speed, ssh, status, stop, sync, tree,
+    contact, forward, invite, join, learning, leave, lock, ping, proxy, revoke, root, send, serve,
+    service, share, speed, ssh, status, stop, sync, tree,
 };
 
 mod commands;
@@ -206,6 +206,7 @@ macro_rules! reaching_verbs {
                 ctx: reaching::ReachCtx<'_>,
             ) -> eyre::Result<()>
             where
+                T::Session: 'static,
                 <T::Session as bifrost::Session>::Write: Send + 'static,
                 <T::Session as bifrost::Session>::Read: Send + 'static,
             {
@@ -340,6 +341,29 @@ enum Verb {
 }
 
 impl Outward {
+    /// Whether a dial of this verb may teach the machine's root: `ping`, `speed`, `status <machine>` and
+    /// `send`, under this home's own key, where the answer can be told once the verb has printed. Never
+    /// `forward` (the ssh bridge among its uses: its stderr is ssh's, and ssh ends it at the session's end),
+    /// `proxy`, a link to anyone's throwaway key, or a verb that dials your own devices itself.
+    fn teaches_root(&self) -> bool {
+        let verb = match self {
+            Self::Ping(_) | Self::Speed(_) | Self::Status(_) | Self::Send(_) => true,
+            Self::Serve(_)
+            | Self::Proxy(_)
+            | Self::Forward(_)
+            | Self::Stop(_)
+            | Self::Sync(_)
+            | Self::Invite(_)
+            | Self::Join(_)
+            | Self::Revoke(_)
+            | Self::RootRestore(_) => false,
+        };
+        verb && matches!(
+            self.bind_role(),
+            BindRole::Dialing(credential::Credential::Family { .. })
+        )
+    }
+
     /// Claim the home for a `serve` (a no-op for every other verb): its lock and control socket, and the
     /// services it starts with, taken before anything else is opened, written or bound.
     async fn claim(self, home: &Home) -> eyre::Result<Self> {
@@ -461,7 +485,9 @@ async fn main() -> std::process::ExitCode {
 /// Parse `argv`. A `forward` missing only its local end is refused with [`forward::NO_LOCAL_END`], which says
 /// what `-` means where clap's own required-argument line shows only the metavar; a `stop` given more than
 /// one machine is refused with [`stop::ONE_MACHINE`], and one given a link or a path with
-/// [`stop::A_LINK_STOPS_NOTHING`]. Every other error is clap's own. Refused here, at parse, so nothing is
+/// [`stop::A_LINK_STOPS_NOTHING`]; an `invite` given a root's key for the device's is refused with
+/// [`invite::ROOT_IS_NO_MACHINE`], and a `serve --admit` given a machine's key with
+/// [`serve::ADMIT_TAKES_A_ROOT`]. Every other error is clap's own. Refused here, at parse, so nothing is
 /// read, opened or bound first, the home included.
 fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
 where
@@ -502,6 +528,25 @@ where
                 }
                 Err(_) => Err(error),
             }
+        }
+        // A machine's key typed to `serve --admit`, refused here rather than in clap's frame, which would
+        // echo the key.
+        Err(error)
+            if core::error::Error::source(&error)
+                .is_some_and(|cause| cause.is::<serve::MachineAdmitted>()) =>
+        {
+            Err(usage(&["serve"], serve::ADMIT_TAKES_A_ROOT))
+        }
+        // A root's key where `invite`'s machine key goes, refused here, before anything binds, with no echo
+        // of the key.
+        Ok(Cli {
+            command:
+                Some(Command::Invite(invite::InviteCmd {
+                    key: Some(ref key), ..
+                })),
+            ..
+        }) if swoosh::root_key::is_prefixed(key) => {
+            Err(usage(&["invite"], invite::ROOT_IS_NO_MACHINE))
         }
         // A link or a path where `stop`'s machine goes, refused here with no echo of what was typed, so a
         // pasted link's token is never printed back.
@@ -705,7 +750,14 @@ async fn run() -> eyre::Result<()> {
         // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save. A root
         // key given for a machine is found only once `contact add` runs, and exits 2, as clap's own do.
         Verb::Contact(cmd) => {
-            return match cmd.run(&home).await {
+            let done = cmd
+                .run(
+                    &home,
+                    &mut swoosh::passphrase::Terminal,
+                    &mut std::io::stderr(),
+                )
+                .await;
+            return match done {
                 Err(report) => match report.downcast_ref::<contact::add::Usage>() {
                     Some(usage) => usage_error(&["contact", "add"], &usage.0),
                     None => Err(report),
@@ -932,6 +984,7 @@ async fn run() -> eyre::Result<()> {
         present,
         membership,
         home: &home,
+        admitted: swoosh::learn::Admitted::unheard(),
     };
     // Each transport bind borrows the seed through `with_bytes` and returns a future that holds only
     // what it derived, so the seed never leaves its wiping owner.
@@ -1047,13 +1100,19 @@ async fn stale_device(home: &Home, machine: &Machine) -> Option<bifrost::NodeId>
 /// it dials (through `dial`). The exchange never waits for the verb, never depends on it succeeding, and
 /// ends with it: whatever the exchange has not finished when the verb returns is dropped, before the node
 /// closes. It is never printed; a failure logs at debug.
+///
+/// Beside it too, once the verb's first stream is admitted and never ahead of it, a verb that may teach a
+/// root asks the machine which root vouches for it ([`swoosh::learn`]), on the verb's own session and
+/// within [`swoosh::learn::DEADLINE`] of asking: a machine that never answers is dropped silently. What it
+/// showed comes back beside the verb's result, to be told once the node is closed.
 async fn run_verb<T: Transport, D: Discovery>(
     outward: Outward,
     node: &Node<T, D>,
-    ctx: reaching::ReachCtx<'_>,
+    mut ctx: reaching::ReachCtx<'_>,
     dial: &impl swoosh::sync::Dial,
-) -> eyre::Result<()>
+) -> (eyre::Result<()>, Option<swoosh::learn::Shown>)
 where
+    T::Session: 'static,
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
@@ -1064,16 +1123,39 @@ where
         }
         _ => None,
     };
-    let verb = outward.run(node, ctx);
-    let Some(device) = device else {
-        return verb.await;
+    let asked = ctx
+        .machine
+        .filter(|_| outward.teaches_root())
+        .and_then(swoosh::learn::Asked::of);
+    let heard = asked.as_ref().map(|_| {
+        let (admitted, heard) = swoosh::learn::Admitted::new();
+        ctx.admitted = admitted;
+        heard
+    });
+    let lookup = async {
+        let (Some(asked), Some(heard)) = (&asked, heard) else {
+            return None;
+        };
+        // Unsent when the verb ended with no stream admitted: then nothing is asked.
+        let question = heard.await.ok()?;
+        let standing = tokio::time::timeout(swoosh::learn::DEADLINE, question)
+            .await
+            .ok()
+            .flatten()?;
+        asked.taught(&standing)
     };
-    let exchange = swoosh::sync::once(dial, device);
-    tokio::pin!(verb, exchange);
-    tokio::select! {
-        biased;
-        _ = &mut exchange => verb.await,
-        result = &mut verb => result,
+    let verb = async { tokio::join!(outward.run(node, ctx), lookup) };
+    match device {
+        None => verb.await,
+        Some(device) => {
+            let exchange = swoosh::sync::once(dial, device);
+            tokio::pin!(verb, exchange);
+            tokio::select! {
+                biased;
+                _ = &mut exchange => verb.await,
+                done = &mut verb => done,
+            }
+        }
     }
 }
 
@@ -1083,6 +1165,9 @@ where
 /// without an awaited close, so a verb that binds iroh must close it before the node drops (quirk's close is
 /// a no-op). One owner of teardown, so no verb re-implements it; `serve`'s own graceful-drain still returns
 /// first, and this is the single close that follows it.
+///
+/// A root the machine showed is told after the close: a question at the terminal can wait on the person
+/// for as long as they take, and nothing is held open meanwhile.
 async fn run_and_close<T: Transport, D: Discovery>(
     outward: Outward,
     node: &Node<T, D>,
@@ -1090,22 +1175,34 @@ async fn run_and_close<T: Transport, D: Discovery>(
     renew: Option<Renew<'_>>,
 ) -> eyre::Result<()>
 where
+    T::Session: 'static,
     <T::Session as bifrost::Session>::Write: Send + 'static,
     <T::Session as bifrost::Session>::Read: Send + 'static,
 {
     let home = ctx.home;
-    let result = async {
+    let (result, shown) = async {
         if let Some(renew) = renew {
             let fetch = swoosh::renewal::NodeFetch::new(node);
             reaching::renew_before_dial(home, &fetch, &mut std::io::stderr()).await;
-            (ctx.present, ctx.membership) = reaching::resolve(renew.credential, renew.secret, home)
-                .await?
-                .into_slots();
+            match reaching::resolve(renew.credential, renew.secret, home).await {
+                Ok(resolved) => (ctx.present, ctx.membership) = resolved.into_slots(),
+                Err(error) => return (Err(error), None),
+            }
         }
         run_verb(outward, node, ctx, &swoosh::sync::NodeDial::new(node, home)).await
     }
     .await;
     node.close().await;
+    if let Some(shown) = shown {
+        learning::tell(
+            home,
+            &shown,
+            learning::Asking::here(),
+            &mut swoosh::passphrase::Terminal,
+            &mut std::io::stderr(),
+        )
+        .await;
+    }
     result
 }
 
@@ -1123,6 +1220,9 @@ struct Renew<'a> {
 #[cfg(test)]
 #[path = "bearer_dial_tests.rs"]
 mod bearer_dial_tests;
+#[cfg(test)]
+#[path = "learn_root_tests.rs"]
+mod learn_root_tests;
 #[cfg(test)]
 #[path = "machine_args_tests.rs"]
 mod machine_args_tests;

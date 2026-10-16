@@ -1884,7 +1884,8 @@ impl Running {
         Some(
             menu.catalog
                 .entries()
-                .filter(|entry| !entry.name.starts_with("control."))
+                // The node's own routes (`control.*`, `lookup.*`) are dotted; a person's services never are.
+                .filter(|entry| !entry.name.contains('.'))
                 .map(|entry| (entry.name.clone(), entry.posture))
                 .collect(),
         )
@@ -4049,6 +4050,27 @@ fn serve_admit_takes_one_root_key() {
         ])
         .is_err(),
         "one key, not repeated"
+    );
+}
+
+/// `--admit` with a bare key, a machine's, refuses at parse, exit 2, and never prints the key back: admitting
+/// one machine's devices means nothing.
+#[test]
+fn admit_refuses_a_machine_key() {
+    let key = swoosh::testkit::TestNode::seeded(0x21)
+        .node_id()
+        .to_string();
+    let error = crate::parse_from(["swoosh", "serve", "--admit", &key])
+        .expect_err("a machine's key refuses");
+    assert_eq!(error.exit_code(), 2);
+    let printed = error.to_string();
+    assert!(
+        printed.starts_with("error: --admit takes a root key, not a machine's key\n"),
+        "{printed}"
+    );
+    assert!(
+        !printed.contains(&key),
+        "the key is never echoed: {printed}"
     );
 }
 

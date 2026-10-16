@@ -11,8 +11,9 @@
 use std::ffi::OsString;
 
 use nauthy::Service;
-use swoosh::peer::{Kind, Machine, MachineError};
+use swoosh::peer::{Kind, Machine, MachineError, Whose};
 use swoosh::reach::Diagnosis;
+use swoosh::root_key::RootKey;
 
 use crate::commands::stop;
 
@@ -80,10 +81,53 @@ pub fn usage(error: &MachineError, verb: &str, argv: &[OsString], typed: &str) -
         }
         MachineError::YourDevice { device } => format!(
             "name the machine:\n  {}",
-            retyped(argv, verb, typed, &device.to_string())
+            retyped(
+                argv,
+                verb,
+                |word| word.eq_ignore_ascii_case(typed),
+                &device.to_string()
+            )
         ),
+        MachineError::Root { whose } => root_key(whose, verb, argv),
         MachineError::Link(_) => return None,
     })
+}
+
+/// The refusal for a root's key typed where a machine goes, never echoing the key: whose root it is and
+/// their machines when this book knows; else the command as typed with the root replaced by the shape a
+/// machine takes.
+fn root_key(whose: &Whose, verb: &str, argv: &[OsString]) -> String {
+    match whose {
+        Whose::Yours { devices } => format!(
+            "that is your root key, not a machine's key\n  {}",
+            stop::listed(devices)
+        ),
+        Whose::Person { person, machines } if machines.is_empty() => format!(
+            "that is {person}'s root key, not a machine's key\n{}",
+            save_one(person.as_str(), "<name>")
+        ),
+        Whose::Person { person, machines } => {
+            let listed: Vec<String> = machines
+                .iter()
+                .map(|label| format!("{person}/{label}"))
+                .collect();
+            format!(
+                "that is {person}'s root key, not a machine's key\n  {person}'s: {}.",
+                listed.join(", ")
+            )
+        }
+        // The argument is found by what it is, a root's key, never by its text, so no spelling of it is
+        // left in the line.
+        Whose::Unknown => format!(
+            "that is a root key, not a machine's key; name one of its machines:\n  {}",
+            retyped(
+                argv,
+                verb,
+                |word| word.parse::<RootKey>().is_ok(),
+                "<person>/<name>"
+            )
+        ),
+    }
 }
 
 /// The detail under a refusal for a person with no machine saved: save one, with the command whose
@@ -98,9 +142,15 @@ fn save_one(person: &str, machine: &str) -> String {
 /// The command line as typed, with only the machine replaced: `swoosh`, then every argument as typed,
 /// global flags included (so the fix runs on the same home), each shell-quoted only when it needs it.
 ///
-/// The machine is the argument after the verb that reads as `typed`: the first such for every verb but
-/// `send`, whose machine comes after its paths and is the last.
-fn retyped(argv: &[OsString], verb: &str, typed: &str, replacement: &str) -> String {
+/// The machine is the argument after the verb that `is_machine` picks: the first such for every verb but
+/// `send`, whose machine comes after its paths and is the last. The replacement is this binary's own
+/// (`me/nas`, `<person>/<name>`), so it goes in as it is, never quoted.
+fn retyped(
+    argv: &[OsString],
+    verb: &str,
+    is_machine: impl Fn(&str) -> bool,
+    replacement: &str,
+) -> String {
     let words: Vec<String> = argv
         .iter()
         .skip(1)
@@ -114,7 +164,7 @@ fn retyped(argv: &[OsString], verb: &str, typed: &str, replacement: &str) -> Str
         .iter()
         .enumerate()
         .skip(after_verb)
-        .filter(|(_, word)| word.eq_ignore_ascii_case(typed))
+        .filter(|(_, word)| is_machine(word))
         .map(|(at, _)| at);
     let machine = if verb == "send" {
         matches.next_back()
@@ -124,11 +174,11 @@ fn retyped(argv: &[OsString], verb: &str, typed: &str, replacement: &str) -> Str
     let mut line = String::from("swoosh");
     for (at, word) in words.iter().enumerate() {
         line.push(' ');
-        line.push_str(&quoted(if Some(at) == machine {
-            replacement
+        if Some(at) == machine {
+            line.push_str(replacement);
         } else {
-            word
-        }));
+            line.push_str(&quoted(word));
+        }
     }
     line
 }

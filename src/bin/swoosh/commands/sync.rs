@@ -5,7 +5,8 @@
 //! newest to any that lacks it, asking again any device it had asked before a take. It prints one report on stdout. It takes no argument, and runs only on a device of a
 //! root, one that holds it or not. When your devices refuse this machine because its standing has ended
 //! or was revoked here, it picks up its renewal from one of them ([`swoosh::renewal`]), says so, and
-//! exchanges again.
+//! exchanges again. Then it asks each saved machine of a person with no root saved which root vouches for
+//! it, and offers that root once per person ([`swoosh::learn`]).
 
 use core::time::Duration;
 
@@ -17,6 +18,8 @@ use swoosh::renewal::{NodeFetch, PickUp, Renewed};
 use swoosh::standing::{Standing, StandingError};
 use swoosh::sync::{Answer, NodeDial, Reply, Until};
 use swoosh::transport::ReachArgs;
+
+use crate::commands::learning;
 
 /// How long `sync` spends on all your devices together.
 const TOTAL: Duration = Duration::from_secs(20);
@@ -78,6 +81,7 @@ impl swoosh::reaching::Reaching for SyncCmd {
             PickUp::Missed => {
                 let label = swoosh::renewal::own_label(ctx.home).await;
                 println!("{}", missed(label.as_ref()));
+                learn_roots(node, ctx.home).await;
                 return Ok(());
             }
         }
@@ -86,8 +90,31 @@ impl swoosh::reaching::Reaching for SyncCmd {
             .map(|(device, reply)| (device.name, Row::of(reply)))
             .collect();
         print!("{}", report(&rows));
+        learn_roots(node, ctx.home).await;
         Ok(())
     }
+}
+
+/// After `sync`'s own lines: ask each saved machine of a person with no root saved which root vouches for
+/// it ([`swoosh::learn::sweep`]), and tell the person once per person, in name order. Silent for a machine
+/// that does not answer; never a failure of `sync`.
+async fn learn_roots<T: Transport, D: Discovery>(node: &Node<T, D>, home: &Home) {
+    let machines = match swoosh::contacts::ContactsStore::open(home).await {
+        Ok(store) => swoosh::learn::unrooted(store.contacts()),
+        Err(error) => {
+            tracing::debug!(%error, "the book could not be read to ask for roots");
+            return;
+        }
+    };
+    let shown = swoosh::learn::sweep(node, machines).await;
+    learning::tell_each(
+        home,
+        &shown,
+        learning::Asking::here(),
+        &mut swoosh::passphrase::Terminal,
+        &mut std::io::stderr(),
+    )
+    .await;
 }
 
 /// The line `sync` prints when it took this machine's renewal from one of your devices.

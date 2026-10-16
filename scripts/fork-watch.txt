@@ -6,8 +6,41 @@
 noq-proto          quinn-proto   RUSTSEC-2023-0063  ported  1.3.0
 noq-proto          quinn-proto   RUSTSEC-2024-0373  ported  1.3.0
 noq-proto          quinn-proto   RUSTSEC-2026-0037  ported  1.3.0
-# Fixed by n0-computer/noq#828, not yet in a noq-proto release; Cargo.toml patches it in. When a
-# release carries it (read it to know), drop the patch and mark this row ported at that version.
-noq-proto          quinn-proto   RUSTSEC-2026-0185  pinned git+https://github.com/n0-computer/noq?rev=d7c3160a7e7b5cb36682eae04e364d3f50e28925#d7c3160a7e7b5cb36682eae04e364d3f50e28925
+# Retains the stream reassembly chunk-count limit and compaction guard.
+# Advisory: https://github.com/rustsec/advisory-db/blob/edb58f5974b83eb8302332821cb6d389777aa351/crates/quinn-proto/RUSTSEC-2026-0185.md
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/assembler.rs#L199-L225
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/assembler.rs#L363-L379
+noq-proto          quinn-proto   RUSTSEC-2026-0185  pinned git+https://github.com/theia-hq/noq?rev=fda50f43b779082da3fc010515dfc0262eeba330#fda50f43b779082da3fc010515dfc0262eeba330
+# Unordered assembly uses ArrayRangeSet, which rejects empty insertions.
+# The disclosed Replace::drop mechanism is absent from this source.
+# Advisory: https://github.com/rustsec/advisory-db/blob/edb58f5974b83eb8302332821cb6d389777aa351/crates/quinn-proto/RUSTSEC-2026-0338.md
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/range_set/array_range_set.rs#L120-L126
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/assembler.rs#L170-L188
+noq-proto          quinn-proto   RUSTSEC-2026-0338  not-affected git+https://github.com/theia-hq/noq?rev=fda50f43b779082da3fc010515dfc0262eeba330#fda50f43b779082da3fc010515dfc0262eeba330
+# Checks aggregate capacity before queuing peer-requested connection ID retirements.
+# Advisory: https://github.com/rustsec/advisory-db/blob/edb58f5974b83eb8302332821cb6d389777aa351/crates/quinn-proto/RUSTSEC-2026-0339.md
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/spaces.rs#L609-L625
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/mod.rs#L5188-L5205
+noq-proto          quinn-proto   RUSTSEC-2026-0339  pinned git+https://github.com/theia-hq/noq?rev=fda50f43b779082da3fc010515dfc0262eeba330#fda50f43b779082da3fc010515dfc0262eeba330
+# Applies the peer minimum ACK delay after the automatic maximum without an inverted clamp.
+# Advisory: https://github.com/rustsec/advisory-db/blob/edb58f5974b83eb8302332821cb6d389777aa351/crates/quinn-proto/RUSTSEC-2026-0340.md
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/ack_frequency.rs#L44-L51
+noq-proto          quinn-proto   RUSTSEC-2026-0340  pinned git+https://github.com/theia-hq/noq?rev=fda50f43b779082da3fc010515dfc0262eeba330#fda50f43b779082da3fc010515dfc0262eeba330
+# Empty residual data still reaches the chunk-count guard; STREAM and CRYPTO propagate rejection.
+# Advisory: https://github.com/rustsec/advisory-db/blob/edb58f5974b83eb8302332821cb6d389777aa351/crates/quinn-proto/RUSTSEC-2026-0341.md
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/assembler.rs#L199-L225
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/streams/recv.rs#L81-L84
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/mod.rs#L4087-L4090
+noq-proto          quinn-proto   RUSTSEC-2026-0341  pinned git+https://github.com/theia-hq/noq?rev=fda50f43b779082da3fc010515dfc0262eeba330#fda50f43b779082da3fc010515dfc0262eeba330
+# Receive admission charges payload bytes and initialized records, including empty datagrams.
+# Advisory: https://github.com/rustsec/advisory-db/blob/edb58f5974b83eb8302332821cb6d389777aa351/crates/quinn-proto/RUSTSEC-2026-0342.md
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/datagrams.rs#L302-L338
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/datagrams.rs#L207-L217
+noq-proto          quinn-proto   RUSTSEC-2026-0342  pinned git+https://github.com/theia-hq/noq?rev=fda50f43b779082da3fc010515dfc0262eeba330#fda50f43b779082da3fc010515dfc0262eeba330
+# Queue removal subtracts payload once; outgoing eviction performs no second subtraction.
+# Advisory: https://github.com/rustsec/advisory-db/blob/edb58f5974b83eb8302332821cb6d389777aa351/crates/quinn-proto/RUSTSEC-2026-0343.md
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/datagrams.rs#L354-L368
+# Source: https://github.com/theia-hq/noq/blob/fda50f43b779082da3fc010515dfc0262eeba330/noq-proto/src/connection/datagrams.rs#L220-L226
+noq-proto          quinn-proto   RUSTSEC-2026-0343  pinned git+https://github.com/theia-hq/noq?rev=fda50f43b779082da3fc010515dfc0262eeba330#fda50f43b779082da3fc010515dfc0262eeba330
 noq                quinn         RUSTSEC-2021-0035  ported  1.3.0
 noq-udp            quinn-udp     -

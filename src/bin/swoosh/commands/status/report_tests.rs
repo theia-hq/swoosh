@@ -1395,3 +1395,50 @@ async fn a_touch_id_only_key_beside_a_root_is_nagged() {
         "{out}"
     );
 }
+
+/// A learned root's row in `contacts` names the machine it was learned from; a typed root's says nothing more.
+/// No row carries a kind word: the key's shape says it.
+#[test]
+fn status_marks_a_learned_root() {
+    let mut contacts = swoosh::contacts::Contacts::default();
+    let alice = "alice".parse().expect("a name");
+    contacts.add(
+        "alice".parse().expect("a name"),
+        Some("laptop".parse().expect("a name")),
+        TestNode::seeded(LAPTOP).node_id(),
+    );
+    let learned = TestRoot::seeded(0x71).node_id();
+    contacts
+        .learn(&alice, learned, "laptop".parse().expect("a name"))
+        .expect("an empty slot");
+    contacts.set_signet(
+        "bob".parse().expect("a name"),
+        TestRoot::seeded(0x72).node_id(),
+    );
+    let section = super::contacts_section(&contacts);
+    let rows: Vec<&[String; 4]> = section.rows.iter().collect();
+    assert_eq!(
+        rows[0],
+        &[
+            "alice".to_owned(),
+            format!("root:{}", swoosh::credential::short(&learned)),
+            "learned from alice/laptop".to_owned(),
+            String::new(),
+        ]
+    );
+    assert_eq!(
+        rows[1],
+        &[
+            "alice/laptop".to_owned(),
+            swoosh::credential::short(&TestNode::seeded(LAPTOP).node_id()),
+            String::new(),
+            String::new(),
+        ],
+        "a machine's row is its name and key"
+    );
+    let bob = rows
+        .iter()
+        .find(|row| row[0] == "bob")
+        .expect("bob's root is listed");
+    assert_eq!(bob[2..], ["", ""], "a typed root carries no mark");
+}
