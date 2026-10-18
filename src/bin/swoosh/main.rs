@@ -996,33 +996,9 @@ async fn run() -> eyre::Result<()> {
         // role picks the n0 constructor (serving publishes the address record, dialing does not);
         // `--local` keeps the same arm and swaps in the persisted key with no n0, no relays.
         transport::Transport::Iroh => {
-            let endpoint = match IrohBind::of(local, &bind_role) {
-                IrohBind::Reachable => {
-                    secret
-                        .with_bytes(|seed| {
-                            bifrost_iroh::Endpoint::bind_reachable_with_secret_via(
-                                seed,
-                                transport::Reach::clone(&bound.reach),
-                            )
-                        })
-                        .await?
-                }
-                IrohBind::Dialing => {
-                    secret
-                        .with_bytes(|seed| {
-                            bifrost_iroh::Endpoint::bind_dialing_with_secret_via(
-                                seed,
-                                transport::Reach::clone(&bound.reach),
-                            )
-                        })
-                        .await?
-                }
-                IrohBind::Local => {
-                    secret
-                        .with_bytes(bifrost_iroh::Endpoint::bind_local_with_secret)
-                        .await?
-                }
-            };
+            let endpoint = IrohBind::of(local, &bind_role)
+                .bind(&secret, transport::Reach::clone(&bound.reach))
+                .await?;
             let composed = PeerHint::discovery(&endpoint, peers, &bind_role);
             let node = Node::new(endpoint, composed.discovery);
             let reach = reach.attach_bound_reach(&bound.reach);
@@ -1071,6 +1047,34 @@ enum IrohBind {
 }
 
 impl IrohBind {
+    async fn bind(
+        self,
+        secret: &swoosh::identity::Secret,
+        reach: transport::Reach,
+    ) -> Result<bifrost_iroh::Endpoint, bifrost_iroh::BindError> {
+        match self {
+            Self::Reachable => {
+                secret
+                    .with_bytes(|seed| {
+                        bifrost_iroh::Endpoint::bind_reachable_with_secret_via(seed, reach)
+                    })
+                    .await
+            }
+            Self::Dialing => {
+                secret
+                    .with_bytes(|seed| {
+                        bifrost_iroh::Endpoint::bind_dialing_with_secret_via(seed, reach)
+                    })
+                    .await
+            }
+            Self::Local => {
+                secret
+                    .with_bytes(bifrost_iroh::Endpoint::bind_local_with_secret)
+                    .await
+            }
+        }
+    }
+
     /// Map the `--local` bit and the verb's [`BindRole`] to the constructor they select. `--local` wins:
     /// it removes n0 entirely, so there is no discovery to resolve and no record to write either way.
     fn of(local: bool, role: &BindRole) -> Self {
@@ -1220,6 +1224,9 @@ struct Renew<'a> {
 #[cfg(test)]
 #[path = "bearer_dial_tests.rs"]
 mod bearer_dial_tests;
+#[cfg(test)]
+#[path = "iroh_group_tests.rs"]
+mod iroh_group_tests;
 #[cfg(test)]
 #[path = "learn_root_tests.rs"]
 mod learn_root_tests;
