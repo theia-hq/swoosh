@@ -3012,24 +3012,20 @@ fn a_bare_serve_serves_the_update_route() {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = KillOnDrop(command.spawn().expect("the resident serve spawns"));
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while !socket.exists() {
-            if let Some(status) = child.0.try_wait().expect("poll the resident") {
-                panic!("the {standing} serve exited before binding its socket: {status}");
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the {standing} serve never bound its socket"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        let stream = runtime
+            .block_on(catalog_stream(&socket, deadline, || {
+                if let Some(status) = child.0.try_wait()? {
+                    return Err(io::Error::other(format!(
+                        "the {standing} serve exited before accepting its socket: {status}"
+                    )));
+                }
+                Ok(())
+            }))
+            .expect("the resident control listener becomes reachable");
         let reply = runtime
             .block_on(async {
-                tokio::time::timeout(
-                    Duration::from_secs(10),
-                    control_round_trip(&socket, Request::Services),
-                )
-                .await
+                tokio::time::timeout(Duration::from_secs(10), catalog_reply(stream)).await
             })
             .expect("the catalog round-trip is bounded")
             .expect("the catalog round-trip answers");
@@ -3164,6 +3160,422 @@ fn run_binary_with_deadline(command: &mut Command, deadline: Duration) -> std::p
             "the product binary did not exit within {deadline:?}"
         );
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Startup acquisition ends at one successful connect; protocol exchange is never retried.
+async fn catalog_stream(
+    socket: &Path,
+    deadline: tokio::time::Instant,
+    mut alive: impl FnMut() -> io::Result<()>,
+) -> io::Result<tokio::net::UnixStream> {
+    // The deadline bounds pending connects and the retry cadence, not just completed refusals.
+    tokio::time::timeout_at(deadline, async {
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            alive()?;
+            match tokio::net::UnixStream::connect(socket).await {
+                Ok(stream) => return Ok(stream),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))?
+}
+
+/// The acquired stream is consumed once, so an exchange cannot reacquire or reuse a failed stream.
+async fn catalog_reply(mut stream: tokio::net::UnixStream) -> Result<Response, ControlError> {
+    Request::Services
+        .write(&mut stream)
+        .await
+        .map_err(ControlError::Io)?;
+    Response::read(&mut stream).await
+}
+
+/// Own a filesystem socket before listen, exposing the kernel transition without a timing guess.
+struct BoundCatalogSocket(std::os::fd::OwnedFd);
+
+impl BoundCatalogSocket {
+    fn bind(path: &Path) -> Self {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        // SAFETY: sockaddr_un is plain C integer/byte data; zero initializes its padding and the
+        // pathname terminator. The family and pathname are filled before the kernel reads it.
+        let mut address: libc::sockaddr_un = unsafe { core::mem::zeroed() };
+        let bytes = path.as_os_str().as_bytes();
+        assert!(bytes.len() < address.sun_path.len());
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (slot, byte) in address.sun_path.iter_mut().zip(bytes) {
+            *slot = *byte as libc::c_char;
+        }
+        // Only the pathname and its terminator belong in the address length. Including trailing
+        // padding makes peer_addr report a different path, invalidating reconnect observations.
+        let length = (core::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1)
+            as libc::socklen_t;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = length as u8;
+        }
+        // Linux sets close-on-exec during creation. Other platforms use checked immediate fcntl
+        // after ownership acquisition; that creation-to-fcntl window is not atomic with exec.
+        #[cfg(target_os = "linux")]
+        let kind = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+        #[cfg(not(target_os = "linux"))]
+        let kind = libc::SOCK_STREAM;
+        // SAFETY: socket takes no pointers and returns a fresh descriptor or -1.
+        let raw = unsafe { libc::socket(libc::AF_UNIX, kind, 0) };
+        assert!(raw >= 0, "create the owned AF_UNIX socket");
+        // SAFETY: raw is a fresh descriptor with no other owner; OwnedFd closes it on every exit.
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        #[cfg(not(target_os = "linux"))]
+        {
+            // SAFETY: fd is owned and live; F_GETFD reads flags without any pointer argument.
+            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            assert!(flags >= 0, "read new fixture descriptor flags");
+            // SAFETY: F_SETFD updates this owned descriptor's flags, preserving every existing bit.
+            let set =
+                unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+            assert_eq!(set, 0, "set close-on-exec on the owned fixture descriptor");
+        }
+        // SAFETY: fd is owned and address is fully initialized; length covers exactly that object.
+        let bound =
+            unsafe { libc::bind(fd.as_raw_fd(), core::ptr::addr_of!(address).cast(), length) };
+        assert_eq!(
+            bound,
+            0,
+            "bind without listening: {}",
+            io::Error::last_os_error()
+        );
+        Self(fd)
+    }
+
+    fn listen(self) -> tokio::net::UnixListener {
+        use std::os::fd::AsRawFd as _;
+
+        // SAFETY: this same owned descriptor is already bound as AF_UNIX/SOCK_STREAM, not listening.
+        assert_eq!(unsafe { libc::listen(self.0.as_raw_fd(), 1) }, 0);
+        let listener = std::os::unix::net::UnixListener::from(self.0);
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        tokio::net::UnixListener::from_std(listener).expect("register the owned listener")
+    }
+}
+
+#[test]
+fn catalog_raw_socket_is_close_on_exec() {
+    use std::os::fd::AsRawFd as _;
+
+    let scratch = ProcessScratch::new("cat-flag");
+    let bound = BoundCatalogSocket::bind(&scratch.base.join("control.sock"));
+    // SAFETY: the descriptor is owned and live; F_GETFD reads flags and takes no pointer argument.
+    let flags = unsafe { libc::fcntl(bound.0.as_raw_fd(), libc::F_GETFD) };
+    assert!(flags >= 0, "read the owned fixture descriptor flags");
+    assert_ne!(
+        flags & libc::FD_CLOEXEC,
+        0,
+        "the raw fixture socket is close-on-exec"
+    );
+}
+
+#[test]
+fn catalog_raw_socket_does_not_survive_exec() {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+
+    let scratch = ProcessScratch::new("cat-exec");
+    let path = scratch.base.join("control.sock");
+    let bound = BoundCatalogSocket::bind(&path);
+    let metadata = std::fs::File::from(bound.0.try_clone().unwrap())
+        .metadata()
+        .unwrap();
+    assert!(metadata.file_type().is_socket());
+    // macOS dev_t is signed 32-bit; compare its bit pattern across Rust/Python representations.
+    #[cfg(target_os = "macos")]
+    let device_mask = u64::from(u32::MAX);
+    #[cfg(not(target_os = "macos"))]
+    let device_mask = u64::MAX;
+    const PROBE: &str = r#"
+import errno
+import os
+import socket
+import stat
+import sys
+fd, device, inode, mask = map(int, sys.argv[1:5])
+try:
+    metadata = os.fstat(fd)
+except OSError as error:
+    if error.errno == errno.EBADF:
+        sys.exit(0)
+    raise
+# An exec can reuse the number. Only the held socket's identity, type and pathname mean inheritance.
+identity = stat.S_ISSOCK(metadata.st_mode) and (metadata.st_dev & mask) == device and metadata.st_ino == inode
+inherited = identity and socket.socket(fileno=fd).getsockname() == sys.argv[5]
+sys.exit(1 if inherited else 0)
+"#;
+    let status = Command::new("python3")
+        .args(["-I", "-c", PROBE])
+        .arg(bound.0.as_raw_fd().to_string())
+        .arg((metadata.dev() & device_mask).to_string())
+        .arg(metadata.ino().to_string())
+        .arg(device_mask.to_string())
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("spawn and reap only the owned exec probe");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "exec must not inherit the owned raw socket identity"
+    );
+    drop(bound);
+}
+
+#[tokio::test]
+async fn catalog_acquisition_waits_for_listen_not_a_socket_path() {
+    use futures::FutureExt as _;
+
+    let scratch = ProcessScratch::new("cat-wait");
+    let socket = scratch.base.join("control.sock");
+    let bound = BoundCatalogSocket::bind(&socket);
+    assert!(socket.exists(), "the raw bind made the pathname visible");
+    let refused = tokio::net::UnixStream::connect(&socket).await.unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
+    let acquisition = catalog_stream(
+        &socket,
+        tokio::time::Instant::now() + Duration::from_secs(30),
+        || Ok(()),
+    );
+    tokio::pin!(acquisition);
+    assert!(
+        acquisition.as_mut().now_or_never().is_none(),
+        "path existence must not complete readiness before listen"
+    );
+    // This is the barrier: no descriptor listens until refusal and incomplete readiness are proven.
+    let listener = bound.listen();
+    let stream = acquisition
+        .await
+        .expect("the same bound descriptor now listens");
+    assert_eq!(
+        stream.peer_addr().unwrap().as_pathname(),
+        Some(socket.as_path()),
+        "the acquired peer pathname has no padding"
+    );
+    let server = tokio::spawn(async move {
+        let (mut peer, _) = listener.accept().await.expect("accept acquired stream");
+        assert!(matches!(
+            Request::read(&mut peer).await.unwrap(),
+            Request::Services
+        ));
+        Response::Ack.write(&mut peer).await.unwrap();
+    });
+    assert!(matches!(catalog_reply(stream).await, Ok(Response::Ack)));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn catalog_acquisition_retries_only_missing_startup_paths() {
+    use futures::FutureExt as _;
+
+    let scratch = ProcessScratch::new("cat-miss");
+    let socket = scratch.base.join("control.sock");
+    assert!(!socket.exists());
+    let acquisition = catalog_stream(
+        &socket,
+        tokio::time::Instant::now() + Duration::from_secs(30),
+        || Ok(()),
+    );
+    tokio::pin!(acquisition);
+    assert!(acquisition.as_mut().now_or_never().is_none());
+    let listener = BoundCatalogSocket::bind(&socket).listen();
+    let stream = acquisition
+        .await
+        .expect("a missing path can become listening");
+    let (_peer, _) = listener.accept().await.unwrap();
+    drop(stream);
+}
+
+#[tokio::test(start_paused = true)]
+async fn catalog_acquisition_never_listening_reaches_its_deadline() {
+    let scratch = ProcessScratch::new("cat-time");
+    let socket = scratch.base.join("control.sock");
+    let _bound = BoundCatalogSocket::bind(&socket);
+    let start = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        catalog_stream(&socket, start + Duration::from_millis(30), || Ok(())),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "the acquisition deadline bounds permanent refusal"
+    );
+    assert_eq!(result.unwrap().unwrap_err().kind(), io::ErrorKind::TimedOut);
+    assert_eq!(
+        tokio::time::Instant::now() - start,
+        Duration::from_millis(30)
+    );
+    let listening = scratch.base.join("expired.sock");
+    let _listener = BoundCatalogSocket::bind(&listening).listen();
+    let checks = core::cell::Cell::new(0);
+    let result = catalog_stream(&listening, tokio::time::Instant::now(), || {
+        checks.set(checks.get() + 1);
+        Ok(())
+    })
+    .await;
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    assert_eq!(
+        checks.get(),
+        0,
+        "expired startup does no liveness or connect work"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn catalog_acquisition_keeps_child_exit_and_unexpected_errors() {
+    use core::cell::Cell;
+
+    let scratch = ProcessScratch::new("cat-exit");
+    let socket = scratch.base.join("control.sock");
+    let _listener = BoundCatalogSocket::bind(&socket).listen();
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 0"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn an owned exiting child");
+    child.wait().expect("reap exactly the owned child");
+    let start = tokio::time::Instant::now();
+    let result = catalog_stream(&socket, start + Duration::from_secs(30), || {
+        if child.try_wait()?.is_some() {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        Ok(())
+    })
+    .await;
+    assert_eq!(
+        result.unwrap_err().kind(),
+        io::ErrorKind::BrokenPipe,
+        "an exited child fails even if its pathname is listening"
+    );
+    let unready = scratch.base.join("unready.sock");
+    let _bound = BoundCatalogSocket::bind(&unready);
+    let checks = Cell::new(0);
+    let result = catalog_stream(&unready, start + Duration::from_secs(30), || {
+        checks.set(checks.get() + 1);
+        if checks.get() == 2 {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        Ok(())
+    })
+    .await;
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+    assert_eq!(checks.get(), 2, "liveness is checked again after refusal");
+
+    let start = tokio::time::Instant::now();
+    let checks = Cell::new(0);
+    let too_long = scratch.base.join("x".repeat(256));
+    let result = catalog_stream(&too_long, start + Duration::from_secs(30), || {
+        checks.set(checks.get() + 1);
+        Ok(())
+    })
+    .await;
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+    assert_eq!(
+        checks.get(),
+        1,
+        "unexpected acquisition errors are not retried"
+    );
+    assert_eq!(tokio::time::Instant::now(), start);
+}
+
+#[tokio::test]
+async fn catalog_connected_exchange_never_reconnects_or_repeats_requests() {
+    use tokio::io::AsyncWriteExt as _;
+
+    enum Reply {
+        Eof,
+        Malformed,
+        Unexpected,
+    }
+    for reply in [Reply::Eof, Reply::Malformed, Reply::Unexpected] {
+        let scratch = ProcessScratch::new("cat-once");
+        let socket = scratch.base.join("control.sock");
+        let listener = BoundCatalogSocket::bind(&socket).listen();
+        let stream = catalog_stream(
+            &socket,
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            || Ok(()),
+        )
+        .await
+        .unwrap();
+        let unexpected = matches!(reply, Reply::Unexpected);
+        let (done, completed) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut peer, _) = listener.accept().await.unwrap();
+            assert!(matches!(
+                Request::read(&mut peer).await.unwrap(),
+                Request::Services
+            ));
+            match reply {
+                Reply::Eof => {}
+                // Deliberately invalid magic, not a second implementation of the control codec.
+                Reply::Malformed => peer.write_all(&[0; 4]).await.unwrap(),
+                Reply::Unexpected => Response::Ack.write(&mut peer).await.unwrap(),
+            }
+            peer.shutdown().await.unwrap();
+            // Keep the listener alive until the exchange ends, and observe reconnects while a
+            // broken retry could be waiting for a second response. Completion is an explicit barrier.
+            let reconnected = tokio::select! {
+                accepted = listener.accept() => {
+                    let _second = accepted.expect("the live fixture listener accepts");
+                    true
+                }
+                ended = completed => {
+                    ended.expect("the client completed its single exchange");
+                    false
+                }
+            };
+            assert!(!reconnected, "no second connection is acquired");
+            assert!(
+                Request::read(&mut peer).await.is_err(),
+                "one connected stream carries one request only"
+            );
+            // Probe the kernel queue directly after completion, not cached reactor readiness.
+            let listener = listener.into_std().unwrap();
+            assert!(
+                matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+            );
+        });
+        let exchange = tokio::time::timeout(Duration::from_secs(1), async {
+            let result = catalog_reply(stream).await;
+            done.send(())
+                .expect("release the server completion barrier");
+            if unexpected {
+                assert!(matches!(result, Ok(Response::Ack)));
+            } else {
+                assert!(result.is_err(), "connected failures stay failures");
+            }
+            server.await.unwrap();
+        })
+        .await;
+        assert!(
+            exchange.is_ok(),
+            "a failed exchange must not hang awaiting a retried request"
+        );
     }
 }
 
