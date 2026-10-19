@@ -169,14 +169,13 @@ fn sign_lapsing(host: &Path) -> String {
     swoosh::link::Link::from(cap.link().unwrap()).to_string()
 }
 
+/// Complete stderr bytes or their read error: neither invalid UTF-8 nor an I/O failure can vanish.
+type Stderr = std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>;
+
 /// Forward the echo `lapsing` serves from a home under `scratch`, its link typed as the machine, with `to` as
 /// the local end.
 /// Every pipe is piped; stderr is read a line at a time on a thread, each line handed over as it comes.
-fn forward(
-    scratch: &Scratch,
-    lapsing: &Lapsing,
-    to: &str,
-) -> (KillOnDrop, std::sync::mpsc::Receiver<String>) {
+fn forward(scratch: &Scratch, lapsing: &Lapsing, to: &str) -> (KillOnDrop, Stderr) {
     let hint = format!("{}={}", lapsing.served.key, lapsing.served.addr);
     let mut child = KillOnDrop(
         Command::new(env!("CARGO_BIN_EXE_swoosh"))
@@ -194,10 +193,21 @@ fn forward(
     let err_pipe = child.0.stderr.take().expect("piped stderr");
     let (sender, stderr) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        for line in BufReader::new(err_pipe).lines() {
-            let Ok(line) = line else { return };
-            if sender.send(line).is_err() {
-                return;
+        let mut reader = BufReader::new(err_pipe);
+        loop {
+            // Preserve the newline too: a prefix or line iterator cannot prove the terminal bytes.
+            let mut line = Vec::new();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => return,
+                Ok(_) => {
+                    if sender.send(Ok(line)).is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(Err(error));
+                    return;
+                }
             }
         }
     });
@@ -206,23 +216,37 @@ fn forward(
 
 /// After the cut: `forward` exits nonzero by `lapses` plus a sweep and [`EXIT`], with one connection-lost
 /// line on stderr and no reason for the cut.
-fn ends_at_the_cut(
-    mut forward: KillOnDrop,
-    stderr: std::sync::mpsc::Receiver<String>,
-    lapses: Instant,
-) {
+fn ends_at_the_cut(mut forward: KillOnDrop, stderr: Stderr, lapses: Instant) {
     assert!(
         Instant::now() < lapses,
         "the echo came back before the link lapsed, so the cut below is the expiry's"
     );
     let status = exited_by(&mut forward.0, lapses + SWEEP + EXIT);
-    assert!(!status.success(), "a cut session exits nonzero: {status}");
-    // The child has exited, so its stderr closes and the reader's channel with it.
-    let printed: Vec<String> = stderr.iter().collect();
-    assert!(
-        printed.len() == 1 && printed[0].starts_with("error: connection lost"),
-        "one connection-lost line, with no reason for the cut: {printed:?}"
-    );
+    assert_eq!(status.code(), Some(1), "a cut session exits 1: {status}");
+    // The child has exited, so its stderr closes and the reader's channel with it. Nothing is filtered.
+    let printed = stderr
+        .iter()
+        .collect::<std::io::Result<Vec<_>>>()
+        .expect("read all stderr");
+    assert_opaque_cut(&printed.concat());
+}
+
+fn assert_opaque_cut(printed: &[u8]) {
+    assert_eq!(printed, b"error: connection lost\n", "the cut stays opaque");
+}
+
+#[test]
+fn the_cut_assertion_rejects_appended_causes_secrets_and_extra_lines() {
+    for printed in [
+        b"error: connection lost: transport cause\n".as_slice(),
+        b"error: connection lost: secret-sentinel\n",
+        b"error: connection lost: expired\n",
+        b"error: connection lost\nextra diagnostic\n",
+        b"error: connection lost",
+        b"error: connection lost\n\xff",
+    ] {
+        assert!(std::panic::catch_unwind(|| assert_opaque_cut(printed)).is_err());
+    }
 }
 
 /// Wait for `child` to exit, polling, and fail once `deadline` passes.
@@ -275,13 +299,15 @@ fn a_forward_ends_when_the_host_cuts_the_session() {
     // since this home holds no name for it; the ctrl-c line is for a terminal, and stderr here is a pipe.
     let started = stderr
         .recv_timeout(EXPIRES)
-        .expect("the start line arrives once admitted");
+        .expect("the start line arrives once admitted")
+        .expect("read the start line");
     assert_eq!(
         started,
         format!(
-            "Forwarding echo on {} to 127.0.0.1:{port}.",
+            "Forwarding echo on {} to 127.0.0.1:{port}.\n",
             lapsing.served.key
-        ),
+        )
+        .into_bytes(),
     );
 
     // One line there and back over a forwarded connection, held open and silent after.

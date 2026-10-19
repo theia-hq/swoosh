@@ -17,7 +17,9 @@
 //! session that is gone. So the exchange, the bridge and the forward live here, over tightbeam's wire
 //! frames, until tightbeam's own end the same way.
 
+use core::pin::Pin;
 use core::str::FromStr;
+use core::task::{Context, Poll};
 use core::time::Duration;
 use std::io::{IsTerminal as _, Read as _};
 use std::path::PathBuf;
@@ -300,20 +302,18 @@ async fn carry<S: Session>(session: &S, request: &Request, mut tcp: TcpStream) -
     Ok(())
 }
 
-/// The session a forward rode on is gone.
+/// A forward's remote stream ended. No source chain can disclose a transport or cut reason.
 #[derive(Debug, thiserror::Error)]
 #[error("connection lost")]
-struct ConnectionLost(#[source] Option<Box<dyn core::error::Error + Send + Sync>>);
+struct ConnectionLost;
 
-/// Why the session ended, in the transport's own words: an open on it now fails with the cause, which
-/// prints after `connection lost`, the line the stdio bridge prints at the same cut.
+/// A transport cause is diagnostic context, never part of the command's terminal outcome. Asking the
+/// closed session does not establish why the host ended it, so no cut reason is inferred here.
 async fn lost<S: Session>(session: &S) -> eyre::Report {
-    ConnectionLost(match session.open_bi().await {
-        Err(bifrost::Error::Stream(cause)) => Some(cause),
-        Err(other) => Some(Box::new(other)),
-        Ok(_) => None,
-    })
-    .into()
+    if let Err(error) = session.open_bi().await {
+        tracing::debug!(cause = %swoosh::escape::Escaped(&swoosh::escape::causes(&error)), "connection lost");
+    }
+    ConnectionLost.into()
 }
 
 /// Reach the service over one stream and pipe it against this process's stdin and stdout: the bridge
@@ -330,35 +330,91 @@ async fn pipe_stdio<T: Transport, D: Discovery>(
 ) -> eyre::Result<()> {
     // Held for the whole pump: the stream rides this session, which closes when it drops.
     let session = node.connect(refused.machine.key()).await?;
-    let (mut writer, mut reader) = match admitted(&session, request).await? {
+    let (writer, reader) = match admitted(&session, request).await? {
         Ok(halves) => halves,
         Err(Refusal::NotAdmitted) => return Err(refused.on(&session, Refusal::NotAdmitted).await),
         Err(refusal) => return Err(bifrost::Error::Refused(refusal).into()),
     };
-    let mut input = stdin_chunks()?;
-    let mut output = io::stdout();
+    pump_stdio(writer, reader, stdin_chunks()?, io::stdout()).await
+}
+
+/// Endpoint provenance, not session closure, identifies a failed remote stream: its error can arrive
+/// before the session's close signal. Local stdin/stdout failures stay local even after a host cut.
+async fn pump_stdio(
+    mut writer: impl io::AsyncWrite + Unpin,
+    reader: impl io::AsyncRead + Unpin,
+    mut input: mpsc::Receiver<io::Result<Vec<u8>>>,
+    mut output: impl io::AsyncWrite + Unpin,
+) -> eyre::Result<()> {
+    let mut reader = RemoteReader(reader);
     let upstream = async {
         while let Some(chunk) = input.recv().await {
-            writer.write_all(&chunk?).await?;
+            writer.write_all(&chunk?).await.map_err(remote_failure)?;
         }
-        writer.shutdown().await
+        writer.shutdown().await.map_err(remote_failure)
     };
     let downstream = async {
-        io::copy(&mut reader, &mut output).await?;
-        output.flush().await
+        io::copy(&mut reader, &mut output)
+            .await
+            .map_err(read_failure)?;
+        output.flush().await?;
+        Ok::<(), eyre::Report>(())
     };
+    // A pending stdout write can leave remote bytes inside the copy's buffer. Keep that same
+    // operation through stdin EOF so a successful half-close cannot discard already consumed bytes.
+    tokio::pin!(downstream);
     tokio::select! {
         // The host's half ended or failed: the run is over. The stdin pump is dropped, never awaited.
-        result = downstream => result?,
+        result = &mut downstream => result?,
         // stdin ended first (a piped, finite input), or the write toward the host failed. A clean end
         // half-closes toward the host, then the host's remaining output still drains to stdout.
         result = upstream => {
             result?;
-            io::copy(&mut reader, &mut output).await?;
-            output.flush().await?;
+            downstream.await?;
         }
     }
     Ok(())
+}
+
+/// `io::copy` returns either endpoint's error as `io::Error`; only the remote reader gets this tag.
+struct RemoteReader<R>(R);
+
+impl<R: io::AsyncRead + Unpin> io::AsyncRead for RemoteReader<R> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut io::ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        match Pin::new(&mut self.get_mut().0).poll_read(cx, buf) {
+            Poll::Ready(Err(error)) => {
+                Poll::Ready(Err(io::Error::new(error.kind(), RemoteRead(error))))
+            }
+            other => other,
+        }
+    }
+}
+
+/// The tag preserves provenance without changing the transport's diagnostic text.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+struct RemoteRead(io::Error);
+
+/// A copy's local writer error must remain local, regardless of the remote session's state.
+fn read_failure(error: io::Error) -> eyre::Report {
+    if error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<RemoteRead>())
+    {
+        remote_failure(error)
+    } else {
+        error.into()
+    }
+}
+
+/// A failed remote read, write or half-close says only that this CLI stream ended, not why.
+fn remote_failure(error: io::Error) -> eyre::Report {
+    tracing::debug!(cause = %swoosh::escape::Escaped(&swoosh::escape::causes(&error)), "connection lost");
+    ConnectionLost.into()
 }
 
 /// This process's stdin, read on a thread of its own and handed over in chunks; the channel closes at
@@ -394,8 +450,16 @@ fn stdin_chunks() -> eyre::Result<mpsc::Receiver<io::Result<Vec<u8>>>> {
 
 #[cfg(test)]
 mod tests {
+    use core::future::Future as _;
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
+
+    use bifrost::{Session as _, Transport as _};
+    use futures::FutureExt as _;
     use swoosh::contacts::Contacts;
     use swoosh::testkit::HostilePeer;
+    use tokio::io;
+    use tokio::sync::{mpsc, oneshot};
 
     use super::{Machine, To, connect};
 
@@ -403,6 +467,466 @@ mod tests {
     const HOSTILE: &str = "no\r\u{1b}[2Kforwarding 127.0.0.1:1 to x\u{202e}";
     /// [`HOSTILE`] as it prints.
     const ESCAPED: &str = r"no\r\u{1b}[2Kforwarding 127.0.0.1:1 to x\u{202e}";
+
+    #[tokio::test]
+    async fn a_cut_has_no_printable_source_even_with_a_hostile_cause() {
+        for session in [
+            HostilePeer::RefusesStreams("secret-sentinel\r\nexpired\u{202e}"),
+            HostilePeer::Unreachable("transport cause"),
+            HostilePeer::HangsUp,
+        ] {
+            let report = super::lost(&session).await;
+            assert!(report.is::<super::ConnectionLost>());
+            assert_eq!(report.chain().count(), 1);
+            assert_eq!(format!("error: {report:#}\n"), "error: connection lost\n");
+            assert_eq!(
+                format!("error: {:#}\n", super::escaped(report)),
+                "error: connection lost\n"
+            );
+        }
+    }
+
+    /// Real closure futures bracket controlled I/O faults; the pump must not depend on their readiness.
+    async fn sessions() -> (bifrost_mem::MemSession, bifrost_mem::MemSession) {
+        let first = bifrost_mem::MemTransport::bind();
+        let second = bifrost_mem::MemTransport::bind();
+        let session = first.connect(second.local_addr()).await.unwrap();
+        let peer = second.accept().await.unwrap();
+        (session, peer)
+    }
+
+    fn fault() -> io::Error {
+        io::Error::other(HOSTILE)
+    }
+
+    struct FailedReader;
+    impl io::AsyncRead for FailedReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Ready(Err(fault()))
+        }
+    }
+
+    /// Never wakes: every tested failure is ready on the other endpoint, so a single poll must finish.
+    struct PendingReader;
+    impl io::AsyncRead for PendingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum WriteFailure {
+        Write,
+        Flush,
+        Shutdown,
+    }
+
+    struct FailedWriter(WriteFailure);
+    impl io::AsyncWrite for FailedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(if matches!(self.0, WriteFailure::Write) {
+                Err(fault())
+            } else {
+                Ok(buf.len())
+            })
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(if matches!(self.0, WriteFailure::Flush) {
+                Err(fault())
+            } else {
+                Ok(())
+            })
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(if matches!(self.0, WriteFailure::Shutdown) {
+                Err(fault())
+            } else {
+                Ok(())
+            })
+        }
+    }
+
+    /// The oneshot forces the reader's result to arrive only after half-close, without scheduling races.
+    struct HalfCloseWriter(Option<oneshot::Sender<()>>);
+    impl io::AsyncWrite for HalfCloseWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            if let Some(closed) = self.0.take() {
+                let _ = closed.send(());
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct AfterHalfClose<R> {
+        closed: Option<oneshot::Receiver<()>>,
+        reader: R,
+    }
+    impl<R: io::AsyncRead + Unpin> io::AsyncRead for AfterHalfClose<R> {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if let Some(closed) = &mut this.closed {
+                match Pin::new(closed).poll(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(result) => {
+                        result.expect("the writer half-closed");
+                        this.closed = None;
+                    }
+                }
+            }
+            Pin::new(&mut this.reader).poll_read(cx, buf)
+        }
+    }
+
+    fn after_half_close<R>(reader: R) -> (HalfCloseWriter, AfterHalfClose<R>) {
+        let (closed, waiting) = oneshot::channel();
+        (
+            HalfCloseWriter(Some(closed)),
+            AfterHalfClose {
+                closed: Some(waiting),
+                reader,
+            },
+        )
+    }
+
+    fn assert_remote(result: eyre::Result<()>) {
+        let report = result.unwrap_err();
+        assert!(report.is::<super::ConnectionLost>(), "{report:?}");
+        assert_eq!(report.chain().count(), 1);
+        assert_eq!(format!("error: {report:#}\n"), "error: connection lost\n");
+        assert_eq!(
+            format!("error: {:#}\n", super::escaped(report)),
+            "error: connection lost\n"
+        );
+    }
+
+    fn assert_local(result: eyre::Result<()>) {
+        let report = result.unwrap_err();
+        assert!(!report.is::<super::ConnectionLost>());
+        assert_eq!(
+            report.downcast_ref::<io::Error>().unwrap().to_string(),
+            HOSTILE
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_reads_are_opaque_before_session_closure_before_and_after_half_close() {
+        let (session, _peer) = sessions().await;
+        assert!(session.wait_closed().now_or_never().is_none());
+        let (_stdin, input) = mpsc::channel(1);
+        assert_remote(
+            super::pump_stdio(io::sink(), FailedReader, input, io::sink())
+                .now_or_never()
+                .expect("a remote read fails without waiting for closure"),
+        );
+        let (stdin, input) = mpsc::channel(1);
+        drop(stdin);
+        let (writer, reader) = after_half_close(FailedReader);
+        assert_remote(
+            super::pump_stdio(writer, reader, input, io::sink())
+                .now_or_never()
+                .expect("the retained copy preserves the reader's tag after half-close"),
+        );
+        assert!(session.wait_closed().now_or_never().is_none());
+    }
+
+    #[tokio::test]
+    async fn remote_write_and_shutdown_failures_are_opaque_before_session_closure() {
+        let (session, _peer) = sessions().await;
+        assert!(session.wait_closed().now_or_never().is_none());
+        for at in [WriteFailure::Write, WriteFailure::Shutdown] {
+            let (stdin, input) = mpsc::channel(1);
+            if matches!(at, WriteFailure::Write) {
+                stdin.try_send(Ok(vec![1])).unwrap();
+            }
+            drop(stdin);
+            assert_remote(
+                super::pump_stdio(FailedWriter(at), PendingReader, input, io::sink())
+                    .now_or_never()
+                    .expect("remote writes fail without waiting for closure"),
+            );
+        }
+        assert!(session.wait_closed().now_or_never().is_none());
+    }
+
+    #[tokio::test]
+    async fn local_stdin_stdout_write_and_flush_errors_stay_local_after_closure() {
+        let (session, _peer) = sessions().await;
+        session.close();
+        assert!(session.wait_closed().now_or_never().is_some());
+        let (_stdin, input) = {
+            let (stdin, input) = mpsc::channel(1);
+            stdin.try_send(Err(fault())).unwrap();
+            (stdin, input)
+        };
+        assert_local(
+            super::pump_stdio(io::sink(), PendingReader, input, io::sink())
+                .now_or_never()
+                .expect("a local stdin error is ready"),
+        );
+        for at in [WriteFailure::Write, WriteFailure::Flush] {
+            let (_stdin, input) = mpsc::channel(1);
+            assert_local(
+                super::pump_stdio(io::sink(), &b"out"[..], input, FailedWriter(at))
+                    .now_or_never()
+                    .expect("a local stdout error is ready"),
+            );
+            let (stdin, input) = mpsc::channel(1);
+            drop(stdin);
+            let (writer, reader) = after_half_close(&b"out"[..]);
+            assert_local(
+                super::pump_stdio(writer, reader, input, FailedWriter(at))
+                    .now_or_never()
+                    .expect("a post-half-close stdout error stays local"),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_clean_remote_eof_ends_with_stdin_still_open() {
+        let (_stdin, input) = mpsc::channel(1);
+        assert!(
+            super::pump_stdio(io::sink(), io::empty(), input, io::sink())
+                .now_or_never()
+                .expect("remote EOF does not wait for stdin")
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn stdin_eof_half_closes_then_drains_remote_output() {
+        let (stdin, input) = mpsc::channel(1);
+        stdin.try_send(Ok(b"in".to_vec())).unwrap();
+        drop(stdin);
+        let (writer, reader) = after_half_close(&b"drained"[..]);
+        let mut output = Vec::new();
+        assert!(
+            super::pump_stdio(writer, reader, input, &mut output)
+                .now_or_never()
+                .expect("half-close makes the remaining output ready")
+                .is_ok()
+        );
+        assert_eq!(output, b"drained");
+    }
+
+    #[tokio::test]
+    async fn stdin_eof_preserves_bytes_already_buffered_behind_pending_stdout() {
+        use core::cell::Cell;
+
+        struct CountedReader<'a> {
+            remaining: &'a [u8],
+            consumed: &'a Cell<usize>,
+        }
+        impl io::AsyncRead for CountedReader<'_> {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _: &mut Context<'_>,
+                buf: &mut io::ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                let count = self.remaining.len().min(buf.remaining());
+                buf.put_slice(&self.remaining[..count]);
+                self.remaining = &self.remaining[count..];
+                self.consumed.set(self.consumed.get() + count);
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        // The receiver holds its registered waker across polls. Output cannot accept any byte until
+        // the test has observed both buffered remote input and the successful upstream half-close.
+        struct BlockedOutput<'a> {
+            release: Option<oneshot::Receiver<()>>,
+            pending: &'a Cell<usize>,
+            flushed: &'a Cell<usize>,
+            bytes: &'a mut Vec<u8>,
+        }
+        impl io::AsyncWrite for BlockedOutput<'_> {
+            fn poll_write(
+                self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+                bytes: &[u8],
+            ) -> Poll<io::Result<usize>> {
+                let this = self.get_mut();
+                if let Some(release) = &mut this.release {
+                    match Pin::new(release).poll(cx) {
+                        Poll::Pending => {
+                            this.pending.set(this.pending.get() + 1);
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(result) => {
+                            result.expect("the test released stdout");
+                            this.release = None;
+                        }
+                    }
+                }
+                this.bytes.extend_from_slice(bytes);
+                Poll::Ready(Ok(bytes.len()))
+            }
+            fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                self.flushed.set(self.flushed.get() + 1);
+                Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+                panic!("the local stdout must not be shut down")
+            }
+        }
+
+        let payload = b"buffered before stdin eof, delivered exactly once";
+        let consumed = Cell::new(0);
+        let pending = Cell::new(0);
+        let flushed = Cell::new(0);
+        let mut bytes = Vec::new();
+        let (stdin, input) = mpsc::channel(1);
+        let (closed, mut half_close) = oneshot::channel();
+        let (release, waiting) = oneshot::channel();
+        let completed_before_release;
+        {
+            let reader = CountedReader {
+                remaining: payload,
+                consumed: &consumed,
+            };
+            let output = BlockedOutput {
+                release: Some(waiting),
+                pending: &pending,
+                flushed: &flushed,
+                bytes: &mut bytes,
+            };
+            let pump = super::pump_stdio(HalfCloseWriter(Some(closed)), reader, input, output);
+            tokio::pin!(pump);
+            let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+            assert!(pump.as_mut().poll(&mut cx).is_pending());
+            assert_eq!(consumed.get(), payload.len(), "remote bytes were consumed");
+            assert!(pending.get() > 0, "stdout write returned Pending");
+            assert!(
+                !stdin.is_closed(),
+                "stdin stays open until output is pending"
+            );
+            assert!(matches!(
+                half_close.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+
+            drop(stdin);
+            completed_before_release = match pump.as_mut().poll(&mut cx) {
+                Poll::Pending => false,
+                Poll::Ready(result) => {
+                    result.unwrap();
+                    true
+                }
+            };
+            assert_eq!(
+                half_close.try_recv(),
+                Ok(()),
+                "upstream shut down before stdout release"
+            );
+            let released = release.send(());
+            if !completed_before_release {
+                assert_eq!(flushed.get(), 0, "buffered output has not flushed");
+                released.expect("stdout still waits for release");
+                assert!(matches!(pump.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+            }
+        }
+        assert_eq!(bytes, payload, "buffered remote bytes arrive exactly once");
+        assert!(
+            !completed_before_release,
+            "the pump waits for pending stdout"
+        );
+        assert_eq!(flushed.get(), 2, "copy and final stdout flush both succeed");
+    }
+
+    #[tokio::test]
+    async fn a_cut_cause_is_escaped_and_separate_in_explicit_diagnostics_only() {
+        use std::sync::{Arc, Mutex};
+
+        use tracing::instrument::WithSubscriber as _;
+
+        // Callsite interest is process-global. Other tests' scoped subscribers must not race this
+        // exact event-count assertion; keep both production-origin calls and all checks in the child.
+        const CHILD: &str = "SWOOSH_TEST_DIAGNOSTIC_CAPTURE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "commands::connect::tests::a_cut_cause_is_escaped_and_separate_in_explicit_diagnostics_only",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(stdout.contains("1 passed"), "{stdout}");
+            return;
+        }
+
+        // The subscriber owns its writer; the test reads the shared bytes after dispatch.
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        for directives in [None, Some("debug")] {
+            let bytes = Arc::new(Mutex::new(Vec::new()));
+            let capture = Capture(Arc::clone(&bytes));
+            let subscriber = tracing_subscriber::fmt()
+                .with_env_filter(crate::log_filter(directives.map(str::to_owned)))
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || Capture::clone(&capture))
+                .finish();
+            let report = async {
+                let session = super::lost(&HostilePeer::RefusesStreams(HOSTILE)).await;
+                assert_eq!(format!("error: {session:#}\n"), "error: connection lost\n");
+                super::remote_failure(fault())
+            }
+            .with_subscriber(subscriber)
+            .await;
+            assert_eq!(format!("error: {report:#}\n"), "error: connection lost\n");
+            let printed = String::from_utf8(Vec::clone(&bytes.lock().unwrap())).unwrap();
+            if directives.is_some() {
+                assert!(printed.contains(ESCAPED), "{printed:?}");
+                assert!(!printed.contains(HOSTILE));
+                assert_eq!(printed.lines().count(), 2);
+            } else {
+                assert_eq!(printed, "");
+            }
+        }
+    }
 
     /// Reach a peer whose gate refuses with [`HOSTILE`], sinking the bytes into `to`.
     async fn refused(to: To) -> eyre::Report {

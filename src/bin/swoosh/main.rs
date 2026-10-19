@@ -683,17 +683,45 @@ fn log_filter(directives: Option<String>) -> tracing_subscriber::EnvFilter {
         .parse_lossy(directives.unwrap_or_else(|| DEFAULT_LOG.to_owned()))
 }
 
+/// Only these pinned IPv4 send diagnostics are opt-in. Unknown or remapped metadata stays visible:
+/// neither the target alone nor a message's text identifies a diagnostic safely.
+fn discovery_send_diagnostic(meta: &tracing::Metadata<'_>) -> bool {
+    const SOURCE: &str = "swarm-discovery-0.6.3/src/socket.rs";
+    meta.is_event()
+        && *meta.level() == tracing::Level::ERROR
+        && meta.target() == "swarm_discovery::socket"
+        && meta.module_path() == Some("swarm_discovery::socket")
+        && meta
+            .file()
+            .and_then(|file| file.strip_suffix(SOURCE))
+            .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))
+        && matches!(meta.line(), Some(474 | 489))
+}
+
+/// Explicit diagnostics bypass the exception, not `EnvFilter`: even `RUST_LOG=off` keeps its meaning.
+fn diagnostic_filter()
+-> tracing_subscriber::filter::FilterFn<impl Fn(&tracing::Metadata<'_>) -> bool> {
+    tracing_subscriber::filter::filter_fn(|meta| !discovery_send_diagnostic(meta))
+}
+
 /// The real entry point, split from `main` so a failure prints its clean message chain rather than
 /// eyre's `Debug` form (see the note in `main`).
 async fn run() -> eyre::Result<()> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+
+    let directives = std::env::var_os(tracing_subscriber::EnvFilter::DEFAULT_ENV);
+    let diagnostics = directives.is_none().then(diagnostic_filter);
     tracing_subscriber::fmt()
         .with_env_filter(log_filter(
-            std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok(),
+            directives.and_then(|value| value.into_string().ok()),
         ))
         // Diagnostics ride stderr, never stdout: stdout is a verb's product (`swoosh forward -` writes the
         // stream there) and the action's public log, so a log line must not interleave. The action holds
         // serve's stderr in a file and echoes it only on failure, redacted.
         .with_writer(std::io::stderr)
+        .finish()
+        .with(diagnostics)
         .init();
 
     // Kept whole: a refusal of a mistyped machine hands back this very line with only the machine replaced.
@@ -2046,6 +2074,234 @@ mod tests {
         let warn = log_filter(Some("warn".to_owned()));
         assert_eq!(warn.max_level_hint(), Some(LevelFilter::WARN));
         assert!(filter_enables(&warn, &PROBE_OTHER_ERROR));
+    }
+
+    /// Synthetic coordinates test classification, not an upstream emitter or network send.
+    fn socket_probe(
+        target: &'static str,
+        level: tracing::Level,
+        file: Option<&'static str>,
+        module: Option<&'static str>,
+        line: Option<u32>,
+        kind: tracing::metadata::Kind,
+    ) -> &'static tracing::Metadata<'static> {
+        Box::leak(Box::new(tracing::Metadata::new(
+            "discovery-coordinate-probe",
+            target,
+            level,
+            file,
+            line,
+            module,
+            tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&PROBE_CALLSITE)),
+            kind,
+        )))
+    }
+
+    /// Drive the same subscriber composition as `run`, with a synthetic event and an in-memory writer.
+    fn formatted_probe(
+        meta: &'static tracing::Metadata<'static>,
+        directives: Option<&str>,
+    ) -> String {
+        use std::sync::{Arc, Mutex};
+
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        // The subscriber owns its writer; the test reads the shared bytes after dispatch.
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let capture = Capture(Arc::clone(&bytes));
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(log_filter(directives.map(str::to_owned)))
+            .with_ansi(false)
+            .without_time()
+            .with_writer(move || Capture::clone(&capture))
+            .finish()
+            .with(directives.is_none().then(diagnostic_filter));
+        let dispatch = tracing::Dispatch::new(subscriber);
+        if dispatch.enabled(meta) {
+            dispatch.event(&tracing::Event::new(meta, &meta.fields().value_set(&[])));
+        }
+        String::from_utf8(Vec::clone(&bytes.lock().unwrap())).unwrap()
+    }
+
+    #[test]
+    fn only_the_two_pinned_discovery_send_events_are_diagnostic_only() {
+        use tracing::Level;
+        use tracing::metadata::Kind;
+
+        const TARGET: &str = "swarm_discovery::socket";
+        const FILE: &str = "/registry/src/index/swarm-discovery-0.6.3/src/socket.rs";
+        for line in [474, 489] {
+            let meta = socket_probe(
+                TARGET,
+                Level::ERROR,
+                Some(FILE),
+                Some(TARGET),
+                Some(line),
+                Kind::EVENT,
+            );
+            assert!(discovery_send_diagnostic(meta));
+            assert_eq!(formatted_probe(meta, None), "");
+            for directives in [
+                "error",
+                "swarm_discovery::socket=error",
+                "",
+                "not[a[directive",
+            ] {
+                assert!(
+                    !formatted_probe(meta, Some(directives)).is_empty(),
+                    "{directives:?}"
+                );
+            }
+            assert_eq!(formatted_probe(meta, Some("off")), "");
+            assert_eq!(
+                formatted_probe(meta, Some("swarm_discovery::socket=off")),
+                ""
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_discovery_metadata_fails_open_and_other_errors_stay_visible() {
+        use tracing::Level;
+        use tracing::metadata::Kind;
+
+        const TARGET: &str = "swarm_discovery::socket";
+        const FILE: &str = "/registry/src/index/swarm-discovery-0.6.3/src/socket.rs";
+        let cases = [
+            (
+                "another::target",
+                Level::ERROR,
+                Some(FILE),
+                Some(TARGET),
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::WARN,
+                Some(FILE),
+                Some(TARGET),
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                None,
+                Some(TARGET),
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some("socket.rs"),
+                Some(TARGET),
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some("src/socket.rs"),
+                Some(TARGET),
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some("/remapped/socket.rs"),
+                Some(TARGET),
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some("/registry/not-swarm-discovery-0.6.3/src/socket.rs"),
+                Some(TARGET),
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some("/registry/swarm-discovery-0.6.4/src/socket.rs"),
+                Some(TARGET),
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some(FILE),
+                None,
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some(FILE),
+                Some("other::module"),
+                Some(474),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some(FILE),
+                Some(TARGET),
+                None,
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some(FILE),
+                Some(TARGET),
+                Some(475),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some(FILE),
+                Some(TARGET),
+                Some(488),
+                Kind::EVENT,
+            ),
+            (
+                TARGET,
+                Level::ERROR,
+                Some(FILE),
+                Some(TARGET),
+                Some(474),
+                Kind::SPAN,
+            ),
+        ];
+        for (target, level, file, module, line, kind) in cases {
+            let meta = socket_probe(target, level, file, module, line, kind);
+            assert!(!discovery_send_diagnostic(meta), "{meta:?}");
+            if meta.is_event() && level == Level::ERROR {
+                assert!(!formatted_probe(meta, None).is_empty(), "{meta:?}");
+            }
+        }
+        assert!(!formatted_probe(&PROBE_OTHER_ERROR, None).is_empty());
+        assert_eq!(formatted_probe(&PROBE_OTHER_INFO, None), "");
+        assert!(!formatted_probe(&PROBE_OTHER_INFO, Some("info")).is_empty());
     }
 
     /// A key nobody can hold is refused where it enters: typed (as a contact's root or device) with the
