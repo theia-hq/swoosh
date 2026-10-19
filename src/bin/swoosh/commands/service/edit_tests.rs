@@ -337,3 +337,52 @@ async fn no_writer_keeps_an_entry_that_is_not_a_service() {
         let _ = std::fs::remove_dir_all(home.dir());
     }
 }
+
+/// The full CLI rejects a reserved add before it can record an unmanageable list.
+#[test]
+fn service_add_refuses_reserved_names_before_home_writes() {
+    let home = temp_home("reserved");
+    list(&home, &["ssh=sshd:"]);
+    let original = std::fs::read(home.serve_toml()).unwrap();
+    let before = std::fs::metadata(home.serve_toml())
+        .unwrap()
+        .modified()
+        .unwrap();
+    for entry in [
+        "control",
+        "lookup",
+        "CONTROL",
+        "LookUp",
+        "control=ping:",
+        "lookup=ping:",
+        "CONTROL=ping:",
+        "LookUp=ping:",
+    ] {
+        let error = crate::Cli::try_parse_from([
+            "swoosh",
+            "--home",
+            home.dir().to_str().unwrap(),
+            "service",
+            "add",
+            entry,
+        ])
+        .expect_err("a reserved name refuses before add can run");
+        assert_eq!(error.exit_code(), 2);
+        let name = entry.split('=').next().unwrap().to_ascii_lowercase();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{name} is reserved: pick another name"))
+        );
+        assert_eq!(std::fs::read(home.serve_toml()).unwrap(), original);
+        assert_eq!(
+            std::fs::metadata(home.serve_toml())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read_dir(home.dir()).unwrap().count(), 1);
+    }
+    let _ = std::fs::remove_dir_all(home.dir());
+}

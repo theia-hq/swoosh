@@ -18,7 +18,7 @@ use tightbeam::tunnel::{Router, Serve};
 
 use crate::escape::EscapedPath;
 use crate::home::{Home, canonical_to_be};
-use crate::names::{Name, NameError};
+use crate::names::NameError;
 
 mod activity;
 mod control;
@@ -208,7 +208,7 @@ pub fn service_entry(entry: &str) -> Result<String, EntryError> {
         _ => {}
     }
     if let Some((name, target)) = entry.split_once('=') {
-        let name = name.parse::<Name>()?;
+        let name = crate::names::service(name)?;
         if let Some((Scheme::Proxy, url)) = Scheme::parse(target) {
             proxy_origin(name.as_str(), url)?;
         }
@@ -217,7 +217,7 @@ pub fn service_entry(entry: &str) -> Result<String, EntryError> {
     if entry.contains(':') || is_port(entry) {
         return Ok(entry.to_owned());
     }
-    let name: String = entry.parse::<Name>()?.into();
+    let name = crate::names::service(entry)?.to_string();
     if name == Scheme::Proxy.as_str() {
         return Err(EntryError::ProxyWithoutTarget(ProxyLine::new(
             &name, "<url>",

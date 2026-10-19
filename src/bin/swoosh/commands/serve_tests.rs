@@ -2470,8 +2470,8 @@ fn serving_is_written_only_after_bind() {
     }
 }
 
-/// `swoosh status` under `scratch`, its `serving:` line, or `None` when it prints none: a machine that is no
-/// device with no `serve` running has nothing served to say.
+/// `swoosh status` under `scratch`: every home with a key reports a serving row, including what the next
+/// bare start serves when no resident answers.
 fn status_serving(scratch: &ProcessScratch) -> Option<String> {
     let mut command = Command::new(swoosh_binary());
     command
@@ -2497,7 +2497,7 @@ fn status_serving(scratch: &ProcessScratch) -> Option<String> {
 /// A `serve` that refuses after it claimed the home leaves no control socket behind, so `status` says
 /// nothing is running rather than that it could not read it.
 #[test]
-fn a_refused_serve_leaves_status_serving_nothing() {
+fn a_refused_serve_leaves_status_showing_the_next_start() {
     let scratch = ProcessScratch::new("refused");
     let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
     let socket = runtime_leaf(&home, &scratch.xdg).join("control.sock");
@@ -2510,8 +2510,8 @@ fn a_refused_serve_leaves_status_serving_nothing() {
         assert!(!socket.exists(), "serve {args:?} leaves no socket");
         assert_eq!(
             status_serving(&scratch),
-            None,
-            "after serve {args:?}, nothing runs"
+            Some("serving: ping, speed, when swoosh serve runs".to_owned()),
+            "after serve {args:?}, the never-named list still starts the default"
         );
     }
 }
@@ -2544,13 +2544,17 @@ fn a_terminated_serve_removes_its_socket() {
         !running.socket.exists(),
         "a terminated serve removes its socket"
     );
-    assert_eq!(status_serving(&scratch), None, "nothing runs");
+    assert_eq!(
+        status_serving(&scratch),
+        Some("serving: ping, when swoosh serve runs".to_owned()),
+        "the stopped node's recorded ping list starts next time"
+    );
 }
 
 /// A `serve` killed outright leaves its socket file with nothing listening on it: `status` reads that as
 /// nothing running.
 #[test]
-fn a_killed_serve_leaves_status_serving_nothing() {
+fn a_killed_serve_leaves_status_showing_the_next_start() {
     let scratch = ProcessScratch::new("sigkill");
     let mut running = Running::start(&scratch, &["--local", "--quiet", "ping"]);
     running.child.0.kill().expect("SIGKILL is sent");
@@ -2559,7 +2563,11 @@ fn a_killed_serve_leaves_status_serving_nothing() {
         running.socket.exists(),
         "a killed serve cannot remove its socket"
     );
-    assert_eq!(status_serving(&scratch), None, "nothing runs");
+    assert_eq!(
+        status_serving(&scratch),
+        Some("serving: ping, when swoosh serve runs".to_owned()),
+        "the stopped node's recorded ping list starts next time"
+    );
 }
 
 /// A service a start adds to the list is served even if it was turned off before, and a bare `serve` says
@@ -3586,6 +3594,101 @@ async fn control_round_trip(socket: &Path, request: Request) -> Result<Response,
         .map_err(ControlError::Io)?;
     request.write(&mut stream).await.map_err(ControlError::Io)?;
     Response::read(&mut stream).await
+}
+
+/// Both forms use the callable-name rule before a home is read or a process binds anything.
+#[test]
+fn serve_refuses_reserved_bare_names_before_home_writes() {
+    assert_reserved_serve_entries(&["control", "lookup", "CONTROL", "LookUp"]);
+}
+
+#[test]
+fn serve_refuses_reserved_explicit_names_before_home_writes() {
+    assert_reserved_serve_entries(&[
+        "control=ping:",
+        "lookup=ping:",
+        "CONTROL=ping:",
+        "LookUp=ping:",
+    ]);
+}
+
+fn assert_reserved_serve_entries(entries: &[&str]) {
+    let scratch = ProcessScratch::new("reserved");
+    let path = scratch.home_dir.join("serve.toml");
+    let original = b"services = ['ssh=sshd:']\n";
+    std::fs::write(&path, original).unwrap();
+    let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+    for entry in entries {
+        let error = <crate::Cli as clap::Parser>::try_parse_from([
+            "swoosh",
+            "--home",
+            scratch.home_dir.to_str().unwrap(),
+            "serve",
+            entry,
+        ])
+        .expect_err("a reserved name refuses at the actual CLI parser");
+        assert_eq!(error.exit_code(), 2);
+        let name = entry.split('=').next().unwrap().to_ascii_lowercase();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{name} is reserved: pick another name"))
+        );
+        assert!(
+            matches!(swoosh::serve::service_entry(entry), Err(swoosh::serve::EntryError::Name(swoosh::names::NameError::Reserved(found))) if found == name)
+        );
+        let output = swoosh_once(&scratch, &["serve", entry]);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains(&format!("{name} is reserved: pick another name"))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        assert_eq!(std::fs::read_dir(&scratch.home_dir).unwrap().count(), 1);
+    }
+}
+
+#[test]
+fn serve_preserves_callable_names_short_forms_and_unnamed_target_teaching() {
+    use swoosh::serve::{Mistyped, service_entry};
+
+    for (entry, expected) in [
+        ("Me=ping:", "me=ping:"),
+        ("Root=ping:", "root=ping:"),
+        ("Anyone=ping:", "anyone=ping:"),
+        ("Me", "me"),
+        ("Root", "root"),
+        ("Anyone", "anyone"),
+        ("SSH", "ssh=sshd:"),
+        ("Ping", "ping=ping:"),
+        ("Speed", "speed=speed:"),
+        ("recv:", "recv=recv:"),
+        (
+            "proxy:https://pkgs.example.com",
+            "proxy=proxy:https://pkgs.example.com",
+        ),
+        ("Web=tcp:localhost:3000", "web=tcp:localhost:3000"),
+        ("tcp:localhost:3000", "tcp:localhost:3000"),
+        ("3000", "3000"),
+    ] {
+        assert_eq!(service_entry(entry).unwrap(), expected);
+        assert!(<crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry]).is_ok());
+    }
+    for name in ["me", "root", "anyone", "ssh", "ping", "speed"] {
+        assert!(swoosh::names::service(name).is_ok());
+    }
+    for entry in ["tcp:localhost:3000", "3000", "me", "root", "anyone"] {
+        let parsed = service_entry(entry).unwrap();
+        assert!(
+            Mistyped::check(&[parsed]).is_err(),
+            "an unnamed target or non-built-in name still needs teaching"
+        );
+    }
 }
 
 /// `serve proxy:<url>` names itself `proxy`, the way `sshd:` names itself `ssh`; a named instance keeps the

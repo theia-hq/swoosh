@@ -713,12 +713,27 @@ fn loose_by(owner: u32, mode: u32, euid: u32) -> Option<Loose> {
 ///
 /// # Errors
 ///
-/// Whatever the open or its `fstat` returns (`NotFound` for a missing file), or the loose file.
+/// Whatever the open or its `fstat` returns (`NotFound` for a missing file), `InvalidInput` if the opened
+/// file is not a regular file, or the loose file.
 // `core::io::ErrorKind` is still unstable, so the error kind reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 pub fn open_trust_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let file = std::fs::File::open(path)?;
-    if let Some(why) = loose(&file.metadata()?) {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        // A planted FIFO must not wait for a writer, and a device must not become our terminal.
+        options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+    }
+    let file = options.open(path)?;
+    let metadata = file.metadata()?;
+    // Check the opened inode, preserving symlink following without a stat/open race.
+    if !metadata.is_file() {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    if let Some(why) = loose(&metadata) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             LooseFile {
