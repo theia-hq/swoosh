@@ -14,13 +14,12 @@ use swoosh::grants::{ANYONE, Delegation, GrantKind, GrantRecord};
 use swoosh::home::Home;
 use swoosh::root::Date;
 use swoosh::roster::{Epoch, Member, RevokedDevice, RosterDoc};
-use swoosh::serve::control_codec::{DisabledList, ServiceMenu};
 use swoosh::standing::Standing;
 use swoosh::testkit::{STANDING_UNTIL, TestNode, TestRoot};
-use tightbeam::tunnel::ServiceCatalog;
+use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use zeroize::Zeroizing;
 
-use super::{Print, SERVING_NOTHING, run_to, unix_now};
+use super::{Print, run_to, unix_now};
 
 /// This machine's key.
 const OWN: u8 = 0x11;
@@ -123,14 +122,15 @@ async fn status(home: &Home) -> String {
     String::from_utf8(out).expect("the report is text")
 }
 
-/// With no `serve` running on a device, `serving:` says so, and the report is still whole.
+/// A device with no recorded list reports the default when no resident runs.
 #[tokio::test]
-async fn status_with_no_node_prints_serving_nothing() {
+async fn status_with_no_node_prints_the_default() {
     let home = home("serving");
     device_of(&home).await;
     let out = status(&home).await;
     assert!(
-        out.lines().any(|line| line == SERVING_NOTHING),
+        out.lines()
+            .any(|line| line == "serving: ping, speed, when swoosh serve runs"),
         "the serving line is printed with nothing running: {out}"
     );
 }
@@ -140,18 +140,18 @@ async fn status_with_no_node_prints_serving_nothing() {
 async fn status_names_the_root_a_running_serve_admits() {
     let home = home("admitting");
     let root = TestRoot::seeded(ROOT).node_id();
-    let running = swoosh::testkit::serving(&home, Some(root));
+    let running = LocalResident::start(&home, &["ping", "speed"], Some(root));
     let out = status(&home).await;
     assert!(
         out.lines()
-            .any(|line| line == format!("serving: admitting root:{root}")),
+            .any(|line| line == format!("serving: ping, speed, admitting root:{root}")),
         "{out}"
     );
     drop(running);
     let out = status(&home).await;
     assert!(
-        !out.contains("serving:"),
-        "once it stops, a machine that is no device has nothing served to say: {out}"
+        out.contains("serving: ping, speed, when swoosh serve runs"),
+        "once it stops, a non-device still reports the default: {out}"
     );
 }
 
@@ -345,23 +345,6 @@ fn catalog(names: &[&str]) -> ServiceCatalog {
         bytes.push(0);
     }
     ServiceCatalog::decode(&bytes).expect("the test catalog decodes")
-}
-
-/// `serving:` names what is on; when the list of what is off could not be read, it claims nothing.
-#[test]
-fn serving_is_unknown_when_what_is_off_cannot_be_read() {
-    let menu = |disabled| ServiceMenu {
-        catalog: catalog(&["ssh", "ping"]),
-        disabled,
-    };
-    assert_eq!(
-        super::serving(&menu(DisabledList::Known(vec!["ssh".to_owned()]))),
-        Ok("serving: ping".to_owned())
-    );
-    assert!(
-        super::serving(&menu(DisabledList::Unknown("too long".to_owned())))
-            .is_err_and(|why| why.contains("too long"))
-    );
 }
 
 /// A link's holder: `anyone`, a device's short key, or a person's root as `root:` and its short key.
@@ -889,7 +872,7 @@ async fn status_prints_every_state_verbatim() {
                 short_key(LAPTOP),
                 Date(now + 20 * DAY)
             ),
-            SERVING_NOTHING.to_owned(),
+            "serving: ping, speed, when swoosh serve runs".to_owned(),
             String::new(),
             format!(
                 "renew me/nas by {}: swoosh invite nas",
@@ -918,7 +901,7 @@ async fn status_prints_every_state_verbatim() {
                 "  me/desk  {}                until {until}",
                 short_key(LAPTOP)
             ),
-            SERVING_NOTHING.to_owned(),
+            "serving: ping, speed, when swoosh serve runs".to_owned(),
         ]
         .map(|line| line + "\n")
         .concat()
@@ -934,6 +917,8 @@ async fn status_prints_every_state_verbatim() {
             "this machine: not one of your devices yet".to_owned(),
             "to join yours, paste its invite into: swoosh join".to_owned(),
             "to make your root on this machine: swoosh invite <name> <key>".to_owned(),
+            String::new(),
+            "serving: ping, speed, when swoosh serve runs".to_owned(),
         ]
         .map(|line| line + "\n")
         .concat()
@@ -1441,4 +1426,398 @@ fn status_marks_a_learned_root() {
         .find(|row| row[0] == "bob")
         .expect("bob's root is listed");
     assert_eq!(bob[2..], ["", ""], "a typed root carries no mark");
+}
+
+/// Record through the same locked writer the service commands use.
+async fn service_list(home: &Home, entries: &[&str], off: &[&str]) {
+    let lock = swoosh::home::HomeWrite::take(home).await.unwrap();
+    swoosh::serve_toml::ServeToml::update(&lock, home, |file| {
+        file.services = Some(entries.iter().map(|entry| (*entry).to_owned()).collect());
+        file.off = off.iter().map(|name| (*name).to_owned()).collect();
+    })
+    .unwrap();
+}
+
+/// A real local resident, without any transport or service target bound.
+struct LocalResident {
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<eyre::Result<()>>,
+    socket: std::path::PathBuf,
+    _lock: swoosh::home::ServeLock,
+}
+
+impl LocalResident {
+    fn start(home: &Home, names: &[&str], admit: Option<bifrost::NodeId>) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::Arc;
+
+        let socket = home.control_socket().unwrap();
+        let dir = socket.parent().unwrap();
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let cancel = CancellationToken::new();
+        let resident = Arc::new(swoosh::serve::Resident::new(
+            TestNode::seeded(OWN).node_id(),
+            None,
+            catalog(names),
+            swoosh::serve_toml::LiveServeToml::load(home).unwrap(),
+            cancel.clone(),
+            Arc::default(),
+        ));
+        let task = tokio::spawn(async move { resident.serve(listener).await });
+        Self {
+            cancel,
+            task,
+            socket,
+            _lock: swoosh::testkit::serving(home, admit),
+        }
+    }
+}
+
+impl Drop for LocalResident {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+        self.task.abort();
+        let _ = std::fs::remove_file(&self.socket);
+        let _ = std::fs::remove_dir(self.socket.parent().unwrap());
+    }
+}
+
+/// The actual toggle leaf must accept the same bare name the report prints.
+async fn turn(home: &Home, name: &str, way: crate::commands::service::toggle::Way) {
+    use crate::commands::service::toggle::{ServiceToggleCmd, Slot};
+
+    ServiceToggleCmd {
+        service: Slot::Service(swoosh::names::service(name).unwrap()),
+        machine: None,
+    }
+    .run(home, way)
+    .await
+    .unwrap();
+}
+
+fn serving_row(out: &str) -> &str {
+    out.lines()
+        .find(|line| line.starts_with("serving:"))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn status_marks_a_listed_service_turned_off() {
+    let home = home("listed-off");
+    service_list(&home, &["ssh=ssh:", "web=tcp:localhost:3000"], &[]).await;
+    // Catalog order and internal entries cannot become the printable-name source.
+    let _resident = LocalResident::start(&home, &["control.stop", "web", "ssh"], None);
+    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web");
+    turn(&home, "web", crate::commands::service::toggle::Way::Off).await;
+    let before = tree(home.dir());
+    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web (off)");
+    assert_eq!(tree(home.dir()), before, "the report must not write");
+}
+
+#[tokio::test]
+async fn status_leaves_out_a_service_added_or_removed_while_serving() {
+    use crate::commands::service::edit::{ServiceAddCmd, ServiceRmCmd};
+
+    let home = home("added-removed");
+    service_list(&home, &["ssh=ssh:", "web=tcp:localhost:3000"], &[]).await;
+    let _resident = LocalResident::start(&home, &["ssh", "web", "control.stop"], None);
+    ServiceAddCmd {
+        entries: vec![swoosh::serve::service_entry("proxy:https://example.com").unwrap()],
+    }
+    .run(&home)
+    .await
+    .unwrap();
+    ServiceRmCmd {
+        names: vec!["web".parse().unwrap()],
+    }
+    .run(&home)
+    .await
+    .unwrap();
+    assert_eq!(serving_row(&status(&home).await), "serving: ssh");
+
+    // Reusing the removed name with a new target still has the old bound route until restart.
+    ServiceAddCmd {
+        entries: vec!["web=tcp:localhost:9090".to_owned()],
+    }
+    .run(&home)
+    .await
+    .unwrap();
+    assert_eq!(serving_row(&status(&home).await), "serving: ssh, web");
+    service_list(&home, &[], &[]).await;
+    assert_eq!(serving_row(&status(&home).await), "serving: nothing");
+}
+
+#[tokio::test]
+async fn status_shows_what_a_bare_serve_starts_when_none_runs() {
+    let home = home("down-listed");
+    assert!(matches!(
+        Standing::read(&home).await,
+        Ok(Standing::Unpinned)
+    ));
+    service_list(&home, &["ssh=ssh:", "web=tcp:localhost:3000"], &["web"]).await;
+    let before = tree(home.dir());
+    assert_eq!(
+        serving_row(&status(&home).await),
+        "serving: ssh, web (off), when swoosh serve runs"
+    );
+    assert_eq!(tree(home.dir()), before);
+}
+
+#[tokio::test]
+async fn status_tells_the_default_from_an_emptied_list() {
+    let home = home("default-empty");
+    assert!(!home.serve_toml().exists());
+    assert_eq!(
+        serving_row(&status(&home).await),
+        "serving: ping, speed, when swoosh serve runs"
+    );
+    // A present file that has only off marks is still a never-named list.
+    turn(&home, "ping", crate::commands::service::toggle::Way::Off).await;
+    assert_eq!(
+        serving_row(&status(&home).await),
+        "serving: ping (off), speed, when swoosh serve runs"
+    );
+    service_list(&home, &[], &[]).await;
+    assert_eq!(
+        serving_row(&status(&home).await),
+        "serving: nothing, even when swoosh serve runs"
+    );
+}
+
+#[tokio::test]
+async fn status_reports_a_damaged_serve_toml_as_unknown() {
+    let home = home("damaged-services");
+    for bytes in [
+        b"services = ['web=tcp:localhost:3000', 'web=tcp:localhost:4000']\n".as_slice(),
+        b"services = ['--public']\n",
+        b"services = ['tcp:localhost:3000']\n",
+        b"this is not TOML\n",
+    ] {
+        overwrite(&home.serve_toml(), bytes);
+        let before = tree(home.dir());
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run_to(&home, Print::Report, &mut out, &mut err)
+            .await
+            .unwrap();
+        assert_eq!(
+            serving_row(&String::from_utf8(out).unwrap()),
+            "serving: unknown"
+        );
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.contains(&home.serve_toml().display().to_string()),
+            "{err}"
+        );
+        assert!(!err.contains("running swoosh serve"), "{err}");
+        assert!(!err.starts_with("could not read "), "{err}");
+        assert_eq!(err.matches("serve.toml").count(), 1, "{err}");
+        if bytes.starts_with(b"services = ['web=") {
+            assert_eq!(
+                err,
+                format!(
+                    "web is named twice in {}\n  Each service needs its own name; swoosh will not guess which one to keep.\n",
+                    home.serve_toml().display()
+                )
+            );
+        }
+        assert_eq!(tree(home.dir()), before);
+    }
+    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:']\n");
+    let _resident = LocalResident::start(&home, &["ssh"], None);
+    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:', 'ssh=ssh:']\n");
+    assert_eq!(serving_row(&status(&home).await), "serving: unknown");
+    drop(_resident);
+
+    // A trusted-file opener refusal is not an absent file, nor a daemon-read failure.
+    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:']\n");
+    std::fs::set_permissions(
+        home.serve_toml(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o666),
+    )
+    .unwrap();
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    run_to(&home, Print::Report, &mut out, &mut err)
+        .await
+        .unwrap();
+    assert_eq!(
+        serving_row(&String::from_utf8(out).unwrap()),
+        "serving: unknown"
+    );
+    let err = String::from_utf8(err).unwrap();
+    assert!(err.contains("serve.toml"), "{err}");
+    assert!(!err.contains("running swoosh serve"), "{err}");
+
+    // A valid file beside a planted non-socket retains the existing, distinct daemon notice.
+    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:']\n");
+    let socket = home.control_socket().unwrap();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    std::fs::set_permissions(
+        socket.parent().unwrap(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    overwrite(&socket, b"not a socket");
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    run_to(&home, Print::Report, &mut out, &mut err)
+        .await
+        .unwrap();
+    assert_eq!(
+        serving_row(&String::from_utf8(out).unwrap()),
+        "serving: unknown"
+    );
+    let err = String::from_utf8(err).unwrap();
+    assert!(
+        err.starts_with("could not read the running swoosh serve:"),
+        "{err}"
+    );
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::remove_dir(socket.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn the_name_status_prints_is_the_name_service_on_takes() {
+    use clap::Parser as _;
+
+    use crate::commands::service::toggle::Way;
+
+    let home = home("names-for-on");
+    service_list(
+        &home,
+        &["web=tcp:localhost:3000", "proxy=proxy:https://example.com"],
+        &[],
+    )
+    .await;
+    let _resident = LocalResident::start(&home, &["web", "proxy"], None);
+    for name in ["web", "proxy"] {
+        turn(&home, name, Way::Off).await;
+    }
+    let out = status(&home).await;
+    assert_eq!(serving_row(&out), "serving: web (off), proxy (off)");
+    for marked in serving_row(&out)
+        .strip_prefix("serving: ")
+        .unwrap()
+        .split(", ")
+    {
+        let name = marked.strip_suffix(" (off)").unwrap();
+        crate::Cli::try_parse_from(["swoosh", "service", "on", name]).unwrap();
+        turn(&home, name, Way::On).await;
+    }
+    assert_eq!(serving_row(&status(&home).await), "serving: web, proxy");
+}
+
+#[tokio::test]
+async fn status_keeps_the_marks_when_admitting() {
+    let home = home("admit-marks");
+    service_list(&home, &["ssh=ssh:", "web=tcp:localhost:3000"], &["web"]).await;
+    let root = TestRoot::seeded(ROOT).node_id();
+    let _resident = LocalResident::start(&home, &["ssh", "web"], Some(root));
+    assert_eq!(
+        serving_row(&status(&home).await),
+        format!("serving: ssh, web (off), admitting root:{root}")
+    );
+    service_list(&home, &[], &[]).await;
+    assert_eq!(
+        serving_row(&status(&home).await),
+        format!("serving: nothing, admitting root:{root}")
+    );
+    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:', 'ssh=ssh:']\n");
+    assert_eq!(
+        serving_row(&status(&home).await),
+        format!("serving: unknown, admitting root:{root}")
+    );
+}
+
+/// Existing typed file/list errors keep one filename and the useful I/O source, while a command-line
+/// error that has no file gets only that missing context.
+#[test]
+fn serving_file_notices_preserve_sources_without_repeating_the_file() {
+    use std::io;
+
+    use swoosh::escape::EscapedPath;
+    use swoosh::serve::{Mistyped, ServingError};
+    use swoosh::serve_toml::ServeTomlError;
+
+    use crate::commands::service_state::ReadError;
+
+    let home = home("file-notices");
+    let path = home.serve_toml();
+    let error = ReadError::File(ServeTomlError::Io {
+        path: path.clone(),
+        source: io::Error::new(io::ErrorKind::PermissionDenied, "fixture permission denied"),
+    });
+    let notice = super::serving_file_notice(&home, error);
+    assert_eq!(
+        notice,
+        format!(
+            "could not use {}: fixture permission denied",
+            EscapedPath(&path)
+        )
+    );
+    let error = ServingError::Mistyped(Mistyped::Twice("web".to_owned()));
+    let expected = format!("{}: {error}", EscapedPath(&path));
+    assert_eq!(
+        super::serving_file_notice(&home, ReadError::List(error)),
+        expected
+    );
+}
+
+#[tokio::test]
+async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
+    use crate::commands::service_state::{ReadError, ServiceState};
+
+    let home = home("uncallable-services");
+    for name in ["control", "lookup"] {
+        let entry = format!("{name}=ping:");
+        service_list(&home, &["ssh=ssh:", &entry], &[]).await;
+        let before = tree(home.dir());
+        assert!(matches!(
+            ServiceState::read(&home).await,
+            Err(ReadError::List(swoosh::serve::ServingError::NotAService { path, line }))
+                if path == home.serve_toml() && line == entry
+        ));
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run_to(&home, Print::Report, &mut out, &mut err)
+            .await
+            .unwrap();
+        assert_eq!(
+            serving_row(&String::from_utf8(out).unwrap()),
+            "serving: unknown"
+        );
+        let err = String::from_utf8(err).unwrap();
+        assert_eq!(err.matches("serve.toml").count(), 1, "{err}");
+        assert!(
+            err.contains(&home.serve_toml().display().to_string()),
+            "{err}"
+        );
+        assert!(
+            err.contains(&entry) && err.contains("which is not a service"),
+            "{err}"
+        );
+        assert_eq!(tree(home.dir()), before);
+
+        service_list(&home, &["ssh=ssh:"], &[]).await;
+        let resident = LocalResident::start(&home, &["ssh", "control.stop"], None);
+        // The invalid entry is absent from the bound catalog, but the whole file still refuses.
+        service_list(&home, &["ssh=ssh:", &entry], &[]).await;
+        assert_eq!(serving_row(&status(&home).await), "serving: unknown");
+        drop(resident);
+    }
+}
+
+#[tokio::test]
+async fn status_preserves_current_callable_names_without_new_reservations() {
+    let home = home("current-service-names");
+    service_list(&home, &["me=ping:", "root=ping:", "anyone=ping:"], &[]).await;
+    assert_eq!(
+        serving_row(&status(&home).await),
+        "serving: me, root, anyone, when swoosh serve runs"
+    );
+    let resident = LocalResident::start(&home, &["me", "root", "anyone", "control.stop"], None);
+    assert_eq!(
+        serving_row(&status(&home).await),
+        "serving: me, root, anyone"
+    );
+    drop(resident);
 }

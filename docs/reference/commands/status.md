@@ -12,25 +12,25 @@ Usage: swoosh status [OPTIONS] [machine]
   --key    print this machine's key and nothing else
 ```
 
-**Example.** On a new machine, the first run makes its key:
+**Example.** With a key, no saved service list and nothing running, `swoosh status` includes this row:
 
-<!-- live-run: the key and its path differ per machine -->
+<!-- live-run: local status with a key, no saved service list and no running serve; only the serving row captured -->
 ```console
-$ swoosh status
-made this machine's key (first run): /home/me/.local/state/swoosh/machine/key
-key: ed01hskmy456mldlsiqv4vuno7t37jzj2rqt3ipnnq4wvd5h67ahnk7q
-lock: none
-root: none yet.
-  to join yours: swoosh join
-  to make one here: swoosh invite <name> <key>
-
-serving: nothing (swoosh serve is not running)
+serving: ping, speed, when swoosh serve runs
 ```
 
 **Things to know.** Bare `status` reads this machine's own files and never dials, so it runs with nothing
 serving and never asks for a passphrase. The report is on stdout; a line such as `made this machine's key`
-is on stderr. `swoosh status --key` prints the key alone, for a script. Sections with no row are left out,
-except `serving:`. On a device, `devices:` is your root's list as of the last sync.
+is on stderr. `swoosh status --key` prints the key alone, for a script. Sections with no row are left out.
+On a device, `devices:` is your root's list as of the last sync.
+
+`serving:` appears on every home with a key. It shows service names, with `(off)` beside those turned off.
+Use those names with `swoosh service on` or `swoosh service off`. While serving, names added or removed
+since start are left out; retargeted names still refer to the old route. When nothing runs, the row says
+what `swoosh serve` would start. An emptied list says `nothing, even when swoosh serve runs`. If
+`serve.toml` cannot be read or its service list is invalid, the row says `unknown`; stderr names the file
+and the reason, and `status` still exits 0. When admitting devices, `admitting root:` and the root key
+follow the service list.
 
 With a machine, `status` dials it and prints one line. A healthy line has the path and a round-trip time, and
 for one of your own devices ends with what it serves (`; serving: ssh, web`). Otherwise `status` exits non-zero

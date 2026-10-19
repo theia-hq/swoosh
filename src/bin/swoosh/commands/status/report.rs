@@ -18,15 +18,16 @@ use swoosh::credential::short;
 use swoosh::escape::EscapedPath;
 use swoosh::grants::{ANYONE, GrantKind, GrantRecord, Grants};
 use swoosh::home::Home;
-use swoosh::node_client::{ControlClient, NodeClient as _};
 use swoosh::passphrase::{Asked, Prompt, Terminal};
 use swoosh::root::{Date, Root, RootPlace};
 use swoosh::root_key::RootKey;
 use swoosh::roster::{Member, RevokedDevice};
-use swoosh::serve::control_codec::{ControlError, DisabledList, ServiceMenu};
+use swoosh::serve::ServingError;
 use swoosh::standing::{Standing, StandingError};
 use swoosh::{badge, roster, standing, sync, touch};
 use tightbeam::identity::AsVerifyKey as _;
+
+use crate::commands::service_state::{ReadError, ServiceState};
 
 /// What bare `status` prints on stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,9 +37,6 @@ pub(crate) enum Print {
     /// This machine's key alone (`--key`).
     Key,
 }
-
-/// The line `serving:` reads when no `serve` runs here.
-pub(crate) const SERVING_NOTHING: &str = "serving: nothing (swoosh serve is not running)";
 
 /// `status --key`'s refusal on a home with no key: `status` makes none.
 pub(crate) const NO_KEY: &str =
@@ -100,7 +98,7 @@ pub(crate) struct Report {
     /// the list.
     this_machine: Option<String>,
     sections: Vec<Section>,
-    /// `serving:`; `None` when nothing runs and this machine is no device, which has nothing to say.
+    /// `serving:`; present on every home with a key.
     serving: Option<String>,
     /// The lines that say what to do, last.
     nags: Vec<String>,
@@ -159,7 +157,6 @@ impl Report {
         let contacts = store.contacts();
         // An act that did not finish, or a home whose records disagree, says so on the last line.
         let mut last = None;
-        let mut device = false;
         match key {
             None => match Standing::read(home).await {
                 // A `leave` from a restored home where the root is kept leaves the root half made, and the
@@ -194,7 +191,6 @@ impl Report {
                 }
                 Ok(Standing::Unpinned) => report.top = NOT_A_DEVICE.map(str::to_owned).to_vec(),
                 Ok(standing) => {
-                    device = true;
                     report.standing(home, standing, now).await?;
                 }
             },
@@ -233,14 +229,14 @@ impl Report {
         }
         report.sections.push(contacts_section(contacts));
         report.sections.push(links_section(home, now).await?);
-        report.serving = report.serving_line(home).await;
-        if let Some(root) = swoosh::home::ServeLock::recorded(home).admit
-            && swoosh::home::serve_running(home).await
-        {
-            report.serving = Some(admitting(report.serving.as_deref(), root));
-        }
-        if device && report.serving.is_none() {
-            report.serving = Some(SERVING_NOTHING.to_owned());
+        if key.is_some() {
+            let mut serving = report.serving_line(home).await;
+            if let Some(root) = swoosh::home::ServeLock::recorded(home).admit
+                && swoosh::home::serve_running(home).await
+            {
+                serving = admitting(&serving, root);
+            }
+            report.serving = Some(serving);
         }
         if roster_fork_held(home) {
             report.nags.push(
@@ -445,22 +441,16 @@ impl Report {
         self.sections.push(Section { title, rows });
     }
 
-    /// `serving:`, from the running `serve`'s local control socket when there is one; `None` when no
-    /// `serve` runs. Reading it is not a dial: no other machine is contacted. A socket nothing listens on
-    /// (a `serve` that was killed) is the same as none.
-    async fn serving_line(&mut self, home: &Home) -> Option<String> {
-        let client = match ControlClient::resolve(home) {
-            Ok(client) => client,
-            Err(ControlError::NoResident) => return None,
-            Err(error) => return Some(self.serving_unknown(&error)),
-        };
-        match client.status().await {
-            Ok(status) => Some(match serving(&status.menu) {
-                Ok(line) => line,
-                Err(why) => self.serving_unknown(&why),
-            }),
-            Err(ControlError::NoResident) => None,
-            Err(error) => Some(self.serving_unknown(&error)),
+    /// The validated local list, intersected with bound names while the local resident runs. File
+    /// refusals report the file, never a daemon failure; neither changes status's successful exit.
+    async fn serving_line(&mut self, home: &Home) -> String {
+        match ServiceState::read(home).await {
+            Ok(state) => serving(&state),
+            Err(ReadError::Daemon(error)) => self.serving_unknown(&error),
+            Err(error) => {
+                self.notices.push(serving_file_notice(home, error));
+                "serving: unknown".to_owned()
+            }
         }
     }
 
@@ -630,37 +620,55 @@ fn renew_line(row: &DeviceRow, root: &str) -> Option<String> {
     ))
 }
 
-/// `serving:` with the root a running `serve --admit` admits, after what it serves when that is known.
-fn admitting(serving: Option<&str>, root: NodeId) -> String {
-    let head = match serving {
-        None | Some(SERVING_NOTHING) => "serving:".to_owned(),
-        Some(serving) => format!("{serving},"),
-    };
-    format!("{head} admitting root:{root}")
+/// Typed file errors already name their path; only a command-line list error needs file context here.
+/// Alternate report formatting retains the source of an I/O refusal without repeating a path.
+fn serving_file_notice(home: &Home, error: ReadError) -> String {
+    match error {
+        ReadError::List(error @ ServingError::Mistyped(_)) => format!(
+            "{}: {:#}",
+            EscapedPath(&home.serve_toml()),
+            eyre::Report::new(error)
+        ),
+        error => format!("{:#}", eyre::Report::new(error)),
+    }
 }
 
-/// `serving:` from a running `serve`'s menu: every service it serves that is not turned off. When the list
-/// of what is off could not be read, what is served is not known: the reason, for stderr.
-fn serving(menu: &ServiceMenu) -> Result<String, String> {
-    let off = match &menu.disabled {
-        DisabledList::Known(names) => names,
-        DisabledList::Unknown(why) => {
-            return Err(format!("its list of services turned off: {why}"));
-        }
-    };
-    let on: Vec<&str> = menu
-        .catalog
-        .entries()
-        .map(|entry| entry.name.as_str())
-        // The node's own routes (`control.*`, `lookup.*`) are dotted, as no service a person starts can be,
-        // so none is listed.
-        .filter(|name| !name.contains('.'))
-        .filter(|name| !off.iter().any(|off| off == name))
+/// Admission follows the complete list, including off marks, an empty list or an unknown one.
+fn admitting(serving: &str, root: NodeId) -> String {
+    format!("{serving}, admitting root:{root}")
+}
+
+/// Only validated configured names can print. Catalog membership keeps a same-name retarget, whose old
+/// route still answers, but omits additions and removals until the next start.
+fn serving(state: &ServiceState) -> String {
+    let names: Vec<String> = state
+        .started
+        .names()
+        .into_iter()
+        .filter(|name| {
+            state
+                .bound
+                .as_ref()
+                .is_none_or(|catalog| catalog.entries().any(|entry| entry.name == *name))
+        })
+        .map(|name| {
+            if state.off.contains(&name) {
+                format!("{name} (off)")
+            } else {
+                name
+            }
+        })
         .collect();
-    Ok(match on.as_slice() {
-        [] => "serving: nothing".to_owned(),
-        names => format!("serving: {}", names.join(", ")),
-    })
+    let list = if names.is_empty() {
+        "nothing".to_owned()
+    } else {
+        names.join(", ")
+    };
+    match (&state.bound, names.is_empty()) {
+        (Some(_), _) => format!("serving: {list}"),
+        (None, true) => "serving: nothing, even when swoosh serve runs".to_owned(),
+        (None, false) => format!("serving: {list}, when swoosh serve runs"),
+    }
 }
 
 /// One of the root's devices, from its records where the root is kept, or from the update a device holds.

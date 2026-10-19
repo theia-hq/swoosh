@@ -428,3 +428,112 @@ fn a_home_that_is_the_key_file_names_no_directory_to_pass() {
     );
     std::fs::remove_dir_all(&home).unwrap();
 }
+
+/// The handle rule accepts regular symlink targets but never a directory.
+#[cfg(unix)]
+#[allow(clippy::std_instead_of_core)]
+#[test]
+fn trust_handles_follow_regular_symlinks_and_refuse_directories() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    let dir = std::env::temp_dir().join(format!("swoosh-trust-handles-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("regular");
+    std::fs::write(&path, "a row\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        super::open_trust_file(&path)
+            .unwrap()
+            .metadata()
+            .unwrap()
+            .is_file()
+    );
+    let link = dir.join("link");
+    symlink(&path, &link).unwrap();
+    assert_eq!(super::read_trust_file(&link).unwrap(), "a row\n");
+    assert_eq!(
+        super::open_trust_file(&dir).unwrap_err().kind(),
+        std::io::ErrorKind::InvalidInput
+    );
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o620)).unwrap();
+    assert_eq!(
+        super::loose_in(&super::open_trust_file(&link).unwrap_err()),
+        Some(super::Loose::Writable)
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A parent deadline protects the test even if the opener is accidentally made blocking again.
+#[cfg(unix)]
+#[allow(clippy::std_instead_of_core)]
+#[test]
+fn trust_fifos_refuse_with_or_without_a_held_writer() {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const CHILD: &str = "SWOOSH_TRUST_FIFO_CHILD";
+    if let Some(path) = std::env::var_os(CHILD) {
+        assert_eq!(
+            super::open_trust_file(std::path::Path::new(&path))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("swoosh-trust-fifos-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fifo");
+    assert!(
+        Command::new("mkfifo")
+            .arg("-m")
+            .arg("600")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success()
+    );
+    for peer in ["absent", "held"] {
+        // O_RDWR keeps a writer present without a second thread that could itself block.
+        let _writer = (peer == "held").then(|| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+                .unwrap()
+        });
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "home::home_tests::trust_fifos_refuse_with_or_without_a_held_writer",
+                "--test-threads=1",
+            ])
+            .env(CHILD, &path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(exit) = child.try_wait().unwrap() {
+                let output = child.wait_with_output().unwrap();
+                let stdout = String::from_utf8(output.stdout).unwrap();
+                assert!(exit.success(), "FIFO {peer} child failed: {stdout}");
+                assert!(
+                    stdout.contains("1 passed; 0 failed;"),
+                    "child must run the exact property: {stdout}"
+                );
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("FIFO {peer} open exceeded parent deadline; exact child killed and reaped");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
