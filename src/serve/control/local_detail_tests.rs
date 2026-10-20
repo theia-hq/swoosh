@@ -16,6 +16,7 @@ use crate::serve::control::{Request, Response};
 std::thread_local! {
     static TRACK: Cell<bool> = const { Cell::new(false) };
     static FAIL: Cell<bool> = const { Cell::new(false) };
+    static FAIL_SIZES: Cell<[usize; 2]> = const { Cell::new([0; 2]) };
     static ALLOCS: Cell<usize> = const { Cell::new(0) };
     static POINTER: Cell<usize> = const { Cell::new(0) };
 }
@@ -26,7 +27,7 @@ static ALLOCATOR: Allocator = Allocator;
 // SAFETY: every successful operation delegates unchanged to System; failure returns a null pointer.
 unsafe impl GlobalAlloc for Allocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if FAIL.get() {
+        if FAIL.get() || FAIL_SIZES.get().contains(&layout.size()) {
             return core::ptr::null_mut();
         }
         // SAFETY: the caller supplied a valid allocation layout.
@@ -41,6 +42,10 @@ unsafe impl GlobalAlloc for Allocator {
         // SAFETY: pointer and layout are passed through from the allocation's owner.
         unsafe { System.dealloc(pointer, layout) };
     }
+}
+
+pub(crate) fn fail_sizes(sizes: [usize; 2]) {
+    FAIL_SIZES.set(sizes);
 }
 
 fn body(pairs: &[(&[u8], &[u8], u8)]) -> Vec<u8> {
@@ -335,12 +340,135 @@ async fn response_io_owns_one_payload_and_writes_it_by_borrow() {
     assert_eq!(input, frame(&[1]));
 }
 
+#[test]
+fn capture_preflights_all_limits_before_allocating() {
+    use LocalDetailError::{InconsistentState, LimitExceeded};
+    use LocalDetailLimit::{BoundCount, NameBytes, PayloadBytes, TargetBytes};
+    let capture =
+        |pairs: &[(&str, &str, bool)]| LocalServiceSnapshot::capture(pairs.iter().copied());
+    assert!(capture(&[]).unwrap().is_empty());
+    for name in ["", "A", "-a", "a.b", "control", "lookup"] {
+        assert!(matches!(
+            capture(&[(name, "x", false)]),
+            Err(InconsistentState)
+        ));
+    }
+    assert!(matches!(
+        capture(&[("a", "", false)]),
+        Err(InconsistentState)
+    ));
+    assert!(matches!(
+        capture(&[("b", "x", false), ("a", "x", false)]),
+        Err(InconsistentState)
+    ));
+    let long_name = "a".repeat(63) + "A";
+    let target = "x".repeat(4096);
+    assert!(matches!(
+        capture(&[(&long_name, "", false)]),
+        Err(LimitExceeded(NameBytes))
+    ));
+    assert!(capture(&[(&long_name[..63], &target, false)]).is_ok());
+    assert!(matches!(
+        capture(&[("a", &(String::clone(&target) + "x"), false)]),
+        Err(LimitExceeded(TargetBytes))
+    ));
+    let names: Vec<_> = (0..257).map(|n| format!("s{n:03}")).collect();
+    let pairs: Vec<_> = names
+        .iter()
+        .map(|name| (name.as_str(), "x", false))
+        .collect();
+    assert_eq!(capture(&pairs[..256]).unwrap().len(), 256);
+    assert!(matches!(capture(&pairs), Err(LimitExceeded(BoundCount))));
+    let second = "y".repeat(4082);
+    let exact = capture(&[("a", &target, false), ("b", &second[..4081], true)]).unwrap();
+    assert_eq!(exact.payload.len(), 8192);
+    assert!(matches!(
+        capture(&[("a", &target, false), ("b", &second, true)]),
+        Err(LimitExceeded(PayloadBytes))
+    ));
+    // Lexical errors in later pairs still precede the total-payload limit.
+    assert!(matches!(
+        capture(&[
+            ("a", &target, false),
+            ("b", &target, false),
+            ("c", "", false)
+        ]),
+        Err(InconsistentState)
+    ));
+    assert_eq!(super::capture_size(usize::MAX, 1, 1), None);
+    assert_eq!(super::capture_size(3, usize::MAX, 1), None);
+    ALLOCS.set(0);
+    TRACK.set(true);
+    let snapshot = capture(&[("a", "x=y\n雪", true)]).unwrap();
+    TRACK.set(false);
+    assert_eq!(ALLOCS.get(), 1);
+    assert!(snapshot.payload.capacity() <= 8192);
+    assert_eq!(snapshot.get("a").unwrap().target().as_str(), "x=y\n雪");
+}
+
 #[tokio::test]
-async fn the_foundation_does_not_activate_request_six() {
+async fn detail_diagnostics_are_fallible_bounded_and_borrowed() {
+    let response = Response::detail_unavailable().unwrap();
+    let Response::Error(reason) = &response else {
+        panic!()
+    };
+    assert!(reason.len() <= 256 && reason.capacity() <= 256);
+    let mut writer = BorrowWriter {
+        header: [0; 7],
+        used: 0,
+        pointer: 0,
+        len: 0,
+    };
+    ALLOCS.set(0);
+    TRACK.set(true);
+    response.write(&mut writer).await.unwrap();
+    TRACK.set(false);
+    assert_eq!(ALLOCS.get(), 0);
+    assert_eq!(writer.pointer, reason.as_ptr() as usize);
+    FAIL.set(true);
+    let response = Response::detail_unavailable();
+    FAIL.set(false);
+    assert!(matches!(
+        response,
+        Err(LocalDetailError::ResourceUnavailable)
+    ));
+    assert!(matches!(
+        super::diagnostic(&"x".repeat(257)),
+        Err(LocalDetailError::ResourceUnavailable)
+    ));
+    assert!(matches!(
+        super::error_diagnostic(&ControlError::Protocol("x".repeat(257))),
+        Err(LocalDetailError::ResourceUnavailable)
+    ));
+    for byte in [b'0', b'9', 0, 255] {
+        let error = ControlError::Version {
+            peer: super::super::WireVersion([byte]),
+        };
+        let expected = error.to_string();
+        let Response::Error(reason) = Response::request_error(error, None).unwrap() else {
+            panic!()
+        };
+        assert_eq!(reason, expected);
+        assert!(reason.capacity() <= 256);
+    }
+}
+
+#[tokio::test]
+async fn local_detail_request_six_has_exact_empty_framing() {
+    ALLOCS.set(0);
+    TRACK.set(true);
+    let oversized = Request::read(&mut b"SWC1\x06\x20\x01".as_slice()).await;
+    TRACK.set(false);
+    assert!(matches!(oversized, Err(ControlError::TooLarge(8193))));
+    assert_eq!(ALLOCS.get(), 0);
+    assert!(
+        matches!(Request::read(&mut b"SWC1\xff\0\0".as_slice()).await, Err(ControlError::Protocol(reason)) if reason == "unknown request tag 0xff")
+    );
     for (request, tag) in [
         (Request::Services, 1),
         (Request::Status, 2),
         (Request::Stop, 3),
+        (Request::LocalServiceDetail, 6),
     ] {
         let mut encoded = Vec::new();
         request.write(&mut encoded).await.unwrap();
@@ -350,8 +478,26 @@ async fn the_foundation_does_not_activate_request_six() {
             request
         );
     }
+    for mut frame in [
+        b"SWC1\x06\0\x01x".as_slice(),
+        b"SWC1\xff\0\0",
+        b"SWC1\x04\0\0",
+        b"SWC1\x05\0\0",
+    ] {
+        assert!(matches!(
+            Request::read(&mut frame).await,
+            Err(ControlError::Protocol(_))
+        ));
+    }
+    for end in 0..7 {
+        assert!(
+            Request::read(&mut b"SWC1\x06\0\0"[..end].as_ref())
+                .await
+                .is_err()
+        );
+    }
     assert!(matches!(
-        Request::read(&mut b"SWC1\x06\0\0".as_slice()).await,
-        Err(ControlError::Protocol(_))
+        Request::read(&mut b"SWC1\x06\x20\x01".as_slice()).await,
+        Err(ControlError::TooLarge(8193))
     ));
 }

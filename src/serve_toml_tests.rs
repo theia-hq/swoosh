@@ -183,6 +183,109 @@ fn the_first_read_stays_what_load_read() {
     assert_eq!(watcher.first_read().relay, None, "the first read is kept");
 }
 
+#[test]
+fn local_detail_preserves_startup_targets_across_saved_refresh() {
+    let scratch = Scratch::new("detail-provenance");
+    list(&scratch, &["api=tcp:old:1", "gone=ping:", "off=ping:"]);
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    list(&scratch, &["api=tcp:next:2", "off=ping:", "added=ping:"]);
+    ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
+        file.off.extend(["off".to_owned(), "unbound".to_owned()]);
+    })
+    .unwrap();
+    watcher.lock().last_stat = None;
+    let snapshot = watcher.local_service_snapshot().unwrap();
+    assert_eq!(snapshot.len(), 3);
+    assert_eq!(snapshot.get("api").unwrap().target().as_str(), "tcp:old:1");
+    assert!(!snapshot.get("api").unwrap().refused());
+    assert!(snapshot.get("gone").unwrap().refused());
+    assert!(snapshot.get("off").unwrap().refused());
+    assert!(!snapshot.contains("unbound") && !snapshot.contains("added"));
+    assert_eq!(
+        ServeToml::read(&scratch.home).unwrap().services.unwrap()[0],
+        "api=tcp:next:2"
+    );
+    let replacement = LiveServeToml::load(&scratch.home).unwrap();
+    replacement.serving(&bare(&scratch));
+    let next = replacement.local_service_snapshot().unwrap();
+    assert_eq!(next.get("api").unwrap().target().as_str(), "tcp:next:2");
+    assert!(!next.contains("gone"));
+    assert_eq!(snapshot.get("api").unwrap().target().as_str(), "tcp:old:1");
+}
+
+#[test]
+fn local_detail_distinguishes_missing_empty_and_inconsistent_startup() {
+    use crate::serve::control_codec::LocalDetailError;
+    let scratch = Scratch::new("detail-state");
+    list(&scratch, &[]);
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    assert!(matches!(
+        watcher.local_service_snapshot(),
+        Err(LocalDetailError::MissingStartup)
+    ));
+    watcher.serving(&bare(&scratch));
+    assert!(watcher.local_service_snapshot().unwrap().is_empty());
+    watcher.lock().running = None;
+    assert!(matches!(
+        watcher.local_service_snapshot(),
+        Err(LocalDetailError::InconsistentState)
+    ));
+}
+
+#[test]
+fn local_detail_limits_do_not_change_valid_saved_configuration() {
+    use crate::serve::control_codec::{LocalDetailError, LocalDetailLimit};
+    let scratch = Scratch::new("detail-large");
+    let entries: Vec<_> = (0..257).map(|n| format!("s{n:03}=ping:")).collect();
+    ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
+        file.services = Some(Vec::clone(&entries))
+    })
+    .unwrap();
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    assert!(matches!(
+        watcher.local_service_snapshot(),
+        Err(LocalDetailError::LimitExceeded(
+            LocalDetailLimit::BoundCount
+        ))
+    ));
+    assert_eq!(
+        ServeToml::read(&scratch.home).unwrap().services.unwrap(),
+        entries
+    );
+    assert!(watcher.is_enabled(&service("s000")));
+}
+
+#[test]
+fn local_detail_waits_for_one_atomic_watcher_update() {
+    use std::sync::{Arc, Barrier, mpsc};
+    let scratch = Scratch::new("detail-atomic");
+    list(&scratch, &["a=ping:", "b=ping:"]);
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&bare(&scratch));
+    let mut held = watcher.lock();
+    let ready = Arc::new(Barrier::new(2));
+    let (send, recv) = mpsc::channel();
+    let reader = std::thread::spawn({
+        let watcher = LiveServeToml::clone(&watcher);
+        let ready = Arc::clone(&ready);
+        move || {
+            ready.wait();
+            send.send(watcher.local_service_snapshot()).unwrap();
+        }
+    });
+    ready.wait();
+    assert!(recv.try_recv().is_err());
+    held.file.off.insert("a".to_owned());
+    held.running.as_mut().unwrap().remove("b");
+    drop(held);
+    let snapshot = recv.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
+    reader.join().unwrap();
+    assert!(snapshot.get("a").unwrap().refused());
+    assert!(snapshot.get("b").unwrap().refused());
+}
+
 /// Write `services` as the file's list, through the writer `serve` uses, keeping every other field.
 fn list(scratch: &Scratch, services: &[&str]) {
     ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {

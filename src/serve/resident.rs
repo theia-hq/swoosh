@@ -16,7 +16,10 @@ use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
-use super::control::{ControlError, DisabledList, Request, Response, ServiceMenu, StatusReply};
+use super::control::{
+    ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, Request, Response,
+    ServiceMenu, StatusReply,
+};
 use crate::node_client::{NodeClient, euid, real_peer_uid};
 use crate::serve_toml::LiveServeToml;
 
@@ -103,15 +106,40 @@ impl Resident {
         self.served.load(Ordering::Relaxed)
     }
 
-    /// Answer one decoded request without side effects: `Stop` is answered [`Response::Ack`], and the
-    /// matching teardown is [`fire_stop`](Self::fire_stop), fired by the serve path only AFTER the
-    /// Ack is on the wire so a socket stop can never lose its confirm to the stop it triggers.
-    pub fn answer(&self, request: Request) -> Response {
-        match request {
+    /// Answer one decoded request without triggering teardown.
+    ///
+    /// `Stop` returns [`Response::Ack`]. The serve path writes the Ack before calling
+    /// [`fire_stop`](Self::fire_stop).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LocalDetailError::ResourceUnavailable`] if a local service detail error reply
+    /// cannot be built within its memory limits. The socket caller then closes the connection
+    /// without writing a response.
+    pub fn answer(&self, request: Request) -> Result<Response, LocalDetailError> {
+        Ok(match request {
             Request::Services => Response::Catalog(self.menu()),
             Request::Status => Response::Status(self.status_reply()),
             Request::Stop => Response::Ack,
-        }
+            Request::LocalServiceDetail => return self.local_service_detail_reply(),
+        })
+    }
+
+    fn local_service_detail_reply(&self) -> Result<Response, LocalDetailError> {
+        let snapshot = match self.off.local_service_snapshot() {
+            Ok(snapshot) => Ok(snapshot),
+            Err(LocalDetailError::MissingStartup) => Err(LocalDetailCaptureError::MissingStartup),
+            Err(LocalDetailError::LimitExceeded(limit)) => {
+                Err(LocalDetailCaptureError::LimitExceeded(limit))
+            }
+            Err(LocalDetailError::InconsistentState) => {
+                Err(LocalDetailCaptureError::InconsistentState)
+            }
+            Err(LocalDetailError::ResourceUnavailable) => return Response::detail_unavailable(),
+            // Capture never produces peer errors; do not turn one into a successful wire outcome.
+            Err(error @ LocalDetailError::PeerError(_)) => return Err(error),
+        };
+        Ok(Response::LocalServiceDetail(snapshot))
     }
 
     /// Fire the socket stop: record the local source (so the run classifies the stop as local, never
@@ -244,10 +272,18 @@ impl Resident {
         self.served.fetch_add(1, Ordering::Relaxed);
         let (reader, mut writer) = stream.into_split();
         let mut reader = tokio::io::BufReader::new(reader);
-        let request = tokio::time::timeout(timeout, Request::read(&mut reader)).await;
-        let (response, stop) = match request {
-            Ok(Ok(Request::Stop)) => (Response::Ack, true),
-            Ok(Ok(request)) => (self.answer(request), false),
+        let mut observed = None;
+        let request =
+            tokio::time::timeout(timeout, Request::read_observed(&mut reader, &mut observed)).await;
+        let (response, stop, detail) = match request {
+            Ok(Ok(Request::Stop)) => (Response::Ack, true, false),
+            Ok(Ok(request)) => {
+                let detail = matches!(request, Request::LocalServiceDetail);
+                let Ok(response) = self.answer(request) else {
+                    return;
+                };
+                (response, false, detail)
+            }
             Ok(Err(ControlError::TooLarge(_))) => {
                 // EOF is the contract for an oversized DECLARED frame: the codec refuses the length
                 // before reading a byte of it (`control.rs`), and the connection closes with no
@@ -256,14 +292,22 @@ impl Resident {
                 // The serve-level test (`oversized_declared_frame_ends_the_connection`) pins this.
                 return;
             }
-            Ok(Err(error)) => (Response::Error(error.to_string()), false),
+            Ok(Err(error)) => {
+                let Ok(response) = Response::request_error(error, observed.as_ref()) else {
+                    return;
+                };
+                (response, false, true)
+            }
             Err(_elapsed) => {
                 return;
             }
         };
         self.reply_then_fire(&mut writer, &response, stop, timeout)
             .await;
-        let _ = writer.shutdown().await;
+        // Declared-frame detail exchanges end by dropping both halves, never by waiting for EOF.
+        if !detail {
+            let _ = writer.shutdown().await;
+        }
     }
 
     /// Write the reply, THEN fire the stop it answered: the order is the stop-Ack contract, the
