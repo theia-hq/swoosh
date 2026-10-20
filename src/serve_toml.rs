@@ -488,6 +488,33 @@ impl LiveServeToml {
         });
     }
 
+    // Startup pairs and refusal bits are serialized while this single refreshed guard is held.
+    pub(crate) fn local_service_snapshot(
+        &self,
+    ) -> Result<
+        crate::serve::control_codec::LocalServiceSnapshot,
+        crate::serve::control_codec::LocalDetailError,
+    > {
+        use crate::serve::control_codec::{LocalDetailError, LocalServiceSnapshot};
+
+        let held = self.refreshed();
+        let serving = held
+            .serving
+            .as_ref()
+            .ok_or(LocalDetailError::MissingStartup)?;
+        let running = held
+            .running
+            .as_ref()
+            .ok_or(LocalDetailError::InconsistentState)?;
+        LocalServiceSnapshot::capture(serving.bound.iter().map(|(name, target)| {
+            (
+                name.as_str(),
+                target.as_str(),
+                held.file.off.contains(name) || !running.contains_key(name),
+            )
+        }))
+    }
+
     /// What the file holds now that the run applies only when it next starts.
     pub fn waiting(&self) -> Waiting {
         let held = self.refreshed();

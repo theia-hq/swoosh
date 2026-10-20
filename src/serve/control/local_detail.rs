@@ -86,6 +86,55 @@ pub struct LocalServiceSnapshot {
 }
 
 impl LocalServiceSnapshot {
+    // The caller holds one watcher guard across both passes; no saved-next target enters this body.
+    pub(crate) fn capture<'a>(
+        pairs: impl Iterator<Item = (&'a str, &'a str, bool)> + Clone,
+    ) -> Result<Self, LocalDetailError> {
+        use LocalDetailError::{InconsistentState, LimitExceeded};
+        use LocalDetailLimit::{BoundCount, NameBytes, PayloadBytes, TargetBytes};
+
+        let count = Clone::clone(&pairs).take(257).count();
+        if count > 256 {
+            return Err(LimitExceeded(BoundCount));
+        }
+        let mut size = Some(3usize);
+        let mut previous = "";
+        for (name, target, _) in Clone::clone(&pairs) {
+            if name.len() > 63 {
+                return Err(LimitExceeded(NameBytes));
+            }
+            if !canonical_name(name.as_bytes()) || name <= previous {
+                return Err(InconsistentState);
+            }
+            previous = name;
+            if target.len() > 4096 {
+                return Err(LimitExceeded(TargetBytes));
+            }
+            if target.is_empty() {
+                return Err(InconsistentState);
+            }
+            size = size.and_then(|size| capture_size(size, name.len(), target.len()));
+        }
+        let size = size
+            .filter(|&size| size <= MAX_FRAME)
+            .ok_or(LimitExceeded(PayloadBytes))?;
+        let mut payload = storage(size).map_err(|_| LocalDetailError::ResourceUnavailable)?;
+        payload.clear();
+        // Preflight admitted the complete body and storage capacity, so these writes cannot grow it.
+        payload.push(0);
+        let count = u16::try_from(count).map_err(|_| LimitExceeded(BoundCount))?;
+        payload.extend_from_slice(&count.to_be_bytes());
+        for (name, target, refused) in pairs {
+            for text in [name, target] {
+                let len = u16::try_from(text.len()).map_err(|_| InconsistentState)?;
+                payload.extend_from_slice(&len.to_be_bytes());
+                payload.extend_from_slice(text.as_bytes());
+            }
+            payload.push(u8::from(refused));
+        }
+        Ok(Self { payload, count })
+    }
+
     /// Return the number of bound startup pairs.
     pub fn len(&self) -> usize {
         usize::from(self.count)
@@ -303,13 +352,58 @@ fn unavailable() -> ControlError {
 }
 
 // Fixed diagnostics are fallible too; no peer text or target ever enters this allocation.
-fn protocol(reason: &'static str) -> ControlError {
+pub(super) fn protocol(reason: &str) -> ControlError {
+    match diagnostic(reason) {
+        Ok(owned) => ControlError::Protocol(owned),
+        Err(error) => error.into(),
+    }
+}
+
+pub(super) fn diagnostic(reason: &str) -> Result<String, LocalDetailError> {
     let mut owned = String::new();
-    if owned.try_reserve_exact(reason.len()).is_err() || owned.capacity() > 256 {
-        return unavailable();
+    if reason.len() > 256
+        || owned.try_reserve_exact(reason.len()).is_err()
+        || owned.capacity() > 256
+    {
+        return Err(LocalDetailError::ResourceUnavailable);
     }
     owned.push_str(reason);
-    ControlError::Protocol(owned)
+    Ok(owned)
+}
+
+pub(super) fn error_diagnostic(error: &ControlError) -> Result<String, LocalDetailError> {
+    let mut text = DiagnosticText {
+        bytes: [0; 256],
+        len: 0,
+    };
+    fmt::write(&mut text, format_args!("{error}"))
+        .map_err(|_| LocalDetailError::ResourceUnavailable)?;
+    let reason = core::str::from_utf8(&text.bytes[..text.len])
+        .map_err(|_| LocalDetailError::ResourceUnavailable)?;
+    diagnostic(reason)
+}
+
+// Formatting cannot grow a String before its bound has been checked; this temporary stays inline.
+struct DiagnosticText {
+    bytes: [u8; 256],
+    len: usize,
+}
+
+impl fmt::Write for DiagnosticText {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let end = self
+            .len
+            .checked_add(text.len())
+            .filter(|&end| end <= self.bytes.len())
+            .ok_or(fmt::Error)?;
+        self.bytes[self.len..end].copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+fn capture_size(size: usize, name: usize, target: usize) -> Option<usize> {
+    size.checked_add(5)?.checked_add(name)?.checked_add(target)
 }
 
 fn checked_end(start: usize, len: usize) -> Result<usize, ControlError> {
@@ -370,4 +464,4 @@ fn borrowed_string<'a>(bytes: &mut &'a [u8]) -> Option<&'a str> {
 
 #[cfg(test)]
 #[path = "local_detail_tests.rs"]
-mod tests;
+pub(super) mod tests;

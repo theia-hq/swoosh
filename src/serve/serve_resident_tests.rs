@@ -86,6 +86,219 @@ async fn wait_for_permits(resident: &Resident, want: usize) {
     }
 }
 
+#[tokio::test]
+async fn detail_capture_failures_never_write_a_success_header() {
+    use crate::serve::Started;
+    for (entries, outcome) in [
+        (None, vec![1]),
+        (Some(vec![]), vec![0, 0, 0]),
+        (
+            Some((0..257).map(|n| format!("s{n:03}=ping:")).collect()),
+            vec![2, 1],
+        ),
+    ] {
+        let resident = test_resident();
+        if let Some(entries) = entries {
+            resident.off.serving(&Started::Named(entries));
+        }
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        Request::LocalServiceDetail
+            .write(&mut client)
+            .await
+            .unwrap();
+        resident
+            .serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT)
+            .await;
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).await.unwrap();
+        let mut expected = b"SWC1\x09".to_vec();
+        expected.extend_from_slice(&(outcome.len() as u16).to_be_bytes());
+        expected.extend_from_slice(&outcome);
+        assert_eq!(bytes, expected);
+        assert!(matches!(
+            resident.answer(Request::Status).unwrap(),
+            Response::Status(_)
+        ));
+        assert!(!format!("{:?}", resident.answer(Request::LocalServiceDetail)).contains("ping:"));
+    }
+}
+
+#[tokio::test]
+async fn detail_write_failure_is_terminal_without_retry_or_stop() {
+    struct BrokenWriter(usize);
+    impl AsyncWrite for BrokenWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.0 += 1;
+            Poll::Ready(Err(std::io::Error::from_raw_os_error(libc::EPIPE)))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            panic!("one-shot detail must drop, not shut down")
+        }
+    }
+    let resident = detail_resident();
+    for response in [
+        resident.answer(Request::LocalServiceDetail).unwrap(),
+        Response::detail_unavailable().unwrap(),
+    ] {
+        let mut writer = BrokenWriter(0);
+        resident
+            .reply_then_fire(&mut writer, &response, false, READ_TIMEOUT)
+            .await;
+        assert_eq!(writer.0, 1);
+        assert!(!resident.cancel.is_cancelled());
+    }
+}
+
+fn detail_resident() -> Resident {
+    let resident = test_resident();
+    resident
+        .off
+        .serving(&super::super::Started::Named(vec!["a=ping:".to_owned()]));
+    resident
+}
+
+#[tokio::test]
+async fn detail_is_one_shot_without_halfclose_or_stop_splicing() {
+    for second in [b"".as_slice(), b"SWC1\x03\0\0", b"SWC1\x06\0\0"] {
+        let resident = detail_resident();
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        client.write_all(b"SWC1\x06\0\0").await.unwrap();
+        client.write_all(second).await.unwrap();
+        tokio::time::timeout(
+            READ_TIMEOUT,
+            resident.serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT),
+        )
+        .await
+        .unwrap();
+        let Response::LocalServiceDetail(Ok(snapshot)) = Response::read(&mut client).await.unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(snapshot.get("a").unwrap().target().as_str(), "ping:");
+        assert_eq!(resident.served(), 1);
+        assert!(!resident.cancel.is_cancelled());
+        let mut byte = [0];
+        assert!(matches!(client.read(&mut byte).await, Ok(0) | Err(_)));
+    }
+}
+
+#[tokio::test]
+async fn detail_allocation_failure_answers_or_closes_without_partial_success() {
+    use crate::serve::control::fail_sizes;
+    let reason = "local service detail resources are unavailable";
+    for diagnostic_failure in [false, true] {
+        let resident = detail_resident();
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        Request::LocalServiceDetail
+            .write(&mut client)
+            .await
+            .unwrap();
+        // Fourteen is the complete one-pair packed body; no watcher refresh scratch is faulted.
+        fail_sizes([14, if diagnostic_failure { reason.len() } else { 0 }]);
+        resident
+            .serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT)
+            .await;
+        fail_sizes([0; 2]);
+        if diagnostic_failure {
+            let mut bytes = [0; 7];
+            assert_eq!(client.read(&mut bytes).await.unwrap(), 0);
+        } else {
+            assert!(
+                matches!(Response::read(&mut client).await.unwrap(), Response::Error(text) if text == reason)
+            );
+        }
+        assert!(!resident.cancel.is_cancelled());
+    }
+}
+
+#[tokio::test]
+async fn detail_checks_accepted_credentials_before_reading_or_capturing() {
+    fn failed_uid(_: i32) -> std::io::Result<u32> {
+        Err(std::io::Error::from_raw_os_error(libc::EIO))
+    }
+    for checker in [foreign_uid as fn(i32) -> std::io::Result<u32>, failed_uid] {
+        let resident = detail_resident();
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        Request::LocalServiceDetail
+            .write(&mut client)
+            .await
+            .unwrap();
+        resident
+            .serve_checked_with(server, checker, READ_TIMEOUT)
+            .await;
+        assert_eq!(resident.served(), 0);
+        let mut byte = [0];
+        assert!(matches!(client.read(&mut byte).await, Ok(0) | Err(_)));
+    }
+}
+
+#[tokio::test]
+async fn detail_capture_releases_guard_before_a_stalled_writer() {
+    let resident = detail_resident();
+    let response = resident.answer(Request::LocalServiceDetail).unwrap();
+    let mut writer = PendingWriter;
+    let deadline = core::time::Duration::from_millis(30);
+    let write = resident.reply_then_fire(&mut writer, &response, false, deadline);
+    tokio::pin!(write);
+    assert!(
+        tokio::time::timeout(core::time::Duration::from_millis(5), &mut write)
+            .await
+            .is_err()
+    );
+    let (send, recv) = std::sync::mpsc::channel();
+    let watcher = crate::serve_toml::LiveServeToml::clone(&resident.off);
+    let reader =
+        std::thread::spawn(move || send.send(watcher.local_service_snapshot().is_ok()).unwrap());
+    assert!(
+        recv.recv_timeout(core::time::Duration::from_secs(1))
+            .unwrap()
+    );
+    reader.join().unwrap();
+    tokio::time::timeout(core::time::Duration::from_secs(1), write)
+        .await
+        .unwrap();
+    assert!(!resident.cancel.is_cancelled());
+}
+
+#[tokio::test]
+async fn malformed_detail_requests_get_only_bounded_fixed_errors() {
+    for (request, expected) in [
+        (
+            b"SWC1\x06\0\x01x".as_slice(),
+            "invalid local service detail request",
+        ),
+        (
+            b"SWC1\x02\0\x01x",
+            "control protocol error: unexpected request payload",
+        ),
+        (
+            b"SWC1\xff\0\0",
+            "control protocol error: unknown request tag 0xff",
+        ),
+        (b"XXXX\x06\0\0", "not a control stream"),
+    ] {
+        let resident = detail_resident();
+        let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        client.write_all(request).await.unwrap();
+        resident
+            .serve_checked_with(server, super::real_peer_uid, READ_TIMEOUT)
+            .await;
+        let Response::Error(reason) = Response::read(&mut client).await.unwrap() else {
+            panic!()
+        };
+        assert_eq!(reason, expected);
+        assert!(reason.len() <= 256);
+        assert!(!reason.contains("ping:"));
+    }
+}
+
 /// Every request tag round-trips through the frame codec.
 #[tokio::test]
 async fn requests_round_trip() {
@@ -468,7 +681,7 @@ async fn control_flood_queues_rather_than_drops() {
     let mut queued = tokio::net::UnixStream::connect(&socket)
         .await
         .expect("the queued client connects");
-    Request::Status
+    Request::LocalServiceDetail
         .write(&mut queued)
         .await
         .expect("queued request writes");
@@ -493,7 +706,12 @@ async fn control_flood_queues_rather_than_drops() {
     .expect("the queued client is served once a slot frees")
     .expect("the queued request gets a reply");
     assert!(
-        matches!(reply, Response::Status(_)),
+        matches!(
+            reply,
+            Response::LocalServiceDetail(Err(
+                crate::serve::control_codec::LocalDetailCaptureError::MissingStartup
+            ))
+        ),
         "the queued request is answered"
     );
     assert_eq!(

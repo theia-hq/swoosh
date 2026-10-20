@@ -1800,12 +1800,15 @@ fn the_control_socket_adds_no_service() {
         "the manifest is exactly the default set; the control socket adds no service"
     );
 
-    // The mutate-free guarantee BY TYPE: the socket carries two reads and a stop, and no toggle. A
-    // total match with no wildcard is the guard: adding a control request variant (a toggle) makes
-    // this fail to compile, at the seat that would break the invariant.
-    for request in [Request::Services, Request::Status, Request::Stop] {
+    // The total match forces every new socket request to be checked against the no-toggle rule.
+    for request in [
+        Request::Services,
+        Request::Status,
+        Request::Stop,
+        Request::LocalServiceDetail,
+    ] {
         match request {
-            Request::Services | Request::Status | Request::Stop => {}
+            Request::Services | Request::Status | Request::Stop | Request::LocalServiceDetail => {}
         }
     }
 }

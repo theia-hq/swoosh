@@ -1,9 +1,8 @@
-//! The SWC1 control frame codec: the mutate-free local socket protocol.
+//! The SWC1 local control codec.
 //!
-//! Hand-rolled like `tightbeam::protocol` (u16 big-endian lengths, no serde): one request, one
-//! response, one-shot per connection. The request enum is the mutate-free guarantee BY TYPE: it can
-//! express Services, Status, and Stop, and nothing else, so a toggle/revoke RPC is unrepresentable,
-//! not merely unhandled.
+//! Each connection carries one request and one response. Reads expose status,
+//! service membership or local startup targets; Stop requests a graceful shutdown.
+//! Service edits remain file operations.
 
 use core::net::SocketAddr;
 use std::path::PathBuf;
@@ -13,6 +12,8 @@ use tightbeam::tunnel::ServiceCatalog;
 use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
 mod local_detail;
+#[cfg(test)]
+pub(crate) use local_detail::tests::fail_sizes;
 pub use local_detail::{
     LocalDetailCaptureError, LocalDetailError, LocalDetailLimit, LocalServiceName,
     LocalServicePair, LocalServicePairs, LocalServiceSnapshot, LocalServiceTarget,
@@ -136,9 +137,9 @@ pub const MAX_DISABLED_NAMES: usize = 1024;
 /// produce a frame the client refuses.
 pub const MAX_WARM_ENTRIES: usize = 64;
 
-/// The only requests a local control client can make: two reads and a stop. There is deliberately
-/// NO toggle/revoke variant: enabling or disabling a service is a file-write on `<home>/serve.toml`,
-/// never a socket RPC, so the compiler enforces the mutate-free rule at every match site.
+/// Requests accepted by the local control socket.
+///
+/// Service edits change the saved configuration, not the resident through this protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     /// Read the served catalog (the `control.services` snapshot).
@@ -147,6 +148,8 @@ pub enum Request {
     Status,
     /// Request a graceful stop (the socket twin of a SIGTERM the local user already holds).
     Stop,
+    /// Read startup service targets and refusal bits over the local socket only.
+    LocalServiceDetail,
 }
 
 impl Request {
@@ -156,6 +159,7 @@ impl Request {
             Self::Services => 1,
             Self::Status => 2,
             Self::Stop => 3,
+            Self::LocalServiceDetail => 6,
         }
     }
 
@@ -165,9 +169,18 @@ impl Request {
             1 => Ok(Self::Services),
             2 => Ok(Self::Status),
             3 => Ok(Self::Stop),
-            other => Err(ControlError::Protocol(format!(
-                "unknown request tag {other:#04x}"
-            ))),
+            6 => Ok(Self::LocalServiceDetail),
+            other => {
+                // Keep the existing hex diagnostic without an infallible formatting allocation.
+                let mut reason = *b"unknown request tag 0x00";
+                let hex = b"0123456789abcdef";
+                reason[22] = hex[usize::from(other >> 4)];
+                reason[23] = hex[usize::from(other & 15)];
+                Err(local_detail::protocol(
+                    core::str::from_utf8(&reason)
+                        .map_err(|_| LocalDetailError::ResourceUnavailable)?,
+                ))
+            }
         }
     }
 
@@ -180,6 +193,14 @@ impl Request {
 
     /// Read one request frame, enforcing the magic and the frame cap.
     pub async fn read<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self, ControlError> {
+        Self::read_observed(reader, &mut None).await
+    }
+
+    // Retain the typed operation even when its bounded payload is malformed; never classify by text.
+    pub(super) async fn read_observed<R: io::AsyncRead + Unpin>(
+        reader: &mut R,
+        observed: &mut Option<Self>,
+    ) -> Result<Self, ControlError> {
         read_magic(reader).await?;
         let mut tag = [0u8; 1];
         reader
@@ -187,6 +208,7 @@ impl Request {
             .await
             .map_err(ControlError::Io)?;
         let request = Self::from_tag(tag[0])?;
+        *observed = Some(Request::clone(&request));
         let mut len = [0u8; 2];
         reader
             .read_exact(&mut len)
@@ -198,15 +220,18 @@ impl Request {
         }
         // Requests carry no payload today; drain exactly what was declared so a padded frame
         // cannot smuggle bytes past the read.
-        let mut rest = vec![0u8; len];
-        reader
-            .read_exact(&mut rest)
-            .await
-            .map_err(ControlError::Io)?;
-        if !rest.is_empty() {
-            return Err(ControlError::Protocol(
-                "unexpected request payload".to_owned(),
-            ));
+        let mut remaining = len;
+        let mut rest = [0u8; 256];
+        while remaining != 0 {
+            let read = remaining.min(rest.len());
+            reader
+                .read_exact(&mut rest[..read])
+                .await
+                .map_err(ControlError::Io)?;
+            remaining -= read;
+        }
+        if len != 0 {
+            return Err(local_detail::protocol("unexpected request payload"));
         }
         Ok(request)
     }
@@ -452,6 +477,28 @@ pub enum Response {
 }
 
 impl Response {
+    pub(super) fn detail_unavailable() -> Result<Self, LocalDetailError> {
+        Ok(Self::Error(local_detail::diagnostic(
+            "local service detail resources are unavailable",
+        )?))
+    }
+
+    pub(super) fn request_error(
+        error: ControlError,
+        observed: Option<&Request>,
+    ) -> Result<Self, LocalDetailError> {
+        if let ControlError::LocalDetail(LocalDetailError::ResourceUnavailable) = error {
+            return Err(LocalDetailError::ResourceUnavailable);
+        }
+        let reason = if matches!(observed, Some(Request::LocalServiceDetail)) {
+            local_detail::diagnostic("invalid local service detail request")?
+        } else {
+            // Preserve existing request diagnostics without infallible formatting or extra heap storage.
+            local_detail::error_diagnostic(&error)?
+        };
+        Ok(Self::Error(reason))
+    }
+
     /// The one-byte tag identifying this response on the wire.
     fn tag(&self) -> u8 {
         match self {
@@ -472,9 +519,20 @@ impl Response {
             Self::Status(status) => status.encode()?,
             Self::Ack => Vec::new(),
             Self::Refused(reason) | Self::Error(reason) => {
-                let mut out = Vec::new();
-                write_str_into(&mut out, reason)?;
-                out
+                // Borrow the existing diagnostic instead of allocating a second payload.
+                let len = reason
+                    .len()
+                    .checked_add(2)
+                    .filter(|&len| len <= MAX_FRAME)
+                    .and_then(|len| u16::try_from(len).ok())
+                    .ok_or(io::ErrorKind::InvalidData)?;
+                let reason_len =
+                    u16::try_from(reason.len()).map_err(|_| io::ErrorKind::InvalidData)?;
+                write_magic(writer).await?;
+                writer.write_all(&[self.tag()]).await?;
+                writer.write_all(&len.to_be_bytes()).await?;
+                writer.write_all(&reason_len.to_be_bytes()).await?;
+                return writer.write_all(reason.as_bytes()).await;
             }
         };
         // The whole payload must fit the frame cap both ends enforce; a server that would emit more
