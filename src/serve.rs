@@ -33,8 +33,10 @@ mod single;
 mod stop;
 pub mod control_codec {
     pub use super::control::{
-        ControlError, DisabledList, MAX_DISABLED_NAMES, MAX_FRAME, MAX_STATUS_STRING,
-        MAX_WARM_ENTRIES, PeerEntry, Request, Response, ServiceMenu, StatusReply, WireVersion,
+        ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, LocalDetailLimit,
+        LocalServiceName, LocalServicePair, LocalServicePairs, LocalServiceSnapshot,
+        LocalServiceTarget, MAX_DISABLED_NAMES, MAX_FRAME, MAX_STATUS_STRING, MAX_WARM_ENTRIES,
+        PeerEntry, Request, Response, ServiceMenu, StatusReply, WireVersion,
     };
 }
 pub use activity::{Activity, RecvLines};

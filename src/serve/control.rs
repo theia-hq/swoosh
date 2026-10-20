@@ -12,6 +12,12 @@ use bifrost::NodeId;
 use tightbeam::tunnel::ServiceCatalog;
 use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
+mod local_detail;
+pub use local_detail::{
+    LocalDetailCaptureError, LocalDetailError, LocalDetailLimit, LocalServiceName,
+    LocalServicePair, LocalServicePairs, LocalServiceSnapshot, LocalServiceTarget,
+};
+
 /// The control wire's identity: the bytes every control frame opens with, at every version, forever.
 /// A frame that does not open with these is not a control frame, and that is the only thing an
 /// identity mismatch is allowed to mean.
@@ -429,7 +435,7 @@ impl StatusReply {
 }
 
 /// The host's reply, sent before the connection closes: one-shot framing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Response {
     /// The live service menu (answers [`Request::Services`]).
     Catalog(ServiceMenu),
@@ -439,8 +445,10 @@ pub enum Response {
     Ack,
     /// A gate/dial refusal, in the same reason vocabulary as the wire path.
     Refused(String),
-    /// Version skew or a protocol error: loud, never a misparse.
+    /// A protocol or request failure; its meaning depends on the request.
     Error(String),
+    /// A local startup service snapshot or a typed capture failure.
+    LocalServiceDetail(Result<LocalServiceSnapshot, LocalDetailCaptureError>),
 }
 
 impl Response {
@@ -452,12 +460,14 @@ impl Response {
             Self::Ack => 3,
             Self::Refused(_) => 4,
             Self::Error(_) => 5,
+            Self::LocalServiceDetail(_) => 9,
         }
     }
 
     /// Write one response frame: magic, tag, length-prefixed payload.
     pub async fn write<W: io::AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
         let payload = match self {
+            Self::LocalServiceDetail(reply) => return local_detail::write(reply, writer).await,
             Self::Catalog(menu) => menu.encode()?,
             Self::Status(status) => status.encode()?,
             Self::Ack => Vec::new(),
@@ -496,6 +506,14 @@ impl Response {
         let len = usize::from(u16::from_be_bytes(len));
         if len > MAX_FRAME {
             return Err(ControlError::TooLarge(len));
+        }
+        if tag[0] == 9 {
+            let mut payload = local_detail::storage(len)?;
+            reader
+                .read_exact(&mut payload)
+                .await
+                .map_err(ControlError::Io)?;
+            return Ok(Self::LocalServiceDetail(local_detail::decode(payload)?));
         }
         let mut payload = vec![0u8; len];
         reader
@@ -581,6 +599,9 @@ pub enum ControlError {
     /// The resident refused the request, in the wire refusal vocabulary.
     #[error("the resident refused: {0}")]
     Refused(String),
+    /// Local service-detail failure, distinct from an absent resident or a wire-version mismatch.
+    #[error(transparent)]
+    LocalDetail(#[from] LocalDetailError),
 }
 
 /// Write the disabled section into a payload buffer: a presence tag, then either the known names or
