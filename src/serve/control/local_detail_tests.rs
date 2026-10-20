@@ -501,3 +501,63 @@ async fn local_detail_request_six_has_exact_empty_framing() {
         Err(ControlError::TooLarge(8193))
     ));
 }
+
+#[tokio::test]
+async fn local_detail_client_owns_one_payload_and_bounded_fallible_diagnostics() {
+    let encoded = frame(&body(&[(b"a", b"private-target", 0)]));
+    ALLOCS.set(0);
+    TRACK.set(true);
+    let response = Response::read_local_detail(&mut encoded.as_slice())
+        .await
+        .unwrap();
+    let snapshot = response.into_local_snapshot().unwrap();
+    TRACK.set(false);
+    assert_eq!(ALLOCS.get(), 1);
+    assert_eq!(snapshot.payload.as_ptr() as usize, POINTER.get());
+    assert!(snapshot.payload.capacity() <= 8192);
+
+    for tag in [4, 5] {
+        let mut encoded = b"SWC1".to_vec();
+        encoded.extend_from_slice(&[tag, 1, 2, 1, 0]);
+        encoded.extend_from_slice(&[b'x'; 256]);
+        ALLOCS.set(0);
+        TRACK.set(true);
+        let result = Response::read_local_detail(&mut encoded.as_slice())
+            .await
+            .unwrap()
+            .into_local_snapshot();
+        TRACK.set(false);
+        assert_eq!(ALLOCS.get(), 1);
+        let reason = match result.unwrap_err() {
+            ControlError::Refused(reason) => reason,
+            ControlError::LocalDetail(LocalDetailError::PeerError(reason)) => reason,
+            error => panic!("{error:?}"),
+        };
+        assert_eq!(reason.as_ptr() as usize, POINTER.get());
+        assert_eq!(reason.len(), 256);
+        assert!(reason.capacity() <= 256);
+        let header = [b'S', b'W', b'C', b'1', tag, 1, 3];
+        fail_sizes([259, 0]);
+        let result = Response::read_local_detail(&mut header.as_slice()).await;
+        fail_sizes([0, 0]);
+        assert!(
+            matches!(result, Err(ControlError::Protocol(reason)) if reason == "local service detail diagnostic exceeds 256 bytes")
+        );
+    }
+    for bytes in [
+        encoded,
+        b"SWC1\x05\0\x05\0\x03abc".to_vec(),
+        b"SWC1\x04\0\x05\0\x03abc".to_vec(),
+        b"SWC1\x03\0\0".to_vec(),
+    ] {
+        FAIL.set(true);
+        let result = Response::read_local_detail(&mut bytes.as_slice()).await;
+        FAIL.set(false);
+        assert!(matches!(
+            result,
+            Err(ControlError::LocalDetail(
+                LocalDetailError::ResourceUnavailable
+            ))
+        ));
+    }
+}

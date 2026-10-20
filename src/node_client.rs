@@ -1,11 +1,8 @@
-//! The control surface every node backend serves: one trait, a typed shared error, two backends.
+//! Shared node control and the local-only service-detail client.
 //!
-//! The uid-socket client and the resident itself implement [`NodeClient`], so a behavior change lands
-//! once and both stay in step. The verbs (bare control) reach a node through [`ControlClient`], which
-//! today has exactly one arm, the local socket; the overlay joins as a second arm in a later phase and
-//! is closed out of any local-only operation by construction. The SWC1 value types live in
-//! [`crate::serve::control`]; this module imports them and adds behavior only, so the module
-//! graph stays a one-way edge from the client seam to the codec.
+//! [`NodeClient`] covers the menu, status and stop. Local service detail is an
+//! inherent method on [`UidSocket`] and [`ControlClient`], not a remote operation.
+//! The control value types live in [`crate::serve::control_codec`].
 
 use core::future::Future;
 use core::time::Duration;
@@ -18,7 +15,9 @@ use tokio::net::UnixStream;
 use tokio::time::timeout;
 
 use crate::home::Home;
-use crate::serve::control_codec::{ControlError, Request, Response, ServiceMenu, StatusReply};
+use crate::serve::control_codec::{
+    ControlError, LocalServiceSnapshot, Request, Response, ServiceMenu, StatusReply,
+};
 
 /// How long a connect to the local control socket may take before it is a [`ControlError::Timeout`].
 /// A local listener admits at once; this bounds only a wedged path, never a normal dial.
@@ -115,6 +114,19 @@ impl UidSocket {
         Ok(Self { socket, pid: None })
     }
 
+    /// Read one startup service snapshot from the verified local resident.
+    ///
+    /// Uses one same-UID socket exchange, with no status fallback or remote route. The snapshot does not prove backend health.
+    ///
+    /// # Errors
+    ///
+    /// Returns control trust, transport, framing or typed local-detail failures. Only [`ControlError::NoResident`] means no resident is addressable.
+    pub async fn local_service_detail(&self) -> Result<LocalServiceSnapshot, ControlError> {
+        self.exchange(&Request::LocalServiceDetail)
+            .await?
+            .into_local_snapshot()
+    }
+
     /// Dial the verified socket and prove the CONNECTED peer's uid is ours. The path stat in
     /// [`resolve`](Self::resolve) can race a same-uid swap; a connected fd cannot, so this is the
     /// client-side twin of the server's accepted-fd check.
@@ -173,11 +185,17 @@ impl UidSocket {
                 phase: "request write",
             })?
             .map_err(ControlError::Io)?;
-        timeout(IO_TIMEOUT, Response::read(&mut stream))
-            .await
-            .map_err(|_| ControlError::Timeout {
-                phase: "response read",
-            })?
+        // One deadline encloses the complete declared response, never each byte or field.
+        timeout(IO_TIMEOUT, async {
+            match request {
+                Request::LocalServiceDetail => Response::read_local_detail(&mut stream).await,
+                _ => Response::read(&mut stream).await,
+            }
+        })
+        .await
+        .map_err(|_| ControlError::Timeout {
+            phase: "response read",
+        })?
     }
 }
 
@@ -245,6 +263,19 @@ impl ControlClient {
         Ok(Self::Socket(UidSocket::resolve_socket(socket)?))
     }
 
+    /// Read local startup targets through the socket backend only.
+    ///
+    /// This local-only operation is not part of [`NodeClient`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors from [`UidSocket::local_service_detail`] without fallback or reclassification.
+    pub async fn local_service_detail(&self) -> Result<LocalServiceSnapshot, ControlError> {
+        match self {
+            Self::Socket(socket) => socket.local_service_detail().await,
+        }
+    }
+
     /// The resident pid read from `serve.lock` at resolve, for the stop confirmation line.
     pub fn pid(&self) -> Option<u32> {
         match self {
@@ -273,9 +304,10 @@ impl NodeClient for ControlClient {
     }
 }
 
-/// Render a [`ControlError`] for a verb boundary, where `eyre` takes over. Every typed error's own
-/// message is used as-is, except `Protocol`, which names the skew fix because every protocol error on
-/// an already-verified local socket is a client/resident version mismatch.
+/// Render shared control failures for a command boundary.
+///
+/// This helper gives Protocol errors version-skew guidance. Local service detail reports its
+/// protocol failures separately; its state, resource and peer failures are not version skew.
 pub fn control_error_report(error: ControlError) -> eyre::Report {
     match error {
         ControlError::Protocol(reason) => eyre::eyre!(

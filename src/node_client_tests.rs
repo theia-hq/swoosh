@@ -2,6 +2,7 @@
 //! without ever connecting.
 
 use core::sync::atomic::{AtomicU32, Ordering};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -519,4 +520,333 @@ fn control_errors_render_through_their_taxonomy() {
         skew.contains("different swoosh version") && skew.contains("restart it with this binary"),
         "a protocol error names the skew fix: {skew}"
     );
+}
+
+fn detail_frame(tag: u8, payload: &[u8]) -> Vec<u8> {
+    let mut frame = b"SWC1".to_vec();
+    frame.push(tag);
+    frame.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
+    frame.extend_from_slice(payload);
+    frame
+}
+
+async fn detail_read(
+    mut bytes: &[u8],
+) -> Result<crate::serve::control_codec::LocalServiceSnapshot, ControlError> {
+    Response::read_local_detail(&mut bytes)
+        .await?
+        .into_local_snapshot()
+}
+
+#[tokio::test]
+async fn local_detail_success_is_one_request_without_eof_or_second_frame_merge() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let target = "unix:秘密=a=b\n";
+    let snapshot = crate::serve::control_codec::LocalServiceSnapshot::capture(
+        [("a", target, true)].into_iter(),
+    )
+    .unwrap();
+    let mut frames = Vec::new();
+    Response::LocalServiceDetail(Ok(snapshot))
+        .write(&mut frames)
+        .await
+        .unwrap();
+    frames.extend_from_slice(&detail_frame(9, &[0, 0, 0]));
+    let leaf = scratch("detail", 0o700);
+    let path = leaf.join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let client = UidSocket::resolve_socket(PathBuf::clone(&path)).unwrap();
+    let server = async {
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 7];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"SWC1\x06\0\0");
+            stream.write_all(&frames).await.unwrap();
+            // Keep the response side open until the client drops, proving no EOF wait or retry.
+            // Dropping an unread second frame may reset the Unix stream instead of returning EOF.
+            let mut extra = [0];
+            match stream.read(&mut extra).await {
+                Ok(0) => {}
+                Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+                result => panic!("expected client close without another request, got {result:?}"),
+            }
+        }
+        assert!(
+            tokio::time::timeout(core::time::Duration::from_millis(20), listener.accept())
+                .await
+                .is_err()
+        );
+    };
+    let calls = async {
+        let direct = client.local_service_detail().await.unwrap();
+        let delegated = super::ControlClient::resolve_socket(path)
+            .unwrap()
+            .local_service_detail()
+            .await
+            .unwrap();
+        for snapshot in [direct, delegated] {
+            assert_eq!(snapshot.len(), 1);
+            let pair = snapshot.get("a").unwrap();
+            assert_eq!(pair.target().as_str().as_bytes(), target.as_bytes());
+            assert!(pair.refused());
+        }
+    };
+    tokio::time::timeout(core::time::Duration::from_secs(2), async {
+        tokio::join!(server, calls);
+    })
+    .await
+    .unwrap();
+    drop(listener);
+    std::fs::remove_dir_all(leaf).unwrap();
+}
+
+#[tokio::test]
+async fn local_detail_socket_rejects_diagnostic_declarations_without_waiting_for_body() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let leaf = scratch("d-cap", 0o700);
+    let path = leaf.join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let client = UidSocket::resolve_socket(path).unwrap();
+    let server = async {
+        for tag in [4, 5] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(
+                Request::read(&mut stream).await.unwrap(),
+                Request::LocalServiceDetail
+            );
+            stream
+                .write_all(&[b'S', b'W', b'C', b'1', tag, 1, 3])
+                .await
+                .unwrap();
+            let mut extra = [0];
+            assert_eq!(stream.read(&mut extra).await.unwrap(), 0);
+        }
+    };
+    let calls = async {
+        for _ in 0..2 {
+            assert!(matches!(client.local_service_detail().await,
+                Err(ControlError::Protocol(reason)) if reason == "local service detail diagnostic exceeds 256 bytes"));
+        }
+    };
+    tokio::time::timeout(core::time::Duration::from_secs(1), async {
+        tokio::join!(server, calls);
+    })
+    .await
+    .unwrap();
+    drop(listener);
+    std::fs::remove_dir_all(leaf).unwrap();
+}
+
+#[tokio::test]
+async fn local_detail_capture_failures_keep_their_structural_types() {
+    use crate::serve::control_codec::{LocalDetailError as E, LocalDetailLimit as L};
+    for payload in [&[1][..], &[3], &[2, 1], &[2, 2], &[2, 3], &[2, 4]] {
+        let error = detail_read(&detail_frame(9, payload)).await.unwrap_err();
+        assert!(match (payload, error) {
+            ([1], ControlError::LocalDetail(E::MissingStartup)) => true,
+            ([3], ControlError::LocalDetail(E::InconsistentState)) => true,
+            ([2, n], ControlError::LocalDetail(E::LimitExceeded(limit))) =>
+                limit
+                    == [L::BoundCount, L::NameBytes, L::TargetBytes, L::PayloadBytes]
+                        [usize::from(*n - 1)],
+            _ => false,
+        });
+    }
+}
+
+#[tokio::test]
+async fn local_detail_diagnostics_are_bounded_exact_utf8_and_not_classified_by_text() {
+    use crate::serve::control_codec::LocalDetailError;
+    for tag in [4, 5] {
+        for reason in [
+            "".to_owned(),
+            "é".repeat(128),
+            "local service detail resources are unavailable".to_owned(),
+        ] {
+            let mut payload = u16::try_from(reason.len()).unwrap().to_be_bytes().to_vec();
+            payload.extend_from_slice(reason.as_bytes());
+            let error = detail_read(&detail_frame(tag, &payload)).await.unwrap_err();
+            let owned = match error {
+                ControlError::Refused(owned) if tag == 4 => owned,
+                ControlError::LocalDetail(LocalDetailError::PeerError(owned)) if tag == 5 => owned,
+                error => panic!("{error:?}"),
+            };
+            assert_eq!(owned, reason);
+            assert!(owned.capacity() <= 256);
+        }
+        for payload in [vec![], vec![0], vec![0, 1], vec![0, 1, 255], vec![0, 0, 0]] {
+            assert!(matches!(detail_read(&detail_frame(tag, &payload)).await,
+                Err(ControlError::Protocol(reason)) if reason == "invalid local service detail diagnostic"));
+        }
+        let mut payload = vec![1, 1];
+        payload.extend_from_slice(&[b'x'; 257]);
+        assert!(matches!(detail_read(&detail_frame(tag, &payload)).await,
+            Err(ControlError::Protocol(reason)) if reason == "local service detail diagnostic exceeds 256 bytes"));
+        // There is no body to read, and allocation at the declared size is forbidden.
+        let header = [b'S', b'W', b'C', b'1', tag, 1, 3];
+        let result = detail_read(&header).await;
+        assert!(
+            matches!(result, Err(ControlError::Protocol(reason)) if reason == "local service detail diagnostic exceeds 256 bytes")
+        );
+    }
+    // Narrowing is operation-specific: generic reads retain their larger diagnostic allowance.
+    let mut bytes = Vec::new();
+    Response::Error("x".repeat(257))
+        .write(&mut bytes)
+        .await
+        .unwrap();
+    assert!(
+        matches!(Response::read(&mut bytes.as_slice()).await.unwrap(), Response::Error(reason) if reason.len() == 257)
+    );
+}
+
+#[tokio::test]
+async fn local_detail_malformed_unexpected_identity_version_and_eof_never_mean_absent() {
+    for tag in [1, 2, 3, 6, 7, 8, 255] {
+        assert!(
+            matches!(detail_read(&detail_frame(tag, b"private-target/path")).await,
+            Err(ControlError::Protocol(reason)) if reason == "unexpected reply to local service detail")
+        );
+    }
+    for payload in [&[][..], &[4], &[2, 5], &[1, 0], &[0, 0, 1]] {
+        assert!(matches!(
+            detail_read(&detail_frame(9, payload)).await,
+            Err(ControlError::Protocol(_))
+        ));
+    }
+    assert!(matches!(
+        detail_read(b"BAD1").await,
+        Err(ControlError::Foreign)
+    ));
+    assert!(matches!(
+        detail_read(b"SWC2").await,
+        Err(ControlError::Version { .. })
+    ));
+    let valid = detail_frame(9, &[0, 0, 0]);
+    for end in 0..valid.len() {
+        assert!(
+            matches!(detail_read(&valid[..end]).await, Err(ControlError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof)
+        );
+    }
+    assert!(matches!(
+        detail_read(b"SWC1\x09\x20\x01").await,
+        Err(ControlError::TooLarge(8193))
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_detail_write_and_read_deadlines_enclose_the_whole_phase() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let (stream, _peer) = tokio::io::duplex(1);
+    let result = tokio::time::timeout(
+        super::IO_TIMEOUT * 2,
+        UidSocket::exchange_on(stream, &Request::LocalServiceDetail),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        Err(ControlError::Timeout {
+            phase: "request write"
+        })
+    ));
+    let (stream, mut peer) = tokio::io::duplex(1);
+    let writer = tokio::spawn(async move {
+        let mut request = [0; 7];
+        peer.read_exact(&mut request).await.unwrap();
+        assert_eq!(&request, b"SWC1\x06\0\0");
+        for byte in detail_frame(9, &[0, 0, 0]) {
+            if peer.write_all(&[byte]).await.is_err() {
+                break;
+            }
+            tokio::time::sleep(core::time::Duration::from_secs(1)).await;
+        }
+    });
+    let start = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        super::IO_TIMEOUT * 2,
+        UidSocket::exchange_on(stream, &Request::LocalServiceDetail),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        Err(ControlError::Timeout {
+            phase: "response read"
+        })
+    ));
+    assert_eq!(start.elapsed(), super::IO_TIMEOUT);
+    writer.abort();
+    let _ = writer.await;
+}
+
+#[tokio::test]
+async fn local_detail_no_resident_is_distinct_from_post_connect_eof() {
+    let leaf = scratch("d-miss", 0o700);
+    let path = leaf.join("control.sock");
+    plant_dead_socket(&path);
+    let client = UidSocket::resolve_socket(PathBuf::clone(&path)).unwrap();
+    assert!(matches!(
+        client.local_service_detail().await,
+        Err(ControlError::NoResident)
+    ));
+    std::fs::remove_file(&path).unwrap();
+    assert!(matches!(
+        client.local_service_detail().await,
+        Err(ControlError::NoResident)
+    ));
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    let server = async {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            Request::read(&mut stream).await.unwrap(),
+            Request::LocalServiceDetail
+        );
+    };
+    let calls = async {
+        assert!(
+            matches!(client.local_service_detail().await, Err(ControlError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof)
+        );
+    };
+    tokio::time::timeout(core::time::Duration::from_secs(2), async {
+        tokio::join!(server, calls);
+    })
+    .await
+    .unwrap();
+    drop(listener);
+    std::fs::remove_dir_all(leaf).unwrap();
+}
+
+#[tokio::test]
+async fn local_detail_credential_query_failure_and_symlinks_stay_untrusted() {
+    fn failed_credentials(_: i32) -> std::io::Result<u32> {
+        Err(io::ErrorKind::PermissionDenied.into())
+    }
+    let leaf = scratch("d-trust", 0o700);
+    let path = leaf.join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let client = UidSocket::resolve_socket(PathBuf::clone(&path)).unwrap();
+    assert!(matches!(
+        client
+            .connect_checked_with(tokio::net::UnixStream::connect(&path), failed_credentials)
+            .await,
+        Err(ControlError::Untrusted { .. })
+    ));
+    let alias = leaf.join("alias.sock");
+    std::os::unix::fs::symlink(&path, &alias).unwrap();
+    assert!(matches!(
+        UidSocket::resolve_socket(alias),
+        Err(ControlError::Untrusted { .. })
+    ));
+    let alias = leaf.with_extension("alias");
+    std::os::unix::fs::symlink(&leaf, &alias).unwrap();
+    assert!(matches!(
+        UidSocket::resolve_socket(alias.join("control.sock")),
+        Err(ControlError::Untrusted { .. })
+    ));
+    std::fs::remove_file(alias).unwrap();
+    drop(listener);
+    std::fs::remove_dir_all(leaf).unwrap();
 }
