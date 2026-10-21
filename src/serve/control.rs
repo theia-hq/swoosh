@@ -550,6 +550,32 @@ impl Response {
 
     /// Read one response frame, enforcing the magic and the frame cap.
     pub async fn read<R: io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self, ControlError> {
+        Self::read_frame(reader, ResponseRead::Generic).await
+    }
+
+    pub(crate) async fn read_local_detail<R: io::AsyncRead + Unpin>(
+        reader: &mut R,
+    ) -> Result<Self, ControlError> {
+        Self::read_frame(reader, ResponseRead::LocalDetail).await
+    }
+
+    pub(crate) fn into_local_snapshot(self) -> Result<LocalServiceSnapshot, ControlError> {
+        match self {
+            Self::LocalServiceDetail(result) => {
+                result.map_err(|error| LocalDetailError::from(error).into())
+            }
+            Self::Error(reason) => Err(LocalDetailError::PeerError(reason).into()),
+            Self::Refused(reason) => Err(ControlError::Refused(reason)),
+            _ => Err(local_detail::protocol(
+                "unexpected reply to local service detail",
+            )),
+        }
+    }
+
+    async fn read_frame<R: io::AsyncRead + Unpin>(
+        reader: &mut R,
+        operation: ResponseRead,
+    ) -> Result<Self, ControlError> {
         read_magic(reader).await?;
         let mut tag = [0u8; 1];
         reader
@@ -564,6 +590,38 @@ impl Response {
         let len = usize::from(u16::from_be_bytes(len));
         if len > MAX_FRAME {
             return Err(ControlError::TooLarge(len));
+        }
+        if let ResponseRead::LocalDetail = operation {
+            match tag[0] {
+                9 => {}
+                4 | 5 => {
+                    // Check the operation's declaration before storage acquisition or body reads.
+                    if len > MAX_STATUS_STRING + 2 {
+                        return Err(local_detail::protocol(
+                            "local service detail diagnostic exceeds 256 bytes",
+                        ));
+                    }
+                    let mut payload = [0u8; MAX_STATUS_STRING + 2];
+                    let payload = &mut payload[..len];
+                    reader.read_exact(payload).await.map_err(ControlError::Io)?;
+                    let reason = read_str_slice(payload)
+                        .filter(|reason| reason.len() <= MAX_STATUS_STRING)
+                        .ok_or_else(|| {
+                            local_detail::protocol("invalid local service detail diagnostic")
+                        })?;
+                    let reason = local_detail::diagnostic(reason)?;
+                    return Ok(if tag[0] == 4 {
+                        Self::Refused(reason)
+                    } else {
+                        Self::Error(reason)
+                    });
+                }
+                _ => {
+                    return Err(local_detail::protocol(
+                        "unexpected reply to local service detail",
+                    ));
+                }
+            }
         }
         if tag[0] == 9 {
             let mut payload = local_detail::storage(len)?;
@@ -599,6 +657,13 @@ impl Response {
             ))),
         }
     }
+}
+
+// A local detail read narrows admitted replies without changing the generic response grammar.
+#[derive(Clone, Copy)]
+enum ResponseRead {
+    Generic,
+    LocalDetail,
 }
 
 /// Why a control frame could not be read or written, or a control operation could not be attempted.
@@ -748,12 +813,17 @@ fn write_str_into(out: &mut Vec<u8>, value: &str) -> io::Result<()> {
 
 /// Read a u16-prefixed string from a whole payload (which must be exactly one string).
 fn read_str_from(payload: &[u8]) -> Option<String> {
+    read_str_slice(payload).map(str::to_owned)
+}
+
+// Both policies share exact length and UTF-8 parsing; only ownership acquisition differs.
+fn read_str_slice(payload: &[u8]) -> Option<&str> {
     let (len, rest) = payload.split_at_checked(2)?;
     let len = usize::from(u16::from_be_bytes([len[0], len[1]]));
     if rest.len() != len {
         return None;
     }
-    core::str::from_utf8(rest).ok().map(str::to_owned)
+    core::str::from_utf8(rest).ok()
 }
 
 /// Read `len` bytes at `cursor`, advancing it, or fail if the blob is too short.
