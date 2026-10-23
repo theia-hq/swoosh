@@ -1,9 +1,9 @@
-//! The one escaper for text swoosh did not write: a refusal detail, a service name or an error another
-//! machine sent, a file name, a home path whose directory names someone else chose.
+//! Terminal escaping for text swoosh did not write.
 //!
-//! A raw newline forges a line, a carriage return rewrites one, ESC drives a terminal, and a bidi override
-//! reorders what a person reads, so such text never reaches a terminal or a log field as-is. Every line
-//! that prints it goes through [`Escaped`]: one escape set, one cap, one cut marker.
+//! [`Escaped`] and [`EscapedPath`] cap output and mark a cut with `...`.
+//! [`EscapedComplete`] uses the same escapes without a length cap; callers must
+//! bound its input independently. Both forms escape controls and characters that
+//! hide or reorder text.
 
 use core::fmt;
 use std::path::Path;
@@ -32,24 +32,54 @@ pub struct Escaped<'a>(pub &'a str);
 
 impl fmt::Display for Escaped<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut written = 0usize;
+        self.fmt_with_limit(f, Some(MAX_ESCAPED))
+    }
+}
+
+/// Complete terminal escaping without an output-length cap.
+///
+/// Uses the same escape policy as [`Escaped`], but never adds a cut marker.
+/// It borrows the input and writes directly to the formatter without allocating;
+/// formatter errors are returned.
+///
+/// Use only for text whose input size the caller has already bounded. This wrapper
+/// does not enforce that bound.
+pub struct EscapedComplete<'a>(pub &'a str);
+
+impl fmt::Display for EscapedComplete<'_> {
+    /// Write the complete escaped input without allocating; return formatter errors.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        Escaped(self.0).fmt_with_limit(f, None)
+    }
+}
+
+impl Escaped<'_> {
+    /// Apply the shared escape policy with an optional output-character budget.
+    ///
+    /// `Some(limit)` counts whole escapes and writes `...` before an escape would
+    /// exceed the budget. `None` streams all escapes without counting or a cut marker.
+    /// Both paths borrow the input, allocate nothing and return formatter errors.
+    fn fmt_with_limit(&self, f: &mut fmt::Formatter<'_>, limit: Option<usize>) -> fmt::Result {
+        let mut remaining = limit;
         for ch in self.0.chars() {
             let blank = BLANK_LETTERS.contains(&ch);
-            // The width is the whole escape's, so the cap check below never admits half of one.
-            let width = if blank {
-                ch.escape_unicode().len()
-            } else {
-                ch.escape_debug().len()
-            };
-            if written + width > MAX_ESCAPED {
-                return f.write_str("...");
+            if let Some(left) = remaining.as_mut() {
+                // Charge only whole escapes; subtraction also handles a usize::MAX budget.
+                let width = if blank {
+                    ch.escape_unicode().len()
+                } else {
+                    ch.escape_debug().len()
+                };
+                if width > *left {
+                    return f.write_str("...");
+                }
+                *left -= width;
             }
             if blank {
                 write!(f, "{}", ch.escape_unicode())?;
             } else {
                 write!(f, "{}", ch.escape_debug())?;
             }
-            written += width;
         }
         Ok(())
     }
