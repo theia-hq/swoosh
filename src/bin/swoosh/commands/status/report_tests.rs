@@ -1765,7 +1765,7 @@ fn serving_file_notices_preserve_sources_without_repeating_the_file() {
 
 #[tokio::test]
 async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
-    use crate::commands::service_state::{ReadError, ServiceState};
+    use crate::commands::service_state::{ReadError, ReadMode, ServiceState};
 
     let home = home("uncallable-services");
     for name in ["control", "lookup"] {
@@ -1773,7 +1773,7 @@ async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
         service_list(&home, &["ssh=ssh:", &entry], &[]).await;
         let before = tree(home.dir());
         assert!(matches!(
-            ServiceState::read(&home).await,
+            ServiceState::read(&home, ReadMode::Membership).await,
             Err(ReadError::List(swoosh::serve::ServingError::NotAService { path, line }))
                 if path == home.serve_toml() && line == entry
         ));
