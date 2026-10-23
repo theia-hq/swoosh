@@ -40,6 +40,8 @@ pub mod control_codec {
     };
 }
 pub use activity::{Activity, RecvLines};
+#[cfg(test)]
+pub(crate) use control::measure_allocations;
 pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};
 pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_single};
 // `roster` shadows `crate::roster`, reached in full above. The general engines (`fetch`, `measure`,

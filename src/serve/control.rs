@@ -13,7 +13,7 @@ use tokio::io::{self, AsyncReadExt as _, AsyncWriteExt as _};
 
 mod local_detail;
 #[cfg(test)]
-pub(crate) use local_detail::tests::fail_sizes;
+pub(crate) use local_detail::tests::{fail_sizes, measure_allocations};
 pub use local_detail::{
     LocalDetailCaptureError, LocalDetailError, LocalDetailLimit, LocalServiceName,
     LocalServicePair, LocalServicePairs, LocalServiceSnapshot, LocalServiceTarget,

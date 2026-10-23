@@ -48,6 +48,32 @@ pub(crate) fn fail_sizes(sizes: [usize; 2]) {
     FAIL_SIZES.set(sizes);
 }
 
+/// Measure allocations made by `run`, restoring prior tracking even if it unwinds.
+pub(crate) fn measure_allocations<T>(run: impl FnOnce() -> T) -> (T, usize) {
+    // Restore the enclosing measurement even if the measured closure unwinds.
+    struct Restore {
+        track: bool,
+        allocs: usize,
+        pointer: usize,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TRACK.set(self.track);
+            ALLOCS.set(self.allocs);
+            POINTER.set(self.pointer);
+        }
+    }
+    let restore = Restore {
+        track: TRACK.replace(true),
+        allocs: ALLOCS.replace(0),
+        pointer: POINTER.get(),
+    };
+    let result = run();
+    let allocations = ALLOCS.get();
+    drop(restore);
+    (result, allocations)
+}
+
 fn body(pairs: &[(&[u8], &[u8], u8)]) -> Vec<u8> {
     let mut out = vec![0];
     out.extend_from_slice(&u16::try_from(pairs.len()).unwrap().to_be_bytes());
