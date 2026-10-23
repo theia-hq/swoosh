@@ -27,7 +27,7 @@ use swoosh::standing::{Standing, StandingError};
 use swoosh::{badge, roster, standing, sync, touch};
 use tightbeam::identity::AsVerifyKey as _;
 
-use crate::commands::service_state::{ReadError, ServiceState};
+use crate::commands::service_state::{ReadError, ReadMode, ServiceState};
 
 /// What bare `status` prints on stdout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -444,7 +444,7 @@ impl Report {
     /// The validated local list, intersected with bound names while the local resident runs. File
     /// refusals report the file, never a daemon failure; neither changes status's successful exit.
     async fn serving_line(&mut self, home: &Home) -> String {
-        match ServiceState::read(home).await {
+        match ServiceState::read(home, ReadMode::Membership).await {
             Ok(state) => serving(&state),
             Err(ReadError::Daemon(error)) => self.serving_unknown(&error),
             Err(error) => {
@@ -645,12 +645,7 @@ fn serving(state: &ServiceState) -> String {
         .started
         .names()
         .into_iter()
-        .filter(|name| {
-            state
-                .bound
-                .as_ref()
-                .is_none_or(|catalog| catalog.entries().any(|entry| entry.name == *name))
-        })
+        .filter(|name| !state.resident_present() || state.contains_bound(name))
         .map(|name| {
             if state.off.contains(&name) {
                 format!("{name} (off)")
@@ -664,10 +659,10 @@ fn serving(state: &ServiceState) -> String {
     } else {
         names.join(", ")
     };
-    match (&state.bound, names.is_empty()) {
-        (Some(_), _) => format!("serving: {list}"),
-        (None, true) => "serving: nothing, even when swoosh serve runs".to_owned(),
-        (None, false) => format!("serving: {list}, when swoosh serve runs"),
+    match (state.resident_present(), names.is_empty()) {
+        (true, _) => format!("serving: {list}"),
+        (false, true) => "serving: nothing, even when swoosh serve runs".to_owned(),
+        (false, false) => format!("serving: {list}, when swoosh serve runs"),
     }
 }
 

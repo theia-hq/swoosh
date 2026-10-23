@@ -92,9 +92,11 @@ enum Command {
     Serve(serve::ServeCmd),
     /// Stop swoosh serve here or on one of your own devices
     Stop(stop::StopCmd),
-    /// Change what this machine serves
-    #[command(subcommand)]
-    Service(service::ServiceCmd),
+    /// Show or change what this machine serves
+    Service {
+        #[command(subcommand)]
+        command: Option<service::ServiceCmd>,
+    },
     /// Measure the round-trip time to a peer, addressed by a petname or their public key.
     Ping(ping::PingCmd),
     /// Measure throughput to a peer: iperf, but over the overlay.
@@ -282,9 +284,9 @@ impl Command {
             // `stop` resolves its machine against the list of your devices first, with no transport: only
             // another of your devices goes on to dial.
             Self::Stop(cmd) => Verb::Stop(cmd),
-            // The `service` group: every leaf is a LOCAL file-write on `<home>/serve.toml`, so none composes a
-            // transport.
-            Self::Service(cmd) => Verb::Service(cmd),
+            // The service group stays local: bare output reads the saved list and control socket; edits
+            // change the saved configuration. No transport is composed.
+            Self::Service { command } => Verb::Service(command),
             Self::Serve(cmd) => Verb::Outward(Outward::Serve(cmd)),
             Self::Ping(cmd) => Verb::Outward(Outward::Ping(cmd)),
             Self::Speed(cmd) => Verb::Outward(Outward::Speed(cmd)),
@@ -323,8 +325,8 @@ enum Verb {
     /// it reaches a peer, but binds no transport of its own (tightbeam, run as ssh's `ProxyCommand`, does),
     /// so it dispatches beside the local verbs, off the store, before any transport is composed.
     Ssh(ssh::SshCmd),
-    /// `swoosh service add|rm|on|off`: a LOCAL file-write on `<home>/serve.toml`, no transport.
-    Service(service::ServiceCmd),
+    /// Show or edit this home's services without composing a transport.
+    Service(Option<service::ServiceCmd>),
     /// `swoosh stop [me/<name>]`: resolves the machine against the list of your devices with no transport,
     /// and stops this machine over its control socket; another of your devices goes on as a reaching verb.
     Stop(stop::StopCmd),
@@ -578,11 +580,15 @@ fn stop_link_unexpected(error: &clap::Error) -> bool {
         && matches!(stop::Aim::parse(unexpected), Ok(stop::Aim::Link))
 }
 
-/// Run a `service` leaf against `home`, exiting 2 on a usage error found once the line is parsed: a machine
-/// or a second service typed to `on` or `off`, an entry with no name, or a name typed twice.
-async fn run_service(cmd: service::ServiceCmd, home: &Home) -> eyre::Result<()> {
+/// Show the local service list or run a service edit.
+///
+/// Edit usage errors exit 2; a failed detail read exits 1 without partial rows.
+async fn run_service(cmd: Option<service::ServiceCmd>, home: &Home) -> eyre::Result<()> {
     use service::toggle::Way;
 
+    let Some(cmd) = cmd else {
+        return service::view::View.run(home).await;
+    };
     let (leaf, done) = match cmd {
         service::ServiceCmd::Add(add) => ("add", add.run(home).await),
         service::ServiceCmd::Rm(rm) => ("rm", rm.run(home).await),
@@ -771,9 +777,8 @@ async fn run() -> eyre::Result<()> {
                 None => return Err(report),
             },
         },
-        // `service add|rm|on|off`: LOCAL file-writes on `<home>/serve.toml`; `on` and `off` are honored live
-        // by a running `serve` via the watched set its gate reads. Need only the home; bind no transport and
-        // touch no store. A machine typed to `on` or `off`, or a name typed twice, exits 2 here.
+        // Bare service output reads the local configuration and resident snapshot; edits change the
+        // saved configuration. Neither path composes a transport or opens the identity store.
         Verb::Service(cmd) => return run_service(cmd, &home).await,
         // Each `contact` verb opens the book itself, holding `home.lock` from its read to its save. A root
         // key given for a machine is found only once `contact add` runs, and exits 2, as clap's own do.
@@ -1980,6 +1985,8 @@ mod tests {
     /// takes `--at`.
     #[test]
     fn service_group_is_add_rm_on_off() {
+        let bare = Cli::try_parse_from(["swoosh", "service"]).unwrap();
+        assert!(matches!(bare.command.unwrap().split(), Verb::Service(None)));
         for argv in [
             ["swoosh", "service", "add", "ssh"].as_slice(),
             ["swoosh", "service", "add", "ssh", "web=tcp:localhost:3000"].as_slice(),

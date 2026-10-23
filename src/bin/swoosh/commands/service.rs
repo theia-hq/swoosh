@@ -1,16 +1,16 @@
-//! `swoosh service`: change what this machine serves.
+//! `swoosh service`: show or change what this machine serves.
 //!
-//! Every leaf is a LOCAL FILE WRITE on `<home>/serve.toml` under `home.lock`, never a socket call and never
-//! a remote op: each acts on this machine.
+//! The bare command reads the saved next-start list and one local resident snapshot.
+//! It prints configured names in order, startup targets when bound, and next-start
+//! targets when they differ. Off marks come from the fresh saved file, not the
+//! resident's refusal bits. Neither observation is a health check.
 //!
-//! - `service add <service>…` / `service rm <service>…` change this machine's list, which a bare `serve`
-//!   serves. A running `serve` binds only at its start, so an add is served from its next start; a remove
-//!   is refused live. See [`edit`].
-//! - `service on <service>` / `service off <service>` change whether a listed service answers, live, with
-//!   no restart, and `off` holds across restarts. See [`toggle`].
+//! `add` and `rm` change the saved list under `home.lock`. Added services start
+//! with the next serve; removed services are refused live. `on` and `off` change
+//! whether a listed service answers, and off marks persist across restarts.
 //!
-//! A machine typed after `on` or `off` (`[me/<name>]`) is parsed, hidden from usage, and refused with exit 2
-//! until those can act on another of your devices.
+//! A machine typed after `on` or `off` is refused with exit 2 until remote
+//! toggles are supported.
 
 use std::collections::BTreeSet;
 
@@ -22,8 +22,9 @@ use swoosh::serve::control_codec::DisabledList;
 
 pub mod edit;
 pub mod toggle;
+pub mod view;
 
-/// Change what this machine serves
+/// Show or change what this machine serves
 #[derive(Debug, Subcommand)]
 pub enum ServiceCmd {
     /// Add services to what this machine serves
