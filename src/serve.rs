@@ -21,7 +21,6 @@ use crate::home::{Home, canonical_to_be};
 use crate::names::NameError;
 
 mod activity;
-mod control;
 mod lookup;
 mod renewal;
 mod resident;
@@ -30,9 +29,10 @@ mod scheme;
 mod services;
 mod serving;
 mod single;
+mod socket;
 mod stop;
 pub mod control_codec {
-    pub use super::control::{
+    pub use super::socket::{
         ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, LocalDetailLimit,
         LocalServiceName, LocalServicePair, LocalServicePairs, LocalServiceSnapshot,
         LocalServiceTarget, MAX_DISABLED_NAMES, MAX_FRAME, MAX_STATUS_STRING, MAX_WARM_ENTRIES,
@@ -40,10 +40,10 @@ pub mod control_codec {
     };
 }
 pub use activity::{Activity, RecvLines};
-#[cfg(test)]
-pub(crate) use control::measure_allocations;
 pub use resident::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident, StopKind, StopSource};
 pub use single::{InstanceLock, RuntimeDir, SingleError, acquire as acquire_single};
+#[cfg(test)]
+pub(crate) use socket::measure_allocations;
 // `roster` shadows `crate::roster`, reached in full above. The general engines (`fetch`, `measure`,
 // `sshh`, `transfer`) are consumed from the services repo, so the names resolve to those crates.
 pub use transfer::Recv;

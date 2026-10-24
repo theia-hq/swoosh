@@ -12,10 +12,10 @@ use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use tokio::io::{AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 use super::{MAX_CONTROL_CONNS, READ_TIMEOUT, Resident};
-use crate::serve::control::ControlError;
 use crate::serve::control_codec::{
     DisabledList, MAX_DISABLED_NAMES, MAX_FRAME, Request, Response, ServiceMenu, StatusReply,
 };
+use crate::serve::socket::ControlError;
 
 /// The four magic bytes a well-formed control frame opens with, spelled out rather than imported, so
 /// a test cannot agree with the codec by sharing its constant.
@@ -191,7 +191,7 @@ async fn detail_is_one_shot_without_halfclose_or_stop_splicing() {
 
 #[tokio::test]
 async fn detail_allocation_failure_answers_or_closes_without_partial_success() {
-    use crate::serve::control::fail_sizes;
+    use crate::serve::socket::fail_sizes;
     let reason = "local service detail resources are unavailable";
     for diagnostic_failure in [false, true] {
         let resident = detail_resident();

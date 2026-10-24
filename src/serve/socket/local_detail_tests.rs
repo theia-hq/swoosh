@@ -10,7 +10,7 @@ use super::{
     ControlError, LocalDetailCaptureError, LocalDetailError, LocalDetailLimit, LocalServicePairs,
     LocalServiceSnapshot, checked_end, decode, protocol, storage,
 };
-use crate::serve::control::{Request, Response};
+use crate::serve::socket::{Request, Response};
 
 // Thread-local accounting excludes unrelated parallel tests and measures requested storage, not RSS.
 std::thread_local! {

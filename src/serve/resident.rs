@@ -16,7 +16,7 @@ use tightbeam::tunnel::{CancellationToken, ServiceCatalog};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Semaphore;
 
-use super::control::{
+use super::socket::{
     ControlError, DisabledList, LocalDetailCaptureError, LocalDetailError, Request, Response,
     ServiceMenu, StatusReply,
 };
@@ -31,7 +31,7 @@ pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_CONTROL_CONNS: usize = 8;
 
 /// The most disabled names one status reply reports, mirroring the codec's decode cap
-/// (`control.rs`), so a grown file can never produce a reply the client refuses to decode.
+/// (`socket.rs`), so a grown file can never produce a reply the client refuses to decode.
 pub const DISABLED_NAMES_CAP: usize = 1024;
 
 /// How long the accept loop waits after a recoverable accept error before retrying: enough for
@@ -286,14 +286,14 @@ impl Resident {
             }
             Ok(Err(ControlError::TooLarge(_))) => {
                 // EOF is the contract for an oversized DECLARED frame: the codec refuses the length
-                // before reading a byte of it (`control.rs`), and the connection closes with no
+                // before reading a byte of it (`socket.rs`), and the connection closes with no
                 // reply. Replying `Error` would answer an attacker-chosen length while the client
                 // may still be sending the payload it declared, so the close is the whole response.
                 // The serve-level test (`oversized_declared_frame_ends_the_connection`) pins this.
                 return;
             }
             Ok(Err(error)) => {
-                let Ok(response) = Response::request_error(error, observed.as_ref()) else {
+                let Ok(response) = Response::request_error(error, observed) else {
                     return;
                 };
                 (response, false, true)
