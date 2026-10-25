@@ -11,10 +11,11 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _}
 use std::os::unix::io::AsRawFd as _;
 use std::path::PathBuf;
 
+use tokio::io::AsyncReadExt as _;
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 
-use crate::home::Home;
+use crate::home::{Home, ProcessId};
 use crate::serve::control_codec::{
     ControlError, LocalServiceSnapshot, Request, Response, ServiceMenu, StatusReply,
 };
@@ -40,46 +41,51 @@ pub trait NodeClient {
     fn services(&self) -> impl Future<Output = Result<ServiceMenu, ControlError>>;
     /// The public status shape: id, pid, address, uptime, the live menu, the warm peers.
     fn status(&self) -> impl Future<Output = Result<StatusReply, ControlError>>;
-    /// Ask the node to stop gracefully. The resident's stop is uid-equivalent to the SIGTERM the local
-    /// user already holds.
+    /// Request a graceful stop. Success does not prove that the process has exited.
     fn stop(&self) -> impl Future<Output = Result<(), ControlError>>;
 }
 
-/// The Phase 2 backend: the local resident's uid-gated control socket. One-shot SWC1 exchange per
-/// call; holds no daemon handle and no shared state.
+/// Local resident control over a Unix socket, with one connection per exchange.
+///
+/// Before each request, check the connected peer's kernel-reported UID and listener PID. The UID must
+/// match this process's effective UID, and the PID must match the selected home's record read after
+/// connecting.
+///
+/// These checks establish account and recorded-listener attribution, not executable identity. They do
+/// not protect against malicious mutation of the home or runtime namespace by the same account.
 #[derive(Debug)]
 pub struct UidSocket {
     /// The verified control socket path.
     socket: PathBuf,
-    /// The resident pid read from `serve.lock` at resolve, for the stop confirmation line.
-    pid: Option<u32>,
+    // Selected state, not cached authentication: every connected exchange rereads its PID.
+    home: Home,
 }
 
 impl UidSocket {
-    /// Resolve and verify the socket for `home`. Never connects: a plain stat of the leaf dir and the
-    /// socket is enough to separate a trusted local resident from a missing or planted one.
+    /// Resolve the selected home's control socket and check its path ownership, directory permissions
+    /// and file types without connecting. These path checks do not identify a listener; each exchange
+    /// checks the connected peer before sending a request.
     pub fn resolve(home: &Home) -> Result<Self, ControlError> {
         // No addressable runtime root (XDG_RUNTIME_DIR unset or relative, confstr failed) means no
         // resident is addressable under this home, not an insecure path.
         let socket = home
             .control_socket()
             .map_err(|_| ControlError::NoResident)?;
-        let mut resolved = Self::resolve_socket(socket)?;
-        resolved.pid = crate::home::ServeLock::recorded(home).pid;
-        Ok(resolved)
+        Self::resolve_socket(home, socket)
     }
 
     /// Verify an already-derived socket path (the path half of [`resolve`](Self::resolve)), split out
     /// so tests can drive the ownership/mode/socket checks without resolving a process-global runtime
     /// root. Never connects.
-    fn resolve_socket(socket: PathBuf) -> Result<Self, ControlError> {
-        Self::resolve_socket_as(socket, euid(), euid())
+    fn resolve_socket(home: &Home, socket: PathBuf) -> Result<Self, ControlError> {
+        Self::resolve_socket_as(home, socket, euid(), euid())
     }
 
     /// [`resolve_socket`](Self::resolve_socket) with the expected owners injected: production passes
     /// [`euid`] for both halves, tests pass a foreign uid for one half to pin each comparison without
     /// root. The refused half names itself in the error, so a test can prove which check refused.
     fn resolve_socket_as(
+        home: &Home,
         socket: PathBuf,
         dir_uid: u32,
         socket_uid: u32,
@@ -111,38 +117,41 @@ impl UidSocket {
             }
             Err(_) => return Err(ControlError::Untrusted { path: socket }),
         }
-        Ok(Self { socket, pid: None })
+        Ok(Self {
+            socket,
+            home: Home::clone(home),
+        })
     }
 
-    /// Read one startup service snapshot from the verified local resident.
+    /// Read one startup service snapshot through the local socket client.
     ///
-    /// Uses one same-UID socket exchange, with no status fallback or remote route. The snapshot does not prove backend health.
+    /// Uses the same connected-peer checks as other local control requests, with no status fallback or
+    /// remote route. The snapshot does not prove backend health.
     ///
     /// # Errors
     ///
-    /// Returns control trust, transport, framing or typed local-detail failures. Only [`ControlError::NoResident`] means no resident is addressable.
+    /// Returns control trust, transport, framing or typed local-detail failures. A socket miss does not
+    /// establish that the home's serve lock is free.
     pub async fn local_service_detail(&self) -> Result<LocalServiceSnapshot, ControlError> {
         self.exchange(&Request::LocalServiceDetail)
             .await?
             .into_local_snapshot()
     }
 
-    /// Dial the verified socket and prove the CONNECTED peer's uid is ours. The path stat in
-    /// [`resolve`](Self::resolve) can race a same-uid swap; a connected fd cannot, so this is the
-    /// client-side twin of the server's accepted-fd check.
-    async fn connect(&self) -> Result<UnixStream, ControlError> {
-        self.connect_checked_with(UnixStream::connect(&self.socket), real_peer_uid)
+    /// Connect within the deadline, then check the kernel-reported peer UID and listener PID against
+    /// this process's effective UID and the selected home's PID record read after connecting. Reject
+    /// missing, invalid or mismatched attribution before writing request bytes.
+    async fn connect(&self) -> Result<(UnixStream, ProcessId), ControlError> {
+        self.connect_checked_with(UnixStream::connect(&self.socket), real_peer_credentials)
             .await
     }
 
-    /// The testable core of [`connect`](Self::connect): bound `dial` by [`CONNECT_TIMEOUT`], map its
-    /// OS errors, then prove the connected peer's uid with `checker`. Split from `connect` so tests
-    /// can drive a wedged dial, a refused dial, and a foreign-uid checker without root.
+    // Injection changes only the kernel query, never the post-connect record read or ordering.
     async fn connect_checked_with<C>(
         &self,
         dial: C,
-        checker: fn(i32) -> std::io::Result<u32>,
-    ) -> Result<UnixStream, ControlError>
+        checker: fn(i32) -> io::Result<PeerCredentials>,
+    ) -> Result<(UnixStream, ProcessId), ControlError>
     where
         C: Future<Output = std::io::Result<UnixStream>>,
     {
@@ -154,21 +163,69 @@ impl UidSocket {
                 Some(libc::ENOENT | libc::ECONNREFUSED) => ControlError::NoResident,
                 _ => ControlError::Io(error),
             })?;
-        let uid = checker(stream.as_raw_fd()).map_err(|_| ControlError::Untrusted {
-            path: self.socket.clone(),
-        })?;
-        if uid != euid() {
-            return Err(ControlError::Untrusted {
-                path: self.socket.clone(),
-            });
+        let untrusted = || ControlError::Untrusted {
+            path: PathBuf::clone(&self.socket),
+        };
+        let peer = checker(stream.as_raw_fd()).map_err(|_| untrusted())?;
+        let recorded = crate::home::ServeLock::checked_pid(&self.home).map_err(|_| untrusted())?;
+        if peer.uid != euid() || recorded != peer.pid {
+            return Err(untrusted());
         }
-        Ok(stream)
+        Ok((stream, peer.pid))
+    }
+
+    /// Request a graceful stop and return the kernel-reported listener PID checked on that connection
+    /// against the selected home's record read after connecting.
+    ///
+    /// After the complete request is written, success requires a complete acknowledgement or EOF before
+    /// any response byte. EOF after any response byte is an error, not a stop confirmation. One
+    /// five-second deadline covers the whole response read.
+    ///
+    /// Success does not prove that the process has exited.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attribution or request writing fails, the node refuses the request, the
+    /// response is truncated or invalid, or the response deadline expires.
+    pub async fn stop_attributed(&self) -> Result<ProcessId, ControlError> {
+        let (stream, pid) = self.connect().await?;
+        Self::stop_on(stream, pid).await
+    }
+
+    async fn stop_on<S>(mut stream: S, pid: ProcessId) -> Result<ProcessId, ControlError>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        Self::write_request(&mut stream, &Request::Stop).await?;
+        // Prefetch only one byte, replaying it into the unchanged codec. Once any response
+        // begins, its truncation is an error; only a zero-byte close can stand in for an Ack.
+        // The same deadline encloses both the prefetch and the entire declared frame.
+        let response = timeout(IO_TIMEOUT, async {
+            let mut first = [0];
+            if stream.read(&mut first).await.map_err(ControlError::Io)? == 0 {
+                return Ok(None);
+            }
+            let mut reader = first.as_slice().chain(&mut stream);
+            Response::read(&mut reader).await.map(Some)
+        })
+        .await
+        .map_err(|_| ControlError::Timeout {
+            phase: "response read",
+        })??;
+        match response {
+            None | Some(Response::Ack) => Ok(pid),
+            Some(Response::Refused(reason)) => Err(ControlError::Refused(reason)),
+            Some(Response::Error(reason)) => Err(ControlError::Protocol(reason)),
+            Some(other) => Err(ControlError::Protocol(format!(
+                "unexpected reply to stop: {other:?}"
+            ))),
+        }
     }
 
     /// One request, one response, one connection. Maps a wire `Refused`/`Error` to the typed error at
     /// the boundary so a caller can match it, never a stringified cause.
     async fn exchange(&self, request: &Request) -> Result<Response, ControlError> {
-        let stream = self.connect().await?;
+        let (stream, _) = self.connect().await?;
         Self::exchange_on(stream, request).await
     }
 
@@ -179,17 +236,32 @@ impl UidSocket {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
-        timeout(IO_TIMEOUT, request.write(&mut stream))
+        Self::write_request(&mut stream, request).await?;
+        Self::read_response(&mut stream, request).await
+    }
+
+    // Keep write failure outside stop's read-EOF success rule.
+    async fn write_request<S>(stream: &mut S, request: &Request) -> Result<(), ControlError>
+    where
+        S: tokio::io::AsyncWrite + Unpin,
+    {
+        timeout(IO_TIMEOUT, request.write(stream))
             .await
             .map_err(|_| ControlError::Timeout {
                 phase: "request write",
             })?
-            .map_err(ControlError::Io)?;
+            .map_err(ControlError::Io)
+    }
+
+    async fn read_response<S>(stream: &mut S, request: &Request) -> Result<Response, ControlError>
+    where
+        S: tokio::io::AsyncRead + Unpin,
+    {
         // One deadline encloses the complete declared response, never each byte or field.
         timeout(IO_TIMEOUT, async {
             match request {
-                Request::LocalServiceDetail => Response::read_local_detail(&mut stream).await,
-                _ => Response::read(&mut stream).await,
+                Request::LocalServiceDetail => Response::read_local_detail(stream).await,
+                _ => Response::read(stream).await,
             }
         })
         .await
@@ -223,44 +295,28 @@ impl NodeClient for UidSocket {
     }
 
     async fn stop(&self) -> Result<(), ControlError> {
-        match self.exchange(&Request::Stop).await {
-            Ok(Response::Ack) => Ok(()),
-            Ok(Response::Refused(reason)) => Err(ControlError::Refused(reason)),
-            Ok(Response::Error(reason)) => Err(ControlError::Protocol(reason)),
-            Ok(other) => Err(ControlError::Protocol(format!(
-                "unexpected reply to stop: {other:?}"
-            ))),
-            // A clean EOF after the request was written is a success: the resident may cancel its
-            // accept loop between writing the Ack and our read, the same discipline the wire stop
-            // uses. Any other I/O error stays loud.
-            Err(ControlError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
-            Err(error) => Err(error),
-        }
+        self.stop_attributed().await.map(|_| ())
     }
 }
 
-/// The pluggable client backends, chosen by distance. Phase 2 builds one arm; the enum is the slot,
-/// because the overlay joins as a variant and the local socket is the only arm that can be resolved
-/// for a same-machine call.
+/// A client for node control operations.
 #[derive(Debug)]
 pub enum ControlClient {
-    /// The local resident's uid-gated socket. The only arm Phase 2 can construct.
+    /// The local resident's Unix socket client.
     Socket(UidSocket),
 }
 
 impl ControlClient {
-    /// Resolve the backend for a same-machine control call: the verified local socket, `NoResident`
-    /// when no addressable resident exists, `Untrusted` when the path exists but is not this user's
-    /// 0700 socket. Never attempts a connection.
+    /// Resolve the local socket backend without connecting. Path resolution does not establish resident
+    /// absence or identify the listener; each exchange checks the connected peer before sending a request.
     pub fn resolve(home: &Home) -> Result<Self, ControlError> {
         Ok(Self::Socket(UidSocket::resolve(home)?))
     }
 
-    /// Verify an already-derived socket path without resolving the process-global runtime root: the
-    /// path half of [`resolve`](Self::resolve), for tests that drive the local backend over a scratch
-    /// socket. Never connects; production always comes through `resolve`.
-    pub fn resolve_socket(socket: PathBuf) -> Result<Self, ControlError> {
-        Ok(Self::Socket(UidSocket::resolve_socket(socket)?))
+    /// Construct a local backend from a socket path for tests. Production resolves the backend from the
+    /// selected home.
+    pub fn resolve_socket(home: &Home, socket: PathBuf) -> Result<Self, ControlError> {
+        Ok(Self::Socket(UidSocket::resolve_socket(home, socket)?))
     }
 
     /// Read local startup targets through the socket backend only.
@@ -276,10 +332,12 @@ impl ControlClient {
         }
     }
 
-    /// The resident pid read from `serve.lock` at resolve, for the stop confirmation line.
-    pub fn pid(&self) -> Option<u32> {
+    /// Request a local stop and return the listener PID attributed by the socket backend on that
+    /// exchange. After the complete request is written, success requires a complete acknowledgement or
+    /// EOF before any response byte. Success does not prove that the process has exited.
+    pub async fn stop_attributed(&self) -> Result<ProcessId, ControlError> {
         match self {
-            Self::Socket(socket) => socket.pid,
+            Self::Socket(socket) => socket.stop_attributed().await,
         }
     }
 }
@@ -323,8 +381,80 @@ pub(crate) fn euid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-/// Read the uid of the peer connected on `fd`: macOS `getpeereid`, Linux `SO_PEERCRED`. Shared by the
-/// server's accepted-fd check and the client's connected-fd check so there is one implementation.
+#[derive(Debug)]
+struct PeerCredentials {
+    uid: u32,
+    pid: ProcessId,
+}
+
+impl PeerCredentials {
+    fn from_kernel(uid: u32, pid: libc::pid_t) -> io::Result<Self> {
+        let pid = u32::try_from(pid)
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?
+            .try_into()?;
+        Ok(Self { uid, pid })
+    }
+}
+
+// Query only the connected client fd. On macOS LOCAL_PEERPID names the listener;
+// getpeereid supplies the UID independently. Neither pathname metadata nor a wire PID suffices.
+fn real_peer_credentials(fd: i32) -> io::Result<PeerCredentials> {
+    #[cfg(target_os = "macos")]
+    {
+        let uid = real_peer_uid(fd)?;
+        let mut pid: libc::pid_t = 0;
+        let mut len = core::mem::size_of_val(&pid) as libc::socklen_t;
+        // SAFETY: fd is borrowed from a live connected stream; pid and len are valid
+        // output slots of the size requested by LOCAL_PEERPID.
+        let ok = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&mut pid as *mut libc::pid_t).cast::<libc::c_void>(),
+                &mut len,
+            )
+        };
+        if ok != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if len as usize != core::mem::size_of_val(&pid) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        PeerCredentials::from_kernel(uid, pid)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: ucred is plain C integer data; zero initializes every output field.
+        let mut cred: libc::ucred = unsafe { core::mem::zeroed() };
+        let mut len = core::mem::size_of_val(&cred) as libc::socklen_t;
+        // SAFETY: fd is a live connected stream; cred and len are valid output slots,
+        // sized exactly for SO_PEERCRED. Check the returned length before accepting fields.
+        let ok = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast::<libc::c_void>(),
+                &mut len,
+            )
+        };
+        if ok != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if len as usize != core::mem::size_of_val(&cred) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        PeerCredentials::from_kernel(cred.uid, cred.pid)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = fd;
+        Err(io::ErrorKind::Unsupported.into())
+    }
+}
+
+/// Read the uid of the peer connected on `fd`: macOS `getpeereid`, Linux `SO_PEERCRED`.
 pub(crate) fn real_peer_uid(fd: i32) -> std::io::Result<u32> {
     #[cfg(target_os = "macos")]
     {
