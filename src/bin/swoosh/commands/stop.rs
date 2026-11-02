@@ -34,8 +34,8 @@ use bifrost::{Discovery, Node, NodeId, Session as _, Transport};
 use clap::Args;
 use nauthy::{Link, Service};
 use swoosh::contacts::{ContactRef, Contacts, ContactsStore, DeviceLabel, ME, Petname};
-use swoosh::home::Home;
-use swoosh::node_client::{ControlClient, NodeClient as _, control_error_report};
+use swoosh::home::{Home, ProcessId};
+use swoosh::node_client::{ControlClient, control_error_report};
 use swoosh::peer::{OwnDevice, Peer};
 use swoosh::root_key::RootKey;
 use swoosh::roster::RosterDoc;
@@ -369,12 +369,13 @@ impl StopCmd {
     }
 }
 
-/// Stop this machine's `serve` over the resolved local client: the line confirming it, with the pid the
-/// client read from the resident's lock at resolve. Split from the resolve so a test drives the verb against
-/// the local socket backend without resolving the process-global runtime root.
+/// Request a local stop and format its confirmation using only the listener PID returned by that
+/// exchange. Do not use a resolve-time PID or reread the record after teardown.
 async fn stop_resolved(client: &ControlClient) -> eyre::Result<String> {
-    let pid = client.pid();
-    client.stop().await.map_err(control_error_report)?;
+    let pid = client
+        .stop_attributed()
+        .await
+        .map_err(control_error_report)?;
     Ok(stop_line(pid))
 }
 
@@ -568,15 +569,10 @@ fn stopped_line(device: &OwnDevice, node: NodeId) -> String {
     )
 }
 
-/// The one line a completed self-stop prints. The pid comes from the resident's `serve.lock` read
-/// at resolve (the same record the single-instance refusal names), so the line proves WHICH process
-/// answered; a lock the resident had not written yet leaves the parenthetical off rather than
-/// printing a blank or a guess.
-fn stop_line(pid: Option<u32>) -> String {
-    match pid {
-        Some(pid) => format!("Stopped swoosh serve here (pid {pid})."),
-        None => "Stopped swoosh serve here.".to_owned(),
-    }
+/// Format the local stop confirmation. The PID identifies the listener attributed on the stop
+/// connection, not proof that the process has exited.
+fn stop_line(pid: ProcessId) -> String {
+    format!("Stopped swoosh serve here (pid {pid}).")
 }
 
 #[cfg(test)]

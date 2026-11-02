@@ -19,7 +19,10 @@ use crate::escape::{BLANK_LETTERS, EscapedPath};
 
 mod lock;
 
-pub use lock::{HomeWrite, LockError, Recorded, ServeLock, ServeLockError, serve_running};
+pub use lock::{
+    HomeWrite, LockError, ProcessId, Recorded, ResidentPresence, ServeLock, ServeLockError,
+    serve_running,
+};
 
 /// The node home: the directory every file this node owns lives in.
 ///
@@ -53,6 +56,21 @@ enum Selection {
 }
 
 impl Home {
+    /// Probe the actual `serve.lock` flock without changing its record. This method takes `HomeWrite`
+    /// internally and releases it and any temporary probe lock before returning.
+    ///
+    /// The result describes only the probe time and reserves no future absence. Call this method
+    /// without holding `HomeWrite`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if taking `HomeWrite` or opening, inspecting or probing the serve-lock file
+    /// fails. A symlink or nonregular serve-lock file is an error, not a free lock.
+    pub async fn resident_presence(&self) -> Result<ResidentPresence, LockError> {
+        let held = HomeWrite::take(self).await?;
+        ServeLock::presence(&held, self)
+    }
+
     /// Resolve the home from the optional `--home`/`SWOOSH_HOME` selection: the named dir when given, else
     /// the platform default (`default_dir`). Fallible only in the default case (it reads `HOME`), and it rejects
     /// an explicit home that names an existing FILE (the home is a directory; the key lives inside it at

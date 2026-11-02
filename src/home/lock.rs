@@ -117,7 +117,122 @@ pub struct Recorded {
     pub admit: Option<NodeId>,
 }
 
+/// Whether `serve.lock` was held when probed under `HomeWrite`. This value retains no lock and reserves
+/// no future absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentPresence {
+    /// The flock is held, regardless of whether the record contains a PID or admitted root.
+    Held,
+    /// The lock file is absent or its flock was free at the probe. A stale recorded PID does not make
+    /// it held.
+    Free,
+}
+
+/// A positive process ID within the platform's signed process-ID range.
+///
+/// This value checks the numeric domain only. It does not establish that a process exists, identify
+/// its executable or prove that it has exited.
+// Keep the field private so neither boundary can construct an unchecked value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessId(core::num::NonZeroU32);
+
+impl ProcessId {
+    /// Return the checked numeric process ID for an operating-system or serialization boundary.
+    pub fn get(self) -> u32 {
+        self.0.get()
+    }
+}
+
+impl TryFrom<u32> for ProcessId {
+    type Error = io::Error;
+
+    /// Check that a process ID is positive and fits the platform's signed process-ID range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero or a value outside that range.
+    fn try_from(pid: u32) -> Result<Self, Self::Error> {
+        if pid > i32::MAX as u32 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        core::num::NonZeroU32::new(pid)
+            .map(Self)
+            .ok_or_else(|| io::ErrorKind::InvalidData.into())
+    }
+}
+
+impl core::str::FromStr for ProcessId {
+    type Err = io::Error;
+
+    /// Parse a process ID from a nonempty sequence of ASCII decimal digits. Signs, whitespace, zero
+    /// and values outside the platform's signed process-ID range are rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the text is not in this form or the value is outside the accepted range.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        // Record syntax is digits only: integer parsing alone also accepts a leading plus.
+        if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let pid = text
+            .parse::<u32>()
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+        Self::try_from(pid)
+    }
+}
+
+impl core::fmt::Display for ProcessId {
+    /// Render the process ID as decimal digits without a sign or padding.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl ServeLock {
+    /// Probe the actual `serve.lock` flock under `HomeWrite` without changing its record. Release any
+    /// temporary lock before returning.
+    ///
+    /// The result describes only the probe time. Release `HomeWrite` before socket or network waits,
+    /// signing or prompting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if opening, inspecting or probing the lock file fails. A symlink or nonregular
+    /// file is an error, not a free lock.
+    pub fn presence(_home_lock: &HomeWrite, home: &Home) -> Result<ResidentPresence, LockError> {
+        let path = home.serve_lock();
+        let Some(file) = open_existing(&path)? else {
+            return Ok(ResidentPresence::Free);
+        };
+        if try_lock(&file, libc::LOCK_SH).map_err(|source| failed(&path, source))? {
+            Ok(ResidentPresence::Free)
+        } else {
+            Ok(ResidentPresence::Held)
+        }
+    }
+
+    /// Read the PID recorded in the selected home's `serve.lock` for connected-listener attribution.
+    /// The record alone does not establish that a resident is running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the record cannot be read or does not contain a valid PID.
+    pub fn checked_pid(home: &Home) -> Result<ProcessId, LockError> {
+        let path = home.serve_lock();
+        let invalid = || failed(&path, io::ErrorKind::InvalidData.into());
+        let file = open_existing(&path)?.ok_or_else(invalid)?;
+        let mut text = String::new();
+        file.take(RECORD_CAP + 1)
+            .read_to_string(&mut text)
+            .map_err(|source| failed(&path, source))?;
+        if text.len() as u64 > RECORD_CAP {
+            return Err(invalid());
+        }
+        let line = text.lines().next().ok_or_else(invalid)?;
+        line.parse().map_err(|source| failed(&path, source))
+    }
+
     /// Take `serve.lock` exclusive without waiting, under `home.lock`, and empty it: what it records is now
     /// this holder's.
     ///
@@ -235,6 +350,28 @@ fn parse(file: &File) -> Recorded {
         pid: lines.next().and_then(|line| line.trim().parse().ok()),
         admit: lines.next().and_then(|line| line.trim().parse().ok()),
     }
+}
+
+// Nonblocking open precedes the regular-file check: a FIFO at this name must not park a
+// synchronous reader. O_NOFOLLOW refuses symlinks, including dangling ones, without mutation.
+fn open_existing(path: &Path) -> Result<Option<File>, LockError> {
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(failed(path, source)),
+    };
+    if !file
+        .metadata()
+        .map_err(|source| failed(path, source))?
+        .is_file()
+    {
+        return Err(failed(path, io::Error::other("not a regular file")));
+    }
+    Ok(Some(file))
 }
 
 /// Open (creating) the lock file at `path` in `home`, owner-only, never following a link at its name, and
