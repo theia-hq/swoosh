@@ -19,9 +19,9 @@
 //! the link it was given. A copy can never do more than its source, so it needs no one's leave. The link is
 //! read from a path or stdin as well as typed, so it need never enter argv.
 //!
-//! Every check that can refuse runs before anything is written. `--save`'s file is made, empty, before the
-//! key is read or a row is written, and filled before any line says what the link gives, so a file that
-//! cannot be made leaves no row behind, and a refused save never follows a line that claimed it worked.
+//! Acquisition, target, trust and pre-unlock issuer failures occur before key provisioning, saving or
+//! ledger changes. Valid first use without a resident may provision a key. A later failure may leave that
+//! key, and a save or output failure after append may leave the ledger row. No rollback is guaranteed.
 
 use core::fmt;
 use core::time::Duration;
@@ -37,13 +37,13 @@ use swoosh::contacts::{ContactRef, Contacts, ContactsStore, ME, Petname};
 use swoosh::escape::EscapedPath;
 use swoosh::grants::{self, Delegation, GrantKind, GrantRecord, Grants};
 use swoosh::home::{Home, HomeWrite};
-use swoosh::identity::{self, Identity};
 use swoosh::names::NameError;
 use swoosh::node_signer::{Bind, NodeSigner};
 use swoosh::root_key::RootKey;
-use swoosh::serve::{Scheme, ServedTarget, Started};
-use swoosh::serve_toml::ServeToml;
+use swoosh::serve::{Scheme, ServedTarget};
 use tightbeam::identity::AsVerifyKey as _;
+
+use super::service_state::{ShareBasis, ShareTarget};
 
 /// Make a link to a service for a person, a device, a key, or anyone
 #[derive(Debug, Args)]
@@ -325,11 +325,13 @@ impl ShareCmd {
                     (true, Recipient::Anyone) => Uses::Once,
                     (true, _) => return Err(Usage(ONCE_ANYONE.to_owned()).into()),
                 };
+                let target = ShareTarget::read(home, &service).await?;
                 let issue = Issue {
                     service,
                     who,
                     uses,
                     lifetime: uses.life(self.expires)?,
+                    target,
                 };
                 return issue.run(home, self.save.as_deref(), out, err).await;
             }
@@ -362,12 +364,13 @@ struct Issue {
     who: Recipient,
     uses: Uses,
     lifetime: Span,
+    target: ShareTarget,
 }
 
 impl Issue {
-    /// Resolve what the service is here, and who it is for, before anything is written; refuse an `anyone`
-    /// link to an engine that must never face an open gate unless it works once, and to a target swoosh
-    /// does not know at all; then sign, record the row, and print.
+    /// Require live detail and status to report the same checked listener PID. Compare the reported issuer
+    /// with the selected home's stored identity before unlocking or saving, then with the signing identity.
+    /// Refuse a mismatch or missing live identity rather than provisioning a replacement or changing target.
     async fn run(
         self,
         home: &Home,
@@ -376,20 +379,9 @@ impl Issue {
         err: &mut impl Write,
     ) -> eyre::Result<()> {
         let service = &self.service;
-        let serves = match Served::of(service, &ServeToml::read(home)?, home)? {
-            Served::Nothing => None,
-            Served::Target(target) => Some(target),
-            // Nothing can say what such a target would give anyone, so it gets no link to anyone; a bound
-            // link records nothing for it, and the gate admits no link to a name bound to it anyway.
-            Served::Unknown(target) if matches!(self.who, Recipient::Anyone) => eyre::bail!(
-                "{service} serves {}, which swoosh does not know; share it with a person: swoosh share \
-                 {service} <person>",
-                target.escape_debug()
-            ),
-            Served::Unknown(_) => None,
-        };
-        let runs_code = serves.as_ref().is_some_and(ServedTarget::runs_code);
-        if serves.as_ref().is_some_and(ServedTarget::never_public)
+        let serves = &self.target.target;
+        let runs_code = serves.runs_code();
+        if serves.never_public()
             && matches!(self.who, Recipient::Anyone)
             && self.uses == Uses::UntilItEnds
         {
@@ -403,13 +395,14 @@ impl Issue {
                  works once: swoosh share {service} anyone --once"
             );
         }
-        let gives = Gives::of(service, serves.as_ref());
+        let gives = Gives::of(service, serves);
+        let issuer = self.target.issuer(home).await?;
         let store = ContactsStore::open(home).await?;
         let bound = self.bind(store.contacts(), home).await?;
-        // A `--save` file is made before the key is read or a row is written, so a directory that takes no
-        // new file refuses with no row; any error after this removes it.
+        // A `--save` file is made before a row is written, so a directory that takes no new file refuses
+        // with no row.
         let save = save.map(NewFile::make).transpose()?;
-        let link = self.sign(home, &bound, serves).await?;
+        let link = self.sign(home, &bound, issuer).await?;
         let delivered = Delivered::new(&link, save)?;
         let until = Until::from_now(self.lifetime.duration(), Some(&self.lifetime));
         // A one-use link says so in the grant's own line, so its end prints once.
@@ -427,6 +420,21 @@ impl Issue {
             err,
             "the link dials this machine: it works while this machine serves {service}."
         )?;
+        match &self.target.basis {
+            ShareBasis::Live { refused: false, .. } => {}
+            ShareBasis::Live { refused: true, .. } => writeln!(
+                err,
+                "{service} was reported unavailable; making this link does not enable it."
+            )?,
+            ShareBasis::Next { off: false } => writeln!(
+                err,
+                "this link is for the next bare `swoosh serve`; {service} is not marked off in saved policy."
+            )?,
+            ShareBasis::Next { off: true } => writeln!(
+                err,
+                "this link is for the next bare `swoosh serve`; {service} remains unavailable while marked off in saved policy. Making this link does not enable it."
+            )?,
+        }
         match (bound.bind, runs_code) {
             (Bind::Anyone, true) => writeln!(
                 err,
@@ -513,13 +521,8 @@ impl Issue {
 
     /// Sign the link under this machine's key (made here on first use) and record its row under
     /// `home.lock`, so the link is on disk before it prints and this machine's gate admits it.
-    async fn sign(
-        &self,
-        home: &Home,
-        bound: &Bound,
-        serves: Option<ServedTarget>,
-    ) -> eyre::Result<Link> {
-        let secret = identity::resolve(Identity::Persisted, home).await?;
+    async fn sign(&self, home: &Home, bound: &Bound, issuer: Option<NodeId>) -> eyre::Result<Link> {
+        let secret = self.target.secret(home, issuer).await?;
         // A slip bound to this machine's own key would let a copy of that key vouch for any device it
         // likes, so the root of a person is never this machine.
         if let Bind::Fleet(root) = bound.bind
@@ -543,14 +546,20 @@ impl Issue {
             .ok_or_else(|| eyre::eyre!("the link has no id to revoke it by"))?;
         let record = GrantRecord {
             target: Service::clone(&self.service),
-            serves,
+            serves: Some(ServedTarget::clone(&self.target.target)),
             kind: bound.kind,
             delegation: bound.delegation,
             holder: bound.holder.clone(),
             root_id,
             expiry,
         };
+        // Unlock, sign and construct the record before taking the home write lock. Under that lock,
+        // recheck the disk identity and recorded live PID before appending the record. Do not wait on a
+        // socket or prompt while holding the lock. These rechecks do not create an atomic snapshot across
+        // files and sockets.
+        let signing_identity = secret.node_id();
         let home_lock = HomeWrite::take(home).await?;
+        self.target.recheck(&home_lock, home, signing_identity)?;
         Grants::at(home.links()).append(&home_lock, &record)?;
         Ok(link)
     }
@@ -617,50 +626,6 @@ impl Bound {
     }
 }
 
-/// What a bare `serve` would bind for a service's name now: the target of its entry in `serve.toml`, names
-/// folded the way `serve` folds them, else the built-in form's (`ssh` is `sshd:`), else nothing. What a link
-/// records it was made for, and what it says it gives.
-enum Served {
-    /// No entry, and no built-in form.
-    Nothing,
-    /// A target some `serve` binds.
-    Target(ServedTarget),
-    /// A target no link can record: a scheme no `serve` binds, or a control character.
-    Unknown(String),
-}
-
-impl Served {
-    /// Read what `service` serves from `served`, the home's `serve.toml`, as a bare `serve` would start it.
-    ///
-    /// # Errors
-    ///
-    /// `served` lists something that is not a service form, which `serve` refuses to start over too.
-    fn of(service: &Service, served: &ServeToml, home: &Home) -> eyre::Result<Self> {
-        let name = service.as_str();
-        let entries = Started::bare(served, &home.serve_toml())?.entries();
-        let target = entries
-            .iter()
-            .find_map(|entry| {
-                entry
-                    .split_once('=')
-                    .filter(|(named, _)| *named == name)
-                    .map(|(_, target)| target.to_owned())
-            })
-            .or_else(|| {
-                swoosh::serve::service_entry(name)
-                    .ok()
-                    .and_then(|entry| entry.split_once('=').map(|(_, target)| target.to_owned()))
-            });
-        Ok(match target {
-            None => Self::Nothing,
-            Some(target) => match target.parse() {
-                Ok(target) => Self::Target(target),
-                Err(_) => Self::Unknown(target),
-            },
-        })
-    }
-}
-
 /// What a link to a service gives, from what its name serves ([`serves`]).
 #[derive(Debug, PartialEq, Eq)]
 enum Gives {
@@ -676,11 +641,8 @@ enum Gives {
 
 impl Gives {
     /// Read what `service` gives, serving `served`.
-    fn of(service: &Service, served: Option<&ServedTarget>) -> Self {
+    fn of(service: &Service, served: &ServedTarget) -> Self {
         let name = service.as_str();
-        let Some(served) = served else {
-            return Self::Service(name.to_owned());
-        };
         match served.scheme() {
             Scheme::Sshd => Self::Shell,
             Scheme::Tcp | Scheme::Unix => Self::Forward {
@@ -799,7 +761,7 @@ impl<'a> Delivered<'a> {
     }
 }
 
-/// A `--save` file made new and empty, `0600`, before the key is read or a row is written: a directory that
+/// A `--save` file made new and empty, `0600`, before a row is written: a directory that
 /// takes no new file then refuses before there is a row for a link nobody holds. Dropped unfilled, on any
 /// error after it was made, it removes the file, so a refusal leaves no empty file behind. A run killed
 /// at the passphrase prompt runs no drop, so that one case leaves the empty file.

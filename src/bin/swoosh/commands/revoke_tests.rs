@@ -2362,6 +2362,10 @@ async fn revoke_a_device_whose_root_step_stops_prints_the_partway_line_then_its_
 async fn the_recipe_link_is_bound_to_a_rescue_key() {
     let nas = scratch("recipe-nas");
     device_of(&nas, &live(OWN, "nas")).await;
+    swoosh::serve_toml::ServeToml::update(&swoosh::testkit::lock(), &nas, |toml| {
+        toml.services = Some(vec!["ssh=sshd:".to_owned()]);
+    })
+    .unwrap();
     let rescue_dir = dir("recipe-rescue");
     swoosh::config::create_store_dir(&rescue_dir).unwrap();
     let rescue = Home::resolve(Some(rescue_dir)).unwrap();

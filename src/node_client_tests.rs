@@ -881,6 +881,56 @@ async fn local_detail_success_is_one_request_without_eof_or_second_frame_merge()
 }
 
 #[tokio::test]
+async fn attributed_detail_and_status_return_kernel_pid_not_the_wire_claim() {
+    let leaf = scratch("attr", 0o700);
+    let path = leaf.join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let client = super::ControlClient::resolve_socket(&home(&leaf), path).unwrap();
+    let resident = test_resident(CancellationToken::new(), &leaf);
+    let mut status = resident.status().await.unwrap();
+    status.pid = if std::process::id() == 1 { 2 } else { 1 };
+    let claimed = status.pid;
+    let server = async {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(
+            Request::read(&mut stream).await.unwrap(),
+            Request::LocalServiceDetail
+        );
+        Response::LocalServiceDetail(Ok(
+            crate::serve::control_codec::LocalServiceSnapshot::capture(
+                [("web", "tcp:localhost:3000", false)].into_iter(),
+            )
+            .unwrap(),
+        ))
+        .write(&mut stream)
+        .await
+        .unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert_eq!(Request::read(&mut stream).await.unwrap(), Request::Status);
+        Response::Status(status).write(&mut stream).await.unwrap();
+    };
+    let calls = async {
+        let (detail, detail_pid) = client.local_service_detail_attributed().await.unwrap();
+        let (status, status_pid) = client.status_attributed().await.unwrap();
+        assert_eq!(
+            detail.get("web").unwrap().target().as_str(),
+            "tcp:localhost:3000"
+        );
+        assert_eq!(detail_pid, status_pid);
+        assert_eq!(status_pid.get(), std::process::id());
+        assert_eq!(status.pid, claimed);
+        assert_ne!(status_pid.get(), status.pid);
+    };
+    tokio::time::timeout(core::time::Duration::from_secs(2), async {
+        tokio::join!(server, calls);
+    })
+    .await
+    .unwrap();
+    drop(listener);
+    std::fs::remove_dir_all(leaf).unwrap();
+}
+
+#[tokio::test]
 async fn local_detail_socket_rejects_diagnostic_declarations_without_waiting_for_body() {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     let leaf = scratch("d-cap", 0o700);
