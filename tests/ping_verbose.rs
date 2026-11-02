@@ -101,6 +101,7 @@ fn swoosh(home: &Path, args: &[&str]) -> Output {
         .arg("--home")
         .arg(home)
         .args(args)
+        .env("XDG_RUNTIME_DIR", home.join("run"))
         .env_remove("SWOOSH_HOME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
