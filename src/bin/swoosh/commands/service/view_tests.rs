@@ -52,6 +52,7 @@ impl Fixture {
         let dir = socket.parent().unwrap();
         std::fs::create_dir_all(dir).unwrap();
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(self.0.serve_lock(), std::process::id().to_string()).unwrap();
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -340,6 +341,7 @@ async fn replacement_residents_cannot_splice_targets_and_membership() {
         std::fs::Permissions::from_mode(0o700),
     )
     .unwrap();
+    std::fs::write(fixture.0.serve_lock(), std::process::id().to_string()).unwrap();
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     // Hold A's response until B owns the socket name, making any second acquisition observable.
     let barrier = Arc::new(tokio::sync::Barrier::new(2));

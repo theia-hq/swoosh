@@ -27,7 +27,16 @@ fn scratch(tag: &str, mode: u32) -> PathBuf {
     std::fs::create_dir_all(&dir).expect("control scratch");
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode))
         .expect("control scratch mode");
+    std::fs::write(dir.join("serve.lock"), format!("{}\n", std::process::id())).unwrap();
     dir
+}
+
+fn home(dir: &Path) -> crate::home::Home {
+    crate::home::Home::resolve(Some(dir.to_owned())).unwrap()
+}
+
+fn resolve_socket(socket: PathBuf) -> Result<UidSocket, ControlError> {
+    UidSocket::resolve_socket(&home(socket.parent().unwrap()), socket)
 }
 
 /// An empty catalog: these tests exercise the control contract, not service content.
@@ -66,7 +75,7 @@ async fn backends_agree() {
         async move { this.serve(listener).await }
     });
 
-    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let client = resolve_socket(socket).expect("the bound socket resolves");
 
     let direct = resident.services().await.expect("resident services");
     let over = client.services().await.expect("socket services");
@@ -114,7 +123,7 @@ async fn services_is_one_round_trip() {
         let this = Arc::clone(&resident);
         async move { this.serve(listener).await }
     });
-    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let client = resolve_socket(socket).expect("the bound socket resolves");
 
     assert_eq!(
         resident.served(),
@@ -167,7 +176,7 @@ async fn stalled_response_read_times_out() {
         core::future::pending::<()>().await;
     });
 
-    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let client = resolve_socket(socket).expect("the bound socket resolves");
     let error = client
         .services()
         .await
@@ -196,12 +205,12 @@ async fn connect_deadline_is_bounded() {
     let socket = leaf.join("control.sock");
     let listener =
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
-    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let client = resolve_socket(socket).expect("the bound socket resolves");
     let error = tokio::time::timeout(
         super::CONNECT_TIMEOUT * 2,
         client.connect_checked_with(
             core::future::pending::<std::io::Result<tokio::net::UnixStream>>(),
-            super::real_peer_uid,
+            super::real_peer_credentials,
         ),
     )
     .await
@@ -242,8 +251,11 @@ async fn request_write_deadline_is_bounded() {
 
 /// A fake peer-credential checker reporting a uid that is never ours: pins the connected-fd uid
 /// proof without root. Shaped as a plain `fn` so it coerces to the checker seam.
-fn foreign_uid(_: i32) -> std::io::Result<u32> {
-    Ok(if super::euid() == 0 { 1 } else { 0 })
+fn foreign_uid(_: i32) -> std::io::Result<super::PeerCredentials> {
+    super::PeerCredentials::from_kernel(
+        if super::euid() == 0 { 1 } else { 0 },
+        std::process::id().try_into().unwrap(),
+    )
 }
 
 /// The connected-fd peer-uid proof refuses a peer the checker reports as foreign: the client twin of
@@ -255,7 +267,7 @@ async fn connect_refuses_a_foreign_uid_peer() {
     let socket = leaf.join("control.sock");
     let listener =
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
-    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let client = resolve_socket(socket).expect("the bound socket resolves");
 
     let error = client
         .connect_checked_with(tokio::net::UnixStream::connect(&client.socket), foreign_uid)
@@ -278,9 +290,13 @@ async fn connect_admits_our_own_uid() {
     let socket = leaf.join("control.sock");
     let listener =
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
-    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let client = resolve_socket(socket).expect("the bound socket resolves");
 
-    let stream = client.connect().await.expect("our own uid is admitted");
+    let (stream, pid) = client
+        .connect()
+        .await
+        .expect("our own uid and PID are admitted");
+    assert_eq!(pid.get(), std::process::id());
     drop(stream);
     drop(listener);
     let _ = std::fs::remove_dir_all(&leaf);
@@ -331,7 +347,7 @@ async fn connect_maps_a_dead_listener_to_no_resident() {
     let leaf = scratch("stale", 0o700);
     let socket = leaf.join("control.sock");
     plant_dead_socket(&socket);
-    let client = UidSocket::resolve_socket(socket).expect("the dead socket inode still resolves");
+    let client = resolve_socket(socket).expect("the dead socket inode still resolves");
 
     let error = client.connect().await.expect_err("a dead listener refuses");
     assert!(
@@ -347,8 +363,7 @@ async fn connect_maps_a_dead_listener_to_no_resident() {
 #[test]
 fn resolve_refuses_untrusted_paths() {
     let loose = scratch("loose", 0o755);
-    let error =
-        UidSocket::resolve_socket(loose.join("control.sock")).expect_err("a 0755 leaf must refuse");
+    let error = resolve_socket(loose.join("control.sock")).expect_err("a 0755 leaf must refuse");
     assert!(
         matches!(error, ControlError::Untrusted { ref path } if path == &loose),
         "a loose leaf is Untrusted naming the dir: {error}"
@@ -358,15 +373,14 @@ fn resolve_refuses_untrusted_paths() {
     let socket = leaf.join("control.sock");
     std::fs::write(&socket, b"not a socket").expect("write a plain file");
     let error =
-        UidSocket::resolve_socket(socket.clone()).expect_err("a non-socket inode must refuse");
+        resolve_socket(PathBuf::clone(&socket)).expect_err("a non-socket inode must refuse");
     assert!(
         matches!(error, ControlError::Untrusted { ref path } if path == &socket),
         "a non-socket inode is Untrusted naming the path: {error}"
     );
 
     let leaf = scratch("absent", 0o700);
-    let error =
-        UidSocket::resolve_socket(leaf.join("control.sock")).expect_err("an absent socket misses");
+    let error = resolve_socket(leaf.join("control.sock")).expect_err("an absent socket misses");
     assert!(
         matches!(error, ControlError::NoResident),
         "an absent socket is a typed NoResident: {error}"
@@ -381,8 +395,8 @@ fn resolve_refuses_a_foreign_owner_leaf() {
     let leaf = scratch("foreign", 0o700);
     let foreign = if super::euid() == 0 { 1 } else { 0 };
     std::os::unix::fs::chown(&leaf, Some(foreign), None).expect("chown the leaf");
-    let error = UidSocket::resolve_socket(leaf.join("control.sock"))
-        .expect_err("a foreign-owner leaf must refuse");
+    let error =
+        resolve_socket(leaf.join("control.sock")).expect_err("a foreign-owner leaf must refuse");
     assert!(
         matches!(error, ControlError::Untrusted { .. }),
         "a foreign-owner leaf is Untrusted: {error}"
@@ -400,21 +414,31 @@ fn resolve_refuses_a_foreign_owner() {
         std::os::unix::net::UnixListener::bind(&socket).expect("bind the control socket");
     let foreign = if super::euid() == 0 { 1 } else { 0 };
 
-    let error = UidSocket::resolve_socket_as(socket.clone(), foreign, super::euid())
-        .expect_err("a foreign-owner leaf must refuse");
+    let error = UidSocket::resolve_socket_as(
+        &home(&leaf),
+        PathBuf::clone(&socket),
+        foreign,
+        super::euid(),
+    )
+    .expect_err("a foreign-owner leaf must refuse");
     assert!(
         matches!(error, ControlError::Untrusted { ref path } if path == &leaf),
         "a foreign-owner leaf is Untrusted naming the dir: {error}"
     );
 
-    let error = UidSocket::resolve_socket_as(socket.clone(), super::euid(), foreign)
-        .expect_err("a foreign-owner socket must refuse");
+    let error = UidSocket::resolve_socket_as(
+        &home(&leaf),
+        PathBuf::clone(&socket),
+        super::euid(),
+        foreign,
+    )
+    .expect_err("a foreign-owner socket must refuse");
     assert!(
         matches!(error, ControlError::Untrusted { ref path } if path == &socket),
         "a foreign-owner socket is Untrusted naming the socket: {error}"
     );
 
-    UidSocket::resolve_socket(socket).expect("our own tree resolves");
+    resolve_socket(socket).expect("our own tree resolves");
 
     drop(listener);
     let _ = std::fs::remove_dir_all(&leaf);
@@ -441,7 +465,7 @@ async fn socket_maps_a_refusal_to_the_typed_error() {
             .expect("the refusal writes");
     });
 
-    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let client = resolve_socket(socket).expect("the bound socket resolves");
     let error = client.services().await.expect_err("a refusal is an error");
     assert!(
         matches!(error, ControlError::Refused(ref reason) if reason == "gated"),
@@ -452,8 +476,8 @@ async fn socket_maps_a_refusal_to_the_typed_error() {
     let _ = std::fs::remove_dir_all(&leaf);
 }
 
-/// `stop` treats a clean EOF after the written request as success: a server that reads the stop and
-/// closes without an Ack still confirms the stop. Deleting the `UnexpectedEof` arm makes this `Io`.
+/// Only EOF before any response byte, after the complete request was written, permits EOF-based stop
+/// success. A partial response is an error.
 #[tokio::test]
 async fn stop_treats_a_clean_eof_as_success() {
     let leaf = scratch("eof", 0o700);
@@ -471,7 +495,7 @@ async fn stop_treats_a_clean_eof_as_success() {
         // Drop the stream with no Ack: the client must read the clean EOF as the confirmation.
     });
 
-    let client = UidSocket::resolve_socket(socket).expect("the bound socket resolves");
+    let client = resolve_socket(socket).expect("the bound socket resolves");
     client
         .stop()
         .await
@@ -522,6 +546,260 @@ fn control_errors_render_through_their_taxonomy() {
     );
 }
 
+#[tokio::test]
+async fn every_exchange_rereads_the_record_and_refuses_before_request_bytes() {
+    use tokio::io::AsyncReadExt as _;
+
+    let leaf = scratch("pid-gate", 0o700);
+    let path = leaf.join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let client = resolve_socket(path).unwrap();
+    let record = leaf.join("serve.lock");
+    for bytes in [
+        None,
+        Some(b"bad\n".as_slice()),
+        Some(b"0\n"),
+        Some(b"2147483647\n"),
+        Some(b"\xff"),
+    ] {
+        std::fs::remove_file(&record).unwrap();
+        if let Some(bytes) = bytes {
+            std::fs::write(&record, bytes).unwrap();
+        }
+        for operation in 0..4 {
+            let result = match operation {
+                0 => client.services().await.map(|_| ()),
+                1 => client.status().await.map(|_| ()),
+                2 => client.stop_attributed().await.map(|_| ()),
+                _ => client.local_service_detail().await.map(|_| ()),
+            };
+            assert!(matches!(result, Err(ControlError::Untrusted { .. })));
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut byte = [0];
+            assert_eq!(
+                tokio::time::timeout(super::IO_TIMEOUT, stream.read(&mut byte))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                0
+            );
+        }
+        // Keep the next iteration's removal independent of whether this record was absent.
+        std::fs::write(&record, b"").unwrap();
+    }
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+    assert!(matches!(
+        client.services().await,
+        Err(ControlError::Untrusted { .. })
+    ));
+    drop(listener);
+    std::fs::remove_dir_all(leaf).unwrap();
+}
+
+#[tokio::test]
+async fn record_at_connect_not_resolution_controls_attribution() {
+    let leaf = scratch("restart", 0o700);
+    let path = leaf.join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    std::fs::write(leaf.join("serve.lock"), b"2147483647\n").unwrap();
+    let client = resolve_socket(PathBuf::clone(&path)).unwrap();
+    std::fs::write(leaf.join("serve.lock"), format!("{}\n", std::process::id())).unwrap();
+    let (stream, pid) = client.connect().await.unwrap();
+    assert_eq!(pid.get(), std::process::id());
+    drop(stream);
+    let dial = async {
+        let stream = tokio::net::UnixStream::connect(&path).await?;
+        std::fs::write(leaf.join("serve.lock"), b"2147483647\n")?;
+        Ok(stream)
+    };
+    assert!(matches!(
+        client
+            .connect_checked_with(dial, super::real_peer_credentials)
+            .await,
+        Err(ControlError::Untrusted { .. })
+    ));
+    drop(listener);
+    std::fs::remove_dir_all(leaf).unwrap();
+}
+
+// A separate process is essential on macOS: a same-process listener cannot distinguish
+// LOCAL_PEERPID reporting the listener from accidentally reporting the connecting process.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test]
+async fn kernel_attribution_names_a_distinct_listener_process() {
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let leaf = scratch("kernel", 0o700);
+    let path = leaf.join("control.sock");
+    std::fs::remove_file(leaf.join("serve.lock")).unwrap();
+    let mut child = Child(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "node_client::node_client_tests::kernel_listener_child",
+            ])
+            .env("SWOOSH_TEST_LISTENER_HOME", &leaf)
+            .spawn()
+            .unwrap(),
+    );
+    tokio::time::timeout(super::CONNECT_TIMEOUT, async {
+        loop {
+            if std::fs::read_to_string(leaf.join("serve.lock")).ok()
+                == Some(format!("{}\n", child.0.id()))
+            {
+                break;
+            }
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "listener child exited before readiness"
+            );
+            tokio::time::sleep(core::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let client = resolve_socket(path).unwrap();
+    let (stream, pid) = client.connect().await.unwrap();
+    assert_ne!(pid.get(), std::process::id());
+    assert_eq!(pid.get(), child.0.id());
+    drop(stream);
+    drop(child);
+    std::fs::remove_dir_all(leaf).unwrap();
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn kernel_listener_child() {
+    let Some(leaf) = std::env::var_os("SWOOSH_TEST_LISTENER_HOME") else {
+        return;
+    };
+    let leaf = PathBuf::from(leaf);
+    let listener = std::os::unix::net::UnixListener::bind(leaf.join("control.sock")).unwrap();
+    std::fs::write(leaf.join("serve.lock"), format!("{}\n", std::process::id())).unwrap();
+    let (mut stream, _) = listener.accept().unwrap();
+    let mut byte = [0];
+    assert_eq!(std::io::Read::read(&mut stream, &mut byte).unwrap(), 0);
+}
+
+#[test]
+fn kernel_pid_must_be_positive() {
+    for pid in [0, -1] {
+        assert!(super::PeerCredentials::from_kernel(super::euid(), pid).is_err());
+    }
+    for pid in [1, 42, i32::MAX] {
+        let peer = super::PeerCredentials::from_kernel(super::euid(), pid).unwrap();
+        assert_eq!(peer.pid.get(), pid as u32);
+    }
+}
+
+#[tokio::test]
+async fn stop_never_treats_a_write_side_eof_as_confirmation() {
+    struct WriteEof;
+    impl tokio::io::AsyncRead for WriteEof {
+        fn poll_read(
+            self: core::pin::Pin<&mut Self>,
+            _: &mut core::task::Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> core::task::Poll<io::Result<()>> {
+            panic!("a failed request must not attempt a response read");
+        }
+    }
+    impl tokio::io::AsyncWrite for WriteEof {
+        fn poll_write(
+            self: core::pin::Pin<&mut Self>,
+            _: &mut core::task::Context<'_>,
+            _: &[u8],
+        ) -> core::task::Poll<io::Result<usize>> {
+            core::task::Poll::Ready(Err(io::ErrorKind::UnexpectedEof.into()))
+        }
+        fn poll_flush(
+            self: core::pin::Pin<&mut Self>,
+            _: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<io::Result<()>> {
+            core::task::Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(
+            self: core::pin::Pin<&mut Self>,
+            _: &mut core::task::Context<'_>,
+        ) -> core::task::Poll<io::Result<()>> {
+            core::task::Poll::Ready(Ok(()))
+        }
+    }
+    assert!(matches!(
+        UidSocket::stop_on(WriteEof, crate::home::ProcessId::try_from(42).unwrap()).await,
+        Err(ControlError::Io(error)) if error.kind() == io::ErrorKind::UnexpectedEof
+    ));
+}
+
+#[tokio::test]
+async fn stop_rejects_every_nonempty_truncated_response() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let pid = crate::home::ProcessId::try_from(42).unwrap();
+    let mut cases = 0;
+    for (name, frame) in [
+        ("ack", detail_frame(3, b"")),
+        ("refusal", detail_frame(4, b"\0\x05gated")),
+        ("error", detail_frame(5, b"\0\x05gated")),
+        ("ack-body", detail_frame(3, b"x")),
+    ] {
+        // Every nonempty prefix covers partial magic, tag, length and declared body.
+        // Ack has no valid body, but a declared one must still never confirm on EOF.
+        for end in 1..frame.len() {
+            let (stream, mut peer) = tokio::io::duplex(64);
+            let server = async {
+                assert_eq!(Request::read(&mut peer).await.unwrap(), Request::Stop);
+                peer.write_all(&frame[..end]).await.unwrap();
+                drop(peer);
+            };
+            let ((), result) = tokio::join!(server, UidSocket::stop_on(stream, pid));
+            assert!(
+                matches!(result, Err(ControlError::Io(error))
+                    if error.kind() == io::ErrorKind::UnexpectedEof),
+                "{name} prefix {end} must not return an attributed PID"
+            );
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 39);
+}
+
+#[tokio::test(start_paused = true)]
+async fn stop_response_deadline_includes_prefetch_and_the_entire_frame() {
+    use tokio::io::AsyncWriteExt as _;
+
+    let pid = crate::home::ProcessId::try_from(42).unwrap();
+    let (stream, mut peer) = tokio::io::duplex(64);
+    let writer = tokio::spawn(async move {
+        assert_eq!(Request::read(&mut peer).await.unwrap(), Request::Stop);
+        for byte in b"SWC1\x03\0\0" {
+            tokio::time::sleep(core::time::Duration::from_secs(1)).await;
+            if peer.write_all(&[*byte]).await.is_err() {
+                break;
+            }
+        }
+    });
+    let start = tokio::time::Instant::now();
+    let result = tokio::time::timeout(super::IO_TIMEOUT * 2, UidSocket::stop_on(stream, pid))
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(ControlError::Timeout {
+            phase: "response read"
+        })
+    ));
+    assert_eq!(start.elapsed(), super::IO_TIMEOUT);
+    writer.abort();
+    let _ = writer.await;
+}
+
 fn detail_frame(tag: u8, payload: &[u8]) -> Vec<u8> {
     let mut frame = b"SWC1".to_vec();
     frame.push(tag);
@@ -556,7 +834,7 @@ async fn local_detail_success_is_one_request_without_eof_or_second_frame_merge()
     let leaf = scratch("detail", 0o700);
     let path = leaf.join("control.sock");
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let client = UidSocket::resolve_socket(PathBuf::clone(&path)).unwrap();
+    let client = resolve_socket(PathBuf::clone(&path)).unwrap();
     let server = async {
         for _ in 0..2 {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -581,7 +859,7 @@ async fn local_detail_success_is_one_request_without_eof_or_second_frame_merge()
     };
     let calls = async {
         let direct = client.local_service_detail().await.unwrap();
-        let delegated = super::ControlClient::resolve_socket(path)
+        let delegated = super::ControlClient::resolve_socket(&home(&leaf), path)
             .unwrap()
             .local_service_detail()
             .await
@@ -608,7 +886,7 @@ async fn local_detail_socket_rejects_diagnostic_declarations_without_waiting_for
     let leaf = scratch("d-cap", 0o700);
     let path = leaf.join("control.sock");
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let client = UidSocket::resolve_socket(path).unwrap();
+    let client = resolve_socket(path).unwrap();
     let server = async {
         for tag in [4, 5] {
             let (mut stream, _) = listener.accept().await.unwrap();
@@ -787,7 +1065,7 @@ async fn local_detail_no_resident_is_distinct_from_post_connect_eof() {
     let leaf = scratch("d-miss", 0o700);
     let path = leaf.join("control.sock");
     plant_dead_socket(&path);
-    let client = UidSocket::resolve_socket(PathBuf::clone(&path)).unwrap();
+    let client = resolve_socket(PathBuf::clone(&path)).unwrap();
     assert!(matches!(
         client.local_service_detail().await,
         Err(ControlError::NoResident)
@@ -821,29 +1099,30 @@ async fn local_detail_no_resident_is_distinct_from_post_connect_eof() {
 
 #[tokio::test]
 async fn local_detail_credential_query_failure_and_symlinks_stay_untrusted() {
-    fn failed_credentials(_: i32) -> std::io::Result<u32> {
+    fn failed_pid_query(fd: i32) -> std::io::Result<super::PeerCredentials> {
+        super::real_peer_uid(fd)?;
         Err(io::ErrorKind::PermissionDenied.into())
     }
     let leaf = scratch("d-trust", 0o700);
     let path = leaf.join("control.sock");
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let client = UidSocket::resolve_socket(PathBuf::clone(&path)).unwrap();
+    let client = resolve_socket(PathBuf::clone(&path)).unwrap();
     assert!(matches!(
         client
-            .connect_checked_with(tokio::net::UnixStream::connect(&path), failed_credentials)
+            .connect_checked_with(tokio::net::UnixStream::connect(&path), failed_pid_query)
             .await,
         Err(ControlError::Untrusted { .. })
     ));
     let alias = leaf.join("alias.sock");
     std::os::unix::fs::symlink(&path, &alias).unwrap();
     assert!(matches!(
-        UidSocket::resolve_socket(alias),
+        resolve_socket(alias),
         Err(ControlError::Untrusted { .. })
     ));
     let alias = leaf.with_extension("alias");
     std::os::unix::fs::symlink(&leaf, &alias).unwrap();
     assert!(matches!(
-        UidSocket::resolve_socket(alias.join("control.sock")),
+        resolve_socket(alias.join("control.sock")),
         Err(ControlError::Untrusted { .. })
     ));
     std::fs::remove_file(alias).unwrap();

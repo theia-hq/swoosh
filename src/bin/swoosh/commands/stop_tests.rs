@@ -14,7 +14,7 @@ use bifrost::{NoDiscovery, Node, NodeId, Session as _, Transport as _};
 use bifrost_mem::MemTransport;
 use clap::Parser as _;
 use keystore::{KeyFile, Protection};
-use swoosh::home::Home;
+use swoosh::home::{Home, ProcessId};
 use swoosh::node_client::ControlClient;
 use swoosh::peer::{OwnDevice, Peer};
 use swoosh::roster::{Epoch, RevokedDevice, RosterDoc};
@@ -341,20 +341,156 @@ async fn stop_own_name_stops_locally() {
     let _ = std::fs::remove_dir_all(&leaf);
 }
 
-/// The stop line names the pid the client read from the resident's lock, and degrades to the pid-less
-/// form rather than printing a blank when the lock record is absent.
 #[test]
-fn the_stop_line_names_the_pid_when_known() {
+fn the_stop_line_names_the_attributed_pid() {
     assert_eq!(
-        stop_line(Some(4242)),
-        "Stopped swoosh serve here (pid 4242).",
-        "the stop confirmation names the resident pid"
+        stop_line(ProcessId::try_from(4242).unwrap()),
+        "Stopped swoosh serve here (pid 4242)."
     );
-    assert_eq!(
-        stop_line(None),
-        "Stopped swoosh serve here.",
-        "no lock record leaves the parenthetical off"
-    );
+}
+
+#[tokio::test]
+async fn local_stop_retains_connected_attribution_when_ack_or_eof_clears_the_record() {
+    use swoosh::serve::control_codec::{Request, Response};
+
+    for ack in [false, true] {
+        let leaf = scratch("clear");
+        let home = Home::resolve(Some(PathBuf::clone(&leaf))).unwrap();
+        let path = leaf.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        // Resolve against A's stale record, then connect to B with its current record.
+        std::fs::write(home.serve_lock(), b"2147483647\n").unwrap();
+        let client = ControlClient::resolve_socket(&home, path).unwrap();
+        std::fs::write(home.serve_lock(), format!("{}\n", std::process::id())).unwrap();
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(Request::read(&mut stream).await.unwrap(), Request::Stop);
+            std::fs::write(home.serve_lock(), b"").unwrap();
+            if ack {
+                Response::Ack.write(&mut stream).await.unwrap();
+            }
+        };
+        let ((), line) = tokio::join!(server, super::stop_resolved(&client));
+        assert_eq!(
+            line.unwrap(),
+            stop_line(ProcessId::try_from(std::process::id()).unwrap())
+        );
+        assert!(std::fs::read(home.serve_lock()).unwrap().is_empty());
+        drop(listener);
+        std::fs::remove_dir_all(leaf).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn local_stop_truncated_frames_never_return_a_stopped_line() {
+    use swoosh::serve::control_codec::{ControlError, Request};
+    use tokio::io::AsyncWriteExt as _;
+
+    let leaf = scratch("partial");
+    let home = Home::resolve(Some(PathBuf::clone(&leaf))).unwrap();
+    std::fs::write(home.serve_lock(), format!("{}\n", std::process::id())).unwrap();
+    let path = leaf.join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let client = ControlClient::resolve_socket(&home, path).unwrap();
+    let mut cases = 0;
+    for (name, frame) in [
+        ("ack", b"SWC1\x03\0\0".as_slice()),
+        ("refusal", b"SWC1\x04\0\x07\0\x05gated"),
+        ("error", b"SWC1\x05\0\x07\0\x05gated"),
+        ("ack-body", b"SWC1\x03\0\x01x"),
+    ] {
+        for end in 1..frame.len() {
+            let server = async {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                assert_eq!(Request::read(&mut stream).await.unwrap(), Request::Stop);
+                stream.write_all(&frame[..end]).await.unwrap();
+            };
+            let ((), result) = tokio::join!(server, super::stop_resolved(&client));
+            let error = result.expect_err("a partial response cannot return a success line");
+            assert!(
+                matches!(error.downcast_ref::<ControlError>(), Some(ControlError::Io(source))
+                    if source.kind() == io::ErrorKind::UnexpectedEof),
+                "{name} prefix {end}: {error:#}"
+            );
+            assert!(!format!("{error:#}").contains("Stopped"));
+            cases += 1;
+        }
+    }
+    assert_eq!(cases, 39);
+    drop(listener);
+    std::fs::remove_dir_all(leaf).unwrap();
+}
+
+#[tokio::test]
+async fn local_stop_missing_or_mismatched_record_never_writes_a_request_or_confirms() {
+    use tokio::io::AsyncReadExt as _;
+
+    let leaf = scratch("pid-miss");
+    let home = Home::resolve(Some(PathBuf::clone(&leaf))).unwrap();
+    let path = leaf.join("control.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    let client = ControlClient::resolve_socket(&home, path).unwrap();
+    for text in [None, Some("2147483647\n")] {
+        if let Some(text) = text {
+            std::fs::write(home.serve_lock(), text).unwrap();
+        }
+        let error = super::stop_resolved(&client).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<swoosh::serve::control_codec::ControlError>(),
+            Some(swoosh::serve::control_codec::ControlError::Untrusted { .. })
+        ));
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    }
+    drop(listener);
+    std::fs::remove_dir_all(leaf).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_stop_refusal_and_response_timeout_never_return_a_success_line() {
+    use swoosh::serve::control_codec::{ControlError, Request, Response};
+
+    for refuse in [false, true] {
+        let leaf = scratch("stop-err");
+        let home = Home::resolve(Some(PathBuf::clone(&leaf))).unwrap();
+        std::fs::write(home.serve_lock(), format!("{}\n", std::process::id())).unwrap();
+        let path = leaf.join("control.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let client = ControlClient::resolve_socket(&home, path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert_eq!(Request::read(&mut stream).await.unwrap(), Request::Stop);
+            if refuse {
+                Response::Refused("gated".to_owned())
+                    .write(&mut stream)
+                    .await
+                    .unwrap();
+            } else {
+                core::future::pending::<()>().await;
+            }
+        });
+        let error = super::stop_resolved(&client).await.unwrap_err();
+        assert!(matches!(
+            (refuse, error.downcast_ref::<ControlError>()),
+            (true, Some(ControlError::Refused(_)))
+                | (
+                    false,
+                    Some(ControlError::Timeout {
+                        phase: "response read"
+                    })
+                )
+        ));
+        server.abort();
+        let _ = server.await;
+        std::fs::remove_dir_all(leaf).unwrap();
+    }
 }
 
 /// A bare `stop` with no addressable resident is the teaching error naming the fix, non-zero at the
@@ -471,7 +607,9 @@ fn resident_reading(leaf: PathBuf, off: LiveServeToml) -> Running {
         let this = Arc::clone(&resident);
         async move { this.serve(listener).await }
     });
-    let client = ControlClient::resolve_socket(socket).expect("the bound socket resolves");
+    let home = Home::resolve(Some(PathBuf::clone(&leaf))).expect("a scratch home");
+    std::fs::write(home.serve_lock(), format!("{}\n", std::process::id())).unwrap();
+    let client = ControlClient::resolve_socket(&home, socket).expect("the bound socket resolves");
     Running {
         leaf,
         client,
