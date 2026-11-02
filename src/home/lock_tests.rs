@@ -83,6 +83,169 @@ async fn a_root_left_by_a_stopped_serve_admits_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn presence_uses_the_flock_without_mutating_or_retaining_it() {
+    let (home, dir) = scratch("presence");
+    let guard = HomeWrite::take(&home).await.unwrap();
+    assert_eq!(
+        ServeLock::presence(&guard, &home).unwrap(),
+        super::ResidentPresence::Free
+    );
+    assert!(
+        !home.serve_lock().exists(),
+        "absence must not create a record"
+    );
+    for text in [
+        String::new(),
+        format!("{}\n", std::process::id()),
+        "damaged\n".to_owned(),
+    ] {
+        std::fs::write(home.serve_lock(), &text).unwrap();
+        assert_eq!(
+            ServeLock::presence(&guard, &home).unwrap(),
+            super::ResidentPresence::Free
+        );
+        assert_eq!(std::fs::read_to_string(home.serve_lock()).unwrap(), text);
+        let held = ServeLock::take(&guard, &home).unwrap();
+        // Empty/startup, PID-only and damaged records all remain held. No admitted root
+        // or valid PID is required to exclude another holder.
+        std::fs::write(home.serve_lock(), &text).unwrap();
+        assert_eq!(
+            ServeLock::presence(&guard, &home).unwrap(),
+            super::ResidentPresence::Held
+        );
+        assert_eq!(std::fs::read_to_string(home.serve_lock()).unwrap(), text);
+        drop(held);
+    }
+    let held = ServeLock::take(&guard, &home).unwrap();
+    held.record(&guard, Some(TestRoot::seeded(0x43).node_id()))
+        .unwrap();
+    assert_eq!(
+        ServeLock::presence(&guard, &home).unwrap(),
+        super::ResidentPresence::Held
+    );
+    drop(held);
+    drop(guard);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn presence_releases_both_locks_before_the_callers_next_wait() {
+    let (home, dir) = scratch("released");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(home.serve_lock(), b"42\n").unwrap();
+    let presence = home.resident_presence().await.unwrap();
+    assert_eq!(presence, super::ResidentPresence::Free);
+    let guard = tokio::time::timeout(Duration::from_secs(1), HomeWrite::take(&home))
+        .await
+        .unwrap()
+        .unwrap();
+    let held = ServeLock::take(&guard, &home).unwrap();
+    // A later serve can start while the classification remains alive: it is no reservation.
+    assert_eq!(presence, super::ResidentPresence::Free);
+    drop(held);
+    drop(guard);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn presence_and_checked_pid_fail_closed_on_nonregular_names() {
+    let (home, dir) = scratch("names");
+    let guard = HomeWrite::take(&home).await.unwrap();
+    let path = home.serve_lock();
+    std::fs::create_dir(&path).unwrap();
+    assert!(ServeLock::presence(&guard, &home).is_err());
+    assert!(ServeLock::checked_pid(&home).is_err());
+    std::fs::remove_dir(&path).unwrap();
+    for target in [home.home_lock(), dir.join("missing")] {
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        assert!(ServeLock::presence(&guard, &home).is_err());
+        assert!(ServeLock::checked_pid(&home).is_err());
+        std::fs::remove_file(&path).unwrap();
+    }
+    let cpath =
+        std::ffi::CString::new(std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())).unwrap();
+    // SAFETY: cpath is a valid NUL-terminated synthetic path; mkfifo retains no pointer.
+    assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
+    assert!(
+        ServeLock::presence(&guard, &home).is_err(),
+        "a FIFO must not block open"
+    );
+    assert!(ServeLock::checked_pid(&home).is_err());
+    drop(guard);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn checked_pid_rejects_missing_invalid_and_unreadable_records() {
+    let (home, dir) = scratch("pid");
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(ServeLock::checked_pid(&home).is_err());
+    for text in [
+        "",
+        "0\n",
+        "-1\n",
+        "+1\n",
+        "2147483648\n",
+        "4294967296\n",
+        "bad\n",
+        " 1\n",
+    ] {
+        std::fs::write(home.serve_lock(), text).unwrap();
+        assert!(ServeLock::checked_pid(&home).is_err(), "{text:?}");
+    }
+    for bytes in [vec![255], vec![b'1'; 257]] {
+        std::fs::write(home.serve_lock(), bytes).unwrap();
+        assert!(ServeLock::checked_pid(&home).is_err());
+    }
+    std::fs::write(home.serve_lock(), b"42\n").unwrap();
+    assert_eq!(ServeLock::checked_pid(&home).unwrap().get(), 42);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn process_id_parses_strictly_and_renders_the_checked_numeric_domain() {
+    for raw in [0, i32::MAX as u32 + 1, u32::MAX] {
+        assert!(super::ProcessId::try_from(raw).is_err(), "{raw}");
+    }
+    for text in [
+        "",
+        "0",
+        "-1",
+        "+1",
+        " 1",
+        "1 ",
+        "1\n",
+        "2147483648",
+        "4294967296",
+    ] {
+        assert!(text.parse::<super::ProcessId>().is_err(), "{text:?}");
+    }
+    for raw in [1, 42, i32::MAX as u32] {
+        let pid = super::ProcessId::try_from(raw).unwrap();
+        assert_eq!(pid.get(), raw);
+        assert_eq!(pid.to_string(), raw.to_string());
+        assert_eq!(pid.to_string().parse::<super::ProcessId>().unwrap(), pid);
+    }
+    assert_eq!("00042".parse::<super::ProcessId>().unwrap().get(), 42);
+}
+
+#[test]
+fn checked_pid_preserves_record_bytes_and_the_signed_pid_range() {
+    let (home, dir) = scratch("pid-range");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (text, raw) in [
+        ("1\n", 1),
+        ("00042\r\n", 42),
+        ("2147483647\n", i32::MAX as u32),
+    ] {
+        std::fs::write(home.serve_lock(), text).unwrap();
+        assert_eq!(ServeLock::checked_pid(&home).unwrap().get(), raw);
+        assert_eq!(std::fs::read(home.serve_lock()).unwrap(), text.as_bytes());
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A lock that cannot be taken says so in swoosh's words, naming the file, and its reason follows once,
 /// as the cause.
 #[tokio::test]

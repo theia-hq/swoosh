@@ -991,14 +991,13 @@ async fn run() -> eyre::Result<()> {
         {
             Some(Renew {
                 credential: credential::Credential::clone(dial),
-                secret: &secret,
             })
         }
         BindRole::Serving | BindRole::Dialing(_) => None,
     };
     let (present, membership) = match (&bind_role, &renew) {
         (BindRole::Dialing(dial), None) if own_peer => {
-            reaching::resolve(credential::Credential::clone(dial), &secret, &home)
+            reaching::resolve(credential::Credential::clone(dial), secret.node_id(), &home)
                 .await?
                 .into_slots()
         }
@@ -1196,12 +1195,7 @@ where
     }
 }
 
-/// Run a reaching verb against the bound node, then CLOSE the node on the way out on EVERY path (a clean
-/// return and an error alike). The composition root owns the node's lifetime, so teardown lives here in one
-/// place for the whole reaching family: iroh's `Endpoint` logs a red "Aborting ungracefully" if it drops
-/// without an awaited close, so a verb that binds iroh must close it before the node drops (quirk's close is
-/// a no-op). One owner of teardown, so no verb re-implements it; `serve`'s own graceful-drain still returns
-/// first, and this is the single close that follows it.
+/// Run a reaching verb, then await node close on success or error. Cancellation can bypass this close.
 ///
 /// A root the machine showed is told after the close: a question at the terminal can wait on the person
 /// for as long as they take, and nothing is held open meanwhile.
@@ -1209,7 +1203,7 @@ async fn run_and_close<T: Transport, D: Discovery>(
     outward: Outward,
     node: &Node<T, D>,
     mut ctx: reaching::ReachCtx<'_>,
-    renew: Option<Renew<'_>>,
+    renew: Option<Renew>,
 ) -> eyre::Result<()>
 where
     T::Session: 'static,
@@ -1221,7 +1215,7 @@ where
         if let Some(renew) = renew {
             let fetch = swoosh::renewal::NodeFetch::new(node);
             reaching::renew_before_dial(home, &fetch, &mut std::io::stderr()).await;
-            match reaching::resolve(renew.credential, renew.secret, home).await {
+            match reaching::resolve(renew.credential, node.node_id(), home).await {
                 Ok(resolved) => (ctx.present, ctx.membership) = resolved.into_slots(),
                 Err(error) => return (Err(error), None),
             }
@@ -1244,11 +1238,9 @@ where
 }
 
 /// What a dialing verb that tries the pick-up route first resolves its slots from, after the try.
-struct Renew<'a> {
-    /// The credential the verb declared.
+struct Renew {
+    /// The credential the verb declared; the bound endpoint already owns the machine identity.
     credential: credential::Credential,
-    /// The key the verb binds under.
-    secret: &'a swoosh::identity::Secret,
 }
 
 // The CLI-surface proofs that drive a real verb (clap-parsed, exactly as the binary dispatches it):

@@ -12,7 +12,7 @@
 unknown-registry = "deny"
 unknown-git      = "deny"
 allow-registry   = ["https://github.com/rust-lang/crates.io-index"]
-allow-git        = ["https://github.com/theia-hq/noq"]
+allow-git        = ["https://github.com/theia-hq/noq", "https://github.com/eclipse-biscuit/biscuit-rust"]
 
 # Trust git repositories in the theia-hq GitHub organization.
 # allow-git entries match repository URLs, not organization prefixes.

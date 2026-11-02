@@ -120,12 +120,26 @@ fn update_files(home: &Home) -> [PathBuf; 4] {
 }
 
 async fn read(home: &Home) -> Standing {
-    Standing::read(home).await.expect("read the standing")
+    let standing = Standing::read(home).await.expect("read the standing");
+    assert_eq!(
+        Standing::read_for_node(home, own())
+            .await
+            .expect("read under the endpoint identity"),
+        standing,
+        "both identity sources use the same classifier"
+    );
+    standing
 }
 
 async fn damaged(home: &Home) -> Disagreement {
     match Standing::read(home).await {
-        Err(StandingError::Damaged(disagreement)) => disagreement,
+        Err(StandingError::Damaged(disagreement)) => {
+            assert!(matches!(
+                Standing::read_for_node(home, own()).await,
+                Err(StandingError::Damaged(ref other)) if other == &disagreement
+            ));
+            disagreement
+        }
         other => panic!("expected a damaged home, read {other:?}"),
     }
 }
@@ -470,6 +484,50 @@ async fn a_root_key_with_no_readable_header_reads_damaged() {
             path: home.root_key()
         }
     );
+}
+
+#[tokio::test]
+async fn bound_and_ordinary_readers_preserve_root_file_errors() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = home("bound-root-errors");
+    std::fs::write(home.root_key(), b"not a key").expect("write a malformed synthetic root");
+    for mode in [0o600, 0o601] {
+        std::fs::set_permissions(home.root_key(), std::fs::Permissions::from_mode(mode))
+            .expect("set the root fixture's mode");
+        let ordinary = Standing::read(&home)
+            .await
+            .expect_err("the ordinary root read fails");
+        let bound = Standing::read_for_node(&home, own())
+            .await
+            .expect_err("the bound root read fails");
+        assert_eq!(
+            core::mem::discriminant(&ordinary),
+            core::mem::discriminant(&bound)
+        );
+        assert_eq!(ordinary.to_string(), bound.to_string());
+        match mode {
+            0o600 => assert!(
+                matches!(bound, StandingError::Damaged(Disagreement::UnreadableRoot { path })
+                if path == home.root_key())
+            ),
+            0o601 => assert!(matches!(bound, StandingError::Loose(_))),
+            _ => unreachable!("only the two fixture modes are used"),
+        }
+    }
+    std::fs::remove_file(home.root_key()).expect("remove the malformed root");
+    std::fs::create_dir(home.root_key()).expect("make the root path a directory");
+    std::fs::set_permissions(home.root_key(), std::fs::Permissions::from_mode(0o700))
+        .expect("keep the directory owner-only");
+    let ordinary = Standing::read(&home)
+        .await
+        .expect_err("ordinary read refuses a directory");
+    let bound = Standing::read_for_node(&home, own())
+        .await
+        .expect_err("bound read refuses a directory");
+    assert!(matches!(ordinary, StandingError::NotAFile { path } if path == home.root_key()));
+    assert!(matches!(bound, StandingError::NotAFile { path } if path == home.root_key()));
+    std::fs::remove_dir_all(home.dir()).expect("remove the synthetic home");
 }
 
 // A root revoked here.

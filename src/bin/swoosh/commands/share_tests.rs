@@ -14,11 +14,18 @@ use clap::Parser as _;
 use nauthy::{CapError, Decision, Link, ProvenPeer, Service};
 use swoosh::contacts::ContactsStore;
 use swoosh::grants::{Delegation, GrantKind, GrantRecord, Grants};
-use swoosh::home::Home;
+use swoosh::home::{Home, HomeWrite, ProcessId, ServeLock};
+use swoosh::node_client::ControlClient;
+use swoosh::serve::control_codec::{
+    DisabledList, LocalServiceSnapshot, Request, Response, ServiceMenu, StatusReply,
+};
 use swoosh::serve_toml::ServeToml;
 use swoosh::testkit::{TestNode, TestRoot};
 use tightbeam::identity::AsVerifyKey as _;
+use tightbeam::tunnel::ServiceCatalog;
+use tokio::io::AsyncWriteExt as _;
 
+use super::super::service_state::ShareTarget;
 use super::{End, ONCE_ANYONE, ShareCmd, Span, Usage};
 
 /// This machine's key.
@@ -42,6 +49,10 @@ async fn scratch(tag: &str) -> Home {
     swoosh::identity::write(&TestNode::seeded(OWN).seed(), &home)
         .await
         .unwrap();
+    serving(
+        &home,
+        &["ssh=sshd:", "demo=echo:", "ping=ping:", "speed=speed:"],
+    );
     home
 }
 
@@ -539,6 +550,8 @@ async fn every_share_states_what_it_gives() {
             "db=tcp:localhost:5432".to_owned(),
             "sock=unix:/run/db.sock".to_owned(),
             "news=proxy:https://news.example".to_owned(),
+            "ssh=sshd:".to_owned(),
+            "ping=ping:".to_owned(),
         ]);
     })
     .unwrap();
@@ -587,7 +600,7 @@ async fn every_share_states_what_it_gives() {
         let mut rest = vec![format!(
             "the link dials this machine: it works while this machine serves {}.",
             args[0]
-        )];
+        ), format!("this link is for the next bare `swoosh serve`; {} is not marked off in saved policy.", args[0])];
         // A shell shared with a person says what it reaches beyond this machine.
         if args[0] == "ssh" {
             rest.push("that shell can reach your other devices.".to_owned());
@@ -617,7 +630,7 @@ async fn every_share_states_what_it_gives() {
         "the end is a date: {date:?}"
     );
     assert_eq!(
-        lines[2],
+        lines[3],
         "anyone holding this link can use it: send it privately."
     );
 }
@@ -822,6 +835,97 @@ fn serving(home: &Home, entries: &[&str]) {
     .unwrap();
 }
 
+/// A synthetic listener in this selected home's actual runtime namespace.
+struct Live {
+    task: tokio::task::JoinHandle<()>,
+    socket: PathBuf,
+}
+
+impl Live {
+    fn start(home: &Home, detail: Vec<u8>, issuer: NodeId) -> Self {
+        let socket = home.control_socket().unwrap();
+        swoosh::config::create_store_dir(socket.parent().unwrap()).unwrap();
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        std::fs::write(home.serve_lock(), format!("{}\n", std::process::id())).unwrap();
+        let status = StatusReply {
+            node_id: issuer,
+            pid: 1, // Deliberately not the authority used to compare the two exchanges.
+            addr: None,
+            uptime_secs: 0,
+            menu: ServiceMenu {
+                catalog: ServiceCatalog::decode(&0u32.to_be_bytes()).unwrap(),
+                disabled: DisabledList::Known(vec![]),
+            },
+            warm: vec![],
+        };
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let Ok(request) = Request::read(&mut stream).await else {
+                    continue;
+                };
+                match request {
+                    Request::LocalServiceDetail => stream.write_all(&detail).await.unwrap(),
+                    Request::Status => Response::Status(status.clone())
+                        .write(&mut stream)
+                        .await
+                        .unwrap(),
+                    other => panic!("unexpected request: {other:?}"),
+                }
+            }
+        });
+        Self { task, socket }
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.task.abort();
+        let _ = std::fs::remove_file(&self.socket);
+        let _ = std::fs::remove_dir(self.socket.parent().unwrap());
+    }
+}
+
+fn detail(name: &str, target: &str, refused: bool) -> Vec<u8> {
+    let mut payload = vec![0, 0, 1];
+    for text in [name, target] {
+        payload.extend_from_slice(&u16::try_from(text.len()).unwrap().to_be_bytes());
+        payload.extend_from_slice(text.as_bytes());
+    }
+    payload.push(u8::from(refused));
+    frame(&payload)
+}
+
+fn frame(payload: &[u8]) -> Vec<u8> {
+    let mut bytes = b"SWC1\x09".to_vec();
+    bytes.extend_from_slice(&u16::try_from(payload.len()).unwrap().to_be_bytes());
+    bytes.extend_from_slice(payload);
+    bytes
+}
+
+async fn snapshot(mut bytes: &[u8]) -> LocalServiceSnapshot {
+    match Response::read(&mut bytes).await.unwrap() {
+        Response::LocalServiceDetail(result) => result.unwrap(),
+        other => panic!("expected local service detail, got {other:?}"),
+    }
+}
+
+/// Preflight refusals must not provision a key, touch a save path, or change the ledger/configuration.
+async fn refuses_unchanged(home: &Home, service: &str) -> String {
+    let paths = [home.key(), home.links(), home.serve_toml()];
+    let before = paths.each_ref().map(|path| std::fs::read(path).ok());
+    let save = path_in(home, "refused.link");
+    let ran = share(home, &[service, "anyone", "--save", save.to_str().unwrap()]).await;
+    let refusal = ran.refusal();
+    assert!(ran.out.is_empty() && ran.err.is_empty());
+    assert!(!save.exists());
+    assert_eq!(
+        before,
+        paths.each_ref().map(|path| std::fs::read(path).ok())
+    );
+    refusal
+}
+
 /// Whether `home`'s `serve` gate admits `link` for `service` from the machine seeded `dialer`, now. A fresh
 /// gate reads the ledger as it stands.
 fn admits(gate: &nauthy::Gate, link: &Link, service: &str, dialer: u8) -> bool {
@@ -883,6 +987,8 @@ async fn an_anyone_link_to_an_engine_never_open_to_anyone_is_refused() {
             "news=proxy:https://news.example",
             "db=tcp:localhost:5432",
             "demo=echo:",
+            "ping=ping:",
+            "speed=speed:",
         ],
     );
     for service in ["ping", "speed", "inbox", "web"] {
@@ -897,7 +1003,7 @@ async fn an_anyone_link_to_an_engine_never_open_to_anyone_is_refused() {
         );
         share(&home, &[service, "anyone", "--once"]).await.made();
     }
-    for service in ["news", "db", "demo", "unserved"] {
+    for service in ["news", "db", "demo"] {
         share(&home, &[service, "anyone"]).await.made();
     }
 }
@@ -955,6 +1061,7 @@ async fn once_on_a_service_that_runs_no_code_works_once() {
         lines[1..],
         [
             "the link dials this machine: it works while this machine serves db.",
+            "this link is for the next bare `swoosh serve`; db is not marked off in saved policy.",
             "anyone holding this link can use it: send it privately.",
         ]
     );
@@ -976,7 +1083,7 @@ async fn an_explicit_shell_link_works_once_and_expires_in_15_minutes() {
         "it ends in 15 minutes"
     );
     let lines: Vec<&str> = ran.err.lines().collect();
-    assert_eq!(lines.len(), 3, "{}", ran.err);
+    assert_eq!(lines.len(), 4, "{}", ran.err);
     assert!(
         lines[0].starts_with("anyone can open a shell on this machine, once, until ")
             && lines[0].ends_with(" (15m)."),
@@ -987,6 +1094,7 @@ async fn an_explicit_shell_link_works_once_and_expires_in_15_minutes() {
         lines[1..],
         [
             "the link dials this machine: it works while this machine serves ssh.",
+            "this link is for the next bare `swoosh serve`; ssh is not marked off in saved policy.",
             "that shell can reach your other devices: send the link privately.",
         ]
     );
@@ -1019,22 +1127,329 @@ async fn an_explicit_shell_link_works_once_and_expires_in_15_minutes() {
     );
 }
 
-/// A name retargeted while `serve` runs: `share` reads the new target from `serve.toml`, and records it,
-/// but the running gate holds what it bound, so a link made for the forward never reaches the shell.
+/// Complete R, not divergent or malformed P, supplies classification, disclosure and the target row.
 #[tokio::test]
-async fn a_retarget_mid_run_refuses_a_link_made_for_the_new_target() {
-    let home = scratch("retarget").await;
-    serving(&home, &["ssh=sshd:"]);
-    let running = gate(&home, &["ssh=sshd:"]).await;
-    serving(&home, &["ssh=tcp:localhost:22"]);
-    let link = share(&home, &["ssh", "anyone"]).await.link();
-    // Past the ledger's stat debounce, so the running gate reads the new row and the refusal is the
-    // target's, not an unread ledger's.
-    std::thread::sleep(nauthy::STAT_DEBOUNCE + Duration::from_millis(50));
-    assert!(
-        !admits(&running, &link, "ssh", 0x51),
-        "the running shell refuses a link made for a forward"
+async fn live_targets_survive_saved_divergence_and_malformed_configuration() {
+    for saved in ["services = [\"ssh=sshd:\"]", "services = ["] {
+        let home = scratch("retarget").await;
+        std::fs::write(home.serve_toml(), saved).unwrap();
+        let _live = Live::start(
+            &home,
+            detail("ssh", "tcp:localhost:3000", false),
+            TestNode::seeded(OWN).node_id(),
+        );
+        let ran = share(&home, &["ssh", "anyone"]).await;
+        let link = ran.link();
+        assert!(
+            ran.err
+                .starts_with("anyone can reach ssh (localhost:3000 on this machine) until ")
+        );
+        assert!(!ran.err.contains("shell"));
+        assert_eq!(
+            rows(&home).await[0].serves.as_ref().unwrap().as_str(),
+            "tcp:localhost:3000"
+        );
+        assert!(admits(
+            &gate(&home, &["ssh=tcp:localhost:3000"]).await,
+            &link,
+            "ssh",
+            0x51
+        ));
+        assert!(!admits(
+            &gate(&home, &["ssh=sshd:"]).await,
+            &link,
+            "ssh",
+            0x51
+        ));
+        assert_eq!(std::fs::read_to_string(home.serve_toml()).unwrap(), saved);
+    }
+    let home = scratch("live-shell").await;
+    serving(&home, &["ssh=tcp:localhost:3000"]);
+    let _live = Live::start(
+        &home,
+        detail("ssh", "sshd:", false),
+        TestNode::seeded(OWN).node_id(),
     );
+    assert!(
+        refuses_unchanged(&home, "ssh")
+            .await
+            .contains("opens a shell")
+    );
+}
+
+#[tokio::test]
+async fn missing_and_failed_live_detail_never_use_saved_targets_or_touch_keys() {
+    for bytes in [
+        frame(&[0, 0, 0]),
+        frame(&[1]),
+        frame(&[2, 1]),
+        frame(&[2, 3]),
+        frame(&[0, 0]),
+        b"SWC1\x09\x20\x01".to_vec(),
+        b"BAD1".to_vec(),
+        detail("demo", "gopher:x", false),
+    ] {
+        let home = scratch("bad-detail").await;
+        std::fs::write(home.key(), b"not a key").unwrap();
+        let _live = Live::start(&home, bytes, TestNode::seeded(OWN).node_id());
+        let refusal = refuses_unchanged(&home, "demo").await;
+        assert!(!refusal.contains("key file"), "{refusal}");
+    }
+    let home = scratch("missing-live").await;
+    let _live = Live::start(&home, frame(&[0, 0, 0]), TestNode::seeded(OWN).node_id());
+    assert_eq!(
+        refuses_unchanged(&home, "demo").await,
+        "the running node does not list that service"
+    );
+}
+
+#[tokio::test]
+async fn only_initial_no_resident_and_actual_free_allow_next_start_shares() {
+    let home = scratch("presence").await;
+    let guard = HomeWrite::take(&home).await.unwrap();
+    let held = ServeLock::take(&guard, &home).unwrap();
+    drop(guard);
+    for record in [
+        String::new(),
+        format!("{}\n", std::process::id()),
+        "startup\n".to_owned(),
+    ] {
+        std::fs::write(home.serve_lock(), record).unwrap();
+        assert_eq!(
+            refuses_unchanged(&home, "demo").await,
+            "cannot confirm that no node is serving this home"
+        );
+    }
+    drop(held);
+    std::fs::write(home.serve_lock(), "42\n").unwrap();
+    share(&home, &["demo", "anyone"]).await.made(); // A stale PID is not a held flock.
+    std::fs::remove_file(home.serve_lock()).unwrap();
+    std::os::unix::fs::symlink(home.dir().join("absent"), home.serve_lock()).unwrap();
+    refuses_unchanged(&home, "demo").await;
+    std::fs::remove_file(home.serve_lock()).unwrap();
+    std::fs::create_dir(home.serve_lock()).unwrap();
+    refuses_unchanged(&home, "demo").await;
+}
+
+#[tokio::test]
+async fn absent_defaults_explicit_empty_and_first_use_remain_distinct() {
+    let home = scratch("defaults").await;
+    std::fs::remove_file(home.serve_toml()).unwrap();
+    std::fs::remove_file(home.key()).unwrap();
+    assert_eq!(
+        refuses_unchanged(&home, "ssh").await,
+        "saved services do not list that service"
+    );
+    let key = TestNode::seeded(BOB_LAPTOP).node_id().to_string();
+    let link = share(&home, &["ping", &key]).await.link();
+    assert!(
+        home.key().exists(),
+        "valid next-start first use still provisions"
+    );
+    assert_eq!(
+        link.root(),
+        swoosh::identity::load(&home)
+            .await
+            .unwrap()
+            .unwrap()
+            .node_id()
+            .verify_key()
+            .unwrap()
+    );
+    assert_eq!(
+        rows(&home).await[0].serves.as_ref().unwrap().as_str(),
+        "ping:"
+    );
+    serving(&home, &[]);
+    assert_eq!(
+        refuses_unchanged(&home, "ping").await,
+        "saved services do not list that service"
+    );
+}
+
+#[tokio::test]
+async fn off_retains_the_exact_target_without_enabling_a_route() {
+    let home = scratch("off").await;
+    ServeToml::update(&swoosh::testkit::lock(), &home, |toml| {
+        toml.off.insert("demo".to_owned());
+    })
+    .unwrap();
+    for live in [false, true] {
+        let _resident = if live {
+            Some(Live::start(
+                &home,
+                detail("demo", "echo:", true),
+                TestNode::seeded(OWN).node_id(),
+            ))
+        } else {
+            None
+        };
+        if live {
+            ServeToml::update(&swoosh::testkit::lock(), &home, |toml| toml.off.clear()).unwrap();
+        }
+        let before = std::fs::read(home.serve_toml()).unwrap();
+        let ran = share(&home, &["demo", "anyone"]).await;
+        ran.made();
+        assert!(ran.err.lines().any(|line| line == if live {
+            "demo was reported unavailable; making this link does not enable it."
+        } else {
+            "this link is for the next bare `swoosh serve`; demo remains unavailable while marked off in saved policy. Making this link does not enable it."
+        }));
+        assert_eq!(
+            rows(&home)
+                .await
+                .last()
+                .unwrap()
+                .serves
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "echo:"
+        );
+        assert_eq!(std::fs::read(home.serve_toml()).unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn live_missing_or_foreign_identity_refuses_without_provision_or_fallback() {
+    for missing in [false, true] {
+        let home = scratch("issuer").await;
+        if missing {
+            std::fs::remove_file(home.key()).unwrap();
+        }
+        let issuer = TestNode::seeded(if missing { OWN } else { BOB_LAPTOP }).node_id();
+        let _live = Live::start(&home, detail("demo", "echo:", false), issuer);
+        let refusal = refuses_unchanged(&home, "demo").await;
+        assert_eq!(
+            refusal,
+            if missing {
+                "this home has no stored identity; cannot share from the running node"
+            } else {
+                "the running node's identity does not match this home"
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn later_pid_key_and_home_changes_cannot_replace_the_selected_live_basis() {
+    let home = scratch("changed").await;
+    let bytes = detail("demo", "echo:", false);
+    let _live = Live::start(&home, bytes.clone(), TestNode::seeded(OWN).node_id());
+    let service = "demo".parse().unwrap();
+    let client = || ControlClient::resolve(&home).unwrap();
+    let pid = ProcessId::try_from(std::process::id()).unwrap();
+    let other = ProcessId::try_from(if pid.get() == 42 { 43 } else { 42 }).unwrap();
+    let old = ShareTarget::from_initial(
+        &home,
+        &service,
+        Ok((client(), snapshot(&bytes).await, other)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        old.issuer(&home).await.unwrap_err().to_string(),
+        "the running node's PID no longer matches this home"
+    );
+    let target =
+        ShareTarget::from_initial(&home, &service, Ok((client(), snapshot(&bytes).await, pid)))
+            .await
+            .unwrap();
+    let issuer = target.issuer(&home).await.unwrap();
+    let foreign = scratch("other-home").await;
+    std::fs::remove_file(foreign.key()).unwrap();
+    assert!(target.secret(&foreign, issuer).await.is_err());
+    assert!(!foreign.key().exists());
+    std::fs::write(home.serve_lock(), format!("{other}\n")).unwrap();
+    assert!(
+        target.issuer(&home).await.is_err(),
+        "F2 rejects a changed record before status"
+    );
+    let guard = HomeWrite::take(&home).await.unwrap();
+    assert!(
+        target
+            .recheck(&guard, &home, TestNode::seeded(OWN).node_id())
+            .is_err()
+    );
+    std::fs::write(home.serve_lock(), format!("{pid}\n")).unwrap();
+    let original = std::fs::read(home.key()).unwrap();
+    std::fs::remove_file(home.key()).unwrap();
+    assert!(
+        target
+            .recheck(&guard, &home, TestNode::seeded(OWN).node_id())
+            .is_err()
+    );
+    drop(guard);
+    swoosh::identity::write(&TestNode::seeded(BOB_LAPTOP).seed(), &home)
+        .await
+        .unwrap();
+    assert!(target.secret(&home, issuer).await.is_err());
+    let guard = HomeWrite::take(&home).await.unwrap();
+    assert!(
+        target
+            .recheck(&guard, &home, TestNode::seeded(OWN).node_id())
+            .is_err()
+    );
+    std::fs::write(home.key(), original).unwrap();
+    target
+        .recheck(&guard, &home, TestNode::seeded(OWN).node_id())
+        .unwrap();
+    assert!(!home.links().exists());
+    assert_eq!(target.target.as_str(), "echo:");
+    drop(guard);
+    drop(_live);
+    assert!(
+        target.issuer(&home).await.is_err(),
+        "later loss never selects Next"
+    );
+    assert!(!home.links().exists());
+}
+
+#[tokio::test]
+async fn next_final_identity_missing_or_changed_has_no_running_node_claim() {
+    let home = scratch("next-key-change").await;
+    let target = ShareTarget::read(&home, &"demo".parse().unwrap())
+        .await
+        .unwrap();
+    let issuer = target.issuer(&home).await.unwrap();
+    assert!(issuer.is_none());
+    let secret = target.secret(&home, issuer).await.unwrap();
+    let guard = HomeWrite::take(&home).await.unwrap();
+    target.recheck(&guard, &home, secret.node_id()).unwrap();
+    std::fs::remove_file(home.key()).unwrap();
+    assert_eq!(
+        target
+            .recheck(&guard, &home, secret.node_id())
+            .unwrap_err()
+            .to_string(),
+        "the selected home's stored identity changed or is missing; cannot finish sharing"
+    );
+    drop(guard);
+    swoosh::identity::write(&TestNode::seeded(BOB_LAPTOP).seed(), &home)
+        .await
+        .unwrap();
+    let guard = HomeWrite::take(&home).await.unwrap();
+    assert_eq!(
+        target
+            .recheck(&guard, &home, secret.node_id())
+            .unwrap_err()
+            .to_string(),
+        "the selected home's stored identity changed or is missing; cannot finish sharing"
+    );
+    assert!(!home.links().exists());
+    assert_eq!(target.target.as_str(), "echo:");
+}
+
+#[tokio::test]
+async fn valid_first_use_may_leave_its_key_when_append_later_fails() {
+    let home = scratch("first-append").await;
+    std::fs::remove_file(home.key()).unwrap();
+    std::fs::create_dir(home.links()).unwrap();
+    let ran = share(&home, &["demo", "anyone"]).await;
+    assert!(ran.result.is_err());
+    assert!(ran.out.is_empty() && ran.err.is_empty());
+    assert!(swoosh::identity::load(&home).await.unwrap().is_some());
+    assert!(home.links().is_dir());
 }
 
 /// `share` folds a name in `serve.toml` as `serve` does, so `Web=sshd:` is the shell `serve` binds as `web`.
@@ -1077,12 +1492,16 @@ async fn a_share_during_a_named_start_is_refused_by_that_start() {
 async fn an_anyone_link_to_an_unknown_scheme_is_refused() {
     let home = scratch("unknown-scheme").await;
     serving(&home, &["odd=gopher:x"]);
-    for args in [&["odd", "anyone"][..], &["odd", "anyone", "--once"][..]] {
+    with_bob(&home).await;
+    for args in [
+        &["odd", "anyone"][..],
+        &["odd", "anyone", "--once"][..],
+        &["odd", "bob"][..],
+    ] {
         let ran = share(&home, args).await;
         assert_eq!(
             ran.refusal(),
-            "odd serves gopher:x, which swoosh does not know; share it with a person: swoosh share odd \
-             <person>",
+            "\"gopher:x\" is not a target serve binds",
             "{args:?}"
         );
     }
@@ -1139,15 +1558,21 @@ async fn share_ssh_to_a_device_records_sshd() {
     );
 }
 
-/// A name `serve.toml` does not list and no built-in stands for serves nothing, and its row records none.
+/// Missing saved membership refuses even when the name has a constructor form.
 #[tokio::test]
-async fn a_name_not_served_records_no_target() {
+async fn a_name_not_served_never_constructs_a_sharing_target() {
     let home = scratch("records-none").await;
     with_bob(&home).await;
     serving(&home, &["db=tcp:localhost:5432"]);
-    share(&home, &["demo", "bob/laptop"]).await.made();
-    let [row] = rows(&home).await.try_into().ok().unwrap();
-    assert!(row.serves.is_none(), "nothing is recorded for demo");
+    for name in ["demo", "ssh"] {
+        for who in ["bob/laptop", "anyone"] {
+            assert_eq!(
+                share(&home, &[name, who]).await.refusal(),
+                "saved services do not list that service"
+            );
+        }
+    }
+    assert!(rows(&home).await.is_empty());
 }
 
 /// The recipient keeps the kind its shape says: `root:ed01…` is a root, every machine of it; a bare key is one

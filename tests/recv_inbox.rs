@@ -110,6 +110,7 @@ impl Scratch {
         command
             .args(args)
             .env("HOME", &self.user)
+            .env("XDG_RUNTIME_DIR", self.base.join("run"))
             .env_remove("XDG_DATA_HOME")
             .env_remove("XDG_STATE_HOME")
             .env_remove("SWOOSH_HOME")

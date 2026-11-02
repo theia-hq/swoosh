@@ -29,6 +29,20 @@ impl Scratch {
     fn home(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
+
+    fn sharing_home(&self) -> PathBuf {
+        let path = self.home("owner");
+        let home = Home::resolve(Some(path.clone())).unwrap();
+        swoosh::serve_toml::ServeToml::update(&swoosh::testkit::lock(), &home, |file| {
+            file.services = Some(vec!["demo=echo:".to_owned()]);
+        })
+        .unwrap();
+        assert!(
+            !home.key().exists(),
+            "saving services must leave the first identity creation to share"
+        );
+        path
+    }
 }
 
 impl Drop for Scratch {
@@ -76,7 +90,7 @@ fn swoosh_with(home: &Path, args: &[&str], input: &str) -> String {
 #[test]
 fn share_prints_the_swoosh_prefix() {
     let scratch = Scratch::new("share");
-    let home = scratch.home("owner");
+    let home = scratch.sharing_home();
     let printed = swoosh(&home, &["share", "demo", "anyone"]);
     let printed = printed.trim();
     let link = swoosh::link::parse(printed).expect("the printed link parses");
@@ -97,7 +111,7 @@ fn share_prints_the_swoosh_prefix() {
 #[test]
 fn a_stored_link_carries_no_prefix() {
     let scratch = Scratch::new("stored");
-    let owner = scratch.home("owner");
+    let owner = scratch.sharing_home();
     let device = scratch.home("device");
     // The key-carrying invite `swoosh invite laptop --new-key` prints where the root is kept.
     let seed = [0x77; 32];
@@ -143,7 +157,7 @@ fn a_stored_link_carries_no_prefix() {
 #[test]
 fn a_fresh_home_writes_key_and_links() {
     let scratch = Scratch::new("fresh");
-    let home = scratch.home("owner");
+    let home = scratch.sharing_home();
     swoosh(&home, &["share", "demo", "anyone"]);
 
     assert!(

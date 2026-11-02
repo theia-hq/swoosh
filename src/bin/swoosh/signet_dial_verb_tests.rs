@@ -114,7 +114,7 @@ impl Device {
         let BindRole::Dialing(credential) = cmd.bind_role() else {
             panic!("a reaching verb that dials states the credential it dials with");
         };
-        reaching::resolve(credential, &self.secret, &self.home)
+        reaching::resolve(credential, self.secret.node_id(), &self.home)
             .await
             .expect("resolve the verb's credential into wire slots")
             .into_slots()
