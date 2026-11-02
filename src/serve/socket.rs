@@ -163,27 +163,6 @@ impl Request {
         }
     }
 
-    /// Parse a request back from its tag. An unknown tag is a protocol error, never a default.
-    fn from_tag(tag: u8) -> Result<Self, ControlError> {
-        match tag {
-            1 => Ok(Self::Services),
-            2 => Ok(Self::Status),
-            3 => Ok(Self::Stop),
-            6 => Ok(Self::LocalServiceDetail),
-            other => {
-                // Keep the existing hex diagnostic without an infallible formatting allocation.
-                let mut reason = *b"unknown request tag 0x00";
-                let hex = b"0123456789abcdef";
-                reason[22] = hex[usize::from(other >> 4)];
-                reason[23] = hex[usize::from(other & 15)];
-                Err(local_detail::protocol(
-                    core::str::from_utf8(&reason)
-                        .map_err(|_| LocalDetailError::ResourceUnavailable)?,
-                ))
-            }
-        }
-    }
-
     /// Write one request frame: magic, tag, then the (empty) length-prefixed payload.
     pub async fn write<W: io::AsyncWrite + Unpin>(&self, writer: &mut W) -> io::Result<()> {
         write_magic(writer).await?;
@@ -199,7 +178,7 @@ impl Request {
     // Retain the typed operation even when its bounded payload is malformed; never classify by text.
     pub(super) async fn read_observed<R: io::AsyncRead + Unpin>(
         reader: &mut R,
-        observed: &mut Option<Self>,
+        observed: &mut Option<RequestKind>,
     ) -> Result<Self, ControlError> {
         read_magic(reader).await?;
         let mut tag = [0u8; 1];
@@ -207,8 +186,8 @@ impl Request {
             .read_exact(&mut tag)
             .await
             .map_err(ControlError::Io)?;
-        let request = Self::from_tag(tag[0])?;
-        *observed = Some(Request::clone(&request));
+        let kind = RequestKind::from_tag(tag[0])?;
+        *observed = Some(kind);
         let mut len = [0u8; 2];
         reader
             .read_exact(&mut len)
@@ -233,9 +212,60 @@ impl Request {
         if len != 0 {
             return Err(local_detail::protocol("unexpected request payload"));
         }
-        Ok(request)
+        Ok(kind.into())
     }
 }
+
+/// Error diagnostics retain the operation without retaining an owning request or its payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RequestKind {
+    /// Read the served catalog (the `control.services` snapshot).
+    Services,
+    /// Read the node status (the public-shape reply).
+    Status,
+    /// Request a graceful stop (the socket twin of a SIGTERM the local user already holds).
+    Stop,
+    /// Read startup service targets and refusal bits over the local socket only.
+    LocalServiceDetail,
+}
+
+impl RequestKind {
+    // Unknown tags must not acquire an operation's diagnostic policy.
+    fn from_tag(tag: u8) -> Result<Self, ControlError> {
+        match tag {
+            1 => Ok(Self::Services),
+            2 => Ok(Self::Status),
+            3 => Ok(Self::Stop),
+            6 => Ok(Self::LocalServiceDetail),
+            other => {
+                // Keep the existing hex diagnostic without an infallible formatting allocation.
+                let mut reason = *b"unknown request tag 0x00";
+                let hex = b"0123456789abcdef";
+                reason[22] = hex[usize::from(other >> 4)];
+                reason[23] = hex[usize::from(other & 15)];
+                Err(local_detail::protocol(
+                    core::str::from_utf8(&reason)
+                        .map_err(|_| LocalDetailError::ResourceUnavailable)?,
+                ))
+            }
+        }
+    }
+}
+
+impl From<RequestKind> for Request {
+    fn from(kind: RequestKind) -> Self {
+        match kind {
+            RequestKind::Services => Self::Services,
+            RequestKind::Status => Self::Status,
+            RequestKind::Stop => Self::Stop,
+            RequestKind::LocalServiceDetail => Self::LocalServiceDetail,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "socket_tests.rs"]
+mod tests;
 
 /// The live disabled list in a status reply: the names, or an explicit unknown when the file could
 /// not be read. An enum, not an empty vector, so a read failure never renders as "nothing disabled"
@@ -485,12 +515,12 @@ impl Response {
 
     pub(super) fn request_error(
         error: ControlError,
-        observed: Option<&Request>,
+        observed: Option<RequestKind>,
     ) -> Result<Self, LocalDetailError> {
         if let ControlError::LocalDetail(LocalDetailError::ResourceUnavailable) = error {
             return Err(LocalDetailError::ResourceUnavailable);
         }
-        let reason = if matches!(observed, Some(Request::LocalServiceDetail)) {
+        let reason = if matches!(observed, Some(RequestKind::LocalServiceDetail)) {
             local_detail::diagnostic("invalid local service detail request")?
         } else {
             // Preserve existing request diagnostics without infallible formatting or extra heap storage.
