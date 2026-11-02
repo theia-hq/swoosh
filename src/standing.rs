@@ -27,7 +27,7 @@ use tightbeam::identity::{AsNodeId as _, AsVerifyKey as _};
 use crate::escape::EscapedPath;
 use crate::home::Home;
 
-/// What this machine is to a root. Built only by [`Standing::read`].
+/// What this machine is to a root, classified from its home's records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Standing {
     /// This machine trusts no root. A pin to a root revoked here counts as none.
@@ -276,7 +276,19 @@ impl Standing {
     /// Read this home's standing. Never prompts and never writes: a pin whose key is revoked here reads
     /// as no pin, and a standing that key signed as no standing.
     pub async fn read(home: &Home) -> Result<Self, StandingError> {
-        let own = own_key(home)?;
+        Self::read_with_own(home, own_key(home)?).await
+    }
+
+    /// Classify standing under the endpoint's own identity without loading the device key again.
+    /// The caller supplies this machine's identity, never the target peer's. Held-root classification
+    /// still loads `root.key`; a plain root can materialize its seed.
+    pub(crate) async fn read_for_node(home: &Home, own: NodeId) -> Result<Self, StandingError> {
+        Self::read_with_own(home, Some(own)).await
+    }
+
+    /// Both entry points retain the same pin, revocation, root and badge-subject checks. Only the source
+    /// of the machine identity differs: a local read loads it, an endpoint already has it.
+    async fn read_with_own(home: &Home, own: Option<NodeId>) -> Result<Self, StandingError> {
         let revoked = crate::revoked::open(home).map_err(StandingError::Revoked)?;
         let pin = match read_pin(home).await? {
             Some(key) if own == Some(key) => {

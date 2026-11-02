@@ -33,7 +33,7 @@ use tightbeam::identity::AsVerifyKey as _;
 use crate::contacts::Contacts;
 use crate::credential::Credential;
 use crate::home::Home;
-use crate::identity::{Identity, Secret};
+use crate::identity::Identity;
 use crate::standing::{Standing, StandingError};
 use crate::{badge, config, transport};
 
@@ -209,8 +209,7 @@ impl Resolved {
     }
 }
 
-/// Resolve a declared [`Credential`] into the concrete badge to present, ONCE, in the composition root,
-/// before the transport binds.
+/// Resolve a declared [`Credential`] into the badges to present.
 ///
 /// It presents by standing, and the choice never depends on the peer. On a `Device` or `HoldsRoot` home
 /// the stored badge is slot 1 of a plain dial, and the pin is this device's own fleet, so a link-as-peer
@@ -219,10 +218,14 @@ impl Resolved {
 /// nothing, and a slip dials alone. A link typed as the peer is always slot 1. Reached only
 /// from a [`Dialing`](BindRole::Dialing) verb: a serving verb resolves no slots because it presents none.
 ///
+/// `node` is this machine's resolved or bound endpoint identity, never the target peer's. Resolution
+/// does not load the device key. Held-root classification still loads `root.key`; a plain root can
+/// materialize its seed, so this is not a root-secret-free operation.
+///
 /// A stored badge that is already dead REFUSES the dial here (see [`into_slot`]), and one inside
 /// [`badge::DEVICE_WARN_WINDOW`] warns on stderr and dials anyway.
-pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Result<Resolved> {
-    resolve_to(cred, secret, home, &mut std::io::stderr()).await
+pub async fn resolve(cred: Credential, node: NodeId, home: &Home) -> eyre::Result<Resolved> {
+    resolve_to(cred, node, home, &mut std::io::stderr()).await
 }
 
 /// The body of [`resolve`], with the expiry warning routed to an injected `warn` sink so a test can
@@ -230,7 +233,7 @@ pub async fn resolve(cred: Credential, secret: &Secret, home: &Home) -> eyre::Re
 /// trying to capture the process stderr. Mirrors [`SecretSource::resolve_to`](crate::secret::SecretSource).
 async fn resolve_to<W: std::io::Write>(
     cred: Credential,
-    secret: &Secret,
+    node: NodeId,
     home: &Home,
     warn: &mut W,
 ) -> eyre::Result<Resolved> {
@@ -245,8 +248,7 @@ async fn resolve_to<W: std::io::Write>(
         }
         Credential::Family { present } => present,
     };
-    let badge = device_badge(home).await?;
-    let node = secret.node_id();
+    let badge = device_badge(home, node).await?;
     match present {
         // A link-as-peer slip is slot 1. Attach the member badge in slot 2 ONLY when
         // the slip pins the SAME fleet the dialer's own badge roots under: that is the only dial where
@@ -283,8 +285,8 @@ async fn resolve_to<W: std::io::Write>(
 /// This machine's stored badge and the pin it roots at, when its standing is `Device` or `HoldsRoot`;
 /// `None` on every other standing, a damaged home included. A home that cannot be read at all is an
 /// error, never a dial with nothing.
-async fn device_badge(home: &Home) -> eyre::Result<Option<(Link, NodeId)>> {
-    let pin = match Standing::read(home).await {
+async fn device_badge(home: &Home, node: NodeId) -> eyre::Result<Option<(Link, NodeId)>> {
+    let pin = match Standing::read_for_node(home, node).await {
         Ok(standing) => match standing {
             Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. } => pin,
             Standing::Unpinned | Standing::InterruptedMint { .. } => {
@@ -369,6 +371,7 @@ mod tests {
     use nauthy::Link;
 
     use super::*;
+    use crate::identity::Secret;
     use crate::peer::Peer;
     use crate::testkit::{TestNode, TestRoot};
 
@@ -389,11 +392,14 @@ mod tests {
     #[tokio::test]
     async fn an_unpinned_dial_presents_no_member_badge() {
         let secret = Secret::ephemeral();
-        let (grant, membership) =
-            resolve(Credential::Family { present: None }, &secret, &test_home())
-                .await
-                .expect("an unpinned dial resolves")
-                .into_slots();
+        let (grant, membership) = resolve(
+            Credential::Family { present: None },
+            secret.node_id(),
+            &test_home(),
+        )
+        .await
+        .expect("an unpinned dial resolves")
+        .into_slots();
         assert!(grant.is_none(), "slot 1 is empty on an unpinned dial");
         assert!(membership.is_none(), "and so is slot 2");
     }
@@ -417,10 +423,14 @@ mod tests {
             .await
             .expect("load the key")
             .expect("the key is there");
-        let (grant, _) = resolve(Credential::Family { present: None }, &secret, &home)
-            .await
-            .expect("a damaged home still resolves")
-            .into_slots();
+        let (grant, _) = resolve(
+            Credential::Family { present: None },
+            secret.node_id(),
+            &home,
+        )
+        .await
+        .expect("a damaged home still resolves")
+        .into_slots();
         assert!(grant.is_none(), "a damaged home presents no badge");
     }
 
@@ -442,7 +452,7 @@ mod tests {
             Credential::Family {
                 present: Some(slip),
             },
-            &secret,
+            secret.node_id(),
             &test_home(),
         )
         .await
@@ -482,7 +492,7 @@ mod tests {
             Credential::Family {
                 present: Some(slip),
             },
-            &secret,
+            secret.node_id(),
             &home,
         )
         .await
@@ -522,7 +532,7 @@ mod tests {
             Credential::Family {
                 present: Some(slip),
             },
-            &secret,
+            secret.node_id(),
             &test_home(),
         )
         .await
@@ -567,7 +577,7 @@ mod tests {
         let cred = Credential::Family {
             present: peer.self_present(),
         };
-        let (grant, membership) = resolve(cred, &secret, &home)
+        let (grant, membership) = resolve(cred, secret.node_id(), &home)
             .await
             .expect("family-with-link-peer resolves")
             .into_slots();
@@ -603,7 +613,7 @@ mod tests {
         let cred = Credential::Family {
             present: peer.self_present(),
         };
-        let (grant, membership) = resolve(cred, &secret, &test_home())
+        let (grant, membership) = resolve(cred, secret.node_id(), &test_home())
             .await
             .expect("family-with-plain-link-peer resolves")
             .into_slots();
@@ -654,6 +664,295 @@ mod tests {
         (secret, signet)
     }
 
+    /// A directory at the device-file path makes any attempted key load fail independently of its
+    /// permissions or the test user's privileges. The root files and all trust records remain usable.
+    async fn forbid_device_read(home: &Home) {
+        std::fs::remove_file(home.key()).expect("remove the synthetic device key");
+        std::fs::create_dir(home.key()).expect("make the device path unavailable as a file");
+        assert!(keystore::KeyFile::new(home.key()).load().is_err());
+        assert!(
+            matches!(Standing::read(home).await, Err(StandingError::OwnKey(_))),
+            "the ordinary reader must retain its device-key error"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_resolution_uses_the_machine_id_without_loading_its_device_key() {
+        let home = provisioned_home("bound-device-sentinel");
+        let (secret, root) = joined_badge(&home, SystemTime::now() + 89 * DAY).await;
+        let own = secret.node_id();
+        drop(secret);
+        let expected = config::load_badge(&home)
+            .await
+            .expect("read the fixture badge")
+            .expect("a badge");
+        forbid_device_read(&home).await;
+
+        let public = resolve(Credential::Family { present: None }, own, &home)
+            .await
+            .expect("the public resolver needs no device key");
+        assert_eq!(
+            public.grant.as_ref().map(Link::as_str),
+            Some(expected.as_str())
+        );
+        assert!(public.membership.is_none());
+        let mut warned = Vec::new();
+        let injected = resolve_to(
+            Credential::Family { present: None },
+            own,
+            &home,
+            &mut warned,
+        )
+        .await
+        .expect("the injected resolver needs no device key");
+        assert_eq!(
+            injected.grant.as_ref().map(Link::as_str),
+            Some(expected.as_str())
+        );
+        assert!(injected.membership.is_none() && warned.is_empty());
+
+        let slip = TestNode::seeded(1)
+            .fleet_slip(
+                &"ssh".parse().expect("a service"),
+                root.verify_key(),
+                SystemTime::now() + DAY,
+            )
+            .expect("a slip for this machine's fleet");
+        let presented = resolve(
+            Credential::Family {
+                present: Some(slip.clone()),
+            },
+            own,
+            &home,
+        )
+        .await
+        .expect("both slots resolve without the device key");
+        assert_eq!(
+            presented.grant.as_ref().map(Link::as_str),
+            Some(slip.as_str())
+        );
+        assert_eq!(
+            presented.membership.as_ref().map(Link::as_str),
+            Some(expected.as_str())
+        );
+        std::fs::remove_dir_all(home.dir()).expect("remove the synthetic home");
+    }
+
+    #[tokio::test]
+    async fn a_bound_identity_still_checks_the_badges_subject_even_when_it_has_expired() {
+        let home = provisioned_home("bound-expired-subject");
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_secs();
+        let end = SystemTime::UNIX_EPOCH + core::time::Duration::from_secs(now) - 6 * DAY;
+        let (secret, root) = joined_badge(&home, end).await;
+        let own = secret.node_id();
+        drop(secret);
+        forbid_device_read(&home).await;
+        assert!(matches!(
+            Standing::read_for_node(&home, own).await,
+            Ok(Standing::Device { pin, until }) if pin == root.node_id() && until == end
+        ));
+        let mut warned = Vec::new();
+        for result in [
+            resolve(Credential::Family { present: None }, own, &home).await,
+            resolve_to(
+                Credential::Family { present: None },
+                own,
+                &home,
+                &mut warned,
+            )
+            .await,
+        ] {
+            let Err(error) = result else {
+                panic!("an expired badge must refuse locally");
+            };
+            assert!(format!("{error:#}").contains("expired"));
+        }
+        assert!(warned.is_empty());
+
+        let other = TestNode::seeded(0x53).node_id();
+        assert!(matches!(
+            Standing::read_for_node(&home, other).await,
+            Err(StandingError::Damaged(crate::standing::Disagreement::StandingForAnotherKey { path }))
+                if path == home.key_cert()
+        ));
+        let wrong_subject = resolve_to(
+            Credential::Family { present: None },
+            other,
+            &home,
+            &mut warned,
+        )
+        .await
+        .expect("a subject mismatch remains a damaged home, not an expiry refusal");
+        assert!(wrong_subject.grant.is_none() && wrong_subject.membership.is_none());
+        std::fs::remove_dir_all(home.dir()).expect("remove the synthetic home");
+    }
+
+    #[tokio::test]
+    async fn bound_resolution_retains_own_pin_and_badge_root_checks() {
+        use crate::standing::Disagreement;
+
+        let home = provisioned_home("bound-pin-checks");
+        let (secret, _) = joined_badge(&home, SystemTime::now() + 89 * DAY).await;
+        let own = secret.node_id();
+        drop(secret);
+        forbid_device_read(&home).await;
+        config::write_signet(&crate::testkit::lock(), &home, own).expect("pin the machine itself");
+        assert!(matches!(
+            Standing::read_for_node(&home, own).await,
+            Err(StandingError::Damaged(Disagreement::OwnKeyPinned { key })) if key == own
+        ));
+        let mut warned = Vec::new();
+        let damaged = resolve_to(
+            Credential::Family { present: None },
+            own,
+            &home,
+            &mut warned,
+        )
+        .await
+        .expect("own-key pin remains damaged");
+        assert!(damaged.grant.is_none() && damaged.membership.is_none());
+
+        let other = TestRoot::seeded(0x54).node_id();
+        config::write_signet(&crate::testkit::lock(), &home, other).expect("pin another root");
+        assert!(matches!(
+            Standing::read_for_node(&home, own).await,
+            Err(StandingError::Damaged(Disagreement::StandingFromAnotherRoot { pin, .. })) if pin == other
+        ));
+        let damaged = resolve(Credential::Family { present: None }, own, &home)
+            .await
+            .expect("a wrong badge root remains damaged");
+        assert!(damaged.grant.is_none() && damaged.membership.is_none());
+        std::fs::remove_file(home.root_pub()).expect("remove the pin");
+        let missing_pin = resolve(Credential::Family { present: None }, own, &home)
+            .await
+            .expect("a badge with no pin remains damaged");
+        assert!(missing_pin.grant.is_none() && missing_pin.membership.is_none());
+        std::fs::remove_dir_all(home.dir()).expect("remove the synthetic home");
+    }
+
+    #[tokio::test]
+    async fn bound_resolution_preserves_held_root_and_revoked_pin_classification() {
+        use keystore::{KeyFile, Protection};
+        use zeroize::Zeroizing;
+
+        let home = provisioned_home("bound-held-root");
+        let (secret, root) = joined_badge(&home, SystemTime::now() + 89 * DAY).await;
+        let own = secret.node_id();
+        drop(secret);
+        forbid_device_read(&home).await;
+        let expected = config::load_badge(&home)
+            .await
+            .expect("read the fixture")
+            .expect("a badge");
+        let passphrase =
+            crate::passphrase::passphrase(Zeroizing::new("test root passphrase".to_owned()))
+                .expect("a synthetic passphrase");
+        // These reads deliberately retain root.key I/O. Bypassing the device file does not promise that
+        // a plain root's seed stays unmaterialized, or that a sealed root's public header goes unread.
+        for (writer, protection) in [
+            (KeyFile::new(home.root_key()), Protection::Plain),
+            (
+                KeyFile::strict(home.root_key()),
+                Protection::Passphrase(&passphrase),
+            ),
+        ] {
+            let mut seed = root.seed();
+            writer
+                .write(&keystore::Secret::take(&mut seed), protection)
+                .expect("write the synthetic held root");
+            assert!(matches!(
+                Standing::read_for_node(&home, own).await,
+                Ok(Standing::HoldsRoot { pin, .. }) if pin == root.node_id()
+            ));
+            let resolved = resolve(Credential::Family { present: None }, own, &home)
+                .await
+                .expect("a held root still resolves its device badge");
+            assert_eq!(
+                resolved.grant.as_ref().map(Link::as_str),
+                Some(expected.as_str())
+            );
+            std::fs::remove_file(home.root_key()).expect("remove this root representation");
+        }
+        nauthy::Denylist::for_repair(home.revoked())
+            .revoke(
+                &crate::testkit::lock(),
+                [nauthy::Revocation::Key(root.verify_key())],
+            )
+            .expect("revoke the pinned root");
+        assert!(home.key().is_dir());
+        assert_eq!(
+            Standing::read_for_node(&home, own)
+                .await
+                .expect("read a revoked pin"),
+            Standing::Unpinned
+        );
+        let mut warned = Vec::new();
+        for result in [
+            resolve(Credential::Family { present: None }, own, &home).await,
+            resolve_to(
+                Credential::Family { present: None },
+                own,
+                &home,
+                &mut warned,
+            )
+            .await,
+        ] {
+            let resolved = result.expect("a revoked pin is no pin");
+            assert!(resolved.grant.is_none() && resolved.membership.is_none());
+        }
+        assert!(warned.is_empty());
+        std::fs::remove_dir_all(home.dir()).expect("remove the synthetic home");
+    }
+
+    #[tokio::test]
+    async fn full_resolution_propagates_root_file_errors_instead_of_treating_them_as_damage() {
+        let home = provisioned_home("bound-root-error");
+        let (secret, _) = joined_badge(&home, SystemTime::now() + 89 * DAY).await;
+        let own = secret.node_id();
+        drop(secret);
+        std::fs::create_dir(home.root_key()).expect("make root.key a directory");
+        std::fs::set_permissions(
+            home.root_key(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .expect("keep the root path owner-only");
+        assert!(matches!(
+            Standing::read(&home).await,
+            Err(StandingError::NotAFile { path }) if path == home.root_key()
+        ));
+        forbid_device_read(&home).await;
+        let mut warned = Vec::new();
+        for result in [
+            resolve(Credential::Family { present: None }, own, &home).await,
+            resolve_to(
+                Credential::Family { present: None },
+                own,
+                &home,
+                &mut warned,
+            )
+            .await,
+        ] {
+            let Err(error) = result else {
+                panic!("a root file error cannot become an empty credential");
+            };
+            assert!(matches!(error.downcast_ref::<StandingError>(),
+                Some(StandingError::NotAFile { path }) if *path == home.root_key()));
+        }
+        assert!(warned.is_empty());
+        std::fs::remove_dir(home.root_key()).expect("remove the directory sentinel");
+        std::fs::remove_file(home.key_cert()).expect("remove the badge");
+        std::fs::create_dir(home.key_cert()).expect("make the badge unreadable");
+        let Err(error) = resolve(Credential::Family { present: None }, own, &home).await else {
+            panic!("a badge read error cannot become an empty credential");
+        };
+        assert!(matches!(error.downcast_ref::<StandingError>(),
+            Some(StandingError::Read { path, .. }) if *path == home.key_cert()));
+        std::fs::remove_dir_all(home.dir()).expect("remove the synthetic home");
+    }
+
     /// A day, the unit the badge's life is measured in.
     const DAY: core::time::Duration = core::time::Duration::from_secs(24 * 60 * 60);
 
@@ -671,7 +970,7 @@ mod tests {
         // credential-carrying type does not grow a derive that prints badge bytes for a test's sake.
         let Err(error) = resolve_to(
             Credential::Family { present: None },
-            &device,
+            device.node_id(),
             &home,
             &mut warned,
         )
@@ -701,7 +1000,7 @@ mod tests {
         let mut warned = Vec::new();
         let resolved = resolve_to(
             Credential::Family { present: None },
-            &device,
+            device.node_id(),
             &home,
             &mut warned,
         )
@@ -731,7 +1030,7 @@ mod tests {
         let mut warned = Vec::new();
         resolve_to(
             Credential::Family { present: None },
-            &device,
+            device.node_id(),
             &home,
             &mut warned,
         )
@@ -769,7 +1068,7 @@ mod tests {
             Credential::Family {
                 present: Some(slip),
             },
-            &device,
+            device.node_id(),
             &home,
             &mut warned,
         )

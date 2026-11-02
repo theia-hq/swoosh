@@ -180,7 +180,7 @@ async fn dial(server: &Scratch, desk: &Scratch, link: &Link) -> Option<VerifyKey
     let BindRole::Dialing(credential) = bind_role else {
         panic!("forward dials");
     };
-    let (slot1, slot2) = reaching::resolve(credential, &secret, &desk.home)
+    let (slot1, slot2) = reaching::resolve(credential, node.node_id(), &desk.home)
         .await
         .unwrap()
         .into_slots();
