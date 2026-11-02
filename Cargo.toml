@@ -38,15 +38,15 @@ bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "88d097439e
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "a288daac953c9d843a3930618b6d31398a2d9efa" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "04350ca64db86b5e155aaa7f9f2a3210207ea271" }
 # The key file store, in its own repo, pinned to the commit that names its key kinds standard and strict
 # and lets a dependent build each touch-id error in its own tests.
-keystore = { git = "https://github.com/theia-hq/keystore", rev = "783c87527663b6465bd735a85cbc84551583a87e" }
-measure = { git = "https://github.com/theia-hq/services", rev = "a288daac953c9d843a3930618b6d31398a2d9efa" }
-nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "a7c82bf58db5d54795b4a3c544da8ca7d2e0a81c" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "a288daac953c9d843a3930618b6d31398a2d9efa", optional = true }
-tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "8730733fc3a1dab0e7c35519336aade5ea76fde1" }
-transfer = { git = "https://github.com/theia-hq/services", rev = "a288daac953c9d843a3930618b6d31398a2d9efa" }
+keystore = { git = "https://github.com/theia-hq/keystore", rev = "301c6535c344c21b4ef6694a55c6b9c628663cbb" }
+measure = { git = "https://github.com/theia-hq/services", rev = "04350ca64db86b5e155aaa7f9f2a3210207ea271" }
+nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "82c377052bbea8f9b2970eba052a97db2a2f7206" }
+sshh = { git = "https://github.com/theia-hq/services", rev = "04350ca64db86b5e155aaa7f9f2a3210207ea271", optional = true }
+tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "9bd485c1d891fd3c57609fbde4963dae46d8f5b7" }
+transfer = { git = "https://github.com/theia-hq/services", rev = "04350ca64db86b5e155aaa7f9f2a3210207ea271" }
 
 # The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
 # sending it.
@@ -102,6 +102,9 @@ unused_must_use = "deny"
 strip = true
 lto = true
 codegen-units = 1
+
+[profile.swoosh-q]
+inherits = "dev"
 
 # Use the pinned NoQ source for the advisory fixes recorded in scripts/fork-watch.txt.
 # Cargo applies this patch at the workspace root.
