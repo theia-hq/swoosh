@@ -2916,29 +2916,30 @@ fn no_self_daemonize() {
     let mut child = KillOnDrop(command.spawn().expect("the resident serve spawns"));
     let pid = child.0.id();
 
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !socket.exists() {
-        if let Some(status) = child.0.try_wait().expect("poll the resident") {
-            panic!("the resident exited before binding its socket: {status}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "the resident never bound {}",
-            socket.display()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a control-client runtime");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut stream = runtime
+        .block_on(catalog_stream(&socket, deadline, || {
+            if let Some(status) = child.0.try_wait()? {
+                return Err(io::Error::other(format!(
+                    "the resident exited before accepting its socket: {status}"
+                )));
+            }
+            Ok(())
+        }))
+        .expect("the resident control listener becomes reachable");
     let reply = runtime
         .block_on(async {
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                control_round_trip(&socket, Request::Status),
-            )
+            tokio::time::timeout(Duration::from_secs(10), async {
+                Request::Status
+                    .write(&mut stream)
+                    .await
+                    .map_err(ControlError::Io)?;
+                Response::read(&mut stream).await
+            })
             .await
         })
         .expect("the status round-trip is bounded")

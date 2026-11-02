@@ -380,19 +380,26 @@ async fn a_node_signed_ssh_grant_opens_a_shell() {
     );
 }
 
-/// The running gate holds what this `serve` bound under each name: a link made after `demo` was retargeted
-/// in `serve.toml` is made for the new target, and the running reflector refuses it, while a link made for
-/// the reflector is admitted.
+/// The running gate admits only links made for its bound target. A saved retarget does not change
+/// that target or the target of a link issued while the reflector runs; an earlier forward link stays
+/// refused.
 #[tokio::test]
 async fn a_running_serve_admits_a_link_only_to_the_target_it_bound() {
     let scratch = Scratch::new("bound-target");
+    swoosh(&scratch.0, &["leave", "--new-key"]);
+    swoosh::serve_toml::ServeToml::update(&swoosh::testkit::lock(), &scratch.home(), |file| {
+        file.services = Some(vec!["demo=tcp:localhost:1".to_owned()]);
+    })
+    .unwrap();
+    let made_for_forward = issue(&scratch.0, &["demo", "anyone"]);
+
     let served = serve(&scratch.0, &["demo=echo:"]);
     let made_for_echo = issue(&scratch.0, &["demo", "anyone"]);
     swoosh::serve_toml::ServeToml::update(&swoosh::testkit::lock(), &scratch.home(), |file| {
         file.services = Some(vec!["demo=tcp:localhost:1".to_owned()]);
     })
     .unwrap();
-    let made_for_forward = issue(&scratch.0, &["demo", "anyone"]);
+    let made_after_retarget = issue(&scratch.0, &["demo", "anyone"]);
 
     let node = dialer(0x47, &served).await;
     let session = echo_session(&node, &served, made_for_echo, None).await;
@@ -408,6 +415,14 @@ async fn a_running_serve_admits_a_link_only_to_the_target_it_bound() {
         open(&session).await.is_none(),
         "a link made for the forward is refused by the running reflector"
     );
+
+    // The refusal ended that connection; a fresh dialer checks live-target issuance.
+    let node = dialer(0x4d, &served).await;
+    let session = echo_session(&node, &served, made_after_retarget, None).await;
+    let (mut write, mut read) = open(&session)
+        .await
+        .expect("a link issued after the saved retarget still names the running reflector");
+    assert!(echoes(&mut write, &mut read).await, "and served");
 }
 
 #[tokio::test]
@@ -564,6 +579,10 @@ async fn a_quiet_serve_stopped_over_the_wire_says_who_stopped_it() {
 fn a_grant_is_on_disk_before_its_link_prints() {
     let scratch = Scratch::new("print");
     swoosh(&scratch.0, &["leave", "--new-key"]);
+    swoosh::serve_toml::ServeToml::update(&swoosh::testkit::lock(), &scratch.home(), |file| {
+        file.services = Some(vec!["demo=echo:".to_owned()]);
+    })
+    .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_swoosh"))
         .arg("--home")
         .arg(&scratch.0)
@@ -763,6 +782,10 @@ fn a_serve_with_nothing_never_public_starts_over_an_unreadable_ledger() {
 async fn a_serve_of_a_never_public_engine_starts_over_an_unreadable_ledger_and_admits_no_link() {
     let scratch = Scratch::new("ledger-unreadable");
     swoosh(&scratch.0, &["leave", "--new-key"]);
+    swoosh::serve_toml::ServeToml::update(&swoosh::testkit::lock(), &scratch.home(), |file| {
+        file.services = Some(vec!["demo=echo:".to_owned()]);
+    })
+    .unwrap();
     let link = issue(&scratch.0, &["demo", "anyone"]);
     let (links, kept) = (scratch.home().links(), scratch.0.join("links.kept"));
     std::fs::rename(&links, &kept).unwrap();

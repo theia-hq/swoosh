@@ -133,9 +133,50 @@ impl UidSocket {
     /// Returns control trust, transport, framing or typed local-detail failures. A socket miss does not
     /// establish that the home's serve lock is free.
     pub async fn local_service_detail(&self) -> Result<LocalServiceSnapshot, ControlError> {
-        self.exchange(&Request::LocalServiceDetail)
+        self.local_service_detail_attributed()
+            .await
+            .map(|(snapshot, _)| snapshot)
+    }
+
+    /// Read the complete local service details and return the kernel-reported listener PID checked on that
+    /// connection against the selected home's record read after connecting.
+    ///
+    /// These checks establish account and recorded-listener attribution, not executable identity. The result
+    /// does not reserve the listener or its state for a later operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attribution fails or the complete service details cannot be read or decoded,
+    /// including when the response exceeds the accepted size. Missing or invalid detail is not an empty list.
+    pub async fn local_service_detail_attributed(
+        &self,
+    ) -> Result<(LocalServiceSnapshot, ProcessId), ControlError> {
+        let (stream, pid) = self.connect().await?;
+        let snapshot = Self::exchange_on(stream, &Request::LocalServiceDetail)
             .await?
-            .into_local_snapshot()
+            .into_local_snapshot()?;
+        Ok((snapshot, pid))
+    }
+
+    /// Read local status and return the kernel-reported listener PID checked on that connection against the
+    /// selected home's record read after connecting.
+    ///
+    /// These checks do not authenticate the executable or make this response atomic with another exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attribution fails, the request is refused or a complete valid status response
+    /// cannot be read.
+    pub async fn status_attributed(&self) -> Result<(StatusReply, ProcessId), ControlError> {
+        let (stream, pid) = self.connect().await?;
+        match Self::exchange_on(stream, &Request::Status).await? {
+            Response::Status(status) => Ok((status, pid)),
+            Response::Refused(reason) => Err(ControlError::Refused(reason)),
+            Response::Error(reason) => Err(ControlError::Protocol(reason)),
+            other => Err(ControlError::Protocol(format!(
+                "unexpected reply to status: {other:?}"
+            ))),
+        }
     }
 
     /// Connect within the deadline, then check the kernel-reported peer UID and listener PID against
@@ -284,14 +325,7 @@ impl NodeClient for UidSocket {
     }
 
     async fn status(&self) -> Result<StatusReply, ControlError> {
-        match self.exchange(&Request::Status).await? {
-            Response::Status(status) => Ok(status),
-            Response::Refused(reason) => Err(ControlError::Refused(reason)),
-            Response::Error(reason) => Err(ControlError::Protocol(reason)),
-            other => Err(ControlError::Protocol(format!(
-                "unexpected reply to status: {other:?}"
-            ))),
-        }
+        self.status_attributed().await.map(|(status, _)| status)
     }
 
     async fn stop(&self) -> Result<(), ControlError> {
@@ -329,6 +363,39 @@ impl ControlClient {
     pub async fn local_service_detail(&self) -> Result<LocalServiceSnapshot, ControlError> {
         match self {
             Self::Socket(socket) => socket.local_service_detail().await,
+        }
+    }
+
+    /// Read the complete local service details and return the kernel-reported listener PID checked on that
+    /// connection against the selected home's record read after connecting.
+    ///
+    /// These checks establish account and recorded-listener attribution, not executable identity. The result
+    /// does not reserve the listener or its state for a later operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attribution fails or the complete service details cannot be read or decoded,
+    /// including when the response exceeds the accepted size. Missing or invalid detail is not an empty list.
+    pub async fn local_service_detail_attributed(
+        &self,
+    ) -> Result<(LocalServiceSnapshot, ProcessId), ControlError> {
+        match self {
+            Self::Socket(socket) => socket.local_service_detail_attributed().await,
+        }
+    }
+
+    /// Read local status and return the kernel-reported listener PID checked on that connection against the
+    /// selected home's record read after connecting.
+    ///
+    /// These checks do not authenticate the executable or make this response atomic with another exchange.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if attribution fails, the request is refused or a complete valid status response
+    /// cannot be read.
+    pub async fn status_attributed(&self) -> Result<(StatusReply, ProcessId), ControlError> {
+        match self {
+            Self::Socket(socket) => socket.status_attributed().await,
         }
     }
 
