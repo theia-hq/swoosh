@@ -214,6 +214,121 @@ impl Fetch for Door {
 }
 
 #[tokio::test]
+async fn renewal_hands_out_a_standing_through_its_effective_endpoint() {
+    let second = 1_788_400_000;
+    let base = at(second);
+    let (nas, standing) = nas_renewing("inclusive-endpoint", second).await;
+    let until = standing.cap().valid_until().unwrap().unwrap();
+    for now in [
+        base - Duration::from_nanos(1),
+        base,
+        base + Duration::from_millis(500),
+        until,
+    ] {
+        let found = super::standing_for(&nas, key(LAPTOP), now).await.unwrap();
+        assert_eq!(found.as_str(), standing.as_str());
+    }
+    assert!(matches!(
+        super::standing_for(&nas, key(LAPTOP), at(second + 1)).await,
+        Err(super::Miss::Ended)
+    ));
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &nas,
+        [nauthy::Revocation::Id(
+            standing.cap().root_revocation_id().unwrap(),
+        )],
+    )
+    .unwrap();
+    assert!(matches!(
+        super::standing_for(&nas, key(LAPTOP), until).await,
+        Err(super::Miss::IdRevoked)
+    ));
+    crate::revoked::add(
+        &crate::testkit::lock(),
+        &nas,
+        [nauthy::Revocation::Key(key(LAPTOP))],
+    )
+    .unwrap();
+    assert!(matches!(
+        super::standing_for(&nas, key(LAPTOP), until).await,
+        Err(super::Miss::KeyRevoked)
+    ));
+    std::fs::remove_dir_all(nas.dir()).unwrap();
+}
+
+#[tokio::test]
+async fn renewal_uses_the_narrowed_bound_and_refuses_an_unreadable_bound() {
+    let second = 1_788_400_000;
+    let base = at(second);
+    let nas = device("narrowed-endpoint", NAS, STANDING_UNTIL).await;
+    let narrowed = root()
+        .member_badge(key(LAPTOP), at(second + 10))
+        .unwrap()
+        .attenuate(None, Some(base))
+        .unwrap()
+        .seal()
+        .unwrap()
+        .link()
+        .unwrap();
+    let until = narrowed.cap().valid_until().unwrap().unwrap();
+    let member = Member {
+        standing: narrowed.clone(),
+        ..row(LAPTOP, "laptop", second + 10)
+    };
+    holding(
+        &nas,
+        &update(2, vec![row(NAS, "nas", STANDING_UNTIL), member], Vec::new()),
+    )
+    .await;
+    assert_eq!(
+        super::standing_for(&nas, key(LAPTOP), until)
+            .await
+            .unwrap()
+            .as_str(),
+        narrowed.as_str()
+    );
+    assert!(matches!(
+        super::standing_for(&nas, key(LAPTOP), at(second + 1)).await,
+        Err(super::Miss::Ended)
+    ));
+    let unreadable = crate::testkit::hand_signed::unreadable_end_date();
+    assert!(matches!(
+        unreadable.cap().valid_until(),
+        Err(nauthy::CapError::UnreadableExpiry)
+    ));
+    let member = Member {
+        standing: unreadable,
+        ..row(LAPTOP, "laptop", second + 10)
+    };
+    holding(
+        &nas,
+        &update(3, vec![row(NAS, "nas", STANDING_UNTIL), member], Vec::new()),
+    )
+    .await;
+    assert!(matches!(
+        super::standing_for(&nas, key(LAPTOP), base).await,
+        Err(super::Miss::Ended)
+    ));
+    std::fs::remove_dir_all(nas.dir()).unwrap();
+}
+
+#[tokio::test]
+async fn renewal_pickup_remains_due_before_the_effective_endpoint() {
+    let second = 1_788_400_000;
+    let base = at(second);
+    let laptop = device("early-pickup", LAPTOP, second).await;
+    let badge = config::load_badge(&laptop).await.unwrap().unwrap();
+    let until = badge.cap().valid_until().unwrap().unwrap();
+    assert!(!is_due(&laptop, base - Duration::from_nanos(1)).await);
+    for now in [base, base + Duration::from_millis(500), until] {
+        assert!(now <= until);
+        assert!(is_due(&laptop, now).await);
+    }
+    std::fs::remove_dir_all(laptop.dir()).unwrap();
+}
+
+#[tokio::test]
 async fn the_door_hands_a_device_its_renewed_standing() {
     let (nas, renewed) = nas_renewing("hit", now() + 90 * DAY).await;
 

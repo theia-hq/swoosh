@@ -200,14 +200,35 @@ fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
 // `core::io::ErrorKind` is still unstable, so the NotFound check reads from `std`.
 #[allow(clippy::std_instead_of_core)]
 fn prune_expired(home_lock: &HomeWrite, path: &Path, prune_at: usize) -> std::io::Result<()> {
+    prune_expired_at(home_lock, path, prune_at, SystemTime::now())
+}
+
+#[allow(clippy::std_instead_of_core)]
+fn prune_expired_at(
+    home_lock: &HomeWrite,
+    path: &Path,
+    prune_at: usize,
+    now: SystemTime,
+) -> std::io::Result<()> {
     let text = match crate::home::read_trust_file(path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    let now = SystemTime::now();
-    let expired =
-        |line: &str| GrantRecord::from_line(line.trim()).is_ok_and(|record| record.expiry <= now);
+    let now = now
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|since| since.as_secs());
+    let expired = |line: &str| {
+        now.is_some_and(|now| {
+            GrantRecord::from_line(line.trim()).is_ok_and(|record| {
+                record
+                    .expiry
+                    .duration_since(UNIX_EPOCH)
+                    .is_ok_and(|expiry| now > expiry.as_secs())
+            })
+        })
+    };
     if text.lines().filter(|line| expired(line)).count() < prune_at {
         return Ok(());
     }
@@ -549,7 +570,7 @@ impl GrantRecord {
             ),
         };
         let holder = next()?.to_owned();
-        let expiry = from_unix_secs(next()?.parse::<u64>().map_err(LedgerError::Expiry)?);
+        let expiry = from_unix_secs(next()?.parse::<u64>().map_err(LedgerError::Expiry)?)?;
         let root_id = RevocationId::from_hex(next()?).map_err(|_| LedgerError::RootId)?;
         // Trailing fields mean a format we did not write; refuse rather than ignore the tail.
         if fields.next().is_some() {
@@ -802,8 +823,10 @@ fn unix_secs(time: SystemTime) -> u64 {
 }
 
 /// The inverse of [`unix_secs`]: whole seconds since the unix epoch back to a [`SystemTime`].
-fn from_unix_secs(secs: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(secs)
+fn from_unix_secs(secs: u64) -> Result<SystemTime, LedgerError> {
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(secs))
+        .ok_or(LedgerError::Malformed)
 }
 
 /// Why reading or writing the grants ledger failed.
@@ -812,7 +835,7 @@ pub enum LedgerError {
     /// The ledger file could not be read or written.
     #[error("access the grants ledger")]
     Io(#[source] std::io::Error),
-    /// A line did not have the expected number of tab-separated fields.
+    /// A line has invalid fields or an expiry date that cannot be represented.
     #[error("grants ledger has a malformed line")]
     Malformed,
     /// A line named a grant kind that is not `device`, `fleet`, `bearer`, or `once`.

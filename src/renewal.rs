@@ -94,8 +94,8 @@ pub(crate) fn reply(standing: Option<&Link>) -> Vec<u8> {
 }
 
 /// `peer`'s newest standing, checked in this order: the key is not revoked here, its row in the update
-/// held here is not revoked, the row's standing id is not revoked, and the standing outlives `now`. The
-/// transport proved the key before the stream reached here.
+/// held here is not revoked, the row's standing id is not revoked, and its effective expiry bound
+/// has not passed. The transport proved the key before the stream reached here.
 async fn standing_for(home: &Home, peer: VerifyKey, now: SystemTime) -> Result<Link, Miss> {
     let pin = match Standing::read(home).await {
         Ok(Standing::Device { pin, .. } | Standing::HoldsRoot { pin, .. }) => pin,
@@ -125,8 +125,8 @@ async fn standing_for(home: &Home, peer: VerifyKey, now: SystemTime) -> Result<L
     if id_revoked {
         return Err(Miss::IdRevoked);
     }
-    match cap.expiry() {
-        Ok(Some(ends)) if ends > now => Ok(row.standing.clone()),
+    match cap.valid_until() {
+        Ok(Some(ends)) if ends >= now => Ok(row.standing.clone()),
         _ => Err(Miss::Ended),
     }
 }

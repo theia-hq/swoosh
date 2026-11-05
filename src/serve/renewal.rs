@@ -95,13 +95,16 @@ impl Known {
 
     /// Whether the update held here lists `key` with a standing that has not ended, as last read.
     pub fn knows(&self, key: &VerifyKey) -> bool {
-        let now = unix_now();
+        self.knows_at(key, unix_now())
+    }
+
+    fn knows_at(&self, key: &VerifyKey, now: u64) -> bool {
         self.rows
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .live
             .get(key)
-            .is_some_and(|until| *until > now)
+            .is_some_and(|until| *until >= now)
     }
 
     /// Read the standing and the update again when a file either is read from changed. A home that is not
@@ -194,3 +197,7 @@ fn unix_now() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
 }
+
+#[cfg(test)]
+#[path = "renewal_tests.rs"]
+mod renewal_tests;
