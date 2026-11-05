@@ -310,15 +310,25 @@ async fn device_badge(home: &Home, node: NodeId) -> eyre::Result<Option<(Link, N
 /// The refusal never reaches the wire, so the gate's uniform `not admitted` stays uniform and no peer
 /// learns anything: this is the dialer telling itself what it already knows about its own credential.
 fn into_slot<W: std::io::Write>(badge: Link, node: NodeId, warn: &mut W) -> eyre::Result<Link> {
-    // Exhaustive on purpose: a new reading is a compile error HERE, at the one site that decides whether
-    // a badge travels, rather than a silent fall-through to dialing.
-    match badge::Expiry::read(&badge, SystemTime::now())? {
-        // Dead: the gate will refuse this, so say so now, with the cause and the fix, instead of spending
-        // a dial to be told `not admitted` by a message that cannot say which of five reasons applied.
+    into_slot_at(badge, node, warn, SystemTime::now())
+}
+
+fn into_slot_at<W: std::io::Write>(
+    badge: Link,
+    node: NodeId,
+    warn: &mut W,
+    now: SystemTime,
+) -> eyre::Result<Link> {
+    match badge::Expiry::at(badge.cap().valid_until()?, now) {
         expiry @ badge::Expiry::Expired { .. } => eyre::bail!(
             "this device's membership badge {expiry}, so a family-gated peer will refuse this dial; {}",
             badge::remedy(node)
         ),
+        badge::Expiry::Expiring { .. } | badge::Expiry::Live { .. } | badge::Expiry::Unknown => {}
+    }
+    // Exhaustive on purpose: a new reading is a compile error HERE, at the one site that decides whether
+    // a badge travels, rather than a silent fall-through to dialing.
+    match badge::Expiry::read(&badge, now)? {
         // Alive but inside the window: the dial goes ahead, and the operator is told once, on stderr, so
         // the line never pollutes a piped result.
         expiry @ badge::Expiry::Expiring { .. } => {
@@ -331,9 +341,10 @@ fn into_slot<W: std::io::Write>(badge: Link, node: NodeId, warn: &mut W) -> eyre
             );
             Ok(badge)
         }
-        // Outside the window, or minted before badges carried a readable expiry: nothing useful to say,
-        // so nothing is said.
-        badge::Expiry::Live { .. } | badge::Expiry::Unknown => Ok(badge),
+        // No advisory warning for expired, distant or missing dates.
+        badge::Expiry::Expired { .. } | badge::Expiry::Live { .. } | badge::Expiry::Unknown => {
+            Ok(badge)
+        }
     }
 }
 
@@ -365,6 +376,10 @@ pub async fn renew_before_dial<W: std::io::Write>(
         Err(error) => tracing::debug!(%error, "the pick-up could not run"),
     }
 }
+
+#[cfg(test)]
+#[path = "reaching_tests.rs"]
+mod expiry_tests;
 
 #[cfg(test)]
 mod tests {

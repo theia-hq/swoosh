@@ -259,6 +259,83 @@ fn concurrent_issues_never_lose_a_ledger_row() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn pruning_retains_an_issuance_id_through_its_encoded_expiry_second() {
+    let (grants, path) = ledger("inclusive-second");
+    let record = record(
+        "ssh",
+        GrantKind::Bearer,
+        Delegation::Sealed,
+        ANYONE,
+        1_788_400_000,
+    );
+    let base = record.expiry;
+    let until = crate::testkit::TestRoot::seeded(1)
+        .slip(&service_target("ssh"), base)
+        .expect("cap")
+        .valid_until()
+        .expect("effective expiry")
+        .expect("bound");
+    grants
+        .append(&crate::testkit::lock(), &record)
+        .expect("append");
+    for now in [
+        base - Duration::from_nanos(1),
+        base,
+        base + Duration::from_millis(500),
+        until,
+    ] {
+        super::prune_expired_at(&crate::testkit::lock(), &path, 1, now).expect("prune");
+        let rows = grants.read().expect("read retained issuance");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].root_id, record.root_id);
+        assert_eq!(rows[0].expiry, base);
+    }
+    super::prune_expired_at(
+        &crate::testkit::lock(),
+        &path,
+        1,
+        base + Duration::from_secs(1),
+    )
+    .expect("prune after the expiry second");
+    assert!(grants.read().expect("read pruned ledger").is_empty());
+    std::fs::remove_file(path).expect("remove ledger");
+}
+
+#[test]
+fn pruning_retains_unconvertible_dates_and_an_unconvertible_clock() {
+    let (grants, path) = ledger("conversion-failure");
+    let record = record("ssh", GrantKind::Bearer, Delegation::Sealed, ANYONE, 60);
+    grants
+        .append(&crate::testkit::lock(), &record)
+        .expect("append");
+    let overflow = "bearer\tsealed\tssh\t-\t-\t18446744073709551615\tdeadbeef";
+    assert!(matches!(
+        GrantRecord::from_line(overflow),
+        Err(LedgerError::Malformed)
+    ));
+    let text = format!("{}\n{overflow}\nnot a row\n", record.to_line());
+    std::fs::write(&path, &text).expect("write unreadable rows");
+    let before_epoch = UNIX_EPOCH
+        .checked_sub(Duration::from_nanos(1))
+        .expect("before epoch");
+    super::prune_expired_at(&crate::testkit::lock(), &path, 1, before_epoch)
+        .expect("retain on clock conversion failure");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), text);
+    super::prune_expired_at(
+        &crate::testkit::lock(),
+        &path,
+        1,
+        UNIX_EPOCH + Duration::from_secs(61),
+    )
+    .expect("prune only the readable expired row");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read"),
+        format!("{overflow}\nnot a row\n")
+    );
+    std::fs::remove_file(path).expect("remove ledger");
+}
+
 /// A prune waits for [`PRUNE_AT`](super::PRUNE_AT) expired rows, then drops every expired row and keeps
 /// every live one and every line it cannot read.
 #[tokio::test]
