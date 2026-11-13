@@ -89,6 +89,7 @@ All notable changes to swoosh, newest first.
   `the receiver did not answer within 10 minutes; the file may have arrived`. Before, it had no limit.
 
 ### Fixed
+- **Updated SSH and filesystem dependencies** following RUSTSEC-2026-0495 and RUSTSEC-2026-0486.
 - **Local badge expiry refusal uses the effective expiry bound.** Renewal expiry checks include the endpoint. Displayed dates and renewal warnings are unchanged.
 - **A push could replace a file in the receiving directory, or write outside it through a symlink.**
   A pushed file now lands only as a new file inside that directory.

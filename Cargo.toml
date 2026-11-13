@@ -38,15 +38,15 @@ bifrost-quirk = { git = "https://github.com/theia-hq/bifrost", rev = "88d097439e
 # theia services. The general engines (fetch, measure, sshh, transfer) live in one repo, pinned to one
 # exact rev like the siblings above; the services repo pins the handler contract in turn, so this is the
 # cascade's outermost hop. The local dev `.cargo/config.toml` [patch]es these by URL to path checkouts.
-fetch = { git = "https://github.com/theia-hq/services", rev = "ea1307302ea7483cebcd4d807357bf07cedb0223" }
+fetch = { git = "https://github.com/theia-hq/services", rev = "fea5f87a2694e3d9992c99acf9295f8055de8c5e" }
 # The key file store, in its own repo, pinned to the commit that names its key kinds standard and strict
 # and lets a dependent build each touch-id error in its own tests.
 keystore = { git = "https://github.com/theia-hq/keystore", rev = "301c6535c344c21b4ef6694a55c6b9c628663cbb" }
-measure = { git = "https://github.com/theia-hq/services", rev = "ea1307302ea7483cebcd4d807357bf07cedb0223" }
+measure = { git = "https://github.com/theia-hq/services", rev = "fea5f87a2694e3d9992c99acf9295f8055de8c5e" }
 nauthy = { git = "https://github.com/theia-hq/nauthy", rev = "cb9e83728ac36ca43c73584f044c7347b5d01895" }
-sshh = { git = "https://github.com/theia-hq/services", rev = "ea1307302ea7483cebcd4d807357bf07cedb0223", optional = true }
+sshh = { git = "https://github.com/theia-hq/services", rev = "fea5f87a2694e3d9992c99acf9295f8055de8c5e", optional = true }
 tightbeam = { git = "https://github.com/theia-hq/tightbeam", rev = "6fe5e39b8c9eee595a37cfca97f9a3b404efe05e" }
-transfer = { git = "https://github.com/theia-hq/services", rev = "ea1307302ea7483cebcd4d807357bf07cedb0223" }
+transfer = { git = "https://github.com/theia-hq/services", rev = "fea5f87a2694e3d9992c99acf9295f8055de8c5e" }
 
 # The exchange names an update by its BLAKE3 digest, so two devices learn they hold the same one without
 # sending it.
