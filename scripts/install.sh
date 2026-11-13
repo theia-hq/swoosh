@@ -23,13 +23,18 @@ os=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$os" in
   linux) os=linux ;;
   darwin) os=macos ;;
-  *) die "unsupported OS '$os' (linux and macos only; on windows, grab the binary from the releases page)" ;;
+  *) die "unsupported OS '$os'; prebuilt binaries are available for Linux and Apple Silicon macOS" ;;
 esac
 arch=$(uname -m)
 case "$arch" in
   x86_64 | amd64) arch=x86_64 ;;
   arm64 | aarch64) arch=aarch64 ;;
   *) die "unsupported architecture '$arch'" ;;
+esac
+# Only pairs built by the release workflow may reach the download step.
+case "$os:$arch" in
+  linux:x86_64 | linux:aarch64 | macos:aarch64) ;;
+  *) die "no prebuilt binary for Intel Macs; build from source or use an Apple Silicon Mac" ;;
 esac
 asset="${BIN}-${arch}-${os}"
 base="https://github.com/${REPO}/releases/latest/download"
