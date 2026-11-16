@@ -35,7 +35,8 @@ use tightbeam::tunnel::{
 };
 
 use super::{
-    Keeper, ReachKind, keeper_line, reach_section, render_banner, serving_line, supervised,
+    Keeper, ReachKind, keeper_line, reach_section, render_banner, serving_block, supervised,
+    waiting_warnings,
 };
 
 /// n0's relay and n0's discovery: the bind every banner test but the reach-flag one is about, and the
@@ -216,24 +217,26 @@ fn update_route(router: Router) -> Router {
         .expect("the update route binds")
 }
 
-/// The banner is this machine's key, what it serves and who reaches each, then how to stop: no
-/// transport block unless asked for, and none of the node's own `control.*` routes.
 #[test]
-fn the_banner_is_the_key_what_it_serves_and_how_to_stop() {
-    let names = ["ping".to_owned(), "speed".to_owned()];
+fn the_banner_frames_selection_actual_targets_and_how_to_stop() {
+    let serving = serving_block(
+        &swoosh::serve::Started::Default,
+        Some(&swoosh::serve::Started::Default),
+        &default_manifest(),
+    )
+    .unwrap();
     let banner = render_banner(
+        "swoosh is serving",
         "ed01exampleid",
-        serving_line(&names, &default_manifest()).as_deref(),
+        &serving,
         None,
         None,
         "ctrl-c to stop",
     );
     assert_eq!(
         banner,
-        "key: ed01exampleid\nserving: ping (your devices), speed (your devices)\nctrl-c to stop\n"
+        "swoosh is serving\n\n  key            ed01exampleid\n\nserving\n  selection  default services\n  ping       your devices  ping:\n  speed      your devices  speed:\nctrl-c to stop\n"
     );
-
-    // Under `--verbose` the transport block rides between what it serves and how to stop.
     let transport = reach_section(
         ReachKind::Internet,
         &heard_on_the_network(),
@@ -241,58 +244,121 @@ fn the_banner_is_the_key_what_it_serves_and_how_to_stop() {
         &wildcard_bind(),
     );
     let verbose = render_banner(
+        "swoosh is serving",
         "ed01exampleid",
-        serving_line(&names, &default_manifest()).as_deref(),
+        &serving,
         Some(&transport),
         None,
         "ctrl-c to stop",
     );
-    assert!(verbose.contains("how peers reach you"), "{verbose}");
+    assert!(verbose.contains("how peers reach you"));
+    assert!(verbose.ends_with("ctrl-c to stop\n"));
+    assert!(!verbose.contains("control."));
+}
+
+#[test]
+fn explicit_origin_is_not_inferred_from_saved_target_equality() {
+    use swoosh::serve::Started;
+    let entries = vec!["ping=ping:".to_owned()];
+    for (started, origin) in [
+        (Started::Named(entries.clone()), "this run only (not saved)"),
+        (Started::Resumed(entries.clone()), "saved services"),
+        (Started::Default, "default services"),
+    ] {
+        let out = serving_block(
+            &started,
+            Some(&Started::Resumed(started.entries())),
+            &default_manifest(),
+        )
+        .unwrap();
+        assert!(out.contains(&format!("  selection  {origin}\n")));
+        assert!(!out.contains("saved for bare start"));
+        assert!(!out.contains("apply to the next bare serve"));
+    }
+}
+
+/// A home that never saved a list holds no saved services: the defaults a bare start would serve are not
+/// shown as saved beside an explicit selection.
+#[test]
+fn an_explicit_start_on_a_fresh_home_shows_no_defaults_as_saved() {
+    use swoosh::serve::Started;
+    let started = Started::Named(vec!["ssh=sshd:".to_owned()]);
+    let out = serving_block(&started, Some(&Started::Default), &default_manifest()).unwrap();
+    assert!(!out.contains("saved for bare start"), "{out}");
+    assert!(!out.contains("apply to the next bare serve"), "{out}");
     assert!(
-        verbose.starts_with("key: ed01exampleid\nserving: ")
-            && verbose.ends_with("ctrl-c to stop\n"),
-        "{verbose}"
+        out.contains("  selection  this run only (not saved)\n"),
+        "{out}"
     );
 }
 
-/// A service opened with `--public` reads `(anyone)`, the rest `(your devices)`, in the order they were
-/// named.
 #[test]
-fn the_serving_line_names_who_reaches_each_service() {
-    let manifest = vec![
-        entry_open("logs", TargetKind::RawStream, None),
-        entry_gated("ping", TargetKind::Handler, Some(Metering::Unmetered)),
-        entry_open("speed", TargetKind::Handler, Some(Metering::Metered)),
-        entry_gated("ssh", TargetKind::Handler, None),
-    ];
-    let names = ["ssh", "ping", "speed", "logs"].map(str::to_owned);
+fn serving_rows_keep_bound_only_and_adjacent_saved_alternatives() {
+    use swoosh::serve::Started;
+    let started = Started::Named(vec![
+        "web=tcp:bound:1".to_owned(),
+        "logs=file:/bound logs".to_owned(),
+    ]);
+    let saved = Started::Resumed(vec!["web=tcp:saved:2".to_owned(), "ping=ping:".to_owned()]);
+    let manifest = vec![entry_open("logs", TargetKind::RawStream, None)];
+    let out = serving_block(&started, Some(&saved), &manifest).unwrap();
     assert_eq!(
-        serving_line(&names, &manifest).as_deref(),
-        Some("ssh (your devices), ping (your devices), speed (anyone), logs (anyone)")
+        out,
+        "serving\n  selection       this run only (not saved)\n  web             your devices          tcp:bound:1\n  web             saved for bare start  tcp:saved:2\n  logs            anyone                file:/bound logs\n  ping            saved for bare start  ping:\n  saved services  apply to the next bare serve\n"
     );
+    let values = [
+        "this run only",
+        "your devices",
+        "saved for bare start",
+        "anyone",
+        "apply to the next bare serve",
+    ];
+    let columns: Vec<_> = out
+        .lines()
+        .filter_map(|line| values.iter().find_map(|value| line.find(value)))
+        .collect();
+    assert_eq!(columns.len(), 6);
+    assert!(columns.iter().all(|column| *column == 18), "{out}");
+    let unavailable = serving_block(&started, None, &manifest).unwrap();
+    assert!(!unavailable.contains("saved for bare start"));
+    assert!(!unavailable.contains("saved services  apply"));
+    assert!(unavailable.contains("file:/bound logs"));
 }
 
-/// The node's own routes are never listed, however they reach the line.
 #[test]
-fn banner_never_lists_an_internal_route() {
-    let names: Vec<String> = default_manifest()
-        .into_iter()
-        .map(|entry| entry.name)
-        .collect();
-    let banner = render_banner(
-        "ed01exampleid",
-        serving_line(&names, &default_manifest()).as_deref(),
-        None,
-        None,
-        "ctrl-c to stop",
-    );
+fn serving_rows_escape_complete_targets_and_stack_without_splitting() {
+    use swoosh::serve::Started;
+    for target in [
+        "unix:/秘密 with spaces".to_owned(),
+        format!("unix:/{} with spaces", "x".repeat(4096)),
+        "unix:/a\n\r\t\u{1b}\u{202e}".to_owned(),
+    ] {
+        let started = Started::Named(vec![format!("a={target}"), "z=ping:".to_owned()]);
+        let out = serving_block(&started, None, &default_manifest()).unwrap();
+        assert!(out.contains(&format!("{}", swoosh::escape::EscapedComplete(&target))));
+        assert!(!out.contains("..."));
+        assert!(out.lines().all(|line| !line.ends_with(' ')));
+        assert!(out.lines().filter(|line| line.len() > 80).all(
+            |line| line.trim_start() == format!("{}", swoosh::escape::EscapedComplete(&target))
+        ));
+    }
+    let empty = serving_block(
+        &Started::Resumed(vec![]),
+        Some(&Started::Resumed(vec![])),
+        &[],
+    )
+    .unwrap();
+    assert!(empty.contains(
+        "Serving nothing.\nTo save a service for a bare start:\n  swoosh service add <service>\n"
+    ));
+    let internal = Started::Named(vec![
+        "control.stop=echo:".to_owned(),
+        "ping=ping:".to_owned(),
+    ]);
     assert!(
-        !banner.contains("control."),
-        "no internal route in the banner: {banner}"
-    );
-    assert!(
-        banner.contains("serving: ping (your devices), speed (your devices)\n"),
-        "{banner}"
+        !serving_block(&internal, None, &default_manifest())
+            .unwrap()
+            .contains("control.stop")
     );
 }
 
@@ -340,8 +406,9 @@ fn banner_names_the_service_manager_line_when_not_supervised() {
     );
     // The line rides the banner before how to stop.
     let banner = render_banner(
+        "swoosh is serving",
         "ed01exampleid",
-        Some("ping (your devices)"),
+        "serving\n  selection  default services\n",
         None,
         Some(systemd),
         "ctrl-c to stop",
@@ -356,21 +423,38 @@ fn banner_names_the_service_manager_line_when_not_supervised() {
     );
 }
 
-/// A scheme neither half of the grammar knows is refused with a pointer to the one complete list. The
-/// tunnel grammar names the schemes IT routes, and it cannot name the engines swoosh serves on top of it
-/// without a scheme registry it deliberately does not have, so a user who types `png:` would otherwise be
-/// handed a legal set that omits `ping:`.
+// Binding preserves finite refusal categories instead of retaining target text.
 #[test]
-fn an_unknown_scheme_is_pointed_at_the_list_that_holds_both_halves() {
-    for entry in ["x=png:", "x=nonsense", "x=tcp:nope"] {
+fn invalid_targets_have_finite_safe_errors() {
+    use swoosh::serve::{DefinitionCause, DefinitionError, Operand};
+
+    for (entry, cause, words) in [
+        (
+            "x=png:",
+            DefinitionCause::Scheme,
+            "unsupported target scheme",
+        ),
+        ("x=nonsense", DefinitionCause::Arity, "invalid target form"),
+        ("x=tcp:nope", DefinitionCause::Endpoint, "invalid endpoint"),
+    ] {
         let Err(error) = bind_entry(Router::new(gated()), entry, [0u8; 32], &[]) else {
-            panic!("`{entry}` is not a target either half of the grammar routes");
+            panic!("{entry} must refuse");
         };
-        let message = format!("{error:#}");
-        assert!(
-            message.contains("`swoosh serve --help` lists every target this node accepts"),
-            "a refused target points at the list carrying both halves: {message}"
+        assert_eq!(
+            error.downcast_ref::<DefinitionError>(),
+            Some(&DefinitionError {
+                operand: Operand::Positional,
+                index: 1,
+                cause,
+            })
         );
+        assert_eq!(
+            format!("{error:#}"),
+            format!("invalid service definition at index 1: {words}")
+        );
+        for source in error.chain() {
+            assert!(!format!("{source} {source:?}").contains(entry));
+        }
     }
 }
 
@@ -469,14 +553,12 @@ fn ping_with_an_argument_is_refused_rather_than_read_as_a_forward() {
             panic!("`{entry}` gives an argument to an engine that takes none and must be refused");
         };
         let message = format!("{error:#}");
-        assert!(
-            message.contains(&format!("`{scheme}:` takes no argument")),
-            "the refusal names the scheme and the rule: {message}"
+        let _ = scheme;
+        assert_eq!(
+            message,
+            "invalid service definition at index 1: invalid target form"
         );
-        assert!(
-            message.contains("`80`"),
-            "the refusal quotes the offending tail: {message}"
-        );
+        assert!(!message.contains(entry));
     }
     // The zero-argument spelling still binds, so the refusal is about the tail and nothing else.
     assert!(
@@ -1956,12 +2038,15 @@ fn a_second_serve_for_one_home_refuses_and_names_the_fix() {
         (&["ping", "--expires", "1h"][..], stop),
         (&["--expires", "1h"][..], stop),
         (&["--local"][..], stop),
-        (&["ssh", "--public", "ping"][..], stop),
+        (&["probe=echo:", "--public", "ping"][..], stop),
         (&[][..], ""),
-        (&["ssh"][..], "  To add ssh:\n    swoosh service add ssh\n"),
         (
-            &["ssh", "web=tcp:localhost:3000", "ping"][..],
-            "  To add them:\n    swoosh service add ssh web=tcp:localhost:3000\n",
+            &["probe=echo:"][..],
+            "  To save services for a bare start:\n    swoosh service add probe=echo:\n",
+        ),
+        (
+            &["probe=echo:", "web=tcp:localhost:3000", "ping"][..],
+            "  To save services for a bare start:\n    swoosh service add probe=echo: web=tcp:localhost:3000\n",
         ),
     ] {
         let second = serve_once(&scratch, args);
@@ -1990,7 +2075,7 @@ fn refusal_against(args: &[&str], serves: &[&str], off: &[&str]) -> String {
 
     let mut argv = vec!["swoosh", "serve"];
     argv.extend_from_slice(args);
-    let Some(crate::Command::Serve(cmd)) = crate::Cli::try_parse_from(argv)
+    let Some(crate::Command::Serve(mut cmd)) = crate::Cli::try_parse_from(argv)
         .expect("serve parses")
         .command
     else {
@@ -2000,6 +2085,8 @@ fn refusal_against(args: &[&str], serves: &[&str], off: &[&str]) -> String {
         serves: serves.iter().map(|&name| name.to_owned()).collect(),
         off: Some(off.iter().map(|&name| name.to_owned()).collect()),
     };
+    cmd.normalize_services(std::path::Path::new("/work"))
+        .expect("pure claim normalization");
     cmd.running_refusal(4121, Some(&running))
 }
 
@@ -2032,26 +2119,28 @@ fn serve_on_a_running_node_names_service_add() {
     let head = "swoosh serve is already running here (pid 4121)\n  It serves ssh, ping, speed.";
     assert_eq!(
         refusal_against(&["web=tcp:localhost:3000"], &["ssh", "ping", "speed"], &[]),
-        format!("{head}\n  To add web:\n    swoosh service add web=tcp:localhost:3000")
+        format!(
+            "{head}\n  To save services for a bare start:\n    swoosh service add web=tcp:localhost:3000"
+        )
     );
     assert_eq!(
         refusal_against(
             &[
                 "web=tcp:localhost:3000",
                 "proxy:https://news.example",
-                "ssh"
+                "ssh=tcp:localhost:22"
             ],
             &["ssh", "ping", "speed"],
             &[]
         ),
         format!(
-            "{head}\n  To add them:\n    swoosh service add web=tcp:localhost:3000 proxy:https://news.example"
+            "{head}\n  To save services for a bare start:\n    swoosh service add web=tcp:localhost:3000 proxy:https://news.example"
         )
     );
     // Nothing bound: no `It serves` line.
     assert_eq!(
         refusal_against(&["web=tcp:localhost:3000"], &[], &[]),
-        "swoosh serve is already running here (pid 4121)\n  To add web:\n    swoosh service add \
+        "swoosh serve is already running here (pid 4121)\n  To save services for a bare start:\n    swoosh service add \
          web=tcp:localhost:3000"
     );
     assert!(
@@ -2066,11 +2155,15 @@ fn serve_on_a_running_node_names_service_add() {
 fn serve_svc_on_a_running_node_names_service_on() {
     let head = "swoosh serve is already running here (pid 4121)\n  It serves ssh, ping, speed.";
     assert_eq!(
-        refusal_against(&["ssh"], &["ssh", "ping", "speed"], &["ssh"]),
+        refusal_against(
+            &["ssh=tcp:localhost:22"],
+            &["ssh", "ping", "speed"],
+            &["ssh"]
+        ),
         format!("{head}\n  To turn ssh on:\n    swoosh service on ssh")
     );
     assert_eq!(
-        refusal_against(&["ssh"], &["ssh", "ping", "speed"], &[]),
+        refusal_against(&["ssh=tcp:localhost:22"], &["ssh", "ping", "speed"], &[]),
         head,
         "a name it serves and has on needs no fix"
     );
@@ -2083,7 +2176,12 @@ fn serve_with_a_flag_and_an_off_name_says_stop_first() {
     let head = "swoosh serve is already running here (pid 4121)\n  It serves ssh, web.";
     assert_eq!(
         refusal_against(
-            &["ssh", "web=tcp:localhost:3000", "--public", "web"],
+            &[
+                "ssh=tcp:localhost:22",
+                "web=tcp:localhost:3000",
+                "--public",
+                "web"
+            ],
             &["ssh", "web"],
             &["ssh"]
         ),
@@ -2123,6 +2221,11 @@ fn wait_for_off(running: &Running, want: &[&str]) {
 #[test]
 fn service_off_turns_a_started_service_off_live() {
     let scratch = ProcessScratch::new("off-live");
+    std::fs::write(
+        scratch.home_dir.join("serve.toml"),
+        "services = [\"web=echo:\"]\n",
+    )
+    .unwrap();
     let running = Running::start(&scratch, &["--local", "--quiet", "web=echo:"]);
     let off = swoosh_once(&scratch, &["service", "off", "web"]);
     assert_eq!(off.status.code(), Some(0));
@@ -2162,7 +2265,7 @@ fn service_on_and_off_ask_no_running_node() {
     assert_eq!(added.status.code(), Some(0));
     assert_eq!(
         String::from_utf8_lossy(&added.stderr),
-        "Added db; it is served when swoosh serve next starts.\n"
+        "Added db to the saved list.\n"
     );
     for (verb, line) in [
         ("off", "Turned db off here.\n"),
@@ -2197,7 +2300,7 @@ fn service_and_serve_usage_errors_exit_2() {
         ),
         (
             &["service", "add", "db"][..],
-            "error: db needs a target, like db=tcp:<address>:<port>\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &[
@@ -2206,15 +2309,15 @@ fn service_and_serve_usage_errors_exit_2() {
                 "web=tcp:localhost:1",
                 "web=tcp:localhost:2",
             ][..],
-            "error: web is named twice; each service needs its own name\n",
+            "error: invalid service definition at index 2: service name already used\n",
         ),
         (
             &["serve", "--local", "tcp:localhost:3000"][..],
-            "error: tcp:localhost:3000 needs a name, like web=tcp:localhost:3000\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &["serve", "--local", "db"][..],
-            "error: db needs a target, like db=tcp:<address>:<port>\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
     ] {
         let out = swoosh_once(&scratch, args);
@@ -2238,19 +2341,19 @@ fn serve_a_bare_port_refuses_and_names_a_service_name() {
     for (args, head) in [
         (
             &["serve", "--local", "3000"][..],
-            "error: 3000 needs a name, like web=tcp:localhost:3000\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &["service", "add", "3000"][..],
-            "error: 3000 needs a name, like web=tcp:localhost:3000\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &["serve", "--local", "app=3000"][..],
-            "error: app=3000 needs a target, like app=tcp:localhost:3000\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
         (
             &["service", "add", "app=3000"][..],
-            "error: app=3000 needs a target, like app=tcp:localhost:3000\n",
+            "error: invalid service definition at index 1: invalid target form\n",
         ),
     ] {
         let out = swoosh_once(&scratch, args);
@@ -2279,7 +2382,7 @@ fn recv_with_a_dir_names_itself_recv() {
     let listed = std::fs::read_to_string(scratch.home_dir.join("serve.toml")).expect("the list");
     assert!(listed.contains("\"recv=recv:/tmp/x\""), "{listed}");
     assert_eq!(
-        swoosh::serve::service_entry("recv:").expect("recv: alone parses"),
+        definition("recv:").expect("recv: alone parses"),
         "recv=recv:"
     );
     assert_eq!(swoosh::serve::as_typed("recv=recv:/tmp/x"), "recv:/tmp/x");
@@ -2325,11 +2428,11 @@ fn quiet_serve_prints_no_banner_and_no_activity() {
     );
 }
 
-/// A list edited by hand to hold an entry that is not a service stops a bare `serve` with exit 1, naming the
-/// file: nothing was typed, so it is never a usage error, which a service manager would restart on forever
-/// with a usage line about a command line no one wrote.
+/// A list edited by hand to hold an entry that is not a service stops a bare `serve` with exit 1, as a saved
+/// definition by its index and without the entry's text: nothing was typed, so it is never a usage error,
+/// which a service manager would restart on forever with a usage line about a command line no one wrote.
 #[test]
-fn a_hand_edited_list_with_a_non_service_exits_1_naming_the_file() {
+fn a_hand_edited_list_with_a_non_service_exits_1_as_a_saved_definition() {
     let scratch = ProcessScratch::new("not-a-service");
     for entry in ["db", "tcp:localhost:3000"] {
         std::fs::write(
@@ -2341,9 +2444,8 @@ fn a_hand_edited_list_with_a_non_service_exits_1_naming_the_file() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(1), "{entry}: {stderr}");
         assert!(
-            stderr.contains(&format!(
-                "serve.toml lists {entry}, which is not a service\n  Edit that file to fix or remove the entry."
-            )),
+            stderr.contains("invalid saved service definition at index 1: invalid target form")
+                && !stderr.contains(entry),
             "{entry}: {stderr}"
         );
         assert!(!stderr.contains("Usage:"), "{entry}: {stderr}");
@@ -2379,68 +2481,51 @@ fn an_emptied_list_does_not_bring_the_starter_back() {
     );
     let printed = running.stop();
     assert!(
-        printed.contains("Serving nothing.\nTo add a service:\n  swoosh service add <service>\n"),
+        printed.contains("Serving nothing.\nTo save a service for a bare start:\n  swoosh service add <service>\n"),
         "{printed}"
     );
 }
 
-/// What a named `serve` replaced, said before its banner: one block for every entry it no longer serves,
-/// with one `service add` bringing them all back as typed, then a line per kept name pointed elsewhere.
 #[test]
-fn a_named_serve_says_what_it_replaced() {
-    use swoosh::serve::Replaced;
-
-    assert_eq!(super::replaced_lines(&Replaced::default()), None);
-    let one = Replaced {
-        dropped: vec!["drop=recv:/Users/m/Drop".to_owned()],
-        retargeted: Vec::new(),
-    };
-    assert_eq!(
-        super::replaced_lines(&one).as_deref(),
-        Some(
-            "No longer serving drop.\nTo add it back:\n  swoosh service add drop=recv:/Users/m/Drop\n"
-        )
-    );
-    let several = Replaced {
-        dropped: vec!["ping=ping:".to_owned(), "speed=speed:".to_owned()],
-        retargeted: vec![(
-            "web".to_owned(),
-            "tcp:localhost:4000".to_owned(),
-            "tcp:localhost:3000".to_owned(),
-        )],
-    };
-    assert_eq!(
-        super::replaced_lines(&several).as_deref(),
-        Some(
-            "No longer serving ping, speed.\nTo add them back:\n  swoosh service add ping speed\nweb now \
-             serves tcp:localhost:4000 instead of tcp:localhost:3000.\n"
-        )
-    );
+fn bare_serve_uses_saved_or_default_services_not_the_previous_invocation() {
+    for saved in [None, Some("services = ['speed=speed:']\n")] {
+        let scratch = ProcessScratch::new("invocation-then-bare");
+        let file = scratch.home_dir.join("serve.toml");
+        if let Some(saved) = saved {
+            std::fs::write(&file, saved).unwrap();
+        }
+        let named = serve_once(&scratch, &["--local", "--expires", "1s", "ping"]);
+        assert!(
+            named.status.success(),
+            "{}",
+            String::from_utf8_lossy(&named.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&named.stdout);
+        let stderr = String::from_utf8_lossy(&named.stderr);
+        assert!(stdout.contains("this run only (not saved)"));
+        assert!(!stderr.contains("No longer serving"));
+        assert!(!stderr.contains("now serves"));
+        assert_eq!(std::fs::read_to_string(&file).ok().as_deref(), saved);
+        let bare = Running::start(&scratch, &["--local"]);
+        let expected = if saved.is_some() {
+            vec![("speed".to_owned(), Posture::Gated)]
+        } else {
+            vec![
+                ("ping".to_owned(), Posture::Gated),
+                ("speed".to_owned(), Posture::Gated),
+            ]
+        };
+        assert_eq!(bare.catalog(), Some(expected));
+        let out = bare.stop();
+        assert!(out.contains(if saved.is_some() {
+            "selection  saved services"
+        } else {
+            "selection  default services"
+        }));
+    }
 }
 
-/// A bare `serve` serves the list this home last started with.
-#[test]
-fn bare_serve_resumes_the_last_named_list() {
-    let scratch = ProcessScratch::new("resume");
-    Running::start(&scratch, &["--local", "ssh", "ping"]).stop();
-
-    let resumed = Running::start(&scratch, &["--local"]);
-    assert_eq!(
-        resumed.catalog(),
-        Some(vec![
-            ("ping".to_owned(), Posture::Gated),
-            ("ssh".to_owned(), Posture::Gated)
-        ]),
-        "a restart serves ssh and ping again, and not the default speed"
-    );
-    let stdout = resumed.stop();
-    assert!(
-        stdout.contains("serving: ssh (your devices), ping (your devices)\n"),
-        "{stdout}"
-    );
-}
-
-/// Only the services are kept: a service opened to anyone on one run is behind the gate on the next.
+/// `--public`, `--public-unsafe`, `--admit` and `--expires` also apply only to this run.
 #[test]
 fn bare_serve_never_resumes_public() {
     let scratch = ProcessScratch::new("public");
@@ -2467,23 +2552,27 @@ fn bare_serve_never_resumes_public() {
 
 /// A start that fails leaves what the next bare `serve` resumes as it was.
 #[test]
-fn serving_is_written_only_after_bind() {
+fn successful_and_failed_launches_leave_service_policy_unchanged() {
     let scratch = ProcessScratch::new("afterbind");
-    Running::start(&scratch, &["--local", "--quiet", "ping"]).stop();
     let serving = scratch.home_dir.join("serve.toml");
-    let before = std::fs::read_to_string(&serving).expect("a named run records its list");
-    assert_eq!(before, "services = [\"ping=ping:\"]\n");
+    let before = "off = [\"ping\", \"unlisted\"]\nservices = [\"speed=speed:\"]\n";
+    std::fs::write(&serving, before).unwrap();
+    Running::start(&scratch, &["--local", "--quiet", "ping"]).stop();
+    assert_eq!(std::fs::read_to_string(&serving).unwrap(), before);
 
     // A keyless shell cannot be opened to anyone, and a scheme nobody serves cannot bind: both refuse
     // after the list is known and before anything serves.
-    for args in [
-        &["--local", "ssh", "--public", "ssh"][..],
-        &["--local", "speed", "x=png:"][..],
+    for (args, code) in [
+        #[cfg(feature = "ssh")]
+        (&["--local", "ssh", "--public", "ssh"][..], 1),
+        #[cfg(not(feature = "ssh"))]
+        (&["--local", "ssh", "--public", "ssh"][..], 2),
+        (&["--local", "speed", "x=png:"][..], 2),
     ] {
         let failed = serve_once(&scratch, args);
         assert_eq!(
             failed.status.code(),
-            Some(1),
+            Some(code),
             "serve {args:?} refuses: {}",
             String::from_utf8_lossy(&failed.stderr)
         );
@@ -2526,12 +2615,15 @@ fn a_refused_serve_leaves_status_showing_the_next_start() {
     let scratch = ProcessScratch::new("refused");
     let home = Home::resolve(Some(scratch.home_dir.clone())).expect("the scratch home resolves");
     let socket = runtime_leaf(&home, &scratch.xdg).join("control.sock");
-    for args in [
-        &["--local", "ssh", "--public", "ssh"][..],
-        &["--local", "speed", "x=png:"][..],
+    for (args, code) in [
+        #[cfg(feature = "ssh")]
+        (&["--local", "ssh", "--public", "ssh"][..], 1),
+        #[cfg(not(feature = "ssh"))]
+        (&["--local", "ssh", "--public", "ssh"][..], 2),
+        (&["--local", "speed", "x=png:"][..], 2),
     ] {
         let failed = serve_once(&scratch, args);
-        assert_eq!(failed.status.code(), Some(1), "serve {args:?} refuses");
+        assert_eq!(failed.status.code(), Some(code), "serve {args:?} refuses");
         assert!(!socket.exists(), "serve {args:?} leaves no socket");
         assert_eq!(
             status_serving(&scratch),
@@ -2571,8 +2663,8 @@ fn a_terminated_serve_removes_its_socket() {
     );
     assert_eq!(
         status_serving(&scratch),
-        Some("serving: ping, when swoosh serve runs".to_owned()),
-        "the stopped node's recorded ping list starts next time"
+        Some("serving: ping, speed, when swoosh serve runs".to_owned()),
+        "an explicit start leaves the next bare start at defaults"
     );
 }
 
@@ -2590,15 +2682,15 @@ fn a_killed_serve_leaves_status_showing_the_next_start() {
     );
     assert_eq!(
         status_serving(&scratch),
-        Some("serving: ping, when swoosh serve runs".to_owned()),
-        "the stopped node's recorded ping list starts next time"
+        Some("serving: ping, speed, when swoosh serve runs".to_owned()),
+        "an explicit start leaves the next bare start at defaults"
     );
 }
 
-/// A service a start adds to the list is served even if it was turned off before, and a bare `serve` says
-/// which of its services are off rather than turning them on.
+/// Explicit service constructors select only this invocation; they do not change saved services or
+/// clear `off` names.
 #[test]
-fn naming_a_new_service_at_start_clears_it_from_off() {
+fn naming_an_off_only_service_at_start_retains_every_off_name() {
     let scratch = ProcessScratch::new("new-off");
     let file = scratch.home_dir.join("serve.toml");
     std::fs::write(&file, "off = [\"web\", \"speed\"]\n").expect("two services turned off");
@@ -2606,14 +2698,14 @@ fn naming_a_new_service_at_start_clears_it_from_off() {
     let running = Running::start(&scratch, &["--local", "--quiet", "web=echo:"]);
     assert_eq!(
         running.off().as_deref(),
-        Some(&["speed".to_owned()][..]),
-        "web is admitted from this start"
+        Some(&["speed".to_owned(), "web".to_owned()][..]),
+        "web remains refused"
     );
     running.stop();
     assert_eq!(
         std::fs::read_to_string(&file).expect("the setting"),
-        "off = [\"speed\"]\nservices = [\"web=echo:\"]\n",
-        "naming web, which the list did not hold, turns it back on, and leaves speed off"
+        "off = [\"web\", \"speed\"]\n",
+        "the complete off policy remains unchanged"
     );
 
     std::fs::write(&file, "off = [\"ping\"]\n").expect("ping turned off again");
@@ -2665,7 +2757,7 @@ fn a_start_never_clears_off_for_a_listed_name() {
     Running::start(&fresh, &["--local", "--quiet", "ping", "web=echo:"]).stop();
     assert_eq!(
         std::fs::read_to_string(&file).expect("the setting"),
-        "off = [\"ping\"]\nservices = [\"ping=ping:\", \"web=echo:\"]\n",
+        "off = [\"ping\"]\n",
         "ping stays off"
     );
 }
@@ -2852,11 +2944,10 @@ fn serve_local_keeps_the_persisted_key_across_two_runs() {
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        // The banner's first line: `key: ` and the full key.
+        // The key fact remains the full persisted identity.
         let reported = stdout
             .lines()
-            .next()
-            .and_then(|line| line.strip_prefix("key: "))
+            .find_map(|line| line.strip_prefix("  key            "))
             .unwrap_or_else(|| {
                 panic!("serve --local run {run} prints the banner key line: {stdout}")
             });
@@ -3638,6 +3729,46 @@ fn serve_refuses_reserved_explicit_names_before_home_writes() {
     ]);
 }
 
+#[tokio::test]
+async fn cli_definition_failures_never_echo_credentials_or_prepare_a_valid_prefix() {
+    let scratch = ProcessScratch::new("safe-definition-errors");
+    let home = Home::resolve(Some(scratch.home_dir.clone())).unwrap();
+    let policy = home.serve_toml();
+    let accepted = b"services = ['speed=speed:']\noff = ['raw']\n";
+    std::fs::write(&policy, accepted).unwrap();
+    for entry in [
+        "bad=proxy:https://user:secret@host.test/?token=private",
+        "secret/name=echo:",
+        "bad=ping:secret",
+    ] {
+        let parsed = <crate::Cli as clap::Parser>::try_parse_from([
+            "swoosh",
+            "serve",
+            "raw=stdin:",
+            "drop=recv:",
+            entry,
+        ])
+        .unwrap();
+        let Some(crate::Command::Serve(cmd)) = parsed.command else {
+            panic!("serve parses")
+        };
+        let error = cmd
+            .claim(&home)
+            .await
+            .expect_err("complete validation precedes preparation");
+        assert!(error.downcast_ref::<swoosh::serve::Mistyped>().is_some());
+        for cause in error.chain() {
+            let text = format!("{cause:?} {cause}");
+            for forbidden in [entry, "secret", "private", "user:", "host.test"] {
+                assert!(!text.contains(forbidden), "{text}");
+            }
+        }
+        assert!(format!("{error:#}").contains("index 3"));
+        assert_eq!(std::fs::read(&policy).unwrap(), accepted);
+        assert_eq!(std::fs::read_dir(&scratch.home_dir).unwrap().count(), 1);
+    }
+}
+
 fn assert_reserved_serve_entries(entries: &[&str]) {
     let scratch = ProcessScratch::new("reserved");
     let path = scratch.home_dir.join("serve.toml");
@@ -3645,30 +3776,28 @@ fn assert_reserved_serve_entries(entries: &[&str]) {
     std::fs::write(&path, original).unwrap();
     let before = std::fs::metadata(&path).unwrap().modified().unwrap();
     for entry in entries {
-        let error = <crate::Cli as clap::Parser>::try_parse_from([
+        <crate::Cli as clap::Parser>::try_parse_from([
             "swoosh",
             "--home",
             scratch.home_dir.to_str().unwrap(),
             "serve",
             entry,
         ])
-        .expect_err("a reserved name refuses at the actual CLI parser");
-        assert_eq!(error.exit_code(), 2);
-        let name = entry.split('=').next().unwrap().to_ascii_lowercase();
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("{name} is reserved: pick another name"))
-        );
-        assert!(
-            matches!(swoosh::serve::service_entry(entry), Err(swoosh::serve::EntryError::Name(swoosh::names::NameError::Reserved(found))) if found == name)
-        );
+        .expect("definition validation occurs after clap without raw operand echo");
+        assert!(matches!(
+            definition(entry),
+            Err(swoosh::serve::DefinitionError {
+                operand: swoosh::serve::Operand::Positional,
+                index: 1,
+                cause: swoosh::serve::DefinitionCause::Name,
+            })
+        ));
         let output = swoosh_once(&scratch, &["serve", entry]);
         assert_eq!(output.status.code(), Some(2));
         assert!(
             String::from_utf8(output.stderr)
                 .unwrap()
-                .contains(&format!("{name} is reserved: pick another name"))
+                .contains("invalid service definition at index 1: invalid service name")
         );
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert_eq!(
@@ -3681,16 +3810,12 @@ fn assert_reserved_serve_entries(entries: &[&str]) {
 
 #[test]
 fn serve_preserves_callable_names_short_forms_and_unnamed_target_teaching() {
-    use swoosh::serve::{Mistyped, service_entry};
+    use swoosh::serve::Mistyped;
 
     for (entry, expected) in [
         ("Me=ping:", "me=ping:"),
         ("Root=ping:", "root=ping:"),
         ("Anyone=ping:", "anyone=ping:"),
-        ("Me", "me"),
-        ("Root", "root"),
-        ("Anyone", "anyone"),
-        ("SSH", "ssh=sshd:"),
         ("Ping", "ping=ping:"),
         ("Speed", "speed=speed:"),
         ("recv:", "recv=recv:"),
@@ -3699,21 +3824,57 @@ fn serve_preserves_callable_names_short_forms_and_unnamed_target_teaching() {
             "proxy=proxy:https://pkgs.example.com",
         ),
         ("Web=tcp:localhost:3000", "web=tcp:localhost:3000"),
-        ("tcp:localhost:3000", "tcp:localhost:3000"),
-        ("3000", "3000"),
     ] {
-        assert_eq!(service_entry(entry).unwrap(), expected);
+        assert_eq!(definition(entry).unwrap(), expected);
         assert!(<crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry]).is_ok());
+    }
+    #[cfg(feature = "ssh")]
+    {
+        assert_eq!(definition("SSH").unwrap(), "ssh=sshd:");
+        assert_eq!(
+            refusal_against(&["SSH"], &["ssh"], &["ssh"]),
+            "swoosh serve is already running here (pid 4121)\n  It serves ssh.\n  To turn ssh on:\n    swoosh service on ssh"
+        );
+    }
+    #[cfg(not(feature = "ssh"))]
+    for entry in ["SSH", "ssh=sshd:"] {
+        let Some(crate::Command::Serve(mut cmd)) =
+            <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
+                .unwrap()
+                .command
+        else {
+            panic!("serve parses");
+        };
+        assert!(matches!(
+            cmd.normalize_services(std::path::Path::new("/work")),
+            Err(swoosh::serve::ServingError::Definition(
+                swoosh::serve::DefinitionError {
+                    operand: swoosh::serve::Operand::Positional,
+                    index: 1,
+                    cause: swoosh::serve::DefinitionCause::Scheme,
+                }
+            ))
+        ));
     }
     for name in ["me", "root", "anyone", "ssh", "ping", "speed"] {
         assert!(swoosh::names::service(name).is_ok());
     }
+    for entry in ["ssh=sshd:22", "ssh=sshd:+lossy"] {
+        assert!(definition(entry).is_err());
+        assert!(Mistyped::check(&[entry.to_owned()]).is_err());
+    }
     for entry in ["tcp:localhost:3000", "3000", "me", "root", "anyone"] {
-        let parsed = service_entry(entry).unwrap();
-        assert!(
-            Mistyped::check(&[parsed]).is_err(),
-            "an unnamed target or non-built-in name still needs teaching"
-        );
+        assert!(definition(entry).is_err());
+        assert!(Mistyped::check(&[entry.to_owned()]).is_err());
+    }
+}
+
+/// `entry` as `serve` normalizes it when typed alone, or the refusal it gets there.
+fn definition(entry: &str) -> Result<String, swoosh::serve::DefinitionError> {
+    match swoosh::serve::Started::positional(&[entry.to_owned()], std::path::Path::new("/work")) {
+        Ok(started) => Ok(started.entries().remove(0)),
+        Err(swoosh::serve::ServingError::Definition(error)) => Err(error),
+        Err(error) => panic!("one definition is never a mistyped list: {error}"),
     }
 }
 
@@ -3735,7 +3896,7 @@ fn a_bare_proxy_url_names_itself_proxy() {
     assert_eq!(
         cmd.services,
         [
-            "proxy=proxy:https://pkgs.example.com",
+            "proxy:https://pkgs.example.com",
             "pkgs=proxy:https://pkgs.example.com"
         ]
     );
@@ -3758,14 +3919,12 @@ fn serve_proxy_without_a_target_is_a_usage_error() {
         ("files=proxy:", "files=proxy:<url>"),
         ("Files=proxy:", "files=proxy:<url>"),
     ] {
-        let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
-            .expect_err("a proxy with nothing to reach refuses");
-        assert_eq!(error.exit_code(), 2, "`serve {entry}` is a usage error");
-        assert!(
-            error.to_string().contains(&format!(
-                "proxy needs what it reaches: swoosh serve {form}\n"
-            )),
-            "`serve {entry}` names the form to type: {error}"
+        let _ = form;
+        <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry]).unwrap();
+        let error = swoosh::serve::Mistyped::check(&[entry.to_owned()]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid service definition at index 1: invalid proxy origin"
         );
     }
 }
@@ -3804,14 +3963,12 @@ fn a_proxy_url_with_a_path_or_query_is_a_usage_error() {
             "proxy:https://cdn.example",
         ),
     ] {
-        let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
-            .expect_err("a proxy URL with a path or a query refuses");
-        assert_eq!(error.exit_code(), 2, "`serve {entry}` is a usage error");
-        assert!(
-            error.to_string().contains(&format!(
-                "a proxy reaches a whole site, so its URL takes no path or query: swoosh serve {form}\n"
-            )),
-            "`serve {entry}` names the origin to type: {error}"
+        let _ = form;
+        <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry]).unwrap();
+        let error = swoosh::serve::Mistyped::check(&[entry.to_owned()]).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid service definition at index 1: invalid proxy origin"
         );
     }
 
@@ -3837,17 +3994,12 @@ fn a_proxy_url_that_is_not_http_or_https_is_a_usage_error() {
         ("dl=proxy:file:///etc/passwd", "dl=proxy:https://<host>"),
         ("dl=proxy:data:text/plain,x", "dl=proxy:https://<host>"),
     ] {
-        let error = <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry])
-            .expect_err("a proxy URL that is not http or https refuses");
-        assert_eq!(error.exit_code(), 2, "`serve {entry}` is a usage error");
-        // clap echoes the argv it refused; the entry's own line is what must name nothing typed.
-        let line = swoosh::serve::service_entry(entry)
-            .expect_err("refused at the entry")
-            .to_string();
+        let _ = form;
+        <crate::Cli as clap::Parser>::try_parse_from(["swoosh", "serve", entry]).unwrap();
+        let error = swoosh::serve::Mistyped::check(&[entry.to_owned()]).unwrap_err();
         assert_eq!(
-            line,
-            format!("a proxy reaches only http and https sites: swoosh serve {form}"),
-            "`serve {entry}`"
+            error.to_string(),
+            "invalid service definition at index 1: invalid proxy origin"
         );
     }
 }
@@ -3863,7 +4015,7 @@ fn a_proxy_origin_with_userinfo_never_names_the_engine() {
     let line = format!("{error:#}");
     assert_eq!(
         line,
-        "a proxy URL cannot carry a user or password (user:pass@)"
+        "invalid service definition at index 1: invalid proxy origin"
     );
     assert!(!line.contains("fetch"), "{line}");
 }
@@ -3909,7 +4061,10 @@ fn bare_proxy_is_refused_with_the_name_addr_teaching_error() {
     let Err(error) = ProxyScope::extract(&mut requested) else {
         panic!("a bare `proxy:` should be refused, not served");
     };
-    assert_eq!(error.to_string(), "proxy: needs a name, like web=proxy:");
+    assert_eq!(
+        error.to_string(),
+        "invalid service definition at index 1: invalid proxy origin"
+    );
 }
 
 /// Non-proxy services pass through in order, and only proxy is de-merged out, so extraction is scoped to proxy
@@ -3960,7 +4115,7 @@ fn a_proxy_entry_with_no_origin_is_refused_at_the_de_merge() {
         assert!(
             error
                 .to_string()
-                .starts_with("proxy needs what it reaches: "),
+                .starts_with("invalid service definition at index 1: invalid proxy origin"),
             "`{entry}`: {error}"
         );
     }
@@ -4045,7 +4200,10 @@ fn bare_recv_is_refused_with_the_name_addr_teaching_error() {
     let Err(error) = extract_recv_services(&mut requested, no_inbox) else {
         panic!("a bare `recv:` should be refused, not served");
     };
-    assert_eq!(error.to_string(), "recv: needs a name, like web=recv:");
+    assert_eq!(
+        error.to_string(),
+        "HOME is not set, so recv: has no inbox to save into; name a directory: swoosh serve recv=recv:<dir>"
+    );
 }
 
 /// Non-recv services pass through in order, and only recv is de-merged out, so extraction is scoped to recv
@@ -4175,7 +4333,8 @@ fn public_speed_builds_and_public_unknown_is_refused() {
 /// manifest.
 #[test]
 fn public_unsafe_reads_anyone_in_the_banner() {
-    let path = std::env::temp_dir().join("swoosh-public-unsafe-banner");
+    // A fixed short path keeps the row within 80 columns on every host; a long temp dir stacks it.
+    let path = std::path::Path::new("/tmp/swoosh-public-unsafe-banner");
     let entry = format!("logs=file:{}", path.display());
     // A family BASE gate (not `Gate::Open`), so the whole-node raw-stream door never fires; the unsafe
     // OVERLAY alone opens `logs` (swoosh's per-service model).
@@ -4200,8 +4359,16 @@ fn public_unsafe_reads_anyone_in_the_banner() {
         "a file: source resolves to an absolute path: {logs:?}"
     );
     assert_eq!(
-        serving_line(&["logs".to_owned()], &manifest).as_deref(),
-        Some("logs (anyone)")
+        serving_block(
+            &swoosh::serve::Started::Named(vec![format!("logs=file:{}", path.display())]),
+            None,
+            &manifest
+        )
+        .unwrap(),
+        format!(
+            "serving\n  selection  this run only (not saved)\n  logs       anyone  file:{}\n",
+            path.display()
+        )
     );
 }
 
@@ -5021,4 +5188,78 @@ async fn fold_into(home: &Home, update: &[u8]) {
     )
     .await
     .expect("the list folds");
+}
+
+#[test]
+fn waiting_warnings_include_the_prefix_in_the_width_and_never_split_names() {
+    use swoosh::serve_toml::Waiting;
+
+    assert!(waiting_warnings(&Waiting::default()).is_empty());
+    let prefix = "warning: saved service ";
+    let suffix = " applies to the next bare serve";
+    let boundary = 80 - prefix.len() - suffix.len();
+    for size in [
+        boundary - 1,
+        boundary,
+        boundary + 1,
+        swoosh::names::Name::MAX_LEN - 1,
+        swoosh::names::Name::MAX_LEN,
+    ] {
+        let name = "a".repeat(size);
+        swoosh::names::service(&name).unwrap();
+        for waiting in [
+            Waiting {
+                added: vec![name.clone()],
+                ..Waiting::default()
+            },
+            Waiting {
+                changed: vec![name.clone()],
+                ..Waiting::default()
+            },
+        ] {
+            let out = waiting_warnings(&waiting);
+            assert_eq!(
+                out.split_whitespace().collect::<Vec<_>>().join(" "),
+                format!("{prefix}{name}{suffix}")
+            );
+            assert!(out.lines().any(|line| line.contains(&name)), "{out}");
+            assert!(out.lines().all(|line| line.len() <= 80), "{out}");
+            if size <= boundary {
+                assert_eq!(out, format!("{prefix}{name}{suffix}\n"));
+            } else {
+                assert!(out.lines().count() > 1, "{out}");
+            }
+        }
+    }
+    let waiting = Waiting {
+        relay: true,
+        resolver: true,
+        added: vec!["one".to_owned()],
+        changed: vec!["two".to_owned()],
+    };
+    assert_eq!(
+        waiting_warnings(&waiting),
+        concat!(
+            "warning: the changed relay in serve.toml takes effect at the next start\n",
+            "warning: the changed resolver in serve.toml takes effect at the next start\n",
+            "warning: saved service one applies to the next bare serve\n",
+            "warning: saved service two applies to the next bare serve\n",
+        )
+    );
+}
+
+#[test]
+fn wide_serving_labels_keep_fixed_words_bounded_and_targets_complete() {
+    use swoosh::serve::Started;
+
+    let name = "a".repeat(63);
+    let started = Started::Named(vec![format!("{name}=ping:")]);
+    let manifest = vec![entry_open(&name, TargetKind::RawStream, None)];
+    let out = serving_block(&started, None, &manifest).unwrap();
+    assert!(
+        out.contains("  selection\n    this run only (not saved)\n"),
+        "{out}"
+    );
+    assert!(out.contains(&format!("  {name}  anyone  ping:\n")), "{out}");
+    assert!(out.lines().all(|line| line.len() <= 80), "{out}");
 }

@@ -2389,58 +2389,102 @@ mod tests {
                 .any(|entry| entry.name == swoosh::serve::RENEWAL_SERVICE),
             "the catalog names the route"
         );
-        for argv in [
-            vec!["swoosh", "serve", "control.renewal=tcp:localhost:1"],
-            vec!["swoosh", "serve", "--public", "control.renewal"],
-        ] {
-            let error = Cli::try_parse_from(&argv).expect_err("the route's name is never typed");
-            assert_eq!(error.exit_code(), 2, "{argv:?} is a usage error");
-        }
+        let Some(Command::Serve(mut cmd)) =
+            Cli::try_parse_from(["swoosh", "serve", "control.renewal=tcp:localhost:1"])
+                .unwrap()
+                .command
+        else {
+            panic!("serve parses");
+        };
+        assert!(
+            cmd.normalize_services(std::path::Path::new("/work"))
+                .is_err()
+        );
+        let error = Cli::try_parse_from(["swoosh", "serve", "--public", "control.renewal"])
+            .expect_err("public names still refuse during clap parsing");
+        assert_eq!(error.exit_code(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A typed service name follows the one name rule, so a dotted internal route (`control.stop`) can never
-    /// be typed: the entry refuses at parse, exit 2, before anything binds. A capital folds.
+    // Constructor names are checked and folded at the pure claim boundary, before anything binds.
     #[test]
     fn a_typed_service_name_cannot_be_an_internal_route() {
-        let error = Cli::try_parse_from(["swoosh", "serve", "control.stop=tcp:localhost:1"])
-            .expect_err("a dotted service name refuses");
-        assert_eq!(error.exit_code(), 2, "a bad name is a usage error");
-        assert!(
-            error.to_string().contains(
-                "control.stop is not a name: a name uses a-z, 0-9 and -, and starts with a letter or digit."
-            ),
-            "the refusal states the rule: {error}"
-        );
-        // A `:` in the name is no exception: the entry is still read as `name=target`.
-        let error = Cli::try_parse_from(["swoosh", "serve", "a:b=tcp:127.0.0.1:1"])
-            .expect_err("a name holding a colon refuses");
-        assert_eq!(error.exit_code(), 2, "a bad name is a usage error");
-        assert!(
-            error.to_string().contains("a:b is not a name"),
-            "the refusal states the rule: {error}"
-        );
-        let Some(Command::Serve(cmd)) =
+        for entry in [
+            "control.stop=tcp:localhost:1",
+            "a:b=tcp:127.0.0.1:1",
+            "control.stop",
+        ] {
+            let Some(Command::Serve(mut cmd)) = Cli::try_parse_from(["swoosh", "serve", entry])
+                .unwrap()
+                .command
+            else {
+                panic!("serve parses");
+            };
+            let error = cmd
+                .normalize_services(std::path::Path::new("/work"))
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                swoosh::serve::ServingError::Definition(swoosh::serve::DefinitionError {
+                    operand: swoosh::serve::Operand::Positional,
+                    index: 1,
+                    cause: swoosh::serve::DefinitionCause::Name,
+                })
+            ));
+            assert_eq!(
+                error.to_string(),
+                "invalid service definition at index 1: invalid service name"
+            );
+        }
+        let Some(Command::Serve(mut cmd)) =
             Cli::try_parse_from(["swoosh", "serve", "Web=tcp:localhost:1"])
                 .expect("a capital name parses")
                 .command
         else {
             panic!("serve parses to the serve verb");
         };
+        cmd.normalize_services(std::path::Path::new("/work"))
+            .unwrap();
         assert_eq!(cmd.services, ["web=tcp:localhost:1"]);
 
         // Every service name a person types takes the same rule: a dotted route refuses at parse, exit 2,
         // wherever it is typed.
+        for verb in ["rm", "on", "off", "add"] {
+            let Some(Command::Service { command: Some(cmd) }) =
+                Cli::try_parse_from(["swoosh", "service", verb, "control.stop"])
+                    .unwrap()
+                    .command
+            else {
+                panic!("service parses");
+            };
+            use crate::commands::service::ServiceCmd;
+            match cmd {
+                ServiceCmd::Rm(cmd) => assert_eq!(
+                    cmd.checked_names().unwrap_err().to_string(),
+                    "invalid service name at index 1"
+                ),
+                ServiceCmd::On(cmd) => assert_eq!(
+                    cmd.here(crate::commands::service::toggle::Way::On)
+                        .unwrap_err()
+                        .to_string(),
+                    "invalid service name at index 1"
+                ),
+                ServiceCmd::Off(cmd) => assert_eq!(
+                    cmd.here(crate::commands::service::toggle::Way::Off)
+                        .unwrap_err()
+                        .to_string(),
+                    "invalid service name at index 1"
+                ),
+                ServiceCmd::Add(cmd) => {
+                    assert!(swoosh::serve::Mistyped::check(&cmd.entries).is_err())
+                }
+            }
+        }
         let key = bifrost::NodeId::from_ed25519_secret(&[3u8; 32]).to_string();
         for argv in [
-            vec!["swoosh", "serve", "control.stop"],
             vec!["swoosh", "serve", "--public", "control.stop"],
             vec!["swoosh", "serve", "--public-unsafe", "control.stop"],
             vec!["swoosh", "share", "control.stop", "anyone"],
-            vec!["swoosh", "service", "off", "control.stop"],
-            vec!["swoosh", "service", "on", "control.stop"],
-            vec!["swoosh", "service", "rm", "control.stop"],
-            vec!["swoosh", "service", "add", "control.stop"],
             vec!["swoosh", "forward", key.as_str(), "control.stop", "-"],
             vec!["swoosh", "ssh", key.as_str(), "--service", "control.stop"],
             vec![

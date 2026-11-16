@@ -529,11 +529,41 @@ async fn the_root_route_is_lookup_root() {
     );
     let root = format!("root:{}", TestRoot::seeded(ALICE_ROOT).node_id());
     let machine = TestNode::seeded(DESK).node_id().to_string();
+    // A positional definition is checked at the claim boundary, not by clap, so its refusal never echoes
+    // the typed text; `Mistyped` is the refusal that exits 2.
+    let Some(crate::Command::Serve(serve)) =
+        Cli::try_parse_from(["swoosh", "serve", "lookup.root=tcp:localhost:1"])
+            .unwrap()
+            .command
+    else {
+        panic!("serve parses");
+    };
+    assert!(matches!(
+        swoosh::serve::Mistyped::check(&serve.services),
+        Err(swoosh::serve::Mistyped(swoosh::serve::DefinitionError {
+            operand: swoosh::serve::Operand::Positional,
+            index: 1,
+            cause: swoosh::serve::DefinitionCause::Name,
+        }))
+    ));
+    // A toggle's name slot is total in clap for the same reason; the verb refuses it as a usage error.
+    let Some(crate::Command::Service {
+        command: Some(crate::commands::service::ServiceCmd::Off(off)),
+    }) = Cli::try_parse_from(["swoosh", "service", "off", "lookup"])
+        .unwrap()
+        .command
+    else {
+        panic!("service off parses");
+    };
+    assert_eq!(
+        off.here(crate::commands::service::toggle::Way::Off)
+            .unwrap_err()
+            .to_string(),
+        "invalid service name at index 1"
+    );
     for argv in [
-        vec!["swoosh", "serve", "lookup.root=tcp:localhost:1"],
         vec!["swoosh", "serve", "--public", "lookup.root"],
         vec!["swoosh", "serve", "--public", "lookup"],
-        vec!["swoosh", "service", "off", "lookup"],
         vec!["swoosh", "share", "lookup.root", "anyone"],
         vec!["swoosh", "contact", "add", "lookup", root.as_str()],
         vec!["swoosh", "contact", "add", "control", root.as_str()],

@@ -40,8 +40,10 @@ fn every_row_has_an_add_form_that_binds_its_own_name() {
         let typed = entry
             .replace("<url>", "https://example.com")
             .replace("<dir>", "/srv/inbox");
-        let parsed = crate::serve::service_entry(&typed).expect("the form a row teaches parses");
-        let (bound, target) = parsed
+        let parsed = crate::serve::Started::positional(&[typed], std::path::Path::new("/work"))
+            .expect("the form a row teaches parses")
+            .entries();
+        let (bound, target) = parsed[0]
             .split_once('=')
             .expect("a parsed entry is always `name=target`");
         assert_eq!(

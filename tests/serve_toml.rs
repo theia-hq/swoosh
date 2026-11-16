@@ -3,7 +3,7 @@
 
 //! `<home>/serve.toml` end to end, through the compiled binary: a `serve` saves its relay only once its
 //! routes bind, a relay the file keeps is read when the file is, by every verb that reads it, and a service
-//! added while `serve` runs is named and starts on the next one. Only the exact spawned pid is ever
+//! added while `serve` runs is named and starts on the next bare start. Only the exact spawned pid is ever
 //! signalled.
 
 use core::time::Duration;
@@ -176,8 +176,8 @@ fn serve(
 }
 
 /// A service added to `serve.toml` while `serve` runs is not served live: the run says, once, that it
-/// starts on the next `serve`, and `status` still lists only what the run started. The next `serve` serves
-/// it.
+/// applies to the next bare `serve`, and `status` still lists only what the run started. The next bare
+/// start serves it; repeating explicit constructors keeps their selection.
 #[test]
 fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
     use std::os::unix::fs::PermissionsExt as _;
@@ -188,25 +188,48 @@ fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
     std::fs::create_dir_all(&run).unwrap();
     std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
 
+    std::fs::create_dir_all(&home).unwrap();
+    let path = home.join("serve.toml");
+    let original = "services = []\noff = [\"unused\"]\n";
+    std::fs::write(&path, original).unwrap();
     let (first, banner, said) = serve(&home, &run, &["ping"]);
+    assert!(banner.contains("\n\n  key            "), "{banner}");
     assert!(
-        banner.contains("serving: ping (your devices)\n"),
+        banner.contains("serving\n  selection       this run only (not saved)\n"),
         "{banner}"
     );
-    let path = home.join("serve.toml");
-    let kept = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(
-        kept, "services = [\"ping=ping:\"]\n",
-        "the run saved its list"
+    assert!(
+        banner.contains("  ping            your devices  ping:\n"),
+        "{banner}"
     );
-    std::fs::write(&path, "services = [\"ping=ping:\", \"speed=speed:\"]\n").unwrap();
+    assert!(
+        banner.contains("  saved services  apply to the next bare serve\n"),
+        "{banner}"
+    );
+    let resolved = swoosh::home::Home::resolve(Some(home.clone())).unwrap();
+    let kept = swoosh::serve_toml::ServeToml::read(&resolved).unwrap();
+    assert_eq!(
+        kept.services,
+        Some(vec![]),
+        "launch preserves saved membership"
+    );
+    assert_eq!(
+        kept.off,
+        std::collections::BTreeSet::from(["unused".to_owned()]),
+        "launch preserves off names"
+    );
+    std::fs::write(
+        &path,
+        "services = [\"ping=ping:\", \"speed=speed:\"]\noff = [\"unused\"]\n",
+    )
+    .unwrap();
 
     let line = said
         .recv_timeout(Duration::from_secs(10))
         .expect("the run names what waits");
     assert_eq!(
         line,
-        "warning: the added service speed in serve.toml takes effect the next time serve starts"
+        "warning: saved service speed applies to the next bare serve"
     );
     let status = swoosh_in(&home, &run, &["status"]);
     assert!(
@@ -220,9 +243,85 @@ fn a_service_added_to_serve_toml_starts_on_the_next_serve() {
     );
     drop(first);
 
-    let (_next, banner, _) = serve(&home, &run, &[]);
+    let (repeated, banner, _) = serve(&home, &run, &["ping"]);
+    assert!(banner.contains("this run only (not saved)\n"), "{banner}");
     assert!(
-        banner.contains("serving: ping (your devices), speed (your devices)\n"),
+        banner.contains("  ping            your devices          ping:\n"),
         "{banner}"
     );
+    assert!(
+        !banner
+            .lines()
+            .any(|line| line.contains("speed") && line.contains("your devices")),
+        "{banner}"
+    );
+    assert!(
+        banner.contains("  speed           saved for bare start  speed:\n"),
+        "{banner}"
+    );
+    drop(repeated);
+
+    let (_next, banner, _) = serve(&home, &run, &[]);
+    assert!(
+        banner.contains("serving\n  selection  saved services\n"),
+        "{banner}"
+    );
+    assert!(
+        banner.contains("  ping       your devices  ping:\n"),
+        "{banner}"
+    );
+    assert!(
+        banner.contains("  speed      your devices  speed:\n"),
+        "{banner}"
+    );
+}
+
+/// An explicit start on a home that never saved a list differs from the defaults from its first moment,
+/// and that is the selection, not a change: neither the banner nor the watch calls the defaults saved.
+/// A real later edit is named once, by itself.
+#[test]
+fn an_explicit_start_on_a_fresh_home_names_only_later_saved_changes() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new("fresh-explicit");
+    let home = scratch.0.join("home");
+    let run = scratch.0.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let (_serving, banner, said) = serve(&home, &run, &["ping"]);
+    assert!(!banner.contains("saved for bare start"), "{banner}");
+    let saved = |line: &String| line.contains("saved service");
+    assert!(
+        !said_within(&said, Duration::from_secs(3)).iter().any(saved),
+        "nothing was saved or changed"
+    );
+
+    std::fs::write(
+        home.join("serve.toml"),
+        "services = [\"ping=ping:\", \"speed=speed:\", \"web=tcp:localhost:3000\"]\n",
+    )
+    .unwrap();
+    let line = core::iter::from_fn(|| said.recv_timeout(Duration::from_secs(10)).ok())
+        .find(saved)
+        .expect("the run names the change");
+    assert_eq!(
+        line,
+        "warning: saved service web applies to the next bare serve"
+    );
+    assert!(
+        !said_within(&said, Duration::from_secs(3)).iter().any(saved),
+        "the change is named once"
+    );
+}
+
+/// The lines `said` gives within `wait`, longer than the run's one-second check, so a line it would say
+/// has had time to come.
+fn said_within(said: &std::sync::mpsc::Receiver<String>, wait: Duration) -> Vec<String> {
+    let deadline = std::time::Instant::now() + wait;
+    core::iter::from_fn(|| {
+        said.recv_timeout(deadline.checked_duration_since(std::time::Instant::now())?)
+            .ok()
+    })
+    .collect()
 }

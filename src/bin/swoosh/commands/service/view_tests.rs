@@ -259,7 +259,7 @@ async fn the_name_service_prints_is_the_name_service_on_takes() {
     let entries = [
         "ping=ping:",
         "speed=speed:",
-        "ssh=ssh:",
+        "ssh=tcp:localhost:22",
         "proxy=proxy:https://example.com",
     ];
     fixture
@@ -492,6 +492,19 @@ async fn file_bounded_targets_remain_complete_beyond_the_optional_wire_limit() {
     let mut out = Vec::new();
     assert!(View.run_to(&fixture.0, &mut out).await.is_err());
     assert!(out.is_empty());
+}
+
+#[tokio::test]
+async fn extracted_wrapping_preserves_service_view_output() {
+    let row = state(
+        &["api=tcp:next:2"],
+        &[("api", "unix:/秘密 with spaces", false)],
+    )
+    .await;
+    assert_eq!(
+        rendered(&row),
+        "  api\n    unix:/秘密 with spaces\n    on, tcp:next:2 from the next start\n"
+    );
 }
 
 #[tokio::test]

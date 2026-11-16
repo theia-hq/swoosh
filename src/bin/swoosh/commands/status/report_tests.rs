@@ -1506,7 +1506,7 @@ fn serving_row(out: &str) -> &str {
 #[tokio::test]
 async fn status_marks_a_listed_service_turned_off() {
     let home = home("listed-off");
-    service_list(&home, &["ssh=ssh:", "web=tcp:localhost:3000"], &[]).await;
+    service_list(&home, &["ssh=sshd:", "web=tcp:localhost:3000"], &[]).await;
     // Catalog order and internal entries cannot become the printable-name source.
     let _resident = LocalResident::start(&home, &["control.stop", "web", "ssh"], None);
     assert_eq!(serving_row(&status(&home).await), "serving: ssh, web");
@@ -1521,16 +1521,16 @@ async fn status_leaves_out_a_service_added_or_removed_while_serving() {
     use crate::commands::service::edit::{ServiceAddCmd, ServiceRmCmd};
 
     let home = home("added-removed");
-    service_list(&home, &["ssh=ssh:", "web=tcp:localhost:3000"], &[]).await;
+    service_list(&home, &["ssh=sshd:", "web=tcp:localhost:3000"], &[]).await;
     let _resident = LocalResident::start(&home, &["ssh", "web", "control.stop"], None);
     ServiceAddCmd {
-        entries: vec![swoosh::serve::service_entry("proxy:https://example.com").unwrap()],
+        entries: vec!["proxy:https://example.com".to_owned()],
     }
     .run(&home)
     .await
     .unwrap();
     ServiceRmCmd {
-        names: vec!["web".parse().unwrap()],
+        names: vec![Some("web".parse().unwrap())],
     }
     .run(&home)
     .await
@@ -1556,7 +1556,7 @@ async fn status_shows_what_a_bare_serve_starts_when_none_runs() {
         Standing::read(&home).await,
         Ok(Standing::Unpinned)
     ));
-    service_list(&home, &["ssh=ssh:", "web=tcp:localhost:3000"], &["web"]).await;
+    service_list(&home, &["ssh=sshd:", "web=tcp:localhost:3000"], &["web"]).await;
     let before = tree(home.dir());
     assert_eq!(
         serving_row(&status(&home).await),
@@ -1617,21 +1617,24 @@ async fn status_reports_a_damaged_serve_toml_as_unknown() {
             assert_eq!(
                 err,
                 format!(
-                    "web is named twice in {}\n  Each service needs its own name; swoosh will not guess which one to keep.\n",
+                    "{}: invalid saved service definition at index 2: service name already used\n",
                     home.serve_toml().display()
                 )
             );
         }
         assert_eq!(tree(home.dir()), before);
     }
-    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:']\n");
+    overwrite(&home.serve_toml(), b"services = ['ssh=sshd:']\n");
     let _resident = LocalResident::start(&home, &["ssh"], None);
-    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:', 'ssh=ssh:']\n");
+    overwrite(
+        &home.serve_toml(),
+        b"services = ['ssh=sshd:', 'ssh=sshd:']\n",
+    );
     assert_eq!(serving_row(&status(&home).await), "serving: unknown");
     drop(_resident);
 
     // A trusted-file opener refusal is not an absent file, nor a daemon-read failure.
-    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:']\n");
+    overwrite(&home.serve_toml(), b"services = ['ssh=sshd:']\n");
     std::fs::set_permissions(
         home.serve_toml(),
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o666),
@@ -1650,7 +1653,7 @@ async fn status_reports_a_damaged_serve_toml_as_unknown() {
     assert!(!err.contains("running swoosh serve"), "{err}");
 
     // A valid file beside a planted non-socket retains the existing, distinct daemon notice.
-    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:']\n");
+    overwrite(&home.serve_toml(), b"services = ['ssh=sshd:']\n");
     let socket = home.control_socket().unwrap();
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     std::fs::set_permissions(
@@ -1710,7 +1713,7 @@ async fn the_name_status_prints_is_the_name_service_on_takes() {
 #[tokio::test]
 async fn status_keeps_the_marks_when_admitting() {
     let home = home("admit-marks");
-    service_list(&home, &["ssh=ssh:", "web=tcp:localhost:3000"], &["web"]).await;
+    service_list(&home, &["ssh=sshd:", "web=tcp:localhost:3000"], &["web"]).await;
     let root = TestRoot::seeded(ROOT).node_id();
     let _resident = LocalResident::start(&home, &["ssh", "web"], Some(root));
     assert_eq!(
@@ -1722,7 +1725,10 @@ async fn status_keeps_the_marks_when_admitting() {
         serving_row(&status(&home).await),
         format!("serving: nothing, admitting root:{root}")
     );
-    overwrite(&home.serve_toml(), b"services = ['ssh=ssh:', 'ssh=ssh:']\n");
+    overwrite(
+        &home.serve_toml(),
+        b"services = ['ssh=sshd:', 'ssh=sshd:']\n",
+    );
     assert_eq!(
         serving_row(&status(&home).await),
         format!("serving: unknown, admitting root:{root}")
@@ -1755,7 +1761,11 @@ fn serving_file_notices_preserve_sources_without_repeating_the_file() {
             EscapedPath(&path)
         )
     );
-    let error = ServingError::Mistyped(Mistyped::Twice("web".to_owned()));
+    let error = ServingError::Mistyped(Mistyped(swoosh::serve::DefinitionError {
+        operand: swoosh::serve::Operand::Saved,
+        index: 2,
+        cause: swoosh::serve::DefinitionCause::Collision,
+    }));
     let expected = format!("{}: {error}", EscapedPath(&path));
     assert_eq!(
         super::serving_file_notice(&home, ReadError::List(error)),
@@ -1770,12 +1780,17 @@ async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
     let home = home("uncallable-services");
     for name in ["control", "lookup"] {
         let entry = format!("{name}=ping:");
-        service_list(&home, &["ssh=ssh:", &entry], &[]).await;
+        service_list(&home, &["ssh=sshd:", &entry], &[]).await;
         let before = tree(home.dir());
         assert!(matches!(
             ServiceState::read(&home, ReadMode::Membership).await,
-            Err(ReadError::List(swoosh::serve::ServingError::NotAService { path, line }))
-                if path == home.serve_toml() && line == entry
+            Err(ReadError::List(swoosh::serve::ServingError::Definition(
+                swoosh::serve::DefinitionError {
+                    operand: swoosh::serve::Operand::Saved,
+                    index: 2,
+                    cause: swoosh::serve::DefinitionCause::Name,
+                }
+            )))
         ));
         let (mut out, mut err) = (Vec::new(), Vec::new());
         run_to(&home, Print::Report, &mut out, &mut err)
@@ -1792,15 +1807,17 @@ async fn status_refuses_uncallable_names_before_intersecting_the_catalog() {
             "{err}"
         );
         assert!(
-            err.contains(&entry) && err.contains("which is not a service"),
+            !err.contains(&entry)
+                && err
+                    .contains("invalid saved service definition at index 2: invalid service name"),
             "{err}"
         );
         assert_eq!(tree(home.dir()), before);
 
-        service_list(&home, &["ssh=ssh:"], &[]).await;
+        service_list(&home, &["ssh=sshd:"], &[]).await;
         let resident = LocalResident::start(&home, &["ssh", "control.stop"], None);
         // The invalid entry is absent from the bound catalog, but the whole file still refuses.
-        service_list(&home, &["ssh=ssh:", &entry], &[]).await;
+        service_list(&home, &["ssh=sshd:", &entry], &[]).await;
         assert_eq!(serving_row(&status(&home).await), "serving: unknown");
         drop(resident);
     }

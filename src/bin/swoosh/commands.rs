@@ -17,6 +17,7 @@ pub mod root;
 pub mod send;
 pub mod serve;
 pub mod service;
+mod service_rows;
 mod service_state;
 pub mod share;
 pub mod speed;

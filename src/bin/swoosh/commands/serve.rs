@@ -2,10 +2,10 @@
 //! this machine's gate, hold the home's control socket, then stay reachable so your devices, and anyone
 //! you gave a link, reach them.
 //!
-//! Bare, it serves what this home last started with (the services in `<home>/serve.toml`), or `ping` and
-//! `speed` when it never named any. `swoosh serve ssh ping` publishes a shell and the round-trip probe;
-//! `ssh`, `ping` and `speed` name themselves, and every other entry is `name=target`. Only the services are remembered:
-//! `--public`, `--public-unsafe`, `--admit` and `--expires` apply to the run that types them. It drives
+//! Bare, it uses the saved services in `<home>/serve.toml`, or `ping` and `speed` if no list is saved.
+//! `swoosh serve ssh ping` selects a shell and round-trip probe for this run without saving them.
+//! `ssh`, `ping` and `speed` name themselves; other entries use `name=target`.
+//! `--public`, `--public-unsafe`, `--admit` and `--expires` also apply only to this run. It drives
 //! tightbeam's tunnel LIBRARY (`Exposer`) directly under swoosh's OWN persisted identity: the node binds
 //! the same key `swoosh ssh` and a signed link root at, gates on the pin read live from swoosh's own
 //! store and on the links this machine signed, and derives the ssh host seed from swoosh's secret, so an
@@ -43,10 +43,9 @@ use swoosh::reaching::{BindRole, ReachCtx, Reaching};
 use swoosh::renewal::PickUp;
 use swoosh::serve::{
     Activity, BoundTargets, CONTROL_SERVICES_SERVICE, CONTROL_STOP_SERVICE, Exchange, FirstRound,
-    InstanceLock, ProxyScope, RecvService, Replaced, Resident, SYNC_SERVICE, ServiceList,
-    SingleError, Started, Stop, StopKind, StopSource, Stopped, acquire_single, bind_entry,
-    bind_lookup, bind_recv, bind_renewal, classify_stop, extract_recv_services,
-    refuse_recv_into_home,
+    InstanceLock, ProxyScope, RecvService, Resident, SYNC_SERVICE, ServiceList, SingleError,
+    Started, Stop, StopKind, StopSource, Stopped, acquire_single, bind_entry, bind_lookup,
+    bind_recv, bind_renewal, classify_stop, extract_recv_services, refuse_recv_into_home,
 };
 use swoosh::serve_toml::{LiveServeToml, ServeToml};
 use swoosh::standing::{Standing, StandingError};
@@ -55,19 +54,19 @@ use tightbeam::duration::Lifetime;
 use tightbeam::tunnel::{CancellationToken, Exposer, ManifestEntry, Posture, Router};
 
 use crate::commands::service::Running;
+use crate::commands::service_rows::{self, Row};
 
 /// Be a node: publish these services behind your gate, then stay reachable.
 #[derive(Debug, Args)]
 pub struct ServeCmd {
-    /// Serve exactly these, saved as this machine's list
+    /// Serve exactly these for this run, without saving them
     // The long form lists every form both halves take: the services swoosh serves under their own names,
     // and the targets served under a name the person gives. A refusal from either half points here, so this
     // list is the one a mistyped form is sent to and it has to be complete.
     #[arg(
         value_name = "service",
-        value_parser = swoosh::serve::service_entry,
-        long_help = "Serve exactly these, saved as this machine's list\n\
-                     With none named, it serves that list, or ping and speed if no list was ever saved.\n\
+        long_help = "Serve exactly these for this run, without saving them\n\
+                     With none named, it serves the saved services, or ping and speed if none are saved.\n\
                      \n\
                      Built in, served under their own names:\n\
                      \x20 ssh                     a shell on this machine\n\
@@ -166,8 +165,8 @@ pub struct ServeCmd {
 /// What a `serve` holds for its whole run, taken before anything binds: the home's single-instance lock
 /// and its bound control socket, and the services this run starts with.
 pub struct Claim {
-    /// `<home>/serve.toml`, read live: the run's one reader of it. The services this run starts with and
-    /// the relay and resolver it binds over come from its first read; the gate and the status ask it after.
+    /// The first file read supplies saved/default services for a bare start, plus relay and resolver
+    /// settings; explicit constructors supply invocation-selected services.
     serve_toml: LiveServeToml,
     /// The services this run starts with, and where they came from.
     started: Started,
@@ -345,6 +344,8 @@ impl ServeCmd {
         // Typed services that cannot be one list are a usage error: refused before the lock, so it reads
         // the same whether or not a `serve` runs here.
         swoosh::serve::Mistyped::check(&self.services)?;
+        let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
+        self.normalize_services(&cwd)?;
         let root = swoosh::home::runtime_root()?;
         let (lock, listener) = match acquire_single(home, &root).await {
             Ok(held) => held,
@@ -354,9 +355,8 @@ impl ServeCmd {
             }
             Err(other) => return Err(eyre::Report::new(other)),
         };
-        let serve_toml = LiveServeToml::load(home)?;
-        let cwd = std::env::current_dir().wrap_err("could not read the current directory")?;
-        let started = Started::of(&self.services, serve_toml.first_read(), home, &cwd)?;
+        let serve_toml = LiveServeToml::load_at(home, &cwd)?;
+        let started = Started::of(&self.services, serve_toml.first_read(), &cwd)?;
         let mut requested = started.entries();
         // An engine that must never face an open gate, bound under a name whose live links were made for
         // something else, is said here, whether named now or resumed. Refusing the start would protect
@@ -390,12 +390,20 @@ impl ServeCmd {
         Ok(self)
     }
 
+    // Refusal reporting needs normalized names before any runtime resource is acquired.
+    pub(crate) fn normalize_services(
+        &mut self,
+        cwd: &std::path::Path,
+    ) -> Result<(), swoosh::serve::ServingError> {
+        self.services = Started::positional(&self.services, cwd)?.entries();
+        Ok(())
+    }
+
     /// The refusal a `serve` prints when one already runs for its home: which one and what it serves, then
     /// the one fix that fits what this run asked for, in order. A flag that changes how the node runs needs a
     /// stop first, and only a new run meets it, so it comes before the rest: the rerun's start then names any
     /// service it keeps off. A name it typed that the running one serves and has off is turned on with
-    /// `service on`; typed entries the running one does not serve are added with one `service add`, served
-    /// from its next start. Typed names it serves and has on, or nothing typed, need no fix: the `It serves` line answers.
+    /// `service on`. Saving services prepares a later bare start; it does not change the running selection.
     fn running_refusal(&self, pid: u32, running: Option<&Running>) -> String {
         let mut out = format!("swoosh serve is already running here (pid {pid})");
         let serves = running
@@ -429,12 +437,8 @@ impl ServeCmd {
             ));
         } else if !new.is_empty() {
             let typed: Vec<&str> = new.iter().map(|(_, typed)| *typed).collect();
-            let which = match new.as_slice() {
-                [(name, _)] => name.as_str(),
-                _ => "them",
-            };
             out.push_str(&format!(
-                "\n  To add {which}:\n    swoosh service add {}",
+                "\n  To save services for a bare start:\n    swoosh service add {}",
                 typed.join(" ")
             ));
         }
@@ -456,9 +460,8 @@ impl ServeCmd {
             || reach.transport != swoosh::transport::Transport::default()
     }
 
-    /// `<home>/serve.toml` as this run's one watcher first read it, when the run claimed its home: the
-    /// root binds over the relay and resolver it holds, the read the services this run starts with came
-    /// from, so the bind and the start never hold the file as read at two different moments.
+    /// The first file read supplies saved/default services for a bare start, plus relay and resolver
+    /// settings; explicit constructors supply invocation-selected services.
     pub fn first_read(&self) -> Option<&ServeToml> {
         self.claim
             .as_ref()
@@ -523,7 +526,7 @@ impl ServeCmd {
     /// Serve the services this run started with under swoosh's identity by driving the tunnel core
     /// directly: parse the services, assemble the route table (`proxy`/`recv` instances, `ping`/`speed`,
     /// the update route, and `sshd` under the `ssh` feature) behind the gate the composition root built,
-    /// record what it serves, print swoosh's banner, and run the exposer and the control socket with the
+    /// keep its captured service selection, print swoosh's banner, and run the exposer and the control socket with the
     /// live cut wired. A service stays gated unless `--public` opens it.
     async fn run_serve<'n: 'p, 'p, T: Transport, D: Discovery>(
         self,
@@ -644,31 +647,12 @@ impl ServeCmd {
                 "bare quirk cannot serve: it does not prove the peer's key; use `--transport quirk+noise`",
             )?;
 
-        // The routes bound: only now does this run save what it was told, in one write: a named list for the
-        // next bare `serve`, with the services it adds to the list turned back on, and the relay and
-        // resolver it was pointed at. A `serve` that did not start saves nothing. A bare `serve` saves no
-        // list.
-        //
-        // What a named list replaces is read from the file as this write found it, and said on stderr before
-        // the banner: an entry it no longer serves, and a kept name it points elsewhere.
         let home_lock = HomeWrite::take(&home).await?;
-        let mut replaced = Replaced::default();
         ServeToml::update(&home_lock, &home, |file| {
-            replaced = started.replaces(file, &home.serve_toml());
-            started.record(file, &home.serve_toml());
             self.reach.keep_reach(file);
         })?;
         drop(home_lock);
-        if let Some(lines) = replaced_lines(&replaced) {
-            eprint!("{lines}");
-        }
-        // From here the watcher holds what this run serves: a service later dropped from `services` is
-        // refused, and a change the run cannot apply is named.
         enabled.serving(&started);
-        // Every start names the services it binds and has off, a named one too: a start never turns back
-        // on a name the list already held, so `serve ssh` over an off ssh binds it and refuses every
-        // stream, and the banner below lists it. Read after the record write, which the watcher holds at
-        // once, so a name this start just turned back on is not named here.
         let off = enabled.off();
         for name in names.iter().filter(|name| off.contains(*name)) {
             eprint!("{}", off_lines(name));
@@ -719,8 +703,13 @@ impl ServeCmd {
             print!(
                 "{}",
                 render_banner(
+                    if self.reach.local {
+                        "swoosh is serving, on this network only"
+                    } else {
+                        "swoosh is serving"
+                    },
                     &addr.node.to_string(),
-                    serving_line(&names, &manifest).as_deref(),
+                    &serving_block(&started, enabled.saved_services().as_ref(), &manifest)?,
                     transport.as_deref(),
                     keeper,
                     &stop_line,
@@ -749,12 +738,8 @@ impl ServeCmd {
             () = sync_rounds(&home, &dial, &fetch, first_round) => unreachable!("the rounds run until the node stops"),
             () = known.watch() => unreachable!("the pick-up route's keys are read until the node stops"),
             () = saved.watch() => unreachable!("the root route's keys are read until the node stops"),
-            // A running `serve` gives service only at its start, so a relay, a resolver or a service
-            // changed in `serve.toml` waits for the next one; this says so once per change. A service added
-            // or retargeted under a name whose live links were made for something else ([`LinksForAnother`])
-            // gets the line that start will print, while the running set stays as it is.
             () = enabled.watch(|waiting| {
-                eprintln!("warning: {waiting}");
+                eprint!("{}", waiting_warnings(waiting));
                 let changed: Vec<String> = waiting.added.iter().chain(&waiting.changed).cloned().collect();
                 match LinksForAnother::among_changed(&home, &enabled.held(), &changed) {
                     Ok(Some(links)) => eprintln!("warning: {links}"),
@@ -860,82 +845,143 @@ where
     Ok(stopped)
 }
 
-/// The `serving:` line's body: each served name in the order it was given, with who reaches it. A name the
-/// run opened to anyone says so, which is how a `--public` typed on a bare `serve` shows on screen. An
-/// internal `control.*` route is never listed. `None` when the run serves nothing, from a list emptied by
-/// `service rm`.
-fn serving_line(names: &[String], manifest: &[ManifestEntry]) -> Option<String> {
-    let line = names
-        .iter()
-        .filter(|name| !name.starts_with("control."))
-        .map(|name| {
-            let open = manifest
-                .iter()
-                .any(|entry| entry.name == *name && entry.posture == Posture::Open);
-            let who = if open { "anyone" } else { "your devices" };
-            format!("{name} ({who})")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    (!line.is_empty()).then_some(line)
+fn service_pairs(entries: &[String]) -> impl Iterator<Item = (&str, &str)> {
+    entries.iter().filter_map(|entry| entry.split_once('='))
 }
 
-/// The block a start prints for one service it binds and has off, before its banner: the service refuses
-/// every stream until it is turned on, so the banner's `serving:` line is never the only word on it. One
-/// block per name, since `service on` takes one service.
+fn serving_block(
+    started: &Started,
+    saved: Option<&Started>,
+    manifest: &[ManifestEntry],
+) -> eyre::Result<String> {
+    use std::collections::BTreeMap;
+    use std::io::Write as _;
+
+    let entries = started.entries();
+    // A home that never saved a list holds no saved services, so its defaults are never shown as saved.
+    let saved_entries = saved
+        .filter(|saved| !matches!(saved, Started::Default))
+        .map(Started::entries);
+    let bound: BTreeMap<_, _> = service_pairs(&entries).collect();
+    let saved_targets: Option<BTreeMap<_, _>> = saved_entries
+        .as_ref()
+        .map(|entries| service_pairs(entries).collect());
+    let selection = match started {
+        Started::Named(_) => "this run only (not saved)",
+        Started::Resumed(_) => "saved services",
+        Started::Default => "default services",
+    };
+    let mut out = Vec::new();
+    let mut rows = Vec::new();
+    for (name, target) in service_pairs(&entries).filter(|(name, _)| !name.starts_with("control."))
+    {
+        let open = manifest
+            .iter()
+            .any(|entry| entry.name == name && entry.posture == Posture::Open);
+        rows.push(Row {
+            name,
+            audience: if open { "anyone" } else { "your devices" },
+            target,
+        });
+        if let Some(target) = saved_targets
+            .as_ref()
+            .and_then(|saved| saved.get(name))
+            .filter(|saved| **saved != target)
+        {
+            rows.push(Row {
+                name,
+                audience: "saved for bare start",
+                target,
+            });
+        }
+    }
+    if let Some(saved_entries) = &saved_entries {
+        for (name, target) in service_pairs(saved_entries)
+            .filter(|(name, _)| !name.starts_with("control.") && !bound.contains_key(name))
+        {
+            rows.push(Row {
+                name,
+                audience: "saved for bare start",
+                target,
+            });
+        }
+    }
+    let differs = saved_targets.as_ref().is_some_and(|saved| *saved != bound);
+    let names = service_rows::label_width(&rows)
+        .max("selection".len())
+        .max(if differs { "saved services".len() } else { 0 });
+    writeln!(out, "serving")?;
+    serving_fact(&mut out, "selection", selection, names)?;
+    service_rows::render_aligned(&rows, names, &mut out)?;
+    if differs {
+        serving_fact(
+            &mut out,
+            "saved services",
+            "apply to the next bare serve",
+            names,
+        )?;
+    }
+    if bound.is_empty() {
+        writeln!(
+            out,
+            "Serving nothing.\nTo save a service for a bare start:\n  swoosh service add <service>"
+        )?;
+    }
+    Ok(String::from_utf8(out)?)
+}
+
+/// Metadata shares the service label column, falling back to the same stacked fixed-word layout.
+fn serving_fact(
+    out: &mut impl std::io::Write,
+    label: &str,
+    value: &'static str,
+    names: usize,
+) -> std::io::Result<()> {
+    if 4 + names + value.len() <= 80 {
+        writeln!(out, "  {label:names$}  {value}")
+    } else {
+        writeln!(out, "  {label}")?;
+        let mut line = service_rows::StateLine { out, column: 0 };
+        line.words(value)?;
+        line.finish()
+    }
+}
+
+/// Account for the diagnostic prefix here, not in the library's unprefixed description.
+fn waiting_warnings(waiting: &swoosh::serve_toml::Waiting) -> String {
+    let mut out = String::new();
+    for fact in waiting.to_string().lines() {
+        out.push_str("warning:");
+        let mut column = "warning:".len();
+        for word in fact.split_ascii_whitespace() {
+            // Validated service names contain no whitespace, so each name remains one whole token.
+            if column + 1 + word.len() > 80 {
+                out.push_str("\n ");
+                column = 1;
+            }
+            out.push(' ');
+            out.push_str(word);
+            column += 1 + word.len();
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Keep off notices, including under quiet: temporary selection does not imply enabled service.
 fn off_lines(name: &str) -> String {
     format!("{name} is off.\nTo turn it on:\n  swoosh service on {name}\n")
 }
 
-/// What a named `serve` changed in the list it replaced, as the lines said before its banner: the entries
-/// it no longer serves, in one block with one `service add` that brings them all back, then each kept name
-/// it points elsewhere. `None` when it changed neither.
-fn replaced_lines(replaced: &Replaced) -> Option<String> {
-    let mut out = String::new();
-    let dropped: Vec<(&str, &str)> = replaced
-        .dropped
-        .iter()
-        .map(|entry| {
-            let name = entry
-                .split_once('=')
-                .map_or(entry.as_str(), |(name, _)| name);
-            (name, swoosh::serve::as_typed(entry))
-        })
-        .collect();
-    if !dropped.is_empty() {
-        let names: Vec<&str> = dropped.iter().map(|(name, _)| *name).collect();
-        let typed: Vec<&str> = dropped.iter().map(|(_, typed)| *typed).collect();
-        let which = if dropped.len() == 1 { "it" } else { "them" };
-        out.push_str(&format!(
-            "No longer serving {}.\nTo add {which} back:\n  swoosh service add {}\n",
-            names.join(", "),
-            typed.join(" ")
-        ));
-    }
-    for (name, now, was) in &replaced.retargeted {
-        out.push_str(&format!("{name} now serves {now} instead of {was}.\n"));
-    }
-    (!out.is_empty()).then_some(out)
-}
-
-/// The banner, as ONE string printed once: this machine's key, what it serves (or how to add a service, when
-/// it serves nothing), the transport block under
-/// `--verbose`, the service-manager line where one applies, and how to stop.
 fn render_banner(
+    title: &str,
     key: &str,
-    serving: Option<&str>,
+    serving: &str,
     transport: Option<&str>,
     keeper: Option<&str>,
     stop_line: &str,
 ) -> String {
-    let mut out = format!("key: {key}\n");
-    match serving {
-        Some(serving) => out.push_str(&format!("serving: {serving}\n")),
-        // An emptied list: the node runs and answers its own routes, and the person is told how to fill it.
-        None => {
-            out.push_str("Serving nothing.\nTo add a service:\n  swoosh service add <service>\n")
-        }
-    }
+    let mut out = format!("{title}\n\n  key            {key}\n\n{serving}");
     if let Some(transport) = transport {
         out.push('\n');
         out.push_str(transport);

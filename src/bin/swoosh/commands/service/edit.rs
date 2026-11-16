@@ -6,11 +6,10 @@
 //! `Nothing was removed.` under it when more than one was typed, so no one reads the entries before the bad
 //! one as landed). Otherwise one line per service, in the order typed.
 //!
-//! `add` takes `serve`'s forms, and on a home that never named a list starts from what a bare `serve`
-//! served, so an add never removes. A running `serve` binds only at its start, so what it adds is served
-//! from its next start. `add` reads the running `serve`'s socket for one line only: a name already listed
-//! that the running one did not bind says it is served from the next start too. Whether the write happens
-//! never depends on that read. `rm` retains all `off` names.
+//! `add` uses `serve`'s service forms and preserves defaults when no list is saved.
+//! It edits only the saved list; a bare `serve` uses that list without clearing off names.
+//! Running-service observations affect reporting only, never whether the edit is saved.
+//! `rm` retains all `off` names.
 //!
 //! A name typed twice is a usage error, exit 2, before the home is read.
 
@@ -20,17 +19,14 @@ use swoosh::home::{Home, HomeWrite};
 use swoosh::serve::{Added, EditError, Mistyped, ServingError, as_typed};
 use swoosh::serve_toml::ServeToml;
 
+use super::name_input::{self, NameError};
 use super::{Running, Usage};
 
 /// Add services to what this machine serves
 #[derive(Debug, Args)]
 pub struct ServiceAddCmd {
     /// A built-in (ssh, ping, speed, proxy:<url>) or name=target
-    #[arg(
-        value_name = "service",
-        required = true,
-        value_parser = swoosh::serve::service_entry
-    )]
+    #[arg(value_name = "service", required = true)]
     pub entries: Vec<String>,
 }
 
@@ -38,8 +34,8 @@ pub struct ServiceAddCmd {
 #[derive(Debug, Args)]
 pub struct ServiceRmCmd {
     /// A name on this machine's list
-    #[arg(value_name = "service", required = true, value_parser = swoosh::names::service)]
-    pub names: Vec<Service>,
+    #[arg(value_name = "service", required = true, value_parser = name_input::parse)]
+    pub names: Vec<Option<Service>>,
 }
 
 impl ServiceAddCmd {
@@ -53,11 +49,8 @@ impl ServiceAddCmd {
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
         Mistyped::check(&self.entries).map_err(Usage::from)?;
         let cwd = std::env::current_dir()?;
-        let path = home.serve_toml();
         let home_lock = HomeWrite::take(home).await?;
-        let added = ServeToml::try_update(&home_lock, home, |file| {
-            file.add(&self.entries, &cwd, &path)
-        })?;
+        let added = ServeToml::try_update(&home_lock, home, |file| file.add(&self.entries, &cwd))?;
         drop(home_lock);
         let added = added.map_err(|error| refused(&error, self.entries.len(), "added"))?;
         // Asked only when a line needs it, after the write: the write never waits on a running node.
@@ -74,6 +67,20 @@ impl ServiceAddCmd {
 }
 
 impl ServiceRmCmd {
+    // Resolve every categorical parser result before a home can be read or locked.
+    pub(crate) fn checked_names(self) -> Result<Vec<Service>, Usage> {
+        let names = self
+            .names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                name.ok_or_else(|| Usage(NameError { index: index + 1 }.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Mistyped::check_names(names.iter().map(Service::as_str)).map_err(Usage::from)?;
+        Ok(names)
+    }
+
     /// Take the names off `<home>/serve.toml`'s list under `home.lock`, all or nothing, and say so on stderr.
     ///
     /// # Errors
@@ -81,27 +88,28 @@ impl ServiceRmCmd {
     /// [`Usage`] when a name is typed twice; a name the list does not hold; the file cannot be read or
     /// written.
     pub async fn run(self, home: &Home) -> eyre::Result<()> {
-        Mistyped::check_names(self.names.iter().map(Service::as_str)).map_err(Usage::from)?;
-        let path = home.serve_toml();
+        let names = self.checked_names()?;
+        let cwd = std::env::current_dir()?;
         let home_lock = HomeWrite::take(home).await?;
-        let removed =
-            ServeToml::try_update(&home_lock, home, |file| file.remove(&self.names, &path))?;
+        let removed = ServeToml::try_update(&home_lock, home, |file| {
+            swoosh::serve::Started::bare_at(file, &cwd)?;
+            file.remove(&names)
+        })?;
         drop(home_lock);
-        removed.map_err(|error| refused(&error, self.names.len(), "removed"))?;
-        for name in &self.names {
+        removed.map_err(|error| refused(&error, names.len(), "removed"))?;
+        for name in &names {
             eprintln!("Removed {name}.");
         }
         Ok(())
     }
 }
 
-/// The line for one entry `add` was given. A name already listed that the `serve` running here did not bind
-/// says when it is served; with no `serve` answering, there is nothing to say past that it is listed.
+/// Report saved-list results, not a promise of live service or enablement.
 fn added_line(found: &Added, running: Option<&Running>) -> String {
     match found {
-        Added::New(name) => format!("Added {name}; it is served when swoosh serve next starts."),
+        Added::New(name) => format!("Added {name} to the saved list."),
         Added::Listed(name) if running.is_some_and(|running| !running.serves(name)) => {
-            format!("{name} is already listed; it is served when swoosh serve next starts.")
+            format!("{name} is already in the saved list.")
         }
         Added::Listed(name) => format!("{name} is already listed."),
         Added::ListedOff(name) => {

@@ -2,13 +2,93 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use core::time::Duration;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nauthy::{STAT_DEBOUNCE, Service};
 use tightbeam::enabled::EnabledServices as _;
 
 use super::{LiveServeToml, ServeToml};
 use crate::home::Home;
+use crate::serve::Started;
+
+#[test]
+fn complete_invalid_off_clearing_update_retains_accepted_data_and_recovers_without_retargeting() {
+    let path = PathBuf::from("/unused/serve.toml");
+    let accepted = ServeToml {
+        services: Some(vec![
+            "api=file:./old".into(),
+            "raw=stdin:".into(),
+            "drop=recv:".into(),
+        ]),
+        off: ["api".into()].into(),
+        ..ServeToml::default()
+    };
+    let watcher = LiveServeToml::from_read(
+        path.clone(),
+        Some((accepted.clone(), None)),
+        Path::new("/captured/./cwd"),
+    )
+    .unwrap();
+    let started = Started::positional(&["api=echo:".into()], Path::new("/captured/./cwd")).unwrap();
+    // Set bound state directly to isolate policy acceptance from filesystem polling or preparation.
+    let mut held = watcher.lock();
+    held.serving = Some(super::Serving {
+        bound: super::targets(&started),
+        selection: super::Selection::Invocation,
+        relay: None,
+        resolver: None,
+    });
+    for invalid in [
+        "bad=ping:80",
+        "bad=file:",
+        "bad=proxy:https://user:secret@example.test/",
+    ] {
+        let changed = ServeToml {
+            services: Some(vec!["api=echo:".into(), invalid.into()]),
+            ..ServeToml::default()
+        };
+        held.take(&path, Ok(Some((changed, None))), None);
+        assert_eq!(held.file, accepted);
+        assert!(held.policy == super::LivePolicy::Failed);
+        assert!(held.refuses("api"));
+        assert!(!held.refuses("control.stop"));
+        assert_eq!(held.serving.as_ref().unwrap().bound["api"], "echo:");
+    }
+    let recovered = ServeToml {
+        services: Some(vec![
+            "api=file:./next".into(),
+            "drop=recv:".into(),
+            "raw=stdin:".into(),
+        ]),
+        ..ServeToml::default()
+    };
+    held.take(&path, Ok(Some((recovered.clone(), None))), None);
+    assert!(held.policy == super::LivePolicy::Accepted);
+    assert!(!held.refuses("api"));
+    assert_eq!(held.file, recovered, "accepted text is not rewritten");
+    assert_eq!(held.running["api"], "file:/captured/./cwd/./next");
+    assert_eq!(held.serving.as_ref().unwrap().bound["api"], "echo:");
+}
+
+#[test]
+fn initial_complete_invalid_grammar_never_establishes_policy_health() {
+    for invalid in [
+        "bad=ping:80",
+        "bad=stdin:tail",
+        "bad=proxy:https://u:secret@host.test",
+    ] {
+        let file = ServeToml {
+            services: Some(vec![invalid.into()]),
+            ..ServeToml::default()
+        };
+        let result = LiveServeToml::from_read(
+            "/unused/serve.toml".into(),
+            Some((file, None)),
+            Path::new("/work"),
+        );
+        assert!(matches!(result, Err(super::ServeTomlError::Definition(_))));
+    }
+}
 
 /// A scratch home, removed on drop.
 struct Scratch {
@@ -233,7 +313,7 @@ fn local_detail_preserves_startup_targets_across_saved_refresh() {
 }
 
 #[test]
-fn local_detail_distinguishes_missing_empty_and_inconsistent_startup() {
+fn local_detail_distinguishes_missing_and_empty_startup() {
     use crate::serve::control_codec::LocalDetailError;
     let scratch = Scratch::new("detail-state");
     list(&scratch, &[]);
@@ -244,11 +324,6 @@ fn local_detail_distinguishes_missing_empty_and_inconsistent_startup() {
     ));
     watcher.serving(&bare(&scratch));
     assert!(watcher.local_service_snapshot().unwrap().is_empty());
-    watcher.lock().running = None;
-    assert!(matches!(
-        watcher.local_service_snapshot(),
-        Err(LocalDetailError::InconsistentState)
-    ));
 }
 
 #[test]
@@ -296,7 +371,7 @@ fn local_detail_waits_for_one_atomic_watcher_update() {
     ready.wait();
     assert!(recv.try_recv().is_err());
     held.file.off.insert("a".to_owned());
-    held.running.as_mut().unwrap().remove("b");
+    held.running.remove("b");
     drop(held);
     let snapshot = recv.recv_timeout(Duration::from_secs(2)).unwrap().unwrap();
     reader.join().unwrap();
@@ -366,7 +441,12 @@ fn an_unstamped_initial_read_is_not_absence() {
     let path = scratch.home.serve_toml();
     let accepted = ServeToml::read(&scratch.home).unwrap();
     let started = bare(&scratch);
-    let watcher = LiveServeToml::from_read(path.clone(), Some((accepted.clone(), None)));
+    let watcher = LiveServeToml::from_read(
+        path.clone(),
+        Some((accepted.clone(), None)),
+        Path::new("/work"),
+    )
+    .unwrap();
     assert!(matches!(watcher.lock().policy, super::LivePolicy::Accepted));
     assert!(watcher.lock().stamp.is_none());
     assert_eq!(watcher.first_read(), &accepted);
@@ -616,6 +696,8 @@ fn invalid_policy_is_not_empty_or_default_policy() {
         "off = 3\n",
         "relay = 'not a url'\n",
         "services = ['--public']\n",
+        "services = ['api=tcp:next:2', 'bad=ping:80']\noff = []\n",
+        "services = ['api=tcp:next:2', 'bad=proxy:https://user:secret@host.test']\noff = []\n",
     ] {
         std::fs::write(scratch.home.serve_toml(), text).unwrap();
         watcher.lock().last_stat = None;
@@ -754,7 +836,7 @@ fn list(scratch: &Scratch, services: &[&str]) {
 /// What a bare `serve` of `scratch`'s home starts with now.
 fn bare(scratch: &Scratch) -> crate::serve::Started {
     let file = ServeToml::read(&scratch.home).expect("read serve.toml");
-    crate::serve::Started::bare(&file, &scratch.home.serve_toml()).expect("the list starts")
+    crate::serve::Started::bare(&file).expect("the list starts")
 }
 
 /// A service dropped from `services` while `serve` runs is refused on its next stream, as one turned off
@@ -832,29 +914,237 @@ fn a_services_entry_that_is_not_a_service_refuses_what_the_run_serves() {
     );
 }
 
-/// The run's own write of what it was told is held at once, not at the next stat: a `serve` that names
-/// its services never refuses them for the list the file held before it wrote, however soon a stream
-/// comes.
 #[test]
-fn the_runs_own_write_is_held_at_once() {
-    let scratch = Scratch::new("own-write");
+fn invocation_selection_is_admitted_without_replacing_saved_services() {
+    let scratch = Scratch::new("no-launch-write");
     list(&scratch, &["ping=ping:"]);
-    let watcher = LiveServeToml::load(&scratch.home).expect("load");
-    past_the_debounce();
-    assert!(
-        watcher.held().services.as_deref() == Some(&["ping=ping:".to_owned()][..]),
-        "the stat is fresh"
-    );
-
-    // `serve files=recv:`: what it names, recorded once its routes bound, read straight after.
+    let before = std::fs::read(scratch.home.serve_toml()).unwrap();
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
     let started = crate::serve::Started::Named(vec!["files=recv:".to_owned()]);
-    ServeToml::update(&crate::testkit::lock(), &scratch.home, |file| {
-        started.record(file, &scratch.home.serve_toml());
-    })
-    .expect("write serve.toml");
     watcher.serving(&started);
-    assert!(watcher.is_enabled(&service("files")), "served at once");
-    assert!(watcher.waiting().is_empty(), "nothing waits");
+    assert_bound_decisions(&watcher, &[("files", "recv:", false)], &[]);
+    assert_eq!(watcher.waiting().added, ["ping"]);
+    assert_eq!(std::fs::read(scratch.home.serve_toml()).unwrap(), before);
+    assert_eq!(bare(&scratch).entries(), ["ping=ping:"]);
+}
+
+/// A saved change made while an explicit start runs is named by itself, once: what differed at the start,
+/// and what was named before, is not named again.
+#[test]
+fn a_saved_change_during_an_explicit_start_is_named_once_by_itself() {
+    let scratch = Scratch::new("named-once");
+    list(&scratch, &["ping=ping:"]);
+    let watcher = LiveServeToml::load(&scratch.home).unwrap();
+    watcher.serving(&Started::Named(vec!["files=recv:".to_owned()]));
+    let startup = watcher.waiting();
+
+    list(&scratch, &["ping=ping:", "web=echo:"]);
+    watcher.lock().last_stat = None;
+    let now = watcher.waiting();
+    let news = now.since(&startup);
+    assert_eq!(news.added, ["web"]);
+    assert!(news.changed.is_empty() && !news.relay && !news.resolver);
+    assert!(watcher.waiting().since(&now).is_empty(), "named once");
+
+    list(&scratch, &["ping=ping:", "web=echo:", "db=echo:"]);
+    watcher.lock().last_stat = None;
+    assert_eq!(watcher.waiting().since(&now).added, ["db"]);
+}
+
+#[test]
+fn captured_selection_controls_membership_but_never_off_or_failed_policy() {
+    use crate::serve::Started;
+    for started in [
+        Started::Named(vec!["api=tcp:old:1".to_owned(), "gone=ping:".to_owned()]),
+        Started::Resumed(vec!["api=tcp:old:1".to_owned(), "gone=ping:".to_owned()]),
+        Started::Default,
+    ] {
+        let scratch = Scratch::new("selection-policy-matrix");
+        let original = started.entries();
+        let refs: Vec<_> = original.iter().map(String::as_str).collect();
+        list(&scratch, &refs);
+        let before = std::fs::read(scratch.home.serve_toml()).unwrap();
+        let watcher = LiveServeToml::load(&scratch.home).unwrap();
+        watcher.serving(&started);
+        let invocation = matches!(started, Started::Named(_));
+        let path = scratch.home.serve_toml();
+        let first = started.names()[0].clone();
+        let changed = ServeToml {
+            services: Some(vec![format!("{first}=echo:"), "added=ping:".to_owned()]),
+            ..ServeToml::default()
+        };
+        {
+            let mut held = watcher.lock();
+            held.take(&path, Ok(Some((changed.clone(), None))), None);
+            held.last_stat = Some(std::time::Instant::now());
+        }
+        let snapshot = watcher.local_service_snapshot().unwrap();
+        assert_eq!(snapshot.len(), original.len());
+        assert!(!snapshot.contains("added"));
+        for entry in &original {
+            let (name, target) = entry.split_once('=').unwrap();
+            let denied = !invocation && name != first;
+            assert_eq!(watcher.is_enabled(&service(name)), !denied);
+            assert_eq!(snapshot.get(name).unwrap().target().as_str(), target);
+            assert_eq!(snapshot.get(name).unwrap().refused(), denied);
+        }
+        {
+            let mut held = watcher.lock();
+            let mut off = changed.clone();
+            off.off.insert(first.clone());
+            held.take(&path, Ok(Some((off, None))), None);
+        }
+        assert!(!watcher.is_enabled(&service(&first)));
+        {
+            let mut held = watcher.lock();
+            held.take(
+                &path,
+                Err(super::ServeTomlError::Damaged { path: path.clone() }),
+                None,
+            );
+        }
+        assert!(watcher.saved_services().is_none());
+        for name in started.names() {
+            assert!(!watcher.is_enabled(&service(&name)));
+        }
+        assert!(watcher.is_enabled(&service("control.stop")));
+        {
+            let mut held = watcher.lock();
+            held.take(
+                &path,
+                Ok(Some((
+                    ServeToml {
+                        services: Some(vec![]),
+                        ..ServeToml::default()
+                    },
+                    None,
+                ))),
+                None,
+            );
+        }
+        for name in started.names() {
+            assert_eq!(watcher.is_enabled(&service(&name)), invocation);
+        }
+        assert!(watcher.saved_services().is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+}
+
+#[test]
+fn malformed_initial_saved_services_are_not_repaired_by_explicit_startup() {
+    use crate::serve::Started;
+    for entries in [&["db"][..], &["ping", "ping"][..]] {
+        let scratch = Scratch::new("malformed-explicit-startup");
+        list(&scratch, entries);
+        let before = std::fs::read(scratch.home.serve_toml()).unwrap();
+        assert!(Started::positional(&["api=tcp:bound:1".into()], Path::new("/work")).is_ok());
+        assert!(matches!(
+            LiveServeToml::load(&scratch.home),
+            Err(super::ServeTomlError::Definition(_))
+        ));
+        assert_eq!(std::fs::read(scratch.home.serve_toml()).unwrap(), before);
+    }
+}
+
+#[test]
+fn malformed_live_membership_retains_accepted_policy_until_valid_recovery() {
+    for entries in [&["db"][..], &["ping", "ping"][..]] {
+        let scratch = Scratch::new("malformed-live-membership");
+        list(&scratch, &["api=tcp:saved:1", "off=ping:"]);
+        scratch.only_off("off");
+        let watcher = LiveServeToml::load(&scratch.home).unwrap();
+        assert!(matches!(watcher.lock().policy, super::LivePolicy::Accepted));
+        watcher.serving(&Started::Named(vec![
+            "api=tcp:bound:1".into(),
+            "off=ping:".into(),
+        ]));
+        let accepted = watcher.held();
+        let running = watcher.lock().running.clone();
+        assert_bound_decisions(
+            &watcher,
+            &[("api", "tcp:bound:1", false), ("off", "ping:", true)],
+            &["off"],
+        );
+        // A rejected update must not clear the accepted off policy.
+        std::fs::write(
+            scratch.home.serve_toml(),
+            format!("services = {entries:?}\noff = []\n"),
+        )
+        .unwrap();
+        let rejected = std::fs::read(scratch.home.serve_toml()).unwrap();
+        watcher.lock().last_stat = None;
+        assert_bound_decisions(
+            &watcher,
+            &[("api", "tcp:bound:1", true), ("off", "ping:", true)],
+            &["api", "off"],
+        );
+        assert!(matches!(watcher.lock().policy, super::LivePolicy::Failed));
+        assert_eq!(watcher.held(), accepted);
+        assert_eq!(watcher.lock().running, running);
+        assert_eq!(watcher.off(), ["off"]);
+        assert!(watcher.saved_services().is_none());
+        assert!(watcher.is_enabled(&service("control.stop")));
+        assert_eq!(std::fs::read(scratch.home.serve_toml()).unwrap(), rejected);
+
+        std::fs::write(
+            scratch.home.serve_toml(),
+            "services = ['api=tcp:next:2', 'other=ping:']\noff = []\n",
+        )
+        .unwrap();
+        let recovered = std::fs::read(scratch.home.serve_toml()).unwrap();
+        watcher.lock().last_stat = None;
+        assert_bound_decisions(
+            &watcher,
+            &[("api", "tcp:bound:1", false), ("off", "ping:", false)],
+            &[],
+        );
+        assert!(matches!(watcher.lock().policy, super::LivePolicy::Accepted));
+        assert!(watcher.off().is_empty());
+        assert_eq!(
+            watcher.saved_services().unwrap().entries(),
+            ["api=tcp:next:2", "other=ping:"]
+        );
+        assert_eq!(watcher.waiting().added, ["other"]);
+        assert_eq!(watcher.waiting().changed, ["api"]);
+        assert!(watcher.is_enabled(&service("control.stop")));
+        assert_eq!(std::fs::read(scratch.home.serve_toml()).unwrap(), recovered);
+    }
+}
+
+#[cfg(not(feature = "ssh"))]
+#[test]
+fn unsupported_ssh_cannot_establish_or_replace_accepted_policy() {
+    for entry in ["ssh", "ssh=sshd:"] {
+        let path = PathBuf::from("/unused/serve.toml");
+        let unsupported = ServeToml {
+            services: Some(vec![entry.into()]),
+            ..ServeToml::default()
+        };
+        assert!(matches!(
+            LiveServeToml::from_read(
+                PathBuf::clone(&path),
+                Some((ServeToml::clone(&unsupported), None)),
+                Path::new("/work"),
+            ),
+            Err(super::ServeTomlError::Definition(_))
+        ));
+        let accepted = ServeToml {
+            services: Some(vec!["api=echo:".into()]),
+            off: ["api".into()].into(),
+            ..ServeToml::default()
+        };
+        let watcher = LiveServeToml::from_read(
+            PathBuf::clone(&path),
+            Some((ServeToml::clone(&accepted), None)),
+            Path::new("/work"),
+        )
+        .unwrap();
+        let mut held = watcher.lock();
+        held.take(&path, Ok(Some((unsupported, None))), None);
+        assert!(matches!(held.policy, super::LivePolicy::Failed));
+        assert_eq!(held.file, accepted);
+        assert_eq!(held.running["api"], "echo:");
+    }
 }
 
 /// A service added to `services`, and a relay or a resolver changed, wait for the next `serve`: the
@@ -894,8 +1184,7 @@ fn what_a_running_serve_cannot_apply_is_named() {
     assert!(watcher.is_enabled(&service("ping")), "ping still served");
     assert_eq!(
         waiting.to_string(),
-        "the changed relay and the added services files and speed in serve.toml take effect the \
-         next time serve starts"
+        "the changed relay in serve.toml takes effect at the next start\nsaved service files applies to the next bare serve\nsaved service speed applies to the next bare serve"
     );
     assert_eq!(
         super::Waiting {
@@ -903,12 +1192,13 @@ fn what_a_running_serve_cannot_apply_is_named() {
             ..super::Waiting::default()
         }
         .to_string(),
-        "the changed resolver in serve.toml takes effect the next time serve starts"
+        "the changed resolver in serve.toml takes effect at the next start"
     );
 }
 
 /// A shell added to `serve.toml` under a name whose live links were made for another target is not bound
 /// while `serve` runs (nothing added is), and the warning that start will print is what the run prints.
+#[cfg(feature = "ssh")]
 #[test]
 fn a_live_add_of_sshd_over_other_links_keeps_the_running_set() {
     use crate::grants::{Delegation, GrantKind, GrantRecord, Grants, LinksForAnother};
@@ -954,6 +1244,7 @@ fn a_live_add_of_sshd_over_other_links_keeps_the_running_set() {
 
 /// A running name retargeted in `serve.toml` waits for the next start like an added one: the watcher names
 /// it, and when that start would warn of links made for the old target, the run prints that too.
+#[cfg(feature = "ssh")]
 #[test]
 fn a_retarget_of_a_running_name_is_named_and_checked() {
     use crate::grants::{Delegation, GrantKind, GrantRecord, Grants, LinksForAnother};
@@ -987,7 +1278,7 @@ fn a_retarget_of_a_running_name_is_named_and_checked() {
     );
     assert_eq!(
         waiting.to_string(),
-        "the changed service ssh in serve.toml takes effect the next time serve starts"
+        "saved service ssh applies to the next bare serve"
     );
     let links = LinksForAnother::among_changed(&scratch.home, &watcher.held(), &waiting.changed)
         .expect("the ledger reads");

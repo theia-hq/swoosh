@@ -673,7 +673,7 @@ impl LinksForAnother {
         held: &crate::serve_toml::ServeToml,
         names: &[String],
     ) -> eyre::Result<Option<Self>> {
-        let Ok(started) = crate::serve::Started::bare(held, &home.serve_toml()) else {
+        let Ok(started) = crate::serve::Started::bare(held) else {
             return Ok(None);
         };
         let entries = started.entries();

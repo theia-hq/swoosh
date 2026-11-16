@@ -21,6 +21,7 @@ use swoosh::serve::Mistyped;
 use swoosh::serve::control_codec::DisabledList;
 
 pub mod edit;
+mod name_input;
 pub mod toggle;
 pub mod view;
 
