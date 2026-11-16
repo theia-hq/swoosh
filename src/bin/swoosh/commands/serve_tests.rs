@@ -39,6 +39,9 @@ use super::{
     waiting_warnings,
 };
 
+#[path = "serve_relative_tests.rs"]
+mod relative_tests;
+
 /// n0's relay and n0's discovery: the bind every banner test but the reach-flag one is about, and the
 /// state whose lines the docs pin byte for byte.
 fn n0() -> Reach {

@@ -5,6 +5,13 @@
 //! Bare, it uses the saved services in `<home>/serve.toml`, or `ping` and `speed` if no list is saved.
 //! `swoosh serve ssh ping` selects a shell and round-trip probe for this run without saving them.
 //! `ssh`, `ping` and `speed` name themselves; other entries use `name=target`.
+//!
+//! Use --with DEF and --without NAME to change the saved/default selection for this run.
+//! Later saved service additions, removals and target changes do not change this process's selection.
+//! Off changes affect new admissions; existing streams may continue. Each restart, including a
+//! supervisor restart, captures the then-current saved/default selection again. Launch changes neither
+//! saved services nor off settings.
+//!
 //! `--public`, `--public-unsafe`, `--admit` and `--expires` also apply only to this run. It drives
 //! tightbeam's tunnel LIBRARY (`Exposer`) directly under swoosh's OWN persisted identity: the node binds
 //! the same key `swoosh ssh` and a signed link root at, gates on the pin read live from swoosh's own
@@ -65,6 +72,7 @@ pub struct ServeCmd {
     // list is the one a mistyped form is sent to and it has to be complete.
     #[arg(
         value_name = "service",
+        conflicts_with_all = ["with", "without"],
         long_help = "Serve exactly these for this run, without saving them\n\
                      With none named, it serves the saved services, or ping and speed if none are saved.\n\
                      \n\
@@ -84,6 +92,22 @@ pub struct ServeCmd {
                      \x20 echo:                   sends back whatever it receives"
     )]
     pub services: Vec<String>,
+    /// add a service to the saved/default selection for this run
+    #[arg(
+        long,
+        value_name = "def",
+        long_help = "add a service to the saved/default selection for this run\n\
+                     Repeat or combine these flags; positional definitions cannot be used with them."
+    )]
+    pub with: Vec<String>,
+    /// omit a saved/default service for this run
+    #[arg(
+        long,
+        value_name = "name",
+        long_help = "omit a saved/default service for this run\n\
+                     Repeat or combine these flags; positional definitions cannot be used with them."
+    )]
+    pub without: Vec<String>,
     /// Open these services to anyone (comma-separated, repeatable)
     #[arg(
         long,
@@ -336,10 +360,7 @@ impl Reaching for ServeCmd {
 }
 
 impl ServeCmd {
-    /// Before anything binds or is written: take this home's one lock and control socket, and settle the
-    /// services this run starts with (named, resumed from `<home>/serve.toml`, or the default). A second
-    /// `serve` for the home refuses here with the running one's pid and the fix, and so does a machine with
-    /// no private runtime directory or one whose path a socket cannot hold.
+    /// Capture this invocation's service selection from positional definitions or the saved/default base, applying relative flags when supplied.
     pub async fn claim(mut self, home: &Home) -> eyre::Result<Self> {
         // Typed services that cannot be one list are a usage error: refused before the lock, so it reads
         // the same whether or not a `serve` runs here.
@@ -356,7 +377,11 @@ impl ServeCmd {
             Err(other) => return Err(eyre::Report::new(other)),
         };
         let serve_toml = LiveServeToml::load_at(home, &cwd)?;
-        let started = Started::of(&self.services, serve_toml.first_read(), &cwd)?;
+        let started = if self.with.is_empty() && self.without.is_empty() {
+            Started::of(&self.services, serve_toml.first_read(), &cwd)?
+        } else {
+            Started::relative(serve_toml.first_read(), &self.with, &self.without, &cwd)?
+        };
         let mut requested = started.entries();
         // An engine that must never face an open gate, bound under a name whose live links were made for
         // something else, is said here, whether named now or resumed. Refusing the start would protect
@@ -449,7 +474,9 @@ impl ServeCmd {
     /// a lifetime, an admitted root, or anything about the bind.
     fn sets_how_it_runs(&self) -> bool {
         let reach = &self.reach;
-        !self.public.is_empty()
+        !self.with.is_empty()
+            || !self.without.is_empty()
+            || !self.public.is_empty()
             || !self.public_unsafe.is_empty()
             || self.expires.is_some()
             || self.admit.is_some()

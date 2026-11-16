@@ -490,7 +490,7 @@ async fn main() -> std::process::ExitCode {
 /// one machine is refused with [`stop::ONE_MACHINE`], and one given a link or a path with
 /// [`stop::A_LINK_STOPS_NOTHING`]; an `invite` given a root's key for the device's is refused with
 /// [`invite::ROOT_IS_NO_MACHINE`], and a `serve --admit` given a machine's key with
-/// [`serve::ADMIT_TAKES_A_ROOT`]. Every other error is clap's own. Refused here, at parse, so nothing is
+/// [`serve::ADMIT_TAKES_A_ROOT`]. A serve argument conflict between positional definitions and relative flags uses a fixed message instead of echoing operand values. Every other error is clap's own. Refused here, at parse, so nothing is
 /// read, opened or bound first, the home included.
 fn parse_from<I, T>(argv: I) -> Result<Cli, clap::Error>
 where
@@ -499,6 +499,30 @@ where
 {
     let argv: Vec<std::ffi::OsString> = argv.into_iter().map(Into::into).collect();
     match Cli::try_parse_from(&argv) {
+        Err(error) if error.kind() == clap::error::ErrorKind::ArgumentConflict => {
+            // Clap may include operand values in a conflict. Confirm this particular conflict with
+            // the same parser, without its positional exclusion, then return only approved fixed text.
+            let lenient = Cli::command().mut_subcommand("serve", |serve| {
+                serve.mut_arg("services", |services| {
+                    services.conflicts_with(clap::builder::Resettable::<clap::Id>::Reset)
+                })
+            });
+            match lenient.try_get_matches_from(&argv) {
+                Ok(matches)
+                    if matches.subcommand().is_some_and(|(verb, args)| {
+                        verb == "serve"
+                            && args.contains_id("services")
+                            && (args.contains_id("with") || args.contains_id("without"))
+                    }) =>
+                {
+                    Err(usage(
+                        &["serve"],
+                        "Repeat or combine these flags; positional definitions cannot be used with them.",
+                    ))
+                }
+                _ => Err(error),
+            }
+        }
         Err(error) if error.kind() == clap::error::ErrorKind::MissingRequiredArgument => {
             // The model again with only `forward`'s local end optional: a line it accepts was missing that
             // slot and nothing else. A line it refuses too was missing something else, and clap's own

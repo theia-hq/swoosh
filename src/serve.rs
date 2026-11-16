@@ -23,6 +23,9 @@ use crate::home::{Home, canonical_to_be};
 mod activity;
 mod definition;
 mod lookup;
+#[cfg(test)]
+#[path = "serve/recv_home_tests.rs"]
+mod recv_home_tests;
 mod renewal;
 mod resident;
 mod roster;
@@ -368,8 +371,19 @@ pub fn refuse_recv_into_home(
     home: &Home,
     user_home: Option<&Path>,
 ) -> eyre::Result<()> {
-    let swoosh_home = Dir::of(home.dir());
-    let user_home = user_home.map(Dir::of);
+    refuse_recv_into_home_with(services, || (Dir::of(home.dir()), user_home.map(Dir::of)))
+}
+
+fn refuse_recv_into_home_with(
+    services: &[RecvService],
+    homes: impl FnOnce() -> (Dir, Option<Dir>),
+) -> eyre::Result<()> {
+    // Resolving receive safety boundaries can access an unavailable filesystem. An empty receive
+    // selection needs no probes, so even home resolution stays deferred until a receiver is present.
+    if services.is_empty() {
+        return Ok(());
+    }
+    let (swoosh_home, user_home) = homes();
     // A canonical path's ancestors are canonical too, so each is only looked up.
     let holders: Vec<Dir> = swoosh_home.path.ancestors().skip(1).map(Dir::at).collect();
     for service in services {
